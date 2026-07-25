@@ -6,17 +6,20 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "test": "bun test scripts/frames.test.mjs",
+    "test": "bun test",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "tauri": "tauri",
     "app": "tauri dev",
     "app:build": "tauri build",
-    "gen:icon": "tauri icon duckweed_icon.ico"
+    "gen:icon": "tauri icon duckweed_icon.ico",
+    "version:next": "bun scripts/release-version.mjs --dry-run"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-dialog": "^2",
+    "@tauri-apps/plugin-process": "^2.3.1",
+    "@tauri-apps/plugin-updater": "^2.10.1",
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/addon-search": "^0.15.0",
     "@xterm/addon-unicode11": "^0.8.0",

@@ -71,6 +71,8 @@ fn pty_kill(manager: State<'_, PtyManager>, id: String) -> Result<(), String> {
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(PtyManager::default())
         .setup(|app| {
             if let (Some(window), Some(icon)) = (

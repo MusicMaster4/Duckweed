@@ -93,6 +93,24 @@ bun run app:build
 On Windows, this produces an NSIS installer. The native shell used by each pane is
 selected from the shells installed on your machine.
 
+### Install and stay updated
+
+Duckweed installs for the current user only, so neither the first install nor any
+later update asks for administrator rights. Once it is installed, updates are one
+click inside the app: the version chip in the status bar, or **Check for updates**
+in the command palette.
+
+There are two channels, and an install only ever sees its own:
+
+| Install from | Channel | Sees |
+| --- | --- | --- |
+| the latest release | stable | stable releases only |
+| a pre-release | beta | beta releases only |
+
+Releases are built automatically — `main` publishes stable, `testing` publishes
+beta. See [docs/releases.md](docs/releases.md) for the versioning rules, the
+signing secrets, and how to test the pipeline.
+
 ## Keyboard shortcuts
 
 | Shortcut | Action |
@@ -124,9 +142,10 @@ render tree so dragging or rearranging a pane does not destroy its process or sc
 
 ```text
 src/
-├── components/       UI: title bar, tabs, panes, search, palette, status bar
-├── hooks/             drag-and-drop behavior
-└── lib/               layout, terminal registry, persistence, IPC, themes, highlighting
+├── components/       UI: title bar, tabs, panes, search, palette, status bar, updates
+├── hooks/             drag-and-drop behavior, update checks
+└── lib/               layout, terminal registry, persistence, IPC, themes, highlighting,
+                       version arithmetic shared with the release workflow
 
 src-tauri/src/
 ├── main.rs            Tauri commands and IPC
@@ -143,6 +162,7 @@ flex bases and `minmax(0, 1fr)` to keep dense layouts inside the window.
 
 ```bash
 bun run typecheck
+bun test
 cd src-tauri && cargo check
 ```
 

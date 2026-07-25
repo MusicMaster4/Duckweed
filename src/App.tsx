@@ -7,7 +7,9 @@ import { PaneTree, type PaneTreeShared } from "./components/PaneTree";
 import { StatusBar } from "./components/StatusBar";
 import { TabStrip } from "./components/TabStrip";
 import { TitleBar } from "./components/TitleBar";
+import { UpdateDialog } from "./components/UpdateDialog";
 import { useDragPane, type DragState } from "./hooks/useDragPane";
+import { useUpdater } from "./hooks/useUpdater";
 import * as bus from "./lib/bus";
 import { listShells, projectInfo } from "./lib/ipc";
 import {
@@ -95,6 +97,7 @@ export default function App() {
   const [booted, setBooted] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [recentsMenu, setRecentsMenu] = useState<{ x: number; y: number } | null>(null);
+  const updater = useUpdater();
 
   // Handlers read state through refs so keyboard shortcuts and pointer drags
   // never act on a stale snapshot.
@@ -880,6 +883,13 @@ export default function App() {
         run: () => applyFontSize(DEFAULT_FONT_SIZE),
       },
       {
+        id: "app.update",
+        group: "App",
+        title: "Check for updates",
+        subtitle: `${updater.channel === "testing" ? "Beta" : "Stable"} channel${updater.version ? ` · v${updater.version}` : ""}`,
+        run: updater.check,
+      },
+      {
         id: "view.highlight",
         group: "View",
         title: highlight ? "Turn off syntax highlighting" : "Turn on syntax highlighting",
@@ -959,6 +969,9 @@ export default function App() {
     tabs,
     toggleHighlight,
     toggleZoom,
+    updater.channel,
+    updater.check,
+    updater.version,
   ]);
 
   // --------------------------------------------------------------- render
@@ -1028,6 +1041,7 @@ export default function App() {
         activeTerm={activeTerm}
         fontSize={fontSize}
         onFontSize={applyFontSize}
+        updater={updater}
       />
 
       {drag && (
@@ -1065,6 +1079,8 @@ export default function App() {
       )}
 
       {paletteOpen && <CommandPalette actions={paletteActions} onClose={() => setPaletteOpen(false)} />}
+
+      {updater.dialogOpen && <UpdateDialog updater={updater} />}
     </div>
   );
 }

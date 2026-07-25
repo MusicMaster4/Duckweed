@@ -1,3 +1,4 @@
+import type { Updater } from "../hooks/useUpdater";
 import * as terminals from "../lib/terminals";
 import type { ProjectInfo } from "../lib/types";
 
@@ -8,10 +9,28 @@ interface Props {
   activeTerm: string | null;
   fontSize: number;
   onFontSize: (size: number) => void;
+  updater: Updater;
 }
 
-export function StatusBar({ project, paneCount, tabCount, activeTerm, fontSize, onFontSize }: Props) {
+/** What the version chip says — it doubles as the update indicator. */
+function updateLabel({ status, version, channel }: Updater): string {
+  switch (status.kind) {
+    case "checking":
+      return "checking…";
+    case "available":
+      return `update to ${status.update.version}`;
+    case "installing":
+      return status.fraction === null
+        ? "installing…"
+        : `installing ${Math.round(status.fraction * 100)}%`;
+    default:
+      return `v${version || "?"}${channel === "testing" ? " beta" : ""}`;
+  }
+}
+
+export function StatusBar({ project, paneCount, tabCount, activeTerm, fontSize, onFontSize, updater }: Props) {
   const meta = activeTerm ? terminals.getMeta(activeTerm) : null;
+  const alert = updater.status.kind === "available" || updater.status.kind === "installing";
 
   return (
     <footer className="statusbar">
@@ -32,6 +51,18 @@ export function StatusBar({ project, paneCount, tabCount, activeTerm, fontSize, 
       <span className="status-item">
         {paneCount} pane{paneCount === 1 ? "" : "s"} · {tabCount} tab{tabCount === 1 ? "" : "s"}
       </span>
+      <button
+        type="button"
+        className={`status-update ${alert ? "is-alert" : ""}`}
+        onClick={updater.check}
+        title={
+          updater.channel === "testing"
+            ? "Beta channel — check for updates (beta releases only)"
+            : "Stable channel — check for updates (stable releases only)"
+        }
+      >
+        {updateLabel(updater)}
+      </button>
       <span className="status-zoom">
         <button type="button" title="Decrease font size (Ctrl+-)" onClick={() => onFontSize(fontSize - 1)}>
           −
