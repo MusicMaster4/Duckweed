@@ -41,6 +41,8 @@ interface Session extends TermMeta {
   observer: ResizeObserver | null;
   unlisten: UnlistenFn[];
   spawned: boolean;
+  /** Set once the spawn handshake starts; a second start would collide server-side. */
+  starting: boolean;
   /** Bytes typed before the PTY was ready. */
   pending: string[];
   /** Decodes PTY bytes; `stream: true` so multi-byte chars can span chunks. */
@@ -53,6 +55,8 @@ interface Session extends TermMeta {
   visualCursor: HTMLDivElement;
   cursorSettler: CursorSettler;
   cursorFocused: boolean;
+  /** Debounce timer that resumes blinking after typing pauses. */
+  typingIdleTimer: number | null;
   highlighter: Highlighter;
 }
 
@@ -216,10 +220,48 @@ function decodeBase64(data: string): Uint8Array {
   return out;
 }
 
+/** How long after the last keystroke before the caret returns to idle blinking. */
+const TYPING_IDLE_MS = 600;
+
 /** Send bytes to the shell, queueing them if the PTY is not up yet. */
 function send(session: Session, data: string): void {
   if (session.spawned) void ptyWrite(session.id, data);
   else session.pending.push(data);
+}
+
+function isTyping(session: Session): boolean {
+  return session.typingIdleTimer !== null;
+}
+
+/**
+ * Hold the caret solid while the user is actively typing or deleting.
+ *
+ * Driven from `onData` (not keydown): xterm handles keys in the capture phase and
+ * some printable input only becomes data on the `input` event, so keydown alone
+ * misses characters inside full-screen CLIs. `onData` is every byte the user
+ * actually sends — keys, backspace, enter, and paste.
+ */
+function markTyping(session: Session): void {
+  session.visualCursor.dataset.typing = "true";
+  session.visualCursor.classList.remove("is-blinking");
+  if (session.typingIdleTimer !== null) window.clearTimeout(session.typingIdleTimer);
+  session.typingIdleTimer = window.setTimeout(() => {
+    delete session.visualCursor.dataset.typing;
+    session.typingIdleTimer = null;
+    // Resume blinking with the cursor visible, not mid-off-phase: restart the
+    // animation so it begins in its "on" segment.
+    session.visualCursor.classList.remove("is-blinking");
+    void session.visualCursor.offsetWidth;
+    session.visualCursor.classList.add("is-blinking");
+  }, TYPING_IDLE_MS);
+}
+
+function clearTyping(session: Session): void {
+  if (session.typingIdleTimer !== null) {
+    window.clearTimeout(session.typingIdleTimer);
+    session.typingIdleTimer = null;
+  }
+  delete session.visualCursor.dataset.typing;
 }
 
 function disarmCursor(session: Session): void {
@@ -276,7 +318,17 @@ function paintVisualCursor(session: Session): void {
  * status/footer position.
  */
 function scheduleVisualCursor(session: Session, forceSettle = false): void {
-  if (!session.cursorVisible || !session.cursorFocused || !session.container) {
+  if (!session.cursorFocused || !session.container) {
+    hideVisualCursor(session);
+    return;
+  }
+
+  // TUI harnesses (Codex, Claude Code, …) often hide mode 25 while repainting
+  // the composer after each keystroke. If we blank the caret then, it looks
+  // like idle blink even though the user is still typing. Keep the last solid
+  // position until the program puts the cursor back.
+  if (!session.cursorVisible) {
+    if (isTyping(session)) return;
     hideVisualCursor(session);
     return;
   }
@@ -307,7 +359,9 @@ function draw(session: Session, chunk: FrameWrite): void {
     chunk.complete,
   );
   session.cursorVisible = stabilized.cursorVisible;
-  if (!session.cursorVisible) hideVisualCursor(session);
+  // While typing, leave the solid caret in place across brief mode-25 hides
+  // that full-screen CLIs emit mid-redraw; scheduleVisualCursor re-evaluates.
+  if (!session.cursorVisible && !isTyping(session)) hideVisualCursor(session);
   session.term.write(stabilized.text, () => scheduleVisualCursor(session));
 }
 
@@ -351,7 +405,7 @@ function create(id: string, opts: { cwd?: string | null; shell?: string | null }
   term.write("\x1b[?25l");
 
   const visualCursor = document.createElement("div");
-  visualCursor.className = "terminal-visual-cursor";
+  visualCursor.className = "terminal-visual-cursor is-blinking";
   visualCursor.style.setProperty("--terminal-cursor-color", GREEN);
   visualCursor.hidden = true;
   host.appendChild(visualCursor);
@@ -372,6 +426,7 @@ function create(id: string, opts: { cwd?: string | null; shell?: string | null }
     observer: null,
     unlisten: [],
     spawned: false,
+    starting: false,
     pending: [],
     decoder: new TextDecoder(),
     // `session` is only read when a frame completes, long after this returns.
@@ -380,6 +435,7 @@ function create(id: string, opts: { cwd?: string | null; shell?: string | null }
     visualCursor,
     cursorSettler: createCursorSettler(),
     cursorFocused: false,
+    typingIdleTimer: null,
     highlighter: createHighlighter(),
     title: "shell",
     cwd: opts.cwd ?? "",
@@ -391,7 +447,10 @@ function create(id: string, opts: { cwd?: string | null; shell?: string | null }
   };
   sessions.set(id, session);
 
-  term.onData((data) => send(session, data));
+  term.onData((data) => {
+    markTyping(session);
+    send(session, data);
+  });
   term.onScroll(() => scheduleVisualCursor(session, true));
   term.textarea?.addEventListener("focus", () => {
     session.cursorFocused = true;
@@ -399,6 +458,7 @@ function create(id: string, opts: { cwd?: string | null; shell?: string | null }
   });
   term.textarea?.addEventListener("blur", () => {
     session.cursorFocused = false;
+    clearTyping(session);
     hideVisualCursor(session);
   });
 
@@ -464,6 +524,11 @@ function create(id: string, opts: { cwd?: string | null; shell?: string | null }
 
 async function start(session: Session, opts: { cwd?: string | null; shell?: string | null }) {
   const { id } = session;
+  // A session starts exactly once. This only matters if `create` ever runs twice
+  // for the same id — the backend would answer the second spawn with
+  // "already exists" and the pane would die with that message.
+  if (session.starting || session.spawned) return;
+  session.starting = true;
 
   // Subscribe before spawning so no output can slip through.
   const offData = await listen<string>(`pty:data:${id}`, (event) => {
@@ -478,6 +543,7 @@ async function start(session: Session, opts: { cwd?: string | null; shell?: stri
     // so the last thing it managed to print stays above its own epitaph.
     session.frames.flush();
     session.cursorVisible = false;
+    clearTyping(session);
     hideVisualCursor(session);
     session.exited = true;
     session.exitCode = event.payload.code ?? null;
@@ -490,13 +556,24 @@ async function start(session: Session, opts: { cwd?: string | null; shell?: stri
   session.unlisten.push(offData, offExit);
 
   try {
-    const result = await ptySpawn({
+    const args = {
       id,
       cwd: opts.cwd ?? null,
       shell: opts.shell ?? null,
       cols: session.term.cols,
       rows: session.term.rows,
-    });
+    };
+    let result;
+    try {
+      result = await ptySpawn(args);
+    } catch (error) {
+      // A webview reload (Vite HMR, manual refresh) leaves the backend PTY
+      // alive while this side starts from scratch — the restored pane asks for
+      // an id the backend still owns. Kill the orphan and spawn again.
+      if (!String(error).includes("already exists")) throw error;
+      await ptyKill(id);
+      result = await ptySpawn(args);
+    }
     session.shellLabel = result.shell_label;
     session.title = result.shell_label;
     if (!session.cwd) session.cwd = result.cwd;
@@ -580,6 +657,7 @@ export function dispose(id: string): void {
   if (!session) return;
   session.observer?.disconnect();
   session.frames.dispose();
+  clearTyping(session);
   hideVisualCursor(session);
   for (const off of session.unlisten) off();
   void ptyKill(id);

@@ -712,7 +712,17 @@ button.chip:hover {
   background: var(--terminal-cursor-color);
   transform-origin: top left;
   will-change: transform, opacity;
+}
+
+.terminal-visual-cursor.is-blinking {
   animation: terminal-cursor-blink 1.05s step-end infinite;
+}
+
+/* Solid while typing/deleting — overrides blink and recovers opacity if the
+   animation was interrupted mid-off phase. */
+.terminal-visual-cursor[data-typing="true"] {
+  animation: none;
+  opacity: var(--terminal-cursor-on-opacity, 1);
 }
 
 .terminal-visual-cursor[data-style="block"] {
