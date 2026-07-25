@@ -37,10 +37,16 @@ export function TitleBar({ project, onOpenProject, onOpenPalette, onOpenRecents 
   return (
     <header className="titlebar" data-tauri-drag-region>
       <div className="titlebar-left">
-        <span className="brand" data-tauri-drag-region>
+        <span className="brand" data-tauri-drag-region title="Duckweed">
+          {/* The app icon's colony, down to four fronds and the waterline — the
+              trailing root is thinner than a pixel here, so it is dropped.
+              Filled rather than stroked, hence the .brand svg override. */}
           <svg viewBox="0 0 20 20" aria-hidden="true">
-            <path d="M6 5.5 10.5 10 6 14.5" />
-            <path d="M12.5 14.5h4" />
+            <ellipse cx="6.5" cy="6.6" rx="3.5" ry="2.8" transform="rotate(-16 6.5 6.6)" />
+            <ellipse cx="13.6" cy="5.4" rx="2.6" ry="2.1" transform="rotate(17 13.6 5.4)" />
+            <ellipse cx="14.3" cy="11.2" rx="2.8" ry="2.2" transform="rotate(-10 14.3 11.2)" />
+            <ellipse cx="8" cy="12.4" rx="3.1" ry="2.4" transform="rotate(13 8 12.4)" />
+            <rect x="4.6" y="16.2" width="10.8" height="1.9" rx="0.95" />
           </svg>
         </span>
 

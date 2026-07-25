@@ -1,4 +1,4 @@
-# Warp Clone
+# Duckweed
 
 Um terminal no estilo do [Warp](https://warp.dev), feito com **Tauri 2 + Rust** no backend e
 **React + TypeScript + xterm.js** no frontend. Shells reais via PTY nativo (ConPTY no Windows,
@@ -26,6 +26,11 @@ Um terminal no estilo do [Warp](https://warp.dev), feito com **Tauri 2 + Rust** 
   cmd, Git Bash, WSL, Nushell; zsh/bash/fish no Unix) e deixa escolher por aba.
 - **O layout é lembrado** entre execuções — a arrumação dos painéis volta igual (com shells novos,
   processos nunca são "restaurados").
+- **Syntax highlighting da saída** (`Ctrl+Shift+H`) — comandos que imprimem texto cru (`dir`,
+  telas de `--help`, stack traces, dumps de config) ganham cor em strings, números, caminhos,
+  URLs, flags, hashes, diffs e palavras de erro/aviso/sucesso. Quem já manda cor — Claude Code,
+  Codex, git, npm — passa intacto: o highlighter só toca em chunk que não traz nenhuma sequência
+  de escape, fora da tela alternativa e com o estado SGR limpo.
 
 ## Atalhos
 
@@ -46,6 +51,7 @@ Um terminal no estilo do [Warp](https://warp.dev), feito com **Tauri 2 + Rust** 
 | `Ctrl+Shift+F` | buscar no terminal |
 | `Ctrl+Shift+C` / `Ctrl+Shift+V` | copiar / colar |
 | `Ctrl+Shift+K` | limpar o painel |
+| `Ctrl+Shift+H` | ligar/desligar o syntax highlighting |
 | `Ctrl+=` / `Ctrl+-` / `Ctrl+0` | tamanho da fonte |
 
 Clique direito no terminal copia a seleção; sem seleção, cola.
@@ -78,6 +84,8 @@ src-tauri/src/
 src/
   lib/layout.ts     árvore de splits (inserir ao lado, remover colapsando, trocar, redimensionar)
   lib/terminals.ts  registro global de instâncias xterm que sobrevive a re-renders do React
+  lib/highlight.ts  colorização da saída que chega sem cor nenhuma
+  lib/theme.ts      paleta ANSI + as cores que o highlighter usa
   hooks/useDragPane.ts  drag-and-drop com zonas de drop calculadas por geometria
   components/       TitleBar, TabStrip, PaneTree, TerminalPane, SearchBar, CommandPalette, StatusBar
 ```
@@ -88,8 +96,9 @@ Três detalhes que fazem a coisa funcionar:
    registro global e move o elemento DOM entre painéis. Quando o layout muda, o React remonta os
    painéis mas o scrollback, a seleção e o processo continuam intactos — sem isso, arrastar um
    painel apagaria o terminal.
-2. **A saída do PTY viaja como base64.** Um chunk de bytes pode cortar um caractere UTF-8 no meio;
-   mandar bytes e deixar o xterm decodificar evita texto corrompido em saídas grandes.
+2. **A saída do PTY viaja como base64 e é decodificada em streaming.** Um chunk pode cortar um
+   caractere UTF-8 no meio, então o `TextDecoder` de cada sessão usa `stream: true` e guarda os
+   bytes incompletos para o chunk seguinte — sem isso, saídas grandes aparecem corrompidas.
 3. **O tamanho dos painéis nunca depende do conteúdo deles.** Cada célula recebe um
    `flex-basis` explícito com `flex-grow`/`flex-shrink` zerados, e a grid raiz usa
    `minmax(0, 1fr)` nos dois eixos. Sem isso, o `min-content` dos terminais empurra o app

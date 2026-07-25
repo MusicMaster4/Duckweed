@@ -150,9 +150,16 @@ pub fn spawn(
         .unwrap_or_else(|| ".".to_string());
     cmd.cwd(&resolved_cwd);
 
+    // Advertise colour, but never force it: `FORCE_COLOR`/`CLICOLOR_FORCE` would
+    // also make tools emit escape codes when their output is redirected, so
+    // `some-cmd > out.txt` inside the terminal would end up full of them.
+    // Detection through TERM/COLORTERM already works — what was missing was a
+    // palette saturated enough to tell the resulting colours apart.
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
-    cmd.env("TERM_PROGRAM", "warp-clone");
+    cmd.env("CLICOLOR", "1");
+    cmd.env("TERM_PROGRAM", "Duckweed");
+    cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
     if let Some(env) = env {
         for (k, v) in env {
             cmd.env(k, v);

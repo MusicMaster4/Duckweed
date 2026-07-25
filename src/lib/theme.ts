@@ -1,33 +1,65 @@
 import type { ITheme } from "@xterm/xterm";
 
 /**
- * Low-contrast dark palette: the foreground is deliberately not white and the
- * ANSI colours are desaturated, so long sessions stay easy on the eyes and the
- * few saturated accents in the UI are the things that draw attention.
+ * Duckweed's terminal palette.
+ *
+ * The surfaces stay near-black, but the ANSI colours are fully saturated: the
+ * previous desaturated set made colour-heavy CLIs (Claude Code, Codex, git,
+ * npm) read as a single wash of grey-blue, which defeats the point of them
+ * emitting colour at all. Green is the house colour, so ANSI green doubles as
+ * the accent and every other hue is tuned to sit beside it without clashing.
  */
+
+/** The one green everything else is derived from — UI accent and ANSI green. */
+export const GREEN = "#7be05a";
+/** Lighter step used for bright green and for text that must beat the accent. */
+export const GREEN_BRIGHT = "#9df07d";
+/** Deep step for fills and borders that should read as green but recede. */
+export const GREEN_DEEP = "#4a9b32";
+
 export const terminalTheme: ITheme = {
-  background: "#131419",
-  foreground: "#c0c5d0",
-  cursor: "#8b83e6",
-  cursorAccent: "#131419",
-  selectionBackground: "#2b2f3d",
-  selectionForeground: "#d6dae3",
+  background: "#131614",
+  foreground: "#d2d8d4",
+  cursor: GREEN,
+  cursorAccent: "#131614",
+  // Alpha keeps the selected text in its own colour instead of flattening it.
+  selectionBackground: "#7be05a38",
 
-  black: "#3b3f4a",
-  red: "#c98b93",
-  green: "#84a98c",
-  yellow: "#c3a068",
-  blue: "#8298c4",
-  magenta: "#a98fc0",
-  cyan: "#7ba8a6",
-  white: "#b0b5c0",
+  black: "#2c322e",
+  red: "#f2686f",
+  green: GREEN,
+  yellow: "#f0c052",
+  blue: "#5fa8f5",
+  magenta: "#c98bf0",
+  cyan: "#45cec4",
+  white: "#c2cac5",
 
-  brightBlack: "#5b606d",
-  brightRed: "#d9a0a7",
-  brightGreen: "#9dbfa4",
-  brightYellow: "#d5b681",
-  brightBlue: "#9db0d6",
-  brightMagenta: "#c0a8d4",
-  brightCyan: "#96bfbc",
-  brightWhite: "#d5d9e2",
+  brightBlack: "#5f6a63",
+  brightRed: "#ff8a90",
+  brightGreen: GREEN_BRIGHT,
+  brightYellow: "#ffd772",
+  brightBlue: "#8cc4ff",
+  brightMagenta: "#e0adff",
+  brightCyan: "#72e6de",
+  brightWhite: "#eef3ef",
 };
+
+/**
+ * Colours the syntax highlighter paints with. They are drawn from the palette
+ * above rather than invented so highlighted output and genuinely-coloured
+ * output look like the same terminal.
+ */
+export const highlightColors = {
+  string: terminalTheme.green!,
+  number: terminalTheme.magenta!,
+  path: terminalTheme.blue!,
+  url: terminalTheme.brightCyan!,
+  flag: terminalTheme.yellow!,
+  key: terminalTheme.cyan!,
+  error: terminalTheme.red!,
+  warn: terminalTheme.yellow!,
+  ok: terminalTheme.brightGreen!,
+  muted: terminalTheme.brightBlack!,
+  added: terminalTheme.green!,
+  removed: terminalTheme.red!,
+} as const;

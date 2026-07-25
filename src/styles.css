@@ -1,25 +1,29 @@
 :root {
-  /* Surfaces: flat, near-black, a hair cool. No glows — the terminal is the subject. */
-  --bg: #0f1014;
-  --bg-raised: #16181e;
-  --bg-pane: #131419;
-  --bg-elevated: #1b1e26;
-  --hover: rgba(255, 255, 255, 0.045);
-  --border: rgba(255, 255, 255, 0.05);
-  --border-strong: rgba(255, 255, 255, 0.095);
+  /* Surfaces: flat, near-black, tilted a hair green. No glows — the terminal is
+     the subject and the accent is the only saturated thing in the chrome. */
+  --bg: #0f120f;
+  --bg-raised: #171b17;
+  --bg-pane: #131614;
+  --bg-elevated: #1c211d;
+  --hover: rgba(255, 255, 255, 0.05);
+  --border: rgba(255, 255, 255, 0.055);
+  --border-strong: rgba(255, 255, 255, 0.1);
 
-  /* Text tops out at a soft grey, never white — this is what keeps contrast low. */
-  --text: #b9bfcc;
-  --text-dim: #7c828f;
-  --text-faint: #565b67;
+  /* Text tops out short of white, but higher than before — the old ceiling made
+     the whole shell read as dim grey next to the terminal. */
+  --text: #ccd3ce;
+  --text-dim: #8d968f;
+  --text-faint: #656e68;
 
   /* Accents, used sparingly: focus, project, git, destructive. */
-  --accent: #8b83e6;
-  --accent-dim: rgba(139, 131, 230, 0.13);
-  --accent-line: rgba(139, 131, 230, 0.32);
-  --amber: #c3a068;
-  --sage: #84a98c;
-  --rose: #c98b93;
+  --accent: #7be05a;
+  --accent-strong: #9df07d;
+  --accent-dim: rgba(123, 224, 90, 0.14);
+  --accent-line: rgba(123, 224, 90, 0.36);
+  --accent-glow: rgba(123, 224, 90, 0.55);
+  --amber: #f0c052;
+  --sage: #7be05a;
+  --rose: #f2686f;
 
   --radius: 9px;
   --titlebar-h: 40px;
@@ -143,14 +147,16 @@ svg {
   height: 21px;
   flex: none;
   border-radius: 6px;
-  color: #d3d0ea;
-  background: linear-gradient(140deg, #514c8c, #3d6577);
+  color: #0e1a0a;
+  background: linear-gradient(140deg, #9df07d, #4a9b32);
 }
 
+/* The leaf is a silhouette, not a line drawing — override the global stroke. */
 .brand svg {
-  width: 14px;
-  height: 14px;
-  stroke-width: 1.8;
+  width: 15px;
+  height: 15px;
+  fill: currentColor;
+  stroke: none;
 }
 
 .chip {
@@ -264,8 +270,8 @@ button.chip:hover {
 }
 
 .win-close:hover {
-  background: #8e3a42;
-  color: #f2e6e7;
+  background: #a03c43;
+  color: #ffeef0;
 }
 
 /* ------------------------------------------------------------ tab strip */
@@ -333,6 +339,7 @@ button.chip:hover {
   margin-top: -1.5px;
   border-radius: 50%;
   background: var(--accent);
+  box-shadow: 0 0 5px var(--accent-glow);
 }
 
 .tab.is-active .tab-title {
@@ -384,7 +391,7 @@ button.chip:hover {
 }
 
 .tab-close:hover {
-  background: rgba(201, 139, 147, 0.14);
+  background: rgba(242, 104, 111, 0.15);
   color: var(--rose);
 }
 
@@ -547,7 +554,7 @@ button.chip:hover {
 }
 
 .pane.is-active {
-  border-color: rgba(139, 131, 230, 0.26);
+  border-color: rgba(123, 224, 90, 0.3);
 }
 
 .pane.is-source {
@@ -633,7 +640,7 @@ button.chip:hover {
   flex: none;
   padding: 0 5px;
   border-radius: 5px;
-  background: rgba(201, 139, 147, 0.13);
+  background: rgba(242, 104, 111, 0.14);
   color: var(--rose);
   font-size: 10px;
   line-height: 15px;
@@ -671,7 +678,7 @@ button.chip:hover {
 }
 
 .pane-btn-danger:hover {
-  background: rgba(201, 139, 147, 0.14);
+  background: rgba(242, 104, 111, 0.15);
   color: var(--rose);
 }
 

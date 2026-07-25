@@ -2,7 +2,7 @@ import { uid } from "./layout";
 import { newTermId } from "./terminals";
 import type { LayoutNode, Tab } from "./types";
 
-const KEY = "warp-clone:state:v1";
+const KEY = "duckweed:state:v1";
 const MAX_RECENTS = 12;
 
 export interface Persisted {
@@ -11,6 +11,8 @@ export interface Persisted {
   recents: string[];
   fontSize: number;
   shell: string | null;
+  /** Colourise output that arrives with no ANSI colour of its own. */
+  highlight: boolean;
   /** Layout only — processes are never restored, just the arrangement. */
   tabs: { title: string; root: LayoutNode }[];
   activeTabIndex: number;
@@ -55,6 +57,7 @@ export function load(): Persisted | null {
       recents: Array.isArray(parsed.recents) ? parsed.recents.slice(0, MAX_RECENTS) : [],
       fontSize: typeof parsed.fontSize === "number" ? parsed.fontSize : 13.5,
       shell: typeof parsed.shell === "string" ? parsed.shell : null,
+      highlight: typeof parsed.highlight === "boolean" ? parsed.highlight : true,
       tabs,
       activeTabIndex: typeof parsed.activeTabIndex === "number" ? parsed.activeTabIndex : 0,
     };
@@ -68,6 +71,7 @@ export function save(state: {
   recents: string[];
   fontSize: number;
   shell: string | null;
+  highlight: boolean;
   tabs: Tab[];
   activeTabId: string;
 }): void {
@@ -78,6 +82,7 @@ export function save(state: {
       recents: state.recents.slice(0, MAX_RECENTS),
       fontSize: state.fontSize,
       shell: state.shell,
+      highlight: state.highlight,
       tabs: state.tabs.map((t) => ({ title: t.title, root: t.root })),
       activeTabIndex: Math.max(
         0,

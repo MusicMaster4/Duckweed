@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Warp Clone",
+  "productName": "Duckweed",
   "version": "0.1.0",
-  "identifier": "dev.slop.warpclone",
+  "identifier": "dev.slop.duckweed",
   "build": {
     "beforeDevCommand": "bun run dev",
     "devUrl": "http://localhost:1420",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Warp Clone",
+        "title": "Duckweed",
         "width": 1280,
         "height": 820,
         "minWidth": 620,
@@ -22,7 +22,7 @@
         "transparent": false,
         "center": true,
         "dragDropEnabled": false,
-        "backgroundColor": "#0d0f14"
+        "backgroundColor": "#0f120f"
       }
     ],
     "security": {

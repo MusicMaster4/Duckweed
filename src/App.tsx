@@ -55,6 +55,7 @@ function boot() {
       recents: saved.recents,
       fontSize: saved.fontSize,
       shell: saved.shell,
+      highlight: saved.highlight,
     };
   }
   const term = terminals.newTermId();
@@ -67,6 +68,7 @@ function boot() {
     recents: [] as string[],
     fontSize: DEFAULT_FONT_SIZE,
     shell: null as string | null,
+    highlight: true,
   };
 }
 
@@ -80,6 +82,7 @@ export default function App() {
   const [shells, setShells] = useState<ShellInfo[]>([]);
   const [shell, setShell] = useState<string | null>(initial.shell);
   const [fontSize, setFontSize] = useState(initial.fontSize);
+  const [highlight, setHighlight] = useState(initial.highlight);
   const [booted, setBooted] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [recentsMenu, setRecentsMenu] = useState<{ x: number; y: number } | null>(null);
@@ -455,7 +458,7 @@ export default function App() {
         setProject(info);
         projectRef.current = info;
         setRecents((prev) => pushRecent(prev, info.path));
-        void getCurrentWindow().setTitle(`${info.name} — Warp Clone`);
+        void getCurrentWindow().setTitle(`${info.name} — Duckweed`);
         if (options.openTab) {
           const term = createTerm({ cwd: info.path });
           const root = leaf(term);
@@ -507,6 +510,7 @@ export default function App() {
       }
 
       terminals.setFontSize(initial.fontSize);
+      terminals.setHighlight(initial.highlight);
 
       if (initial.projectPath) {
         try {
@@ -514,7 +518,7 @@ export default function App() {
           if (!cancelled) {
             setProject(info);
             projectRef.current = info;
-            void getCurrentWindow().setTitle(`${info.name} — Warp Clone`);
+            void getCurrentWindow().setTitle(`${info.name} — Duckweed`);
           }
         } catch {
           if (!cancelled) setRecents((prev) => prev.filter((p) => p !== initial.projectPath));
@@ -526,18 +530,19 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [initial.fontSize, initial.projectPath]);
+  }, [initial.fontSize, initial.highlight, initial.projectPath]);
 
   // Persist the arrangement (never the processes). Debounced because dragging a
   // divider produces a state update per pointer move.
   useEffect(() => {
     if (!booted) return;
     const id = window.setTimeout(
-      () => save({ project: project?.path ?? null, recents, fontSize, shell, tabs, activeTabId }),
+      () =>
+        save({ project: project?.path ?? null, recents, fontSize, shell, highlight, tabs, activeTabId }),
       400,
     );
     return () => window.clearTimeout(id);
-  }, [booted, project, recents, fontSize, shell, tabs, activeTabId]);
+  }, [booted, project, recents, fontSize, shell, highlight, tabs, activeTabId]);
 
   // Keep the OS focus on the terminal the UI considers active.
   const focusKey = activeTab ? `${activeTab.id}:${activeTab.activeLeaf}` : "";
@@ -577,6 +582,12 @@ export default function App() {
     setFontSize(terminals.getFontSize());
   }, []);
 
+  const toggleHighlight = useCallback(() => {
+    const next = !terminals.getHighlight();
+    terminals.setHighlight(next);
+    setHighlight(next);
+  }, []);
+
   // ----------------------------------------------------------- shortcuts
 
   const actions = {
@@ -592,6 +603,7 @@ export default function App() {
     focusDirection,
     openProject,
     applyFontSize,
+    toggleHighlight,
     currentTab,
     setPaletteOpen,
   };
@@ -679,6 +691,9 @@ export default function App() {
             return take();
           case "k":
             if (activeTerm) terminals.clear(activeTerm);
+            return take();
+          case "h":
+            a.toggleHighlight();
             return take();
           case "c": {
             if (!activeTerm) return;
@@ -820,6 +835,14 @@ export default function App() {
         hint: "Ctrl+0",
         run: () => applyFontSize(DEFAULT_FONT_SIZE),
       },
+      {
+        id: "view.highlight",
+        group: "View",
+        title: highlight ? "Turn off syntax highlighting" : "Turn on syntax highlighting",
+        subtitle: "Colours output that arrives with no colour of its own",
+        hint: "Ctrl+Shift+H",
+        run: toggleHighlight,
+      },
     ];
 
     for (const info of shells) {
@@ -883,12 +906,14 @@ export default function App() {
     balancePanes,
     closePane,
     closeTab,
+    highlight,
     newTab,
     openProject,
     recents,
     shells,
     splitPane,
     tabs,
+    toggleHighlight,
     toggleZoom,
   ]);
 

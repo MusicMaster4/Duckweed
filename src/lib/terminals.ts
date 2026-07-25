@@ -6,6 +6,7 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
+import { createHighlighter, type Highlighter } from "./highlight";
 import { ptyKill, ptyResize, ptySpawn, ptyWrite } from "./ipc";
 import { terminalTheme } from "./theme";
 
@@ -34,12 +35,16 @@ interface Session extends TermMeta {
   spawned: boolean;
   /** Bytes typed before the PTY was ready. */
   pending: string[];
+  /** Decodes PTY bytes; `stream: true` so multi-byte chars can span chunks. */
+  decoder: TextDecoder;
+  highlighter: Highlighter;
 }
 
 const sessions = new Map<string, Session>();
 const listeners = new Set<() => void>();
 
 let fontSize = 13.5;
+let highlightEnabled = true;
 const FONT_FAMILY =
   '"CaskaydiaCove Nerd Font", "Cascadia Code", "JetBrains Mono", "Fira Code", Consolas, "Courier New", monospace';
 
@@ -155,6 +160,8 @@ function create(id: string, opts: { cwd?: string | null; shell?: string | null }
     unlisten: [],
     spawned: false,
     pending: [],
+    decoder: new TextDecoder(),
+    highlighter: createHighlighter(),
     title: "shell",
     cwd: opts.cwd ?? "",
     shellLabel: "",
@@ -216,7 +223,13 @@ async function start(session: Session, opts: { cwd?: string | null; shell?: stri
 
   // Subscribe before spawning so no output can slip through.
   const offData = await listen<string>(`pty:data:${id}`, (event) => {
-    session.term.write(decodeBase64(event.payload));
+    // The highlighter needs text, so decoding moves here from xterm. `stream`
+    // keeps a UTF-8 character split across two PTY reads intact; the
+    // highlighter is always fed the chunk so its escape-sequence state stays
+    // in sync even while highlighting is switched off.
+    const text = session.decoder.decode(decodeBase64(event.payload), { stream: true });
+    const painted = session.highlighter(text);
+    session.term.write(highlightEnabled ? painted : text);
   });
   const offExit = await listen<{ code: number | null }>(`pty:exit:${id}`, (event) => {
     session.exited = true;
@@ -338,6 +351,19 @@ export function getFontSize(): number {
   return fontSize;
 }
 
+/**
+ * Turn the colouriser for uncoloured output on or off. It only affects output
+ * written from here on — scrollback keeps whatever colours it was drawn with.
+ */
+export function setHighlight(enabled: boolean): void {
+  highlightEnabled = enabled;
+  notify();
+}
+
+export function getHighlight(): boolean {
+  return highlightEnabled;
+}
+
 export function clear(id: string): void {
   const session = sessions.get(id);
   if (!session) return;
@@ -367,10 +393,10 @@ export function clearSearch(id: string): void {
 }
 
 const searchDecorations = {
-  matchBackground: "#4a3d8f",
-  matchBorder: "#7c6cff",
-  matchOverviewRuler: "#7c6cff",
-  activeMatchBackground: "#7c6cff",
-  activeMatchBorder: "#c8bfff",
-  activeMatchColorOverviewRuler: "#c8bfff",
+  matchBackground: "#2f5e1f",
+  matchBorder: "#4a9b32",
+  matchOverviewRuler: "#4a9b32",
+  activeMatchBackground: "#7be05a",
+  activeMatchBorder: "#d6ffc4",
+  activeMatchColorOverviewRuler: "#d6ffc4",
 };

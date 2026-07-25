@@ -90,5 +90,5 @@ fn main() {
             }
         })
         .run(tauri::generate_context!())
-        .expect("error while running warp-clone");
+        .expect("error while running duckweed");
 }

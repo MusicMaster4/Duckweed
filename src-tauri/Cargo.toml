@@ -1,7 +1,7 @@
 [package]
-name = "warp-clone"
+name = "duckweed"
 version = "0.1.0"
-description = "A Warp-like terminal built with Tauri + Rust"
+description = "Duckweed — a Warp-like terminal built with Tauri + Rust"
 edition = "2021"
 rust-version = "1.77"
 
