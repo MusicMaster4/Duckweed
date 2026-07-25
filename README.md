@@ -1,111 +1,164 @@
+<div align="center">
+
+<img src="assets/icon.png" alt="Duckweed icon" width="112" />
+
 # Duckweed
 
-Um terminal no estilo do [Warp](https://warp.dev), feito com **Tauri 2 + Rust** no backend e
-**React + TypeScript + xterm.js** no frontend. Shells reais via PTY nativo (ConPTY no Windows,
-`openpty` no Linux/macOS).
+### The terminal workspace for vibe coding
 
-## O que dá para fazer
+Organize real shells, projects, and AI coding agents in draggable panes and tabs —
+without breaking your flow.
 
-- **Abrir um projeto** — escolhe uma pasta, o app abre uma aba já com o shell naquele diretório
-  e mostra o nome do projeto e a branch do git na barra de título. Projetos recentes ficam
-  guardados.
-- **Vários terminais na mesma página** — divide qualquer painel para a direita, esquerda, cima ou
-  baixo, quantas vezes quiser. Cada painel é um shell independente.
-- **Arrastar e organizar como quiser** — pega na barrinha de cima de um painel e arrasta:
-  - solta perto de uma **borda** de outro painel → o terminal passa a ocupar aquele lado;
-  - solta no **centro** de outro painel → os dois trocam de lugar;
-  - solta numa **aba** → o terminal muda de aba;
-  - solta no **`+`** da barra de abas → o terminal vira uma aba nova.
-- **Redimensionar** — arrasta as divisórias entre painéis; duplo-clique iguala os dois vizinhos.
-- **Abas** — criar, fechar, renomear (duplo-clique) e reordenar arrastando.
-- **Zoom de painel** — um painel ocupa a aba inteira sem perder os outros.
-- **Paleta de comandos** (`Ctrl+Shift+P`) — todas as ações, os shells disponíveis, os projetos
-  recentes e navegação direta para qualquer aba ou painel.
-- **Busca no scrollback** (`Ctrl+Shift+F`) com destaque dos resultados.
-- **Escolha de shell** — o app detecta o que existe na máquina (PowerShell 7, Windows PowerShell,
-  cmd, Git Bash, WSL, Nushell; zsh/bash/fish no Unix) e deixa escolher por aba.
-- **O layout é lembrado** entre execuções — a arrumação dos painéis volta igual (com shells novos,
-  processos nunca são "restaurados").
-- **Syntax highlighting da saída** (`Ctrl+Shift+H`) — comandos que imprimem texto cru (`dir`,
-  telas de `--help`, stack traces, dumps de config) ganham cor em strings, números, caminhos,
-  URLs, flags, hashes, diffs e palavras de erro/aviso/sucesso. Quem já manda cor — Claude Code,
-  Codex, git, npm — passa intacto: o highlighter só toca em chunk que não traz nenhuma sequência
-  de escape, fora da tela alternativa e com o estado SGR limpo.
+<p>
+  <img src="https://img.shields.io/badge/Tauri_2-24C8DB?logo=tauri&logoColor=white" alt="Tauri 2" />
+  <img src="https://img.shields.io/badge/Rust-000000?logo=rust&logoColor=white" alt="Rust" />
+  <img src="https://img.shields.io/badge/React-20232A?logo=react&logoColor=61DAFB" alt="React" />
+  <img src="https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white" alt="TypeScript" />
+  <img src="https://img.shields.io/badge/xterm.js-terminal-0f172a" alt="xterm.js" />
+</p>
 
-## Atalhos
+<p>
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#features">Features</a> ·
+  <a href="#keyboard-shortcuts">Shortcuts</a> ·
+  <a href="#how-it-works">Architecture</a>
+</p>
 
-| Atalho | Ação |
-| --- | --- |
-| `Ctrl+Shift+D` / `Ctrl+Shift+E` | dividir à direita / abaixo |
-| `Ctrl+Shift+W` | fechar painel |
-| `Ctrl+Shift+Z` | zoom do painel |
-| `Ctrl+Shift+B` | igualar todos os painéis |
-| `F11` | fullscreen |
-| `Alt+←↑↓→` | mover o foco entre painéis |
-| `Ctrl+Shift+[` / `]` | painel anterior / seguinte |
-| `Ctrl+Shift+T` / `Ctrl+Shift+Q` | nova aba / fechar aba |
-| `Ctrl+Tab` / `Ctrl+Shift+Tab` | ciclar abas |
-| `Ctrl+1` … `Ctrl+9` | ir para a aba N |
-| `Ctrl+Shift+O` | abrir projeto |
-| `Ctrl+Shift+P` | paleta de comandos |
-| `Ctrl+Shift+F` | buscar no terminal |
-| `Ctrl+Shift+C` / `Ctrl+Shift+V` | copiar / colar |
-| `Ctrl+Shift+K` | limpar o painel |
-| `Ctrl+Shift+H` | ligar/desligar o syntax highlighting |
-| `Ctrl+=` / `Ctrl+-` / `Ctrl+0` | tamanho da fonte |
+</div>
 
-Clique direito no terminal copia a seleção; sem seleção, cola.
+<br />
 
-## Rodar
+> A calm, capable terminal for the messy middle of building things.
+
+## The idea
+
+Vibe coding is faster when your terminal keeps up with your thoughts. Duckweed is a
+focused, native desktop terminal built around the way modern development actually
+happens: multiple repositories, several shells, quick experiments, and an AI coding
+agent running alongside you.
+
+It gives you the flexibility of a tiling workspace with the familiarity of a regular
+terminal, while staying small, fast, and keyboard-friendly.
+
+<table>
+  <tr>
+    <td width="33%" align="center"><strong>⚡ Stay in flow</strong><br /><sub>Keep your editor, shell, logs, and agent sessions one shortcut away.</sub></td>
+    <td width="33%" align="center"><strong>🧭 See the whole project</strong><br /><sub>Project names, Git branches, tabs, and panes stay visible together.</sub></td>
+    <td width="33%" align="center"><strong>🪶 Keep it light</strong><br /><sub>A native Tauri shell with a focused interface and no hosted workspace.</sub></td>
+  </tr>
+</table>
+
+## Features
+
+<table>
+  <tr>
+    <td width="50%"><strong>🗂 Project-aware sessions</strong><br /><sub>Open a folder and see its project name and Git branch in the title bar.</sub></td>
+    <td width="50%"><strong>🖥 Real native shells</strong><br /><sub>PTY-backed sessions with ConPTY on Windows and <code>openpty</code> on Linux/macOS.</sub></td>
+  </tr>
+  <tr>
+    <td><strong>▦ Flexible pane layouts</strong><br /><sub>Split, resize, swap, drag, and temporarily zoom any pane.</sub></td>
+    <td><strong>⌘ Command palette</strong><br /><sub>Reach every action, shell, project, tab, and pane with <code>Ctrl+Shift+P</code>.</sub></td>
+  </tr>
+  <tr>
+    <td><strong>⌕ Searchable scrollback</strong><br /><sub>Find terminal output instantly with <code>Ctrl+Shift+F</code>.</sub></td>
+    <td><strong>◎ Readable output</strong><br /><sub>Optional highlighting for paths, URLs, flags, hashes, diffs, and warnings.</sub></td>
+  </tr>
+  <tr>
+    <td><strong>☷ Shell discovery</strong><br /><sub>Detect PowerShell, <code>cmd</code>, Git Bash, WSL, Nushell, Bash, Zsh, and Fish.</sub></td>
+    <td><strong>↺ Persistent layouts</strong><br /><sub>Restore your arrangement between launches without reviving old processes.</sub></td>
+  </tr>
+</table>
+
+## Quick start
+
+### Requirements
+
+- [Bun](https://bun.sh/)
+- [Rust](https://www.rust-lang.org/tools/install)
+- [Tauri 2 prerequisites](https://v2.tauri.app/start/prerequisites/)
+
+### Run locally
 
 ```bash
 bun install
-bun run app          # tauri dev
-bun run app:build    # instalador (NSIS no Windows)
+bun run app
 ```
 
-Checagens:
+### Build an installer
+
+```bash
+bun run app:build
+```
+
+On Windows, this produces an NSIS installer. The native shell used by each pane is
+selected from the shells installed on your machine.
+
+## Keyboard shortcuts
+
+| Shortcut | Action |
+| --- | --- |
+| `Ctrl+Shift+D` / `Ctrl+Shift+E` | Split right / down |
+| `Ctrl+Shift+W` | Close the focused pane |
+| `Ctrl+Shift+Z` | Zoom the focused pane |
+| `Ctrl+Shift+B` | Equalize all panes |
+| `Alt+Arrow keys` | Move focus between panes |
+| `Ctrl+Shift+[` / `]` | Focus the previous / next pane |
+| `Ctrl+Shift+T` / `Ctrl+Shift+Q` | New tab / close tab |
+| `Ctrl+Tab` / `Ctrl+Shift+Tab` | Cycle tabs |
+| `Ctrl+1` … `Ctrl+9` | Go to tab N |
+| `Ctrl+Shift+O` | Open a project |
+| `Ctrl+Shift+P` | Open the command palette |
+| `Ctrl+Shift+F` | Search terminal output |
+| `Ctrl+Shift+K` | Clear the focused pane |
+| `Ctrl+Shift+H` | Toggle output highlighting |
+| `Ctrl+=` / `Ctrl+-` / `Ctrl+0` | Increase / decrease / reset font size |
+| `F11` | Toggle fullscreen |
+
+Right-click copies a selection. With no selection, it pastes from the clipboard.
+
+## How it works
+
+Duckweed combines a React + TypeScript interface with a Rust backend through Tauri 2.
+Each pane owns a real PTY process, while the terminal instances live outside the React
+render tree so dragging or rearranging a pane does not destroy its process or scrollback.
+
+```text
+src/
+├── components/       UI: title bar, tabs, panes, search, palette, status bar
+├── hooks/             drag-and-drop behavior
+└── lib/               layout, terminal registry, persistence, IPC, themes, highlighting
+
+src-tauri/src/
+├── main.rs            Tauri commands and IPC
+├── pty.rs             One PTY session per pane
+├── shells.rs          Installed-shell discovery
+└── project.rs         Project name and Git branch detection
+```
+
+The PTY stream is transported as base64 and decoded incrementally, so split UTF-8
+characters are preserved even during large bursts of output. Pane sizing uses explicit
+flex bases and `minmax(0, 1fr)` to keep dense layouts inside the window.
+
+## Development checks
 
 ```bash
 bun run typecheck
 cd src-tauri && cargo check
 ```
 
-O ícone é gerado por código (sem dependências de imagem): `bun run gen:icon`.
+## Current scope
 
-## Como está montado
+Duckweed is an active, experimental project. The core workspace experience — projects,
+tabs, panes, native shells, search, and layout persistence — is implemented.
 
-```
-src-tauri/src/
-  main.rs      comandos IPC (pty_spawn/write/resize/kill, list_shells, project_info)
-  pty.rs       uma sessão PTY por painel; saída vai para o webview em base64
-  shells.rs    descoberta dos shells instalados
-  project.rs   nome do projeto + branch lida direto de .git/HEAD
-src/
-  lib/layout.ts     árvore de splits (inserir ao lado, remover colapsando, trocar, redimensionar)
-  lib/terminals.ts  registro global de instâncias xterm que sobrevive a re-renders do React
-  lib/highlight.ts  colorização da saída que chega sem cor nenhuma
-  lib/theme.ts      paleta ANSI + as cores que o highlighter usa
-  hooks/useDragPane.ts  drag-and-drop com zonas de drop calculadas por geometria
-  components/       TitleBar, TabStrip, PaneTree, TerminalPane, SearchBar, CommandPalette, StatusBar
-```
+Warp-style command blocks (grouping each command and its output into a navigable card)
+are not implemented yet. They require shell integration through OSC 133 and prompt hooks.
 
-Três detalhes que fazem a coisa funcionar:
+## Contributing
 
-1. **Os terminais vivem fora do React.** `lib/terminals.ts` guarda cada instância xterm num
-   registro global e move o elemento DOM entre painéis. Quando o layout muda, o React remonta os
-   painéis mas o scrollback, a seleção e o processo continuam intactos — sem isso, arrastar um
-   painel apagaria o terminal.
-2. **A saída do PTY viaja como base64 e é decodificada em streaming.** Um chunk pode cortar um
-   caractere UTF-8 no meio, então o `TextDecoder` de cada sessão usa `stream: true` e guarda os
-   bytes incompletos para o chunk seguinte — sem isso, saídas grandes aparecem corrompidas.
-3. **O tamanho dos painéis nunca depende do conteúdo deles.** Cada célula recebe um
-   `flex-basis` explícito com `flex-grow`/`flex-shrink` zerados, e a grid raiz usa
-   `minmax(0, 1fr)` nos dois eixos. Sem isso, o `min-content` dos terminais empurra o app
-   para além da janela: com 3+ painéis o layout estoura e os botões da janela saem da tela.
+Issues, ideas, and pull requests are welcome. If you find a bug, include your operating
+system, shell, reproduction steps, and any relevant terminal output.
 
-## O que não tem
+## License
 
-Os "blocks" do Warp (agrupar cada comando e a sua saída num cartão, com histórico navegável)
-dependem de integração com o shell via sequências OSC 133 e de um hook no prompt de cada shell —
-isso não está implementado. O resto da experiência de painéis, abas e projeto está.
+No license has been declared yet. Until one is added, all rights are reserved.

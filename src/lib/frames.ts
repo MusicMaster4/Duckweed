@@ -14,8 +14,13 @@
  * "synchronized output". `CSI ? 2026 h` means hold the picture still, `CSI ?
  * 2026 l` means the frame is complete. xterm.js has no support for it and drops
  * both on the floor, so this module implements it — everything between the two
- * markers is collected and handed to xterm in a single write, which makes it a
- * single paint of a finished frame.
+ * markers is collected and handed to xterm together.
+ *
+ * A single `Terminal.write` is still not necessarily a single paint: xterm
+ * yields after its parser has worked for 12 ms so the renderer can catch up.
+ * `stabilizeCursorDuringFrame` therefore keeps the cursor hidden while a held
+ * redraw is parsed and only restores the program's requested visibility after
+ * the closing marker has been processed.
  *
  * The markers are left in the stream rather than stripped: xterm ignores private
  * modes it does not know, and passing the bytes through untouched keeps what the
@@ -28,7 +33,69 @@ const ESC = "\x1b";
 export const SYNC_MODE = 2026;
 
 /** `CSI ? <params> h` / `CSI ? <params> l` — DEC private mode set and reset. */
-const PRIVATE_MODE = /\x1b\[\?([0-9;]*)([hl])/g;
+const PRIVATE_MODE_SOURCE = String.raw`\x1b\[\?([0-9;]*)([hl])`;
+
+function privateModes(): RegExp {
+  // A fresh expression matters here: delivering a frame can synchronously run
+  // cursor stabilization, and sharing one global `lastIndex` would make the
+  // outer frame scan skip its next marker.
+  return new RegExp(PRIVATE_MODE_SOURCE, "g");
+}
+
+export interface FrameWrite {
+  text: string;
+  /** The bytes belong to a DEC 2026 synchronized-output frame. */
+  synchronized: boolean;
+  /** The matching `CSI ? 2026 l` was received; false means a safety flush. */
+  complete: boolean;
+}
+
+export interface StabilizedWrite {
+  text: string;
+  /** Logical visibility requested by the program after processing this text. */
+  cursorVisible: boolean;
+}
+
+/**
+ * Keep the cursor off intermediate cells while xterm parses a synchronized
+ * redraw.
+ *
+ * xterm may yield and paint part-way through one `write` call. Moving every
+ * cursor-visibility command to the boundary of the frame makes those partial
+ * paints harmless: the cursor is hidden before any cursor movement and restored
+ * only after a real closing marker. Other private modes sharing the same CSI
+ * command are preserved.
+ */
+export function stabilizeCursorDuringFrame(
+  text: string,
+  cursorVisible: boolean,
+  synchronized: boolean,
+  complete: boolean,
+): StabilizedWrite {
+  let nextVisible = cursorVisible;
+  const withoutCursorChanges = text.replace(privateModes(), (sequence, rawParams: string, action: string) => {
+    const params = rawParams.split(";").filter(Boolean);
+    if (!params.includes("25")) return sequence;
+
+    nextVisible = action === "h";
+    const remaining = params.filter((param) => param !== "25");
+    return remaining.length ? `${ESC}[?${remaining.join(";")}${action}` : "";
+  });
+
+  if (!synchronized) {
+    return { text, cursorVisible: nextVisible };
+  }
+
+  // A safety-flushed frame stays logically open. Do not expose its temporary
+  // cursor position; the later chunk containing the real close will restore the
+  // last visibility requested by the program.
+  return {
+    text:
+      `${ESC}[?25l${withoutCursorChanges}` +
+      (complete ? `${ESC}[?25${nextVisible ? "h" : "l"}` : ""),
+    cursorVisible: nextVisible,
+  };
+}
 
 /**
  * How long a frame may stay open before it is drawn anyway. A program that
@@ -87,7 +154,7 @@ export interface FrameBuffer {
  * Output from a program that never uses mode 2026 passes straight through, so
  * this is only ever as slow as the stream it is reassembling.
  */
-export function createFrameBuffer(write: (text: string) => void): FrameBuffer {
+export function createFrameBuffer(write: (chunk: FrameWrite) => void): FrameBuffer {
   /** An escape sequence cut in half by a read boundary, waiting for its tail. */
   let carry = "";
   /** The frame being assembled, if one is open. */
@@ -107,7 +174,7 @@ export function createFrameBuffer(write: (text: string) => void): FrameBuffer {
     if (!frame) return;
     const text = frame;
     frame = "";
-    write(text);
+    write({ text, synchronized: true, complete: false });
   }
 
   function push(chunk: string): void {
@@ -121,13 +188,20 @@ export function createFrameBuffer(write: (text: string) => void): FrameBuffer {
     }
     if (!text) return;
 
-    // Everything outside a frame accumulates in `out` and everything inside it
-    // in `frame`; when a frame closes it joins `out`, so a chunk holding a whole
-    // frame — the common case — still costs exactly one write.
+    // Everything outside a frame accumulates in `out`, while synchronized bytes
+    // stay in `frame`. They are emitted separately so the renderer knows exactly
+    // which writes need cursor stabilization.
     let out = "";
     let at = 0;
-    PRIVATE_MODE.lastIndex = 0;
-    for (let m = PRIVATE_MODE.exec(text); m; m = PRIVATE_MODE.exec(text)) {
+
+    function emitOutside(): void {
+      if (!out) return;
+      write({ text: out, synchronized: false, complete: true });
+      out = "";
+    }
+
+    const modes = privateModes();
+    for (let m = modes.exec(text); m; m = modes.exec(text)) {
       // `CSI ? 1049 ; 2026 h` is legal: the mode can ride along with others.
       if (!m[1].split(";").includes(String(SYNC_MODE))) continue;
 
@@ -143,13 +217,20 @@ export function createFrameBuffer(write: (text: string) => void): FrameBuffer {
         //
         // Already inside a frame? Then this marker is redundant, not a nested
         // frame — mode 2026 has no depth, so the outer frame simply continues.
+        if (!open) emitOutside();
         open = true;
         frame += m[0];
       } else {
-        frame += m[0];
-        out += frame;
-        frame = "";
-        open = false;
+        if (open) {
+          frame += m[0];
+          write({ text: frame, synchronized: true, complete: true });
+          frame = "";
+          open = false;
+        } else {
+          // A reset without a matching set is ordinary terminal output. Keep it
+          // byte-for-byte so mode state can still be repaired by the program.
+          out += m[0];
+        }
       }
     }
 
@@ -160,11 +241,11 @@ export function createFrameBuffer(write: (text: string) => void): FrameBuffer {
     // A frame this big is not a frame. Let it through and keep collecting: the
     // program gets one torn redraw instead of a pane that stops updating.
     if (frame.length > MAX_FRAME) {
-      out += frame;
+      write({ text: frame, synchronized: true, complete: false });
       frame = "";
     }
 
-    if (out) write(out);
+    emitOutside();
     if (frame) {
       if (timer === undefined) timer = setTimeout(flush, FRAME_TIMEOUT_MS);
     } else {

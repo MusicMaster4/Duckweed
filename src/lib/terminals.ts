@@ -6,7 +6,13 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
-import { createFrameBuffer, SYNC_MODE, type FrameBuffer } from "./frames";
+import {
+  createFrameBuffer,
+  stabilizeCursorDuringFrame,
+  SYNC_MODE,
+  type FrameBuffer,
+  type FrameWrite,
+} from "./frames";
 import { createHighlighter, type Highlighter } from "./highlight";
 import { ptyKill, ptyResize, ptySpawn, ptyWrite } from "./ipc";
 import { terminalTheme } from "./theme";
@@ -40,6 +46,8 @@ interface Session extends TermMeta {
   decoder: TextDecoder;
   /** Reassembles synchronized-output frames so xterm only paints finished ones. */
   frames: FrameBuffer;
+  /** Last cursor visibility requested by the shell, independent of redraw hiding. */
+  cursorVisible: boolean;
   highlighter: Highlighter;
 }
 
@@ -210,11 +218,19 @@ function send(session: Session, data: string): void {
 }
 
 /** Hand assembled output to xterm, colourised if that is switched on. */
-function draw(session: Session, text: string): void {
+function draw(session: Session, chunk: FrameWrite): void {
   // The highlighter needs to see every chunk, even while highlighting is off,
   // so its escape-sequence state stays in sync with the stream.
-  const painted = session.highlighter(text);
-  session.term.write(highlightEnabled ? painted : text);
+  const painted = session.highlighter(chunk.text);
+  const output = highlightEnabled ? painted : chunk.text;
+  const stabilized = stabilizeCursorDuringFrame(
+    output,
+    session.cursorVisible,
+    chunk.synchronized,
+    chunk.complete,
+  );
+  session.cursorVisible = stabilized.cursorVisible;
+  session.term.write(stabilized.text);
 }
 
 function create(id: string, opts: { cwd?: string | null; shell?: string | null }): Session {
@@ -272,7 +288,8 @@ function create(id: string, opts: { cwd?: string | null; shell?: string | null }
     pending: [],
     decoder: new TextDecoder(),
     // `session` is only read when a frame completes, long after this returns.
-    frames: createFrameBuffer((text) => draw(session, text)),
+    frames: createFrameBuffer((chunk) => draw(session, chunk)),
+    cursorVisible: true,
     highlighter: createHighlighter(),
     title: "shell",
     cwd: opts.cwd ?? "",
