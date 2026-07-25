@@ -422,11 +422,6 @@ button.chip:hover {
   line-height: 1;
 }
 
-.tab-new-caret {
-  width: 17px;
-  font-size: 11px;
-}
-
 .tab-new:hover {
   background: var(--hover);
   color: var(--text);
@@ -583,10 +578,12 @@ button.chip:hover {
   flex: none;
 }
 
-/* With the pane borders gone, the header is what marks the active pane: a
-   lighter bar, an accent grip and a brighter title. */
+/* The active pane gets the full house-colour bar so it remains unmistakable
+   even in a dense split layout. Everything on top uses the app's near-black. */
 .pane.is-active .pane-header {
-  background: rgba(255, 255, 255, 0.05);
+  border-bottom-color: var(--accent);
+  background: var(--accent);
+  color: var(--bg);
 }
 
 .pane-grip {
@@ -611,7 +608,7 @@ button.chip:hover {
 }
 
 .pane.is-active .pane-grip i {
-  background: var(--accent);
+  background: var(--bg);
 }
 
 .pane-title {
@@ -624,7 +621,7 @@ button.chip:hover {
 }
 
 .pane.is-active .pane-title {
-  color: var(--text);
+  color: var(--bg);
 }
 
 .pane-cwd {
@@ -637,6 +634,10 @@ button.chip:hover {
 
 .pane-cwd::before {
   content: "· ";
+}
+
+.pane.is-active .pane-cwd {
+  color: var(--bg);
 }
 
 .pane-badge {
@@ -652,6 +653,11 @@ button.chip:hover {
 .pane-badge-busy {
   background: var(--accent-dim);
   color: var(--accent-strong);
+}
+
+.pane.is-active .pane-badge {
+  background: rgba(15, 18, 15, 0.14);
+  color: var(--bg);
 }
 
 .pane-spacer {
@@ -690,6 +696,16 @@ button.chip:hover {
   color: var(--rose);
 }
 
+.pane.is-active .pane-btn {
+  color: var(--bg);
+}
+
+.pane.is-active .pane-btn:hover,
+.pane.is-active .pane-btn-danger:hover {
+  background: rgba(15, 18, 15, 0.14);
+  color: var(--bg);
+}
+
 .pane-body {
   position: relative;
   flex: 1 1 auto;
@@ -699,120 +715,204 @@ button.chip:hover {
   overflow: hidden;
 }
 
+/* ------------------------------------------------- empty pane (Warp-style) */
+
+/*
+ * A pane that has run nothing has only the shell's prompt in the grid, and a
+ * prompt on its own is chrome pretending to be content. `.is-blank` hides the
+ * grid — visibility, not display, so xterm keeps a real layout to measure and
+ * the first command does not arrive to a mis-sized terminal.
+ */
+.pane.is-blank .xterm-host {
+  visibility: hidden;
+}
+
+.pane-welcome {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  display: flex;
+  align-items: flex-end;
+  /* Matches `.pane-body`'s own padding so the greeting lines up with column 0
+     of the grid it is standing in for. */
+  padding: 0 8px 4px 7px;
+  /* Opaque, not just layered on top: if anything ever leaves a stray glyph in
+     the grid underneath, the empty state still reads as empty. */
+  background: var(--bg-pane);
+  overflow: hidden;
+  pointer-events: none;
+  user-select: none;
+}
+
+.pane-welcome-inner {
+  min-width: 0;
+  max-width: 100%;
+  animation: welcome-in 320ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes welcome-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.pane-welcome-greeting {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+
+.pane-welcome-sub {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  margin: 4px 0 0;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.pane-welcome-shell {
+  color: var(--text-dim);
+}
+
+.pane-welcome-cwd {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pane-welcome-cwd::before {
+  content: "· ";
+}
+
+.pane-welcome-hints {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 14px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.pane-welcome-hints li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.pane-welcome-keys {
+  display: flex;
+  gap: 3px;
+  flex: none;
+}
+
+.pane-welcome-label {
+  font-size: 11px;
+  color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Short panes cannot fit the hint list; the greeting alone still reads. */
+.pane-welcome.is-compact .pane-welcome-hints {
+  display: none;
+}
+
 /* ---------------------------------------------------- command editor (Warp) */
 
 /*
  * Separate input editor below the grid — same idea as Warp: type commands in a
  * real text field, not inside the VT grid. The shell still receives the line
  * over the PTY when Enter is pressed.
+ *
+ * No box, no glow: Warp's composer is text sitting on the pane, with a hairline
+ * above it as the only separator. The focus signal is the accent rule on that
+ * hairline, not a halo around a rounded rectangle.
  */
 .command-input {
+  position: relative;
   flex: none;
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: 8px 10px 10px;
+  gap: 7px;
+  padding: 10px 14px 9px;
   border-top: 1px solid var(--border);
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.015), transparent 60%),
-    var(--bg-pane);
+  background: var(--bg-pane);
 }
 
-.command-input.is-focused {
-  background: linear-gradient(180deg, rgba(123, 224, 90, 0.04), transparent 70%), var(--bg-pane);
-}
-
-.command-input.is-raw {
-  opacity: 0.72;
-}
-
-.command-input.is-disabled .command-input-box {
-  opacity: 0.55;
-}
-
-.command-input-meta {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-  padding: 0 2px;
-  font-size: 10.5px;
-  color: var(--text-faint);
-  user-select: none;
-}
-
-.command-input-shell {
-  color: var(--text-dim);
-  font-weight: 500;
-}
-
-.command-input-sep {
-  opacity: 0.5;
-}
-
-.command-input-cwd {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--text-faint);
-}
-
-.command-input-spacer {
-  flex: 1;
-  min-width: 0;
-}
-
-.command-input-hint {
-  flex: none;
+/* The focus rule sits on top of the border rather than replacing it, so the
+   composer's edge never shifts by a pixel when focus arrives. */
+.command-input::before {
+  content: "";
+  position: absolute;
+  top: -1px;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: var(--accent-line);
   opacity: 0;
-  transition: opacity 120ms ease;
-  white-space: nowrap;
-  font-size: 10px;
+  transition: opacity 140ms ease;
 }
 
-.command-input.is-focused .command-input-hint,
-.pane:hover .command-input-hint {
+.command-input.is-focused::before {
   opacity: 1;
 }
 
-.command-input-box {
+.command-input.is-disabled {
+  opacity: 0.6;
+}
+
+.command-input-chips {
   display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  min-height: 40px;
-  padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--bg-elevated);
-  transition:
-    border-color 120ms ease,
-    box-shadow 120ms ease,
-    background 120ms ease;
-}
-
-.command-input-box.is-focused {
-  border-color: var(--accent-line);
-  background: #1a211c;
-  box-shadow:
-    0 0 0 1px var(--accent-dim),
-    0 8px 24px rgba(0, 0, 0, 0.28);
-}
-
-.command-input-prompt {
-  flex: none;
-  margin-top: 1px;
-  color: var(--accent);
-  font-family: "CaskaydiaCove Nerd Font", "Cascadia Code", "JetBrains Mono", "Fira Code", Consolas,
-    "Courier New", monospace;
-  font-size: 14px;
-  line-height: 22px;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
   user-select: none;
 }
 
-.command-input-field {
-  flex: 1 1 auto;
+/* Deliberately not `.chip` — that name already belongs to the titlebar's
+   project/branch chips, which are taller and have icon slots. */
+.composer-chip {
+  flex: none;
   min-width: 0;
+  padding: 1px 7px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.03);
+  font-size: 10.5px;
+  line-height: 16px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-chip.is-shell {
+  color: var(--accent);
+  border-color: var(--accent-dim);
+  background: var(--accent-dim);
+}
+
+.composer-chip.is-cwd {
+  flex: 0 1 auto;
+}
+
+.command-input-field {
+  display: block;
+  width: 100%;
   min-height: 22px;
-  max-height: 140px;
+  max-height: 160px;
   margin: 0;
   padding: 0;
   border: none;
@@ -836,6 +936,39 @@ button.chip:hover {
 .command-input-field:disabled {
   cursor: not-allowed;
 }
+
+.command-input-hint {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 16px;
+  font-size: 10px;
+  color: var(--text-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  opacity: 0;
+  transition: opacity 140ms ease;
+  user-select: none;
+}
+
+.command-input.is-focused .command-input-hint,
+.command-input.is-disabled .command-input-hint,
+.pane:hover .command-input-hint {
+  opacity: 1;
+}
+
+.command-input-hint kbd {
+  font-size: 9.5px;
+  padding: 0 4px;
+}
+
+.hint-sep {
+  width: 1px;
+  height: 9px;
+  margin: 0 4px;
+  background: var(--border-strong);
+}
+
 
 .xterm-host {
   position: relative;
@@ -1059,12 +1192,6 @@ body.is-resizing * {
   border-radius: 10px;
   background: var(--bg-elevated);
   box-shadow: 0 16px 40px rgba(0, 0, 0, 0.55);
-}
-
-.menu-shells {
-  position: absolute;
-  top: 29px;
-  left: 0;
 }
 
 .menu-item {

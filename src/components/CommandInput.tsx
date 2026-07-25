@@ -7,33 +7,30 @@ interface Props {
   cwd: string;
   shellLabel: string;
   active: boolean;
-  /** Full-screen / interactive program — hand keys to the raw PTY instead. */
-  rawMode: boolean;
   exited: boolean;
-  onRawMode: (raw: boolean) => void;
 }
 
 const historyByTerm = new Map<string, string[]>();
 
-function basename(path: string): string {
+/**
+ * Keep the tail of a long path — the part that says where you are. Leading
+ * segments are what you can afford to lose in a chip a few centimetres wide.
+ */
+function shortPath(path: string): string {
   if (!path) return "";
   const parts = path.replace(/[\\/]+$/, "").split(/[\\/]/);
-  return parts[parts.length - 1] || path;
+  if (parts.length <= 3) return path;
+  return `…${path.includes("\\") ? "\\" : "/"}${parts.slice(-2).join(path.includes("\\") ? "\\" : "/")}`;
 }
 
 /**
  * Warp-style command editor: a real text field for commands, separate from the
  * terminal grid. Enter submits to the PTY; Shift+Enter inserts a newline.
+ *
+ * It renders only while the pane is in editor mode (or the shell has exited) —
+ * a running CLI owns the whole pane, and the composer is unmounted for it.
  */
-export function CommandInput({
-  termId,
-  cwd,
-  shellLabel,
-  active,
-  rawMode,
-  exited,
-  onRawMode,
-}: Props) {
+export function CommandInput({ termId, cwd, shellLabel, active, exited }: Props) {
   const [value, setValue] = useState("");
   const [focused, setFocused] = useState(false);
   const [historyIndex, setHistoryIndex] = useState<number | null>(null);
@@ -41,13 +38,12 @@ export function CommandInput({
   const valueRef = useRef(value);
   valueRef.current = value;
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const disabled = exited || rawMode;
 
   const resize = useCallback(() => {
     const el = textareaRef.current;
     if (!el) return;
     el.style.height = "0px";
-    el.style.height = `${Math.min(140, Math.max(22, el.scrollHeight))}px`;
+    el.style.height = `${Math.min(160, Math.max(22, el.scrollHeight))}px`;
   }, []);
 
   useLayoutEffect(() => {
@@ -56,17 +52,17 @@ export function CommandInput({
 
   useEffect(() => {
     return terminals.registerInputFocus(termId, () => {
-      if (exited || rawMode) {
+      if (exited) {
         terminals.focusTerminal(termId);
         return;
       }
       textareaRef.current?.focus();
     });
-  }, [termId, exited, rawMode]);
+  }, [termId, exited]);
 
   useEffect(() => {
     return terminals.registerInputPaste(termId, (text) => {
-      if (exited || rawMode) return;
+      if (exited) return;
       const el = textareaRef.current;
       const current = valueRef.current;
       if (!el) {
@@ -84,14 +80,14 @@ export function CommandInput({
         el.setSelectionRange(pos, pos);
       });
     });
-  }, [termId, exited, rawMode]);
+  }, [termId, exited]);
 
   // When this pane becomes active and we are in editor mode, own the keyboard.
   useEffect(() => {
-    if (!active || disabled) return;
+    if (!active || exited) return;
     const id = window.setTimeout(() => textareaRef.current?.focus(), 0);
     return () => window.clearTimeout(id);
-  }, [active, disabled, termId]);
+  }, [active, exited, termId]);
 
   const pushHistory = (command: string) => {
     const trimmed = command.trimEnd();
@@ -188,93 +184,70 @@ export function CommandInput({
       return;
     }
 
-    // Escape — drop into raw terminal mode for interactive programs that do not
-    // spawn a child process (in-process REPLs, menus, etc.).
-    if (e.key === "Escape" && !e.ctrlKey && !e.metaKey && !e.altKey) {
-      if (value.length > 0) {
-        e.preventDefault();
-        e.stopPropagation();
-        setValue("");
-        setHistoryIndex(null);
-        draftRef.current = "";
-        return;
-      }
+    // Escape discards the draft and nothing more. It used to switch the pane to
+    // raw input, which meant an idle Escape silently moved the keyboard
+    // somewhere else; raw input is a setting now.
+    if (e.key === "Escape" && !e.ctrlKey && !e.metaKey && !e.altKey && value.length > 0) {
       e.preventDefault();
       e.stopPropagation();
-      onRawMode(true);
-      terminals.focusTerminal(termId);
+      setValue("");
+      setHistoryIndex(null);
+      draftRef.current = "";
     }
   };
-
-  const cwdLabel = cwd ? basename(cwd) : "";
-  const hint = rawMode
-    ? "Raw terminal — click here or press Esc in the grid to return"
-    : exited
-      ? "Session ended"
-      : "Enter to run · Shift+Enter newline · Esc raw mode";
 
   return (
     <div
       className={[
         "command-input",
-        focused && !disabled ? "is-focused" : "",
-        disabled ? "is-disabled" : "",
-        rawMode ? "is-raw" : "",
+        focused && !exited ? "is-focused" : "",
+        exited ? "is-disabled" : "",
       ]
         .filter(Boolean)
         .join(" ")}
-      onMouseDown={(e) => {
-        // Clicking the chrome reclaims editor mode from a raw-grid session.
-        if (rawMode && !exited) {
-          e.preventDefault();
-          onRawMode(false);
-          requestAnimationFrame(() => textareaRef.current?.focus());
-        }
-      }}
     >
-      <div className="command-input-meta">
-        <span className="command-input-shell">{shellLabel || "shell"}</span>
-        {cwdLabel && (
-          <>
-            <span className="command-input-sep" aria-hidden="true">
-              ·
-            </span>
-            <span className="command-input-cwd" title={cwd}>
-              {cwdLabel}
-            </span>
-          </>
+      <div className="command-input-chips">
+        <span className="composer-chip is-shell">{shellLabel || "shell"}</span>
+        {cwd && (
+          <span className="composer-chip is-cwd" title={cwd}>
+            {shortPath(cwd)}
+          </span>
         )}
-        <span className="command-input-spacer" />
-        <span className="command-input-hint">{hint}</span>
       </div>
 
-      <div className={`command-input-box ${focused && !disabled ? "is-focused" : ""}`}>
-        <span className="command-input-prompt" aria-hidden="true">
-          ❯
-        </span>
-        <textarea
-          ref={textareaRef}
-          className="command-input-field"
-          value={value}
-          disabled={exited}
-          readOnly={rawMode}
-          rows={1}
-          spellCheck={false}
-          autoCapitalize="off"
-          autoCorrect="off"
-          autoComplete="off"
-          placeholder={rawMode ? "Raw mode — terminal has keyboard focus" : "Enter a command…"}
-          onChange={(e) => {
-            setValue(e.target.value);
-            setHistoryIndex(null);
-          }}
-          onKeyDown={onKeyDown}
-          onFocus={() => {
-            setFocused(true);
-            if (rawMode && !exited) onRawMode(false);
-          }}
-          onBlur={() => setFocused(false)}
-        />
+      <textarea
+        ref={textareaRef}
+        className="command-input-field"
+        value={value}
+        disabled={exited}
+        rows={1}
+        spellCheck={false}
+        autoCapitalize="off"
+        autoCorrect="off"
+        autoComplete="off"
+        placeholder={exited ? "Session ended" : "Run a command"}
+        onChange={(e) => {
+          setValue(e.target.value);
+          setHistoryIndex(null);
+        }}
+        onKeyDown={onKeyDown}
+        onFocus={() => setFocused(true)}
+        onBlur={() => setFocused(false)}
+      />
+
+      <div className="command-input-hint">
+        {exited ? (
+          "This shell has exited"
+        ) : (
+          <>
+            <kbd>Enter</kbd> run
+            <span className="hint-sep" />
+            <kbd>Shift</kbd>
+            <kbd>Enter</kbd> newline
+            <span className="hint-sep" />
+            <kbd>↑</kbd> history
+          </>
+        )}
       </div>
     </div>
   );

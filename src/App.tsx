@@ -60,6 +60,7 @@ function boot() {
       fontSize: saved.fontSize,
       shell: saved.shell,
       highlight: saved.highlight,
+      inputMode: saved.inputMode,
     };
   }
   const term = terminals.newTermId();
@@ -73,6 +74,7 @@ function boot() {
     fontSize: DEFAULT_FONT_SIZE,
     shell: null as string | null,
     highlight: true,
+    inputMode: "editor" as terminals.InputMode,
   };
 }
 
@@ -96,6 +98,7 @@ export default function App() {
   const [shell, setShell] = useState<string | null>(initial.shell);
   const [fontSize, setFontSize] = useState(initial.fontSize);
   const [highlight, setHighlight] = useState(initial.highlight);
+  const [inputMode, setInputMode] = useState(initial.inputMode);
   const [booted, setBooted] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [recentsMenu, setRecentsMenu] = useState<{ x: number; y: number } | null>(null);
@@ -562,6 +565,7 @@ export default function App() {
 
       terminals.setFontSize(initial.fontSize);
       terminals.setHighlight(initial.highlight);
+      terminals.setInputMode(initial.inputMode);
 
       if (initial.projectPath) {
         try {
@@ -581,7 +585,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [initial.fontSize, initial.highlight, initial.projectPath]);
+  }, [initial.fontSize, initial.highlight, initial.inputMode, initial.projectPath]);
 
   // Persist the arrangement (never the processes). Debounced because dragging a
   // divider produces a state update per pointer move.
@@ -589,11 +593,20 @@ export default function App() {
     if (!booted) return;
     const id = window.setTimeout(
       () =>
-        save({ project: project?.path ?? null, recents, fontSize, shell, highlight, tabs, activeTabId }),
+        save({
+          project: project?.path ?? null,
+          recents,
+          fontSize,
+          shell,
+          highlight,
+          inputMode,
+          tabs,
+          activeTabId,
+        }),
       400,
     );
     return () => window.clearTimeout(id);
-  }, [booted, project, recents, fontSize, shell, highlight, tabs, activeTabId]);
+  }, [booted, project, recents, fontSize, shell, highlight, inputMode, tabs, activeTabId]);
 
   // Keep the OS focus on the terminal the UI considers active.
   const focusKey = activeTab ? `${activeTab.id}:${activeTab.activeLeaf}` : "";
@@ -661,6 +674,12 @@ export default function App() {
     const next = !terminals.getHighlight();
     terminals.setHighlight(next);
     setHighlight(next);
+  }, []);
+
+  const toggleInputMode = useCallback(() => {
+    const next = terminals.getInputMode() === "editor" ? "raw" : "editor";
+    terminals.setInputMode(next);
+    setInputMode(next);
   }, []);
 
   // ----------------------------------------------------------- shortcuts
@@ -959,6 +978,19 @@ export default function App() {
         run: updater.check,
       },
       {
+        id: "view.inputmode",
+        group: "View",
+        title:
+          inputMode === "editor"
+            ? "Use the raw terminal for input"
+            : "Use the command editor for input",
+        subtitle:
+          inputMode === "editor"
+            ? "Type straight into the grid, like a conventional terminal"
+            : "Compose commands in a text field below the grid (Warp-style)",
+        run: toggleInputMode,
+      },
+      {
         id: "view.highlight",
         group: "View",
         title: highlight ? "Turn off syntax highlighting" : "Turn on syntax highlighting",
@@ -1030,6 +1062,7 @@ export default function App() {
     closePane,
     closeTab,
     highlight,
+    inputMode,
     newTab,
     openProject,
     recents,
@@ -1037,6 +1070,7 @@ export default function App() {
     splitPane,
     tabs,
     toggleHighlight,
+    toggleInputMode,
     toggleZoom,
     updater.channel,
     updater.check,
@@ -1083,8 +1117,6 @@ export default function App() {
         tabs={tabs}
         activeTabId={activeTabId}
         paneCounts={paneCounts}
-        shells={shells}
-        activeShell={shell}
         drag={drag}
         onSelect={setActiveTabId}
         onClose={(id) => void closeTab(id)}

@@ -28,6 +28,12 @@ export interface TermMeta {
   exitCode: number | null;
   cols: number;
   rows: number;
+  /**
+   * Something has been sent to the shell since the pane opened (or since the
+   * last clear). Until then the grid holds only a prompt, which the pane hides
+   * behind its empty state.
+   */
+  ran: boolean;
 }
 
 interface Session extends TermMeta {
@@ -75,6 +81,21 @@ const inputPasters = new Map<string, (text: string) => void>();
 const sessions = new Map<string, Session>();
 const listeners = new Set<() => void>();
 
+/**
+ * How keystrokes reach the shell, app-wide.
+ *
+ * `editor` is the Warp arrangement: a real text field below the grid that
+ * submits whole commands. `raw` is a conventional terminal, where the grid owns
+ * the keyboard. It is a setting rather than a per-pane mode you fall into,
+ * because a modifier key that silently changes where your typing goes is a trap
+ * — you find out you were in the other mode by what it did to your shell.
+ *
+ * Panes still hand the keyboard to the grid on their own while a child process
+ * is running; that is not a mode, it is who the keystrokes belong to.
+ */
+export type InputMode = "editor" | "raw";
+
+let inputMode: InputMode = "editor";
 let fontSize = 13.5;
 let highlightEnabled = true;
 const FONT_FAMILY =
@@ -204,7 +225,28 @@ export function getMeta(id: string): TermMeta | null {
     exitCode: s.exitCode,
     cols: s.cols,
     rows: s.rows,
+    ran: s.ran,
   };
+}
+
+/**
+ * Viewport row of the last line holding anything but blanks, or -1 when the
+ * whole viewport is empty. Everything below it is dead space.
+ */
+function lastContentRow(term: Terminal): number {
+  const buffer = term.buffer.active;
+  for (let row = term.rows - 1; row >= 0; row--) {
+    const line = buffer.getLine(buffer.viewportY + row);
+    if (line && /\S/.test(line.translateToString(true))) return row;
+  }
+  return -1;
+}
+
+/** Mark the pane as having real content, so the empty state steps aside. */
+function markRan(session: Session): void {
+  if (session.ran) return;
+  session.ran = true;
+  notify();
 }
 
 export function newTermId(): string {
@@ -460,6 +502,7 @@ function create(id: string, opts: { cwd?: string | null; shell?: string | null }
     exitCode: null,
     cols: term.cols,
     rows: term.rows,
+    ran: false,
   };
   sessions.set(id, session);
 
@@ -467,11 +510,77 @@ function create(id: string, opts: { cwd?: string | null; shell?: string | null }
     markTyping(session);
     send(session, data);
   });
+
+  // `onKey` rather than `onData`, because not everything the terminal sends is
+  // something the user did: ConPTY queries the terminal on startup (cursor
+  // position, device attributes) and xterm answers through `onData`. Treating
+  // those replies as input marked every pane as used before it had run
+  // anything, which is exactly what the empty state is there to hide.
+  term.onKey(() => markRan(session));
   term.onScroll(() => scheduleVisualCursor(session, true));
 
-  // Warp-style: empty grid cells are not meaningful content. Drop selections that
-  // carry no non-whitespace text so drag-selecting blank areas does not paint
-  // green slabs across the empty viewport.
+  /** Keys the grid keeps in editor mode: they move the view, not the cursor. */
+  const VIEWPORT_KEYS = new Set(["PageUp", "PageDown", "Home", "End", "Shift", "Control", "Alt", "Meta"]);
+
+  // Editor mode means the composer owns typing, and clicking output to copy it
+  // must not quietly change that. Without this, a click on the grid moved DOM
+  // focus to xterm and the next keystroke went straight down the PTY — the same
+  // "your typing is somewhere else now" problem the Escape mode had.
+  term.attachCustomKeyEventHandler((event) => {
+    if (!session.editorMode || session.exited) return true;
+    if (event.type !== "keydown") return true;
+    // App shortcuts and copy/paste are handled elsewhere and must pass through.
+    if (event.ctrlKey || event.metaKey || event.altKey) return true;
+    if (VIEWPORT_KEYS.has(event.key)) return true;
+    const focusInput = inputFocusers.get(session.id);
+    if (!focusInput) return true;
+
+    // xterm only consults this handler; it does not stop the browser from
+    // typing the character into its hidden textarea, which would reach the PTY
+    // through the input event. Cancelling here is what actually holds it back.
+    event.preventDefault();
+    focusInput();
+    // A printable key is the user starting a command — carry it across so the
+    // first character is not the price of having clicked on the output.
+    if (event.key.length === 1) inputPasters.get(session.id)?.(event.key);
+    return false;
+  });
+
+  // Warp-style: the dead space under the last line of output holds no text, so
+  // a drag that starts there can only ever select nothing. xterm would still
+  // paint the whole rectangle green until the button came up — it fires
+  // `onSelectionChange` on mouseup, not during the drag — so the trim below
+  // cannot help. Refusing the press is what makes the empty area behave like
+  // the empty area of a Warp block list: inert.
+  //
+  // Capture phase on the host, so the event never reaches xterm's own handler.
+  host.addEventListener(
+    "mousedown",
+    (event) => {
+      if (event.button !== 0 || event.shiftKey) return;
+      // A program that asked for mouse reporting gets its clicks, wherever they
+      // land — an empty-looking row is still a row it is drawing on. Same for
+      // the alt buffer, which belongs to whatever full-screen thing is running.
+      if (term.modes.mouseTrackingMode !== "none") return;
+      if (term.buffer.active.type !== "normal") return;
+      const screen = host.querySelector<HTMLElement>(".xterm-screen");
+      if (!screen) return;
+      const rect = screen.getBoundingClientRect();
+      if (rect.height <= 0) return;
+      const row = Math.floor(((event.clientY - rect.top) / rect.height) * term.rows);
+      if (row <= lastContentRow(term)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      // Clicking away still dismisses whatever was selected before.
+      term.clearSelection();
+      focus(id);
+    },
+    true,
+  );
+
+  // Selections that start in real content can still be dragged down past it.
+  // Anything that comes out as pure whitespace is dropped once the button is
+  // released, so it never becomes a copyable "selection" of nothing.
   term.onSelectionChange(() => {
     if (session.trimmingSelection) return;
     if (!term.hasSelection()) return;
@@ -579,6 +688,7 @@ async function start(session: Session, opts: { cwd?: string | null; shell?: stri
     clearTyping(session);
     hideVisualCursor(session);
     session.exited = true;
+    session.ran = true;
     session.exitCode = event.payload.code ?? null;
     const code = session.exitCode;
     session.term.write(
@@ -751,6 +861,7 @@ export function getEditorMode(id: string): boolean {
 export function submitCommand(id: string, command: string): void {
   const session = sessions.get(id);
   if (!session || session.exited) return;
+  markRan(session);
   const text = command.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
   if (!text.trim()) {
     // Empty Enter — just send a newline so the shell re-draws the prompt.
@@ -770,6 +881,7 @@ export function writeRaw(id: string, data: string): void {
   const session = sessions.get(id);
   if (!session || session.exited) return;
   markTyping(session);
+  markRan(session);
   send(session, data);
 }
 
@@ -827,6 +939,16 @@ export function allSessionIds(): string[] {
   return [...sessions.keys()];
 }
 
+export function setInputMode(mode: InputMode): void {
+  if (inputMode === mode) return;
+  inputMode = mode;
+  notify();
+}
+
+export function getInputMode(): InputMode {
+  return inputMode;
+}
+
 export function setFontSize(size: number): void {
   // The requested size is what's kept and stepped from; each terminal renders at
   // the nudged size metricsFor picks so the steps don't compound.
@@ -857,6 +979,12 @@ export function clear(id: string): void {
   const session = sessions.get(id);
   if (!session) return;
   session.term.clear();
+  // `Terminal.clear` keeps the current prompt line and drops everything above
+  // it — exactly the state a pane opens in, so the empty state belongs back.
+  if (session.ran && !session.exited) {
+    session.ran = false;
+    notify();
+  }
 }
 
 export function selection(id: string): string {
@@ -876,6 +1004,7 @@ export function paste(id: string, text: string): void {
       return;
     }
   }
+  markRan(session);
   session.term.paste(text);
 }
 

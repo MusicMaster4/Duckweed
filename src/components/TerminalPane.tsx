@@ -4,6 +4,7 @@ import * as bus from "../lib/bus";
 import * as terminals from "../lib/terminals";
 import type { DropZone, LeafNode } from "../lib/types";
 import { CommandInput } from "./CommandInput";
+import { PaneWelcome } from "./PaneWelcome";
 import { SearchBar } from "./SearchBar";
 
 interface Props {
@@ -44,8 +45,7 @@ export function TerminalPane({
   const bodyRef = useRef<HTMLDivElement>(null);
   const [meta, setMeta] = useState(() => terminals.getMeta(node.term));
   const [searching, setSearching] = useState(false);
-  /** User opted into raw PTY input (or a child process is running). */
-  const [rawMode, setRawMode] = useState(false);
+  const [inputMode, setInputMode] = useState(terminals.getInputMode);
   const [busy, setBusy] = useState(false);
 
   // Attach before paint so the terminal never flashes an empty frame when the
@@ -60,7 +60,14 @@ export function TerminalPane({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [node.term]);
 
-  useEffect(() => terminals.subscribe(() => setMeta(terminals.getMeta(node.term))), [node.term]);
+  useEffect(
+    () =>
+      terminals.subscribe(() => {
+        setMeta(terminals.getMeta(node.term));
+        setInputMode(terminals.getInputMode());
+      }),
+    [node.term],
+  );
 
   useEffect(
     () =>
@@ -86,8 +93,9 @@ export function TerminalPane({
     };
   }, [node.term]);
 
-  // Effective raw mode: user override or a busy child process.
-  const effectiveRaw = rawMode || busy || !!meta?.exited;
+  // The grid owns the keyboard when the app is set to raw input, while a child
+  // process is running, or once the shell is gone.
+  const effectiveRaw = inputMode === "raw" || busy || !!meta?.exited;
 
   useEffect(() => {
     terminals.setEditorMode(node.term, !effectiveRaw);
@@ -96,18 +104,24 @@ export function TerminalPane({
   // Hand keyboard to the grid while a child is running; reclaim the editor after.
   useEffect(() => {
     if (!active || meta?.exited) return;
-    if (busy) {
-      const id = window.setTimeout(() => terminals.focusTerminal(node.term), 0);
-      return () => window.clearTimeout(id);
-    }
-    if (!rawMode) {
-      const id = window.setTimeout(() => terminals.focus(node.term), 0);
-      return () => window.clearTimeout(id);
-    }
-  }, [busy, rawMode, active, meta?.exited, node.term]);
+    const id = window.setTimeout(
+      () => (effectiveRaw ? terminals.focusTerminal(node.term) : terminals.focus(node.term)),
+      0,
+    );
+    return () => window.clearTimeout(id);
+  }, [effectiveRaw, active, meta?.exited, node.term]);
 
   const title = meta?.title || meta?.shellLabel || "shell";
   const cwdLabel = meta?.cwd ? basename(meta.cwd) : "";
+
+  /**
+   * A running CLI owns the pane: the composer is unmounted so the program gets
+   * every row, and nothing below it competes for the keyboard. An exited shell
+   * keeps the bar — it is the only thing left saying what happened.
+   */
+  const showComposer = inputMode === "editor" && !busy;
+  /** Nothing has been run — hide the shell's lone prompt behind the empty state. */
+  const blank = !!meta && !meta.ran && !effectiveRaw;
 
   return (
     <div
@@ -117,6 +131,7 @@ export function TerminalPane({
         isSource ? "is-source" : "",
         meta?.exited ? "is-exited" : "",
         effectiveRaw ? "is-raw" : "is-editor",
+        blank ? "is-blank" : "",
       ]
         .filter(Boolean)
         .join(" ")}
@@ -198,6 +213,12 @@ export function TerminalPane({
         className="pane-body"
         ref={bodyRef}
         onPointerDown={() => {
+          // Nothing has been run, so there is no output to select — a click on
+          // the empty state means "let me type", not "let me grab the grid".
+          if (blank) {
+            terminals.focus(node.term);
+            return;
+          }
           // Clicking the grid: allow selection; if the user wants raw typing,
           // switch modes. Selecting text still works in editor mode.
           if (!meta?.exited && !busy) {
@@ -218,21 +239,24 @@ export function TerminalPane({
             if (text) terminals.paste(node.term, text);
           });
         }}
-      />
+      >
+        {blank && (
+          <PaneWelcome
+            shellLabel={meta?.shellLabel || meta?.title || "shell"}
+            cwd={meta?.cwd ?? ""}
+          />
+        )}
+      </div>
 
-      <CommandInput
-        termId={node.term}
-        cwd={meta?.cwd ?? ""}
-        shellLabel={meta?.shellLabel || meta?.title || "shell"}
-        active={active && !searching}
-        rawMode={effectiveRaw && !meta?.exited}
-        exited={!!meta?.exited}
-        onRawMode={(raw) => {
-          setRawMode(raw);
-          if (!raw) terminals.focus(node.term);
-          else terminals.focusTerminal(node.term);
-        }}
-      />
+      {showComposer && (
+        <CommandInput
+          termId={node.term}
+          cwd={meta?.cwd ?? ""}
+          shellLabel={meta?.shellLabel || meta?.title || "shell"}
+          active={active && !searching}
+          exited={!!meta?.exited}
+        />
+      )}
 
       {searching && <SearchBar termId={node.term} onClose={() => setSearching(false)} />}
 

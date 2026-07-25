@@ -1,5 +1,5 @@
 import { uid } from "./layout";
-import { newTermId } from "./terminals";
+import { newTermId, type InputMode } from "./terminals";
 import type { LayoutNode, Tab } from "./types";
 
 const KEY = "duckweed:state:v1";
@@ -13,6 +13,8 @@ export interface Persisted {
   shell: string | null;
   /** Colourise output that arrives with no ANSI colour of its own. */
   highlight: boolean;
+  /** Warp-style command editor, or a conventional raw terminal. */
+  inputMode: InputMode;
   /** Layout only — processes are never restored, just the arrangement. */
   tabs: { title: string; root: LayoutNode }[];
   activeTabIndex: number;
@@ -58,6 +60,7 @@ export function load(): Persisted | null {
       fontSize: typeof parsed.fontSize === "number" ? parsed.fontSize : 13.5,
       shell: typeof parsed.shell === "string" ? parsed.shell : null,
       highlight: typeof parsed.highlight === "boolean" ? parsed.highlight : true,
+      inputMode: parsed.inputMode === "raw" ? "raw" : "editor",
       tabs,
       activeTabIndex: typeof parsed.activeTabIndex === "number" ? parsed.activeTabIndex : 0,
     };
@@ -72,6 +75,7 @@ export function save(state: {
   fontSize: number;
   shell: string | null;
   highlight: boolean;
+  inputMode: InputMode;
   tabs: Tab[];
   activeTabId: string;
 }): void {
@@ -83,6 +87,7 @@ export function save(state: {
       fontSize: state.fontSize,
       shell: state.shell,
       highlight: state.highlight,
+      inputMode: state.inputMode,
       tabs: state.tabs.map((t) => ({ title: t.title, root: t.root })),
       activeTabIndex: Math.max(
         0,

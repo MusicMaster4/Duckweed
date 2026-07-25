@@ -1,14 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 
-import type { ShellInfo, Tab } from "../lib/types";
+import type { Tab } from "../lib/types";
 import type { DragState } from "../hooks/useDragPane";
 
 interface Props {
   tabs: Tab[];
   activeTabId: string;
   paneCounts: Record<string, number>;
-  shells: ShellInfo[];
-  activeShell: string | null;
   drag: DragState | null;
   onSelect: (tabId: string) => void;
   onClose: (tabId: string) => void;
@@ -21,8 +19,6 @@ export function TabStrip({
   tabs,
   activeTabId,
   paneCounts,
-  shells,
-  activeShell,
   drag,
   onSelect,
   onClose,
@@ -33,14 +29,6 @@ export function TabStrip({
   const stripRef = useRef<HTMLDivElement>(null);
   const reorder = useRef<{ tabId: string } | null>(null);
   const [editing, setEditing] = useState<string | null>(null);
-  const [shellMenu, setShellMenu] = useState(false);
-
-  useEffect(() => {
-    if (!shellMenu) return;
-    const close = () => setShellMenu(false);
-    window.addEventListener("pointerdown", close);
-    return () => window.removeEventListener("pointerdown", close);
-  }, [shellMenu]);
 
   useEffect(() => {
     const move = (e: PointerEvent) => {
@@ -148,37 +136,6 @@ export function TabStrip({
           >
             +
           </button>
-          {shells.length > 1 && (
-            <button
-              type="button"
-              className="tab-new tab-new-caret"
-              title="New tab with a specific shell"
-              onPointerDown={(e) => {
-                e.stopPropagation();
-                setShellMenu((v) => !v);
-              }}
-            >
-              ⌄
-            </button>
-          )}
-          {shellMenu && (
-            <div className="menu menu-shells" onPointerDown={(e) => e.stopPropagation()}>
-              {shells.map((shell) => (
-                <button
-                  key={shell.id}
-                  type="button"
-                  className={`menu-item ${shell.id === activeShell ? "is-current" : ""}`}
-                  onClick={() => {
-                    setShellMenu(false);
-                    onNew(shell.id);
-                  }}
-                >
-                  <span>{shell.label}</span>
-                  <span className="menu-hint">{shell.program}</span>
-                </button>
-              ))}
-            </div>
-          )}
         </div>
       </div>
     </div>

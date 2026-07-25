@@ -187,6 +187,12 @@ describe("the shipped app configuration", () => {
     expect(capabilities.permissions).toContain("process:allow-restart");
   });
 
+  test("the custom close handler can finish destroying the window", () => {
+    const capabilities = JSON.parse(read("src-tauri/capabilities/default.json"));
+    expect(capabilities.permissions).toContain("core:window:allow-close");
+    expect(capabilities.permissions).toContain("core:window:allow-destroy");
+  });
+
   test("the release workflow is the only workflow that touches versions", () => {
     expect(releaseText).toContain("apply-version.mjs");
     expect(read(".github/workflows/ci.yml")).not.toContain("apply-version");
