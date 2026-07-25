@@ -6,6 +6,7 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
+import { createFrameBuffer, SYNC_MODE, type FrameBuffer } from "./frames";
 import { createHighlighter, type Highlighter } from "./highlight";
 import { ptyKill, ptyResize, ptySpawn, ptyWrite } from "./ipc";
 import { terminalTheme } from "./theme";
@@ -37,6 +38,8 @@ interface Session extends TermMeta {
   pending: string[];
   /** Decodes PTY bytes; `stream: true` so multi-byte chars can span chunks. */
   decoder: TextDecoder;
+  /** Reassembles synchronized-output frames so xterm only paints finished ones. */
+  frames: FrameBuffer;
   highlighter: Highlighter;
 }
 
@@ -47,6 +50,97 @@ let fontSize = 13.5;
 let highlightEnabled = true;
 const FONT_FAMILY =
   '"CaskaydiaCove Nerd Font", "Cascadia Code", "JetBrains Mono", "Fira Code", Consolas, "Courier New", monospace';
+
+const measureCanvas = document.createElement("canvas").getContext("2d");
+
+/**
+ * Measure a font size exactly the way xterm does, so the cell size worked out
+ * here is the cell size it will use: canvas TextMetrics for the advance and the
+ * font's own bounding box, with xterm's fallback (a 32-character run measured
+ * through the DOM) for engines without `fontBoundingBoxAscent`.
+ */
+function measureFont(size: number): { width: number; height: number } {
+  if (measureCanvas) {
+    measureCanvas.font = `${size}px ${FONT_FAMILY}`;
+    const m = measureCanvas.measureText("W");
+    const height = m.fontBoundingBoxAscent + m.fontBoundingBoxDescent;
+    if (m.width > 0 && height > 0) return { width: m.width, height };
+  }
+  const el = document.createElement("span");
+  el.style.cssText =
+    "position:absolute;top:-10000px;left:-10000px;white-space:pre;" +
+    `line-height:normal;font-family:${FONT_FAMILY};font-size:${size}px`;
+  el.textContent = "W".repeat(32);
+  document.body.appendChild(el);
+  const width = el.offsetWidth / 32;
+  const height = el.offsetHeight;
+  el.remove();
+  return { width, height };
+}
+
+const metricsCache = new Map<string, { fontSize: number; lineHeight: number }>();
+
+/**
+ * Pick the font size and line height that make block-drawing art come out
+ * right, which is what most TUI splash screens and progress bars are built from.
+ *
+ * Two things go wrong if you just hand xterm a size:
+ *  - xterm derives its cell width straight from the measured advance, so a
+ *    fractional device width puts every column on a sub-pixel boundary and
+ *    leaves hairline seams through what should be solid blocks. Nudging the
+ *    size onto a whole device pixel removes them.
+ *  - block art is half-block based: one cell is two "pixels" stacked, so those
+ *    pixels are only square when the cell is exactly twice as tall as it is
+ *    wide. A generous line height stretches the art vertically — a 1.28 line
+ *    height is what made the Claude Code mascot look pulled out of shape.
+ */
+function metricsFor(size: number): { fontSize: number; lineHeight: number } {
+  const dpr = window.devicePixelRatio || 1;
+  const key = `${size}@${dpr}`;
+  const cached = metricsCache.get(key);
+  if (cached) return cached;
+
+  let best = size;
+  let bestError = Infinity;
+  // ±1.2px is roughly ±9% — imperceptible as a size change, and wide enough that
+  // a whole-pixel advance always falls inside it. Nearest size wins, so the
+  // search walks outwards from the one that was asked for.
+  for (let delta = 0; delta <= 1.2 && bestError > 0.005; delta += 0.02) {
+    for (const candidate of delta === 0 ? [size] : [size - delta, size + delta]) {
+      const device = measureFont(candidate).width * dpr;
+      const error = Math.abs(device - Math.round(device));
+      if (error < bestError) {
+        best = candidate;
+        bestError = error;
+      }
+    }
+  }
+
+  const { width, height } = measureFont(best);
+  const cellWidth = Math.round(width * dpr);
+  const charHeight = Math.ceil(height * dpr);
+  // xterm floors `charHeight * lineHeight`; the half-pixel lands the result on
+  // 2×cellWidth instead of one short of it.
+  const square = (2 * cellWidth + 0.5) / charHeight;
+  // Clamped so a font with unusually tall metrics can't crush the text: at the
+  // bottom of the range ascenders and descenders still have room.
+  const metrics = { fontSize: best, lineHeight: Math.min(1.25, Math.max(0.95, square)) };
+  metricsCache.set(key, metrics);
+  return metrics;
+}
+
+/** The pixel ratio the mounted terminals were sized for. */
+let metricsDpr = 0;
+
+/** Size every terminal for the current font size and pixel ratio. */
+function applyMetrics(): void {
+  const metrics = metricsFor(fontSize);
+  metricsDpr = window.devicePixelRatio || 1;
+  for (const session of sessions.values()) {
+    session.term.options.fontSize = metrics.fontSize;
+    session.term.options.lineHeight = metrics.lineHeight;
+  }
+}
 
 /** Off-screen parking spot so xterm keeps a live layout while unmounted. */
 function limbo(): HTMLElement {
@@ -109,14 +203,30 @@ function decodeBase64(data: string): Uint8Array {
   return out;
 }
 
+/** Send bytes to the shell, queueing them if the PTY is not up yet. */
+function send(session: Session, data: string): void {
+  if (session.spawned) void ptyWrite(session.id, data);
+  else session.pending.push(data);
+}
+
+/** Hand assembled output to xterm, colourised if that is switched on. */
+function draw(session: Session, text: string): void {
+  // The highlighter needs to see every chunk, even while highlighting is off,
+  // so its escape-sequence state stays in sync with the stream.
+  const painted = session.highlighter(text);
+  session.term.write(highlightEnabled ? painted : text);
+}
+
 function create(id: string, opts: { cwd?: string | null; shell?: string | null }): Session {
+  const metrics = metricsFor(fontSize);
+  metricsDpr = window.devicePixelRatio || 1;
   const term = new Terminal({
     allowProposedApi: true,
     cursorBlink: true,
     cursorStyle: "bar",
     fontFamily: FONT_FAMILY,
-    fontSize,
-    lineHeight: 1.28,
+    fontSize: metrics.fontSize,
+    lineHeight: metrics.lineHeight,
     letterSpacing: 0,
     scrollback: 20000,
     smoothScrollDuration: 0,
@@ -161,6 +271,8 @@ function create(id: string, opts: { cwd?: string | null; shell?: string | null }
     spawned: false,
     pending: [],
     decoder: new TextDecoder(),
+    // `session` is only read when a frame completes, long after this returns.
+    frames: createFrameBuffer((text) => draw(session, text)),
     highlighter: createHighlighter(),
     title: "shell",
     cwd: opts.cwd ?? "",
@@ -172,9 +284,19 @@ function create(id: string, opts: { cwd?: string | null; shell?: string | null }
   };
   sessions.set(id, session);
 
-  term.onData((data) => {
-    if (session.spawned) void ptyWrite(id, data);
-    else session.pending.push(data);
+  term.onData((data) => send(session, data));
+
+  // DECRQM for mode 2026. xterm.js does not know the mode and would answer "not
+  // recognised", which is exactly how a program decides synchronized output is
+  // unavailable and goes back to redrawing in pieces. Registered last so it runs
+  // first — every other mode returns false and falls through to xterm's own
+  // handler, which still owns them.
+  term.parser.registerCsiHandler({ prefix: "?", intermediates: "$", final: "p" }, (params) => {
+    if (params[0] !== SYNC_MODE) return false;
+    // DECRPM: 1 = currently set, 2 = currently reset. Either one answers the
+    // question the program is actually asking, which is whether we know the mode.
+    send(session, `\x1b[?${SYNC_MODE};${session.frames.isFraming() ? 1 : 2}$y`);
+    return true;
   });
 
   term.onTitleChange((title) => {
@@ -223,15 +345,16 @@ async function start(session: Session, opts: { cwd?: string | null; shell?: stri
 
   // Subscribe before spawning so no output can slip through.
   const offData = await listen<string>(`pty:data:${id}`, (event) => {
-    // The highlighter needs text, so decoding moves here from xterm. `stream`
-    // keeps a UTF-8 character split across two PTY reads intact; the
-    // highlighter is always fed the chunk so its escape-sequence state stays
-    // in sync even while highlighting is switched off.
+    // Decoding moves here from xterm because everything downstream — frame
+    // reassembly and the highlighter — works on text. `stream` keeps a UTF-8
+    // character split across two PTY reads intact.
     const text = session.decoder.decode(decodeBase64(event.payload), { stream: true });
-    const painted = session.highlighter(text);
-    session.term.write(highlightEnabled ? painted : text);
+    session.frames.push(text);
   });
   const offExit = await listen<{ code: number | null }>(`pty:exit:${id}`, (event) => {
+    // A program killed mid-redraw leaves a frame open; draw it before the notice
+    // so the last thing it managed to print stays above its own epitaph.
+    session.frames.flush();
     session.exited = true;
     session.exitCode = event.payload.code ?? null;
     const code = session.exitCode;
@@ -315,6 +438,9 @@ export function refit(id: string): void {
 
 /** Re-measure every mounted terminal — used after window resize/fullscreen. */
 export function refitAll(): void {
+  // Moving the window to a display with a different scale factor arrives here as
+  // a resize, and it invalidates the cell size the metrics were picked for.
+  if ((window.devicePixelRatio || 1) !== metricsDpr) applyMetrics();
   for (const id of sessions.keys()) refit(id);
 }
 
@@ -326,6 +452,7 @@ export function dispose(id: string): void {
   const session = sessions.get(id);
   if (!session) return;
   session.observer?.disconnect();
+  session.frames.dispose();
   for (const off of session.unlisten) off();
   void ptyKill(id);
   session.term.dispose();
@@ -339,11 +466,11 @@ export function disposeAll(): void {
 }
 
 export function setFontSize(size: number): void {
+  // The requested size is what's kept and stepped from; each terminal renders at
+  // the nudged size metricsFor picks so the steps don't compound.
   fontSize = Math.min(28, Math.max(8, size));
-  for (const session of sessions.values()) {
-    session.term.options.fontSize = fontSize;
-    refit(session.id);
-  }
+  applyMetrics();
+  for (const id of sessions.keys()) refit(id);
   notify();
 }
 

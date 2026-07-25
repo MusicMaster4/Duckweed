@@ -18,6 +18,10 @@ use crate::shells;
 /// How much PTY output we buffer before flushing an event to the webview.
 const READ_BUF: usize = 16 * 1024;
 
+/// Ceiling on one coalesced webview event, so a program dumping a large file
+/// still arrives in pieces the UI can render as they land.
+const EMIT_MAX: usize = 256 * 1024;
+
 pub struct Session {
     writer: Box<dyn Write + Send>,
     master: Box<dyn MasterPty + Send>,
@@ -185,9 +189,9 @@ pub fn spawn(
         },
     );
 
-    // Reader thread: PTY bytes -> base64 -> webview event.
-    let data_event = format!("pty:data:{id}");
-    let reader_app = app.clone();
+    // Reader thread: block on the PTY and hand whatever arrives straight over,
+    // so a slow webview can never stall the read side into losing output.
+    let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
     std::thread::Builder::new()
         .name(format!("pty-read-{id}"))
         .spawn(move || {
@@ -196,11 +200,39 @@ pub fn spawn(
                 match reader.read(&mut buf) {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
-                        let encoded = base64::engine::general_purpose::STANDARD.encode(&buf[..n]);
-                        if reader_app.emit(&data_event, encoded).is_err() {
+                        if tx.send(buf[..n].to_vec()).is_err() {
                             break;
                         }
                     }
+                }
+            }
+        })
+        .map_err(err)?;
+
+    // Emitter thread: bytes -> base64 -> webview event, one event per batch.
+    //
+    // A program flushes a single redraw in many small writes and the PTY hands
+    // each one over the moment it lands. Emitting them one by one spreads one
+    // redraw across several webview events, and the terminal paints each arrival
+    // — a part-drawn frame every time. Draining the queue coalesces them without
+    // waiting for anything: a batch only ever holds bytes that had already
+    // arrived, so this costs no latency, only round trips.
+    let data_event = format!("pty:data:{id}");
+    let emit_app = app.clone();
+    std::thread::Builder::new()
+        .name(format!("pty-emit-{id}"))
+        .spawn(move || {
+            while let Ok(first) = rx.recv() {
+                let mut batch = first;
+                while batch.len() < EMIT_MAX {
+                    match rx.try_recv() {
+                        Ok(more) => batch.extend_from_slice(&more),
+                        Err(_) => break,
+                    }
+                }
+                let encoded = base64::engine::general_purpose::STANDARD.encode(&batch);
+                if emit_app.emit(&data_event, encoded).is_err() {
+                    break;
                 }
             }
         })

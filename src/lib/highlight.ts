@@ -9,8 +9,8 @@
  *
  * The safety rules are deliberately strict. A chunk is only ever touched when:
  *
- *   1. the terminal is not on the alternate screen — anything full-screen owns
- *      its own drawing and must not be second-guessed;
+ *   1. nothing is drawing its own screen — the alternate screen is the obvious
+ *      case, and mouse reporting catches the TUIs that run inline instead;
  *   2. the chunk contains no ESC byte at all, so there is no escape sequence to
  *      land inside and corrupt;
  *   3. no carriage return appears without a following newline, which is the
@@ -22,6 +22,7 @@
  * wrapping, cursor position and selection are unaffected.
  */
 
+import { incompleteTailStart } from "./frames";
 import { highlightColors } from "./theme";
 
 const ESC = "\x1b";
@@ -159,27 +160,14 @@ function highlightLine(line: string): string {
 }
 
 /**
- * Does the chunk stop in the middle of an escape sequence? A 16 KiB PTY read
- * can land anywhere, including between `ESC [` and its final byte — and the
- * remainder then arrives as a chunk with no ESC in it, which would otherwise
- * look like plain text and get painted, corrupting the sequence.
+ * Mouse reporting — the tracking modes, not the encodings, which say nothing on
+ * their own. Only a program painting its own screen turns these on, and unlike
+ * the alternate screen they also catch the ones that draw inline: Codex and
+ * Claude Code both render into the normal buffer, where the alt-screen test
+ * would happily wave their frames through to be repainted.
  */
-function endsMidSequence(chunk: string): boolean {
-  const start = chunk.lastIndexOf(ESC);
-  if (start < 0) return false;
-  const tail = chunk.slice(start);
-  if (tail.length < 2) return true;
-
-  const kind = tail[1];
-  // CSI — parameters and intermediates, then a final byte in @…~.
-  if (kind === "[") return !/^\x1b\[[0-?]*[ -/]*[@-~]/.test(tail);
-  // String sequences (OSC/DCS/APC/PM/SOS) run until BEL or ST.
-  if (kind === "]" || kind === "P" || kind === "_" || kind === "^" || kind === "X") {
-    return !(tail.includes("\x07") || tail.includes(`${ESC}\\`));
-  }
-  // Everything else is a complete two-byte sequence.
-  return false;
-}
+const MOUSE_ON = /\x1b\[\?(?:1000|1002|1003)h/;
+const MOUSE_OFF = /\x1b\[\?(?:1000|1002|1003)l/;
 
 /**
  * A per-session colouriser. It has to be stateful because the decision to
@@ -188,6 +176,8 @@ function endsMidSequence(chunk: string): boolean {
  */
 export function createHighlighter() {
   let altScreen = false;
+  /** A program is tracking the mouse, so it is drawing and we are not. */
+  let mouse = false;
   /** True when the last SGR seen was something other than a full reset. */
   let styled = false;
   /** The previous chunk ended mid-sequence, so this one starts inside it. */
@@ -197,6 +187,8 @@ export function createHighlighter() {
   function observe(chunk: string): void {
     if (chunk.includes("?1049h") || chunk.includes("?47h")) altScreen = true;
     if (chunk.includes("?1049l") || chunk.includes("?47l")) altScreen = false;
+    if (MOUSE_ON.test(chunk)) mouse = true;
+    if (MOUSE_OFF.test(chunk)) mouse = false;
 
     // Only the final SGR in the chunk matters — it is the state the next chunk
     // inherits. `\x1b[m`, `\x1b[0m` and `\x1b[00m` all mean "back to default".
@@ -214,10 +206,12 @@ export function createHighlighter() {
       // A sequence split across chunks is rare enough that the tail is assumed
       // to complete inside the very next chunk; the cost of being wrong is one
       // uncoloured chunk, never a corrupted one.
-      continuing = endsMidSequence(chunk);
+      // Frame reassembly holds a split sequence back until the rest of it lands,
+      // so this only trips on a payload too long to be worth waiting for.
+      continuing = incompleteTailStart(chunk) >= 0;
       return chunk;
     }
-    if (altScreen || styled) return chunk;
+    if (altScreen || mouse || styled) return chunk;
     // Bare CR means an in-place redraw (spinners, progress bars); colouring a
     // line that is about to be overwritten just makes it flicker.
     if (/\r(?!\n)/.test(chunk)) return chunk;

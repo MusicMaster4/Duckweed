@@ -72,6 +72,15 @@ function boot() {
   };
 }
 
+/**
+ * True for a field the user is typing into. xterm's hidden helper textarea is
+ * not one of those — it is how the terminal itself receives keys.
+ */
+function isTextField(target: EventTarget | null): boolean {
+  if (target instanceof HTMLInputElement) return true;
+  return target instanceof HTMLTextAreaElement && !target.classList.contains("xterm-helper-textarea");
+}
+
 export default function App() {
   const initial = useMemo(boot, []);
 
@@ -657,6 +666,22 @@ export default function App() {
         }
       }
 
+      // Plain Ctrl+V. Left alone, xterm swallows it: it turns the key into a
+      // literal ^V for the shell and cancels the event, so the webview's own
+      // paste never runs. That is what breaks dictation tools like OpenFlow,
+      // which put the transcription on the clipboard and synthesise a Ctrl+V
+      // into whatever window is focused — the keystroke lands, nothing appears.
+      // So keep the key away from xterm, but do not call preventDefault: the
+      // native paste is exactly what we want. It is also the only way to read
+      // the clipboard synchronously — those tools put the user's previous
+      // clipboard back a couple of hundred milliseconds later, which an async
+      // navigator.clipboard read can easily lose the race to.
+      if (ctrl && !e.shiftKey && !e.altKey && key === "v" && !isTextField(e.target)) {
+        if (activeTerm) terminals.focus(activeTerm);
+        e.stopPropagation();
+        return;
+      }
+
       if (ctrl && e.shiftKey) {
         switch (key) {
           case "d":
@@ -730,6 +755,25 @@ export default function App() {
 
     window.addEventListener("keydown", onKeyDown, true);
     return () => window.removeEventListener("keydown", onKeyDown, true);
+  }, []);
+
+  // A paste nobody claimed — the keystroke arrived while the focus sat on the
+  // tab strip, a pane header or the body, so it never reached a terminal. xterm
+  // stops propagation on the pastes it does handle, so anything that gets this
+  // far belongs to the active terminal by default.
+  useEffect(() => {
+    const onPaste = (e: ClipboardEvent) => {
+      if (isTextField(e.target)) return;
+      const text = e.clipboardData?.getData("text/plain");
+      if (!text) return;
+      const tab = actionsRef.current.currentTab();
+      const node = tab ? findLeaf(tab.root, tab.activeLeaf) : null;
+      if (!node) return;
+      e.preventDefault();
+      terminals.paste(node.term, text);
+    };
+    window.addEventListener("paste", onPaste);
+    return () => window.removeEventListener("paste", onPaste);
   }, []);
 
   // ------------------------------------------------------------- palette

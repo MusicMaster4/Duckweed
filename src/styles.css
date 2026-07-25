@@ -143,20 +143,16 @@ svg {
 .brand {
   display: grid;
   place-items: center;
-  width: 21px;
-  height: 21px;
+  width: 24px;
+  height: 24px;
   flex: none;
-  border-radius: 6px;
-  color: #0e1a0a;
-  background: linear-gradient(140deg, #9df07d, #4a9b32);
 }
 
-/* The leaf is a silhouette, not a line drawing — override the global stroke. */
-.brand svg {
-  width: 15px;
-  height: 15px;
-  fill: currentColor;
-  stroke: none;
+.brand img {
+  display: block;
+  width: 22px;
+  height: 22px;
+  object-fit: contain;
 }
 
 .chip {
@@ -453,7 +449,19 @@ button.chip:hover {
   overflow: hidden;
 }
 
-.workspace > * {
+/* One frame around the whole layout, whether it holds a single pane or a tree of
+   them, so splits never show a gap or a doubled border. */
+.workspace > *:not(.booting) {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-pane);
+  overflow: hidden;
+}
+
+.workspace > .booting {
   flex: 1 1 auto;
   min-width: 0;
   min-height: 0;
@@ -502,59 +510,55 @@ button.chip:hover {
   min-height: 0;
 }
 
+/*
+ * A split is one surface cut by a hairline, so the divider is 1px in the layout
+ * and its grab area is an overlay that reaches into both neighbours. Hovering
+ * lights the line up, which is the only cue that it can be dragged.
+ */
 .divider {
   position: relative;
-  flex: 0 0 6px;
-  display: grid;
-  place-items: center;
-  z-index: 2;
-}
-
-.divider span {
-  background: transparent;
-  border-radius: 2px;
+  flex: 0 0 1px;
+  /* A touch stronger than the outer frame: this line is the only thing telling
+     two panes apart, so it has to read at a glance. */
+  background: var(--border-strong);
+  z-index: 3;
   transition: background 120ms ease;
 }
 
-.divider-row {
-  cursor: col-resize;
+.divider span {
+  position: absolute;
+  inset: 0;
 }
 
 .divider-row span {
-  width: 2px;
-  height: 24px;
-}
-
-.divider-col {
-  cursor: row-resize;
+  left: -3px;
+  right: -3px;
+  cursor: col-resize;
 }
 
 .divider-col span {
-  width: 24px;
-  height: 2px;
+  top: -3px;
+  bottom: -3px;
+  cursor: row-resize;
 }
 
-.divider:hover span {
+.divider:hover,
+.divider.is-dragging {
   background: var(--accent-line);
 }
 
 /* ---------------------------------------------------------------- panes */
 
+/* The frame and rounding live on the workspace child, not here — a pane inside
+   a split has no edge of its own, only the dividers around it. */
 .pane {
   position: relative;
   display: flex;
   flex-direction: column;
   min-width: 0;
   min-height: 0;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
   background: var(--bg-pane);
   overflow: hidden;
-  transition: border-color 130ms ease;
-}
-
-.pane.is-active {
-  border-color: rgba(123, 224, 90, 0.3);
 }
 
 .pane.is-source {
@@ -579,10 +583,10 @@ button.chip:hover {
   flex: none;
 }
 
-/* The active pane is marked by its border, its grip and its brighter title —
-   deliberately not by a tinted bar, which reads as noise at this contrast. */
+/* With the pane borders gone, the header is what marks the active pane: a
+   lighter bar, an accent grip and a brighter title. */
 .pane.is-active .pane-header {
-  background: rgba(255, 255, 255, 0.028);
+  background: rgba(255, 255, 255, 0.05);
 }
 
 .pane-grip {

@@ -1,12 +1,16 @@
-import { Fragment, useRef } from "react";
+import { Fragment, useRef, useState } from "react";
 
 import { resizeSplit } from "../lib/layout";
 import type { DropZone, LayoutNode, LeafNode, SplitNode } from "../lib/types";
 import type { DragState } from "../hooks/useDragPane";
 import { TerminalPane } from "./TerminalPane";
 
-/** Thickness of the draggable gap between two cells, in px. */
-const DIVIDER = 6;
+/**
+ * Space the divider takes out of the layout, in px. It is a hairline: the grab
+ * area overhangs into the panes on both sides (see `.divider span`) instead of
+ * pushing them apart, so splits read as one surface cut by a line.
+ */
+const DIVIDER = 1;
 
 export interface PaneTreeShared {
   activeLeaf: string;
@@ -95,11 +99,15 @@ interface DividerProps {
 
 function Divider({ dir, index, containerRef, sizes, onResize }: DividerProps) {
   const drag = useRef<{ origin: number; total: number; base: number[] } | null>(null);
+  // Keeps the line lit for the whole drag, including once the pointer has run
+  // past the divider and is no longer hovering it.
+  const [dragging, setDragging] = useState(false);
 
   const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     if (e.button !== 0) return;
     const container = containerRef.current;
     if (!container) return;
+    setDragging(true);
     drag.current = {
       origin: dir === "row" ? e.clientX : e.clientY,
       // Fractions are of the container box, dividers included — see gapShare.
@@ -120,13 +128,14 @@ function Divider({ dir, index, containerRef, sizes, onResize }: DividerProps) {
   const stop = (e: React.PointerEvent<HTMLDivElement>) => {
     if (!drag.current) return;
     drag.current = null;
+    setDragging(false);
     document.body.classList.remove("is-resizing");
     e.currentTarget.releasePointerCapture(e.pointerId);
   };
 
   return (
     <div
-      className={`divider divider-${dir}`}
+      className={`divider divider-${dir}${dragging ? " is-dragging" : ""}`}
       role="separator"
       aria-orientation={dir === "row" ? "vertical" : "horizontal"}
       onPointerDown={onPointerDown}
