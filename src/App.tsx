@@ -7,10 +7,12 @@ import { PaneTree, type PaneTreeShared } from "./components/PaneTree";
 import { StatusBar } from "./components/StatusBar";
 import { TabStrip } from "./components/TabStrip";
 import { TitleBar } from "./components/TitleBar";
+import { ConfirmCloseDialog } from "./components/ConfirmCloseDialog";
 import { UpdateDialog } from "./components/UpdateDialog";
 import { useDragPane, type DragState } from "./hooks/useDragPane";
 import { useUpdater } from "./hooks/useUpdater";
 import * as bus from "./lib/bus";
+import { confirmCloseRunning } from "./lib/confirmClose";
 import { listShells, projectInfo } from "./lib/ipc";
 import {
   balance,
@@ -175,15 +177,36 @@ export default function App() {
   );
 
   const closeTab = useCallback(
-    (tabId: string, skipTerms: string[] = []) => {
+    async (tabId: string, skipTerms: string[] = []) => {
       const prev = tabsRef.current;
       const tab = prev.find((t) => t.id === tabId);
       if (!tab) return;
-      for (const node of leaves(tab.root)) {
+
+      const termsToCheck = leaves(tab.root)
+        .map((n) => n.term)
+        .filter((t) => !skipTerms.includes(t));
+      if (await terminals.anyHasRunningProcess(termsToCheck)) {
+        const ok = await confirmCloseRunning({
+          title: "Close tab?",
+          message:
+            termsToCheck.length === 1
+              ? "You have a process running in this tab."
+              : "You have processes running in this tab.",
+          confirmLabel: "Yes, close",
+        });
+        if (!ok) return;
+      }
+
+      // Re-read after the dialog — the user may have restructured tabs meanwhile.
+      const latest = tabsRef.current;
+      const still = latest.find((t) => t.id === tabId);
+      if (!still) return;
+
+      for (const node of leaves(still.root)) {
         if (!skipTerms.includes(node.term)) releaseTerm(node.term);
       }
-      const index = prev.findIndex((t) => t.id === tabId);
-      const remaining = prev.filter((t) => t.id !== tabId);
+      const index = latest.findIndex((t) => t.id === tabId);
+      const remaining = latest.filter((t) => t.id !== tabId);
 
       if (remaining.length === 0) {
         const term = createTerm({ cwd: projectRef.current?.path ?? null });
@@ -248,22 +271,38 @@ export default function App() {
   );
 
   const closePane = useCallback(
-    (leafId: string) => {
+    async (leafId: string) => {
       const tab = currentTab();
       if (!tab) return;
       const node = findLeaf(tab.root, leafId);
       if (!node) return;
-      const nextRoot = removeLeaf(tab.root, leafId);
+
+      if (await terminals.hasRunningProcess(node.term)) {
+        const ok = await confirmCloseRunning({
+          title: "Close pane?",
+          message: "You have a process running in this pane.",
+          confirmLabel: "Yes, close",
+        });
+        if (!ok) return;
+      }
+
+      // Re-read after the dialog — the layout may have changed while it was open.
+      const tabNow = currentTab();
+      if (!tabNow || tabNow.id !== tab.id) return;
+      const nodeNow = findLeaf(tabNow.root, leafId);
+      if (!nodeNow) return;
+      const nextRoot = removeLeaf(tabNow.root, leafId);
 
       if (!nextRoot) {
-        releaseTerm(node.term);
-        closeTab(tab.id, [node.term]);
+        releaseTerm(nodeNow.term);
+        // Term already checked above; skip a second busy prompt in closeTab.
+        void closeTab(tabNow.id, [nodeNow.term]);
         return;
       }
 
-      releaseTerm(node.term);
+      releaseTerm(nodeNow.term);
       const fallback = leaves(nextRoot)[0].id;
-      updateTab(tab.id, (t) => ({
+      updateTab(tabNow.id, (t) => ({
         ...t,
         root: nextRoot,
         activeLeaf: findLeaf(nextRoot, t.activeLeaf) ? t.activeLeaf : fallback,
@@ -470,7 +509,7 @@ export default function App() {
         setProject(info);
         projectRef.current = info;
         setRecents((prev) => pushRecent(prev, info.path));
-        void getCurrentWindow().setTitle(`${info.name} — Duckweed`);
+        void getCurrentWindow().setTitle(`Duckweed — ${info.name}`);
         if (options.openTab) {
           const term = createTerm({ cwd: info.path });
           const root = leaf(term);
@@ -530,7 +569,7 @@ export default function App() {
           if (!cancelled) {
             setProject(info);
             projectRef.current = info;
-            void getCurrentWindow().setTitle(`${info.name} — Duckweed`);
+            void getCurrentWindow().setTitle(`Duckweed — ${info.name}`);
           }
         } catch {
           if (!cancelled) setRecents((prev) => prev.filter((p) => p !== initial.projectPath));
@@ -571,6 +610,30 @@ export default function App() {
     const cleanup = () => terminals.disposeAll();
     window.addEventListener("beforeunload", cleanup);
     return () => window.removeEventListener("beforeunload", cleanup);
+  }, []);
+
+  // Warn before quitting if any terminal still has a command running.
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void getCurrentWindow()
+      .onCloseRequested(async (event) => {
+        if (!(await terminals.anyHasRunningProcess(terminals.allSessionIds()))) return;
+        const ok = await confirmCloseRunning({
+          title: "Quit Duckweed?",
+          message: "You have processes running in open terminals.",
+          confirmLabel: "Yes, quit",
+        });
+        if (!ok) event.preventDefault();
+      })
+      .then((fn) => {
+        if (disposed) fn();
+        else unlisten = fn;
+      });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
   }, []);
 
   // Each pane has a ResizeObserver, but maximize/fullscreen/DPI changes can land
@@ -679,6 +742,8 @@ export default function App() {
       // the clipboard synchronously — those tools put the user's previous
       // clipboard back a couple of hundred milliseconds later, which an async
       // navigator.clipboard read can easily lose the race to.
+      // Plain Ctrl+V. Prefer the command editor (or raw grid) of the active pane.
+      // Left alone, xterm swallows Ctrl+V into a literal ^V for the shell.
       if (ctrl && !e.shiftKey && !e.altKey && key === "v" && !isTextField(e.target)) {
         if (activeTerm) terminals.focus(activeTerm);
         e.stopPropagation();
@@ -694,7 +759,7 @@ export default function App() {
             if (activeLeaf) a.splitPane(activeLeaf, "bottom");
             return take();
           case "w":
-            if (activeLeaf) a.closePane(activeLeaf);
+            if (activeLeaf) void a.closePane(activeLeaf);
             return take();
           case "z":
             if (activeLeaf) a.toggleZoom(activeLeaf);
@@ -706,7 +771,7 @@ export default function App() {
             a.newTab(null);
             return take();
           case "q":
-            if (tab) a.closeTab(tab.id);
+            if (tab) void a.closeTab(tab.id);
             return take();
           case "o":
             void a.openProject();
@@ -798,7 +863,9 @@ export default function App() {
         group: "Tab",
         title: "Close tab",
         hint: "Ctrl+Shift+Q",
-        run: () => tab && closeTab(tab.id),
+        run: () => {
+          if (tab) void closeTab(tab.id);
+        },
       },
       {
         id: "pane.right",
@@ -845,7 +912,9 @@ export default function App() {
         group: "Pane",
         title: "Close pane",
         hint: "Ctrl+Shift+W",
-        run: () => activeLeaf && closePane(activeLeaf),
+        run: () => {
+          if (activeLeaf) void closePane(activeLeaf);
+        },
       },
       {
         id: "pane.search",
@@ -988,7 +1057,7 @@ export default function App() {
     zoomedLeaf: activeTab?.zoomedLeaf ?? null,
     onActivate: activatePane,
     onSplit: (leafId, zone) => splitPane(leafId, zone),
-    onClose: closePane,
+    onClose: (id) => void closePane(id),
     onToggleZoom: toggleZoom,
     onStartDrag,
     onResize: resizeSplitSizes,
@@ -1018,7 +1087,7 @@ export default function App() {
         activeShell={shell}
         drag={drag}
         onSelect={setActiveTabId}
-        onClose={(id) => closeTab(id)}
+        onClose={(id) => void closeTab(id)}
         onNew={newTab}
         onReorder={reorderTabs}
         onRename={(id, title) => updateTab(id, (t) => ({ ...t, title }))}
@@ -1081,6 +1150,7 @@ export default function App() {
       {paletteOpen && <CommandPalette actions={paletteActions} onClose={() => setPaletteOpen(false)} />}
 
       {updater.dialogOpen && <UpdateDialog updater={updater} />}
+      <ConfirmCloseDialog />
     </div>
   );
 }

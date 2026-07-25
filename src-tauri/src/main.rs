@@ -1,6 +1,7 @@
 // Hide the console window on Windows release builds.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod process_tree;
 mod project;
 mod pty;
 mod shells;
@@ -68,6 +69,18 @@ fn pty_kill(manager: State<'_, PtyManager>, id: String) -> Result<(), String> {
     manager.kill(&id)
 }
 
+/// Whether the shell for `id` currently has a child process running.
+#[tauri::command]
+fn pty_is_busy(manager: State<'_, PtyManager>, id: String) -> bool {
+    manager.is_busy(&id)
+}
+
+/// Whether any of the listed sessions has a child process running.
+#[tauri::command]
+fn pty_any_busy(manager: State<'_, PtyManager>, ids: Vec<String>) -> bool {
+    manager.any_busy(&ids)
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -75,11 +88,27 @@ fn main() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(PtyManager::default())
         .setup(|app| {
+            // Restore the last normal size/position and whether the window was
+            // maximized or fullscreen before showing it.
+            let state_flags = tauri_plugin_window_state::StateFlags::SIZE
+                | tauri_plugin_window_state::StateFlags::POSITION
+                | tauri_plugin_window_state::StateFlags::MAXIMIZED
+                | tauri_plugin_window_state::StateFlags::FULLSCREEN;
+            app.handle().plugin(
+                tauri_plugin_window_state::Builder::default()
+                    .with_state_flags(state_flags)
+                    .build(),
+            )?;
+
             if let (Some(window), Some(icon)) = (
                 app.get_webview_window("main"),
                 app.default_window_icon().cloned(),
             ) {
                 window.set_icon(icon)?;
+            }
+            if let Some(window) = app.get_webview_window("main") {
+                window.show()?;
+                window.set_focus()?;
             }
             Ok(())
         })
@@ -91,6 +120,8 @@ fn main() {
             pty_write,
             pty_resize,
             pty_kill,
+            pty_is_busy,
+            pty_any_busy,
         ])
         .on_window_event(|window, event| {
             // Make sure we never leave orphaned shells behind.

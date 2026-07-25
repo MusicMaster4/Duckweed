@@ -15,7 +15,7 @@ import {
   type FrameWrite,
 } from "./frames";
 import { createHighlighter, type Highlighter } from "./highlight";
-import { ptyKill, ptyResize, ptySpawn, ptyWrite } from "./ipc";
+import { ptyAnyBusy, ptyIsBusy, ptyKill, ptyResize, ptySpawn, ptyWrite } from "./ipc";
 import { GREEN, terminalTheme } from "./theme";
 
 export interface TermMeta {
@@ -58,7 +58,19 @@ interface Session extends TermMeta {
   /** Debounce timer that resumes blinking after typing pauses. */
   typingIdleTimer: number | null;
   highlighter: Highlighter;
+  /**
+   * Prefer the Warp-style command editor over typing into the raw grid.
+   * Cleared when a full-screen / interactive program needs the real PTY.
+   */
+  editorMode: boolean;
+  /** Re-entry guard while we clear empty selections. */
+  trimmingSelection: boolean;
 }
+
+/** Focus handlers for the per-pane command editor (Warp-style input). */
+const inputFocusers = new Map<string, () => void>();
+/** Paste handlers so right-click paste can land in the editor buffer. */
+const inputPasters = new Map<string, (text: string) => void>();
 
 const sessions = new Map<string, Session>();
 const listeners = new Set<() => void>();
@@ -277,7 +289,9 @@ function hideVisualCursor(session: Session): void {
 function paintVisualCursor(session: Session): void {
   const { term, visualCursor } = session;
   const buffer = term.buffer.active;
+  // In editor mode the caret lives in the command bar, not the grid.
   if (
+    session.editorMode ||
     !session.cursorVisible ||
     !session.cursorFocused ||
     !session.container ||
@@ -437,6 +451,8 @@ function create(id: string, opts: { cwd?: string | null; shell?: string | null }
     cursorFocused: false,
     typingIdleTimer: null,
     highlighter: createHighlighter(),
+    editorMode: true,
+    trimmingSelection: false,
     title: "shell",
     cwd: opts.cwd ?? "",
     shellLabel: "",
@@ -452,6 +468,23 @@ function create(id: string, opts: { cwd?: string | null; shell?: string | null }
     send(session, data);
   });
   term.onScroll(() => scheduleVisualCursor(session, true));
+
+  // Warp-style: empty grid cells are not meaningful content. Drop selections that
+  // carry no non-whitespace text so drag-selecting blank areas does not paint
+  // green slabs across the empty viewport.
+  term.onSelectionChange(() => {
+    if (session.trimmingSelection) return;
+    if (!term.hasSelection()) return;
+    const text = term.getSelection();
+    if (/\S/.test(text)) return;
+    session.trimmingSelection = true;
+    try {
+      term.clearSelection();
+    } finally {
+      session.trimmingSelection = false;
+    }
+  });
+
   term.textarea?.addEventListener("focus", () => {
     session.cursorFocused = true;
     scheduleVisualCursor(session, true);
@@ -648,8 +681,96 @@ export function refitAll(): void {
   for (const id of sessions.keys()) refit(id);
 }
 
+/**
+ * Register the pane's command editor focus callback. When editor mode is on,
+ * {@link focus} prefers this over the raw xterm textarea — same idea as Warp's
+ * separate input editor.
+ */
+export function registerInputFocus(id: string, focusFn: () => void): () => void {
+  inputFocusers.set(id, focusFn);
+  return () => {
+    if (inputFocusers.get(id) === focusFn) inputFocusers.delete(id);
+  };
+}
+
+/** Register how the command editor accepts pasted text. */
+export function registerInputPaste(id: string, pasteFn: (text: string) => void): () => void {
+  inputPasters.set(id, pasteFn);
+  return () => {
+    if (inputPasters.get(id) === pasteFn) inputPasters.delete(id);
+  };
+}
+
+/** Prefer the command editor when active; otherwise the raw terminal. */
 export function focus(id: string): void {
+  const session = sessions.get(id);
+  if (!session) return;
+  if (session.editorMode && !session.exited) {
+    const focusInput = inputFocusers.get(id);
+    if (focusInput) {
+      focusInput();
+      return;
+    }
+  }
+  session.term.focus();
+}
+
+/** Always focus the raw xterm grid (selection, interactive programs). */
+export function focusTerminal(id: string): void {
   sessions.get(id)?.term.focus();
+}
+
+/**
+ * Toggle Warp-style editor mode. When off, keystrokes go straight to the PTY
+ * grid — needed for TUIs, password prompts, and nested REPLs that spawn no child.
+ */
+export function setEditorMode(id: string, enabled: boolean): void {
+  const session = sessions.get(id);
+  if (!session) return;
+  if (session.editorMode === enabled) return;
+  session.editorMode = enabled;
+  if (!enabled) {
+    // Editor mode hides the visual caret in favor of the input bar.
+    session.cursorFocused = true;
+    scheduleVisualCursor(session, true);
+  } else {
+    hideVisualCursor(session);
+  }
+  notify();
+}
+
+export function getEditorMode(id: string): boolean {
+  return sessions.get(id)?.editorMode ?? true;
+}
+
+/**
+ * Submit a command through the PTY as if the user typed it at a shell prompt.
+ * Multi-line buffers use bracketed paste so shells that support it treat the
+ * payload as a single unit (Warp sends the editor buffer the same way).
+ */
+export function submitCommand(id: string, command: string): void {
+  const session = sessions.get(id);
+  if (!session || session.exited) return;
+  const text = command.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  if (!text.trim()) {
+    // Empty Enter — just send a newline so the shell re-draws the prompt.
+    send(session, "\r");
+    return;
+  }
+  markTyping(session);
+  if (text.includes("\n")) {
+    send(session, `\x1b[200~${text}\x1b[201~\r`);
+  } else {
+    send(session, `${text}\r`);
+  }
+}
+
+/** Write raw bytes to the PTY (Ctrl+C, Ctrl+L, Ctrl+D, etc.). */
+export function writeRaw(id: string, data: string): void {
+  const session = sessions.get(id);
+  if (!session || session.exited) return;
+  markTyping(session);
+  send(session, data);
 }
 
 export function dispose(id: string): void {
@@ -659,6 +780,8 @@ export function dispose(id: string): void {
   session.frames.dispose();
   clearTyping(session);
   hideVisualCursor(session);
+  inputFocusers.delete(id);
+  inputPasters.delete(id);
   for (const off of session.unlisten) off();
   void ptyKill(id);
   session.term.dispose();
@@ -669,6 +792,39 @@ export function dispose(id: string): void {
 
 export function disposeAll(): void {
   for (const id of [...sessions.keys()]) dispose(id);
+}
+
+/**
+ * True when the shell for `id` still has a child process (a command running).
+ * Sessions that never spawned or already exited are never busy.
+ */
+export async function hasRunningProcess(id: string): Promise<boolean> {
+  const session = sessions.get(id);
+  if (!session || session.exited || !session.spawned) return false;
+  try {
+    return await ptyIsBusy(id);
+  } catch {
+    return false;
+  }
+}
+
+/** True when any of the listed terminals has a command still running. */
+export async function anyHasRunningProcess(ids: string[]): Promise<boolean> {
+  const live = ids.filter((id) => {
+    const s = sessions.get(id);
+    return s && s.spawned && !s.exited;
+  });
+  if (live.length === 0) return false;
+  try {
+    return await ptyAnyBusy(live);
+  } catch {
+    return false;
+  }
+}
+
+/** Every live session id — used when quitting the app. */
+export function allSessionIds(): string[] {
+  return [...sessions.keys()];
 }
 
 export function setFontSize(size: number): void {
@@ -710,6 +866,16 @@ export function selection(id: string): string {
 export function paste(id: string, text: string): void {
   const session = sessions.get(id);
   if (!session) return;
+  // Prefer the command editor when it is owning input (Warp-style).
+  if (session.editorMode && !session.exited) {
+    const pasteToInput = inputPasters.get(id);
+    if (pasteToInput) {
+      pasteToInput(text);
+      const focusInput = inputFocusers.get(id);
+      focusInput?.();
+      return;
+    }
+  }
   session.term.paste(text);
 }
 

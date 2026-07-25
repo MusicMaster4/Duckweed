@@ -3,6 +3,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import * as bus from "../lib/bus";
 import * as terminals from "../lib/terminals";
 import type { DropZone, LeafNode } from "../lib/types";
+import { CommandInput } from "./CommandInput";
 import { SearchBar } from "./SearchBar";
 
 interface Props {
@@ -43,6 +44,9 @@ export function TerminalPane({
   const bodyRef = useRef<HTMLDivElement>(null);
   const [meta, setMeta] = useState(() => terminals.getMeta(node.term));
   const [searching, setSearching] = useState(false);
+  /** User opted into raw PTY input (or a child process is running). */
+  const [rawMode, setRawMode] = useState(false);
+  const [busy, setBusy] = useState(false);
 
   // Attach before paint so the terminal never flashes an empty frame when the
   // layout changes and React remounts this pane.
@@ -66,6 +70,42 @@ export function TerminalPane({
     [node.id],
   );
 
+  // Poll for child processes — when something is running (vim, servers, …),
+  // hand the keyboard to the raw grid like Warp does for interactive programs.
+  useEffect(() => {
+    let cancelled = false;
+    const tick = async () => {
+      const running = await terminals.hasRunningProcess(node.term);
+      if (!cancelled) setBusy(running);
+    };
+    void tick();
+    const id = window.setInterval(() => void tick(), 500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [node.term]);
+
+  // Effective raw mode: user override or a busy child process.
+  const effectiveRaw = rawMode || busy || !!meta?.exited;
+
+  useEffect(() => {
+    terminals.setEditorMode(node.term, !effectiveRaw);
+  }, [node.term, effectiveRaw]);
+
+  // Hand keyboard to the grid while a child is running; reclaim the editor after.
+  useEffect(() => {
+    if (!active || meta?.exited) return;
+    if (busy) {
+      const id = window.setTimeout(() => terminals.focusTerminal(node.term), 0);
+      return () => window.clearTimeout(id);
+    }
+    if (!rawMode) {
+      const id = window.setTimeout(() => terminals.focus(node.term), 0);
+      return () => window.clearTimeout(id);
+    }
+  }, [busy, rawMode, active, meta?.exited, node.term]);
+
   const title = meta?.title || meta?.shellLabel || "shell";
   const cwdLabel = meta?.cwd ? basename(meta.cwd) : "";
 
@@ -76,6 +116,7 @@ export function TerminalPane({
         active ? "is-active" : "",
         isSource ? "is-source" : "",
         meta?.exited ? "is-exited" : "",
+        effectiveRaw ? "is-raw" : "is-editor",
       ]
         .filter(Boolean)
         .join(" ")}
@@ -98,10 +139,8 @@ export function TerminalPane({
         <span className="pane-title">{title}</span>
         {cwdLabel && <span className="pane-cwd">{cwdLabel}</span>}
         {meta?.exited && <span className="pane-badge">exited</span>}
+        {busy && !meta?.exited && <span className="pane-badge pane-badge-busy">running</span>}
         <span className="pane-spacer" />
-        <span className="pane-dims">
-          {meta?.cols ?? 0}×{meta?.rows ?? 0}
-        </span>
         <button
           type="button"
           className="pane-btn"
@@ -158,6 +197,15 @@ export function TerminalPane({
       <div
         className="pane-body"
         ref={bodyRef}
+        onPointerDown={() => {
+          // Clicking the grid: allow selection; if the user wants raw typing,
+          // switch modes. Selecting text still works in editor mode.
+          if (!meta?.exited && !busy) {
+            // Soft raw: focus terminal for selection without permanently
+            // leaving editor mode unless they start typing there.
+            terminals.focusTerminal(node.term);
+          }
+        }}
         onContextMenu={(e) => {
           // Terminal convention: right-click copies a selection, else pastes.
           e.preventDefault();
@@ -169,6 +217,20 @@ export function TerminalPane({
           void navigator.clipboard.readText().then((text) => {
             if (text) terminals.paste(node.term, text);
           });
+        }}
+      />
+
+      <CommandInput
+        termId={node.term}
+        cwd={meta?.cwd ?? ""}
+        shellLabel={meta?.shellLabel || meta?.title || "shell"}
+        active={active && !searching}
+        rawMode={effectiveRaw && !meta?.exited}
+        exited={!!meta?.exited}
+        onRawMode={(raw) => {
+          setRawMode(raw);
+          if (!raw) terminals.focus(node.term);
+          else terminals.focusTerminal(node.term);
         }}
       />
 

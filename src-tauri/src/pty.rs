@@ -13,6 +13,7 @@ use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, Pt
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
+use crate::process_tree;
 use crate::shells;
 
 /// How much PTY output we buffer before flushing an event to the webview.
@@ -26,6 +27,8 @@ pub struct Session {
     writer: Box<dyn Write + Send>,
     master: Box<dyn MasterPty + Send>,
     killer: Box<dyn ChildKiller + Send + Sync>,
+    /// Shell process id, used to detect in-flight commands (child processes).
+    pid: Option<u32>,
     cols: u16,
     rows: u16,
 }
@@ -110,6 +113,35 @@ impl PtyManager {
             let _ = self.kill(&id);
         }
     }
+
+    /// True when the shell for `id` still has a child process (a command running).
+    pub fn is_busy(&self, id: &str) -> bool {
+        let guard = self.sessions.lock().unwrap();
+        let Some(session) = guard.get(id) else {
+            return false;
+        };
+        let Some(pid) = session.pid else {
+            return false;
+        };
+        process_tree::has_child_processes(pid)
+    }
+
+    /// True when any of the given sessions has a command still running.
+    pub fn any_busy(&self, ids: &[String]) -> bool {
+        let guard = self.sessions.lock().unwrap();
+        for id in ids {
+            let Some(session) = guard.get(id) else {
+                continue;
+            };
+            let Some(pid) = session.pid else {
+                continue;
+            };
+            if process_tree::has_child_processes(pid) {
+                return true;
+            }
+        }
+        false
+    }
 }
 
 /// Spawn a shell attached to a fresh PTY and start streaming its output.
@@ -172,6 +204,7 @@ pub fn spawn(
 
     let mut child = pair.slave.spawn_command(cmd).map_err(err)?;
     let killer = child.clone_killer();
+    let pid = child.process_id();
     // Dropping the slave lets the shell see EOF once it exits.
     drop(pair.slave);
 
@@ -184,6 +217,7 @@ pub fn spawn(
             writer,
             master: pair.master,
             killer,
+            pid,
             cols,
             rows,
         },

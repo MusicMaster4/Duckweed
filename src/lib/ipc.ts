@@ -27,3 +27,9 @@ export const ptyResize = (id: string, cols: number, rows: number) =>
   invoke<void>("pty_resize", { id, cols: Math.round(cols), rows: Math.round(rows) });
 
 export const ptyKill = (id: string) => invoke<void>("pty_kill", { id });
+
+/** True when the shell for `id` has a child process (a command still running). */
+export const ptyIsBusy = (id: string) => invoke<boolean>("pty_is_busy", { id });
+
+/** True when any of the listed sessions has a command still running. */
+export const ptyAnyBusy = (ids: string[]) => invoke<boolean>("pty_any_busy", { ids });
