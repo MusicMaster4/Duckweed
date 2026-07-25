@@ -244,6 +244,7 @@ export function TerminalPane({
           <PaneWelcome
             shellLabel={meta?.shellLabel || meta?.title || "shell"}
             cwd={meta?.cwd ?? ""}
+            active={active}
           />
         )}
       </div>

@@ -824,6 +824,27 @@ button.chip:hover {
   white-space: nowrap;
 }
 
+/* Overlay is pointer-events:none; this row is the one intentional control. */
+.pane-welcome-show-hints {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: default;
+  pointer-events: auto;
+}
+
+.pane-welcome-show-hints:hover .pane-welcome-label {
+  color: var(--text-dim);
+}
+
 /* Short panes cannot fit the hint list; the greeting alone still reads. */
 .pane-welcome.is-compact .pane-welcome-hints {
   display: none;
