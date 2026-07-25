@@ -76,7 +76,7 @@ jobs:
       channel: ${{ steps.calc.outputs.channel }}
       publish: ${{ steps.calc.outputs.publish }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0 # every tag, to find the latest release of each channel
 
@@ -125,7 +125,7 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: oven-sh/setup-bun@v2
         with:
@@ -180,7 +180,7 @@ jobs:
 
       - name: Keep the installer as an artifact (test build)
         if: needs.version.outputs.publish != 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: duckweed-windows-${{ needs.version.outputs.channel }}
           path: |

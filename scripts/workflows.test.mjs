@@ -4,7 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { BETA_POINTER_TAG, endpointFor } from "./apply-version.mjs";
-import { channelForBranch } from "../src/lib/version.ts";
+import { channelForBranch, channelOf } from "../src/lib/version.ts";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const read = (file) => readFileSync(path.join(ROOT, file), "utf8");
@@ -149,8 +149,16 @@ describe("CI workflow", () => {
 });
 
 describe("the shipped app configuration", () => {
-  test("is built with the stable endpoint by default", () => {
-    expect(tauriConfig.plugins.updater.endpoints).toEqual([endpointFor("stable")]);
+  // In the repository this is the stable endpoint; inside a release build the
+  // step before the tests has already rewritten it for the channel being built.
+  // Either way the endpoint and the version have to agree, or a build would ask
+  // the wrong channel for updates.
+  test("reads the endpoint of the channel its version belongs to, and only that one", () => {
+    const endpoints = tauriConfig.plugins.updater.endpoints;
+    expect(endpoints).toHaveLength(1);
+    const repo = /github\.com\/([^/]+\/[^/]+)\//.exec(endpoints[0])?.[1];
+    expect(repo).toBeTruthy();
+    expect(endpoints[0]).toBe(endpointFor(channelOf(tauriConfig.version), repo));
   });
 
   test("carries a public key, so an unsigned update is rejected", () => {
