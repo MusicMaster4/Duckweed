@@ -131,17 +131,25 @@ describe("visual cursor stabilization", () => {
   test("holds Codex's transient jump from composer to status", () => {
     // Real capture: composer row 22, transient Working row 19, correction
     // arrives 23.6 ms later. The settle window must cover that correction.
-    expect(cursorMoveNeedsSettling(21, 18)).toBe(true);
+    expect(
+      cursorMoveNeedsSettling(
+        { row: 21, column: 2 },
+        { row: 18, column: 13 },
+      ),
+    ).toBe(true);
     expect(CURSOR_SETTLE_MS).toBeGreaterThan(23.6);
   });
 
-  test("keeps composer typing and downward layout movement immediate", () => {
-    expect(cursorMoveNeedsSettling(21, 21)).toBe(false);
-    expect(cursorMoveNeedsSettling(21, 23)).toBe(false);
+  test("keeps typing immediate and settles vertical or large horizontal jumps", () => {
+    const stable = { row: 21, column: 8 };
+    expect(cursorMoveNeedsSettling(stable, { row: 21, column: 9 })).toBe(false);
+    expect(cursorMoveNeedsSettling(stable, { row: 21, column: 6 })).toBe(false);
+    expect(cursorMoveNeedsSettling(stable, { row: 23, column: 8 })).toBe(true);
+    expect(cursorMoveNeedsSettling(stable, { row: 21, column: 37 })).toBe(true);
   });
 
   test("settles the first cursor snapshot instead of flashing startup positions", () => {
-    expect(cursorMoveNeedsSettling(null, 10)).toBe(true);
+    expect(cursorMoveNeedsSettling(null, { row: 10, column: 2 })).toBe(true);
   });
 
   test("real Codex status-to-composer sequence never paints the status row", () => {
@@ -158,18 +166,75 @@ describe("visual cursor stabilization", () => {
     );
 
     // Establish the composer at zero-based row 21.
-    settler.schedule(21, () => painted.push(21), true);
+    settler.schedule({ row: 21, column: 2 }, () => painted.push("21:2"), true);
     pending();
     pending = null;
 
     // Captured frame ends at Working row 18. Its cursor-only correction lands
     // 15.3 ms later at composer row 21, before the 32 ms settle timer.
-    settler.schedule(18, () => painted.push(18));
-    expect(painted).toEqual([21]);
-    settler.schedule(21, () => painted.push(21));
+    settler.schedule({ row: 18, column: 13 }, () => painted.push("18:13"));
+    expect(painted).toEqual(["21:2"]);
+    settler.schedule({ row: 21, column: 2 }, () => painted.push("21:2"));
 
     expect(pending).toBeNull();
-    expect(painted).toEqual([21, 21]);
+    expect(painted).toEqual(["21:2", "21:2"]);
+    settler.cancel();
+  });
+
+  test("real Codex footer-to-composer sequence never paints the footer row", () => {
+    let pending = null;
+    const painted = [];
+    const settler = createCursorSettler(
+      (callback) => {
+        pending = callback;
+        return 1;
+      },
+      () => {
+        pending = null;
+      },
+    );
+
+    // Establish the composer at zero-based row 14.
+    settler.schedule({ row: 14, column: 12 }, () => painted.push("14:12"), true);
+    pending();
+    pending = null;
+
+    // Captured backspace repaint ended on footer row 16, then corrected to the
+    // composer about 15 ms later. The footer position must remain provisional.
+    settler.schedule({ row: 16, column: 59 }, () => painted.push("16:59"));
+    expect(painted).toEqual(["14:12"]);
+    settler.schedule({ row: 14, column: 11 }, () => painted.push("14:11"));
+
+    expect(pending).toBeNull();
+    expect(painted).toEqual(["14:12", "14:11"]);
+    settler.cancel();
+  });
+
+  test("real same-row path jump is replaced before paint", () => {
+    let pending = null;
+    const painted = [];
+    const settler = createCursorSettler(
+      (callback) => {
+        pending = callback;
+        return 1;
+      },
+      () => {
+        pending = null;
+      },
+    );
+
+    settler.schedule({ row: 14, column: 3 }, () => painted.push("14:3"), true);
+    pending();
+    pending = null;
+
+    // The final captured backspace jumped to column 37 on the composer's row,
+    // then returned to column 3 after 17.7 ms.
+    settler.schedule({ row: 14, column: 37 }, () => painted.push("14:37"));
+    expect(painted).toEqual(["14:3"]);
+    settler.schedule({ row: 14, column: 3 }, () => painted.push("14:3"));
+
+    expect(pending).toBeNull();
+    expect(painted).toEqual(["14:3", "14:3"]);
     settler.cancel();
   });
 });

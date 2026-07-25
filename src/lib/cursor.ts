@@ -1,22 +1,33 @@
 /**
  * Visual cursor policy for terminal programs that repaint their own interface.
  *
- * Codex briefly leaves the hardware cursor on its animated status line and
- * corrects it to the composer on the next render tick. Moving upward is
- * therefore treated as provisional; same-row movement (typing) and movement
- * toward the bottom (the usual composer direction) remain immediate.
+ * Codex briefly leaves the hardware cursor on its animated status or footer
+ * line and corrects it to the composer on the next render tick. A row change or
+ * a large horizontal jump is therefore treated as provisional; movement by one
+ * or two columns while typing remains immediate.
  */
 
 /** Longer than the largest status → composer gap in the captured Codex stream. */
 export const CURSOR_SETTLE_MS = 32;
 
-export function cursorMoveNeedsSettling(stableRow: number | null, nextRow: number): boolean {
-  return stableRow === null || nextRow < stableRow;
+export interface CursorPosition {
+  row: number;
+  column: number;
+}
+
+export function cursorMoveNeedsSettling(
+  stable: CursorPosition | null,
+  next: CursorPosition,
+): boolean {
+  if (stable === null || next.row !== stable.row) return true;
+  // Two cells keeps full-width characters responsive while still catching the
+  // large jump Codex emits from the composer to its footer/path text.
+  return Math.abs(next.column - stable.column) > 2;
 }
 
 export interface CursorSettler {
   /** Replace a provisional position or paint a stable one immediately. */
-  schedule(row: number, paint: () => void, force?: boolean): void;
+  schedule(position: CursorPosition, paint: () => void, force?: boolean): void;
   /** Prevent a delayed cursor from appearing after blur, scroll, or disposal. */
   cancel(): void;
 }
@@ -29,7 +40,7 @@ export function createCursorSettler(
   clearTimer: (timer: Timer) => void = clearTimeout,
 ): CursorSettler {
   let timer: Timer | undefined;
-  let stableRow: number | null = null;
+  let stable: CursorPosition | null = null;
 
   function cancel(): void {
     if (timer === undefined) return;
@@ -38,17 +49,17 @@ export function createCursorSettler(
   }
 
   return {
-    schedule(row, paint, force = false) {
+    schedule(position, paint, force = false) {
       cancel();
-      if (!force && !cursorMoveNeedsSettling(stableRow, row)) {
-        stableRow = row;
+      if (!force && !cursorMoveNeedsSettling(stable, position)) {
+        stable = position;
         paint();
         return;
       }
 
       timer = setTimer(() => {
         timer = undefined;
-        stableRow = row;
+        stable = position;
         paint();
       }, CURSOR_SETTLE_MS);
     },

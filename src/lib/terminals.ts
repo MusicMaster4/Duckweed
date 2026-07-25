@@ -270,9 +270,10 @@ function paintVisualCursor(session: Session): void {
 /**
  * Update the cursor independently from terminal grid writes.
  *
- * Same-row movement remains immediate for responsive typing. An upward jump is
- * held for one render cycle: Codex's next tiny update moves the buffer cursor
- * back down to its composer and cancels the provisional position.
+ * Short same-row movement remains immediate for responsive typing. A row change
+ * or large horizontal jump is held for one render cycle: Codex's next tiny
+ * update moves the buffer cursor back to its composer and cancels a provisional
+ * status/footer position.
  */
 function scheduleVisualCursor(session: Session, forceSettle = false): void {
   if (!session.cursorVisible || !session.cursorFocused || !session.container) {
@@ -287,7 +288,7 @@ function scheduleVisualCursor(session: Session, forceSettle = false): void {
   }
 
   session.cursorSettler.schedule(
-    buffer.cursorY,
+    { row: buffer.cursorY, column: buffer.cursorX },
     () => paintVisualCursor(session),
     forceSettle,
   );
