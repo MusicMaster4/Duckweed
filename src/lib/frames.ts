@@ -18,9 +18,9 @@
  *
  * A single `Terminal.write` is still not necessarily a single paint: xterm
  * yields after its parser has worked for 12 ms so the renderer can catch up.
- * `stabilizeCursorDuringFrame` therefore keeps the cursor hidden while a held
- * redraw is parsed and only restores the program's requested visibility after
- * the closing marker has been processed.
+ * `stabilizeCursorDuringFrame` therefore tracks the program's requested cursor
+ * visibility but keeps xterm's renderer hidden. The app paints the logical
+ * cursor separately after the parsed buffer has settled.
  *
  * The markers are left in the stream rather than stripped: xterm ignores private
  * modes it does not know, and passing the bytes through untouched keeps what the
@@ -57,20 +57,19 @@ export interface StabilizedWrite {
 }
 
 /**
- * Keep the cursor off intermediate cells while xterm parses a synchronized
- * redraw.
+ * Keep xterm's native cursor hidden while tracking the program's logical state.
  *
- * xterm may yield and paint part-way through one `write` call. Moving every
- * cursor-visibility command to the boundary of the frame makes those partial
- * paints harmless: the cursor is hidden before any cursor movement and restored
- * only after a real closing marker. Other private modes sharing the same CSI
- * command are preserved.
+ * Cursor visibility changes are removed even outside synchronized frames.
+ * Codex sometimes completes a valid frame with the cursor on its status row and
+ * sends the composer position in a second update ~24 ms later. Letting xterm
+ * paint either position would expose that transient jump. Other private modes
+ * sharing the same CSI command are preserved.
  */
 export function stabilizeCursorDuringFrame(
   text: string,
   cursorVisible: boolean,
-  synchronized: boolean,
-  complete: boolean,
+  _synchronized: boolean,
+  _complete: boolean,
 ): StabilizedWrite {
   let nextVisible = cursorVisible;
   const withoutCursorChanges = text.replace(privateModes(), (sequence, rawParams: string, action: string) => {
@@ -82,17 +81,10 @@ export function stabilizeCursorDuringFrame(
     return remaining.length ? `${ESC}[?${remaining.join(";")}${action}` : "";
   });
 
-  if (!synchronized) {
-    return { text, cursorVisible: nextVisible };
-  }
-
-  // A safety-flushed frame stays logically open. Do not expose its temporary
-  // cursor position; the later chunk containing the real close will restore the
-  // last visibility requested by the program.
   return {
-    text:
-      `${ESC}[?25l${withoutCursorChanges}` +
-      (complete ? `${ESC}[?25${nextVisible ? "h" : "l"}` : ""),
+    // Reasserting mode 25 on every write also repairs native cursor state if a
+    // renderer reset or a future xterm change happens to restore it.
+    text: `${ESC}[?25l${withoutCursorChanges}`,
     cursorVisible: nextVisible,
   };
 }

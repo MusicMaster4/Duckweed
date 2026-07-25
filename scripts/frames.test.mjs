@@ -4,6 +4,11 @@ import {
   createFrameBuffer,
   stabilizeCursorDuringFrame,
 } from "../src/lib/frames.ts";
+import {
+  CURSOR_SETTLE_MS,
+  createCursorSettler,
+  cursorMoveNeedsSettling,
+} from "../src/lib/cursor.ts";
 
 const ESC = "\x1b";
 const OPEN = `${ESC}[?2026h`;
@@ -75,11 +80,11 @@ describe("synchronized terminal frames", () => {
     expect(stabilized).toHaveLength(2);
     expect(stabilized.every((write) => write.synchronized && write.complete)).toBe(true);
     expect(stabilized.every((write) => write.text.startsWith(HIDE))).toBe(true);
-    expect(stabilized.every((write) => write.text.endsWith(SHOW))).toBe(true);
+    expect(stabilized.every((write) => !write.text.includes(SHOW))).toBe(true);
     frames.dispose();
   });
 
-  test("hides cursor for every partial paint and restores it at the true close", () => {
+  test("keeps the native cursor hidden for partial and completed paints", () => {
     const first = stabilizeCursorDuringFrame(
       `${OPEN}cursor-move${SHOW}`,
       true,
@@ -97,8 +102,8 @@ describe("synchronized terminal frames", () => {
       true,
     );
     expect(last.text.startsWith(HIDE)).toBe(true);
-    expect(last.text.endsWith(SHOW)).toBe(true);
-    expect(last.text.slice(0, -SHOW.length).includes(SHOW)).toBe(false);
+    expect(last.text.includes(SHOW)).toBe(false);
+    expect(last.cursorVisible).toBe(true);
   });
 
   test("preserves a hidden final cursor and other combined private modes", () => {
@@ -111,13 +116,60 @@ describe("synchronized terminal frames", () => {
 
     expect(result.cursorVisible).toBe(false);
     expect(result.text).toContain(`${ESC}[?1004h`);
-    expect(result.text.endsWith(HIDE)).toBe(true);
+    expect(result.text.startsWith(HIDE)).toBe(true);
     expect(result.text.match(/\x1b\[\?25h/g)).toBeNull();
   });
 
-  test("tracks ordinary cursor state without rewriting ordinary output", () => {
+  test("tracks ordinary cursor state while suppressing the native cursor", () => {
     const text = `plain${HIDE}text`;
     const result = stabilizeCursorDuringFrame(text, true, false, true);
-    expect(result).toEqual({ text, cursorVisible: false });
+    expect(result).toEqual({ text: `${HIDE}plaintext`, cursorVisible: false });
+  });
+});
+
+describe("visual cursor stabilization", () => {
+  test("holds Codex's transient jump from composer to status", () => {
+    // Real capture: composer row 22, transient Working row 19, correction
+    // arrives 23.6 ms later. The settle window must cover that correction.
+    expect(cursorMoveNeedsSettling(21, 18)).toBe(true);
+    expect(CURSOR_SETTLE_MS).toBeGreaterThan(23.6);
+  });
+
+  test("keeps composer typing and downward layout movement immediate", () => {
+    expect(cursorMoveNeedsSettling(21, 21)).toBe(false);
+    expect(cursorMoveNeedsSettling(21, 23)).toBe(false);
+  });
+
+  test("settles the first cursor snapshot instead of flashing startup positions", () => {
+    expect(cursorMoveNeedsSettling(null, 10)).toBe(true);
+  });
+
+  test("real Codex status-to-composer sequence never paints the status row", () => {
+    let pending = null;
+    const painted = [];
+    const settler = createCursorSettler(
+      (callback) => {
+        pending = callback;
+        return 1;
+      },
+      () => {
+        pending = null;
+      },
+    );
+
+    // Establish the composer at zero-based row 21.
+    settler.schedule(21, () => painted.push(21), true);
+    pending();
+    pending = null;
+
+    // Captured frame ends at Working row 18. Its cursor-only correction lands
+    // 15.3 ms later at composer row 21, before the 32 ms settle timer.
+    settler.schedule(18, () => painted.push(18));
+    expect(painted).toEqual([21]);
+    settler.schedule(21, () => painted.push(21));
+
+    expect(pending).toBeNull();
+    expect(painted).toEqual([21, 21]);
+    settler.cancel();
   });
 });

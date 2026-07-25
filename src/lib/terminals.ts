@@ -6,6 +6,7 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
+import { createCursorSettler, type CursorSettler } from "./cursor";
 import {
   createFrameBuffer,
   stabilizeCursorDuringFrame,
@@ -15,7 +16,7 @@ import {
 } from "./frames";
 import { createHighlighter, type Highlighter } from "./highlight";
 import { ptyKill, ptyResize, ptySpawn, ptyWrite } from "./ipc";
-import { terminalTheme } from "./theme";
+import { GREEN, terminalTheme } from "./theme";
 
 export interface TermMeta {
   /** Title reported by the shell via OSC 0/2, or the shell name. */
@@ -48,6 +49,10 @@ interface Session extends TermMeta {
   frames: FrameBuffer;
   /** Last cursor visibility requested by the shell, independent of redraw hiding. */
   cursorVisible: boolean;
+  /** Cursor painted independently from xterm, like Warp's grid renderer. */
+  visualCursor: HTMLDivElement;
+  cursorSettler: CursorSettler;
+  cursorFocused: boolean;
   highlighter: Highlighter;
 }
 
@@ -217,6 +222,77 @@ function send(session: Session, data: string): void {
   else session.pending.push(data);
 }
 
+function disarmCursor(session: Session): void {
+  session.cursorSettler.cancel();
+}
+
+function hideVisualCursor(session: Session): void {
+  disarmCursor(session);
+  session.visualCursor.hidden = true;
+}
+
+/** Paint the visual cursor from xterm's fully-parsed buffer snapshot. */
+function paintVisualCursor(session: Session): void {
+  const { term, visualCursor } = session;
+  const buffer = term.buffer.active;
+  if (
+    !session.cursorVisible ||
+    !session.cursorFocused ||
+    !session.container ||
+    buffer.viewportY !== buffer.baseY
+  ) {
+    visualCursor.hidden = true;
+    return;
+  }
+
+  const screen = session.host.querySelector<HTMLElement>(".xterm-screen");
+  if (!screen || screen.clientWidth <= 0 || screen.clientHeight <= 0) {
+    visualCursor.hidden = true;
+    return;
+  }
+
+  const hostRect = session.host.getBoundingClientRect();
+  const screenRect = screen.getBoundingClientRect();
+  const cellWidth = screenRect.width / term.cols;
+  const cellHeight = screenRect.height / term.rows;
+  const column = Math.min(buffer.cursorX, term.cols - 1);
+  const row = Math.min(buffer.cursorY, term.rows - 1);
+  const x = screenRect.left - hostRect.left + column * cellWidth;
+  const y = screenRect.top - hostRect.top + row * cellHeight;
+
+  visualCursor.style.setProperty("--terminal-cell-width", `${cellWidth}px`);
+  visualCursor.style.setProperty("--terminal-cell-height", `${cellHeight}px`);
+  visualCursor.style.transform = `translate3d(${x}px, ${y}px, 0)`;
+  visualCursor.dataset.style = term.options.cursorStyle ?? "block";
+  visualCursor.hidden = false;
+}
+
+/**
+ * Update the cursor independently from terminal grid writes.
+ *
+ * Same-row movement remains immediate for responsive typing. An upward jump is
+ * held for one render cycle: Codex's next tiny update moves the buffer cursor
+ * back down to its composer and cancels the provisional position.
+ */
+function scheduleVisualCursor(session: Session, forceSettle = false): void {
+  if (!session.cursorVisible || !session.cursorFocused || !session.container) {
+    hideVisualCursor(session);
+    return;
+  }
+
+  const buffer = session.term.buffer.active;
+  if (buffer.viewportY !== buffer.baseY) {
+    hideVisualCursor(session);
+    return;
+  }
+
+  session.cursorSettler.schedule(
+    buffer.cursorY,
+    () => paintVisualCursor(session),
+    forceSettle,
+  );
+}
+
 /** Hand assembled output to xterm, colourised if that is switched on. */
 function draw(session: Session, chunk: FrameWrite): void {
   // The highlighter needs to see every chunk, even while highlighting is off,
@@ -230,7 +306,8 @@ function draw(session: Session, chunk: FrameWrite): void {
     chunk.complete,
   );
   session.cursorVisible = stabilized.cursorVisible;
-  session.term.write(stabilized.text);
+  if (!session.cursorVisible) hideVisualCursor(session);
+  session.term.write(stabilized.text, () => scheduleVisualCursor(session));
 }
 
 function create(id: string, opts: { cwd?: string | null; shell?: string | null }): Session {
@@ -268,6 +345,15 @@ function create(id: string, opts: { cwd?: string | null; shell?: string | null }
   host.className = "xterm-host";
   limbo().appendChild(host);
   term.open(host);
+  // xterm parses the grid, but the cursor is a separate overlay controlled
+  // below. Keep its native cursor off from the very first paint.
+  term.write("\x1b[?25l");
+
+  const visualCursor = document.createElement("div");
+  visualCursor.className = "terminal-visual-cursor";
+  visualCursor.style.setProperty("--terminal-cursor-color", GREEN);
+  visualCursor.hidden = true;
+  host.appendChild(visualCursor);
 
   try {
     term.loadAddon(new WebglAddon());
@@ -290,6 +376,9 @@ function create(id: string, opts: { cwd?: string | null; shell?: string | null }
     // `session` is only read when a frame completes, long after this returns.
     frames: createFrameBuffer((chunk) => draw(session, chunk)),
     cursorVisible: true,
+    visualCursor,
+    cursorSettler: createCursorSettler(),
+    cursorFocused: false,
     highlighter: createHighlighter(),
     title: "shell",
     cwd: opts.cwd ?? "",
@@ -302,14 +391,29 @@ function create(id: string, opts: { cwd?: string | null; shell?: string | null }
   sessions.set(id, session);
 
   term.onData((data) => send(session, data));
+  term.onScroll(() => scheduleVisualCursor(session, true));
+  term.textarea?.addEventListener("focus", () => {
+    session.cursorFocused = true;
+    scheduleVisualCursor(session, true);
+  });
+  term.textarea?.addEventListener("blur", () => {
+    session.cursorFocused = false;
+    hideVisualCursor(session);
+  });
 
   // DECRQM for mode 2026. xterm.js does not know the mode and would answer "not
   // recognised", which is exactly how a program decides synchronized output is
   // unavailable and goes back to redrawing in pieces. Registered last so it runs
   // first — every other mode returns false and falls through to xterm's own
   // handler, which still owns them.
+  // Mode 25 is the exception: report the separately painted cursor's state.
   term.parser.registerCsiHandler({ prefix: "?", intermediates: "$", final: "p" }, (params) => {
-    if (params[0] !== SYNC_MODE) return false;
+    const mode = params[0];
+    if (mode === 25) {
+      send(session, `\x1b[?25;${session.cursorVisible ? 1 : 2}$y`);
+      return true;
+    }
+    if (mode !== SYNC_MODE) return false;
     // DECRPM: 1 = currently set, 2 = currently reset. Either one answers the
     // question the program is actually asking, which is whether we know the mode.
     send(session, `\x1b[?${SYNC_MODE};${session.frames.isFraming() ? 1 : 2}$y`);
@@ -372,6 +476,8 @@ async function start(session: Session, opts: { cwd?: string | null; shell?: stri
     // A program killed mid-redraw leaves a frame open; draw it before the notice
     // so the last thing it managed to print stays above its own epitaph.
     session.frames.flush();
+    session.cursorVisible = false;
+    hideVisualCursor(session);
     session.exited = true;
     session.exitCode = event.payload.code ?? null;
     const code = session.exitCode;
@@ -429,6 +535,7 @@ export function attach(
   session.observer = observer;
 
   refit(id);
+  scheduleVisualCursor(session, true);
 }
 
 /** Park the terminal off-screen; its scrollback and process stay alive. */
@@ -438,6 +545,7 @@ export function detach(id: string): void {
   session.observer?.disconnect();
   session.observer = null;
   session.container = null;
+  hideVisualCursor(session);
   limbo().appendChild(session.host);
 }
 
@@ -448,6 +556,7 @@ export function refit(id: string): void {
   if (clientWidth < 20 || clientHeight < 20) return;
   try {
     session.fit.fit();
+    scheduleVisualCursor(session, true);
   } catch {
     // Fit can throw while the pane is mid-animation; the observer retries.
   }
@@ -470,6 +579,7 @@ export function dispose(id: string): void {
   if (!session) return;
   session.observer?.disconnect();
   session.frames.dispose();
+  hideVisualCursor(session);
   for (const off of session.unlisten) off();
   void ptyKill(id);
   session.term.dispose();

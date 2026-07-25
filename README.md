@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/icon.png" alt="Duckweed icon" width="112" />
+<img src="duckweed_icon.ico" alt="Duckweed icon" width="112" />
 
 # Duckweed
 

@@ -696,8 +696,49 @@ button.chip:hover {
 }
 
 .xterm-host {
+  position: relative;
   width: 100%;
   height: 100%;
+}
+
+.terminal-visual-cursor {
+  position: absolute;
+  z-index: 5;
+  top: 0;
+  left: 0;
+  width: max(1.5px, calc(var(--terminal-cell-width) * 0.14));
+  height: var(--terminal-cell-height);
+  pointer-events: none;
+  background: var(--terminal-cursor-color);
+  transform-origin: top left;
+  will-change: transform, opacity;
+  animation: terminal-cursor-blink 1.05s step-end infinite;
+}
+
+.terminal-visual-cursor[data-style="block"] {
+  width: var(--terminal-cell-width);
+  --terminal-cursor-on-opacity: 0.72;
+}
+
+.terminal-visual-cursor[data-style="underline"] {
+  width: var(--terminal-cell-width);
+  height: max(1.5px, calc(var(--terminal-cell-height) * 0.12));
+  margin-top: calc(var(--terminal-cell-height) * 0.88);
+}
+
+.terminal-visual-cursor[hidden] {
+  display: none;
+}
+
+@keyframes terminal-cursor-blink {
+  0%,
+  52% {
+    opacity: var(--terminal-cursor-on-opacity, 1);
+  }
+  53%,
+  100% {
+    opacity: 0;
+  }
 }
 
 .xterm .xterm-viewport {
