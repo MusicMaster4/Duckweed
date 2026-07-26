@@ -155,11 +155,12 @@ export function TerminalPane({
   /** Nothing has been run — hide the shell's lone prompt behind the empty state. */
   const blank = !!meta && !meta.ran && !effectiveRaw;
   /**
-   * Shell title / cwd / split chrome is for the raw terminal. With the command
-   * editor on, that bar is redundant (open-folder gate, composer, shortcuts).
-   * It only comes back when Command Editor is disabled.
+   * The header doubles as the active-pane marker, so it stays visible in both
+   * input modes — in a split there is nothing else saying which terminal has
+   * the keyboard. The one exception is the open-a-folder gate: that tab has no
+   * shell worth labelling, so the empty state gets the pane to itself.
    */
-  const showHeader = inputMode === "raw";
+  const showHeader = inputMode === "raw" || !!project;
 
   return (
     <div
@@ -288,6 +289,7 @@ export function TerminalPane({
       >
         {blank && (
           <PaneWelcome
+            termId={node.term}
             active={active}
             project={project}
             recents={recents}

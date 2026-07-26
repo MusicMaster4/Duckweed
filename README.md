@@ -60,12 +60,15 @@ terminal, while staying small, fast, and keyboard-friendly.
     <td><strong>⌘ Command palette</strong><br /><sub>Reach every action, shell, project, tab, and pane with <code>Ctrl+Shift+P</code>.</sub></td>
   </tr>
   <tr>
+    <td><strong>⎇ Live diff review</strong><br /><sub>A chip counts your uncommitted files and lines; click it for the full diff.</sub></td>
     <td><strong>⌕ Searchable scrollback</strong><br /><sub>Find terminal output instantly with <code>Ctrl+Shift+F</code>.</sub></td>
-    <td><strong>◎ Readable output</strong><br /><sub>Optional highlighting for paths, URLs, flags, hashes, diffs, and warnings.</sub></td>
   </tr>
   <tr>
+    <td><strong>◎ Readable output</strong><br /><sub>Optional highlighting for paths, URLs, flags, hashes, diffs, and warnings.</sub></td>
     <td><strong>☷ Shell discovery</strong><br /><sub>Detect PowerShell, <code>cmd</code>, Git Bash, WSL, Nushell, Bash, Zsh, and Fish.</sub></td>
-    <td><strong>↺ Persistent layouts</strong><br /><sub>Restore your arrangement between launches without reviving old processes.</sub></td>
+  </tr>
+  <tr>
+    <td colspan="2"><strong>↺ Persistent layouts</strong><br /><sub>Restore your arrangement between launches without reviving old processes.</sub></td>
   </tr>
 </table>
 
@@ -126,6 +129,7 @@ signing secrets, and how to test the pipeline.
 | `Ctrl+1` … `Ctrl+9` | Go to tab N |
 | `Ctrl+Shift+O` | Open a project |
 | `Ctrl+Shift+P` | Open the command palette |
+| `Ctrl+Shift+G` | Review uncommitted changes |
 | `Ctrl+Shift+F` | Search terminal output |
 | `Ctrl+Shift+K` | Clear the focused pane |
 | `Ctrl+Shift+H` | Toggle output highlighting |

@@ -1,11 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 
-import { randomGreeting, randomUnclaimedGreeting } from "../lib/greetings";
+import { greetingFor, unclaimedGreetingFor } from "../lib/greetings";
 import { PaneDuck } from "./PaneDuck";
 import type { ProjectInfo } from "../lib/types";
 
 interface Props {
+  /** Terminal this empty state belongs to — greeting is stable for this id. */
+  termId: string;
   /** Only the focused pane should claim the show-hints chord. */
   active: boolean;
   /** Folder this tab works in, or null while it has none. */
@@ -55,10 +57,10 @@ function HintKeys({ keys }: { keys: readonly string[] }) {
   );
 }
 
-export function PaneWelcome({ active, project, recents, onBrowse, onPickRecent }: Props) {
-  // Once per mount: a line that changes while you read it is a distraction.
-  const greeting = useMemo(() => randomGreeting(), []);
-  const unclaimedLine = useMemo(() => randomUnclaimedGreeting(), []);
+export function PaneWelcome({ termId, active, project, recents, onBrowse, onPickRecent }: Props) {
+  // Once per terminal, not per mount: splits remount the leaf under a SplitView.
+  const greeting = useMemo(() => greetingFor(termId), [termId]);
+  const unclaimedLine = useMemo(() => unclaimedGreetingFor(termId), [termId]);
   const rootRef = useRef<HTMLDivElement>(null);
   const pickRef = useRef(onPickRecent);
   pickRef.current = onPickRecent;

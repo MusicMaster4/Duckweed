@@ -4,7 +4,7 @@ import { gitBranches, gitCheckout } from "../lib/ipc";
 import type { Branches, ProjectInfo } from "../lib/types";
 
 interface Props {
-  /** The tab's project — the repo whose branches this lists. */
+  /** The active tab's project — the repo whose branches this lists. */
   project: ProjectInfo;
   /** Re-read the project, so the pill shows the branch we just moved to. */
   onSwitched: () => void;
@@ -21,17 +21,17 @@ interface Entry {
 }
 
 /**
- * The branch pill inside a tab, and the switcher behind it.
+ * The branch pill in the status bar, and the switcher behind it.
  *
- * It lives in the tab because the repo does: each tab is its own folder, so the
- * branch is the tab's, not the window's.
+ * It follows the active tab's project. Keeping it outside the tab strip means
+ * selecting a tab never changes that tab's width.
  *
  * Checking out happens in the backend rather than by typing `git checkout` into
  * the pane: the shell may be busy, or halfway through a command the user is
  * still writing, and neither is a reason the switcher should refuse to work.
  */
 export function BranchMenu({ project, onSwitched }: Props) {
-  const [anchor, setAnchor] = useState<{ x: number; y: number } | null>(null);
+  const [anchor, setAnchor] = useState<{ x: number; bottom: number } | null>(null);
   const [load, setLoad] = useState<Load>({ kind: "loading" });
   const [query, setQuery] = useState("");
   const [cursor, setCursor] = useState(0);
@@ -99,7 +99,7 @@ export function BranchMenu({ project, onSwitched }: Props) {
     [close, current, onSwitched, project.path],
   );
 
-  // A tab near the right edge would hang its menu off-screen; pull it back in.
+  // A trigger near the right edge would hang its menu off-screen; pull it back in.
   useEffect(() => {
     const el = menuRef.current;
     if (!el || !anchor) return;
@@ -138,18 +138,15 @@ export function BranchMenu({ project, onSwitched }: Props) {
     <>
       <button
         type="button"
-        className={`tab-branch ${open ? "is-open" : ""}`}
+        className={`status-branch ${open ? "is-open" : ""}`}
         title={`${project.name} is on ${project.branch ?? "a detached HEAD"} — click to switch branch`}
-        // The tab strip starts a reorder drag on pointerdown; this is a button.
-        onPointerDown={(e) => e.stopPropagation()}
         onClick={(e) => {
-          e.stopPropagation();
           if (open) {
             close();
             return;
           }
           const rect = e.currentTarget.getBoundingClientRect();
-          setAnchor({ x: rect.left, y: rect.bottom + 6 });
+          setAnchor({ x: rect.left, bottom: window.innerHeight - rect.top + 6 });
         }}
       >
         <svg viewBox="0 0 16 16" aria-hidden="true">
@@ -158,13 +155,13 @@ export function BranchMenu({ project, onSwitched }: Props) {
           <circle cx="11.5" cy="7" r="1.8" />
           <path d="M4.5 5.8v4.4M4.5 8.6h3.6a3 3 0 0 0 2.2-1" />
         </svg>
-        <span className="tab-branch-label">{project.branch ?? "detached"}</span>
+        <span className="status-branch-label">{project.branch ?? "detached"}</span>
       </button>
 
       {anchor && (
         <>
           <div className="menu-backdrop" onPointerDown={close} />
-          <div className="menu menu-branches" ref={menuRef} style={{ left: anchor.x, top: anchor.y }}>
+          <div className="menu menu-branches" ref={menuRef} style={{ left: anchor.x, bottom: anchor.bottom }}>
             <input
               className="menu-filter"
               autoFocus

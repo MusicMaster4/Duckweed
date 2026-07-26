@@ -2,8 +2,8 @@ import { useEffect, useRef, useState, type CSSProperties, type MouseEvent } from
 
 import type { Tab } from "../lib/types";
 import { tabColorHex } from "../lib/tabColors";
+import { tabIconDef } from "../lib/tabIcons";
 import type { DragState } from "../hooks/useDragPane";
-import { BranchMenu } from "./BranchMenu";
 import { ProjectMenu } from "./ProjectMenu";
 import { TabContextMenu } from "./TabContextMenu";
 
@@ -14,8 +14,6 @@ export interface ProjectActions {
   setFor: (tabId: string, path: string) => void;
   /** Open the folder picker for an existing tab. */
   browseFor: (tabId: string) => void;
-  /** Re-read the tab's project after a branch switch. */
-  refresh: (tabId: string) => void;
 }
 
 interface Props {
@@ -34,6 +32,7 @@ interface Props {
   onRename: (tabId: string, title: string) => void;
   onPin: (tabId: string) => void;
   onColor: (tabId: string, colorId: string | null) => void;
+  onIcon: (tabId: string, iconId: string | null) => void;
 }
 
 /** Folder picker open on a tab. */
@@ -41,11 +40,16 @@ type Picker = { tabId: string; x: number; y: number };
 
 type ContextMenu = { tabId: string; x: number; y: number };
 
-const FolderIcon = () => (
-  <svg viewBox="0 0 16 16" aria-hidden="true">
-    <path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h3l1.5 1.8h4.5A1.5 1.5 0 0 1 14 6.3v5.2A1.5 1.5 0 0 1 12.5 13h-9A1.5 1.5 0 0 1 2 11.5z" />
-  </svg>
-);
+const TabGlyph = ({ iconId }: { iconId: string | null | undefined }) => {
+  const def = tabIconDef(iconId);
+  return (
+    <svg viewBox="0 0 16 16" aria-hidden="true" className="tab-glyph-fill">
+      {def.paths.map((d, i) => (
+        <path key={i} d={d} fillRule={def.evenodd ? "evenodd" : undefined} />
+      ))}
+    </svg>
+  );
+};
 
 const PinIcon = () => (
   <svg viewBox="0 0 16 16" aria-hidden="true" className="tab-pin">
@@ -83,6 +87,7 @@ export function TabStrip({
   onRename,
   onPin,
   onColor,
+  onIcon,
 }: Props) {
   const stripRef = useRef<HTMLDivElement>(null);
   const reorder = useRef<{ tabId: string } | null>(null);
@@ -133,7 +138,7 @@ export function TabStrip({
 
   return (
     <div className="tabstrip">
-      <div className="tabs" ref={stripRef}>
+      <div className="tabs" ref={stripRef} role="tablist" aria-label="Open tabs">
         {tabs.map((tab) => {
           const count = paneCounts[tab.id] ?? 0;
           const isActive = tab.id === activeTabId;
@@ -142,6 +147,9 @@ export function TabStrip({
             <div
               key={tab.id}
               data-tab-id={tab.id}
+              role="tab"
+              aria-selected={isActive}
+              tabIndex={isActive ? 0 : -1}
               className={[
                 "tab",
                 isActive ? "is-active" : "",
@@ -160,6 +168,12 @@ export function TabStrip({
                 document.body.classList.add("is-dragging-tab");
               }}
               onDoubleClick={() => setEditing(tab.id)}
+              onKeyDown={(e) => {
+                if (e.target !== e.currentTarget) return;
+                if (e.key !== "Enter" && e.key !== " ") return;
+                e.preventDefault();
+                onSelect(tab.id);
+              }}
               onAuxClick={(e) => {
                 if (e.button === 1) onClose(tab.id);
               }}
@@ -205,15 +219,9 @@ export function TabStrip({
                       openPicker(e, tab.id);
                     }}
                   >
-                    <FolderIcon />
+                    <TabGlyph iconId={tab.icon} />
                   </button>
                   <span className="tab-title">{tab.title}</span>
-                  {isActive && tab.project?.is_git && (
-                    <BranchMenu
-                      project={tab.project}
-                      onSwitched={() => projects.refresh(tab.id)}
-                    />
-                  )}
                   {count > 1 && <span className="tab-count">{count}</span>}
                   <button
                     type="button"
@@ -270,10 +278,12 @@ export function TabStrip({
           anchor={context}
           pinned={contextTab.pinned === true}
           color={contextTab.color ?? null}
+          icon={contextTab.icon ?? null}
           canCloseOthers={tabs.length > 1}
           onPin={() => onPin(contextTab.id)}
           onRename={() => setEditing(contextTab.id)}
           onColor={(colorId) => onColor(contextTab.id, colorId)}
+          onIcon={(iconId) => onIcon(contextTab.id, iconId)}
           onClose={() => onClose(contextTab.id)}
           onCloseOthers={() => onCloseOthers(contextTab.id)}
           onDismiss={() => setContext(null)}

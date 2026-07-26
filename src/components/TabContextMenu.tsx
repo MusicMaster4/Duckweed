@@ -1,37 +1,54 @@
 import { useEffect, useRef, type CSSProperties } from "react";
 
 import { TAB_COLORS } from "../lib/tabColors";
+import { isDefaultTabIcon, TAB_ICONS, tabIconDef } from "../lib/tabIcons";
 
 interface Props {
   anchor: { x: number; y: number };
   pinned: boolean;
   color: string | null;
+  icon: string | null;
   canCloseOthers: boolean;
   onPin: () => void;
   onRename: () => void;
   onColor: (colorId: string | null) => void;
+  onIcon: (iconId: string | null) => void;
   onClose: () => void;
   onCloseOthers: () => void;
   onDismiss: () => void;
 }
 
+function MenuIcon({ id }: { id: string }) {
+  const def = tabIconDef(id);
+  return (
+    <svg viewBox="0 0 16 16" aria-hidden="true" className="menu-icon-svg tab-glyph-fill">
+      {def.paths.map((d, i) => (
+        <path key={i} d={d} fillRule={def.evenodd ? "evenodd" : undefined} />
+      ))}
+    </svg>
+  );
+}
+
 /**
- * Right-click menu for a tab — pin, rename, close helpers, and a Warp-style
- * colour strip so tabs stay easy to spot.
+ * Right-click menu for a tab — pin, rename, close helpers, and Warp-style
+ * colour / icon strips so tabs stay easy to spot.
  */
 export function TabContextMenu({
   anchor,
   pinned,
   color,
+  icon,
   canCloseOthers,
   onPin,
   onRename,
   onColor,
+  onIcon,
   onClose,
   onCloseOthers,
   onDismiss,
 }: Props) {
   const ref = useRef<HTMLDivElement>(null);
+  const selectedIcon = isDefaultTabIcon(icon) ? null : icon;
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -113,6 +130,7 @@ export function TabContextMenu({
 
         <div className="menu-separator" />
 
+        <div className="menu-section-label">Color</div>
         <div className="menu-colors" role="group" aria-label="Tab color">
           <button
             type="button"
@@ -142,6 +160,30 @@ export function TabContextMenu({
               }}
             />
           ))}
+        </div>
+
+        <div className="menu-section-label">Icon</div>
+        <div className="menu-icons" role="group" aria-label="Tab icon">
+          {TAB_ICONS.map((ic) => {
+            const isDefault = ic.id === "folder";
+            const selected = isDefault ? selectedIcon == null : selectedIcon === ic.id;
+            return (
+              <button
+                key={ic.id}
+                type="button"
+                className={`menu-icon ${selected ? "is-selected" : ""}`}
+                title={ic.label}
+                aria-label={ic.label}
+                aria-pressed={selected}
+                onClick={() => {
+                  onIcon(isDefault ? null : ic.id);
+                  onDismiss();
+                }}
+              >
+                <MenuIcon id={ic.id} />
+              </button>
+            );
+          })}
         </div>
       </div>
     </>

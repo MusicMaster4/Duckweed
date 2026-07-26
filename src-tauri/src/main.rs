@@ -11,7 +11,7 @@ use std::collections::HashMap;
 
 use tauri::{AppHandle, Manager, State};
 
-use git::Branches;
+use git::{Branches, Diff, DiffStats, FileDiff};
 use project::ProjectInfo;
 use pty::{PtyManager, SpawnResult};
 use shells::ShellInfo;
@@ -44,6 +44,24 @@ fn git_branches(path: String) -> Result<Branches, String> {
 #[tauri::command]
 fn git_checkout(path: String, branch: String) -> Result<(), String> {
     git::checkout(&path, &branch)
+}
+
+/// Counts for the status-bar chip: changed files, lines added, lines removed.
+#[tauri::command]
+fn git_diff_stats(path: String) -> Result<DiffStats, String> {
+    git::diff_stats(&path)
+}
+
+/// Every uncommitted change, hunk by hunk, for the changes panel.
+#[tauri::command]
+fn git_diff(path: String) -> Result<Diff, String> {
+    git::diff(&path)
+}
+
+/// One file with all of its unmodified lines, for expanding a collapsed run.
+#[tauri::command]
+fn git_file_diff(path: String, file: String) -> Result<FileDiff, String> {
+    git::file_diff(&path, &file)
 }
 
 #[tauri::command]
@@ -131,6 +149,9 @@ fn main() {
             project_info,
             git_branches,
             git_checkout,
+            git_diff_stats,
+            git_diff,
+            git_file_diff,
             pty_spawn,
             pty_write,
             pty_resize,

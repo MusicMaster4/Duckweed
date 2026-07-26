@@ -13,6 +13,8 @@ export interface PersistedTab {
   pinned?: boolean;
   /** Tab accent color id, or null/absent for default. */
   color?: string | null;
+  /** Tab icon id, or null/absent for the default folder. */
+  icon?: string | null;
 }
 
 export interface Persisted {
@@ -73,6 +75,7 @@ export function load(): Persisted | null {
         project: typeof t.project === "string" ? t.project : project,
         pinned: t.pinned === true,
         color: typeof t.color === "string" ? t.color : null,
+        icon: typeof t.icon === "string" ? t.icon : null,
       }));
     return {
       version: 1,
@@ -115,6 +118,7 @@ export function save(state: {
         project: t.project?.path ?? null,
         pinned: t.pinned === true ? true : undefined,
         color: t.color ?? null,
+        icon: t.icon ?? null,
       })),
       activeTabIndex: Math.max(
         0,

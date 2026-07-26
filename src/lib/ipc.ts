@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Branches, ProjectInfo, ShellInfo } from "./types";
+import type { Branches, Diff, DiffStats, FileDiff, ProjectInfo, ShellInfo } from "./types";
 
 export const listShells = () => invoke<ShellInfo[]>("list_shells");
 export const homeDir = () => invoke<string>("home_dir");
@@ -9,6 +9,16 @@ export const gitBranches = (path: string) => invoke<Branches>("git_branches", { 
 
 export const gitCheckout = (path: string, branch: string) =>
   invoke<void>("git_checkout", { path, branch });
+
+/** Counts only — cheap enough to poll while the window has focus. */
+export const gitDiffStats = (path: string) => invoke<DiffStats>("git_diff_stats", { path });
+
+/** Every uncommitted change, with the three context lines a patch carries. */
+export const gitDiff = (path: string) => invoke<Diff>("git_diff", { path });
+
+/** One file with its unmodified lines filled back in. */
+export const gitFileDiff = (path: string, file: string) =>
+  invoke<FileDiff>("git_file_diff", { path, file });
 
 export interface SpawnResult {
   id: string;

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
+import { ChangesPanel } from "./components/ChangesPanel";
 import { CommandPalette, type PaletteAction } from "./components/CommandPalette";
 import { PaneTree, type PaneTreeShared } from "./components/PaneTree";
 import { StatusBar } from "./components/StatusBar";
@@ -11,9 +12,11 @@ import { SettingsMenu } from "./components/SettingsMenu";
 import { ConfirmCloseDialog } from "./components/ConfirmCloseDialog";
 import { UpdateDialog } from "./components/UpdateDialog";
 import { useDragPane, type DragState } from "./hooks/useDragPane";
+import { useGitChanges } from "./hooks/useGitChanges";
 import { useUpdater } from "./hooks/useUpdater";
 import * as bus from "./lib/bus";
 import { confirmCloseRunning } from "./lib/confirmClose";
+import { clearGreetings } from "./lib/greetings";
 import { listShells, projectInfo } from "./lib/ipc";
 import {
   balance,
@@ -74,6 +77,7 @@ function boot() {
         project: entry.project ? provisionalProject(entry.project) : null,
         pinned: entry.pinned === true,
         color: entry.color ?? null,
+        icon: entry.icon ?? null,
       };
     });
     const index = Math.min(Math.max(0, saved.activeTabIndex), tabs.length - 1);
@@ -133,6 +137,7 @@ export default function App() {
   const [booted, setBooted] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [changesOpen, setChangesOpen] = useState(false);
   const updater = useUpdater();
 
   // Handlers read state through refs so keyboard shortcuts and pointer drags
@@ -151,6 +156,7 @@ export default function App() {
 
   const activeTab = tabs.find((t) => t.id === activeTabId) ?? tabs[0];
   const project = activeTab?.project ?? null;
+  const changes = useGitChanges(project);
 
   const currentTab = useCallback(
     () => tabsRef.current.find((t) => t.id === activeTabIdRef.current) ?? tabsRef.current[0] ?? null,
@@ -195,6 +201,7 @@ export default function App() {
   const releaseTerm = useCallback((term: string) => {
     terminals.dispose(term);
     spawnOpts.current.delete(term);
+    clearGreetings(term);
   }, []);
 
   // ---------------------------------------------------------------- tabs
@@ -305,6 +312,10 @@ export default function App() {
 
   const colorTab = useCallback((tabId: string, colorId: string | null) => {
     updateTab(tabId, (t) => ({ ...t, color: colorId }));
+  }, [updateTab]);
+
+  const iconTab = useCallback((tabId: string, iconId: string | null) => {
+    updateTab(tabId, (t) => ({ ...t, icon: iconId }));
   }, [updateTab]);
 
   const closeOtherTabs = useCallback(
@@ -797,6 +808,12 @@ export default function App() {
     };
   }, [activeTabId, refreshProject]);
 
+  // A tab with no repo has nothing to review, and a panel that reappeared on
+  // the way back would be showing another project's diff.
+  useEffect(() => {
+    if (!project?.is_git) setChangesOpen(false);
+  }, [project?.is_git]);
+
   // Persist the arrangement (never the processes). Debounced because dragging a
   // divider produces a state update per pointer move.
   useEffect(() => {
@@ -911,6 +928,7 @@ export default function App() {
     toggleHighlight,
     currentTab,
     setPaletteOpen,
+    setChangesOpen,
   };
   const actionsRef = useRef(actions);
   actionsRef.current = actions;
@@ -1023,6 +1041,11 @@ export default function App() {
           case "p":
             a.setPaletteOpen(true);
             return take();
+          case "g":
+            // Only a repo has changes to review; in anything else the key does
+            // nothing rather than opening an empty panel.
+            if (tab?.project?.is_git) a.setChangesOpen((open) => !open);
+            return take();
           case "f":
             if (activeLeaf) bus.emit("pane:search", { leafId: activeLeaf });
             return take();
@@ -1108,6 +1131,20 @@ export default function App() {
         title: "Open project folder in a new tab…",
         run: () => void openProject({ newTab: true }),
       },
+      ...(project?.is_git
+        ? [
+            {
+              id: "git.changes",
+              group: "Git",
+              title: "Review uncommitted changes",
+              subtitle: changes.stats
+                ? `${changes.stats.files} file${changes.stats.files === 1 ? "" : "s"} · +${changes.stats.insertions} −${changes.stats.deletions}`
+                : project.path,
+              hint: "Ctrl+Shift+G",
+              run: () => setChangesOpen(true),
+            },
+          ]
+        : []),
       ...(project
         ? [{ id: "tab.new", group: "Tab", title: "New tab", hint: "Ctrl+Shift+T", run: () => newTab(null) }]
         : []),
@@ -1302,6 +1339,7 @@ export default function App() {
     applyFontSize,
     applyProject,
     balancePanes,
+    changes.stats,
     closePane,
     closeTab,
     highlight,
@@ -1367,7 +1405,6 @@ export default function App() {
             recents,
             setFor: (tabId, path) => void applyProject(path, { tabId }),
             browseFor: (tabId) => void openProject({ tabId }),
-            refresh: (tabId) => void refreshProject(tabId),
           }}
           allowNewTab={!!project}
           onSelect={setActiveTabId}
@@ -1378,6 +1415,7 @@ export default function App() {
           onRename={(id, title) => updateTab(id, (t) => ({ ...t, title }))}
           onPin={pinTab}
           onColor={colorTab}
+          onIcon={iconTab}
         />
       </TitleBar>
 
@@ -1399,6 +1437,9 @@ export default function App() {
         fontSize={fontSize}
         onFontSize={applyFontSize}
         updater={updater}
+        changes={changes.stats}
+        onOpenChanges={() => setChangesOpen(true)}
+        onProjectRefresh={() => void refreshProject(activeTab?.id)}
       />
 
       {drag && (
@@ -1431,6 +1472,18 @@ export default function App() {
           }}
           onCheckUpdates={updater.check}
           onClose={() => setSettingsOpen(false)}
+        />
+      )}
+
+      {changesOpen && project?.is_git && (
+        <ChangesPanel
+          project={project}
+          onClose={() => {
+            setChangesOpen(false);
+            // Whatever happened in there — a commit, a discard — the chip is
+            // one poll behind until it re-reads.
+            changes.refresh();
+          }}
         />
       )}
 

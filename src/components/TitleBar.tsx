@@ -48,9 +48,14 @@ export function TitleBar({ children, settingsOpen, onToggleSettings }: Props) {
           aria-expanded={settingsOpen}
           onClick={onToggleSettings}
         >
+          {/*
+            Six-tooth cog: flat tips with a deep root (tip r 6.7 vs root r 4.35)
+            so the teeth still read as teeth once the 1.4 stroke is applied at
+            15px — the old shallow-tooth path collapsed into a blob.
+          */}
           <svg viewBox="0 0 16 16" aria-hidden="true">
-            <circle cx="8" cy="8" r="2.25" />
-            <path d="M6.9 2.1h2.2l.45 1.55c.3.12.58.28.84.48l1.55-.4 1.1 1.9-1.1 1.15c.03.2.05.4.05.62s-.02.42-.05.62l1.1 1.15-1.1 1.9-1.55-.4c-.26.2-.54.36-.84.48l-.45 1.55H6.9l-.45-1.55a4.3 4.3 0 0 1-.84-.48l-1.55.4-1.1-1.9 1.1-1.15A4 4 0 0 1 4 7.4c0-.21.02-.42.05-.62l-1.1-1.15 1.1-1.9 1.55.4c.26-.2.54-.36.84-.48z" />
+            <circle cx="8" cy="8" r="2" />
+            <path d="M6.44 3.94 6.61 1.45h2.78l.17 2.49a4.35 4.35 0 0 1 1.18.68l2.24-1.1 1.39 2.41-2.07 1.39a4.35 4.35 0 0 1 0 1.36l2.07 1.39-1.39 2.41-2.24-1.1a4.35 4.35 0 0 1-1.18.68l-.17 2.49H6.61l-.17-2.49a4.35 4.35 0 0 1-1.18-.68l-2.24 1.1-1.39-2.41 2.07-1.39a4.35 4.35 0 0 1 0-1.36L1.63 5.93l1.39-2.41 2.24 1.1a4.35 4.35 0 0 1 1.18-.68z" />
           </svg>
         </button>
         <button type="button" className="win-btn" title="Minimize" onClick={() => void win().minimize()}>
@@ -67,11 +72,16 @@ export function TitleBar({ children, settingsOpen, onToggleSettings }: Props) {
           <svg viewBox="0 0 12 12" aria-hidden="true">
             {maximized ? (
               <>
-                <rect x="3.75" y="1.5" width="6" height="6" rx="0.9" />
-                <rect x="1.5" y="3.75" width="6" height="6" rx="0.9" />
+                {/*
+                  The back square is drawn open — only the part that escapes the
+                  front square. Two full rects overlapping read as a grid, not as
+                  one window sitting on another.
+                */}
+                <path d="M3.75 3.75V2.75a1 1 0 0 1 1-1h4.5a1 1 0 0 1 1 1v4.5a1 1 0 0 1-1 1H8.25" />
+                <rect x="1.75" y="3.75" width="6.5" height="6.5" rx="1" />
               </>
             ) : (
-              <rect x="2.5" y="2.5" width="7" height="7" rx="1" />
+              <rect x="2.25" y="2.25" width="7.5" height="7.5" rx="1.2" />
             )}
           </svg>
         </button>
