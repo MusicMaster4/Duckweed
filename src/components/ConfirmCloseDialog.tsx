@@ -1,4 +1,4 @@
-import { useEffect, useSyncExternalStore } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 
 import {
   answerConfirmClose,
@@ -16,6 +16,13 @@ export function ConfirmCloseDialog() {
     getConfirmClose,
     getConfirmClose,
   );
+  const [dontShowAgain, setDontShowAgain] = useState(false);
+
+  // Reset the checkbox whenever a new prompt opens so a previous choice never
+  // bleeds into the next dialog.
+  useEffect(() => {
+    if (request) setDontShowAgain(false);
+  }, [request]);
 
   useEffect(() => {
     if (!request) return;
@@ -27,14 +34,16 @@ export function ConfirmCloseDialog() {
       } else if (e.key === "Enter" && !e.isComposing) {
         e.preventDefault();
         e.stopPropagation();
-        answerConfirmClose(true);
+        answerConfirmClose(true, dontShowAgain && !!request.allowDontShowAgain);
       }
     };
     window.addEventListener("keydown", onKeyDown, true);
     return () => window.removeEventListener("keydown", onKeyDown, true);
-  }, [request]);
+  }, [request, dontShowAgain]);
 
   if (!request) return null;
+
+  const showDontShowAgain = request.allowDontShowAgain === true;
 
   return (
     <div
@@ -56,12 +65,22 @@ export function ConfirmCloseDialog() {
         <p id="confirm-close-body" className="confirm-message">
           {request.message}
         </p>
+        {showDontShowAgain && (
+          <label className="confirm-dont-show">
+            <input
+              type="checkbox"
+              checked={dontShowAgain}
+              onChange={(e) => setDontShowAgain(e.target.checked)}
+            />
+            <span>Don&apos;t show this again</span>
+          </label>
+        )}
         <div className="confirm-actions">
           <button
             type="button"
             className="confirm-btn is-danger"
             autoFocus
-            onClick={() => answerConfirmClose(true)}
+            onClick={() => answerConfirmClose(true, dontShowAgain && showDontShowAgain)}
           >
             {request.confirmLabel}
           </button>

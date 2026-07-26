@@ -18,6 +18,8 @@ export interface PaneTreeShared {
   /** Resolves the shell/cwd a not-yet-created terminal should start with. */
   spawnFor: (term: string) => { cwd: string | null; shell: string | null };
   highlight: boolean;
+  /** Terminals whose most recent completion has not been reviewed yet. */
+  unreadTerms: ReadonlySet<string>;
   /** Folder of the tab being rendered; the empty pane offers to pick one. */
   project: ProjectInfo | null;
   recents: string[];
@@ -50,6 +52,7 @@ export const PaneTree = memo(function PaneTree({ node, shared }: { node: LayoutN
         isSource={shared.drag?.leafId === node.id}
         spawn={shared.spawnFor(node.term)}
         highlight={shared.highlight}
+        unread={shared.unreadTerms.has(node.term)}
         project={shared.project}
         recents={shared.recents}
         onBrowseProject={shared.onBrowseProject}

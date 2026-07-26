@@ -29,6 +29,12 @@ export interface Persisted {
   highlight: boolean;
   /** Warp-style command editor, or a conventional raw terminal. */
   inputMode: InputMode;
+  /**
+   * Ask before closing a pane, tab, or the window when a process is still
+   * running. Users can turn this off from the dialog ("Don't show this again")
+   * or from Settings.
+   */
+  confirmCloseRunning: boolean;
   /** Left tool dock: whether it is showing, and how wide it was left. */
   toolsOpen: boolean;
   toolsWidth: number;
@@ -89,6 +95,9 @@ export function load(): Persisted | null {
       shell: typeof parsed.shell === "string" ? parsed.shell : null,
       highlight: typeof parsed.highlight === "boolean" ? parsed.highlight : true,
       inputMode: parsed.inputMode === "raw" ? "raw" : "editor",
+      // Default on so a missing field from older saves still asks before killing work.
+      confirmCloseRunning:
+        typeof parsed.confirmCloseRunning === "boolean" ? parsed.confirmCloseRunning : true,
       toolsOpen: parsed.toolsOpen === true,
       toolsWidth: typeof parsed.toolsWidth === "number" ? parsed.toolsWidth : DEFAULT_TOOLS_WIDTH,
       tabs,
@@ -106,6 +115,7 @@ export function save(state: {
   shell: string | null;
   highlight: boolean;
   inputMode: InputMode;
+  confirmCloseRunning: boolean;
   toolsOpen: boolean;
   toolsWidth: number;
   tabs: Tab[];
@@ -120,6 +130,7 @@ export function save(state: {
       shell: state.shell,
       highlight: state.highlight,
       inputMode: state.inputMode,
+      confirmCloseRunning: state.confirmCloseRunning,
       toolsOpen: state.toolsOpen,
       toolsWidth: state.toolsWidth,
       tabs: state.tabs.map((t) => ({

@@ -18,7 +18,22 @@ import {
   type FrameWrite,
 } from "./frames";
 import { createHighlighter, type Highlighter } from "./highlight";
-import { ptyAnyBusy, ptyIsBusy, ptyKill, ptyResize, ptySpawn, ptyWrite } from "./ipc";
+import {
+  agentUnwatch,
+  agentWatch,
+  ptyAnyBusy,
+  ptyIsBusy,
+  ptyKill,
+  ptyResize,
+  ptySpawn,
+  ptyWrite,
+} from "./ipc";
+import {
+  detectAgent,
+  isGenericOsc777Notification,
+  parseAgentOsc777,
+  type AgentKind,
+} from "./processActivity";
 import { GREEN, terminalTheme } from "./theme";
 
 export interface TermMeta {
@@ -33,6 +48,8 @@ export interface TermMeta {
   rows: number;
   /** A child process currently owns this terminal. */
   busy: boolean;
+  /** Persistent CLI-agent turns completed while the process remains alive. */
+  completionSeq: number;
   /**
    * Something has been sent to the shell since the pane opened (or since the
    * last clear). Until then the grid holds only a prompt, which the pane hides
@@ -96,6 +113,12 @@ interface Session extends TermMeta {
    * Shared autosuggest history lives in {@link commandHistory}.
    */
   history: string[];
+  /** Persistent coding agent currently owning this PTY, if recognised. */
+  agent: AgentKind | null;
+  /** Deduplicates a log event and OSC notification for the same completed turn. */
+  lastAgentCompletionAt: number;
+  /** Command assembled while the conventional raw terminal owns shell input. */
+  rawCommand: string;
 }
 
 /** Focus handlers for the per-pane command editor (Warp-style input). */
@@ -107,6 +130,7 @@ const sessions = new Map<string, Session>();
 const sessionListeners = new Map<string, Set<() => void>>();
 const settingsListeners = new Set<() => void>();
 let busyUnlisten: Promise<UnlistenFn> | null = null;
+let agentUnlisten: Promise<UnlistenFn> | null = null;
 
 /**
  * How keystrokes reach the shell, app-wide.
@@ -309,6 +333,7 @@ export function getMeta(id: string): TermMeta | null {
     cols: s.cols,
     rows: s.rows,
     busy: s.busy,
+    completionSeq: s.completionSeq,
     ran: s.ran,
   };
 }
@@ -367,6 +392,64 @@ interface BusyPayload {
   busy: boolean;
 }
 
+interface AgentCompletionPayload {
+  id: string;
+  agent: AgentKind;
+}
+
+function markAgentComplete(session: Session): void {
+  const now = Date.now();
+  if (now - session.lastAgentCompletionAt < 1200) return;
+  session.lastAgentCompletionAt = now;
+  session.completionSeq += 1;
+  notifySession(session.id);
+}
+
+function bindAgentKind(session: Session, agent: AgentKind): void {
+  if (session.agent === agent) return;
+  session.agent = agent;
+  if (TAURI_RUNTIME) void agentWatch(session.id, agent, session.cwd);
+}
+
+function bindAgentCommand(session: Session, command: string): void {
+  const agent = detectAgent(command);
+  if (agent) bindAgentKind(session, agent);
+}
+
+function captureRawAgentCommand(session: Session, data: string): void {
+  if (session.editorMode || session.busy || session.agent) return;
+  for (const char of data) {
+    if (char === "\r" || char === "\n") {
+      bindAgentCommand(session, session.rawCommand);
+      session.rawCommand = "";
+    } else if (char === "\x7f" || char === "\b") {
+      session.rawCommand = session.rawCommand.slice(0, -1);
+    } else if (char === "\x15") {
+      session.rawCommand = "";
+    } else if (char >= " " || char === "\x1b") {
+      session.rawCommand = (session.rawCommand + char).slice(-2048);
+    }
+  }
+}
+
+function unbindAgent(session: Session): void {
+  if (!session.agent) return;
+  session.agent = null;
+  session.rawCommand = "";
+  if (TAURI_RUNTIME) void agentUnwatch(session.id);
+}
+
+/** One listener receives turn completion events from every watched agent log. */
+function ensureAgentListener(): void {
+  if (!TAURI_RUNTIME || agentUnlisten) return;
+  agentUnlisten = listen<AgentCompletionPayload>("agent:complete", (event) => {
+    const session = sessions.get(event.payload.id);
+    if (!session) return;
+    if (!session.agent) session.agent = event.payload.agent;
+    markAgentComplete(session);
+  });
+}
+
 /** One app-wide listener replaces the per-pane busy polling loops. */
 function ensureBusyListener(): void {
   if (!TAURI_RUNTIME) return;
@@ -375,8 +458,10 @@ function ensureBusyListener(): void {
     for (const state of event.payload) {
       const session = sessions.get(state.id);
       if (!session || session.busy === state.busy) continue;
+      const wasBusy = session.busy;
       session.busy = state.busy;
       session.blocks.busyChanged(state.busy);
+      if (wasBusy && !state.busy) unbindAgent(session);
       notifySession(state.id);
     }
   });
@@ -612,17 +697,23 @@ function create(id: string, opts: { cwd?: string | null; shell?: string | null }
     cols: term.cols,
     rows: term.rows,
     busy: false,
+    completionSeq: 0,
     ran: false,
     lastSubmitAt: 0,
     history: [],
+    agent: null,
+    lastAgentCompletionAt: 0,
+    rawCommand: "",
   };
   sessions.set(id, session);
   ensureBusyListener();
+  ensureAgentListener();
   // Selecting a chunk here drops chunk selection everywhere else so two panes
   // never show a selected block at the same time.
   session.blocks = new BlockTracker(term, host, () => clearOtherBlockSelections(id));
 
   term.onData((data) => {
+    captureRawAgentCommand(session, data);
     markTyping(session);
     send(session, data);
   });
@@ -838,6 +929,28 @@ function create(id: string, opts: { cwd?: string | null; shell?: string | null }
     if (match) {
       session.cwd = match[1].replace(/^"|"$/g, "");
       notifySession(id);
+      return true;
+    }
+    if (session.agent && payload.trim()) {
+      markAgentComplete(session);
+      return true;
+    }
+    return false;
+  });
+
+  // Warp's CLI-agent integrations use OSC 777 with a structured JSON body.
+  // Supporting the same protocol lets their plugins report a completed turn
+  // even though the long-lived agent process remains attached to this PTY.
+  term.parser.registerOscHandler(777, (payload) => {
+    const event = parseAgentOsc777(payload);
+    if (event) {
+      if (event.agent) bindAgentKind(session, event.agent);
+      if (event.needsAttention) markAgentComplete(session);
+      return true;
+    }
+    if (session.agent && isGenericOsc777Notification(payload)) {
+      markAgentComplete(session);
+      return true;
     }
     return false;
   });
@@ -1047,9 +1160,8 @@ export function setEditorMode(id: string, enabled: boolean): void {
   if (!session) return;
   if (session.editorMode === enabled) return;
   session.editorMode = enabled;
-  // Shell blocks are useful in editor mode, but an interactive child (Codex,
-  // vim, less, etc.) owns the entire grid and must not have DOM block chrome
-  // painted over its status/footer rows.
+  // Drop editor-only chrome (prompt cover / selection) for interactive children.
+  // Command labels stay up so the shell's `PS path> cmd` echo remains covered.
   session.blocks.setEditorMode(enabled);
   if (!enabled) {
     // Editor mode hides the visual caret in favor of the input bar.
@@ -1110,6 +1222,7 @@ export function submitCommand(id: string, command: string): void {
   // Shared history (ghost autosuggest across panes) + per-pane ↑ walk.
   commandHistory.record(text, session.cwd || null);
   recordLocalHistory(session, text);
+  bindAgentCommand(session, text);
   // Mark the block before writing so the start line is the prompt row that
   // will hold the echoed command.
   session.blocks.open(text);
@@ -1207,6 +1320,7 @@ export function dispose(id: string): void {
   hideVisualCursor(session);
   inputFocusers.delete(id);
   inputPasters.delete(id);
+  if (session.agent && TAURI_RUNTIME) void agentUnwatch(id);
   for (const off of session.unlisten) off();
   session.dataChannel = null;
   if (TAURI_RUNTIME) void ptyKill(id);

@@ -70,6 +70,12 @@ export const ptyResize = (id: string, cols: number, rows: number) =>
 
 export const ptyKill = (id: string) => invoke<void>("pty_kill", { id });
 
+/** Bind a persistent coding-agent session to its on-disk turn-completion log. */
+export const agentWatch = (id: string, agent: string, cwd: string) =>
+  invoke<void>("agent_watch", { id, agent, cwd });
+
+export const agentUnwatch = (id: string) => invoke<void>("agent_unwatch", { id });
+
 /** True when the shell for `id` has a child process (a command still running). */
 export const ptyIsBusy = (id: string) => invoke<boolean>("pty_is_busy", { id });
 

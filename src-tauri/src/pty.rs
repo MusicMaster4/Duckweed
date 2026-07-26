@@ -283,6 +283,9 @@ pub fn spawn(
     cmd.env("CLICOLOR", "1");
     cmd.env("TERM_PROGRAM", "Duckweed");
     cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
+    for (key, value) in crate::agent_activity::terminal_env(app, &id) {
+        cmd.env(key, value);
+    }
     if let Some(env) = env {
         for (k, v) in env {
             cmd.env(k, v);

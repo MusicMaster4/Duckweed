@@ -1,5 +1,6 @@
 import { useState } from "react";
 
+import { UsagePanel } from "./UsagePanel";
 import type { InputMode } from "../lib/terminals";
 import type { ShellInfo } from "../lib/types";
 
@@ -7,12 +8,14 @@ interface Props {
   fontSize: number;
   inputMode: InputMode;
   highlight: boolean;
+  confirmCloseRunning: boolean;
   shell: string | null;
   shells: ShellInfo[];
   updateLabel: string;
   onFontSize: (size: number) => void;
   onToggleInputMode: () => void;
   onToggleHighlight: () => void;
+  onToggleConfirmCloseRunning: () => void;
   onShell: (shellId: string | null) => void;
   onCheckUpdates: () => void;
 }
@@ -25,18 +28,20 @@ function Toggle({ enabled }: { enabled: boolean }) {
   );
 }
 
-type SettingsSection = "General" | "Appearance" | "Terminal" | "About";
+type SettingsSection = "General" | "Appearance" | "Terminal" | "Usage" | "About";
 
 export function SettingsMenu({
   fontSize,
   inputMode,
   highlight,
+  confirmCloseRunning,
   shell,
   shells,
   updateLabel,
   onFontSize,
   onToggleInputMode,
   onToggleHighlight,
+  onToggleConfirmCloseRunning,
   onShell,
   onCheckUpdates,
 }: Props) {
@@ -53,10 +58,18 @@ export function SettingsMenu({
   const showTerminal =
     (section === "General" || section === "Terminal" || searching) &&
     (matches("terminal command editor compose commands grid type directly") ||
-      matches("default shell system powershell"));
+      matches("default shell system powershell") ||
+      matches(
+        "confirm close running process warn quit tab pane don't show again dont show",
+      ));
   const showAbout =
     (section === "General" || section === "About" || searching) &&
     matches("about updates version stable beta command palette");
+  // The dashboard scans gigabytes of transcripts, so it loads only when asked
+  // for by name — never as part of the General overview or a search sweep.
+  const showUsage = section === "Usage" && !searching;
+  const usageHit =
+    searching && matches("usage statistics cost tokens spend quota limits agents models pricing");
   const visibleTitle = searching ? "Search results" : section;
 
   return (
@@ -75,7 +88,7 @@ export function SettingsMenu({
           />
         </label>
         <nav aria-label="Settings sections">
-          {(["General", "Appearance", "Terminal", "About"] as const).map((item) => (
+          {(["General", "Appearance", "Terminal", "Usage", "About"] as const).map((item) => (
             <button
               key={item}
               type="button"
@@ -93,11 +106,33 @@ export function SettingsMenu({
       </aside>
 
       <main className="settings-content" aria-label="Settings">
-        <div className="settings-content-inner">
+        <div className={`settings-content-inner${showUsage ? " is-wide" : ""}`}>
           <header className="settings-content-header">
             <span>Settings</span>
             <h1>{visibleTitle}</h1>
           </header>
+
+          {usageHit && (
+            <section className="settings-section">
+              <h2>Usage</h2>
+              <button
+                type="button"
+                className="settings-row settings-action"
+                onClick={() => {
+                  setQuery("");
+                  setSection("Usage");
+                }}
+              >
+                <span className="settings-copy">
+                  <strong>Usage statistics</strong>
+                  <span>Cost, tokens, models, and quotas across every coding agent</span>
+                </span>
+                <small className="settings-value">Open</small>
+              </button>
+            </section>
+          )}
+
+          {showUsage && <UsagePanel />}
 
           {showAppearance && (
             <section className="settings-section">
@@ -159,6 +194,21 @@ export function SettingsMenu({
                   </select>
                 </label>
               )}
+              {matches(
+                "confirm close running process warn quit tab pane don't show again dont show",
+              ) && (
+                <button
+                  type="button"
+                  className="settings-row settings-action"
+                  onClick={onToggleConfirmCloseRunning}
+                >
+                  <span className="settings-copy">
+                    <strong>Confirm before closing</strong>
+                    <span>Warn when a pane, tab, or the window still has a process running</span>
+                  </span>
+                  <Toggle enabled={confirmCloseRunning} />
+                </button>
+              )}
             </section>
           )}
 
@@ -182,7 +232,7 @@ export function SettingsMenu({
             </section>
           )}
 
-          {!showAppearance && !showTerminal && !showAbout && (
+          {!showAppearance && !showTerminal && !showAbout && !showUsage && !usageHit && (
             <div className="settings-empty">
               <strong>No settings found</strong>
               <span>Try a different search.</span>

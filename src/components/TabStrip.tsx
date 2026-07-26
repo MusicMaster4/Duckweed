@@ -20,6 +20,7 @@ interface Props {
   tabs: Tab[];
   activeTabId: string;
   paneCounts: Record<string, number>;
+  unreadCounts: Record<string, number>;
   drag: DragState | null;
   projects: ProjectActions;
   /** New empty tabs are locked until the active tab has a folder. */
@@ -80,6 +81,7 @@ export function TabStrip({
   tabs,
   activeTabId,
   paneCounts,
+  unreadCounts,
   drag,
   projects,
   allowNewTab,
@@ -149,6 +151,7 @@ export function TabStrip({
       <div className="tabs" ref={stripRef} role="tablist" aria-label="Open tabs">
         {tabs.map((tab) => {
           const count = paneCounts[tab.id] ?? 0;
+          const unread = unreadCounts[tab.id] ?? 0;
           const isActive = tab.id === activeTabId && !settingsActive;
           const accent = tabColorHex(tab.color);
           return (
@@ -157,6 +160,11 @@ export function TabStrip({
               data-tab-id={tab.id}
               role="tab"
               aria-selected={isActive}
+              aria-label={
+                unread > 0
+                  ? `${tab.title}, ${unread} finished terminal${unread === 1 ? "" : "s"} not reviewed`
+                  : tab.title
+              }
               tabIndex={isActive ? 0 : -1}
               className={[
                 "tab",
@@ -165,6 +173,7 @@ export function TabStrip({
                 tab.project ? "" : "is-unclaimed",
                 tab.pinned ? "is-pinned" : "",
                 accent ? "is-colored" : "",
+                unread > 0 ? "is-unread" : "",
               ]
                 .filter(Boolean)
                 .join(" ")}
@@ -231,6 +240,13 @@ export function TabStrip({
                   </button>
                   <span className="tab-title">{tab.title}</span>
                   {count > 1 && <span className="tab-count">{count}</span>}
+                  {unread > 0 && (
+                    <span
+                      className="completion-dot tab-completion-dot"
+                      title={`${unread} finished terminal${unread === 1 ? "" : "s"} not reviewed`}
+                      aria-hidden="true"
+                    />
+                  )}
                   <button
                     type="button"
                     className="tab-close"

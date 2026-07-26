@@ -567,6 +567,65 @@ const GREETINGS: readonly string[] = [
   "Blameless postmortem: the agent did it.",
   "Root cause: Tuesday.",
   "I'm tired boss... send more tokens.",
+  // --- Slop Live / vibe-coding extras ---
+  "Welcome back to Slop Live!",
+  "The Slop Thickens",
+  "The slop must flow.",
+  "Live from the context window.",
+  "Slop Live: now with 40% more confidence.",
+  "We're going live with untested code.",
+  "In this episode of 'it works locally'…",
+  "Breaking news: still broken.",
+  "Stay tuned for the next hallucination.",
+  "Brought to you by Ctrl+Z.",
+  "Viewer discretion: generated code ahead.",
+  "Like and subscribe to my stack traces.",
+  "This message was approved by vibes.",
+  "Don't touch that dial. Touch the agent.",
+  "Plot twist: the tests were also slop.",
+  "Previously on this codebase…",
+  "Next time: we fix the last fix.",
+  "Commercial break for npm install.",
+  "Audience of one. Energy of ten.",
+  "Rated R for Recursive refactors.",
+  "Tonight's guest: undefined is not a function.",
+  "Call now for free technical debt!",
+  "As seen on main.",
+  "No refunds on vibes.",
+  "Happening now: chaos compilation.",
+  "Your regularly scheduled spaghetti.",
+  "We now return to your broken build.",
+  "Slop thicker than water.",
+  "Vibes so loud the linter left.",
+  "This pane is brought to you by YOLO.",
+  "Ask not what you can code—ask the model.",
+  "In a world where tests are optional…",
+  "One agent. One dream. Many files.",
+  "The empire of slop strikes back.",
+  "May the force push be with you.",
+  "I have a bad feeling about this PR.",
+  "These aren't the bugs you're looking for.",
+  "Do or do not. There is no typecheck.",
+  "I've got a good feeling about this deploy.",
+  "Use the source—or generate it.",
+  "Vibe coding: type first, think never.",
+  "This is fine. Everything is tokens.",
+  "We're not debugging. We're negotiating.",
+  "Ship it while the vibe is still warm.",
+  "I don't write code. I curate outcomes.",
+  "Prompt engineer by day. Survivor by night.",
+  "Sponsored by pure delusion.",
+  "Please hold for a better answer.",
+  "Trust the process. Distrust the process.",
+  "The thickens have slopped.",
+  "Coming up next: more refactors.",
+  "Slop Live never ends. Only restarts.",
+  "Tonight on Slop: we ship vibes.",
+  "Welcome to the show. The build is the host.",
+  "And now, a word from our sponsor: hope.",
+  "Cue the confetti. Ignore the red CI.",
+  "Live reaction to my own code. Horrified.",
+  "We thick the slop so you don't have to.",
 ];
 
 /**
@@ -911,14 +970,54 @@ const UNCLAIMED: readonly string[] = [
   "Nowhere to swim—until you choose shore.",
 ];
 
-/** One greeting, chosen at random. */
-export function randomGreeting(): string {
-  return GREETINGS[Math.floor(Math.random() * GREETINGS.length)] ?? GREETINGS[0];
+/**
+ * Pick from a phrase list with a half-pool cooldown.
+ *
+ * Pure random repeats the same joke too often. Instead, once a line is chosen it
+ * is blocked until half the list has been drawn (floor(n / 2) later picks). With
+ * 10 phrases that is a 5-round sit-out; available pool stays at least ~50%.
+ * State is module-level so new panes share the same anti-repeat history.
+ */
+function createCooldownPicker(phrases: readonly string[]): () => string {
+  /** Indices still cooling down, oldest first. Length ≤ floor(n / 2). */
+  const recent: number[] = [];
+  const cooldown = Math.floor(phrases.length / 2);
+
+  return () => {
+    if (phrases.length === 0) return "";
+    if (cooldown <= 0) {
+      return phrases[Math.floor(Math.random() * phrases.length)] ?? phrases[0]!;
+    }
+
+    const blocked = new Set(recent);
+    const available: number[] = [];
+    for (let i = 0; i < phrases.length; i++) {
+      if (!blocked.has(i)) available.push(i);
+    }
+    // Cooldown is half the list, so available should never be empty; fall back
+    // to the full set if the list is tiny or state got weird.
+    const pool = available.length > 0 ? available : phrases.map((_, i) => i);
+    const idx = pool[Math.floor(Math.random() * pool.length)]!;
+
+    recent.push(idx);
+    if (recent.length > cooldown) {
+      recent.shift();
+    }
+    return phrases[idx]!;
+  };
 }
 
-/** One unclaimed-tab line, chosen at random. */
+const pickGreeting = createCooldownPicker(GREETINGS);
+const pickUnclaimed = createCooldownPicker(UNCLAIMED);
+
+/** One greeting, random among phrases not on half-pool cooldown. */
+export function randomGreeting(): string {
+  return pickGreeting();
+}
+
+/** One unclaimed-tab line, random among phrases not on half-pool cooldown. */
 export function randomUnclaimedGreeting(): string {
-  return UNCLAIMED[Math.floor(Math.random() * UNCLAIMED.length)] ?? UNCLAIMED[0];
+  return pickUnclaimed();
 }
 
 /**

@@ -1,23 +1,28 @@
 // Hide the console window on Windows release builds.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod agent_activity;
 mod fs;
 mod git;
 mod process_tree;
 mod project;
 mod pty;
 mod shells;
+mod usage;
 mod watch;
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 
-use tauri::{ipc::Channel, AppHandle, Manager, State};
+use tauri::{ipc::Channel, AppHandle, Emitter, Manager, State};
 
+use agent_activity::AgentActivityManager;
 use fs::{DirEntry, FileContent};
 use git::{Branches, Diff, DiffStats, FileDiff};
 use project::ProjectInfo;
 use pty::{PtyManager, SpawnResult};
 use shells::ShellInfo;
+use usage::{pricing, Query, Snapshot, UsageState};
 use watch::ProjectWatchManager;
 
 async fn blocking<T, F>(job: F) -> Result<T, String>
@@ -146,6 +151,75 @@ fn pty_any_busy(manager: State<'_, PtyManager>, ids: Vec<String>) -> bool {
     manager.any_busy(&ids)
 }
 
+#[tauri::command]
+fn agent_watch(manager: State<'_, AgentActivityManager>, id: String, agent: String, cwd: String) {
+    manager.watch(id, agent, cwd);
+}
+
+#[tauri::command]
+fn agent_unwatch(manager: State<'_, AgentActivityManager>, id: String) {
+    manager.unwatch(&id);
+}
+
+fn home_path() -> PathBuf {
+    PathBuf::from(home_dir())
+}
+
+/// Where the usage index and the user's price overrides live.
+fn usage_paths(app: &AppHandle) -> (PathBuf, PathBuf) {
+    let base = app
+        .path()
+        .app_data_dir()
+        .unwrap_or_else(|_| std::env::temp_dir().join("duckweed"));
+    (
+        base.join("usage-index.json"),
+        base.join("usage-pricing.json"),
+    )
+}
+
+/// Token and cost totals across every installed coding agent.
+///
+/// The first call builds the index and can take a while — it reads every
+/// transcript on disk — so progress arrives on the `usage:progress` event.
+/// Later calls only re-read files that changed.
+#[tauri::command]
+async fn usage_scan(
+    app: AppHandle,
+    state: State<'_, UsageState>,
+    query: Query,
+) -> Result<Snapshot, String> {
+    let (index_path, pricing_path) = usage_paths(&app);
+    let state = state.inner().clone();
+    blocking(move || {
+        let overrides = pricing::load_overrides(&pricing_path);
+        let emit = |done: u32, total: u32| {
+            let _ = app.emit("usage:progress", (done, total));
+        };
+        usage::scan(&home_path(), &index_path, &overrides, &state, &query, &emit)
+    })
+    .await
+}
+
+/// The price overrides the user has saved, plus the models we ship rates for.
+#[tauri::command]
+async fn usage_pricing(app: AppHandle) -> Result<(Vec<String>, pricing::Overrides), String> {
+    let (_, pricing_path) = usage_paths(&app);
+    blocking(move || {
+        Ok((
+            pricing::known_models(),
+            pricing::load_overrides(&pricing_path),
+        ))
+    })
+    .await
+}
+
+/// Replace the saved price overrides.
+#[tauri::command]
+async fn usage_set_pricing(app: AppHandle, overrides: pricing::Overrides) -> Result<(), String> {
+    let (_, pricing_path) = usage_paths(&app);
+    blocking(move || pricing::save_overrides(&pricing_path, &overrides)).await
+}
+
 /// Reveal the initially hidden window only after React has painted its shell.
 #[tauri::command]
 fn frontend_ready(app: AppHandle) -> Result<(), String> {
@@ -182,7 +256,9 @@ fn main() {
                 .build(),
         )
         .manage(PtyManager::default())
+        .manage(AgentActivityManager::default())
         .manage(ProjectWatchManager::default())
+        .manage(UsageState::default())
         .setup(|app| {
             if let (Some(window), Some(icon)) = (
                 app.get_webview_window("main"),
@@ -191,6 +267,7 @@ fn main() {
                 window.set_icon(icon)?;
             }
             pty::start_busy_monitor(app.handle().clone())?;
+            agent_activity::start_monitor(app.handle().clone())?;
             watch::start_monitor(app.handle().clone())?;
             Ok(())
         })
@@ -212,8 +289,13 @@ fn main() {
             pty_kill,
             pty_is_busy,
             pty_any_busy,
+            agent_watch,
+            agent_unwatch,
             frontend_ready,
             watch_project,
+            usage_scan,
+            usage_pricing,
+            usage_set_pricing,
         ])
         .on_window_event(|window, event| {
             // Make sure we never leave orphaned shells behind.

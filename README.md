@@ -68,7 +68,8 @@ terminal, while staying small, fast, and keyboard-friendly.
     <td><strong>☷ Shell discovery</strong><br /><sub>Detect PowerShell, <code>cmd</code>, Git Bash, WSL, Nushell, Bash, Zsh, and Fish.</sub></td>
   </tr>
   <tr>
-    <td colspan="2"><strong>↺ Persistent layouts</strong><br /><sub>Restore your arrangement between launches without reviving old processes.</sub></td>
+    <td><strong>↺ Persistent layouts</strong><br /><sub>Restore your arrangement between launches without reviving old processes.</sub></td>
+    <td><strong>Usage analytics</strong><br /><sub>Compare local token use, estimated spend, models, agents, and quota windows.</sub></td>
   </tr>
 </table>
 
@@ -113,6 +114,35 @@ There are two channels, and an install only ever sees its own:
 Releases are built automatically — `main` publishes stable, `testing` publishes
 beta. See [docs/releases.md](docs/releases.md) for the versioning rules, the
 signing secrets, and how to test the pipeline.
+
+## Agent usage analytics
+
+Open **Settings → Usage** to see daily token and estimated cost charts for the
+last 7, 14, 30, or 90 days. The same page ranks agents and models, shows exact
+values in an accessible table, and automatically includes every agent whose
+transcripts are found.
+
+Duckweed currently understands the local session formats for:
+
+- Claude Code, Codex CLI, Gemini CLI, OpenCode, and Grok CLI
+- Factory Droid, Kilo Code, Kimi CLI, Antigravity CLI, and Pi Coding Agent
+
+The scanner reads the session logs these tools already keep and never uploads
+their contents. Quota checks may use a CLI's existing local OAuth session to
+contact that provider's official usage endpoint. The first scan builds a durable
+index; later scans compare file metadata and resume append-only JSONL files from
+their last complete line. Duckweed warms this index in the background at startup
+and whenever Settings opens, so Usage can normally render from memory.
+
+Costs are estimates based on published per-token list prices. Provider-reported
+cost wins when a transcript includes it. Unknown models remain visible with
+their tokens counted and their cost marked as unpriced.
+
+Quota cards appear only for agents used in the selected period. Claude is queried
+through the official OAuth usage endpoint with Claude Code's local session;
+Codex and Grok use the latest provider snapshots their CLIs persist. Results are
+cached to avoid aggressive polling. Other agents are marked unavailable rather
+than comparing transcript totals against an invented or user-entered ceiling.
 
 ## Keyboard shortcuts
 

@@ -10,6 +10,10 @@ import { nextBlockSelection, type BlockNavAction } from "./blockNav";
  * label showing only the command, draw a hairline above every block after the
  * first, and let a click select the whole chunk.
  *
+ * The command label stays up even while a child process is running (so the raw
+ * `PS path> cmd` echo never bleeds through). Prompt-cover and selection chrome
+ * are editor-only — they paint free-floating rows and flicker on TUI footers.
+ *
  * Overlays are plain DOM (not xterm decorations) so they stay visible under the
  * WebGL renderer and resize with the pane the same way the visual cursor does.
  */
@@ -48,9 +52,10 @@ export class BlockTracker {
   private readonly scrollDisposable: { dispose: () => void };
   private active = false;
   /**
-   * Block chrome belongs to the shell editor, never to an interactive child
-   * process. TUIs such as Codex repaint arbitrary rows (especially their
-   * footer), so overlays above that grid cause false chunks and flicker.
+   * Editor mode owns the full block chrome (prompt cover + selection). When a
+   * child/TUI is running we still keep the command labels so the shell's
+   * `PS path> cmd` echo stays covered — but never the prompt cover, which
+   * paints over TUI footers and causes flicker.
    */
   private editorMode = true;
   /** True while we programmatically touch xterm selection (suppresses races). */
@@ -175,17 +180,14 @@ export class BlockTracker {
     }
     this.prune();
 
-    if (!this.editorMode) {
-      this.hideChrome();
-      return;
-    }
-
     const screen = this.host.querySelector<HTMLElement>(".xterm-screen");
     if (!screen || screen.clientWidth <= 0 || screen.clientHeight <= 0) {
       this.hideChrome();
       return;
     }
 
+    // Alternate screen (vim, less, full-screen TUI): the program owns every
+    // cell. Shell command labels from the normal buffer must not float on top.
     if (this.term.buffer.active.type !== "normal") {
       this.hideChrome();
       return;
@@ -201,6 +203,10 @@ export class BlockTracker {
     const viewportY = this.term.buffer.active.viewportY;
     const rows = this.term.rows;
 
+    // Command labels always cover `PS path> cmd`, even while a child is
+    // running — otherwise the raw echo bleeds through the moment we drop the
+    // editor chrome (Codex, cargo, long builds). Selection/prompt covers are
+    // editor-only: they paint free-floating rows and flicker on TUI footers.
     for (const block of this.blocks) {
       const range = this.range(block);
       if (!range) {
@@ -215,7 +221,10 @@ export class BlockTracker {
       if (cmdVisible) {
         const y = offsetY + cmdRow * cellHeight;
         block.cmdEl.hidden = false;
-        block.cmdEl.classList.toggle("is-selected", block.id === this.selectedId);
+        block.cmdEl.classList.toggle(
+          "is-selected",
+          this.editorMode && block.id === this.selectedId,
+        );
         block.cmdEl.style.transform = `translate3d(0, ${y}px, 0)`;
         block.cmdEl.style.width = `${fullWidth}px`;
         block.cmdEl.style.height = `${cellHeight}px`;
@@ -236,12 +245,19 @@ export class BlockTracker {
       }
     }
 
-    this.layoutPromptCover(fullWidth, offsetY, cellHeight, viewportY, rows);
-    this.layoutSelectOverlay(fullWidth, offsetY, cellHeight, viewportY, rows);
+    if (this.editorMode) {
+      this.layoutPromptCover(fullWidth, offsetY, cellHeight, viewportY, rows);
+      this.layoutSelectOverlay(fullWidth, offsetY, cellHeight, viewportY, rows);
+    } else {
+      this.promptCover.hidden = true;
+      this.selectOverlay.hidden = true;
+    }
   }
 
   scheduleLayout(): void {
-    if (!this.active || !this.editorMode) return;
+    // Keep scheduling while a child is running so command labels track scroll
+    // and still cover the shell's `PS path> cmd` echo.
+    if (!this.active) return;
     if (this.layoutRaf !== null) return;
     this.layoutRaf = requestAnimationFrame(() => {
       this.layoutRaf = null;
@@ -262,21 +278,19 @@ export class BlockTracker {
   }
 
   /**
-   * A running/raw terminal owns every cell. Hide Duckweed's shell overlays
-   * immediately instead of waiting for another PTY paint.
+   * Toggle editor-only chrome (prompt cover + block selection). Command labels
+   * that hide the shell echo stay up either way — see {@link layout}.
    */
   setEditorMode(enabled: boolean): void {
     if (this.editorMode === enabled) return;
     this.editorMode = enabled;
-    if (enabled) {
-      this.scheduleLayout();
-      return;
+    if (!enabled) {
+      // Drop selection chrome immediately so it never sits on a TUI frame.
+      this.selectedId = null;
+      this.selectOverlay.hidden = true;
+      this.promptCover.hidden = true;
     }
-    if (this.layoutRaf !== null) {
-      cancelAnimationFrame(this.layoutRaf);
-      this.layoutRaf = null;
-    }
-    this.hideChrome();
+    this.scheduleLayout();
   }
 
   /**
@@ -288,8 +302,9 @@ export class BlockTracker {
    */
   busyChanged(busy: boolean): void {
     // The backend sees the child process before React has time to unmount the
-    // composer. Drop block chrome on that same event so a TUI never gets even
-    // one frame with the shell's prompt cover painted over its footer.
+    // composer. Drop the prompt cover on that same event so a TUI never gets
+    // even one frame with shell chrome painted over its footer — but keep the
+    // command label so `PS path> cmd` does not flash through.
     if (busy) {
       this.setEditorMode(false);
       return;
@@ -651,6 +666,7 @@ export class BlockTracker {
   }
 
   private handleMouseDown(e: MouseEvent): void {
+    if (!this.editorMode) return;
     if (e.button !== 0 || e.shiftKey) return;
     if (this.term.modes.mouseTrackingMode !== "none") return;
     if (this.term.buffer.active.type !== "normal") return;
@@ -678,7 +694,7 @@ export class BlockTracker {
     if (e.button !== 0) return;
     const press = this.press;
     this.press = null;
-    if (!press) return;
+    if (!press || !this.editorMode) return;
     if (this.term.modes.mouseTrackingMode !== "none") return;
     if (this.term.buffer.active.type !== "normal") return;
     // Leave double-click (word) and triple-click (line) to xterm.

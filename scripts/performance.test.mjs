@@ -14,6 +14,13 @@ describe("idle work stays bounded", () => {
     expect(read("src-tauri/src/process_tree.rs")).toContain("parents_with_children");
   });
 
+  test("persistent agents share one throttled completion monitor", () => {
+    const activity = read("src-tauri/src/agent_activity.rs");
+    expect(activity).toContain("agent-activity-monitor");
+    expect(activity).toContain("DISCOVERY_POLL");
+    expect(read("src/lib/terminals.ts")).not.toContain("setInterval");
+  });
+
   test("project chrome is watcher-driven rather than timer-driven", () => {
     expect(read("src/hooks/useGitChanges.ts")).not.toContain("setInterval");
     expect(read("src/App.tsx")).not.toContain("BRANCH_POLL_MS");

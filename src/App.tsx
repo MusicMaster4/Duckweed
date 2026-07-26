@@ -17,9 +17,15 @@ import { useDragPane, type DragState } from "./hooks/useDragPane";
 import { useGitChanges } from "./hooks/useGitChanges";
 import { useUpdater } from "./hooks/useUpdater";
 import * as bus from "./lib/bus";
-import { confirmCloseRunning } from "./lib/confirmClose";
+import {
+  confirmCloseRunning,
+  isConfirmCloseRunningEnabled,
+  setConfirmCloseRunningEnabled,
+  subscribeConfirmClosePref,
+} from "./lib/confirmClose";
 import { clearGreetings } from "./lib/greetings";
 import { frontendReady, listShells, projectInfo, watchProject } from "./lib/ipc";
+import { loadSettings as loadUsageSettings, prefetchUsage } from "./lib/usage";
 import {
   balance,
   findLeaf,
@@ -34,6 +40,7 @@ import {
 } from "./lib/layout";
 import { toggleFullscreen } from "./lib/window";
 import { DEFAULT_TOOLS_WIDTH, load, pushRecent, rehydrate, save } from "./lib/persist";
+import { didProcessFinish, type ProcessState } from "./lib/processActivity";
 import * as terminals from "./lib/terminals";
 import type { LeafNode, ProjectInfo, ShellInfo, Tab } from "./lib/types";
 
@@ -89,6 +96,7 @@ function boot() {
       shell: saved.shell,
       highlight: saved.highlight,
       inputMode: saved.inputMode,
+      confirmCloseRunning: saved.confirmCloseRunning,
       toolsOpen: saved.toolsOpen,
       toolsWidth: saved.toolsWidth,
     };
@@ -112,6 +120,7 @@ function boot() {
     shell: null as string | null,
     highlight: true,
     inputMode: "editor" as terminals.InputMode,
+    confirmCloseRunning: true,
     toolsOpen: false,
     toolsWidth: DEFAULT_TOOLS_WIDTH,
   };
@@ -129,6 +138,14 @@ function isTextField(target: EventTarget | null): boolean {
 export default function App() {
   const initial = useMemo(boot, []);
 
+  useEffect(() => {
+    // Build the incremental transcript index while the terminal UI becomes
+    // interactive. Usage can then paint from memory on its first visit.
+    void prefetchUsage(loadUsageSettings().days).catch(() => {
+      // The Usage panel owns the visible retry/error state.
+    });
+  }, []);
+
   const [tabs, setTabs] = useState<Tab[]>(initial.tabs);
   const [activeTabId, setActiveTabId] = useState(initial.activeTabId);
   const [recents, setRecents] = useState<string[]>(initial.recents);
@@ -137,12 +154,18 @@ export default function App() {
   const [fontSize, setFontSize] = useState(initial.fontSize);
   const [highlight, setHighlight] = useState(initial.highlight);
   const [inputMode, setInputMode] = useState(initial.inputMode);
+  const [confirmCloseRunningPref, setConfirmCloseRunningPref] = useState(() => {
+    // Honour the saved preference before any close handler can run.
+    setConfirmCloseRunningEnabled(initial.confirmCloseRunning);
+    return initial.confirmCloseRunning;
+  });
   const [booted, setBooted] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [settingsTabOpen, setSettingsTabOpen] = useState(false);
   const [settingsActive, setSettingsActive] = useState(false);
   const [changesOpen, setChangesOpen] = useState(false);
   const [toolsOpen, setToolsOpen] = useState(initial.toolsOpen);
+  const [unreadTermIds, setUnreadTermIds] = useState<Set<string>>(() => new Set());
   const [toolsWidth, setToolsWidth] = useState(
     Math.min(TOOLS_MAX_WIDTH, Math.max(TOOLS_MIN_WIDTH, initial.toolsWidth)),
   );
@@ -154,8 +177,11 @@ export default function App() {
   tabsRef.current = tabs;
   const activeTabIdRef = useRef(activeTabId);
   activeTabIdRef.current = activeTabId;
+  const settingsActiveRef = useRef(settingsActive);
+  settingsActiveRef.current = settingsActive;
   const shellRef = useRef(shell);
   shellRef.current = shell;
+  const processState = useRef(new Map<string, ProcessState>());
   /** Last folder opened in any tab — only ever used to seed the folder picker. */
   const lastProject = useRef<string | null>(initial.lastProject);
 
@@ -173,6 +199,25 @@ export default function App() {
 
   const updateTab = useCallback((tabId: string, fn: (tab: Tab) => Tab) => {
     setTabs((prev) => prev.map((t) => (t.id === tabId ? fn(t) : t)));
+  }, []);
+
+  const acknowledgeTerm = useCallback((termId: string) => {
+    setUnreadTermIds((prev) => {
+      if (!prev.has(termId)) return prev;
+      const next = new Set(prev);
+      next.delete(termId);
+      return next;
+    });
+  }, []);
+
+  /** A terminal is being watched only when its pane and app window both have focus. */
+  const isFocusedTerm = useCallback((termId: string): boolean => {
+    if (!document.hasFocus() || settingsActiveRef.current) return false;
+    const tab = tabsRef.current.find((candidate) =>
+      leaves(candidate.root).some((node) => node.term === termId),
+    );
+    if (!tab || tab.id !== activeTabIdRef.current) return false;
+    return findLeaf(tab.root, tab.activeLeaf)?.term === termId;
   }, []);
 
   /** cwd a new pane should start in: follow the focused shell, then the tab's project. */
@@ -209,8 +254,56 @@ export default function App() {
   const releaseTerm = useCallback((term: string) => {
     terminals.dispose(term);
     spawnOpts.current.delete(term);
+    processState.current.delete(term);
+    acknowledgeTerm(term);
     clearGreetings(term);
-  }, []);
+  }, [acknowledgeTerm]);
+
+  const termIds = useMemo(
+    () => tabs.flatMap((tab) => leaves(tab.root).map((node) => node.term)),
+    [tabs],
+  );
+  const termIdsKey = termIds.join("\0");
+
+  // Background tabs remain subscribed to the app-wide PTY busy monitor so a
+  // running -> idle transition can leave a durable "not reviewed yet" marker.
+  useEffect(() => {
+    const readState = (termId: string) => {
+      const meta = terminals.getMeta(termId);
+      if (!meta) {
+        processState.current.delete(termId);
+        acknowledgeTerm(termId);
+        return;
+      }
+
+      const previous = processState.current.get(termId);
+      processState.current.set(termId, {
+        busy: meta.busy,
+        exited: meta.exited,
+        completionSeq: meta.completionSeq,
+      });
+      if (!previous) return;
+
+      const finished = didProcessFinish(previous, meta);
+      if (!finished || isFocusedTerm(termId)) return;
+      setUnreadTermIds((prev) => {
+        if (prev.has(termId)) return prev;
+        const next = new Set(prev);
+        next.add(termId);
+        return next;
+      });
+    };
+
+    const unsubscribers = termIds.map((termId) => {
+      readState(termId);
+      return terminals.subscribeSession(termId, () => readState(termId));
+    });
+    return () => {
+      for (const unsubscribe of unsubscribers) unsubscribe();
+    };
+    // Tab metadata changes must not tear down every terminal subscription.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [termIdsKey, acknowledgeTerm, isFocusedTerm]);
 
   // ---------------------------------------------------------------- tabs
 
@@ -252,6 +345,7 @@ export default function App() {
               ? "You have a process running in this tab."
               : "You have processes running in this tab.",
           confirmLabel: "Yes, close",
+          allowDontShowAgain: true,
         });
         if (!ok) return;
       }
@@ -344,6 +438,7 @@ export default function App() {
               ? "That tab has a process running."
               : "Some of those tabs have processes running.",
           confirmLabel: n === 1 ? "Yes, close" : "Yes, close all",
+          allowDontShowAgain: true,
         });
         if (!ok) return;
       }
@@ -364,12 +459,20 @@ export default function App() {
 
   const selectTab = useCallback((id: string) => {
     if (id !== activeTabIdRef.current) terminals.clearAllBlockSelections();
+    const tab = tabsRef.current.find((candidate) => candidate.id === id);
+    const term = tab ? findLeaf(tab.root, tab.activeLeaf)?.term : null;
+    if (term) acknowledgeTerm(term);
     setSettingsActive(false);
     setActiveTabId(id);
-  }, []);
+  }, [acknowledgeTerm]);
 
   const openSettings = useCallback(() => {
     terminals.clearAllBlockSelections();
+    // Re-stat known transcripts in the background before the user reaches
+    // Usage. Unchanged files stay in the index and are never reopened.
+    void prefetchUsage(loadUsageSettings().days, 0).catch(() => {
+      // The Usage panel owns the visible retry/error state.
+    });
     setSettingsTabOpen(true);
     setSettingsActive(true);
   }, []);
@@ -420,6 +523,7 @@ export default function App() {
           title: "Close pane?",
           message: "You have a process running in this pane.",
           confirmLabel: "Yes, close",
+          allowDontShowAgain: true,
         });
         if (!ok) return;
       }
@@ -453,19 +557,25 @@ export default function App() {
   const activatePane = useCallback(
     (leafId: string) => {
       const tab = currentTab();
-      if (!tab || tab.activeLeaf === leafId) return;
+      if (!tab) return;
+      const node = findLeaf(tab.root, leafId);
+      if (!node) return;
+      acknowledgeTerm(node.term);
+      if (tab.activeLeaf === leafId) return;
       // Leaving a pane (or tab leaf) drops its chunk selection — only one
       // terminal may own a selected block, and clicking another pane clears it.
       terminals.clearAllBlockSelections();
       updateTab(tab.id, (t) => ({ ...t, activeLeaf: leafId }));
     },
-    [currentTab, updateTab],
+    [acknowledgeTerm, currentTab, updateTab],
   );
 
   const toggleZoom = useCallback(
     (leafId: string) => {
       const tab = currentTab();
       if (!tab) return;
+      const node = findLeaf(tab.root, leafId);
+      if (node) acknowledgeTerm(node.term);
       if (tab.activeLeaf !== leafId) terminals.clearAllBlockSelections();
       updateTab(tab.id, (t) => ({
         ...t,
@@ -473,7 +583,7 @@ export default function App() {
         zoomedLeaf: t.zoomedLeaf === leafId ? null : leafId,
       }));
     },
-    [currentTab, updateTab],
+    [acknowledgeTerm, currentTab, updateTab],
   );
 
   const balancePanes = useCallback(() => {
@@ -517,11 +627,10 @@ export default function App() {
         if (!best || score < best.score) best = { id, score };
       }
       if (best) {
-        terminals.clearAllBlockSelections();
-        updateTab(tab.id, (t) => ({ ...t, activeLeaf: best.id }));
+        activatePane(best.id);
       }
     },
-    [currentTab, updateTab],
+    [activatePane, currentTab],
   );
 
   const cyclePane = useCallback(
@@ -529,12 +638,9 @@ export default function App() {
       const tab = currentTab();
       if (!tab) return;
       const next = nextLeaf(tab.root, tab.activeLeaf, step);
-      if (next && next !== tab.activeLeaf) {
-        terminals.clearAllBlockSelections();
-        updateTab(tab.id, (t) => ({ ...t, activeLeaf: next }));
-      }
+      if (next && next !== tab.activeLeaf) activatePane(next);
     },
-    [currentTab, updateTab],
+    [activatePane, currentTab],
   );
 
   // ---------------------------------------------------------- drag & drop
@@ -872,6 +978,19 @@ export default function App() {
     if (!project?.is_git) setChangesOpen(false);
   }, [project?.is_git]);
 
+  // Settings toggle -> module flag used by confirmCloseRunning().
+  useEffect(() => {
+    setConfirmCloseRunningEnabled(confirmCloseRunningPref);
+  }, [confirmCloseRunningPref]);
+
+  // Dialog "Don't show this again" flips the module flag; mirror into React so
+  // Settings and localStorage stay honest.
+  useEffect(() => {
+    return subscribeConfirmClosePref(() => {
+      setConfirmCloseRunningPref(isConfirmCloseRunningEnabled());
+    });
+  }, []);
+
   // Persist the arrangement (never the processes). Debounced because dragging a
   // divider produces a state update per pointer move.
   useEffect(() => {
@@ -885,6 +1004,7 @@ export default function App() {
           shell,
           highlight,
           inputMode,
+          confirmCloseRunning: confirmCloseRunningPref,
           toolsOpen,
           toolsWidth,
           tabs,
@@ -901,6 +1021,7 @@ export default function App() {
     shell,
     highlight,
     inputMode,
+    confirmCloseRunningPref,
     toolsOpen,
     toolsWidth,
     tabs,
@@ -943,6 +1064,7 @@ export default function App() {
           title: "Quit Duckweed?",
           message: "You have processes running in open terminals.",
           confirmLabel: "Yes, quit",
+          allowDontShowAgain: true,
         });
         if (!ok) event.preventDefault();
       })
@@ -1480,6 +1602,16 @@ export default function App() {
     () => Object.fromEntries(tabs.map((t) => [t.id, leaves(t.root).length])),
     [tabs],
   );
+  const unreadCounts = useMemo(
+    () =>
+      Object.fromEntries(
+        tabs.map((tab) => [
+          tab.id,
+          leaves(tab.root).filter((node) => unreadTermIds.has(node.term)).length,
+        ]),
+      ),
+    [tabs, unreadTermIds],
+  );
 
   const browseActiveProject = useCallback(() => {
     const tab = currentTab();
@@ -1504,6 +1636,7 @@ export default function App() {
       drag,
       spawnFor,
       highlight,
+      unreadTerms: unreadTermIds,
       project,
       recents,
       onBrowseProject: browseActiveProject,
@@ -1532,6 +1665,7 @@ export default function App() {
       spawnFor,
       splitAt,
       toggleZoom,
+      unreadTermIds,
     ],
   );
 
@@ -1560,6 +1694,7 @@ export default function App() {
           tabs={tabs}
           activeTabId={activeTabId}
           paneCounts={paneCounts}
+          unreadCounts={unreadCounts}
           drag={drag}
           projects={tabProjects}
           allowNewTab={!!project}
@@ -1600,12 +1735,16 @@ export default function App() {
               fontSize={fontSize}
               inputMode={inputMode}
               highlight={highlight}
+              confirmCloseRunning={confirmCloseRunningPref}
               shell={shell}
               shells={shells}
               updateLabel={`${updater.channel === "testing" ? "Beta" : "Stable"}${updater.version ? ` · v${updater.version}` : ""}`}
               onFontSize={applyFontSize}
               onToggleInputMode={toggleInputMode}
               onToggleHighlight={toggleHighlight}
+              onToggleConfirmCloseRunning={() =>
+                setConfirmCloseRunningPref((prev) => !prev)
+              }
               onShell={(shellId) => {
                 setShell(shellId);
                 shellRef.current = shellId;
