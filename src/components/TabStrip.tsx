@@ -4,6 +4,7 @@ import type { Tab } from "../lib/types";
 import { tabColorHex } from "../lib/tabColors";
 import { tabIconDef } from "../lib/tabIcons";
 import type { DragState } from "../hooks/useDragPane";
+import { CompletionDot } from "./CompletionDot";
 import { ProjectMenu } from "./ProjectMenu";
 import { TabContextMenu } from "./TabContextMenu";
 
@@ -21,6 +22,8 @@ interface Props {
   activeTabId: string;
   paneCounts: Record<string, number>;
   unreadCounts: Record<string, number>;
+  /** When false, hide completion dots (tracking still runs in the app). */
+  completionHighlights: boolean;
   drag: DragState | null;
   projects: ProjectActions;
   /** New empty tabs are locked until the active tab has a folder. */
@@ -82,6 +85,7 @@ export function TabStrip({
   activeTabId,
   paneCounts,
   unreadCounts,
+  completionHighlights,
   drag,
   projects,
   allowNewTab,
@@ -152,6 +156,7 @@ export function TabStrip({
         {tabs.map((tab) => {
           const count = paneCounts[tab.id] ?? 0;
           const unread = unreadCounts[tab.id] ?? 0;
+          const showUnread = completionHighlights && unread > 0;
           const isActive = tab.id === activeTabId && !settingsActive;
           const accent = tabColorHex(tab.color);
           return (
@@ -161,7 +166,7 @@ export function TabStrip({
               role="tab"
               aria-selected={isActive}
               aria-label={
-                unread > 0
+                showUnread
                   ? `${tab.title}, ${unread} finished terminal${unread === 1 ? "" : "s"} not reviewed`
                   : tab.title
               }
@@ -173,7 +178,7 @@ export function TabStrip({
                 tab.project ? "" : "is-unclaimed",
                 tab.pinned ? "is-pinned" : "",
                 accent ? "is-colored" : "",
-                unread > 0 ? "is-unread" : "",
+                showUnread ? "is-unread" : "",
               ]
                 .filter(Boolean)
                 .join(" ")}
@@ -240,13 +245,12 @@ export function TabStrip({
                   </button>
                   <span className="tab-title">{tab.title}</span>
                   {count > 1 && <span className="tab-count">{count}</span>}
-                  {unread > 0 && (
-                    <span
-                      className="completion-dot tab-completion-dot"
-                      title={`${unread} finished terminal${unread === 1 ? "" : "s"} not reviewed`}
-                      aria-hidden="true"
-                    />
-                  )}
+                  <CompletionDot
+                    active={showUnread}
+                    className="tab-completion-dot"
+                    title={`${unread} finished terminal${unread === 1 ? "" : "s"} not reviewed`}
+                    aria-hidden="true"
+                  />
                   <button
                     type="button"
                     className="tab-close"

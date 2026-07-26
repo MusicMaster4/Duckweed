@@ -5,6 +5,11 @@
 //! OAuth usage endpoint or a snapshot persisted by the CLI. Agents without
 //! either source still get a card, but it says why no trustworthy limit is
 //! available instead of asking the user to invent a ceiling.
+//!
+//! Each successful snapshot is also appended to a small local history so we
+//! can estimate how long the remaining allowance lasts at the last hour's
+//! burn rate. A drop in utilization is treated as a window reset, not as
+//! "negative burn".
 
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Seek, SeekFrom};
@@ -19,6 +24,21 @@ use serde_json::Value;
 const CLAUDE_USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 const CLAUDE_BETA: &str = "oauth-2025-04-20";
 const CLAUDE_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
+
+/// Prefer a sample about one hour old when computing burn rate.
+const LOOKBACK_MS: i64 = 60 * 60 * 1000;
+/// Need at least this much elapsed time between baseline and now.
+const MIN_SPAN_MS: i64 = 15 * 60 * 1000;
+/// Utilization drop of this many points counts as a window reset.
+const RESET_DROP: f64 = 5.0;
+/// Keep samples long enough to cover the lookback after a quiet stretch.
+const HISTORY_RETENTION_MS: i64 = 48 * 60 * 60 * 1000;
+/// Don't write a new sample for the same limit more often than this.
+const MIN_SAMPLE_GAP_MS: i64 = 2 * 60 * 1000;
+/// Remaining at or below this is treated as already exhausted.
+const EXHAUSTED_REMAINING: f64 = 0.5;
+/// Burn rates smaller than this (percent per hour) are noise / idle.
+const MIN_BURN_PER_HOUR: f64 = 0.25;
 
 #[derive(Clone, Serialize)]
 pub struct QuotaLimit {
@@ -46,12 +66,19 @@ pub struct Quota {
     /// Why an official limit cannot be displayed.
     pub message: Option<String>,
     pub limits: Vec<QuotaLimit>,
+    /// Epoch ms when the first limit is expected to hit empty at the observed
+    /// last-hour burn rate. `Some(now)` when already exhausted.
+    pub available_until: Option<i64>,
+    /// Remaining quota with no positive burn observed in the lookback window.
+    pub estimate_idle: bool,
 }
 
 /// Build one card for every agent with at least one request in the selected
 /// dashboard range. Empty/installed-only agents are deliberately omitted.
-pub fn build(used_agents: &HashSet<&'static str>, home: &Path) -> Vec<Quota> {
-    crate::usage::sources::AGENTS
+pub fn build(used_agents: &HashSet<&'static str>, home: &Path, history_path: &Path) -> Vec<Quota> {
+    let now = Utc::now().timestamp_millis();
+    let mut history = load_history(history_path);
+    let mut quotas: Vec<Quota> = crate::usage::sources::AGENTS
         .iter()
         .filter(|agent| used_agents.contains(agent.id))
         .map(|agent| {
@@ -62,9 +89,19 @@ pub fn build(used_agents: &HashSet<&'static str>, home: &Path) -> Vec<Quota> {
                 plan: None,
                 message: Some(unavailable_message(agent.id).into()),
                 limits: Vec::new(),
+                available_until: None,
+                estimate_idle: false,
             })
         })
-        .collect()
+        .collect();
+
+    for quota in &mut quotas {
+        if quota.source == "reported" && !quota.limits.is_empty() {
+            apply_estimate(quota, &mut history, now);
+        }
+    }
+    save_history(history_path, &history);
+    quotas
 }
 
 fn unavailable_message(agent_id: &str) -> &'static str {
@@ -83,6 +120,180 @@ fn unavailable_message(agent_id: &str) -> &'static str {
         }
         _ => "This agent does not persist provider-reported account limits locally.",
     }
+}
+
+// ---------------------------------------------------------------- history / ETA
+
+#[derive(Clone, Serialize, Deserialize)]
+struct QuotaSample {
+    at: i64,
+    agent: String,
+    limit_id: String,
+    percent: f64,
+}
+
+#[derive(Default, Serialize, Deserialize)]
+struct QuotaHistory {
+    samples: Vec<QuotaSample>,
+}
+
+fn load_history(path: &Path) -> QuotaHistory {
+    let Ok(bytes) = std::fs::read(path) else {
+        return QuotaHistory::default();
+    };
+    serde_json::from_slice(&bytes).unwrap_or_default()
+}
+
+fn save_history(path: &Path, history: &QuotaHistory) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(bytes) = serde_json::to_vec(history) {
+        let _ = std::fs::write(path, bytes);
+    }
+}
+
+/// Record the latest reading and fill `available_until` / `estimate_idle`.
+fn apply_estimate(quota: &mut Quota, history: &mut QuotaHistory, now: i64) {
+    record_samples(quota, history, now);
+    let (available_until, estimate_idle) = estimate_available_until(quota, history, now);
+    quota.available_until = available_until;
+    quota.estimate_idle = estimate_idle;
+}
+
+fn record_samples(quota: &Quota, history: &mut QuotaHistory, now: i64) {
+    history
+        .samples
+        .retain(|sample| now - sample.at <= HISTORY_RETENTION_MS);
+
+    for limit in &quota.limits {
+        if let Some(last) = history
+            .samples
+            .iter()
+            .rev()
+            .find(|sample| sample.agent == quota.agent && sample.limit_id == limit.id)
+        {
+            if now - last.at < MIN_SAMPLE_GAP_MS && (last.percent - limit.percent).abs() < 0.05 {
+                continue;
+            }
+        }
+        history.samples.push(QuotaSample {
+            at: now,
+            agent: quota.agent.clone(),
+            limit_id: limit.id.clone(),
+            percent: limit.percent,
+        });
+    }
+}
+
+/// Per-agent: the soonest any actively burning limit would hit empty.
+fn estimate_available_until(
+    quota: &Quota,
+    history: &QuotaHistory,
+    now: i64,
+) -> (Option<i64>, bool) {
+    let mut any_remaining = false;
+    let mut any_burn = false;
+    let mut soonest: Option<i64> = None;
+
+    for limit in &quota.limits {
+        let remaining = (100.0 - limit.percent).max(0.0);
+        if remaining <= EXHAUSTED_REMAINING {
+            return (Some(now), false);
+        }
+        any_remaining = true;
+
+        let Some(burn_per_ms) = burn_rate_per_ms(quota, limit, history, now) else {
+            continue;
+        };
+        if burn_per_ms <= 0.0 {
+            continue;
+        }
+        any_burn = true;
+        let eta_ms = (remaining / burn_per_ms).ceil() as i64;
+        let until = now.saturating_add(eta_ms.max(0));
+        soonest = Some(match soonest {
+            Some(other) => other.min(until),
+            None => until,
+        });
+    }
+
+    if let Some(until) = soonest {
+        (Some(until), false)
+    } else if any_remaining && !any_burn {
+        (None, true)
+    } else {
+        (None, false)
+    }
+}
+
+/// Percent-per-ms burn from a baseline sample ~1h ago, ignoring post-reset noise.
+fn burn_rate_per_ms(
+    quota: &Quota,
+    limit: &QuotaLimit,
+    history: &QuotaHistory,
+    now: i64,
+) -> Option<f64> {
+    let mut series: Vec<(i64, f64)> = history
+        .samples
+        .iter()
+        .filter(|sample| {
+            sample.agent == quota.agent
+                && sample.limit_id == limit.id
+                && sample.at <= now
+                && now - sample.at <= LOOKBACK_MS + MIN_SPAN_MS
+        })
+        .map(|sample| (sample.at, sample.percent))
+        .collect();
+
+    // Always include the live reading so a just-fetched snapshot participates.
+    if series
+        .last()
+        .map(|(at, percent)| *at != now || (*percent - limit.percent).abs() > 0.01)
+        .unwrap_or(true)
+    {
+        series.push((now, limit.percent));
+    }
+    series.sort_by_key(|(at, _)| *at);
+    series.dedup_by(|a, b| a.0 == b.0);
+
+    // Drop everything before the latest reset (sharp utilization fall).
+    let mut start = 0;
+    for i in 1..series.len() {
+        if series[i - 1].1 - series[i].1 >= RESET_DROP {
+            start = i;
+        }
+    }
+    let series = &series[start..];
+    if series.len() < 2 {
+        return None;
+    }
+
+    // Prefer the sample closest to one hour ago; otherwise the oldest kept one.
+    let target = now - LOOKBACK_MS;
+    let baseline = series
+        .iter()
+        .take(series.len() - 1)
+        .min_by_key(|(at, _)| (*at - target).abs())
+        .copied()?;
+    let (base_at, base_percent) = baseline;
+    let elapsed = now - base_at;
+    if elapsed < MIN_SPAN_MS {
+        return None;
+    }
+
+    let delta = limit.percent - base_percent;
+    if delta <= 0.0 {
+        // Flat or falling after reset filter → not burning.
+        return Some(0.0);
+    }
+
+    let per_ms = delta / elapsed as f64;
+    let per_hour = per_ms * LOOKBACK_MS as f64;
+    if per_hour < MIN_BURN_PER_HOUR {
+        return Some(0.0);
+    }
+    Some(per_ms)
 }
 
 /// Pull the provider's own rate-limit state for CLIs that persist it.
@@ -238,6 +449,8 @@ fn claude_quota_from_payload(payload: &Value, plan: Option<String>) -> Option<Qu
         plan,
         message: None,
         limits,
+        available_until: None,
+        estimate_idle: false,
     })
 }
 
@@ -289,6 +502,8 @@ fn codex_quota(home: &Path) -> Option<Quota> {
         plan,
         message: None,
         limits,
+        available_until: None,
+        estimate_idle: false,
     })
 }
 
@@ -331,6 +546,8 @@ fn grok_quota(home: &Path) -> Option<Quota> {
             unit: "percent".into(),
             resets_at,
         }],
+        available_until: None,
+        estimate_idle: false,
     })
 }
 
@@ -418,10 +635,160 @@ mod tests {
     fn only_agents_used_in_the_range_receive_cards() {
         let used = HashSet::from(["claude", "opencode"]);
         let empty = std::env::temp_dir().join("duckweed-no-such-home");
-        let quotas = build(&used, &empty);
+        let history = std::env::temp_dir().join(format!(
+            "duckweed-quota-history-empty-{}",
+            std::process::id()
+        ));
+        let quotas = build(&used, &empty, &history);
         assert_eq!(quotas.len(), 2);
         assert!(quotas.iter().all(|quota| quota.source == "unavailable"));
         assert!(!quotas.iter().any(|quota| quota.agent == "codex"));
+        let _ = std::fs::remove_file(&history);
+    }
+
+    fn sample_quota(agent: &str, limits: Vec<(&str, f64)>) -> Quota {
+        Quota {
+            agent: agent.into(),
+            label: agent.into(),
+            source: "reported".into(),
+            plan: None,
+            message: None,
+            limits: limits
+                .into_iter()
+                .map(|(id, percent)| QuotaLimit {
+                    id: id.into(),
+                    label: id.into(),
+                    used: percent,
+                    limit: Some(100.0),
+                    percent,
+                    unit: "percent".into(),
+                    resets_at: None,
+                })
+                .collect(),
+            available_until: None,
+            estimate_idle: false,
+        }
+    }
+
+    #[test]
+    fn burn_rate_uses_last_hour_and_picks_the_tightest_limit() {
+        let now = 1_700_000_000_000i64;
+        let mut history = QuotaHistory {
+            samples: vec![
+                QuotaSample {
+                    at: now - LOOKBACK_MS,
+                    agent: "claude".into(),
+                    limit_id: "five-hour".into(),
+                    percent: 50.0,
+                },
+                QuotaSample {
+                    at: now - LOOKBACK_MS,
+                    agent: "claude".into(),
+                    limit_id: "seven-day".into(),
+                    percent: 10.0,
+                },
+            ],
+        };
+        // 5h: 50% → 90% in 1h = 40%/h, remaining 10% → 15 min
+        // week: 10% → 12% in 1h = 2%/h, remaining 88% → 44h
+        let mut quota = sample_quota("claude", vec![("five-hour", 90.0), ("seven-day", 12.0)]);
+        apply_estimate(&mut quota, &mut history, now);
+        assert!(!quota.estimate_idle);
+        let until = quota.available_until.expect("eta");
+        let eta_min = (until - now) as f64 / 60_000.0;
+        assert!(
+            (eta_min - 15.0).abs() < 1.0,
+            "expected ~15 min from 5h window, got {eta_min}"
+        );
+    }
+
+    #[test]
+    fn weekly_limit_can_bind_even_when_short_window_is_almost_full_remaining() {
+        let now = 1_700_000_000_000i64;
+        let mut history = QuotaHistory {
+            samples: vec![
+                QuotaSample {
+                    at: now - LOOKBACK_MS,
+                    agent: "claude".into(),
+                    limit_id: "five-hour".into(),
+                    percent: 1.0,
+                },
+                QuotaSample {
+                    at: now - LOOKBACK_MS,
+                    agent: "claude".into(),
+                    limit_id: "seven-day".into(),
+                    percent: 90.0,
+                },
+            ],
+        };
+        // 5h barely moved; week 90→99 = 9%/h, remaining 1% → ~6.7 min
+        let mut quota = sample_quota("claude", vec![("five-hour", 2.0), ("seven-day", 99.0)]);
+        apply_estimate(&mut quota, &mut history, now);
+        let until = quota.available_until.expect("eta");
+        let eta_min = (until - now) as f64 / 60_000.0;
+        assert!(
+            (eta_min - (1.0 / 9.0) * 60.0).abs() < 1.0,
+            "expected weekly to bind near 6–7 min, got {eta_min}"
+        );
+    }
+
+    #[test]
+    fn reset_drop_does_not_produce_infinite_or_negative_burn() {
+        let now = 1_700_000_000_000i64;
+        let mut history = QuotaHistory {
+            samples: vec![
+                // Pre-reset: fully used
+                QuotaSample {
+                    at: now - LOOKBACK_MS,
+                    agent: "claude".into(),
+                    limit_id: "five-hour".into(),
+                    percent: 100.0,
+                },
+                // Post-reset: back to empty, then mild use
+                QuotaSample {
+                    at: now - 30 * 60 * 1000,
+                    agent: "claude".into(),
+                    limit_id: "five-hour".into(),
+                    percent: 0.0,
+                },
+            ],
+        };
+        let mut quota = sample_quota("claude", vec![("five-hour", 10.0)]);
+        apply_estimate(&mut quota, &mut history, now);
+        // 0 → 10% over 30 min = 20%/h, remaining 90% → 4.5h
+        let until = quota.available_until.expect("post-reset eta");
+        let eta_h = (until - now) as f64 / 3_600_000.0;
+        assert!(
+            (eta_h - 4.5).abs() < 0.2,
+            "expected ~4.5h after reset, got {eta_h}"
+        );
+    }
+
+    #[test]
+    fn exhausted_limit_reports_available_until_now() {
+        let now = 1_700_000_000_000i64;
+        let mut history = QuotaHistory::default();
+        let mut quota = sample_quota("claude", vec![("five-hour", 100.0), ("seven-day", 40.0)]);
+        apply_estimate(&mut quota, &mut history, now);
+        assert_eq!(quota.available_until, Some(now));
+        assert!(!quota.estimate_idle);
+    }
+
+    #[test]
+    fn flat_history_is_idle_not_infinite() {
+        let now = 1_700_000_000_000i64;
+        let mut history = QuotaHistory {
+            samples: vec![QuotaSample {
+                at: now - LOOKBACK_MS,
+                agent: "claude".into(),
+                limit_id: "five-hour".into(),
+                percent: 40.0,
+            }],
+        };
+        let mut quota = sample_quota("claude", vec![("five-hour", 40.0)]);
+        apply_estimate(&mut quota, &mut history, now);
+        assert!(quota.estimate_idle);
+        assert!(quota.available_until.is_none());
     }
 
     #[test]

@@ -47,6 +47,37 @@ describe("usage formatting", () => {
     expect(usage.formatQuotaValue(1_500_000, "tokens")).toBe("1.5M");
   });
 
+  test("quota remaining inverts utilization for the meter label", () => {
+    expect(
+      usage.quotaRemaining({ used: 2, limit: 100, percent: 2, unit: "percent" }),
+    ).toBe(98);
+    expect(
+      usage.quotaRemaining({ used: 77, limit: 100, percent: 77, unit: "percent" }),
+    ).toBe(23);
+    expect(
+      usage.quotaRemaining({ used: 100, limit: 100, percent: 100, unit: "percent" }),
+    ).toBe(0);
+    expect(
+      usage.quotaRemaining({ used: 3.5, limit: 10, percent: 35, unit: "usd" }),
+    ).toBe(6.5);
+    expect(
+      usage.quotaRemaining({ used: 500, limit: null, percent: 0, unit: "tokens" }),
+    ).toBe(0);
+  });
+
+  test("available-until formats clocks relative to today", () => {
+    const now = new Date(2026, 6, 26, 14, 0, 0).getTime(); // local Jul 26 2pm
+    expect(usage.formatAvailableUntil(now, now)).toBe("now");
+    expect(usage.formatAvailableUntil(now + 60_000, now)).not.toBe("now");
+    // Same calendar day → clock only
+    const sameDay = new Date(2026, 6, 26, 18, 30, 0).getTime();
+    const same = usage.formatAvailableUntil(sameDay, now);
+    expect(same.toLowerCase()).not.toContain("tomorrow");
+    // Next day
+    const tomorrow = new Date(2026, 6, 27, 9, 15, 0).getTime();
+    expect(usage.formatAvailableUntil(tomorrow, now).toLowerCase()).toContain("tomorrow");
+  });
+
   test("reset and last-used times read as prose", () => {
     const now = 1_000_000_000_000;
     expect(usage.untilReset(now - 1, now)).toBe("resetting");
@@ -171,7 +202,7 @@ describe("usage wiring", () => {
     expect(panel).not.toContain("Tracked agents");
     expect(panel).not.toContain("Set a limit");
     expect(panel).toContain("Automatically tracking");
-    expect(panel).toContain("quota.source === \"reported\" ? \"Reported\" : \"Unavailable\"");
+    expect(panel).not.toContain("usage-badge");
 
     const backend = read("src-tauri/src/usage/mod.rs");
     expect(backend).not.toContain("pub agents: Vec<String>");

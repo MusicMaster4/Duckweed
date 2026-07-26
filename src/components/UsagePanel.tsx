@@ -10,6 +10,7 @@ import {
   dayTick,
   formatBytes,
   formatExact,
+  formatAvailableUntil,
   formatQuotaValue,
   formatTokens,
   formatUsd,
@@ -17,6 +18,7 @@ import {
   cachedUsage,
   loadSettings,
   prefetchUsage,
+  quotaRemaining,
   saveSettings,
   untilReset,
   type Metric,
@@ -367,16 +369,27 @@ export function UsagePanel() {
                     <i style={{ background: agentColor(quota.agent) }} aria-hidden="true" />
                     {quota.label}
                   </span>
-                  <span
-                    className={`usage-badge ${quota.source === "reported" ? "is-live" : ""}`}
-                    title={
-                      quota.source === "reported"
-                        ? "Latest provider snapshot persisted by this CLI"
-                        : "This CLI does not persist an official account limit"
-                    }
-                  >
-                    {quota.source === "reported" ? "Reported" : "Unavailable"}
-                  </span>
+                  {quota.source === "reported" && quota.available_until != null && (
+                    <div
+                      className={`usage-quota-eta ${
+                        quota.available_until <= now + 30_000 ? "is-critical" : ""
+                      }`}
+                    >
+                      <span className="usage-quota-eta-label">Limits available until</span>
+                      <strong>{formatAvailableUntil(quota.available_until, now)}</strong>
+                      <small>Based on last hour of use</small>
+                    </div>
+                  )}
+                  {quota.source === "reported" &&
+                    quota.available_until == null &&
+                    quota.estimate_idle &&
+                    quota.limits.length > 0 && (
+                      <div className="usage-quota-eta is-idle">
+                        <span className="usage-quota-eta-label">Limits available until</span>
+                        <strong>stable</strong>
+                        <small>No burn in the last hour</small>
+                      </div>
+                    )}
                 </header>
                 {quota.plan && (
                   <div className="usage-quota-plan">
@@ -384,18 +397,21 @@ export function UsagePanel() {
                     <strong>{quota.plan}</strong>
                   </div>
                 )}
-                {quota.limits.map((limit) => (
-                  <div key={limit.id} className="usage-quota-row">
-                    <Meter
-                      label={limit.label}
-                      value={formatQuotaValue(limit.used, limit.unit)}
-                      percent={limit.percent}
-                      {...(limit.resets_at
-                        ? { hint: `resets ${untilReset(limit.resets_at, now)}` }
-                        : {})}
-                    />
-                  </div>
-                ))}
+                {quota.limits.map((limit) => {
+                  const remaining = quotaRemaining(limit);
+                  return (
+                    <div key={limit.id} className="usage-quota-row">
+                      <Meter
+                        label={limit.label}
+                        value={formatQuotaValue(remaining, limit.unit)}
+                        percent={Math.max(0, 100 - limit.percent)}
+                        {...(limit.resets_at
+                          ? { hint: `resets ${untilReset(limit.resets_at, now)}` }
+                          : {})}
+                      />
+                    </div>
+                  );
+                })}
                 {quota.message && <p className="usage-quota-message">{quota.message}</p>}
               </article>
             ))}

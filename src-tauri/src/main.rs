@@ -12,7 +12,8 @@ mod usage;
 mod watch;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use tauri::{ipc::Channel, AppHandle, Emitter, Manager, State};
 
@@ -24,6 +25,73 @@ use pty::{PtyManager, SpawnResult};
 use shells::ShellInfo;
 use usage::{pricing, Query, Snapshot, UsageState};
 use watch::ProjectWatchManager;
+
+#[derive(Default)]
+struct DurableSettings(Mutex<()>);
+
+const DURABLE_SETTING_KEYS: [&str; 3] = [
+    "duckweed:state:v1",
+    "duckweed:usage:v1",
+    "duckweed:command-history:v1",
+];
+
+fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_data_dir()
+        .map(|dir| dir.join("durable-settings.json"))
+        .map_err(|error| error.to_string())
+}
+
+fn read_settings(path: &Path) -> HashMap<String, String> {
+    let parse = |candidate: &Path| {
+        std::fs::read_to_string(candidate)
+            .ok()
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+    };
+    parse(path)
+        .or_else(|| parse(&path.with_extension("json.bak")))
+        .unwrap_or_default()
+}
+
+#[tauri::command]
+fn settings_load(
+    app: AppHandle,
+    state: State<'_, DurableSettings>,
+) -> Result<HashMap<String, String>, String> {
+    let _guard = state.0.lock().map_err(|error| error.to_string())?;
+    Ok(read_settings(&settings_path(&app)?))
+}
+
+#[tauri::command]
+fn settings_save(
+    app: AppHandle,
+    state: State<'_, DurableSettings>,
+    key: String,
+    value: String,
+) -> Result<(), String> {
+    if !DURABLE_SETTING_KEYS.contains(&key.as_str()) {
+        return Err("unsupported settings key".into());
+    }
+    // Reject corrupt payloads before they can replace the last good copy.
+    serde_json::from_str::<serde_json::Value>(&value).map_err(|error| error.to_string())?;
+
+    let _guard = state.0.lock().map_err(|error| error.to_string())?;
+    let path = settings_path(&app)?;
+    let mut settings = read_settings(&path);
+    settings.insert(key, value);
+    let raw = serde_json::to_vec_pretty(&settings).map_err(|error| error.to_string())?;
+    let parent = path.parent().ok_or("settings path has no parent")?;
+    std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+
+    let temporary = path.with_extension("json.tmp");
+    let backup = path.with_extension("json.bak");
+    std::fs::write(&temporary, raw).map_err(|error| error.to_string())?;
+    if path.exists() {
+        std::fs::copy(&path, &backup).map_err(|error| error.to_string())?;
+        std::fs::remove_file(&path).map_err(|error| error.to_string())?;
+    }
+    std::fs::rename(&temporary, &path).map_err(|error| error.to_string())
+}
 
 async fn blocking<T, F>(job: F) -> Result<T, String>
 where
@@ -259,6 +327,7 @@ fn main() {
         .manage(AgentActivityManager::default())
         .manage(ProjectWatchManager::default())
         .manage(UsageState::default())
+        .manage(DurableSettings::default())
         .setup(|app| {
             if let (Some(window), Some(icon)) = (
                 app.get_webview_window("main"),
@@ -296,6 +365,8 @@ fn main() {
             usage_scan,
             usage_pricing,
             usage_set_pricing,
+            settings_load,
+            settings_save,
         ])
         .on_window_event(|window, event| {
             // Make sure we never leave orphaned shells behind.

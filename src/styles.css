@@ -532,6 +532,16 @@ svg.tab-glyph-fill path {
     0 0 0 2px rgba(242, 104, 111, 0.14),
     0 0 7px rgba(242, 104, 111, 0.3);
   flex: none;
+  opacity: 0;
+  transform: scale(0.65);
+  transition:
+    opacity 500ms ease,
+    transform 500ms ease;
+}
+
+.completion-dot.is-visible {
+  opacity: 1;
+  transform: scale(1);
 }
 
 .tab-completion-dot {
@@ -1265,6 +1275,27 @@ svg.tab-glyph-fill path {
   overflow: hidden;
 }
 
+/*
+ * Outline only the finished pane (not shared dividers). Shared bars would light
+ * both neighbours; drawing on the pane keeps the signal on the terminal that
+ * actually completed. Always present so opacity can fade in/out in 500ms.
+ */
+.pane::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border: 2px solid var(--rose);
+  box-shadow: inset 0 0 10px rgba(242, 104, 111, 0.18);
+  pointer-events: none;
+  z-index: 5;
+  opacity: 0;
+  transition: opacity 500ms ease;
+}
+
+.pane.is-unread::after {
+  opacity: 1;
+}
+
 .pane.is-source {
   opacity: 0.4;
 }
@@ -1393,16 +1424,6 @@ svg.tab-glyph-fill path {
 .pane.is-active .pane-badge {
   background: rgba(15, 18, 15, 0.14);
   color: var(--bg);
-}
-
-.pane-completion-dot {
-  margin-left: 1px;
-}
-
-.pane.is-active .pane-completion-dot {
-  box-shadow:
-    0 0 0 2px rgba(15, 18, 15, 0.2),
-    0 0 7px rgba(242, 104, 111, 0.36);
 }
 
 .pane-spacer {
@@ -4177,29 +4198,31 @@ body.is-resizing * {
 /* --- quota meters --- */
 .usage-quota-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-  gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+  gap: 12px;
 }
 
 .usage-quota {
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  padding: 14px;
+  gap: 14px;
+  padding: 16px;
   background: var(--bg-pane);
   border: 1px solid var(--border);
   border-radius: var(--radius);
+  min-height: 148px;
 }
 
 .usage-quota.is-unavailable {
   gap: 10px;
+  min-height: 0;
 }
 
 .usage-quota > header {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
-  gap: 10px;
+  gap: 12px;
 }
 
 .usage-quota-name {
@@ -4217,20 +4240,44 @@ body.is-resizing * {
   border-radius: 2px;
 }
 
-.usage-badge {
-  padding: 2px 7px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
+.usage-quota-eta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 1px;
+  text-align: right;
+  max-width: 58%;
+  min-width: 0;
+}
+
+.usage-quota-eta-label {
   color: var(--text-faint);
   font-size: 9.5px;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.02em;
   text-transform: uppercase;
 }
 
-.usage-badge.is-live {
-  border-color: var(--accent-line);
-  color: var(--accent-strong);
-  background: var(--accent-dim);
+.usage-quota-eta strong {
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+}
+
+.usage-quota-eta small {
+  color: var(--text-faint);
+  font-size: 10px;
+  line-height: 1.2;
+}
+
+.usage-quota-eta.is-critical strong {
+  color: var(--danger, #f07178);
+}
+
+.usage-quota-eta.is-idle strong {
+  color: var(--text-muted, var(--text-faint));
+  font-weight: 500;
 }
 
 .usage-quota-plan {

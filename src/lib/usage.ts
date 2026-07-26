@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { saveDurably } from "./durableStorage";
 
 /**
  * Token and cost statistics gathered from the coding agents installed on this
@@ -74,6 +75,13 @@ export interface Quota {
   /** Why a trustworthy provider limit cannot be shown. */
   message: string | null;
   limits: QuotaLimit[];
+  /**
+   * Epoch ms when the first limit is expected to empty at the last-hour burn
+   * rate. Equal to "now" when already exhausted; null when unknown/idle.
+   */
+  available_until: number | null;
+  /** Remaining quota, but no positive burn observed in the last hour. */
+  estimate_idle: boolean;
 }
 
 export interface ScanStats {
@@ -309,6 +317,53 @@ export function formatQuotaValue(value: number, unit: QuotaLimit["unit"]): strin
   return compactNumber(value);
 }
 
+/**
+ * How much of a quota window is still available, in the same unit as `used`.
+ * Both the meter label and the bar use remaining (drains toward empty).
+ */
+export function quotaRemaining(
+  limit: Pick<QuotaLimit, "used" | "limit" | "percent" | "unit">,
+): number {
+  if (limit.unit === "percent") {
+    return Math.max(0, Math.min(100, 100 - limit.percent));
+  }
+  if (limit.limit != null) {
+    return Math.max(0, limit.limit - limit.used);
+  }
+  return 0;
+}
+
+/**
+ * Headline for the card-level ETA: absolute clock time when limits would first
+ * run out at the observed last-hour burn rate.
+ */
+export function formatAvailableUntil(at: number, now: number): string {
+  if (at <= now + 30_000) return "now";
+  const date = new Date(at);
+  const clock = date.toLocaleTimeString(undefined, {
+    hour: "numeric",
+    minute: "2-digit",
+  });
+  const startOfToday = new Date(now);
+  startOfToday.setHours(0, 0, 0, 0);
+  const startOfTarget = new Date(at);
+  startOfTarget.setHours(0, 0, 0, 0);
+  const dayDelta = Math.round(
+    (startOfTarget.getTime() - startOfToday.getTime()) / 86_400_000,
+  );
+  if (dayDelta === 0) return clock;
+  if (dayDelta === 1) return `tomorrow ${clock}`;
+  if (dayDelta > 1 && dayDelta < 7) {
+    const weekday = date.toLocaleDateString(undefined, { weekday: "short" });
+    return `${weekday} ${clock}`;
+  }
+  const day = date.toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+  });
+  return `${day}, ${clock}`;
+}
+
 // ---------------------------------------------------------------- settings
 
 const KEY = "duckweed:usage:v1";
@@ -345,7 +400,9 @@ export function loadSettings(): UsageSettings {
 
 export function saveSettings(settings: UsageSettings): void {
   try {
-    localStorage.setItem(KEY, JSON.stringify(settings));
+    const raw = JSON.stringify(settings);
+    localStorage.setItem(KEY, raw);
+    saveDurably(KEY, raw);
   } catch {
     // Storage can be unavailable; the dashboard still works, it just forgets.
   }

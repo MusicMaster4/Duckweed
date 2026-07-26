@@ -22,7 +22,7 @@ interface Props {
   isSource: boolean;
   spawn: { cwd: string | null; shell: string | null };
   highlight: boolean;
-  /** A background process finished and this pane has not been reviewed yet. */
+  /** Background completion not reviewed yet — drives the pane outline, not a header dot. */
   unread: boolean;
   /** Folder of the tab this pane belongs to — the empty state offers to set it. */
   project: ProjectInfo | null;
@@ -179,6 +179,7 @@ export const TerminalPane = memo(function TerminalPane({
         meta?.exited ? "is-exited" : "",
         effectiveRaw ? "is-raw" : "is-editor",
         blank ? "is-blank" : "",
+        unread ? "is-unread" : "",
       ]
         .filter(Boolean)
         .join(" ")}
@@ -236,14 +237,6 @@ export const TerminalPane = memo(function TerminalPane({
           {cwdLabel && <span className="pane-cwd">{cwdLabel}</span>}
           {meta?.exited && <span className="pane-badge">exited</span>}
           {busy && !meta?.exited && <span className="pane-badge pane-badge-busy">running</span>}
-          {unread && (
-            <span
-              className="completion-dot pane-completion-dot"
-              title="Process finished — click this terminal to mark it reviewed"
-              role="status"
-              aria-label="Finished process not reviewed"
-            />
-          )}
           <span className="pane-spacer" />
           <button
             type="button"

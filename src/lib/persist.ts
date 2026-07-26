@@ -1,6 +1,7 @@
 import { uid } from "./layout";
 import { newTermId, type InputMode } from "./terminals";
 import type { LayoutNode, Tab } from "./types";
+import { saveDurably } from "./durableStorage";
 
 const KEY = "duckweed:state:v1";
 const MAX_RECENTS = 12;
@@ -27,6 +28,11 @@ export interface Persisted {
   shell: string | null;
   /** Colourise output that arrives with no ANSI colour of its own. */
   highlight: boolean;
+  /**
+   * Mark finished background processes: rose outline on the pane and a
+   * completion dot on the tab until the user reviews it.
+   */
+  completionHighlights: boolean;
   /** Warp-style command editor, or a conventional raw terminal. */
   inputMode: InputMode;
   /**
@@ -94,6 +100,8 @@ export function load(): Persisted | null {
       fontSize: typeof parsed.fontSize === "number" ? parsed.fontSize : 13.5,
       shell: typeof parsed.shell === "string" ? parsed.shell : null,
       highlight: typeof parsed.highlight === "boolean" ? parsed.highlight : true,
+      completionHighlights:
+        typeof parsed.completionHighlights === "boolean" ? parsed.completionHighlights : true,
       inputMode: parsed.inputMode === "raw" ? "raw" : "editor",
       // Default on so a missing field from older saves still asks before killing work.
       confirmCloseRunning:
@@ -114,6 +122,7 @@ export function save(state: {
   fontSize: number;
   shell: string | null;
   highlight: boolean;
+  completionHighlights: boolean;
   inputMode: InputMode;
   confirmCloseRunning: boolean;
   toolsOpen: boolean;
@@ -129,6 +138,7 @@ export function save(state: {
       fontSize: state.fontSize,
       shell: state.shell,
       highlight: state.highlight,
+      completionHighlights: state.completionHighlights,
       inputMode: state.inputMode,
       confirmCloseRunning: state.confirmCloseRunning,
       toolsOpen: state.toolsOpen,
@@ -146,7 +156,9 @@ export function save(state: {
         state.tabs.findIndex((t) => t.id === state.activeTabId),
       ),
     };
-    localStorage.setItem(KEY, JSON.stringify(payload));
+    const raw = JSON.stringify(payload);
+    localStorage.setItem(KEY, raw);
+    saveDurably(KEY, raw);
   } catch {
     // Storage can be unavailable (private mode, quota); layout persistence is
     // a convenience, never a requirement.

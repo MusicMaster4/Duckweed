@@ -542,7 +542,11 @@ pub fn scan(
         .iter()
         .filter_map(|(agent, totals)| (totals.requests > 0).then_some(*agent))
         .collect();
-    let quotas = quota::build(&used_agents, home);
+    let history_path = index_path
+        .parent()
+        .map(|parent| parent.join("quota-history.json"))
+        .unwrap_or_else(|| PathBuf::from("quota-history.json"));
+    let quotas = quota::build(&used_agents, home, &history_path);
 
     // --- persist ----------------------------------------------------------
     compact(index, recent_cutoff, now);

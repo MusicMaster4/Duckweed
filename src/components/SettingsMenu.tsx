@@ -8,6 +8,7 @@ interface Props {
   fontSize: number;
   inputMode: InputMode;
   highlight: boolean;
+  completionHighlights: boolean;
   confirmCloseRunning: boolean;
   shell: string | null;
   shells: ShellInfo[];
@@ -15,6 +16,7 @@ interface Props {
   onFontSize: (size: number) => void;
   onToggleInputMode: () => void;
   onToggleHighlight: () => void;
+  onToggleCompletionHighlights: () => void;
   onToggleConfirmCloseRunning: () => void;
   onShell: (shellId: string | null) => void;
   onCheckUpdates: () => void;
@@ -34,6 +36,7 @@ export function SettingsMenu({
   fontSize,
   inputMode,
   highlight,
+  completionHighlights,
   confirmCloseRunning,
   shell,
   shells,
@@ -41,6 +44,7 @@ export function SettingsMenu({
   onFontSize,
   onToggleInputMode,
   onToggleHighlight,
+  onToggleCompletionHighlights,
   onToggleConfirmCloseRunning,
   onShell,
   onCheckUpdates,
@@ -54,7 +58,8 @@ export function SettingsMenu({
   const showAppearance =
     (section === "General" || section === "Appearance" || searching) &&
     (matches("appearance font size terminal text command editor") ||
-      matches("syntax highlighting colour commands plain terminal output"));
+      matches("syntax highlighting colour commands plain terminal output") ||
+      matches("completion highlights finished process unread tab outline rose"));
   const showTerminal =
     (section === "General" || section === "Terminal" || searching) &&
     (matches("terminal command editor compose commands grid type directly") ||
@@ -161,6 +166,19 @@ export function SettingsMenu({
                     <span>Colour commands and plain terminal output</span>
                   </span>
                   <Toggle enabled={highlight} />
+                </button>
+              )}
+              {matches("completion highlights finished process unread tab outline rose") && (
+                <button
+                  type="button"
+                  className="settings-row settings-action"
+                  onClick={onToggleCompletionHighlights}
+                >
+                  <span className="settings-copy">
+                    <strong>Completion highlights</strong>
+                    <span>Outline finished panes and mark their tab until you review them</span>
+                  </span>
+                  <Toggle enabled={completionHighlights} />
                 </button>
               )}
             </section>

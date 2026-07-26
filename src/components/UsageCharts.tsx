@@ -339,8 +339,9 @@ export function BarList({ rows, empty }: { rows: BarRow[]; empty: string }) {
 // ------------------------------------------------------------- meter
 
 /**
- * A quota bar. Severity is carried by the fill, and repeated as text, so the
- * state never depends on colour alone.
+ * A quota bar for remaining allowance. The fill starts full and drains as the
+ * window is consumed. Severity is carried by the fill colour, and repeated as
+ * text, so the state never depends on colour alone.
  */
 export function Meter({
   label,
@@ -351,13 +352,15 @@ export function Meter({
 }: {
   label: string;
   value: string;
+  /** How much of the limit is still left (0–100). */
   percent: number;
   hint?: string;
   /** No limit configured: show the number, skip the bar. */
   unknown?: boolean;
 }) {
-  const clamped = Math.max(0, Math.min(100, percent));
-  const level = percent >= 90 ? "is-critical" : percent >= 70 ? "is-warning" : "is-ok";
+  const remaining = Math.max(0, Math.min(100, percent));
+  // Drain toward empty: critical when almost gone, warning when under a third left.
+  const level = remaining <= 10 ? "is-critical" : remaining <= 30 ? "is-warning" : "is-ok";
   return (
     <div className="viz-meter">
       <div className="viz-meter-head">
@@ -373,12 +376,12 @@ export function Meter({
         <div
           className={`viz-meter-track ${level}`}
           role="meter"
-          aria-valuenow={Math.round(percent)}
+          aria-valuenow={Math.round(remaining)}
           aria-valuemin={0}
           aria-valuemax={100}
-          aria-label={label}
+          aria-label={`${label} remaining`}
         >
-          <div className="viz-meter-fill" style={{ width: `${clamped}%` }} />
+          <div className="viz-meter-fill" style={{ width: `${remaining}%` }} />
         </div>
       )}
     </div>

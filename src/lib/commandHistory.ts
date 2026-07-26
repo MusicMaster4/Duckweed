@@ -1,3 +1,5 @@
+import { saveDurably } from "./durableStorage";
+
 /**
  * Shared command history for ghost-text autosuggestions.
  *
@@ -60,7 +62,9 @@ function parse(raw: string | null): HistoryEntry[] {
 function persist(): void {
   try {
     if (typeof localStorage === "undefined") return;
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(entries));
+    const raw = JSON.stringify(entries);
+    localStorage.setItem(STORAGE_KEY, raw);
+    saveDurably(STORAGE_KEY, raw);
   } catch {
     // Quota / private mode — history is a convenience, not a requirement.
   }

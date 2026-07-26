@@ -95,6 +95,7 @@ function boot() {
       fontSize: saved.fontSize,
       shell: saved.shell,
       highlight: saved.highlight,
+      completionHighlights: saved.completionHighlights,
       inputMode: saved.inputMode,
       confirmCloseRunning: saved.confirmCloseRunning,
       toolsOpen: saved.toolsOpen,
@@ -119,12 +120,16 @@ function boot() {
     fontSize: DEFAULT_FONT_SIZE,
     shell: null as string | null,
     highlight: true,
+    completionHighlights: true,
     inputMode: "editor" as terminals.InputMode,
     confirmCloseRunning: true,
     toolsOpen: false,
     toolsWidth: DEFAULT_TOOLS_WIDTH,
   };
 }
+
+/** Stable empty set so hiding completion marks does not churn PaneTree memos. */
+const NO_UNREAD_TERMS: ReadonlySet<string> = new Set();
 
 /**
  * True for a field the user is typing into. xterm's hidden helper textarea is
@@ -153,6 +158,7 @@ export default function App() {
   const [shell, setShell] = useState<string | null>(initial.shell);
   const [fontSize, setFontSize] = useState(initial.fontSize);
   const [highlight, setHighlight] = useState(initial.highlight);
+  const [completionHighlights, setCompletionHighlights] = useState(initial.completionHighlights);
   const [inputMode, setInputMode] = useState(initial.inputMode);
   const [confirmCloseRunningPref, setConfirmCloseRunningPref] = useState(() => {
     // Honour the saved preference before any close handler can run.
@@ -1003,6 +1009,7 @@ export default function App() {
           fontSize,
           shell,
           highlight,
+          completionHighlights,
           inputMode,
           confirmCloseRunning: confirmCloseRunningPref,
           toolsOpen,
@@ -1020,6 +1027,7 @@ export default function App() {
     fontSize,
     shell,
     highlight,
+    completionHighlights,
     inputMode,
     confirmCloseRunningPref,
     toolsOpen,
@@ -1103,6 +1111,10 @@ export default function App() {
     const next = !terminals.getHighlight();
     terminals.setHighlight(next);
     setHighlight(next);
+  }, []);
+
+  const toggleCompletionHighlights = useCallback(() => {
+    setCompletionHighlights((prev) => !prev);
   }, []);
 
   const toggleInputMode = useCallback(() => {
@@ -1636,7 +1648,8 @@ export default function App() {
       drag,
       spawnFor,
       highlight,
-      unreadTerms: unreadTermIds,
+      // Tracking still runs; the setting only hides the rose chrome.
+      unreadTerms: completionHighlights ? unreadTermIds : NO_UNREAD_TERMS,
       project,
       recents,
       onBrowseProject: browseActiveProject,
@@ -1655,6 +1668,7 @@ export default function App() {
       activatePane,
       browseActiveProject,
       closePaneById,
+      completionHighlights,
       drag,
       highlight,
       onStartDrag,
@@ -1695,6 +1709,7 @@ export default function App() {
           activeTabId={activeTabId}
           paneCounts={paneCounts}
           unreadCounts={unreadCounts}
+          completionHighlights={completionHighlights}
           drag={drag}
           projects={tabProjects}
           allowNewTab={!!project}
@@ -1735,6 +1750,7 @@ export default function App() {
               fontSize={fontSize}
               inputMode={inputMode}
               highlight={highlight}
+              completionHighlights={completionHighlights}
               confirmCloseRunning={confirmCloseRunningPref}
               shell={shell}
               shells={shells}
@@ -1742,6 +1758,7 @@ export default function App() {
               onFontSize={applyFontSize}
               onToggleInputMode={toggleInputMode}
               onToggleHighlight={toggleHighlight}
+              onToggleCompletionHighlights={toggleCompletionHighlights}
               onToggleConfirmCloseRunning={() =>
                 setConfirmCloseRunningPref((prev) => !prev)
               }
