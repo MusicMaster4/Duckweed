@@ -5,6 +5,7 @@ import { listen } from "@tauri-apps/api/event";
 
 import { ChangesPanel } from "./components/ChangesPanel";
 import { CommandPalette, type PaletteAction } from "./components/CommandPalette";
+import { FileEditor } from "./components/FileEditor";
 import { PaneTree, type PaneTreeShared } from "./components/PaneTree";
 import { StatusBar } from "./components/StatusBar";
 import { TabStrip } from "./components/TabStrip";
@@ -189,6 +190,11 @@ export default function App() {
   const [toolsWidth, setToolsWidth] = useState(
     Math.min(TOOLS_MAX_WIDTH, Math.max(TOOLS_MIN_WIDTH, initial.toolsWidth)),
   );
+  /**
+   * Popup file editor path. Held here (not inside the tools panel) so Ctrl+Tab,
+   * hiding the explorer, or opening settings cannot unmount a dirty buffer.
+   */
+  const [openFile, setOpenFile] = useState<string | null>(null);
   const updater = useUpdater({ beforeInstall: confirmUpdateWithRunningProcesses });
 
   // Handlers read state through refs so keyboard shortcuts and pointer drags
@@ -207,6 +213,8 @@ export default function App() {
   completionHighlightsRef.current = completionHighlights;
   const completionFlashSeq = useRef(0);
   const completionFlashTimers = useRef(new Map<string, number>());
+  /** Dirty flag for the lifted file editor (file switches confirm through this). */
+  const editorDirtyRef = useRef(false);
   const processState = useRef(new Map<string, ProcessState>());
   /** Last folder opened in any tab — only ever used to seed the folder picker. */
   const lastProject = useRef<string | null>(initial.lastProject);
@@ -845,7 +853,7 @@ export default function App() {
     }
     if (await terminals.hasRunningProcess(term)) return;
     // Blank panes keep the welcome duck (like a fresh split); used panes get a
-    // normal `cd` in the grid. Double quotes work for cmd, PowerShell and POSIX.
+    // normal `cd` in the grid. Quoting is shell-specific (see buildCdCommand).
     terminals.changeDirectory(term, path);
   }, []);
 
@@ -1234,6 +1242,23 @@ export default function App() {
       if (node) void cdPane(node.term, path);
     },
     [cdPane, currentTab],
+  );
+
+  /** Open a path in the popup editor; confirm first if another dirty buffer is open. */
+  const openExplorerFile = useCallback(
+    async (path: string) => {
+      if (openFile === path) return;
+      if (openFile && editorDirtyRef.current) {
+        const ok = await confirmCloseRunning({
+          title: "Unsaved changes",
+          message: "The open file has unsaved edits. Discard them and open another?",
+          confirmLabel: "Discard",
+        });
+        if (!ok) return;
+      }
+      setOpenFile(path);
+    },
+    [openFile],
   );
 
   // ----------------------------------------------------------- shortcuts
@@ -1832,6 +1857,7 @@ export default function App() {
             onInsertPath={insertPath}
             onOpenFolder={cdActivePane}
             onBrowseProject={browseActiveProject}
+            onOpenFile={(path) => void openExplorerFile(path)}
           />
         )}
 
@@ -1905,6 +1931,17 @@ export default function App() {
             // Whatever happened in there — a commit, a discard — the chip is
             // one poll behind until it re-reads.
             changes.refresh();
+          }}
+        />
+      )}
+
+      {openFile && (
+        <FileEditor
+          key={openFile}
+          path={openFile}
+          onClose={() => setOpenFile(null)}
+          onDirtyChange={(dirty) => {
+            editorDirtyRef.current = dirty;
           }}
         />
       )}

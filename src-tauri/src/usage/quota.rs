@@ -206,6 +206,9 @@ fn unavailable_message(agent_id: &str) -> &'static str {
         "claude" => {
             "Claude usage could not be fetched from the local OAuth session. Open Claude Code to refresh its sign-in, then refresh Usage."
         }
+        "codex" => {
+            "No usable Codex rate-limit snapshot found in recent sessions. Run Codex after signing in so it can write usage limits, then refresh Usage."
+        }
         "gemini" => {
             "Gemini reports session statistics in /stats; it does not persist a reliable account-wide remaining quota."
         }
@@ -742,7 +745,12 @@ fn codex_quota(home: &Path, latest_session: Option<&Path>) -> Option<Quota> {
         let Some(block) = value.get(key).filter(|block| !block.is_null()) else {
             continue;
         };
-        let percent = block.get("used_percent").and_then(Value::as_f64)?;
+        // A present block without a percentage is not a usable limit — skip it
+        // rather than failing the whole snapshot (the other window may still
+        // have data).
+        let Some(percent) = block.get("used_percent").and_then(Value::as_f64) else {
+            continue;
+        };
         let minutes = block
             .get("window_minutes")
             .and_then(Value::as_i64)
@@ -875,43 +883,84 @@ fn read_tail(path: &Path, bytes: u64) -> Option<String> {
     Some(String::from_utf8_lossy(&buffer).into_owned())
 }
 
-/// The `rate_limits` payload from the newest Codex session, with the time the
-/// CLI wrote it. Re-reading an unchanged session must not look like a fresh
-/// reading of an unchanged limit.
-fn latest_codex_rate_limits(
-    home: &Path,
-    latest_session: Option<&Path>,
-) -> Option<(Option<i64>, Value)> {
-    let discovered;
-    let newest = if let Some(path) = latest_session {
-        path
-    } else {
-        discovered = crate::usage::sources::discover("codex", home)
-            .into_iter()
-            .filter_map(|path| {
-                let modified = std::fs::metadata(&path).ok()?.modified().ok()?;
-                Some((modified, path))
-            })
-            .max_by_key(|(modified, _)| *modified)
-            .map(|(_, path)| path)?;
-        &discovered
-    };
+/// Whether a Codex `rate_limits` object has at least one window we can meter.
+///
+/// After the account is exhausted, newer sessions often still write a
+/// `rate_limits` event, but with `primary`/`secondary` null (sometimes only a
+/// credits stub). Those must be skipped so we keep the last usable snapshot
+/// instead of showing "unavailable".
+fn codex_rate_limits_usable(limits: &Value) -> bool {
+    if limits.is_null() {
+        return false;
+    }
+    for key in ["primary", "secondary"] {
+        if limits
+            .get(key)
+            .filter(|block| !block.is_null())
+            .and_then(|block| block.get("used_percent"))
+            .and_then(Value::as_f64)
+            .is_some()
+        {
+            return true;
+        }
+    }
+    false
+}
 
-    read_tail(&newest, 512 * 1024)?
+/// Usable `rate_limits` payload from one session tail, newest line first.
+fn codex_rate_limits_from_session(path: &Path) -> Option<(Option<i64>, Value)> {
+    read_tail(path, 512 * 1024)?
         .lines()
         .rev()
         .filter(|line| line.contains("rate_limits"))
         .find_map(|line| {
             let value: Value = serde_json::from_str(line).ok()?;
             let limits = value.get("payload")?.get("rate_limits")?;
-            (!limits.is_null()).then(|| {
-                let at = value
-                    .get("timestamp")
-                    .and_then(Value::as_str)
-                    .and_then(parse_rfc3339_ms);
-                (at, limits.clone())
-            })
+            if !codex_rate_limits_usable(limits) {
+                return None;
+            }
+            let at = value
+                .get("timestamp")
+                .and_then(Value::as_str)
+                .and_then(parse_rfc3339_ms);
+            Some((at, limits.clone()))
         })
+}
+
+/// The newest *usable* `rate_limits` payload across Codex sessions, with the
+/// time the CLI wrote it. Prefer the session the index pass already found as
+/// latest so the common path stays cheap; only walk other sessions when that
+/// one has no meterable snapshot (typical once the account is exhausted and
+/// newer rollouts write null primary/secondary).
+fn latest_codex_rate_limits(
+    home: &Path,
+    latest_session: Option<&Path>,
+) -> Option<(Option<i64>, Value)> {
+    if let Some(path) = latest_session {
+        if let Some(found) = codex_rate_limits_from_session(path) {
+            return Some(found);
+        }
+    }
+
+    let mut sessions: Vec<(std::time::SystemTime, PathBuf)> =
+        crate::usage::sources::discover("codex", home)
+            .into_iter()
+            .filter_map(|path| {
+                if latest_session.is_some_and(|latest| latest == path.as_path()) {
+                    return None;
+                }
+                let modified = std::fs::metadata(&path).ok()?.modified().ok()?;
+                Some((modified, path))
+            })
+            .collect();
+    sessions.sort_by(|a, b| b.0.cmp(&a.0));
+
+    for (_, path) in sessions {
+        if let Some(found) = codex_rate_limits_from_session(&path) {
+            return Some(found);
+        }
+    }
+    None
 }
 
 /// Grok persists the same credit percentage shown by its `/usage` command in
@@ -1509,6 +1558,70 @@ mod tests {
         assert!((quota.limits[0].percent - 47.0).abs() < 1e-9);
         assert_eq!(quota.limits[0].resets_at, Some(1785621051 * 1000));
         assert_eq!(quota.limits[1].label, "5-hour limit");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn codex_skips_exhausted_null_limits_and_uses_prior_session() {
+        // After the account hits its ceiling, Codex still appends rate_limits
+        // events but with primary/secondary null. The card must keep the last
+        // usable reading (often 100%) instead of saying limits are unavailable.
+        let root = std::env::temp_dir().join(format!(
+            "duckweed-quota-exhausted-{}",
+            std::process::id()
+        ));
+        let dir = root.join(".codex/sessions/2026/07/26");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let usable = r#"{"timestamp":"2026-07-26T19:31:05.778Z","type":"event_msg","payload":{"type":"token_count","info":null,"rate_limits":{"primary":{"used_percent":100.0,"window_minutes":10080,"resets_at":1785621051},"secondary":null,"plan_type":"plus"}}}"#;
+        let empty = r#"{"timestamp":"2026-07-26T19:33:19.492Z","type":"event_msg","payload":{"type":"token_count","info":null,"rate_limits":{"limit_id":"premium","limit_name":null,"primary":null,"secondary":null,"credits":{"has_credits":false,"unlimited":false,"balance":"0"},"individual_limit":null,"spend_control_reached":null,"plan_type":null,"rate_limit_reached_type":null}}}"#;
+
+        let older = dir.join("rollout-2026-07-26T16-25-35-older.jsonl");
+        let newer = dir.join("rollout-2026-07-26T16-33-03-newer.jsonl");
+        std::fs::write(&older, format!("{usable}\n")).unwrap();
+        // Ensure the empty session is newer by mtime.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&newer, format!("{empty}\n")).unwrap();
+
+        let quota = reported_for("codex", &root).expect("codex quota from prior session");
+        assert_eq!(quota.source, "reported");
+        assert_eq!(quota.plan.as_deref(), Some("plus"));
+        assert_eq!(quota.limits.len(), 1);
+        assert!((quota.limits[0].percent - 100.0).abs() < 1e-9);
+        assert_eq!(quota.limits[0].label, "7-day limit");
+        assert_eq!(quota.limits[0].resets_at, Some(1785621051 * 1000));
+
+        // Prefer-path: even when the index hands us the empty newest file,
+        // fall back across sessions.
+        let quota = reported_for_with_codex_session("codex", &root, Some(&newer))
+            .expect("fallback from hinted empty session");
+        assert!((quota.limits[0].percent - 100.0).abs() < 1e-9);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn codex_skips_empty_rate_limits_in_the_same_session_tail() {
+        let root = std::env::temp_dir().join(format!(
+            "duckweed-quota-same-session-{}",
+            std::process::id()
+        ));
+        let dir = root.join(".codex/sessions/2026/07/26");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let usable = r#"{"timestamp":"2026-07-26T19:30:00.000Z","type":"event_msg","payload":{"type":"token_count","info":null,"rate_limits":{"primary":{"used_percent":88.0,"window_minutes":300,"resets_at":1785600000},"secondary":null,"plan_type":"plus"}}}"#;
+        let empty = r#"{"timestamp":"2026-07-26T19:33:00.000Z","type":"event_msg","payload":{"type":"token_count","info":null,"rate_limits":{"primary":null,"secondary":null,"plan_type":null}}}"#;
+        std::fs::write(
+            dir.join("rollout-same.jsonl"),
+            format!("{usable}\n{empty}\n"),
+        )
+        .unwrap();
+
+        let quota = reported_for("codex", &root).expect("codex quota");
+        assert_eq!(quota.limits.len(), 1);
+        assert!((quota.limits[0].percent - 88.0).abs() < 1e-9);
+        assert_eq!(quota.limits[0].label, "5-hour limit");
 
         let _ = std::fs::remove_dir_all(&root);
     }

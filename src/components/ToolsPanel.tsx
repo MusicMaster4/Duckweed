@@ -11,6 +11,7 @@ interface Props {
   onInsertPath: (path: string) => void;
   onOpenFolder: (path: string) => void;
   onBrowseProject: () => void;
+  onOpenFile: (path: string) => void;
 }
 
 export const TOOLS_MIN_WIDTH = 190;
@@ -48,6 +49,7 @@ export function ToolsPanel({
   onInsertPath,
   onOpenFolder,
   onBrowseProject,
+  onOpenFile,
 }: Props) {
   const [section, setSection] = useState<SectionId>("files");
   const [dragging, setDragging] = useState(false);
@@ -125,6 +127,7 @@ export function ToolsPanel({
             onInsertPath={onInsertPath}
             onOpenFolder={onOpenFolder}
             onBrowseProject={onBrowseProject}
+            onOpenFile={onOpenFile}
           />
         )}
       </div>

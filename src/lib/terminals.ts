@@ -34,6 +34,7 @@ import {
   parseAgentOsc777,
   type AgentKind,
 } from "./processActivity";
+import { buildCdCommand } from "./shellQuote";
 import { GREEN, terminalTheme } from "./theme";
 
 export interface TermMeta {
@@ -717,7 +718,9 @@ function create(id: string, opts: { cwd?: string | null; shell?: string | null }
     title: "shell",
     titleLocked: false,
     cwd: opts.cwd ?? "",
-    shellLabel: "",
+    // Prefer the spawn shell id until the backend returns a display label, so
+    // early `cd`s (open project / explorer) still pick the right quote rules.
+    shellLabel: opts.shell ?? "",
     exited: false,
     exitCode: null,
     cols: term.cols,
@@ -1332,7 +1335,10 @@ export function changeDirectory(id: string, path: string): void {
   const session = sessions.get(id);
   if (!session || session.exited) return;
 
-  const command = `cd "${path}"`;
+  // Quote for the pane's shell — double quotes still expand $(...) / `...` /
+  // $vars on PowerShell and POSIX, so a hostile folder name must not become a
+  // command just because the explorer opened it.
+  const command = buildCdCommand(path, session.shellLabel || session.title);
 
   if (session.ran) {
     submitCommand(id, command);

@@ -1,7 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { FileEditor } from "./FileEditor";
-import { confirmCloseRunning } from "../lib/confirmClose";
 import { listDir } from "../lib/ipc";
 import type { DirEntry, ProjectInfo } from "../lib/types";
 
@@ -13,6 +11,11 @@ interface Props {
   /** Take the focused shell to a folder. */
   onOpenFolder: (path: string) => void;
   onBrowseProject: () => void;
+  /**
+   * Open a file in the popup editor. Lives above this panel so tab switches
+   * and hiding the tools rail cannot silently discard a dirty buffer.
+   */
+  onOpenFile: (path: string) => void;
 }
 
 /** A level that has been asked for: its entries, or why they never arrived. */
@@ -53,25 +56,28 @@ const FileIcon = () => (
  * Ignored entries are listed but dimmed — the same call the editors make, and it
  * beats hiding files the shell can plainly see.
  */
-export function ProjectExplorer({ project, onInsertPath, onOpenFolder, onBrowseProject }: Props) {
+export function ProjectExplorer({
+  project,
+  onInsertPath,
+  onOpenFolder,
+  onBrowseProject,
+  onOpenFile,
+}: Props) {
   const root = project?.path ?? null;
 
   const [cache, setCache] = useState<Record<string, Load>>({});
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [selected, setSelected] = useState<string | null>(null);
-  /** File open in the popup editor, if any. */
-  const [openFile, setOpenFile] = useState<string | null>(null);
-  /** Whether the open editor has unsaved edits (used when switching files). */
-  const editorDirty = useRef(false);
   /** Levels being read right now, so the fetch effect never asks twice. */
   const inflight = useRef(new Set<string>());
 
   // A different project is a different tree; nothing about the old one survives.
+  // The popup editor is lifted out of this tree so a tab switch cannot wipe a
+  // dirty draft — only the explorer's expand/cache state resets here.
   useEffect(() => {
     inflight.current.clear();
     setCache({});
     setSelected(null);
-    setOpenFile(null);
     setExpanded(root ? new Set([root]) : new Set());
   }, [root]);
 
@@ -106,20 +112,6 @@ export function ProjectExplorer({ project, onInsertPath, onOpenFolder, onBrowseP
       return next;
     });
   }, []);
-
-  /** Open a file in the popup; confirm first if another dirty buffer is open. */
-  const openInEditor = useCallback(async (path: string) => {
-    if (openFile === path) return;
-    if (openFile && editorDirty.current) {
-      const ok = await confirmCloseRunning({
-        title: "Unsaved changes",
-        message: "The open file has unsaved edits. Discard them and open another?",
-        confirmLabel: "Discard",
-      });
-      if (!ok) return;
-    }
-    setOpenFile(path);
-  }, [openFile]);
 
   const rows = useMemo(() => {
     if (!root) return [];
@@ -219,7 +211,7 @@ export function ProjectExplorer({ project, onInsertPath, onOpenFolder, onBrowseP
                   if (row.entry.is_dir) {
                     toggle(row.entry.path);
                   } else {
-                    void openInEditor(row.entry.path);
+                    onOpenFile(row.entry.path);
                   }
                 }}
                 onDoubleClick={() =>
@@ -242,17 +234,6 @@ export function ProjectExplorer({ project, onInsertPath, onOpenFolder, onBrowseP
             ),
           )}
       </div>
-
-      {openFile && (
-        <FileEditor
-          key={openFile}
-          path={openFile}
-          onClose={() => setOpenFile(null)}
-          onDirtyChange={(dirty) => {
-            editorDirty.current = dirty;
-          }}
-        />
-      )}
     </>
   );
 }
