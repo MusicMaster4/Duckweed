@@ -10,6 +10,12 @@
 //! can estimate how long the remaining allowance lasts at the last hour's
 //! burn rate. A drop in utilization is treated as a window reset, not as
 //! "negative burn".
+//!
+//! An idle hour is not an answer, so when there is no recent burn we fall back
+//! to the average pace of the window so far — utilization divided by the time
+//! elapsed since the window opened. Every forecast says which of the two it
+//! came from, and is measured against the window's own reset: a limit that
+//! refills before it empties never runs out at all.
 
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Seek, SeekFrom};
@@ -40,6 +46,22 @@ const EXHAUSTED_REMAINING: f64 = 0.5;
 /// Burn rates smaller than this (percent per hour) are noise / idle.
 const MIN_BURN_PER_HOUR: f64 = 0.25;
 
+/// How one limit is trending, and where that number came from.
+#[derive(Clone, Debug, Serialize)]
+pub struct QuotaForecast {
+    /// Utilization points consumed per hour.
+    pub per_hour: f64,
+    /// `recent` = measured over the last hour of samples, `window` = average
+    /// since this window opened (used when nothing burned recently).
+    pub basis: String,
+    /// Epoch ms when this limit would reach 100% at `per_hour`. `Some(now)`
+    /// when already exhausted; `None` when the pace would never empty it.
+    pub runs_out_at: Option<i64>,
+    /// Utilization projected for the moment the window resets. Lets the UI
+    /// show how much of the bar is expected to be gone by then.
+    pub projected_percent: Option<f64>,
+}
+
 #[derive(Clone, Serialize)]
 pub struct QuotaLimit {
     pub id: String,
@@ -52,6 +74,12 @@ pub struct QuotaLimit {
     /// `percent`, `usd`, or another provider-native counter.
     pub unit: String,
     pub resets_at: Option<i64>,
+    /// Length of the quota window, when the provider implies one. With
+    /// `resets_at` this gives the elapsed time the average pace divides by.
+    pub window_ms: Option<i64>,
+    /// Filled in after the provider read; `None` when there is nothing to
+    /// project from yet.
+    pub forecast: Option<QuotaForecast>,
 }
 
 #[derive(Clone, Serialize)]
@@ -66,11 +94,6 @@ pub struct Quota {
     /// Why an official limit cannot be displayed.
     pub message: Option<String>,
     pub limits: Vec<QuotaLimit>,
-    /// Epoch ms when the first limit is expected to hit empty at the observed
-    /// last-hour burn rate. `Some(now)` when already exhausted.
-    pub available_until: Option<i64>,
-    /// Remaining quota with no positive burn observed in the lookback window.
-    pub estimate_idle: bool,
 }
 
 /// Build one card for every agent with at least one request in the selected
@@ -89,8 +112,6 @@ pub fn build(used_agents: &HashSet<&'static str>, home: &Path, history_path: &Pa
                 plan: None,
                 message: Some(unavailable_message(agent.id).into()),
                 limits: Vec::new(),
-                available_until: None,
-                estimate_idle: false,
             })
         })
         .collect();
@@ -153,12 +174,13 @@ fn save_history(path: &Path, history: &QuotaHistory) {
     }
 }
 
-/// Record the latest reading and fill `available_until` / `estimate_idle`.
+/// Record the latest reading, then give every limit its own forecast.
 fn apply_estimate(quota: &mut Quota, history: &mut QuotaHistory, now: i64) {
     record_samples(quota, history, now);
-    let (available_until, estimate_idle) = estimate_available_until(quota, history, now);
-    quota.available_until = available_until;
-    quota.estimate_idle = estimate_idle;
+    let agent = quota.agent.clone();
+    for limit in &mut quota.limits {
+        limit.forecast = forecast_for(&agent, limit, history, now);
+    }
 }
 
 fn record_samples(quota: &Quota, history: &mut QuotaHistory, now: i64) {
@@ -186,50 +208,75 @@ fn record_samples(quota: &Quota, history: &mut QuotaHistory, now: i64) {
     }
 }
 
-/// Per-agent: the soonest any actively burning limit would hit empty.
-fn estimate_available_until(
-    quota: &Quota,
+/// What happens to one limit next: when it would empty, and where it lands by
+/// the time its window resets.
+///
+/// The recent burn rate answers "am I about to lose this session"; the window
+/// average answers "how am I doing overall" when nothing burned in the last
+/// hour. Preferring the former keeps an active session's forecast responsive,
+/// and falling back to the latter means an idle card still says something.
+fn forecast_for(
+    agent: &str,
+    limit: &QuotaLimit,
     history: &QuotaHistory,
     now: i64,
-) -> (Option<i64>, bool) {
-    let mut any_remaining = false;
-    let mut any_burn = false;
-    let mut soonest: Option<i64> = None;
-
-    for limit in &quota.limits {
-        let remaining = (100.0 - limit.percent).max(0.0);
-        if remaining <= EXHAUSTED_REMAINING {
-            return (Some(now), false);
-        }
-        any_remaining = true;
-
-        let Some(burn_per_ms) = burn_rate_per_ms(quota, limit, history, now) else {
-            continue;
-        };
-        if burn_per_ms <= 0.0 {
-            continue;
-        }
-        any_burn = true;
-        let eta_ms = (remaining / burn_per_ms).ceil() as i64;
-        let until = now.saturating_add(eta_ms.max(0));
-        soonest = Some(match soonest {
-            Some(other) => other.min(until),
-            None => until,
+) -> Option<QuotaForecast> {
+    let remaining = (100.0 - limit.percent).max(0.0);
+    if remaining <= EXHAUSTED_REMAINING {
+        return Some(QuotaForecast {
+            per_hour: 0.0,
+            basis: "exhausted".into(),
+            runs_out_at: Some(now),
+            projected_percent: Some(100.0),
         });
     }
 
-    if let Some(until) = soonest {
-        (Some(until), false)
-    } else if any_remaining && !any_burn {
-        (None, true)
-    } else {
-        (None, false)
+    let recent = burn_rate_per_ms(agent, limit, history, now)
+        .map(|per_ms| per_ms * 3_600_000.0)
+        .filter(|per_hour| *per_hour > 0.0);
+    let (per_hour, basis) = match recent {
+        Some(per_hour) => (per_hour, "recent"),
+        None => (window_average_per_hour(limit, now)?, "window"),
+    };
+
+    let runs_out_at = (per_hour > 0.0).then(|| {
+        let eta_ms = (remaining / per_hour * 3_600_000.0).ceil() as i64;
+        now.saturating_add(eta_ms.max(0))
+    });
+    let projected_percent = limit.resets_at.map(|resets| {
+        let hours = (resets - now).max(0) as f64 / 3_600_000.0;
+        limit.percent + per_hour * hours
+    });
+
+    Some(QuotaForecast {
+        per_hour,
+        basis: basis.into(),
+        runs_out_at,
+        projected_percent,
+    })
+}
+
+/// Points-per-hour averaged over the part of the window already elapsed.
+///
+/// Needs both ends of the window: `resets_at` says when it closes and
+/// `window_ms` how long it runs, so the difference is how long the recorded
+/// utilization took to accumulate.
+fn window_average_per_hour(limit: &QuotaLimit, now: i64) -> Option<f64> {
+    if limit.percent <= 0.0 {
+        return None;
     }
+    let elapsed = limit.window_ms? - (limit.resets_at? - now);
+    if elapsed < MIN_SPAN_MS {
+        // Too early in the window for the average to mean anything.
+        return None;
+    }
+    let per_hour = limit.percent / (elapsed as f64 / 3_600_000.0);
+    (per_hour >= MIN_BURN_PER_HOUR).then_some(per_hour)
 }
 
 /// Percent-per-ms burn from a baseline sample ~1h ago, ignoring post-reset noise.
 fn burn_rate_per_ms(
-    quota: &Quota,
+    agent: &str,
     limit: &QuotaLimit,
     history: &QuotaHistory,
     now: i64,
@@ -238,7 +285,7 @@ fn burn_rate_per_ms(
         .samples
         .iter()
         .filter(|sample| {
-            sample.agent == quota.agent
+            sample.agent == agent
                 && sample.limit_id == limit.id
                 && sample.at <= now
                 && now - sample.at <= LOOKBACK_MS + MIN_SPAN_MS
@@ -406,24 +453,43 @@ fn epoch_ms(value: i64) -> i64 {
 }
 
 fn claude_quota_from_payload(payload: &Value, plan: Option<String>) -> Option<Quota> {
+    const FIVE_HOUR: i64 = 5 * 60 * 60 * 1000;
+    const SEVEN_DAY: i64 = 7 * 24 * 60 * 60 * 1000;
+
     let mut limits = Vec::new();
-    for (key, id, label) in [
-        ("five_hour", "five-hour", "5-hour limit"),
-        ("seven_day", "seven-day", "7-day limit"),
+    for (key, id, label, window) in [
+        ("five_hour", "five-hour", "5-hour limit", Some(FIVE_HOUR)),
+        ("seven_day", "seven-day", "7-day limit", Some(SEVEN_DAY)),
         (
             "seven_day_oauth_apps",
             "seven-day-oauth-apps",
             "7-day OAuth apps",
+            Some(SEVEN_DAY),
         ),
-        ("seven_day_opus", "seven-day-opus", "7-day Opus"),
-        ("seven_day_sonnet", "seven-day-sonnet", "7-day Sonnet"),
-        ("seven_day_cowork", "seven-day-cowork", "7-day Cowork"),
-        ("iguana_necktie", "iguana-necktie", "Iguana Necktie"),
+        (
+            "seven_day_opus",
+            "seven-day-opus",
+            "7-day Opus",
+            Some(SEVEN_DAY),
+        ),
+        (
+            "seven_day_sonnet",
+            "seven-day-sonnet",
+            "7-day Sonnet",
+            Some(SEVEN_DAY),
+        ),
+        (
+            "seven_day_cowork",
+            "seven-day-cowork",
+            "7-day Cowork",
+            Some(SEVEN_DAY),
+        ),
+        ("iguana_necktie", "iguana-necktie", "Iguana Necktie", None),
     ] {
-        let Some(window) = payload.get(key).filter(|value| !value.is_null()) else {
+        let Some(reported) = payload.get(key).filter(|value| !value.is_null()) else {
             continue;
         };
-        let Some(percent) = window.get("utilization").and_then(Value::as_f64) else {
+        let Some(percent) = reported.get("utilization").and_then(Value::as_f64) else {
             continue;
         };
         limits.push(QuotaLimit {
@@ -433,10 +499,12 @@ fn claude_quota_from_payload(payload: &Value, plan: Option<String>) -> Option<Qu
             limit: Some(100.0),
             percent,
             unit: "percent".into(),
-            resets_at: window
+            resets_at: reported
                 .get("resets_at")
                 .and_then(Value::as_str)
                 .and_then(parse_rfc3339_ms),
+            window_ms: window,
+            forecast: None,
         });
     }
     if limits.is_empty() {
@@ -449,8 +517,6 @@ fn claude_quota_from_payload(payload: &Value, plan: Option<String>) -> Option<Qu
         plan,
         message: None,
         limits,
-        available_until: None,
-        estimate_idle: false,
     })
 }
 
@@ -490,6 +556,8 @@ fn codex_quota(home: &Path) -> Option<Quota> {
                 .get("resets_at")
                 .and_then(Value::as_i64)
                 .map(|seconds| seconds * 1000),
+            window_ms: (minutes > 0).then(|| minutes * 60 * 1000),
+            forecast: None,
         });
     }
     if limits.is_empty() {
@@ -502,8 +570,6 @@ fn codex_quota(home: &Path) -> Option<Quota> {
         plan,
         message: None,
         limits,
-        available_until: None,
-        estimate_idle: false,
     })
 }
 
@@ -545,9 +611,9 @@ fn grok_quota(home: &Path) -> Option<Quota> {
             percent,
             unit: "percent".into(),
             resets_at,
+            window_ms: period_window_ms(kind),
+            forecast: None,
         }],
-        available_until: None,
-        estimate_idle: false,
     })
 }
 
@@ -563,6 +629,17 @@ fn period_name(kind: &str) -> &'static str {
         "USAGE_PERIOD_TYPE_MONTHLY" => "Monthly credit limit",
         "USAGE_PERIOD_TYPE_WEEKLY" => "Weekly credit limit",
         _ => "Credit limit",
+    }
+}
+
+/// Grok reports the period kind rather than its length; the names are fixed.
+fn period_window_ms(kind: &str) -> Option<i64> {
+    const DAY: i64 = 24 * 60 * 60 * 1000;
+    match kind {
+        "USAGE_PERIOD_TYPE_DAILY" => Some(DAY),
+        "USAGE_PERIOD_TYPE_WEEKLY" => Some(7 * DAY),
+        "USAGE_PERIOD_TYPE_MONTHLY" => Some(30 * DAY),
+        _ => None,
     }
 }
 
@@ -663,11 +740,21 @@ mod tests {
                     percent,
                     unit: "percent".into(),
                     resets_at: None,
+                    window_ms: None,
+                    forecast: None,
                 })
                 .collect(),
-            available_until: None,
-            estimate_idle: false,
         }
+    }
+
+    /// Soonest empty across the card's limits — the old card-level headline,
+    /// kept here so the per-limit forecasts stay comparable to it.
+    fn soonest_runs_out(quota: &Quota) -> Option<i64> {
+        quota
+            .limits
+            .iter()
+            .filter_map(|limit| limit.forecast.as_ref()?.runs_out_at)
+            .min()
     }
 
     #[test]
@@ -693,8 +780,11 @@ mod tests {
         // week: 10% → 12% in 1h = 2%/h, remaining 88% → 44h
         let mut quota = sample_quota("claude", vec![("five-hour", 90.0), ("seven-day", 12.0)]);
         apply_estimate(&mut quota, &mut history, now);
-        assert!(!quota.estimate_idle);
-        let until = quota.available_until.expect("eta");
+        assert!(quota.limits.iter().all(|limit| limit
+            .forecast
+            .as_ref()
+            .is_some_and(|forecast| forecast.basis == "recent")));
+        let until = soonest_runs_out(&quota).expect("eta");
         let eta_min = (until - now) as f64 / 60_000.0;
         assert!(
             (eta_min - 15.0).abs() < 1.0,
@@ -724,7 +814,7 @@ mod tests {
         // 5h barely moved; week 90→99 = 9%/h, remaining 1% → ~6.7 min
         let mut quota = sample_quota("claude", vec![("five-hour", 2.0), ("seven-day", 99.0)]);
         apply_estimate(&mut quota, &mut history, now);
-        let until = quota.available_until.expect("eta");
+        let until = soonest_runs_out(&quota).expect("eta");
         let eta_min = (until - now) as f64 / 60_000.0;
         assert!(
             (eta_min - (1.0 / 9.0) * 60.0).abs() < 1.0,
@@ -756,7 +846,7 @@ mod tests {
         let mut quota = sample_quota("claude", vec![("five-hour", 10.0)]);
         apply_estimate(&mut quota, &mut history, now);
         // 0 → 10% over 30 min = 20%/h, remaining 90% → 4.5h
-        let until = quota.available_until.expect("post-reset eta");
+        let until = soonest_runs_out(&quota).expect("post-reset eta");
         let eta_h = (until - now) as f64 / 3_600_000.0;
         assert!(
             (eta_h - 4.5).abs() < 0.2,
@@ -765,17 +855,22 @@ mod tests {
     }
 
     #[test]
-    fn exhausted_limit_reports_available_until_now() {
+    fn exhausted_limit_runs_out_now() {
         let now = 1_700_000_000_000i64;
         let mut history = QuotaHistory::default();
         let mut quota = sample_quota("claude", vec![("five-hour", 100.0), ("seven-day", 40.0)]);
         apply_estimate(&mut quota, &mut history, now);
-        assert_eq!(quota.available_until, Some(now));
-        assert!(!quota.estimate_idle);
+        let spent = quota.limits[0].forecast.as_ref().expect("forecast");
+        assert_eq!(spent.basis, "exhausted");
+        assert_eq!(spent.runs_out_at, Some(now));
+        // The week is untouched by the 5-hour window running dry.
+        assert!(quota.limits[1].forecast.is_none());
     }
 
+    /// The old behaviour here was a card that just said "stable". With a window
+    /// length in hand, an idle limit still reports the pace it was filled at.
     #[test]
-    fn flat_history_is_idle_not_infinite() {
+    fn idle_limit_falls_back_to_the_window_average() {
         let now = 1_700_000_000_000i64;
         let mut history = QuotaHistory {
             samples: vec![QuotaSample {
@@ -786,9 +881,42 @@ mod tests {
             }],
         };
         let mut quota = sample_quota("claude", vec![("five-hour", 40.0)]);
+        // 4 of the 5 hours elapsed: 40% in 4h = 10%/h.
+        quota.limits[0].window_ms = Some(5 * 60 * 60 * 1000);
+        quota.limits[0].resets_at = Some(now + 60 * 60 * 1000);
         apply_estimate(&mut quota, &mut history, now);
-        assert!(quota.estimate_idle);
-        assert!(quota.available_until.is_none());
+
+        let forecast = quota.limits[0].forecast.as_ref().expect("forecast");
+        assert_eq!(forecast.basis, "window");
+        assert!((forecast.per_hour - 10.0).abs() < 0.01, "{forecast:?}");
+        // 60% left at 10%/h is 6h, well past the reset an hour from now, so the
+        // window refills first and the projection stays under the cap.
+        let eta_h = (forecast.runs_out_at.expect("eta") - now) as f64 / 3_600_000.0;
+        assert!((eta_h - 6.0).abs() < 0.05, "expected ~6h, got {eta_h}");
+        assert!((forecast.projected_percent.expect("projection") - 50.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_flat_untouched_window_has_nothing_to_project() {
+        let now = 1_700_000_000_000i64;
+        let mut history = QuotaHistory::default();
+        let mut quota = sample_quota("claude", vec![("five-hour", 0.0)]);
+        quota.limits[0].window_ms = Some(5 * 60 * 60 * 1000);
+        quota.limits[0].resets_at = Some(now + 4 * 60 * 60 * 1000);
+        apply_estimate(&mut quota, &mut history, now);
+        assert!(quota.limits[0].forecast.is_none());
+    }
+
+    #[test]
+    fn a_just_opened_window_does_not_extrapolate_from_a_minute_of_use() {
+        let now = 1_700_000_000_000i64;
+        let mut history = QuotaHistory::default();
+        let mut quota = sample_quota("claude", vec![("five-hour", 8.0)]);
+        quota.limits[0].window_ms = Some(5 * 60 * 60 * 1000);
+        // Only 5 minutes in — below MIN_SPAN_MS.
+        quota.limits[0].resets_at = Some(now + 5 * 60 * 60 * 1000 - 5 * 60 * 1000);
+        apply_estimate(&mut quota, &mut history, now);
+        assert!(quota.limits[0].forecast.is_none());
     }
 
     #[test]

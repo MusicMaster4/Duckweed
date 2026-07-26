@@ -8,9 +8,9 @@ import {
   agentColor,
   dayFull,
   dayTick,
+  describeForecast,
   formatBytes,
   formatExact,
-  formatAvailableUntil,
   formatQuotaValue,
   formatTokens,
   formatUsd,
@@ -70,6 +70,13 @@ export function UsagePanel() {
     return () => {
       void stop.then((off) => off());
     };
+  }, []);
+
+  // Reset countdowns and burn forecasts are read against the wall clock, so
+  // they keep ticking between scans instead of freezing at the last fetch.
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 30_000);
+    return () => clearInterval(timer);
   }, []);
 
   const { days, metric } = settings;
@@ -355,7 +362,8 @@ export function UsagePanel() {
         <h2>Quota management</h2>
         <p className="usage-sub">
           Provider-reported limits for agents used in the selected period. Duckweed never invents
-          a quota from transcript totals.
+          a quota from transcript totals. The line under each bar projects that limit against its
+          own reset, from your measured burn rate.
         </p>
         {snapshot.quotas.length > 0 ? (
           <div className="usage-quota-grid">
@@ -369,36 +377,15 @@ export function UsagePanel() {
                     <i style={{ background: agentColor(quota.agent) }} aria-hidden="true" />
                     {quota.label}
                   </span>
-                  {quota.source === "reported" && quota.available_until != null && (
-                    <div
-                      className={`usage-quota-eta ${
-                        quota.available_until <= now + 30_000 ? "is-critical" : ""
-                      }`}
-                    >
-                      <span className="usage-quota-eta-label">Limits available until</span>
-                      <strong>{formatAvailableUntil(quota.available_until, now)}</strong>
-                      <small>Based on last hour of use</small>
-                    </div>
+                  {quota.plan && (
+                    <span className="usage-quota-plan" title={`Plan: ${quota.plan}`}>
+                      {quota.plan}
+                    </span>
                   )}
-                  {quota.source === "reported" &&
-                    quota.available_until == null &&
-                    quota.estimate_idle &&
-                    quota.limits.length > 0 && (
-                      <div className="usage-quota-eta is-idle">
-                        <span className="usage-quota-eta-label">Limits available until</span>
-                        <strong>stable</strong>
-                        <small>No burn in the last hour</small>
-                      </div>
-                    )}
                 </header>
-                {quota.plan && (
-                  <div className="usage-quota-plan">
-                    <span>Plan</span>
-                    <strong>{quota.plan}</strong>
-                  </div>
-                )}
                 {quota.limits.map((limit) => {
                   const remaining = quotaRemaining(limit);
+                  const forecast = describeForecast(limit, now);
                   return (
                     <div key={limit.id} className="usage-quota-row">
                       <Meter
@@ -409,6 +396,11 @@ export function UsagePanel() {
                           ? { hint: `resets ${untilReset(limit.resets_at, now)}` }
                           : {})}
                       />
+                      <p className={`usage-quota-forecast is-${forecast.tone}`}>
+                        <i aria-hidden="true" />
+                        <span>{forecast.text}</span>
+                        {forecast.detail && <small>{forecast.detail}</small>}
+                      </p>
                     </div>
                   );
                 })}

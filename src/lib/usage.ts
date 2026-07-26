@@ -55,6 +55,21 @@ export interface ModelSummary extends Totals {
   priced: boolean;
 }
 
+/** Where a limit is heading, measured against its own reset. */
+export interface QuotaForecast {
+  /** Utilization points consumed per hour. */
+  per_hour: number;
+  /**
+   * `recent` from the last hour of samples, `window` from the average since
+   * the window opened, `exhausted` when there is nothing left to burn.
+   */
+  basis: "recent" | "window" | "exhausted";
+  /** Epoch ms this limit would hit 100%; null when the pace never gets there. */
+  runs_out_at: number | null;
+  /** Utilization projected for the moment the window resets. */
+  projected_percent: number | null;
+}
+
 export interface QuotaLimit {
   id: string;
   label: string;
@@ -64,6 +79,10 @@ export interface QuotaLimit {
   percent: number;
   unit: "tokens" | "usd" | "percent";
   resets_at: number | null;
+  /** Length of the quota window, when the provider implies one. */
+  window_ms: number | null;
+  /** Null when there is not enough history or window to project from. */
+  forecast: QuotaForecast | null;
 }
 
 export interface Quota {
@@ -75,13 +94,6 @@ export interface Quota {
   /** Why a trustworthy provider limit cannot be shown. */
   message: string | null;
   limits: QuotaLimit[];
-  /**
-   * Epoch ms when the first limit is expected to empty at the last-hour burn
-   * rate. Equal to "now" when already exhausted; null when unknown/idle.
-   */
-  available_until: number | null;
-  /** Remaining quota, but no positive burn observed in the last hour. */
-  estimate_idle: boolean;
 }
 
 export interface ScanStats {
@@ -272,19 +284,23 @@ function parseDay(date: string): Date | null {
   return new Date(year, month - 1, day);
 }
 
+/** `3h 20m` / `2d` — a duration, at the precision people actually plan by. */
+export function formatSpan(ms: number): string {
+  const minutes = Math.round(Math.max(0, ms) / 60000);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) {
+    const rest = minutes % 60;
+    return rest ? `${hours}h ${rest}m` : `${hours}h`;
+  }
+  return `${Math.round(hours / 24)}d`;
+}
+
 /** `in 3h 20m` / `in 2d` — how long until a quota window resets. */
 export function untilReset(at: number, now: number): string {
   const ms = at - now;
   if (ms <= 0) return "resetting";
-  const minutes = Math.round(ms / 60000);
-  if (minutes < 60) return `in ${minutes}m`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) {
-    const rest = minutes % 60;
-    return rest ? `in ${hours}h ${rest}m` : `in ${hours}h`;
-  }
-  const days = Math.round(hours / 24);
-  return `in ${days}d`;
+  return `in ${formatSpan(ms)}`;
 }
 
 /** `4m ago` / `yesterday` — when an agent last ran. */
@@ -334,10 +350,10 @@ export function quotaRemaining(
 }
 
 /**
- * Headline for the card-level ETA: absolute clock time when limits would first
- * run out at the observed last-hour burn rate.
+ * When a limit is expected to empty, as a clock time rather than a countdown:
+ * "4:40 PM" is something you can plan a session around, "in 2h 37m" is not.
  */
-export function formatAvailableUntil(at: number, now: number): string {
+export function formatEtaClock(at: number, now: number): string {
   if (at <= now + 30_000) return "now";
   const date = new Date(at);
   const clock = date.toLocaleTimeString(undefined, {
@@ -362,6 +378,86 @@ export function formatAvailableUntil(at: number, now: number): string {
     day: "numeric",
   });
   return `${day}, ${clock}`;
+}
+
+/** `21%/h` — a burn rate, kept to one significant decimal while it is small. */
+export function formatPace(perHour: number): string {
+  if (perHour >= 10) return `${Math.round(perHour)}%/h`;
+  if (perHour >= 1) return `${perHour.toFixed(1).replace(/\.0$/, "")}%/h`;
+  return `${perHour.toFixed(1)}%/h`;
+}
+
+/** Severity of a forecast, so the colour is never the only signal. */
+export type ForecastTone = "critical" | "warning" | "ok" | "muted";
+
+export interface ForecastCopy {
+  tone: ForecastTone;
+  /** The verdict — what actually happens to this limit next. */
+  text: string;
+  /** Where the number came from; shown dimmed after the verdict. */
+  detail: string | null;
+}
+
+/**
+ * The line under a quota bar.
+ *
+ * A limit does not simply "run out" — it races its own reset, and whichever
+ * lands first is the only thing worth saying. So the verdict is always one of:
+ * you run dry at a specific time, or the window refills before you get there.
+ * The pace that produced it is spelled out, including whether it was measured
+ * from live burn or averaged over the window, because an extrapolation from an
+ * idle hour deserves to be read with more suspicion than a live one.
+ */
+export function describeForecast(limit: QuotaLimit, now: number): ForecastCopy {
+  const { forecast, resets_at: resets } = limit;
+  const backAt = resets != null ? `back ${untilReset(resets, now)}` : null;
+
+  if (forecast?.basis === "exhausted" || limit.percent >= 99.5) {
+    return { tone: "critical", text: "Spent for this window", detail: backAt };
+  }
+
+  if (!forecast) {
+    // Either nothing has been used yet, or the window is too young to average.
+    if (limit.percent <= 0) {
+      return {
+        tone: "ok",
+        text: "Untouched this window",
+        detail: resets != null ? `resets ${untilReset(resets, now)}` : null,
+      };
+    }
+    return {
+      tone: "muted",
+      text: `${Math.round(limit.percent)}% used so far`,
+      detail: "not enough history to project a pace",
+    };
+  }
+
+  const live = forecast.basis === "recent";
+  const pace = live
+    ? `burning ${formatPace(forecast.per_hour)}`
+    : `${formatPace(forecast.per_hour)} average, idle this hour`;
+
+  const runsOut = forecast.runs_out_at;
+  if (runsOut != null && (resets == null || runsOut < resets)) {
+    const lead = resets == null ? "" : `, ${formatSpan(resets - runsOut)} before reset`;
+    return {
+      tone: runsOut - now <= 3_600_000 ? "critical" : "warning",
+      text: `${live ? "Runs out" : "Would run out"} ${formatEtaClock(runsOut, now)}${lead}`,
+      detail: pace,
+    };
+  }
+
+  // The window refills first. Say how close it gets, so a limit creeping
+  // toward the cap still reads differently from one barely touched.
+  const projected = forecast.projected_percent;
+  if (projected == null) {
+    return { tone: "ok", text: "Not on pace to run out", detail: pace };
+  }
+  return {
+    tone: projected >= 90 ? "warning" : "ok",
+    text: `Resets first, at about ${Math.round(projected)}% used`,
+    detail: pace,
+  };
 }
 
 // ---------------------------------------------------------------- settings

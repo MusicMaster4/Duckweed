@@ -4220,7 +4220,7 @@ body.is-resizing * {
 
 .usage-quota > header {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: 12px;
 }
@@ -4240,67 +4240,76 @@ body.is-resizing * {
   border-radius: 2px;
 }
 
-.usage-quota-eta {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 1px;
-  text-align: right;
-  max-width: 58%;
-  min-width: 0;
-}
-
-.usage-quota-eta-label {
-  color: var(--text-faint);
-  font-size: 9.5px;
-  letter-spacing: 0.02em;
-  text-transform: uppercase;
-}
-
-.usage-quota-eta strong {
-  color: var(--text);
-  font-size: 12.5px;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-  line-height: 1.2;
-}
-
-.usage-quota-eta small {
-  color: var(--text-faint);
-  font-size: 10px;
-  line-height: 1.2;
-}
-
-.usage-quota-eta.is-critical strong {
-  color: var(--danger, #f07178);
-}
-
-.usage-quota-eta.is-idle strong {
-  color: var(--text-muted, var(--text-faint));
-  font-weight: 500;
-}
-
+/* The plan sits with the agent name; the forecast lives under its own bar. */
 .usage-quota-plan {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  font-size: 11px;
-}
-
-.usage-quota-plan span {
-  color: var(--text-faint);
-}
-
-.usage-quota-plan strong {
-  color: var(--text);
+  flex: none;
+  padding: 2px 8px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-dim);
+  font-size: 10.5px;
   font-weight: 600;
   text-transform: capitalize;
+  white-space: nowrap;
 }
 
 .usage-quota-row {
   display: flex;
   flex-direction: column;
   gap: 5px;
+}
+
+/* One line per limit: what happens next, then the pace it was read from. */
+.usage-quota-forecast {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 3px 6px;
+  margin: 1px 0 0;
+  color: var(--text-dim);
+  font-size: 10.5px;
+  line-height: 1.4;
+}
+
+.usage-quota-forecast > i {
+  flex: none;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentcolor;
+  transform: translateY(-1px);
+}
+
+.usage-quota-forecast > span {
+  font-variant-numeric: tabular-nums;
+}
+
+.usage-quota-forecast small {
+  color: var(--text-faint);
+  font-size: 10px;
+}
+
+.usage-quota-forecast.is-critical {
+  color: #f07178;
+}
+
+/* Severity rides on the dot and the wording; only an empty window shouts. */
+.usage-quota-forecast.is-warning > i {
+  background: #e8a33d;
+}
+
+.usage-quota-forecast.is-ok > i {
+  background: #0ca30c;
+}
+
+.usage-quota-forecast.is-muted {
+  color: var(--text-faint);
+}
+
+.usage-quota-forecast.is-muted > i {
+  background: var(--text-faint);
+  opacity: 0.6;
 }
 
 .viz-meter-head {

@@ -65,17 +65,24 @@ describe("usage formatting", () => {
     ).toBe(0);
   });
 
-  test("available-until formats clocks relative to today", () => {
+  test("run-out clocks read relative to today", () => {
     const now = new Date(2026, 6, 26, 14, 0, 0).getTime(); // local Jul 26 2pm
-    expect(usage.formatAvailableUntil(now, now)).toBe("now");
-    expect(usage.formatAvailableUntil(now + 60_000, now)).not.toBe("now");
+    expect(usage.formatEtaClock(now, now)).toBe("now");
+    expect(usage.formatEtaClock(now + 60_000, now)).not.toBe("now");
     // Same calendar day → clock only
     const sameDay = new Date(2026, 6, 26, 18, 30, 0).getTime();
-    const same = usage.formatAvailableUntil(sameDay, now);
+    const same = usage.formatEtaClock(sameDay, now);
     expect(same.toLowerCase()).not.toContain("tomorrow");
     // Next day
     const tomorrow = new Date(2026, 6, 27, 9, 15, 0).getTime();
-    expect(usage.formatAvailableUntil(tomorrow, now).toLowerCase()).toContain("tomorrow");
+    expect(usage.formatEtaClock(tomorrow, now).toLowerCase()).toContain("tomorrow");
+  });
+
+  test("burn rates keep a decimal only while they are small", () => {
+    expect(usage.formatPace(21.4)).toBe("21%/h");
+    expect(usage.formatPace(2.5)).toBe("2.5%/h");
+    expect(usage.formatPace(3.04)).toBe("3%/h");
+    expect(usage.formatPace(0.4)).toBe("0.4%/h");
   });
 
   test("reset and last-used times read as prose", () => {
@@ -88,6 +95,129 @@ describe("usage formatting", () => {
     expect(usage.relativeTime(now, now)).toBe("just now");
     expect(usage.relativeTime(now - 4 * 60_000, now)).toBe("4m ago");
     expect(usage.relativeTime(now - 26 * 3_600_000, now)).toBe("yesterday");
+  });
+});
+
+describe("quota forecasts", () => {
+  const NOW = new Date(2026, 6, 26, 14, 0, 0).getTime();
+  const HOUR = 3_600_000;
+  const limit = (percent, resetsInHours, forecast = null) => ({
+    id: "five-hour",
+    label: "5-hour limit",
+    used: percent,
+    limit: 100,
+    percent,
+    unit: "percent",
+    resets_at: resetsInHours == null ? null : NOW + resetsInHours * HOUR,
+    window_ms: 5 * HOUR,
+    forecast,
+  });
+
+  test("a spent window says when it comes back, not how fast it went", () => {
+    const copy = usage.describeForecast(
+      limit(100, 2, { per_hour: 0, basis: "exhausted", runs_out_at: NOW, projected_percent: 100 }),
+      NOW,
+    );
+    expect(copy.tone).toBe("critical");
+    expect(copy.text).toBe("Spent for this window");
+    expect(copy.detail).toBe("back in 2h");
+  });
+
+  test("a limit that empties before its reset reports the clock and the gap", () => {
+    // 40% left, burning 20%/h → 2h, an hour before the 3h reset.
+    const copy = usage.describeForecast(
+      limit(60, 3, {
+        per_hour: 20,
+        basis: "recent",
+        runs_out_at: NOW + 2 * HOUR,
+        projected_percent: 120,
+      }),
+      NOW,
+    );
+    expect(copy.tone).toBe("warning");
+    expect(copy.text).toContain("Runs out");
+    expect(copy.text).toContain("1h before reset");
+    expect(copy.detail).toBe("burning 20%/h");
+  });
+
+  test("under an hour of allowance left is critical, not merely a warning", () => {
+    const copy = usage.describeForecast(
+      limit(90, 4, {
+        per_hour: 20,
+        basis: "recent",
+        runs_out_at: NOW + 30 * 60_000,
+        projected_percent: 170,
+      }),
+      NOW,
+    );
+    expect(copy.tone).toBe("critical");
+  });
+
+  test("a window that refills first says so, with where it lands", () => {
+    const copy = usage.describeForecast(
+      limit(50, 1, {
+        per_hour: 10,
+        basis: "recent",
+        runs_out_at: NOW + 5 * HOUR,
+        projected_percent: 60,
+      }),
+      NOW,
+    );
+    expect(copy.tone).toBe("ok");
+    expect(copy.text).toBe("Resets first, at about 60% used");
+  });
+
+  test("a projection landing near the cap is flagged even though it holds", () => {
+    const copy = usage.describeForecast(
+      limit(80, 1, {
+        per_hour: 15,
+        basis: "recent",
+        runs_out_at: NOW + 80 * 60_000,
+        projected_percent: 95,
+      }),
+      NOW,
+    );
+    expect(copy.tone).toBe("warning");
+    expect(copy.text).toContain("95% used");
+  });
+
+  // The old panel printed "stable" here, which told you nothing at all.
+  test("an idle hour still reports the window's own average pace", () => {
+    const copy = usage.describeForecast(
+      limit(40, 1, {
+        per_hour: 10,
+        basis: "window",
+        runs_out_at: NOW + 6 * HOUR,
+        projected_percent: 50,
+      }),
+      NOW,
+    );
+    expect(copy.detail).toBe("10%/h average, idle this hour");
+    expect(copy.text).toContain("Resets first");
+  });
+
+  test("an averaged run-out is hedged, a live one is not", () => {
+    const averaged = usage.describeForecast(
+      limit(70, 4, {
+        per_hour: 30,
+        basis: "window",
+        runs_out_at: NOW + HOUR,
+        projected_percent: 190,
+      }),
+      NOW,
+    );
+    expect(averaged.text.startsWith("Would run out")).toBe(true);
+  });
+
+  test("nothing to project from falls back to plain facts", () => {
+    const untouched = usage.describeForecast(limit(0, 3), NOW);
+    expect(untouched.text).toBe("Untouched this window");
+    expect(untouched.detail).toBe("resets in 3h");
+
+    const young = usage.describeForecast(limit(8, 4.9), NOW);
+    expect(young.tone).toBe("muted");
+    expect(young.text).toBe("8% used so far");
+    expect(young.detail).toBe("not enough history to project a pace");
   });
 });
 
