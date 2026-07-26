@@ -40,6 +40,8 @@ export interface TermMeta {
 
 interface Session extends TermMeta {
   id: string;
+  /** A user-supplied title stays put instead of being replaced by OSC 0/2. */
+  titleLocked: boolean;
   term: Terminal;
   fit: FitAddon;
   search: SearchAddon;
@@ -112,6 +114,12 @@ let fontSize = 13.5;
 let highlightEnabled = true;
 const FONT_FAMILY =
   '"CaskaydiaCove Nerd Font", "Cascadia Code", "JetBrains Mono", "Fira Code", Consolas, "Courier New", monospace';
+/**
+ * One device pixel of breathing room prevents bold ANSI glyphs from painting
+ * into the next cell. xterm floors the measured character advance for WebGL,
+ * so at fractional font sizes the ink can otherwise be wider than the cell.
+ */
+const LETTER_SPACING = 1;
 
 const measureCanvas = document.createElement("canvas").getContext("2d");
 
@@ -192,6 +200,10 @@ function syncFontCss(): void {
   // cell grid, so the user-facing number is the right thing to show there.
   root.style.setProperty("--terminal-font-size", `${fontSize}px`);
   root.style.setProperty("--terminal-line-height", `${Math.round(fontSize * 1.63)}px`);
+  root.style.setProperty(
+    "--terminal-letter-spacing",
+    `${LETTER_SPACING / (window.devicePixelRatio || 1)}px`,
+  );
 }
 
 /** Size every terminal for the current font size and pixel ratio. */
@@ -267,6 +279,17 @@ export function getMeta(id: string): TermMeta | null {
     rows: s.rows,
     ran: s.ran,
   };
+}
+
+/** Give a terminal a stable user-facing name. */
+export function rename(id: string, title: string): void {
+  const session = sessions.get(id);
+  const clean = title.trim();
+  if (!session || !clean) return;
+  session.titleLocked = true;
+  if (session.title === clean) return;
+  session.title = clean;
+  notify();
 }
 
 /**
@@ -474,7 +497,7 @@ function create(id: string, opts: { cwd?: string | null; shell?: string | null }
     fontFamily: FONT_FAMILY,
     fontSize: metrics.fontSize,
     lineHeight: metrics.lineHeight,
-    letterSpacing: 0,
+    letterSpacing: LETTER_SPACING,
     scrollback: 20000,
     smoothScrollDuration: 0,
     theme: terminalTheme,
@@ -540,6 +563,7 @@ function create(id: string, opts: { cwd?: string | null; shell?: string | null }
     trimmingSelection: false,
     blocks: null as unknown as BlockTracker,
     title: "shell",
+    titleLocked: false,
     cwd: opts.cwd ?? "",
     shellLabel: "",
     exited: false,
@@ -731,6 +755,7 @@ function create(id: string, opts: { cwd?: string | null; shell?: string | null }
   });
 
   term.onTitleChange((title) => {
+    if (session.titleLocked) return;
     const clean = prettyTitle(title, session.shellLabel || session.title);
     if (clean && clean !== session.title) {
       session.title = clean;
@@ -825,7 +850,7 @@ async function start(session: Session, opts: { cwd?: string | null; shell?: stri
       result = await ptySpawn(args);
     }
     session.shellLabel = result.shell_label;
-    session.title = result.shell_label;
+    if (!session.titleLocked) session.title = result.shell_label;
     if (!session.cwd) session.cwd = result.cwd;
     session.spawned = true;
     // The pane may have been resized while the spawn was in flight; resizes are
@@ -1133,8 +1158,7 @@ export function getInputMode(): InputMode {
 }
 
 export function setFontSize(size: number): void {
-  // The requested size is what's kept and stepped from; each terminal renders at
-  // the nudged size metricsFor picks so the steps don't compound.
+  // Keep and step from the requested size; metricsFor only derives line height.
   const next = Math.min(28, Math.max(8, Math.round(size * 10) / 10));
   const changed = next !== fontSize;
   fontSize = next;

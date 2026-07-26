@@ -7,12 +7,14 @@ import {
   suggest,
 } from "../lib/autosuggest";
 import * as commandHistory from "../lib/commandHistory";
+import { highlightCommand } from "../lib/commandSyntax";
 import * as terminals from "../lib/terminals";
 
 interface Props {
   termId: string;
   active: boolean;
   exited: boolean;
+  highlight: boolean;
 }
 
 /**
@@ -25,7 +27,7 @@ interface Props {
  * It renders only while the pane is in editor mode (or the shell has exited) —
  * a running CLI owns the whole pane, and the composer is unmounted for it.
  */
-export function CommandInput({ termId, active, exited }: Props) {
+export function CommandInput({ termId, active, exited, highlight }: Props) {
   const [value, setValue] = useState("");
   const [focused, setFocused] = useState(false);
   const [historyIndex, setHistoryIndex] = useState<number | null>(null);
@@ -55,6 +57,10 @@ export function CommandInput({ termId, active, exited }: Props) {
       setHistoryEpoch((n) => n + 1);
     });
   }, [resize]);
+
+  useEffect(() => {
+    return commandHistory.subscribe(() => setHistoryEpoch((n) => n + 1));
+  }, []);
 
   useEffect(() => {
     return terminals.registerInputFocus(termId, () => {
@@ -104,6 +110,10 @@ export function CommandInput({ termId, active, exited }: Props) {
   }, [value, cwd, exited, historyIndex, historyEpoch]);
 
   const ghost = ghostSuffix(value, suggestion);
+  const highlighted = useMemo(
+    () => (highlight ? highlightCommand(value) : [{ text: value, kind: "plain" as const }]),
+    [value, highlight],
+  );
 
   const cursorAtEnd = (): boolean => {
     const el = textareaRef.current;
@@ -304,11 +314,12 @@ export function CommandInput({ termId, active, exited }: Props) {
   };
 
   const showGhost = Boolean(ghost) && !exited && historyIndex === null;
-  // Transparent textarea text when ghost is showing so the mirror layer paints
-  // both typed + ghost; caret stays visible via caret-color.
+  const showMirror = showGhost || (highlight && Boolean(value));
+  // The textarea keeps native editing, selection, accessibility, and its caret;
+  // its mirror owns only the visible glyphs (syntax colours + muted ghost).
   const fieldClass = [
     "command-input-field",
-    showGhost ? "has-ghost" : "",
+    showMirror ? "has-painted-text" : "",
   ]
     .filter(Boolean)
     .join(" ");
@@ -324,10 +335,14 @@ export function CommandInput({ termId, active, exited }: Props) {
         .join(" ")}
     >
       <div className="command-input-editor">
-        {showGhost && (
+        {showMirror && (
           <div className="command-input-mirror" aria-hidden="true">
-            <span className="command-input-typed">{value}</span>
-            <span className="command-input-ghost">{ghost}</span>
+            {highlighted.map((token, index) => (
+              <span key={index} className={`command-token token-${token.kind}`}>
+                {token.text}
+              </span>
+            ))}
+            {showGhost && <span className="command-input-ghost">{ghost}</span>}
           </div>
         )}
         <textarea

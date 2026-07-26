@@ -18,24 +18,37 @@ const STORAGE_KEY = "duckweed:command-history:v1";
 const MAX_ENTRIES = 500;
 
 let entries: HistoryEntry[] = load();
+const listeners = new Set<() => void>();
 
 function load(): HistoryEntry[] {
   try {
     if (typeof localStorage === "undefined") return [];
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return [];
+    return parse(localStorage.getItem(STORAGE_KEY));
+  } catch {
+    return [];
+  }
+}
+
+function parse(raw: string | null): HistoryEntry[] {
+  if (!raw) return [];
+  try {
     const parsed = JSON.parse(raw) as unknown;
     if (!Array.isArray(parsed)) return [];
     return parsed
-      .filter((e): e is HistoryEntry => {
-        if (!e || typeof e !== "object") return false;
-        const o = e as Record<string, unknown>;
-        return typeof o.command === "string" && typeof o.at === "number";
+      .filter((entry): entry is HistoryEntry => {
+        if (!entry || typeof entry !== "object") return false;
+        const value = entry as Record<string, unknown>;
+        return (
+          typeof value.command === "string" &&
+          value.command.trim().length > 0 &&
+          typeof value.at === "number" &&
+          Number.isFinite(value.at)
+        );
       })
-      .map((e) => ({
-        command: e.command,
-        cwd: typeof e.cwd === "string" ? e.cwd : null,
-        at: e.at,
+      .map((entry) => ({
+        command: entry.command.replace(/\r\n/g, "\n").replace(/\r/g, "\n").trimEnd(),
+        cwd: typeof entry.cwd === "string" ? entry.cwd : null,
+        at: entry.at,
       }))
       .slice(-MAX_ENTRIES);
   } catch {
@@ -50,6 +63,16 @@ function persist(): void {
   } catch {
     // Quota / private mode — history is a convenience, not a requirement.
   }
+}
+
+function notify(): void {
+  for (const listener of listeners) listener();
+}
+
+/** Observe history changes, including updates written by another app window. */
+export function subscribe(listener: () => void): () => void {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
 }
 
 /** Snapshot of history, oldest first. */
@@ -81,16 +104,29 @@ export function record(command: string, cwd: string | null = null, at = Date.now
     entries = [...entries, { command: trimmed, cwd, at }].slice(-MAX_ENTRIES);
   }
   persist();
+  notify();
 }
 
 /** Test / reset helper — replaces the in-memory list and persists. */
 export function replaceAll(next: HistoryEntry[]): void {
   entries = next.slice(-MAX_ENTRIES);
   persist();
+  notify();
 }
 
 /** Clear history (tests). */
 export function clear(): void {
   entries = [];
   persist();
+  notify();
+}
+
+// localStorage survives a Tauri webview restart. The storage event additionally
+// keeps ghost suggestions coherent when more than one Duckweed window is open.
+if (typeof window !== "undefined") {
+  window.addEventListener("storage", (event) => {
+    if (event.key !== STORAGE_KEY) return;
+    entries = parse(event.newValue);
+    notify();
+  });
 }

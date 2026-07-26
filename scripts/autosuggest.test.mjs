@@ -131,4 +131,14 @@ describe("shared command history store", () => {
     history.record("two", null, 2);
     expect(history.commands()).toEqual(["one", "two"]);
   });
+
+  test("subscribers see changes that can refresh visible ghost text", () => {
+    let changes = 0;
+    const unsubscribe = history.subscribe(() => changes++);
+    history.record("bun run app", null, 1);
+    history.replaceAll([{ command: "git status", cwd: null, at: 2 }]);
+    unsubscribe();
+    history.record("ignored by listener", null, 3);
+    expect(changes).toBe(2);
+  });
 });

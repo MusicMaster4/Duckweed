@@ -1,9 +1,20 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Branches, Diff, DiffStats, FileDiff, ProjectInfo, ShellInfo } from "./types";
+import type {
+  Branches,
+  Diff,
+  DiffStats,
+  DirEntry,
+  FileDiff,
+  ProjectInfo,
+  ShellInfo,
+} from "./types";
 
 export const listShells = () => invoke<ShellInfo[]>("list_shells");
 export const homeDir = () => invoke<string>("home_dir");
 export const projectInfo = (path: string) => invoke<ProjectInfo>("project_info", { path });
+
+/** One level of a folder: folders first, then files, ignored entries flagged. */
+export const listDir = (path: string) => invoke<DirEntry[]>("list_dir", { path });
 
 export const gitBranches = (path: string) => invoke<Branches>("git_branches", { path });
 

@@ -132,7 +132,7 @@ signing secrets, and how to test the pipeline.
 | `Ctrl+Shift+G` | Review uncommitted changes |
 | `Ctrl+Shift+F` | Search terminal output |
 | `Ctrl+Shift+K` | Clear the focused pane |
-| `Ctrl+Shift+H` | Toggle output highlighting |
+| `Ctrl+Shift+H` | Toggle command and output highlighting |
 | `Ctrl+=` / `Ctrl+-` / `Ctrl+0` | Increase / decrease / reset font size |
 | `F11` | Toggle fullscreen |
 

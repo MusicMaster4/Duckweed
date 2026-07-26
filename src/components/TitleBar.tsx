@@ -1,14 +1,21 @@
 import { type ReactNode, useEffect, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import appIcon from "../../src-tauri/icons/32x32.png";
 
 interface Props {
   children: ReactNode;
   settingsOpen: boolean;
   onToggleSettings: () => void;
+  toolsOpen: boolean;
+  onToggleTools: () => void;
 }
 
-export function TitleBar({ children, settingsOpen, onToggleSettings }: Props) {
+export function TitleBar({
+  children,
+  settingsOpen,
+  onToggleSettings,
+  toolsOpen,
+  onToggleTools,
+}: Props) {
   const [maximized, setMaximized] = useState(false);
 
   useEffect(() => {
@@ -32,9 +39,21 @@ export function TitleBar({ children, settingsOpen, onToggleSettings }: Props) {
   return (
     <header className="titlebar" data-tauri-drag-region>
       <div className="titlebar-left">
-        <span className="brand" data-tauri-drag-region title="Duckweed">
-          <img src={appIcon} alt="" draggable={false} />
-        </span>
+        {/* Where the app icon used to sit. Warp puts its tool dock here too, and
+            the corner is worth more as a control than as a logo. */}
+        <button
+          type="button"
+          className={`tools-trigger ${toolsOpen ? "is-open" : ""}`}
+          title={`${toolsOpen ? "Hide" : "Show"} the tools panel (Ctrl+Shift+X)`}
+          aria-label="Tools panel"
+          aria-expanded={toolsOpen}
+          onClick={onToggleTools}
+        >
+          <svg viewBox="0 0 16 16" aria-hidden="true">
+            <rect x="2" y="2.5" width="12" height="11" rx="2" />
+            <path d="M6.5 2.5v11" />
+          </svg>
+        </button>
       </div>
 
       <div className="titlebar-tabs">{children}</div>
@@ -77,8 +96,8 @@ export function TitleBar({ children, settingsOpen, onToggleSettings }: Props) {
                   front square. Two full rects overlapping read as a grid, not as
                   one window sitting on another.
                 */}
-                <path d="M3.75 3.75V2.75a1 1 0 0 1 1-1h4.5a1 1 0 0 1 1 1v4.5a1 1 0 0 1-1 1H8.25" />
-                <rect x="1.75" y="3.75" width="6.5" height="6.5" rx="1" />
+                <path d="M4.25 3.75V2.25h5.5v5.5h-1.5" />
+                <rect x="2.25" y="4.25" width="5.5" height="5.5" rx=".45" />
               </>
             ) : (
               <rect x="2.25" y="2.25" width="7.5" height="7.5" rx="1.2" />

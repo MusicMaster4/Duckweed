@@ -87,7 +87,7 @@ export function SettingsMenu({
           <button type="button" className="settings-row settings-action" onClick={onToggleHighlight}>
             <span className="settings-copy">
               <strong>Syntax highlighting</strong>
-              <span>Colour plain terminal output</span>
+              <span>Colour commands and plain terminal output</span>
             </span>
             <Toggle enabled={highlight} />
           </button>

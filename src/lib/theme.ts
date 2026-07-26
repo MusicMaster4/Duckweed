@@ -19,22 +19,25 @@ export const GREEN_DEEP = "#4a9b32";
 
 export const terminalTheme: ITheme = {
   background: "#131614",
-  foreground: "#d2d8d4",
+  foreground: "#e4eae6",
   cursor: GREEN,
   cursorAccent: "#131614",
   // Alpha keeps the selected text in its own colour instead of flattening it.
   selectionBackground: "#7be05a38",
 
-  black: "#2c322e",
+  black: "#39413b",
   red: "#f2686f",
   green: GREEN,
   yellow: "#f0c052",
   blue: "#5fa8f5",
   magenta: "#c98bf0",
   cyan: "#45cec4",
-  white: "#c2cac5",
+  white: "#d6ddd8",
 
-  brightBlack: "#5f6a63",
+  // The workhorse for "dimmed" text in CLIs (Claude Code's hints, git's
+  // context lines). Too dark and half of every tool's output disappears, so it
+  // sits well above the surface rather than just above the background.
+  brightBlack: "#8a948c",
   brightRed: "#ff8a90",
   brightGreen: GREEN_BRIGHT,
   brightYellow: "#ffd772",

@@ -4,6 +4,7 @@ import type { LayoutNode, Tab } from "./types";
 
 const KEY = "duckweed:state:v1";
 const MAX_RECENTS = 12;
+export const DEFAULT_TOOLS_WIDTH = 260;
 
 export interface PersistedTab {
   title: string;
@@ -28,6 +29,9 @@ export interface Persisted {
   highlight: boolean;
   /** Warp-style command editor, or a conventional raw terminal. */
   inputMode: InputMode;
+  /** Left tool dock: whether it is showing, and how wide it was left. */
+  toolsOpen: boolean;
+  toolsWidth: number;
   /** Layout only — processes are never restored, just the arrangement. */
   tabs: PersistedTab[];
   activeTabIndex: number;
@@ -85,6 +89,8 @@ export function load(): Persisted | null {
       shell: typeof parsed.shell === "string" ? parsed.shell : null,
       highlight: typeof parsed.highlight === "boolean" ? parsed.highlight : true,
       inputMode: parsed.inputMode === "raw" ? "raw" : "editor",
+      toolsOpen: parsed.toolsOpen === true,
+      toolsWidth: typeof parsed.toolsWidth === "number" ? parsed.toolsWidth : DEFAULT_TOOLS_WIDTH,
       tabs,
       activeTabIndex: typeof parsed.activeTabIndex === "number" ? parsed.activeTabIndex : 0,
     };
@@ -100,6 +106,8 @@ export function save(state: {
   shell: string | null;
   highlight: boolean;
   inputMode: InputMode;
+  toolsOpen: boolean;
+  toolsWidth: number;
   tabs: Tab[];
   activeTabId: string;
 }): void {
@@ -112,6 +120,8 @@ export function save(state: {
       shell: state.shell,
       highlight: state.highlight,
       inputMode: state.inputMode,
+      toolsOpen: state.toolsOpen,
+      toolsWidth: state.toolsWidth,
       tabs: state.tabs.map((t) => ({
         title: t.title,
         root: t.root,

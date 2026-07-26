@@ -51,6 +51,16 @@ export interface ProjectInfo {
   is_git: boolean;
 }
 
+/** One row of the project explorer's tree. */
+export interface DirEntry {
+  name: string;
+  /** Absolute path — the tree never joins paths itself. */
+  path: string;
+  is_dir: boolean;
+  /** git ignores this entry; still listed, just dimmed. */
+  ignored: boolean;
+}
+
 export interface Branches {
   /** Branch HEAD points at, or null on a detached HEAD. */
   current: string | null;

@@ -10,6 +10,7 @@ import { SearchBar } from "./SearchBar";
 
 /** Brief "Copied" chip shown at the cursor after right-click copy. */
 type CopyToast = { x: number; y: number; id: number };
+type TitleMenu = { x: number; y: number };
 
 interface Props {
   node: LeafNode;
@@ -20,6 +21,7 @@ interface Props {
   /** This pane is the one being dragged. */
   isSource: boolean;
   spawn: { cwd: string | null; shell: string | null };
+  highlight: boolean;
   /** Folder of the tab this pane belongs to — the empty state offers to set it. */
   project: ProjectInfo | null;
   recents: string[];
@@ -45,6 +47,7 @@ export function TerminalPane({
   dropZone,
   isSource,
   spawn,
+  highlight,
   project,
   recents,
   onActivate,
@@ -62,6 +65,8 @@ export function TerminalPane({
   const [inputMode, setInputMode] = useState(terminals.getInputMode);
   const [busy, setBusy] = useState(false);
   const [copyToast, setCopyToast] = useState<CopyToast | null>(null);
+  const [editingTitle, setEditingTitle] = useState(false);
+  const [titleMenu, setTitleMenu] = useState<TitleMenu | null>(null);
 
   useEffect(
     () => () => {
@@ -69,6 +74,15 @@ export function TerminalPane({
     },
     [],
   );
+
+  useEffect(() => {
+    if (!titleMenu) return;
+    const dismiss = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setTitleMenu(null);
+    };
+    window.addEventListener("keydown", dismiss, true);
+    return () => window.removeEventListener("keydown", dismiss, true);
+  }, [titleMenu]);
 
   const showCopyToast = (x: number, y: number) => {
     if (copyToastTimer.current != null) window.clearTimeout(copyToastTimer.current);
@@ -191,7 +205,42 @@ export function TerminalPane({
             <i />
             <i />
           </span>
-          <span className="pane-title">{title}</span>
+          {editingTitle ? (
+            <input
+              className="pane-title-rename"
+              autoFocus
+              defaultValue={title}
+              aria-label="Terminal name"
+              onPointerDown={(e) => e.stopPropagation()}
+              onFocus={(e) => e.currentTarget.select()}
+              onBlur={(e) => {
+                terminals.rename(node.term, e.currentTarget.value);
+                setEditingTitle(false);
+              }}
+              onKeyDown={(e) => {
+                e.stopPropagation();
+                if (e.key === "Enter") e.currentTarget.blur();
+                if (e.key === "Escape") setEditingTitle(false);
+              }}
+            />
+          ) : (
+            <span
+              className="pane-title"
+              title="Double-click or right-click to rename this terminal"
+              onPointerDown={(e) => e.stopPropagation()}
+              onDoubleClick={(e) => {
+                e.stopPropagation();
+                setEditingTitle(true);
+              }}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                setTitleMenu({ x: e.clientX, y: e.clientY });
+              }}
+            >
+              {title}
+            </span>
+          )}
           {cwdLabel && <span className="pane-cwd">{cwdLabel}</span>}
           {meta?.exited && <span className="pane-badge">exited</span>}
           {busy && !meta?.exited && <span className="pane-badge pane-badge-busy">running</span>}
@@ -304,6 +353,7 @@ export function TerminalPane({
           termId={node.term}
           active={active && !searching}
           exited={!!meta?.exited}
+          highlight={highlight}
         />
       )}
 
@@ -322,6 +372,35 @@ export function TerminalPane({
           >
             Copied
           </div>,
+          document.body,
+        )}
+
+      {titleMenu &&
+        createPortal(
+          <>
+            <div className="menu-backdrop" onPointerDown={() => setTitleMenu(null)} />
+            <div
+              className="menu pane-title-menu"
+              role="menu"
+              style={{
+                left: Math.max(8, Math.min(titleMenu.x, window.innerWidth - 170)),
+                top: Math.max(8, Math.min(titleMenu.y, window.innerHeight - 48)),
+              }}
+            >
+              <button
+                type="button"
+                className="menu-item menu-item-row"
+                role="menuitem"
+                autoFocus
+                onClick={() => {
+                  setTitleMenu(null);
+                  setEditingTitle(true);
+                }}
+              >
+                Rename terminal
+              </button>
+            </div>
+          </>,
           document.body,
         )}
     </div>

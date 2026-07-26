@@ -9,6 +9,7 @@ import { StatusBar } from "./components/StatusBar";
 import { TabStrip } from "./components/TabStrip";
 import { TitleBar } from "./components/TitleBar";
 import { SettingsMenu } from "./components/SettingsMenu";
+import { ToolsPanel, TOOLS_MAX_WIDTH, TOOLS_MIN_WIDTH } from "./components/ToolsPanel";
 import { ConfirmCloseDialog } from "./components/ConfirmCloseDialog";
 import { UpdateDialog } from "./components/UpdateDialog";
 import { useDragPane, type DragState } from "./hooks/useDragPane";
@@ -31,7 +32,7 @@ import {
   uid,
 } from "./lib/layout";
 import { toggleFullscreen } from "./lib/window";
-import { load, pushRecent, rehydrate, save } from "./lib/persist";
+import { DEFAULT_TOOLS_WIDTH, load, pushRecent, rehydrate, save } from "./lib/persist";
 import * as terminals from "./lib/terminals";
 import type { LeafNode, ProjectInfo, ShellInfo, Tab } from "./lib/types";
 
@@ -90,6 +91,8 @@ function boot() {
       shell: saved.shell,
       highlight: saved.highlight,
       inputMode: saved.inputMode,
+      toolsOpen: saved.toolsOpen,
+      toolsWidth: saved.toolsWidth,
     };
   }
   const term = terminals.newTermId();
@@ -111,6 +114,8 @@ function boot() {
     shell: null as string | null,
     highlight: true,
     inputMode: "editor" as terminals.InputMode,
+    toolsOpen: false,
+    toolsWidth: DEFAULT_TOOLS_WIDTH,
   };
 }
 
@@ -138,6 +143,10 @@ export default function App() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [changesOpen, setChangesOpen] = useState(false);
+  const [toolsOpen, setToolsOpen] = useState(initial.toolsOpen);
+  const [toolsWidth, setToolsWidth] = useState(
+    Math.min(TOOLS_MAX_WIDTH, Math.max(TOOLS_MIN_WIDTH, initial.toolsWidth)),
+  );
   const updater = useUpdater();
 
   // Handlers read state through refs so keyboard shortcuts and pointer drags
@@ -827,13 +836,34 @@ export default function App() {
           shell,
           highlight,
           inputMode,
+          toolsOpen,
+          toolsWidth,
           tabs,
           activeTabId,
         }),
       400,
     );
     return () => window.clearTimeout(id);
-  }, [booted, project, recents, fontSize, shell, highlight, inputMode, tabs, activeTabId]);
+  }, [
+    booted,
+    project,
+    recents,
+    fontSize,
+    shell,
+    highlight,
+    inputMode,
+    toolsOpen,
+    toolsWidth,
+    tabs,
+    activeTabId,
+  ]);
+
+  // The grid just lost (or got back) horizontal room; the per-pane observers see
+  // it, but re-measuring on the next frame keeps the reflow to a single pass.
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => terminals.refitAll());
+    return () => cancelAnimationFrame(frame);
+  }, [toolsOpen, toolsWidth]);
 
   // Keep the OS focus on the terminal the UI considers active.
   const focusKey = activeTab ? `${activeTab.id}:${activeTab.activeLeaf}` : "";
@@ -910,6 +940,30 @@ export default function App() {
     setInputMode(next);
   }, []);
 
+  // --------------------------------------------------------- tools panel
+
+  /** Hand a path from the explorer to the prompt of the focused pane. */
+  const insertPath = useCallback(
+    (path: string) => {
+      const tab = currentTab();
+      const node = tab ? findLeaf(tab.root, tab.activeLeaf) : null;
+      if (!node) return;
+      terminals.paste(node.term, /\s/.test(path) ? `"${path}"` : path);
+      terminals.focus(node.term);
+    },
+    [currentTab],
+  );
+
+  /** `cd` the focused pane, the same way opening a project moves its panes. */
+  const cdActivePane = useCallback(
+    (path: string) => {
+      const tab = currentTab();
+      const node = tab ? findLeaf(tab.root, tab.activeLeaf) : null;
+      if (node) void cdPane(node.term, path);
+    },
+    [cdPane, currentTab],
+  );
+
   // ----------------------------------------------------------- shortcuts
 
   const actions = {
@@ -929,6 +983,7 @@ export default function App() {
     currentTab,
     setPaletteOpen,
     setChangesOpen,
+    setToolsOpen,
   };
   const actionsRef = useRef(actions);
   actionsRef.current = actions;
@@ -1045,6 +1100,9 @@ export default function App() {
             // Only a repo has changes to review; in anything else the key does
             // nothing rather than opening an empty panel.
             if (tab?.project?.is_git) a.setChangesOpen((open) => !open);
+            return take();
+          case "x":
+            a.setToolsOpen((open) => !open);
             return take();
           case "f":
             if (activeLeaf) bus.emit("pane:search", { leafId: activeLeaf });
@@ -1214,6 +1272,14 @@ export default function App() {
         run: () => activeLeaf && bus.emit("pane:search", { leafId: activeLeaf }),
       },
       {
+        id: "view.tools",
+        group: "View",
+        title: toolsOpen ? "Hide the tools panel" : "Show the tools panel",
+        subtitle: "Project explorer beside the grid",
+        hint: "Ctrl+Shift+X",
+        run: () => setToolsOpen((open) => !open),
+      },
+      {
         id: "view.fullscreen",
         group: "View",
         title: "Toggle fullscreen",
@@ -1353,6 +1419,7 @@ export default function App() {
     toggleHighlight,
     toggleInputMode,
     toggleZoom,
+    toolsOpen,
     updater.channel,
     updater.check,
     updater.version,
@@ -1369,6 +1436,7 @@ export default function App() {
     activeLeaf: activeTab?.activeLeaf ?? "",
     drag,
     spawnFor,
+    highlight,
     project,
     recents,
     onBrowseProject: () => {
@@ -1395,6 +1463,8 @@ export default function App() {
       <TitleBar
         settingsOpen={settingsOpen}
         onToggleSettings={() => setSettingsOpen((open) => !open)}
+        toolsOpen={toolsOpen}
+        onToggleTools={() => setToolsOpen((open) => !open)}
       >
         <TabStrip
           tabs={tabs}
@@ -1419,15 +1489,33 @@ export default function App() {
         />
       </TitleBar>
 
-      <main className="workspace">
-        {!booted ? (
-          <div className="booting">starting shell…</div>
-        ) : zoomedNode && activeTab ? (
-          <PaneTree node={zoomedNode} shared={shared} />
-        ) : activeTab ? (
-          <PaneTree node={activeTab.root} shared={shared} />
-        ) : null}
-      </main>
+      {/* The dock shares the row with the grid rather than covering it, so a
+          folder can be read while a command is still running. */}
+      <div className="workbench">
+        {toolsOpen && (
+          <ToolsPanel
+            project={project}
+            width={toolsWidth}
+            onWidth={setToolsWidth}
+            onClose={() => setToolsOpen(false)}
+            onInsertPath={insertPath}
+            onOpenFolder={cdActivePane}
+            onBrowseProject={() => {
+              if (activeTab) void openProject({ tabId: activeTab.id });
+            }}
+          />
+        )}
+
+        <main className="workspace">
+          {!booted ? (
+            <div className="booting">starting shell…</div>
+          ) : zoomedNode && activeTab ? (
+            <PaneTree node={zoomedNode} shared={shared} />
+          ) : activeTab ? (
+            <PaneTree node={activeTab.root} shared={shared} />
+          ) : null}
+        </main>
+      </div>
 
       <StatusBar
         project={project}
