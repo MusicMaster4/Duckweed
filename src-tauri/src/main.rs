@@ -95,24 +95,24 @@ fn pty_any_busy(manager: State<'_, PtyManager>, ids: Vec<String>) -> bool {
 }
 
 fn main() {
+    let window_state_flags = tauri_plugin_window_state::StateFlags::SIZE
+        | tauri_plugin_window_state::StateFlags::POSITION
+        | tauri_plugin_window_state::StateFlags::MAXIMIZED
+        | tauri_plugin_window_state::StateFlags::FULLSCREEN;
+
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        // Register this before setup so it receives the initial window-ready
+        // event and the final app-exit event.
+        .plugin(
+            tauri_plugin_window_state::Builder::default()
+                .with_state_flags(window_state_flags)
+                .build(),
+        )
         .manage(PtyManager::default())
         .setup(|app| {
-            // Restore the last normal size/position and whether the window was
-            // maximized or fullscreen before showing it.
-            let state_flags = tauri_plugin_window_state::StateFlags::SIZE
-                | tauri_plugin_window_state::StateFlags::POSITION
-                | tauri_plugin_window_state::StateFlags::MAXIMIZED
-                | tauri_plugin_window_state::StateFlags::FULLSCREEN;
-            app.handle().plugin(
-                tauri_plugin_window_state::Builder::default()
-                    .with_state_flags(state_flags)
-                    .build(),
-            )?;
-
             if let (Some(window), Some(icon)) = (
                 app.get_webview_window("main"),
                 app.default_window_icon().cloned(),
