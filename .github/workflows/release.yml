@@ -27,6 +27,15 @@ name: Release
 #   prerelease, which only this workflow's beta runs ever write. Neither build
 #   knows the other channel's URL, so an install stays on the channel it was
 #   installed from.
+#
+# Stable changelogs (scripts/release-notes.mjs):
+#   A stable release's "What's Changed" section is written by an OpenRouter chat
+#   model from the commits since the previous stable tag. To enable it, add the
+#   OPENROUTER_API_KEY secret and the OPENROUTER_MODEL variable (e.g.
+#   google/gemini-2.5-flash) under Settings → Secrets and variables → Actions.
+#   Without the secret the release keeps the notes GitHub generated for the
+#   draft, and a failed model call only logs a warning — the changelog never
+#   blocks a release. Beta releases always keep the auto-generated notes.
 on:
   push:
     branches:
@@ -202,6 +211,40 @@ jobs:
       TAG: ${{ needs.version.outputs.tag }}
       REPO: ${{ github.repository }}
     steps:
+      # The changelog ranges over the release tags, which the default checkout
+      # does not fetch. Stable-only: betas keep the auto-generated notes.
+      - uses: actions/checkout@v5
+        if: needs.version.outputs.channel == 'stable'
+        with:
+          fetch-depth: 0
+
+      - uses: oven-sh/setup-bun@v2
+        if: needs.version.outputs.channel == 'stable'
+        with:
+          bun-version: latest
+
+      # scripts/release-notes.mjs writes the What's Changed section with an
+      # OpenRouter model (secret OPENROUTER_API_KEY, variable OPENROUTER_MODEL).
+      # No key or a failed call keeps the notes the draft was opened with — a
+      # changelog never holds a release hostage.
+      - name: Write the What's Changed section
+        if: needs.version.outputs.channel == 'stable'
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENROUTER_MODEL: ${{ vars.OPENROUTER_MODEL }}
+        run: |
+          set -euo pipefail
+          if [ -z "${OPENROUTER_API_KEY:-}" ]; then
+            echo "OPENROUTER_API_KEY is not set — keeping the auto-generated notes."
+            exit 0
+          fi
+          if bun scripts/release-notes.mjs --tag "$TAG" --repo "$REPO" > release-notes.md && [ -s release-notes.md ]; then
+            gh release edit "$TAG" --repo "$REPO" --notes-file release-notes.md \
+              || echo "::warning::could not attach the generated changelog"
+          else
+            echo "::warning::changelog generation failed — keeping the auto-generated notes"
+          fi
+
       - name: Publish the stable release
         if: needs.version.outputs.channel == 'stable'
         run: gh release edit "$TAG" --repo "$REPO" --draft=false --latest

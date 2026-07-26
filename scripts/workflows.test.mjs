@@ -53,7 +53,7 @@ describe("release triggers", () => {
 
 describe("channel isolation in the published releases", () => {
   const publish = release.jobs.publish;
-  const stableStep = publish.steps.find((s) => s.if?.includes("'stable'"));
+  const stableStep = publish.steps.find((s) => s.if?.includes("'stable'") && s.run?.includes("--draft=false --latest"));
   const betaStep = publish.steps.find((s) => s.if?.includes("'testing'") && s.run.includes("release edit"));
 
   test("a stable release becomes the repository's Latest", () => {
@@ -94,6 +94,44 @@ describe("channel isolation in the published releases", () => {
     for (const step of release.jobs.publish.steps) {
       if (step.run?.includes("BETA_POINTER_TAG")) expect(step.if).toContain("'testing'");
     }
+  });
+});
+
+describe("AI-written stable changelogs", () => {
+  const steps = release.jobs.publish.steps;
+  const notesStep = steps.find((s) => s.run?.includes("release-notes.mjs"));
+
+  test("only stable releases get their What's Changed written by OpenRouter", () => {
+    expect(notesStep).toBeDefined();
+    expect(notesStep.if).toContain("'stable'");
+    expect(notesStep.env.OPENROUTER_API_KEY).toContain("secrets.OPENROUTER_API_KEY");
+    expect(notesStep.env.OPENROUTER_MODEL).toContain("vars.OPENROUTER_MODEL");
+  });
+
+  test("the generated notes are attached to the release they describe", () => {
+    expect(notesStep.run).toContain("gh release edit");
+    expect(notesStep.run).toContain("--notes-file");
+    expect(notesStep.run).toContain('"$TAG"');
+    expect(notesStep.run).toContain('"$REPO"');
+  });
+
+  test("a missing key or a failed call keeps the auto-generated notes and never blocks the release", () => {
+    expect(notesStep.run).toContain("OPENROUTER_API_KEY:-");
+    expect(notesStep.run).toContain("::warning::");
+  });
+
+  test("the notes are written before the release leaves draft", () => {
+    const notesIndex = steps.findIndex((s) => s.run?.includes("release-notes.mjs"));
+    const publishIndex = steps.findIndex((s) => s.run?.includes("--draft=false --latest"));
+    expect(notesIndex).toBeGreaterThanOrEqual(0);
+    expect(publishIndex).toBeGreaterThanOrEqual(0);
+    expect(notesIndex).toBeLessThan(publishIndex);
+  });
+
+  test("the publish job fetches every tag, so the changelog can range over them", () => {
+    const checkout = steps.find((s) => s.uses?.startsWith("actions/checkout"));
+    expect(checkout.if).toContain("'stable'");
+    expect(checkout.with["fetch-depth"]).toBe(0);
   });
 });
 
