@@ -145,16 +145,23 @@ export function CommandInput({ termId, active, exited }: Props) {
       return;
     }
 
-    // Ctrl+C — clear the editor buffer (Warp). With empty buffer, forward interrupt.
+    // Ctrl+C — if the grid has a selection, copy it (select-then-copy). Else
+    // clear the editor buffer (Warp). Empty buffer only interrupts when a
+    // command is running; idle Ctrl+C would otherwise spam `^C` prompts.
     if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "c") {
       e.preventDefault();
       e.stopPropagation();
+      const selected = terminals.selection(termId);
+      if (selected) {
+        void navigator.clipboard.writeText(selected);
+        return;
+      }
       if (value.length > 0) {
         setValue("");
         setHistoryIndex(null);
         draftRef.current = "";
       } else {
-        terminals.writeRaw(termId, "\x03");
+        void terminals.interrupt(termId);
       }
       return;
     }

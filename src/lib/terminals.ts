@@ -77,6 +77,11 @@ interface Session extends TermMeta {
    * a hairline separator — the Warp "command blocks" primitive.
    */
   blocks: BlockTracker;
+  /**
+   * Wall-clock of the last non-empty {@link submitCommand}. Empty Ctrl+C still
+   * interrupts for a short window after submit, before the busy poll flips.
+   */
+  lastSubmitAt: number;
 }
 
 /** Focus handlers for the per-pane command editor (Warp-style input). */
@@ -452,7 +457,10 @@ function draw(session: Session, chunk: FrameWrite): void {
   // While typing, leave the solid caret in place across brief mode-25 hides
   // that full-screen CLIs emit mid-redraw; scheduleVisualCursor re-evaluates.
   if (!session.cursorVisible && !isTyping(session)) hideVisualCursor(session);
-  session.term.write(stabilized.text, () => scheduleVisualCursor(session));
+  session.term.write(stabilized.text, () => {
+    scheduleVisualCursor(session);
+    session.blocks.scheduleLayout();
+  });
 }
 
 function create(id: string, opts: { cwd?: string | null; shell?: string | null }): Session {
@@ -538,6 +546,7 @@ function create(id: string, opts: { cwd?: string | null; shell?: string | null }
     cols: term.cols,
     rows: term.rows,
     ran: false,
+    lastSubmitAt: 0,
   };
   sessions.set(id, session);
   // After insert so busy checks can resolve this session by id.
@@ -554,7 +563,10 @@ function create(id: string, opts: { cwd?: string | null; shell?: string | null }
   // those replies as input marked every pane as used before it had run
   // anything, which is exactly what the empty state is there to hide.
   term.onKey(() => markRan(session));
-  term.onScroll(() => scheduleVisualCursor(session, true));
+  term.onScroll(() => {
+    scheduleVisualCursor(session, true);
+    session.blocks.scheduleLayout();
+  });
 
   /** Keys the grid keeps in editor mode: they move the view, not the cursor. */
   const VIEWPORT_KEYS = new Set(["PageUp", "PageDown", "Home", "End", "Shift", "Control", "Alt", "Meta"]);
@@ -564,10 +576,36 @@ function create(id: string, opts: { cwd?: string | null; shell?: string | null }
   // focus to xterm and the next keystroke went straight down the PTY — the same
   // "your typing is somewhere else now" problem the Escape mode had.
   term.attachCustomKeyEventHandler((event) => {
-    if (!session.editorMode || session.exited) return true;
+    if (session.exited) return true;
     if (event.type !== "keydown") return true;
-    // App shortcuts and copy/paste are handled elsewhere and must pass through.
-    if (event.ctrlKey || event.metaKey || event.altKey) return true;
+
+    const ctrl = event.ctrlKey || event.metaKey;
+    // Ctrl+C on the grid: copy when there is a selection (select-then-copy),
+    // otherwise only interrupt when something is running. Letting xterm turn
+    // every idle Ctrl+C into \x03 makes PowerShell stack `PS …> ^C` lines.
+    if (ctrl && !event.shiftKey && !event.altKey && event.key.toLowerCase() === "c") {
+      let text = "";
+      if (session.blocks.hasBlockSelection()) {
+        text = session.blocks.copyText() ?? "";
+      }
+      if (!text) text = term.getSelection();
+      if (/\S/.test(text)) {
+        event.preventDefault();
+        void navigator.clipboard.writeText(text);
+        return false;
+      }
+      if (session.editorMode) {
+        event.preventDefault();
+        void interrupt(session.id);
+        return false;
+      }
+      // Raw mode, no selection: real interrupt for the running program.
+      return true;
+    }
+
+    if (!session.editorMode) return true;
+    // App shortcuts and remaining copy/paste are handled elsewhere.
+    if (ctrl || event.altKey) return true;
     if (VIEWPORT_KEYS.has(event.key)) return true;
     const focusInput = inputFocusers.get(session.id);
     if (!focusInput) return true;
@@ -620,12 +658,16 @@ function create(id: string, opts: { cwd?: string | null; shell?: string | null }
   // released, so it never becomes a copyable "selection" of nothing.
   term.onSelectionChange(() => {
     if (session.trimmingSelection) return;
-    if (!term.hasSelection()) return;
+    if (!term.hasSelection()) {
+      session.blocks.clearSelection();
+      return;
+    }
     const text = term.getSelection();
     if (/\S/.test(text)) return;
     session.trimmingSelection = true;
     try {
       term.clearSelection();
+      session.blocks.clearSelection();
     } finally {
       session.trimmingSelection = false;
     }
@@ -818,6 +860,7 @@ export function refit(id: string): void {
     // the new column/row count for the same pane.
     session.fit.fit();
     scheduleVisualCursor(session, true);
+    session.blocks.scheduleLayout();
   } catch {
     // Fit can throw while the pane is mid-animation; the observer retries.
   }
@@ -914,12 +957,41 @@ export function submitCommand(id: string, command: string): void {
   // Mark the block before writing so the start line is the prompt row that
   // will hold the echoed command.
   session.blocks.open(text);
+  session.lastSubmitAt = Date.now();
   markTyping(session);
   if (text.includes("\n")) {
     send(session, `\x1b[200~${text}\x1b[201~\r`);
   } else {
     send(session, `${text}\r`);
   }
+}
+
+/**
+ * How long after a submit empty Ctrl+C is still treated as an interrupt, so a
+ * quick cancel lands before the busy poll notices the child.
+ */
+const INTERRUPT_GRACE_MS = 2000;
+
+/**
+ * Send Ctrl+C to the shell only when something is (or was just) running.
+ *
+ * Idle Ctrl+C in editor mode must not reach PowerShell: every press echoes
+ * `PS path> ^C` and a fresh prompt, which stacks into noise the block UI has
+ * no place for. When a child is running the composer is usually unmounted
+ * already; this path covers the grace window right after submit.
+ */
+export async function interrupt(id: string): Promise<void> {
+  const session = sessions.get(id);
+  if (!session || session.exited) return;
+  const running = await hasRunningProcess(id);
+  const recentlySubmitted =
+    session.lastSubmitAt > 0 && Date.now() - session.lastSubmitAt < INTERRUPT_GRACE_MS;
+  if (!running && !recentlySubmitted) return;
+  markTyping(session);
+  // Avoid writeRaw: that always markRan, and an interrupt is not "using" a
+  // blank pane the way a typed command is.
+  if (running || session.ran) markRan(session);
+  send(session, "\x03");
 }
 
 /**
@@ -1138,7 +1210,15 @@ export function clear(id: string): void {
 }
 
 export function selection(id: string): string {
-  return sessions.get(id)?.term.getSelection() ?? "";
+  const session = sessions.get(id);
+  if (!session) return "";
+  // Prefer a clean block copy (command + output, no PS path chrome) when the
+  // user clicked a command block rather than dragging a free-range selection.
+  if (session.blocks.hasBlockSelection()) {
+    const blockText = session.blocks.copyText();
+    if (blockText !== null) return blockText;
+  }
+  return session.term.getSelection();
 }
 
 export function paste(id: string, text: string): void {

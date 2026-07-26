@@ -67,8 +67,8 @@ export function TitleBar({ children, settingsOpen, onToggleSettings }: Props) {
           <svg viewBox="0 0 12 12" aria-hidden="true">
             {maximized ? (
               <>
-                <rect x="2" y="3.5" width="6" height="6" rx="1" />
-                <path d="M4.2 3.5V2.5h5.3v5.3H8.5" />
+                <rect x="3.75" y="1.5" width="6" height="6" rx="0.9" />
+                <rect x="1.5" y="3.75" width="6" height="6" rx="0.9" />
               </>
             ) : (
               <rect x="2.5" y="2.5" width="7" height="7" rx="1" />

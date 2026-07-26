@@ -221,7 +221,10 @@ export function TerminalPane({
         >
           <svg viewBox="0 0 14 14" aria-hidden="true">
             {zoomed ? (
-              <rect x="3" y="3" width="8" height="8" rx="1.5" />
+              <>
+                <rect x="4.5" y="1.75" width="7" height="7" rx="1" />
+                <rect x="1.75" y="4.5" width="7" height="7" rx="1" />
+              </>
             ) : (
               <rect x="1.5" y="2" width="11" height="10" rx="1.5" />
             )}

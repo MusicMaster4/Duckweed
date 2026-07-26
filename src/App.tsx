@@ -980,6 +980,19 @@ export default function App() {
         return;
       }
 
+      // Plain Ctrl+C with a grid selection: copy, never interrupt. Without this,
+      // focus-on-xterm after a drag turns Ctrl+C into \x03 and PowerShell paints
+      // a stack of `PS …> ^C` lines under the blocks.
+      if (ctrl && !e.shiftKey && !e.altKey && key === "c" && !isTextField(e.target)) {
+        if (activeTerm) {
+          const text = terminals.selection(activeTerm);
+          if (text) {
+            void navigator.clipboard.writeText(text);
+            return take();
+          }
+        }
+      }
+
       if (ctrl && e.shiftKey) {
         switch (key) {
           case "d":

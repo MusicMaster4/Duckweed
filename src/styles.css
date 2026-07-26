@@ -44,8 +44,8 @@
   --scrollbar-thumb-hover: rgba(255, 255, 255, 0.22);
   --scrollbar-track: transparent;
 
-  /* Hairline between Warp-style command blocks in the terminal grid. */
-  --block-separator: rgba(255, 255, 255, 0.1);
+  /* Hairline between Warp-style command blocks (matches former chrome 1px). */
+  --block-separator: rgba(255, 255, 255, 0.12);
 
   font-synthesis: none;
 }
@@ -881,13 +881,13 @@ button.chip:hover {
 }
 
 /*
- * A split is one surface cut by a hairline, so the divider is 1px in the layout
- * and its grab area is an overlay that reaches into both neighbours. Hovering
- * lights the line up, which is the only cue that it can be dragged.
+ * A split is one surface cut by a 2px rule, with a grab area that reaches into
+ * both neighbours. Hovering lights the line up — the only cue that it can be
+ * dragged. (Command-block hairlines stay 1px; chrome rules are one step bolder.)
  */
 .divider {
   position: relative;
-  flex: 0 0 1px;
+  flex: 0 0 2px;
   /* A touch stronger than the outer frame: this line is the only thing telling
      two panes apart, so it has to read at a glance. */
   background: var(--border-strong);
@@ -1152,8 +1152,9 @@ button.chip:hover {
   justify-content: flex-end;
   align-items: flex-start;
   /* Matches `.pane-body`'s own padding so the greeting lines up with column 0
-     of the grid it is standing in for. */
-  padding: 0 8px 4px 7px;
+     of the grid it is standing in for. Extra bottom pad keeps the show-hints
+     row clear of the composer's top rule. */
+  padding: 0 8px 14px 7px;
   /* Opaque, not just layered on top: if anything ever leaves a stray glyph in
      the grid underneath, the empty state still reads as empty. */
   background: var(--bg-pane);
@@ -1210,7 +1211,7 @@ button.chip:hover {
 }
 
 .pane-welcome-label {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-faint);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1221,10 +1222,10 @@ button.chip:hover {
 .pane-welcome-show-hints {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 9px;
   min-width: 0;
-  margin: 0;
-  padding: 0;
+  margin: 4px 0 0;
+  padding: 2px 0;
   border: 0;
   background: none;
   color: inherit;
@@ -1232,6 +1233,12 @@ button.chip:hover {
   text-align: left;
   cursor: default;
   pointer-events: auto;
+}
+
+.pane-welcome-show-hints .pane-welcome-keys kbd {
+  font-size: 11px;
+  padding: 2px 6px;
+  min-width: 1.4em;
 }
 
 .pane-welcome-show-hints:hover .pane-welcome-label {
@@ -1601,7 +1608,7 @@ button.chip:hover {
   flex-direction: column;
   gap: 7px;
   padding: 10px 14px 9px;
-  border-top: 1px solid var(--border);
+  border-top: 2px solid var(--border);
   background: var(--bg-pane);
 }
 
@@ -1610,10 +1617,10 @@ button.chip:hover {
 .command-input::before {
   content: "";
   position: absolute;
-  top: -1px;
+  top: -2px;
   left: 0;
   right: 0;
-  height: 1px;
+  height: 2px;
   background: var(--accent-line);
   opacity: 0;
   transition: opacity 140ms ease;
@@ -1695,16 +1702,76 @@ button.chip:hover {
 }
 
 /*
- * Separator drawn by xterm decorations at the first line of each command block
- * after the first. A single top border keeps it a hairline without covering the
- * command text (the decoration sits on that row with a transparent fill).
+ * Warp-style block chrome, painted as DOM overlays above the xterm canvas
+ * (same trick as the visual cursor). The command label hides the shell's
+ * `PS path>` echo; the separator is a full-width 1px hairline with padding.
+ */
+.command-block-cmd {
+  position: absolute;
+  z-index: 4;
+  top: 0;
+  left: 0;
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0 6px;
+  overflow: hidden;
+  white-space: pre;
+  text-overflow: ellipsis;
+  pointer-events: none;
+  /* Opaque so the PS prompt underneath never bleeds through. */
+  background: var(--bg-pane);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: var(--terminal-font-size, 13.5px);
+  font-weight: 500;
+  letter-spacing: 0;
+  will-change: transform;
+}
+
+.command-block-cmd.is-selected {
+  /* Match xterm selection tint so the covered command row feels selected too. */
+  background: color-mix(in srgb, var(--bg-pane) 72%, #7be05a 28%);
+}
+
+/*
+ * Gap band between blocks: opaque so previous-line glyphs don't show through,
+ * hairline centered so the break reads with real breathing room.
  */
 .command-block-separator {
-  pointer-events: none !important;
-  background: transparent !important;
-  border: none !important;
-  border-top: 1px solid var(--block-separator) !important;
-  box-sizing: border-box !important;
+  position: absolute;
+  z-index: 5;
+  top: 0;
+  left: 0;
+  margin: 0;
+  padding: 0;
+  border: none;
+  pointer-events: none;
+  background: var(--bg-pane);
+  will-change: transform;
+  display: flex;
+  align-items: center;
+}
+
+.command-block-separator::after {
+  content: "";
+  display: block;
+  width: 100%;
+  height: 0;
+  border: none;
+  border-top: 1px solid var(--block-separator);
+}
+
+/* Hides the idle shell prompt under the last block in editor mode. */
+.command-block-prompt-cover {
+  position: absolute;
+  z-index: 3;
+  top: 0;
+  left: 0;
+  margin: 0;
+  padding: 0;
+  pointer-events: none;
+  background: var(--bg-pane);
+  will-change: transform;
 }
 
 .terminal-visual-cursor {
