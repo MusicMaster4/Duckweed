@@ -25,6 +25,7 @@ import {
   subscribeConfirmClosePref,
 } from "./lib/confirmClose";
 import { playCompletionSound, preloadCompletionSound } from "./lib/completionSound";
+import * as commandHistory from "./lib/commandHistory";
 import { clearGreetings } from "./lib/greetings";
 import { frontendReady, listShells, projectInfo, watchProject } from "./lib/ipc";
 import {
@@ -1891,6 +1892,17 @@ export default function App() {
               onToggleCompletionSound={toggleCompletionSound}
               onToggleConfirmCloseRunning={() =>
                 setConfirmCloseRunningPref((prev) => !prev)
+              }
+              onResetSuggestions={() =>
+                confirmCloseRunning({
+                  title: "Reset suggestions?",
+                  message:
+                    "Duckweed will forget every command it learned. Ghost suggestions start fresh. This can't be undone.",
+                  confirmLabel: "Reset",
+                }).then((ok) => {
+                  if (ok) commandHistory.clear();
+                  return ok;
+                })
               }
               onShell={(shellId) => {
                 setShell(shellId);
