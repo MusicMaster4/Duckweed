@@ -16,6 +16,33 @@ export const projectInfo = (path: string) => invoke<ProjectInfo>("project_info",
 export const watchProject = (path: string | null) => invoke<void>("watch_project", { path });
 export const frontendReady = () => invoke<void>("frontend_ready");
 
+/** Folder request from Explorer / the CLI, if the app was cold-started with one. */
+export type LaunchAction = "new_tab" | "new_window";
+
+export interface LaunchIntent {
+  action: LaunchAction;
+  path: string;
+}
+
+export const takeLaunchIntent = () => invoke<LaunchIntent | null>("take_launch_intent");
+
+export type ShellVerb = "tab" | "window";
+
+export interface ShellIntegrationStatus {
+  tab: boolean;
+  window: boolean;
+}
+
+/**
+ * Whether Explorer shows each Duckweed folder right-click verb.
+ * `null` on non-Windows platforms where the setting does not apply.
+ */
+export const shellIntegrationStatus = () =>
+  invoke<ShellIntegrationStatus | null>("shell_integration_status");
+
+export const shellIntegrationSet = (verb: ShellVerb, enabled: boolean) =>
+  invoke<ShellIntegrationStatus>("shell_integration_set", { verb, enabled });
+
 /** One level of a folder: folders first, then files, ignored entries flagged. */
 export const listDir = (path: string) => invoke<DirEntry[]>("list_dir", { path });
 

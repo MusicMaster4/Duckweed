@@ -27,7 +27,17 @@ import {
 import { playCompletionSound, preloadCompletionSound } from "./lib/completionSound";
 import * as commandHistory from "./lib/commandHistory";
 import { clearGreetings } from "./lib/greetings";
-import { frontendReady, listShells, projectInfo, watchProject } from "./lib/ipc";
+import {
+  frontendReady,
+  listShells,
+  projectInfo,
+  shellIntegrationSet,
+  shellIntegrationStatus,
+  takeLaunchIntent,
+  watchProject,
+  type LaunchIntent,
+  type ShellIntegrationStatus,
+} from "./lib/ipc";
 import {
   balance,
   findLeaf,
@@ -182,6 +192,10 @@ export default function App() {
     setConfirmCloseRunningEnabled(initial.confirmCloseRunning);
     return initial.confirmCloseRunning;
   });
+  /** null = not Windows / unknown; settings hides the rows until we know. */
+  const [explorerIntegration, setExplorerIntegration] = useState<ShellIntegrationStatus | null>(
+    null,
+  );
   const [booted, setBooted] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [settingsTabOpen, setSettingsTabOpen] = useState(false);
@@ -918,6 +932,14 @@ export default function App() {
     [cdPane, createTerm, currentTab],
   );
 
+  /** Explorer / CLI asked for this folder — always as a dedicated project tab. */
+  const handleLaunchIntent = useCallback(
+    (intent: LaunchIntent) => {
+      void applyProject(intent.path, { newTab: true });
+    },
+    [applyProject],
+  );
+
   const openProject = useCallback(
     async (options: { newTab?: boolean; tabId?: string } = {}) => {
       const target = options.tabId
@@ -1061,6 +1083,47 @@ export default function App() {
     const frame = requestAnimationFrame(() => void frontendReady());
     return () => cancelAnimationFrame(frame);
   }, [booted]);
+
+  // Cold-start folder from Explorer, plus live handoffs while already running.
+  useEffect(() => {
+    if (!booted || !TAURI_RUNTIME) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+
+    void takeLaunchIntent()
+      .then((intent) => {
+        if (!disposed && intent?.path) handleLaunchIntent(intent);
+      })
+      .catch(() => {
+        /* browser preview / older builds */
+      });
+
+    void listen<LaunchIntent>("launch-intent", (event) => {
+      if (event.payload?.path) handleLaunchIntent(event.payload);
+    }).then((off) => {
+      if (disposed) off();
+      else unlisten = off;
+    });
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [booted, handleLaunchIntent]);
+
+  // Windows-only: folder context menu verbs (tab on by default, window opt-in).
+  useEffect(() => {
+    if (!TAURI_RUNTIME) return;
+    void shellIntegrationStatus()
+      .then((status) => {
+        if (status && typeof status.tab === "boolean" && typeof status.window === "boolean") {
+          setExplorerIntegration(status);
+        } else {
+          setExplorerIntegration(null);
+        }
+      })
+      .catch(() => setExplorerIntegration(null));
+  }, []);
 
   // A tab with no repo has nothing to review, and a panel that reappeared on
   // the way back would be showing another project's diff.
@@ -1882,6 +1945,7 @@ export default function App() {
               completionHighlights={completionHighlights}
               completionSoundEnabled={completionSoundEnabled}
               confirmCloseRunning={confirmCloseRunningPref}
+              explorerIntegration={explorerIntegration}
               shell={shell}
               shells={shells}
               updateLabel={`${updater.channel === "testing" ? "Beta" : "Stable"}${updater.version ? ` · v${updater.version}` : ""}`}
@@ -1893,6 +1957,18 @@ export default function App() {
               onToggleConfirmCloseRunning={() =>
                 setConfirmCloseRunningPref((prev) => !prev)
               }
+              onToggleExplorerTab={() => {
+                if (explorerIntegration === null) return;
+                void shellIntegrationSet("tab", !explorerIntegration.tab)
+                  .then((status) => setExplorerIntegration(status))
+                  .catch((error) => console.error("shell integration", error));
+              }}
+              onToggleExplorerWindow={() => {
+                if (explorerIntegration === null) return;
+                void shellIntegrationSet("window", !explorerIntegration.window)
+                  .then((status) => setExplorerIntegration(status))
+                  .catch((error) => console.error("shell integration", error));
+              }}
               onResetSuggestions={() =>
                 confirmCloseRunning({
                   title: "Reset suggestions?",
