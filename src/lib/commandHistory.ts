@@ -1,24 +1,24 @@
 import { saveDurably } from "./durableStorage";
+import {
+  MAX_HISTORY_ENTRIES,
+  mergeHistory,
+  parseHistory,
+  type HistoryEntry,
+} from "./historyMerge";
 
 /**
  * Shared command history for ghost-text autosuggestions.
  *
- * Entries are app-wide (not per-pane) and durable in localStorage so a command
- * run in one pane can suggest in another after restarts. Per-pane ↑/↓ walk
- * lives on each terminal session (see terminals.localHistory).
+ * Entries are app-wide (not per-pane) and durable in localStorage *and* in the
+ * native app-data copy, so a command run in one pane can suggest in another
+ * after a restart or an app update. Per-pane ↑/↓ walk lives on each terminal
+ * session (see terminals.localHistory).
  */
 
-export interface HistoryEntry {
-  command: string;
-  /** Working directory when the command was submitted, if known. */
-  cwd: string | null;
-  /** Epoch ms when recorded. */
-  at: number;
-}
+export type { HistoryEntry };
 
 const STORAGE_KEY = "duckweed:command-history:v1";
-/** Keep the list bounded; oldest entries drop first. */
-const MAX_ENTRIES = 500;
+const MAX_ENTRIES = MAX_HISTORY_ENTRIES;
 
 let entries: HistoryEntry[] = load();
 const listeners = new Set<() => void>();
@@ -26,45 +26,20 @@ const listeners = new Set<() => void>();
 function load(): HistoryEntry[] {
   try {
     if (typeof localStorage === "undefined") return [];
-    return parse(localStorage.getItem(STORAGE_KEY));
+    return mergeHistory(parseHistory(localStorage.getItem(STORAGE_KEY)));
   } catch {
     return [];
   }
 }
 
-function parse(raw: string | null): HistoryEntry[] {
-  if (!raw) return [];
+function persist(options?: { replace?: boolean }): void {
   try {
-    const parsed = JSON.parse(raw) as unknown;
-    if (!Array.isArray(parsed)) return [];
-    return parsed
-      .filter((entry): entry is HistoryEntry => {
-        if (!entry || typeof entry !== "object") return false;
-        const value = entry as Record<string, unknown>;
-        return (
-          typeof value.command === "string" &&
-          value.command.trim().length > 0 &&
-          typeof value.at === "number" &&
-          Number.isFinite(value.at)
-        );
-      })
-      .map((entry) => ({
-        command: entry.command.replace(/\r\n/g, "\n").replace(/\r/g, "\n").trimEnd(),
-        cwd: typeof entry.cwd === "string" ? entry.cwd : null,
-        at: entry.at,
-      }))
-      .slice(-MAX_ENTRIES);
-  } catch {
-    return [];
-  }
-}
-
-function persist(): void {
-  try {
-    if (typeof localStorage === "undefined") return;
-    const raw = JSON.stringify(entries);
-    localStorage.setItem(STORAGE_KEY, raw);
-    saveDurably(STORAGE_KEY, raw);
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(entries));
+    }
+    // The native copy merges by default, so a window holding an older snapshot
+    // (or a build running on a different WebView origin) can never truncate it.
+    saveDurably(STORAGE_KEY, JSON.stringify(entries), options);
   } catch {
     // Quota / private mode — history is a convenience, not a requirement.
   }
@@ -115,23 +90,27 @@ export function record(command: string, cwd: string | null = null, at = Date.now
 /** Test / reset helper — replaces the in-memory list and persists. */
 export function replaceAll(next: HistoryEntry[]): void {
   entries = next.slice(-MAX_ENTRIES);
-  persist();
+  persist({ replace: true });
   notify();
 }
 
-/** Clear history (tests). */
+/** Clear history (user reset / tests) — drops the native copy too. */
 export function clear(): void {
   entries = [];
-  persist();
+  persist({ replace: true });
   notify();
 }
 
-// localStorage survives a Tauri webview restart. The storage event additionally
-// keeps ghost suggestions coherent when more than one Duckweed window is open.
+// localStorage survives a Tauri webview restart, and durableStorage restores it
+// after an app update. The storage event additionally keeps ghost suggestions
+// coherent when more than one Duckweed window is open.
 if (typeof window !== "undefined") {
   window.addEventListener("storage", (event) => {
     if (event.key !== STORAGE_KEY) return;
-    entries = parse(event.newValue);
+    const incoming = parseHistory(event.newValue);
+    // An explicit clear in another window empties the key — honour it. Anything
+    // else is a union, so neither window can shrink the other's history.
+    entries = event.newValue === "[]" ? [] : mergeHistory(entries, incoming);
     notify();
   });
 }

@@ -384,6 +384,42 @@ button.chip:hover {
   overflow: hidden;
 }
 
+/* While a tab is being dragged the whole window is in that gesture: no text
+   selection anywhere, and the cursor says so wherever it goes. */
+body.is-dragging-tab {
+  cursor: grabbing;
+  user-select: none;
+}
+
+body.is-dragging-tab .tab,
+body.is-dragging-tab .tab-close,
+body.is-dragging-tab .tab-folder {
+  cursor: grabbing;
+}
+
+/* Tabs the dragged one is displacing glide out of its way. The dragged tab
+   itself is pinned to the pointer, so it must not be smoothed at all. */
+body.is-dragging-tab .tab {
+  transition:
+    transform 170ms cubic-bezier(0.22, 1, 0.36, 1),
+    background 120ms ease,
+    color 120ms ease,
+    border-color 120ms ease;
+}
+
+/* The dragged tab is lifted off the strip and follows the pointer. */
+body.is-dragging-tab .tab.is-reordering,
+.tab.is-reordering {
+  z-index: 2;
+  border-color: var(--border-strong);
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.45);
+  transition: none;
+}
+
+.tab.is-reordering .tab-close {
+  visibility: hidden;
+}
+
 .tab:hover {
   background: rgba(255, 255, 255, 0.07);
   border-color: var(--border-strong);
@@ -1294,6 +1330,36 @@ svg.tab-glyph-fill path {
 
 .pane.is-unread::after {
   opacity: 1;
+}
+
+/*
+ * A completion in the focused pane is informational rather than unread. It
+ * fades in for 500ms, holds for 500ms, then fades away for 500ms.
+ */
+.pane-completion-flash {
+  position: absolute;
+  inset: 0;
+  border: 2px solid var(--rose);
+  box-shadow: inset 0 0 10px rgba(242, 104, 111, 0.18);
+  pointer-events: none;
+  z-index: 5;
+  opacity: 0;
+  animation: pane-completion-flash 1500ms linear both;
+}
+
+@keyframes pane-completion-flash {
+  0% {
+    opacity: 0;
+  }
+
+  33.333%,
+  66.667% {
+    opacity: 1;
+  }
+
+  100% {
+    opacity: 0;
+  }
 }
 
 .pane.is-source {
@@ -2998,6 +3064,9 @@ body.is-resizing * {
 /* -------------------------------------------------------------- updates */
 
 .update-dialog {
+  /* align-self: flex-start so the palette backdrop (align-items: stretch) does not
+     force this to max-height even when content is short ("up to date" etc.). */
+  align-self: flex-start;
   width: min(380px, 90vw);
   max-height: 60vh;
   display: flex;

@@ -1,0 +1,74 @@
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const read = (file) => readFileSync(path.join(ROOT, file), "utf8");
+
+const originalAudio = globalThis.Audio;
+const players = [];
+
+class FakeAudio {
+  constructor(src) {
+    this.src = src;
+    this.currentTime = 19;
+    this.preload = "";
+    this.loads = 0;
+    this.plays = 0;
+    players.push(this);
+  }
+
+  load() {
+    this.loads += 1;
+  }
+
+  play() {
+    this.plays += 1;
+    return Promise.resolve();
+  }
+}
+
+beforeAll(() => {
+  globalThis.Audio = FakeAudio;
+});
+
+afterAll(() => {
+  if (originalAudio === undefined) delete globalThis.Audio;
+  else globalThis.Audio = originalAudio;
+});
+
+describe("completion sound", () => {
+  test("preloads and reuses the bundled sound player", async () => {
+    const sound = await import("../src/lib/completionSound.ts");
+    sound.preloadCompletionSound();
+    sound.playCompletionSound();
+    sound.playCompletionSound();
+
+    expect(players).toHaveLength(1);
+    expect(players[0].src).toContain("completion_sound.ogg");
+    expect(players[0].preload).toBe("auto");
+    expect(players[0].loads).toBe(1);
+    expect(players[0].plays).toBe(2);
+    expect(players[0].currentTime).toBe(0);
+  });
+
+  test("the preference is persisted and defaults on for older saves", () => {
+    const persist = read("src/lib/persist.ts");
+    expect(persist).toContain("completionSoundEnabled: boolean");
+    expect(persist).toContain(
+      'typeof parsed.completionSoundEnabled === "boolean" ? parsed.completionSoundEnabled : true',
+    );
+    expect(persist).toContain("completionSoundEnabled: state.completionSoundEnabled");
+  });
+
+  test("every detected completion can play before focus only affects its visual marker", () => {
+    const app = read("src/App.tsx");
+    const finish = app.indexOf("const finished = didProcessFinish(previous, meta);");
+    const sound = app.indexOf("playCompletionSound();", finish);
+    const focus = app.indexOf("if (isFocusedTerm(termId)) {", finish);
+    expect(finish).toBeGreaterThan(-1);
+    expect(sound).toBeGreaterThan(finish);
+    expect(sound).toBeLessThan(focus);
+  });
+});

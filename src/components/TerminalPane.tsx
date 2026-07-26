@@ -22,6 +22,7 @@ interface Props {
   isSource: boolean;
   spawn: { cwd: string | null; shell: string | null };
   highlight: boolean;
+  completionFlash: number;
   /** Background completion not reviewed yet — drives the pane outline, not a header dot. */
   unread: boolean;
   /** Folder of the tab this pane belongs to — the empty state offers to set it. */
@@ -50,6 +51,7 @@ export const TerminalPane = memo(function TerminalPane({
   isSource,
   spawn,
   highlight,
+  completionFlash,
   unread,
   project,
   recents,
@@ -186,6 +188,13 @@ export const TerminalPane = memo(function TerminalPane({
       data-pane-id={node.id}
       onPointerDownCapture={onActivate}
     >
+      {completionFlash > 0 && (
+        <span
+          key={completionFlash}
+          className="pane-completion-flash"
+          aria-hidden="true"
+        />
+      )}
       {showHeader && (
         <div
           className="pane-header"

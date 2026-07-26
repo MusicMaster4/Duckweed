@@ -32,6 +32,14 @@ describe("idle work stays bounded", () => {
     expect(duck).toContain("const ticks = new Set");
     expect(duck).toContain("IntersectionObserver");
     expect(duck).toContain("document.hidden");
+    expect(duck).toContain("document.hasFocus()");
+    expect(duck).not.toContain("requestAnimationFrame(clockStep)");
+  });
+
+  test("the Windows process snapshot is sampled at a bounded idle cadence", () => {
+    const pty = read("src-tauri/src/pty.rs");
+    expect(pty).toContain("Duration::from_millis(500)");
+    expect(pty).not.toContain("Duration::from_millis(200)");
   });
 });
 
@@ -95,6 +103,18 @@ describe("large and blocking work is isolated", () => {
     const app = read("src/App.tsx");
     expect(app.indexOf("setBooted(true)")).toBeLessThan(app.indexOf("await listShells()"));
     expect(app).toContain("frontendReady()");
+  });
+
+  test("CLI startup reuses shell discovery and Node's persistent compile cache", () => {
+    const shells = read("src-tauri/src/shells.rs");
+    const agents = read("src-tauri/src/agent_activity.rs");
+    expect(shells).toContain("OnceLock<Vec<ShellInfo>>");
+    expect(shells).toContain("SHELLS.get_or_init(discover_shells)");
+    expect(agents).toContain("DISCOVERY_START_DELAY");
+    expect(agents).toContain("!LOG_AGENTS.contains");
+    expect(agents).toContain('"NODE_COMPILE_CACHE"');
+    expect(agents).toContain('"NODE_DISABLE_COMPILE_CACHE"');
+    expect(agents).toContain('"duckweed-node-compile-cache"');
   });
 
   test("usage work waits for Settings entry and never polls while Settings stays open", () => {

@@ -771,6 +771,17 @@ function create(id: string, opts: { cwd?: string | null; shell?: string | null }
       return true;
     }
 
+    // xterm encodes Shift+Enter exactly like Enter — a bare CR — so TUIs that
+    // treat the two differently (Claude Code, Codex, aider) submit instead of
+    // inserting a line break. ESC+CR is the sequence `/terminal-setup` installs
+    // in VS Code and iTerm2 for precisely this.
+    if (event.key === "Enter" && event.shiftKey && !ctrl && !event.altKey) {
+      event.preventDefault();
+      markTyping(session);
+      send(session, "\x1b\r");
+      return false;
+    }
+
     if (!session.editorMode) return true;
 
     // Keyboard block navigation while focus sits on the grid (after a click

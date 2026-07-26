@@ -33,6 +33,8 @@ export interface Persisted {
    * completion dot on the tab until the user reviews it.
    */
   completionHighlights: boolean;
+  /** Play the bundled cue whenever a process or persistent agent finishes. */
+  completionSoundEnabled: boolean;
   /** Warp-style command editor, or a conventional raw terminal. */
   inputMode: InputMode;
   /**
@@ -102,6 +104,8 @@ export function load(): Persisted | null {
       highlight: typeof parsed.highlight === "boolean" ? parsed.highlight : true,
       completionHighlights:
         typeof parsed.completionHighlights === "boolean" ? parsed.completionHighlights : true,
+      completionSoundEnabled:
+        typeof parsed.completionSoundEnabled === "boolean" ? parsed.completionSoundEnabled : true,
       inputMode: parsed.inputMode === "raw" ? "raw" : "editor",
       // Default on so a missing field from older saves still asks before killing work.
       confirmCloseRunning:
@@ -123,6 +127,7 @@ export function save(state: {
   shell: string | null;
   highlight: boolean;
   completionHighlights: boolean;
+  completionSoundEnabled: boolean;
   inputMode: InputMode;
   confirmCloseRunning: boolean;
   toolsOpen: boolean;
@@ -139,6 +144,7 @@ export function save(state: {
       shell: state.shell,
       highlight: state.highlight,
       completionHighlights: state.completionHighlights,
+      completionSoundEnabled: state.completionSoundEnabled,
       inputMode: state.inputMode,
       confirmCloseRunning: state.confirmCloseRunning,
       toolsOpen: state.toolsOpen,

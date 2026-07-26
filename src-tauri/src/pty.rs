@@ -31,7 +31,12 @@ const OUTPUT_QUEUE_CHUNKS: usize = 64;
 const EMIT_BATCH_WINDOW: Duration = Duration::from_millis(1);
 
 /// Busy changes do not need per-pane polling. One snapshot covers every PTY.
-const BUSY_POLL: Duration = Duration::from_millis(200);
+///
+/// A process snapshot walks the system-wide process table on Windows. Twice a
+/// second keeps the pane state responsive while avoiding five global walks per
+/// second whenever Duckweed is merely open. Close/update checks still take an
+/// immediate fresh snapshot rather than relying on this cached UI state.
+const BUSY_POLL: Duration = Duration::from_millis(500);
 
 pub struct Session {
     writer: Box<dyn Write + Send>,

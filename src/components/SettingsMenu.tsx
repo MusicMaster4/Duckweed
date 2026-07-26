@@ -9,6 +9,7 @@ interface Props {
   inputMode: InputMode;
   highlight: boolean;
   completionHighlights: boolean;
+  completionSoundEnabled: boolean;
   confirmCloseRunning: boolean;
   shell: string | null;
   shells: ShellInfo[];
@@ -17,6 +18,7 @@ interface Props {
   onToggleInputMode: () => void;
   onToggleHighlight: () => void;
   onToggleCompletionHighlights: () => void;
+  onToggleCompletionSound: () => void;
   onToggleConfirmCloseRunning: () => void;
   onShell: (shellId: string | null) => void;
   onCheckUpdates: () => void;
@@ -32,11 +34,15 @@ function Toggle({ enabled }: { enabled: boolean }) {
 
 type SettingsSection = "General" | "Appearance" | "Terminal" | "Usage" | "About";
 
+// Survive SettingsMenu unmount when the user leaves the Settings tab and comes back.
+let lastSettingsSection: SettingsSection = "General";
+
 export function SettingsMenu({
   fontSize,
   inputMode,
   highlight,
   completionHighlights,
+  completionSoundEnabled,
   confirmCloseRunning,
   shell,
   shells,
@@ -45,12 +51,17 @@ export function SettingsMenu({
   onToggleInputMode,
   onToggleHighlight,
   onToggleCompletionHighlights,
+  onToggleCompletionSound,
   onToggleConfirmCloseRunning,
   onShell,
   onCheckUpdates,
 }: Props) {
-  const [section, setSection] = useState<SettingsSection>("General");
+  const [section, setSectionState] = useState<SettingsSection>(lastSettingsSection);
   const [query, setQuery] = useState("");
+  const setSection = (next: SettingsSection) => {
+    lastSettingsSection = next;
+    setSectionState(next);
+  };
   const roundedFontSize = Math.round(fontSize * 10) / 10;
   const normalizedQuery = query.trim().toLowerCase();
   const searching = normalizedQuery.length > 0;
@@ -59,7 +70,8 @@ export function SettingsMenu({
     (section === "General" || section === "Appearance" || searching) &&
     (matches("appearance font size terminal text command editor") ||
       matches("syntax highlighting colour commands plain terminal output") ||
-      matches("completion highlights finished process unread tab outline rose"));
+      matches("completion highlights finished process unread tab outline rose") ||
+      matches("completion sound audio cue process agent finished"));
   const showTerminal =
     (section === "General" || section === "Terminal" || searching) &&
     (matches("terminal command editor compose commands grid type directly") ||
@@ -179,6 +191,19 @@ export function SettingsMenu({
                     <span>Outline finished panes and mark their tab until you review them</span>
                   </span>
                   <Toggle enabled={completionHighlights} />
+                </button>
+              )}
+              {matches("completion sound audio cue process agent finished") && (
+                <button
+                  type="button"
+                  className="settings-row settings-action"
+                  onClick={onToggleCompletionSound}
+                >
+                  <span className="settings-copy">
+                    <strong>Completion sound</strong>
+                    <span>Play a sound when a process or agent finishes</span>
+                  </span>
+                  <Toggle enabled={completionSoundEnabled} />
                 </button>
               )}
             </section>

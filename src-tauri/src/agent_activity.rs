@@ -20,6 +20,7 @@ use tauri::{AppHandle, Emitter, Manager};
 
 const POLL: Duration = Duration::from_millis(350);
 const DISCOVERY_POLL: Duration = Duration::from_secs(2);
+const DISCOVERY_START_DELAY: Duration = Duration::from_secs(1);
 const START_TOLERANCE: Duration = Duration::from_secs(3);
 const LOG_AGENTS: &[&str] = &["codex", "claude", "grok"];
 const SUPPORTED_AGENTS: &[&str] = &[
@@ -84,7 +85,10 @@ impl AgentActivityManager {
                 agent,
                 cwd: PathBuf::from(cwd),
                 started: SystemTime::now(),
-                next_discovery: Instant::now(),
+                // Let the CLI read its own executable/configuration first.
+                // Transcript discovery is disk-heavy and completion records
+                // remain durable, so beginning a moment later loses nothing.
+                next_discovery: Instant::now() + DISCOVERY_START_DELAY,
                 file: None,
                 offset: 0,
             },
@@ -148,6 +152,17 @@ impl AgentActivityManager {
     }
 
     fn poll_hook_events(&self, app: &AppHandle) {
+        // Log-backed agents never write this bridge file. Avoid opening and
+        // stat-ing it every 350 ms while Codex/Claude/Grok are starting.
+        if !self
+            .watches
+            .lock()
+            .unwrap()
+            .values()
+            .any(|watch| !LOG_AGENTS.contains(&watch.agent.as_str()))
+        {
+            return;
+        }
         let lines = {
             let mut state = self.hook_events.lock().unwrap();
             let Some(events) = state.as_mut() else {
@@ -250,6 +265,22 @@ pub fn terminal_env(app: &AppHandle, id: &str) -> Vec<(String, String)> {
             paths.events.to_string_lossy().into_owned(),
         ),
     ];
+    // Most coding CLIs are sizeable Node applications. Node 22+ can persist
+    // compiled CommonJS/ESM bytecode between runs, which removes a substantial
+    // amount of repeated parsing from every subsequent CLI launch. Older Node
+    // versions simply ignore this variable, and an explicit user cache or
+    // NODE_DISABLE_COMPILE_CACHE always wins.
+    if std::env::var_os("NODE_COMPILE_CACHE").is_none()
+        && std::env::var_os("NODE_DISABLE_COMPILE_CACHE").is_none()
+    {
+        env.push((
+            "NODE_COMPILE_CACHE".into(),
+            std::env::temp_dir()
+                .join("duckweed-node-compile-cache")
+                .to_string_lossy()
+                .into_owned(),
+        ));
+    }
     if std::env::var_os("GEMINI_CLI_SYSTEM_DEFAULTS_PATH").is_none() {
         env.push((
             "GEMINI_CLI_SYSTEM_DEFAULTS_PATH".into(),

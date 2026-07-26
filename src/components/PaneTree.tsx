@@ -20,6 +20,8 @@ export interface PaneTreeShared {
   highlight: boolean;
   /** Terminals whose most recent completion has not been reviewed yet. */
   unreadTerms: ReadonlySet<string>;
+  /** One-shot animation pulse for a completion in the currently focused pane. */
+  completionFlashes: ReadonlyMap<string, number>;
   /** Folder of the tab being rendered; the empty pane offers to pick one. */
   project: ProjectInfo | null;
   recents: string[];
@@ -57,6 +59,7 @@ export const PaneTree = memo(function PaneTree({ node, shared }: { node: LayoutN
         spawn={shared.spawnFor(node.term)}
         highlight={shared.highlight}
         unread={shared.unreadTerms.has(node.term)}
+        completionFlash={shared.completionFlashes.get(node.term) ?? 0}
         project={shared.project}
         recents={shared.recents}
         onBrowseProject={shared.onBrowseProject}

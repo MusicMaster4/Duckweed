@@ -29,11 +29,62 @@ use watch::ProjectWatchManager;
 #[derive(Default)]
 struct DurableSettings(Mutex<()>);
 
+const COMMAND_HISTORY_KEY: &str = "duckweed:command-history:v1";
+
 const DURABLE_SETTING_KEYS: [&str; 3] = [
     "duckweed:state:v1",
     "duckweed:usage:v1",
-    "duckweed:command-history:v1",
+    COMMAND_HISTORY_KEY,
 ];
+
+/// Keep the stored list bounded; oldest entries drop first.
+const MAX_HISTORY_ENTRIES: usize = 500;
+
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+struct HistoryEntry {
+    command: String,
+    #[serde(default)]
+    cwd: Option<String>,
+    at: i64,
+}
+
+fn parse_history(raw: &str) -> Vec<HistoryEntry> {
+    serde_json::from_str(raw).unwrap_or_default()
+}
+
+/// Union of the stored history and an incoming snapshot, oldest first.
+///
+/// Ghost-text history has several writers — a second window, or an installed
+/// build and a dev build, which use different WebView origins and therefore
+/// different localStorage. Replacing the file with whichever snapshot saved
+/// last would drop the other writer's commands, so entries are merged instead;
+/// the same command in the same directory collapses to its newest timestamp,
+/// which keeps re-saving an unchanged list idempotent.
+fn merge_history(stored: &str, incoming: &str) -> String {
+    let mut merged: Vec<HistoryEntry> = Vec::new();
+    let mut index: HashMap<(String, String), usize> = HashMap::new();
+
+    for entry in parse_history(stored).into_iter().chain(parse_history(incoming)) {
+        if entry.command.trim().is_empty() {
+            continue;
+        }
+        let key = (entry.command.clone(), entry.cwd.clone().unwrap_or_default());
+        match index.get(&key) {
+            Some(&at) if merged[at].at > entry.at => {}
+            Some(&at) => merged[at] = entry,
+            None => {
+                index.insert(key, merged.len());
+                merged.push(entry);
+            }
+        }
+    }
+
+    merged.sort_by_key(|entry| entry.at);
+    if merged.len() > MAX_HISTORY_ENTRIES {
+        merged.drain(..merged.len() - MAX_HISTORY_ENTRIES);
+    }
+    serde_json::to_string(&merged).unwrap_or_else(|_| incoming.to_string())
+}
 
 fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
     app.path()
@@ -68,6 +119,7 @@ fn settings_save(
     state: State<'_, DurableSettings>,
     key: String,
     value: String,
+    replace: Option<bool>,
 ) -> Result<(), String> {
     if !DURABLE_SETTING_KEYS.contains(&key.as_str()) {
         return Err("unsupported settings key".into());
@@ -78,6 +130,15 @@ fn settings_save(
     let _guard = state.0.lock().map_err(|error| error.to_string())?;
     let path = settings_path(&app)?;
     let mut settings = read_settings(&path);
+
+    // History accumulates across windows, builds and updates; everything else
+    // is a single-writer snapshot that simply replaces the stored copy.
+    let value = if key == COMMAND_HISTORY_KEY && !replace.unwrap_or(false) {
+        merge_history(settings.get(&key).map(String::as_str).unwrap_or("[]"), &value)
+    } else {
+        value
+    };
+
     settings.insert(key, value);
     let raw = serde_json::to_vec_pretty(&settings).map_err(|error| error.to_string())?;
     let parent = path.parent().ok_or("settings path has no parent")?;
@@ -378,4 +439,54 @@ fn main() {
         })
         .run(tauri::generate_context!())
         .expect("error while running duckweed");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn commands(raw: &str) -> Vec<String> {
+        parse_history(raw).into_iter().map(|e| e.command).collect()
+    }
+
+    #[test]
+    fn merge_keeps_commands_a_stale_snapshot_never_saw() {
+        let stored = r#"[{"command":"cargo build","cwd":"/a","at":1}]"#;
+        let incoming = r#"[{"command":"npm test","cwd":"/a","at":2}]"#;
+        assert_eq!(commands(&merge_history(stored, incoming)), ["cargo build", "npm test"]);
+    }
+
+    #[test]
+    fn merge_is_idempotent_and_ordered_by_recency() {
+        let stored = r#"[{"command":"ls","cwd":"/a","at":5},{"command":"pwd","cwd":"/a","at":1}]"#;
+        let once = merge_history(stored, stored);
+        assert_eq!(commands(&once), ["pwd", "ls"]);
+        assert_eq!(commands(&merge_history(&once, stored)), ["pwd", "ls"]);
+    }
+
+    #[test]
+    fn merge_bumps_recency_but_keeps_other_directories() {
+        let stored = r#"[{"command":"ls","cwd":"/a","at":1}]"#;
+        let incoming = r#"[{"command":"ls","cwd":"/a","at":9},{"command":"ls","cwd":"/b","at":4}]"#;
+        let merged = parse_history(&merge_history(stored, incoming));
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].cwd.as_deref(), Some("/b"));
+        assert_eq!(merged[1].at, 9);
+    }
+
+    #[test]
+    fn merge_caps_the_stored_list_at_the_newest_entries() {
+        let entries: Vec<String> = (0..MAX_HISTORY_ENTRIES + 20)
+            .map(|i| format!(r#"{{"command":"c{i}","cwd":null,"at":{i}}}"#))
+            .collect();
+        let merged = parse_history(&merge_history("[]", &format!("[{}]", entries.join(","))));
+        assert_eq!(merged.len(), MAX_HISTORY_ENTRIES);
+        assert_eq!(merged[0].command, "c20");
+    }
+
+    #[test]
+    fn merge_survives_a_corrupt_stored_copy() {
+        let incoming = r#"[{"command":"ls","cwd":null,"at":1}]"#;
+        assert_eq!(commands(&merge_history("not json", incoming)), ["ls"]);
+    }
 }

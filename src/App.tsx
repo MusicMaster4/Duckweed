@@ -23,6 +23,7 @@ import {
   setConfirmCloseRunningEnabled,
   subscribeConfirmClosePref,
 } from "./lib/confirmClose";
+import { playCompletionSound, preloadCompletionSound } from "./lib/completionSound";
 import { clearGreetings } from "./lib/greetings";
 import { frontendReady, listShells, projectInfo, watchProject } from "./lib/ipc";
 import {
@@ -107,6 +108,7 @@ function boot() {
       shell: saved.shell,
       highlight: saved.highlight,
       completionHighlights: saved.completionHighlights,
+      completionSoundEnabled: saved.completionSoundEnabled,
       inputMode: saved.inputMode,
       confirmCloseRunning: saved.confirmCloseRunning,
       toolsOpen: saved.toolsOpen,
@@ -132,6 +134,7 @@ function boot() {
     shell: null as string | null,
     highlight: true,
     completionHighlights: true,
+    completionSoundEnabled: true,
     inputMode: "editor" as terminals.InputMode,
     confirmCloseRunning: true,
     toolsOpen: false,
@@ -141,6 +144,8 @@ function boot() {
 
 /** Stable empty set so hiding completion marks does not churn PaneTree memos. */
 const NO_UNREAD_TERMS: ReadonlySet<string> = new Set();
+/** Stable empty map used while focused completion flashes are hidden. */
+const NO_COMPLETION_FLASHES: ReadonlyMap<string, number> = new Map();
 
 /**
  * True for a field the user is typing into. xterm's hidden helper textarea is
@@ -162,6 +167,9 @@ export default function App() {
   const [fontSize, setFontSize] = useState(initial.fontSize);
   const [highlight, setHighlight] = useState(initial.highlight);
   const [completionHighlights, setCompletionHighlights] = useState(initial.completionHighlights);
+  const [completionSoundEnabled, setCompletionSoundEnabled] = useState(
+    initial.completionSoundEnabled,
+  );
   const [inputMode, setInputMode] = useState(initial.inputMode);
   const [confirmCloseRunningPref, setConfirmCloseRunningPref] = useState(() => {
     // Honour the saved preference before any close handler can run.
@@ -175,6 +183,9 @@ export default function App() {
   const [changesOpen, setChangesOpen] = useState(false);
   const [toolsOpen, setToolsOpen] = useState(initial.toolsOpen);
   const [unreadTermIds, setUnreadTermIds] = useState<Set<string>>(() => new Set());
+  const [completionFlashes, setCompletionFlashes] = useState<Map<string, number>>(
+    () => new Map(),
+  );
   const [toolsWidth, setToolsWidth] = useState(
     Math.min(TOOLS_MAX_WIDTH, Math.max(TOOLS_MIN_WIDTH, initial.toolsWidth)),
   );
@@ -190,6 +201,12 @@ export default function App() {
   settingsActiveRef.current = settingsActive;
   const shellRef = useRef(shell);
   shellRef.current = shell;
+  const completionSoundEnabledRef = useRef(completionSoundEnabled);
+  completionSoundEnabledRef.current = completionSoundEnabled;
+  const completionHighlightsRef = useRef(completionHighlights);
+  completionHighlightsRef.current = completionHighlights;
+  const completionFlashSeq = useRef(0);
+  const completionFlashTimers = useRef(new Map<string, number>());
   const processState = useRef(new Map<string, ProcessState>());
   /** Last folder opened in any tab — only ever used to seed the folder picker. */
   const lastProject = useRef<string | null>(initial.lastProject);
@@ -217,6 +234,31 @@ export default function App() {
       next.delete(termId);
       return next;
     });
+  }, []);
+
+  const flashFocusedCompletion = useCallback((termId: string) => {
+    const previousTimer = completionFlashTimers.current.get(termId);
+    if (previousTimer !== undefined) window.clearTimeout(previousTimer);
+
+    const pulse = ++completionFlashSeq.current;
+    setCompletionFlashes((previous) => {
+      const next = new Map(previous);
+      next.set(termId, pulse);
+      return next;
+    });
+
+    completionFlashTimers.current.set(
+      termId,
+      window.setTimeout(() => {
+        completionFlashTimers.current.delete(termId);
+        setCompletionFlashes((previous) => {
+          if (!previous.has(termId)) return previous;
+          const next = new Map(previous);
+          next.delete(termId);
+          return next;
+        });
+      }, 1500),
+    );
   }, []);
 
   /** A terminal is being watched only when its pane and app window both have focus. */
@@ -264,6 +306,17 @@ export default function App() {
     terminals.dispose(term);
     spawnOpts.current.delete(term);
     processState.current.delete(term);
+    const flashTimer = completionFlashTimers.current.get(term);
+    if (flashTimer !== undefined) {
+      window.clearTimeout(flashTimer);
+      completionFlashTimers.current.delete(term);
+    }
+    setCompletionFlashes((previous) => {
+      if (!previous.has(term)) return previous;
+      const next = new Map(previous);
+      next.delete(term);
+      return next;
+    });
     acknowledgeTerm(term);
     clearGreetings(term);
   }, [acknowledgeTerm]);
@@ -294,7 +347,12 @@ export default function App() {
       if (!previous) return;
 
       const finished = didProcessFinish(previous, meta);
-      if (!finished || isFocusedTerm(termId)) return;
+      if (!finished) return;
+      if (completionSoundEnabledRef.current) playCompletionSound();
+      if (isFocusedTerm(termId)) {
+        if (completionHighlightsRef.current) flashFocusedCompletion(termId);
+        return;
+      }
       setUnreadTermIds((prev) => {
         if (prev.has(termId)) return prev;
         const next = new Set(prev);
@@ -312,7 +370,7 @@ export default function App() {
     };
     // Tab metadata changes must not tear down every terminal subscription.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [termIdsKey, acknowledgeTerm, isFocusedTerm]);
+  }, [termIdsKey, acknowledgeTerm, flashFocusedCompletion, isFocusedTerm]);
 
   // ---------------------------------------------------------------- tabs
 
@@ -902,6 +960,7 @@ export default function App() {
       terminals.setFontSize(initial.fontSize);
       terminals.setHighlight(initial.highlight);
       terminals.setInputMode(initial.inputMode);
+      preloadCompletionSound();
       if (!cancelled) setBooted(true);
 
       try {
@@ -1014,6 +1073,7 @@ export default function App() {
           shell,
           highlight,
           completionHighlights,
+          completionSoundEnabled,
           inputMode,
           confirmCloseRunning: confirmCloseRunningPref,
           toolsOpen,
@@ -1032,6 +1092,7 @@ export default function App() {
     shell,
     highlight,
     completionHighlights,
+    completionSoundEnabled,
     inputMode,
     confirmCloseRunningPref,
     toolsOpen,
@@ -1119,6 +1180,29 @@ export default function App() {
 
   const toggleCompletionHighlights = useCallback(() => {
     setCompletionHighlights((prev) => !prev);
+  }, []);
+
+  useEffect(() => {
+    if (completionHighlights) return;
+    for (const timer of completionFlashTimers.current.values()) {
+      window.clearTimeout(timer);
+    }
+    completionFlashTimers.current.clear();
+    setCompletionFlashes((previous) => (previous.size === 0 ? previous : new Map()));
+  }, [completionHighlights]);
+
+  useEffect(
+    () => () => {
+      for (const timer of completionFlashTimers.current.values()) {
+        window.clearTimeout(timer);
+      }
+      completionFlashTimers.current.clear();
+    },
+    [],
+  );
+
+  const toggleCompletionSound = useCallback(() => {
+    setCompletionSoundEnabled((prev) => !prev);
   }, []);
 
   const toggleInputMode = useCallback(() => {
@@ -1654,6 +1738,7 @@ export default function App() {
       highlight,
       // Tracking still runs; the setting only hides the rose chrome.
       unreadTerms: completionHighlights ? unreadTermIds : NO_UNREAD_TERMS,
+      completionFlashes: completionHighlights ? completionFlashes : NO_COMPLETION_FLASHES,
       project,
       recents,
       onBrowseProject: browseActiveProject,
@@ -1672,6 +1757,7 @@ export default function App() {
       activatePane,
       browseActiveProject,
       closePaneById,
+      completionFlashes,
       completionHighlights,
       drag,
       highlight,
@@ -1755,6 +1841,7 @@ export default function App() {
               inputMode={inputMode}
               highlight={highlight}
               completionHighlights={completionHighlights}
+              completionSoundEnabled={completionSoundEnabled}
               confirmCloseRunning={confirmCloseRunningPref}
               shell={shell}
               shells={shells}
@@ -1763,6 +1850,7 @@ export default function App() {
               onToggleInputMode={toggleInputMode}
               onToggleHighlight={toggleHighlight}
               onToggleCompletionHighlights={toggleCompletionHighlights}
+              onToggleCompletionSound={toggleCompletionSound}
               onToggleConfirmCloseRunning={() =>
                 setConfirmCloseRunningPref((prev) => !prev)
               }

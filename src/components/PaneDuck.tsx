@@ -13,23 +13,21 @@ import {
 const PROBE_COLS = 64;
 type DuckTick = (seconds: number) => void;
 const ticks = new Set<DuckTick>();
-let clockRaf = 0;
-let clockLast = -Infinity;
+let clockTimer = 0;
 
-function clockStep(ms: number) {
-  if (document.hidden || ticks.size === 0) {
-    clockRaf = 0;
+function clockStep() {
+  clockTimer = 0;
+  if (document.hidden || !document.hasFocus() || ticks.size === 0) {
     return;
   }
-  clockRaf = requestAnimationFrame(clockStep);
-  if (ms - clockLast < 1000 / DUCK_FPS) return;
-  clockLast = ms;
-  for (const tick of ticks) tick(ms / 1000);
+  const seconds = performance.now() / 1000;
+  for (const tick of ticks) tick(seconds);
+  clockTimer = window.setTimeout(clockStep, 1000 / DUCK_FPS);
 }
 
 function ensureClock() {
-  if (!clockRaf && !document.hidden && ticks.size > 0) {
-    clockRaf = requestAnimationFrame(clockStep);
+  if (!clockTimer && !document.hidden && document.hasFocus() && ticks.size > 0) {
+    clockTimer = window.setTimeout(clockStep, 1000 / DUCK_FPS);
   }
 }
 
@@ -38,14 +36,15 @@ function subscribeClock(tick: DuckTick): () => void {
   ensureClock();
   return () => {
     ticks.delete(tick);
-    if (ticks.size === 0 && clockRaf) {
-      cancelAnimationFrame(clockRaf);
-      clockRaf = 0;
+    if (ticks.size === 0 && clockTimer) {
+      window.clearTimeout(clockTimer);
+      clockTimer = 0;
     }
   };
 }
 
 document.addEventListener("visibilitychange", ensureClock);
+window.addEventListener("focus", ensureClock);
 
 function sameLayout(a: DuckLayout | null, b: DuckLayout): boolean {
   return (

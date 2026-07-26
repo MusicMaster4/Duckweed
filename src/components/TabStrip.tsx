@@ -3,6 +3,7 @@ import { useEffect, useRef, useState, type CSSProperties, type MouseEvent } from
 import type { Tab } from "../lib/types";
 import { tabColorHex } from "../lib/tabColors";
 import { tabIconDef } from "../lib/tabIcons";
+import { clampLeft, dropIndex, restingLeft, slotShift } from "../lib/tabReorder";
 import type { DragState } from "../hooks/useDragPane";
 import { CompletionDot } from "./CompletionDot";
 import { ProjectMenu } from "./ProjectMenu";
@@ -47,6 +48,32 @@ interface Props {
 type Picker = { tabId: string; x: number; y: number };
 
 type ContextMenu = { tabId: string; x: number; y: number };
+
+/** Where a tab sat when the drag began. */
+type Slot = { el: HTMLElement; left: number; width: number };
+
+/** A tab being dragged along the strip. */
+type Reorder = {
+  tabId: string;
+  /** Pointer x at pointerdown, measured against the slop threshold. */
+  startX: number;
+  /** Distance from the pointer to the tab's left edge — held constant. */
+  grabOffset: number;
+  /** Index the drag started from. */
+  from: number;
+  /** Index the tab would land on if dropped now. */
+  to: number;
+  /** The strip as it was when the drag began; never re-measured. */
+  slots: Slot[];
+  dragging: boolean;
+};
+
+/** Pointer travel before a press turns into a drag. */
+const DRAG_SLOP = 4;
+
+/** How long tabs take to slide into a new order. */
+const SLIDE_MS = 170;
+const SLIDE_EASE = "cubic-bezier(0.22, 1, 0.36, 1)";
 
 const TabGlyph = ({ iconId }: { iconId: string | null | undefined }) => {
   const def = tabIconDef(iconId);
@@ -104,36 +131,126 @@ export function TabStrip({
   onCloseSettings,
 }: Props) {
   const stripRef = useRef<HTMLDivElement>(null);
-  const reorder = useRef<{ tabId: string } | null>(null);
+  const reorder = useRef<Reorder | null>(null);
+  /** Drop animation in flight — run it early if another gesture starts. */
+  const settling = useRef<(() => void) | null>(null);
+  const [dragTabId, setDragTabId] = useState<string | null>(null);
   const [editing, setEditing] = useState<string | null>(null);
   const [picker, setPicker] = useState<Picker | null>(null);
   const [context, setContext] = useState<ContextMenu | null>(null);
 
   useEffect(() => {
+    /**
+     * Snapshot the strip once, when the gesture turns into a drag. Every later
+     * decision is made against this frozen layout: the tabs are being moved
+     * around by transforms, so live rects would feed the gesture its own
+     * output and the drag would fight itself.
+     */
+    const snapshot = (tabId: string) => {
+      const strip = stripRef.current;
+      if (!strip) return null;
+      const els = [...strip.querySelectorAll<HTMLElement>("[data-tab-id]")];
+      const from = els.findIndex((el) => el.dataset.tabId === tabId);
+      if (from < 0) return null;
+      const slots = els.map((el) => {
+        const rect = el.getBoundingClientRect();
+        return { el, left: rect.left, width: rect.width };
+      });
+      return { slots, from };
+    };
+
+    /** Slide everything into the new order, then hand it to React. */
+    const settle = (state: Reorder) => {
+      const { slots, from, to } = state;
+      const width = slots[from].width;
+      const rest = restingLeft(slots, from, to);
+
+      for (let i = 0; i < slots.length; i++) {
+        const { el } = slots[i];
+        const shift = i === from ? rest - slots[from].left : slotShift(i, from, to, width);
+        el.style.transition = `transform ${SLIDE_MS}ms ${SLIDE_EASE}`;
+        el.style.transform = shift ? `translateX(${shift}px)` : "translateX(0px)";
+      }
+
+      // The transforms are only a preview: once they have played out the tabs
+      // are already sitting in the new order, so dropping them and letting
+      // React re-render the real order is invisible.
+      const commit = () => {
+        settling.current = null;
+        for (const { el } of slots) {
+          el.style.transition = "";
+          el.style.transform = "";
+        }
+        document.body.classList.remove("is-dragging-tab");
+        setDragTabId(null);
+        if (to !== from) onReorder(from, to);
+      };
+      settling.current = commit;
+      window.setTimeout(() => {
+        if (settling.current === commit) commit();
+      }, SLIDE_MS);
+    };
+
+    /** End the gesture — dropping the tab where it currently reads as being. */
+    const finish = () => {
+      const state = reorder.current;
+      reorder.current = null;
+      if (!state) return;
+      if (!state.dragging) return; // A plain click: nothing was ever moved.
+      settle(state);
+    };
+
     const move = (e: PointerEvent) => {
       const state = reorder.current;
-      const strip = stripRef.current;
-      if (!state || !strip) return;
-      const buttons = [...strip.querySelectorAll<HTMLElement>("[data-tab-id]")];
-      const from = buttons.findIndex((b) => b.dataset.tabId === state.tabId);
-      if (from < 0) return;
-      let to = from;
-      for (let i = 0; i < buttons.length; i++) {
-        const rect = buttons[i].getBoundingClientRect();
-        if (e.clientX > rect.left + rect.width / 2) to = i;
+      if (!state) return;
+      // A click is a click until the pointer has travelled far enough that the
+      // user clearly means to move the tab rather than just select it.
+      if (!state.dragging) {
+        if (Math.abs(e.clientX - state.startX) < DRAG_SLOP) return;
+        const shot = snapshot(state.tabId);
+        if (!shot) return;
+        state.dragging = true;
+        state.slots = shot.slots;
+        state.from = shot.from;
+        state.to = shot.from;
+        document.body.classList.add("is-dragging-tab");
+        setDragTabId(state.tabId);
       }
-      if (e.clientX < buttons[0].getBoundingClientRect().left) to = 0;
-      if (to !== from) onReorder(from, to);
+
+      const { slots, from } = state;
+      const width = slots[from].width;
+      const left = clampLeft(slots, from, e.clientX - state.grabOffset);
+      const to = dropIndex(slots, from, left);
+      state.to = to;
+
+      // The dragged tab tracks the pointer exactly; the tabs it has passed
+      // step aside by its width and are eased there by CSS.
+      slots[from].el.style.transform = `translateX(${left - slots[from].left}px)`;
+      for (let i = 0; i < slots.length; i++) {
+        if (i === from) continue;
+        const shift = slotShift(i, from, to, width);
+        slots[i].el.style.transform = shift ? `translateX(${shift}px)` : "translateX(0px)";
+      }
     };
-    const up = () => {
+
+    /** Escape puts the tab back where the drag started. */
+    const key = (e: KeyboardEvent) => {
+      const state = reorder.current;
+      if (!state || !state.dragging || e.key !== "Escape") return;
       reorder.current = null;
-      document.body.classList.remove("is-dragging-tab");
+      state.to = state.from;
+      settle(state);
     };
+
     window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", up);
+    window.addEventListener("pointerup", finish);
+    window.addEventListener("pointercancel", finish);
+    window.addEventListener("keydown", key);
     return () => {
       window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointerup", finish);
+      window.removeEventListener("pointercancel", finish);
+      window.removeEventListener("keydown", key);
     };
   }, [onReorder]);
 
@@ -179,15 +296,26 @@ export function TabStrip({
                 tab.pinned ? "is-pinned" : "",
                 accent ? "is-colored" : "",
                 showUnread ? "is-unread" : "",
+                dragTabId === tab.id ? "is-reordering" : "",
               ]
                 .filter(Boolean)
                 .join(" ")}
               style={accent ? ({ "--tab-color": accent } as CSSProperties) : undefined}
               onPointerDown={(e) => {
                 if (e.button !== 0) return;
+                // Land any drop still animating before measuring anything.
+                settling.current?.();
                 onSelect(tab.id);
-                reorder.current = { tabId: tab.id };
-                document.body.classList.add("is-dragging-tab");
+                const rect = e.currentTarget.getBoundingClientRect();
+                reorder.current = {
+                  tabId: tab.id,
+                  startX: e.clientX,
+                  grabOffset: e.clientX - rect.left,
+                  from: 0,
+                  to: 0,
+                  slots: [],
+                  dragging: false,
+                };
               }}
               onDoubleClick={() => setEditing(tab.id)}
               onKeyDown={(e) => {
