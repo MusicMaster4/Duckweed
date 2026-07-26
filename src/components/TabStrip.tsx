@@ -14,9 +14,6 @@ export interface ProjectActions {
   setFor: (tabId: string, path: string) => void;
   /** Open the folder picker for an existing tab. */
   browseFor: (tabId: string) => void;
-  /** Open a new tab, already in that folder. */
-  openInNewTab: (path: string) => void;
-  browseInNewTab: () => void;
   /** Re-read the tab's project after a branch switch. */
   refresh: (tabId: string) => void;
 }
@@ -39,9 +36,8 @@ interface Props {
   onColor: (tabId: string, colorId: string | null) => void;
 }
 
-/** Which folder picker is open: one tab's, or the new-tab button's. */
-type Picker = { kind: "tab"; tabId: string; x: number; y: number } | { kind: "new"; x: number; y: number };
-type PickerRequest = { kind: "tab"; tabId: string } | { kind: "new" };
+/** Folder picker open on a tab. */
+type Picker = { tabId: string; x: number; y: number };
 
 type ContextMenu = { tabId: string; x: number; y: number };
 
@@ -126,13 +122,13 @@ export function TabStrip({
   const paneDropNew = drag?.target?.kind === "newTab";
 
   /** Hang the folder picker under whatever was clicked. */
-  const openPicker = (e: MouseEvent, request: PickerRequest) => {
+  const openPicker = (e: MouseEvent, tabId: string) => {
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
     setContext(null);
-    setPicker({ ...request, x: rect.left, y: rect.bottom + 6 } as Picker);
+    setPicker({ tabId, x: rect.left, y: rect.bottom + 6 });
   };
 
-  const pickerTab = picker?.kind === "tab" ? tabs.find((t) => t.id === picker.tabId) : null;
+  const pickerTab = picker ? tabs.find((t) => t.id === picker.tabId) : null;
   const contextTab = context ? tabs.find((t) => t.id === context.tabId) : null;
 
   return (
@@ -206,7 +202,7 @@ export function TabStrip({
                     onClick={(e) => {
                       e.stopPropagation();
                       onSelect(tab.id);
-                      openPicker(e, { kind: "tab", tabId: tab.id });
+                      openPicker(e, tab.id);
                     }}
                   >
                     <FolderIcon />
@@ -254,27 +250,10 @@ export function TabStrip({
           >
             +
           </button>
-          <button
-            type="button"
-            className={`tab-new tab-new-menu ${picker?.kind === "new" ? "is-open" : ""}`}
-            title={
-              allowNewTab
-                ? "Choose a folder for a new tab…"
-                : "Choose a folder for this tab before opening another"
-            }
-            disabled={!allowNewTab}
-            onClick={(e) => {
-              if (allowNewTab) openPicker(e, { kind: "new" });
-            }}
-          >
-            <svg viewBox="0 0 12 12" aria-hidden="true">
-              <path d="M3 4.75 6 7.75l3-3" />
-            </svg>
-          </button>
         </div>
       </div>
 
-      {picker?.kind === "tab" && pickerTab && (
+      {picker && pickerTab && (
         <ProjectMenu
           anchor={picker}
           scope={`Folder for “${pickerTab.title}”`}
@@ -282,18 +261,6 @@ export function TabStrip({
           current={pickerTab.project?.path ?? null}
           onPick={(path) => projects.setFor(pickerTab.id, path)}
           onBrowse={() => projects.browseFor(pickerTab.id)}
-          onClose={() => setPicker(null)}
-        />
-      )}
-
-      {picker?.kind === "new" && (
-        <ProjectMenu
-          anchor={picker}
-          scope="Folder for a new tab"
-          recents={projects.recents}
-          current={null}
-          onPick={projects.openInNewTab}
-          onBrowse={projects.browseInNewTab}
           onClose={() => setPicker(null)}
         />
       )}

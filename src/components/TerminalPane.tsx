@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 
 import * as bus from "../lib/bus";
 import * as terminals from "../lib/terminals";
@@ -6,6 +7,9 @@ import type { DropZone, LeafNode, ProjectInfo } from "../lib/types";
 import { CommandInput } from "./CommandInput";
 import { PaneWelcome } from "./PaneWelcome";
 import { SearchBar } from "./SearchBar";
+
+/** Brief "Copied" chip shown at the cursor after right-click copy. */
+type CopyToast = { x: number; y: number; id: number };
 
 interface Props {
   node: LeafNode;
@@ -52,10 +56,28 @@ export function TerminalPane({
   onPickProject,
 }: Props) {
   const bodyRef = useRef<HTMLDivElement>(null);
+  const copyToastTimer = useRef<number | null>(null);
   const [meta, setMeta] = useState(() => terminals.getMeta(node.term));
   const [searching, setSearching] = useState(false);
   const [inputMode, setInputMode] = useState(terminals.getInputMode);
   const [busy, setBusy] = useState(false);
+  const [copyToast, setCopyToast] = useState<CopyToast | null>(null);
+
+  useEffect(
+    () => () => {
+      if (copyToastTimer.current != null) window.clearTimeout(copyToastTimer.current);
+    },
+    [],
+  );
+
+  const showCopyToast = (x: number, y: number) => {
+    if (copyToastTimer.current != null) window.clearTimeout(copyToastTimer.current);
+    setCopyToast({ x, y, id: Date.now() });
+    copyToastTimer.current = window.setTimeout(() => {
+      setCopyToast(null);
+      copyToastTimer.current = null;
+    }, 700);
+  };
 
   // Attach before paint so the terminal never flashes an empty frame when the
   // layout changes and React remounts this pane.
@@ -245,6 +267,7 @@ export function TerminalPane({
           const selected = terminals.selection(node.term);
           if (selected) {
             void navigator.clipboard.writeText(selected);
+            showCopyToast(e.clientX, e.clientY);
             return;
           }
           void navigator.clipboard.readText().then((text) => {
@@ -274,6 +297,20 @@ export function TerminalPane({
       {searching && <SearchBar termId={node.term} onClose={() => setSearching(false)} />}
 
       {dropZone && <div className={`drop-hint drop-${dropZone}`} />}
+
+      {copyToast &&
+        createPortal(
+          <div
+            key={copyToast.id}
+            className="copy-toast"
+            style={{ left: copyToast.x, top: copyToast.y }}
+            role="status"
+            aria-live="polite"
+          >
+            Copied
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }

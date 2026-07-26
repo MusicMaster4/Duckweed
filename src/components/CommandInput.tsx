@@ -37,6 +37,12 @@ export function CommandInput({ termId, active, exited }: Props) {
     resize();
   }, [value, resize]);
 
+  // Font size is applied via CSS variables from terminals.setFontSize; remeasure
+  // the textarea so a larger/smaller face does not leave a stale height.
+  useEffect(() => {
+    return terminals.subscribe(() => resize());
+  }, [resize]);
+
   useEffect(() => {
     return terminals.registerInputFocus(termId, () => {
       if (exited) {

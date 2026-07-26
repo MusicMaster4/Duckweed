@@ -171,8 +171,9 @@ cd src-tauri && cargo check
 Duckweed is an active, experimental project. The core workspace experience — projects,
 tabs, panes, native shells, search, and layout persistence — is implemented.
 
-Warp-style command blocks (grouping each command and its output into a navigable card)
-are not implemented yet. They require shell integration through OSC 133 and prompt hooks.
+Warp-style command blocks group each command submitted from the editor with its output:
+a thin separator between chunks, and a click selects the whole block. Raw-mode typing
+(without the composer) still needs OSC 133 shell integration for the same treatment.
 
 ## Contributing
 

@@ -1354,8 +1354,6 @@ export default function App() {
             recents,
             setFor: (tabId, path) => void applyProject(path, { tabId }),
             browseFor: (tabId) => void openProject({ tabId }),
-            openInNewTab: (path) => void applyProject(path, { newTab: true }),
-            browseInNewTab: () => void openProject({ newTab: true }),
             refresh: (tabId) => void refreshProject(tabId),
           }}
           allowNewTab={!!project}

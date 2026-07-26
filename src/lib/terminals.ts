@@ -6,6 +6,7 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
+import { BlockTracker } from "./blocks";
 import { createCursorSettler, type CursorSettler } from "./cursor";
 import {
   createFrameBuffer,
@@ -71,6 +72,11 @@ interface Session extends TermMeta {
   editorMode: boolean;
   /** Re-entry guard while we clear empty selections. */
   trimmingSelection: boolean;
+  /**
+   * Groups each submitted command and its output into a selectable block with
+   * a hairline separator — the Warp "command blocks" primitive.
+   */
+  blocks: BlockTracker;
 }
 
 /** Focus handlers for the per-pane command editor (Warp-style input). */
@@ -131,18 +137,17 @@ function measureFont(size: number): { width: number; height: number } {
 const metricsCache = new Map<string, { fontSize: number; lineHeight: number }>();
 
 /**
- * Pick the font size and line height that make block-drawing art come out
- * right, which is what most TUI splash screens and progress bars are built from.
+ * Pick line height (and keep font size) so block-drawing art stays square.
  *
- * Two things go wrong if you just hand xterm a size:
- *  - xterm derives its cell width straight from the measured advance, so a
- *    fractional device width puts every column on a sub-pixel boundary and
- *    leaves hairline seams through what should be solid blocks. Nudging the
- *    size onto a whole device pixel removes them.
- *  - block art is half-block based: one cell is two "pixels" stacked, so those
- *    pixels are only square when the cell is exactly twice as tall as it is
- *    wide. A generous line height stretches the art vertically — a 1.28 line
- *    height is what made the Claude Code mascot look pulled out of shape.
+ * Block art is half-block based: one cell is two "pixels" stacked, so those
+ * pixels are only square when the cell is exactly twice as tall as it is wide.
+ * A generous line height stretches the art vertically — a 1.28 line height is
+ * what made the Claude Code mascot look pulled out of shape.
+ *
+ * Font size is the value the user asked for. An earlier version nudged it by
+ * up to ±1.2px to land on a whole device-pixel advance; that made neighbouring
+ * settings steps (12.5 vs 13.5) render as the same face, so the label moved and
+ * the grid did not. Honour the request; only lineHeight is derived.
  */
 function metricsFor(size: number): { fontSize: number; lineHeight: number } {
   const dpr = window.devicePixelRatio || 1;
@@ -150,31 +155,19 @@ function metricsFor(size: number): { fontSize: number; lineHeight: number } {
   const cached = metricsCache.get(key);
   if (cached) return cached;
 
-  let best = size;
-  let bestError = Infinity;
-  // ±1.2px is roughly ±9% — imperceptible as a size change, and wide enough that
-  // a whole-pixel advance always falls inside it. Nearest size wins, so the
-  // search walks outwards from the one that was asked for.
-  for (let delta = 0; delta <= 1.2 && bestError > 0.005; delta += 0.02) {
-    for (const candidate of delta === 0 ? [size] : [size - delta, size + delta]) {
-      const device = measureFont(candidate).width * dpr;
-      const error = Math.abs(device - Math.round(device));
-      if (error < bestError) {
-        best = candidate;
-        bestError = error;
-      }
-    }
-  }
-
-  const { width, height } = measureFont(best);
-  const cellWidth = Math.round(width * dpr);
-  const charHeight = Math.ceil(height * dpr);
+  const { width, height } = measureFont(size);
+  const cellWidth = Math.max(1, Math.round(width * dpr));
+  const charHeight = Math.max(1, Math.ceil(height * dpr));
   // xterm floors `charHeight * lineHeight`; the half-pixel lands the result on
   // 2×cellWidth instead of one short of it.
   const square = (2 * cellWidth + 0.5) / charHeight;
-  // Clamped so a font with unusually tall metrics can't crush the text: at the
-  // bottom of the range ascenders and descenders still have room.
-  const metrics = { fontSize: best, lineHeight: Math.min(1.25, Math.max(0.95, square)) };
+  // xterm rejects lineHeight < 1 (throws on options write). Floor at 1 so a
+  // tall font never aborts setFontSize after only half the metrics applied.
+  // Cap at 1.25 so the text is never stretched into the old "pulled" look.
+  const metrics = {
+    fontSize: size,
+    lineHeight: Math.min(1.25, Math.max(1, square)),
+  };
   metricsCache.set(key, metrics);
   return metrics;
 }
@@ -182,14 +175,55 @@ function metricsFor(size: number): { fontSize: number; lineHeight: number } {
 /** The pixel ratio the mounted terminals were sized for. */
 let metricsDpr = 0;
 
+/**
+ * Mirror the terminal font into CSS so the command editor (and anything else
+ * that should match the grid) updates the moment the setting changes — not only
+ * the xterm cells.
+ */
+function syncFontCss(): void {
+  const root = document.documentElement;
+  // Requested size, not the pixel-snapped render size: the composer is not a
+  // cell grid, so the user-facing number is the right thing to show there.
+  root.style.setProperty("--terminal-font-size", `${fontSize}px`);
+  root.style.setProperty("--terminal-line-height", `${Math.round(fontSize * 1.63)}px`);
+}
+
 /** Size every terminal for the current font size and pixel ratio. */
 function applyMetrics(): void {
   const metrics = metricsFor(fontSize);
   metricsDpr = window.devicePixelRatio || 1;
   for (const session of sessions.values()) {
-    session.term.options.fontSize = metrics.fontSize;
-    session.term.options.lineHeight = metrics.lineHeight;
+    const { term } = session;
+    try {
+      term.options.fontSize = metrics.fontSize;
+      term.options.lineHeight = metrics.lineHeight;
+    } catch (error) {
+      // xterm validates option writes; never let one bad value leave the grid
+      // stuck at the previous size.
+      console.error("failed to apply terminal font metrics", error);
+      continue;
+    }
+
+    // Force a cell remeasure + WebGL atlas rebuild. Public option writes are
+    // supposed to do this; this is belt-and-braces after rapid stepper clicks.
+    const core = (
+      term as unknown as {
+        _core?: {
+          _charSizeService?: { measure: () => void };
+          _renderService?: { handleCharSizeChanged?: () => void };
+        };
+      }
+    )._core;
+    core?._charSizeService?.measure();
+    core?._renderService?.handleCharSizeChanged?.();
+    try {
+      term.clearTextureAtlas();
+    } catch {
+      // DOM renderer has no atlas.
+    }
+    term.refresh(0, term.rows - 1);
   }
+  syncFontCss();
 }
 
 /** Off-screen parking spot so xterm keeps a live layout while unmounted. */
@@ -495,6 +529,7 @@ function create(id: string, opts: { cwd?: string | null; shell?: string | null }
     highlighter: createHighlighter(),
     editorMode: true,
     trimmingSelection: false,
+    blocks: null as unknown as BlockTracker,
     title: "shell",
     cwd: opts.cwd ?? "",
     shellLabel: "",
@@ -505,6 +540,8 @@ function create(id: string, opts: { cwd?: string | null; shell?: string | null }
     ran: false,
   };
   sessions.set(id, session);
+  // After insert so busy checks can resolve this session by id.
+  session.blocks = new BlockTracker(term, host, () => hasRunningProcess(id));
 
   term.onData((data) => {
     markTyping(session);
@@ -776,6 +813,9 @@ export function refit(id: string): void {
   const { clientWidth, clientHeight } = session.container;
   if (clientWidth < 20 || clientHeight < 20) return;
   try {
+    // FitAddon only resizes when cols/rows change. After a font-size change the
+    // cell metrics have already been rebuilt in applyMetrics; fit here picks up
+    // the new column/row count for the same pane.
     session.fit.fit();
     scheduleVisualCursor(session, true);
   } catch {
@@ -857,6 +897,9 @@ export function getEditorMode(id: string): boolean {
  * Submit a command through the PTY as if the user typed it at a shell prompt.
  * Multi-line buffers use bracketed paste so shells that support it treat the
  * payload as a single unit (Warp sends the editor buffer the same way).
+ *
+ * Opens a command block at the current cursor line so the command and its
+ * output stay selectable as one chunk (Warp-style).
  */
 export function submitCommand(id: string, command: string): void {
   const session = sessions.get(id);
@@ -868,6 +911,9 @@ export function submitCommand(id: string, command: string): void {
     send(session, "\r");
     return;
   }
+  // Mark the block before writing so the start line is the prompt row that
+  // will hold the echoed command.
+  session.blocks.open(text);
   markTyping(session);
   if (text.includes("\n")) {
     send(session, `\x1b[200~${text}\x1b[201~\r`);
@@ -924,6 +970,7 @@ export function dispose(id: string): void {
   if (!session) return;
   session.observer?.disconnect();
   session.frames.dispose();
+  session.blocks.dispose();
   clearTyping(session);
   hideVisualCursor(session);
   inputFocusers.delete(id);
@@ -986,10 +1033,14 @@ export function getInputMode(): InputMode {
 export function setFontSize(size: number): void {
   // The requested size is what's kept and stepped from; each terminal renders at
   // the nudged size metricsFor picks so the steps don't compound.
-  fontSize = Math.min(28, Math.max(8, size));
+  const next = Math.min(28, Math.max(8, Math.round(size * 10) / 10));
+  const changed = next !== fontSize;
+  fontSize = next;
+  // Always re-apply: first boot may share the module default (13.5) with the
+  // saved preference, and the command editor still needs the CSS variables.
   applyMetrics();
   for (const id of sessions.keys()) refit(id);
-  notify();
+  if (changed) notify();
 }
 
 export function getFontSize(): number {
@@ -997,11 +1048,75 @@ export function getFontSize(): number {
 }
 
 /**
- * Turn the colouriser for uncoloured output on or off. It only affects output
- * written from here on — scrollback keeps whatever colours it was drawn with.
+ * Dump the active buffer as plain text (no cell colours). Used when the
+ * highlighter toggle flips so scrollback can be redrawn with the new setting.
+ */
+function dumpBufferPlain(term: Terminal): string {
+  const buffer = term.buffer.active;
+  const lines: string[] = [];
+  for (let i = 0; i < buffer.length; i++) {
+    const line = buffer.getLine(i);
+    lines.push(line ? line.translateToString(true) : "");
+  }
+  while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+  if (lines.length === 0) return "";
+  // `\r\n` matches how most shells write the grid, so re-wrapping lands close
+  // to the original layout.
+  return `${lines.join("\r\n")}\r\n`;
+}
+
+/**
+ * Re-paint scrollback for the current highlight setting.
+ *
+ * Colours that were already in the cells (program SGR *or* a previous pass of
+ * our highlighter) are flattened to plain text first — there is no public API
+ * to strip only our palette. That is the cost of a live toggle; new output is
+ * exact either way.
+ */
+function recolorSession(session: Session): void {
+  const { term } = session;
+  // Leave full-screen / TUI buffers alone — rewriting them as plain lines
+  // destroys the alt-screen layout the program is mid-drawing.
+  if (term.buffer.active.type !== "normal") return;
+  if (term.modes.mouseTrackingMode !== "none") return;
+
+  const plain = dumpBufferPlain(term);
+  const wasFocused = session.cursorFocused;
+
+  // Markers sit on buffer lines that are about to vanish; drop the blocks so
+  // we do not keep decorations pointing at disposed rows.
+  session.blocks.clear();
+
+  // Soft clear of screen + scrollback, then home. Avoid `reset()` so custom
+  // key handlers and parser registrations stay put.
+  term.write("\x1b[2J\x1b[3J\x1b[H");
+  session.highlighter = createHighlighter();
+  session.cursorVisible = true;
+
+  if (!plain) {
+    term.write("\x1b[?25l", () => scheduleVisualCursor(session, true));
+    return;
+  }
+
+  // Always run the highlighter so its escape-sequence state tracks the stream;
+  // only the painted form is optional (same rule as live `draw`).
+  const painted = session.highlighter(plain);
+  const output = highlightEnabled ? painted : plain;
+  term.write(`\x1b[?25l${output}`, () => {
+    session.cursorFocused = wasFocused;
+    scheduleVisualCursor(session, true);
+  });
+}
+
+/**
+ * Turn the colouriser for uncoloured output on or off, and re-paint existing
+ * scrollback so the setting is visible immediately — same live feel as the
+ * command-editor toggle.
  */
 export function setHighlight(enabled: boolean): void {
+  if (highlightEnabled === enabled) return;
   highlightEnabled = enabled;
+  for (const session of sessions.values()) recolorSession(session);
   notify();
 }
 
@@ -1012,6 +1127,7 @@ export function getHighlight(): boolean {
 export function clear(id: string): void {
   const session = sessions.get(id);
   if (!session) return;
+  session.blocks.clear();
   session.term.clear();
   // `Terminal.clear` keeps the current prompt line and drops everything above
   // it — exactly the state a pane opens in, so the empty state belongs back.

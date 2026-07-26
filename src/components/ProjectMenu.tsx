@@ -21,8 +21,8 @@ function basename(path: string): string {
  * The folder picker: browse, or one of the folders you have opened before.
  *
  * It is deliberately never mounted in the window chrome — it hangs off the tab
- * (or the new-tab button) it acts on, because a project belongs to a tab and a
- * control parked next to the app icon reads as a setting for the whole window.
+ * it acts on, because a project belongs to a tab and a control parked next to
+ * the app icon reads as a setting for the whole window.
  */
 export function ProjectMenu({ anchor, scope, recents, current, onPick, onBrowse, onClose }: Props) {
   const ref = useRef<HTMLDivElement>(null);
