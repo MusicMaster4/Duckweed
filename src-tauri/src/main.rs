@@ -505,6 +505,9 @@ fn main() {
             watch::start_monitor(app.handle().clone())?;
             // Register "Open Duckweed in new tab" on first Windows run.
             let _ = shell_integration::ensure_defaults();
+            // After an in-place update the exe icon can change while Explorer
+            // still shows the previous one; notify once per product version.
+            shell_integration::refresh_icons_if_needed(&app.package_info().version.to_string());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
