@@ -32,6 +32,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring"] }
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_System_Diagnostics_ToolHelp",
+    "Win32_UI_Shell",
 ] }
 winreg = "0.55"
 

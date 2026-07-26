@@ -25,6 +25,33 @@ describe("explorer shell integration", () => {
     expect(hooks).toContain('DeleteRegKey HKCU "Software\\Classes\\Directory\\shell\\DuckweedWindow"');
   });
 
+  test("installer refreshes shell icons after install or update", () => {
+    const hooks = read("src-tauri/windows/hooks.nsh");
+    const postInstall = hooks.slice(
+      hooks.indexOf("NSIS_HOOK_POSTINSTALL"),
+      hooks.indexOf("NSIS_HOOK_PREUNINSTALL"),
+    );
+    // Rewrite desktop / Start shortcuts so IconLocation hits the new exe.
+    expect(postInstall).toContain('CreateShortCut "$DESKTOP\\Duckweed.lnk"');
+    expect(postInstall).toContain('CreateShortCut "$SMPROGRAMS\\Duckweed.lnk"');
+    expect(postInstall).toContain("$INSTDIR\\duckweed.exe");
+    // SHChangeNotify so Explorer drops the cached previous icon.
+    expect(postInstall).toContain("SHChangeNotify");
+    expect(postInstall).toContain("0x08000000");
+  });
+
+  test("app refreshes shell icons once per product version", () => {
+    const main = read("src-tauri/src/main.rs");
+    const shell = read("src-tauri/src/shell_integration.rs");
+    expect(main).toContain("refresh_icons_if_needed");
+    expect(main).toContain("package_info().version");
+    expect(shell).toContain("refresh_icons_if_needed");
+    expect(shell).toContain("notify_shell_icons_changed");
+    expect(shell).toContain("IconRefreshVersion");
+    expect(shell).toContain("SHCNE_ASSOCCHANGED");
+    expect(shell).toContain("SHCNE_UPDATEITEM");
+  });
+
   test("tauri conf wires the NSIS installer hooks", () => {
     const conf = read("src-tauri/tauri.conf.json");
     expect(conf).toContain("installerHooks");

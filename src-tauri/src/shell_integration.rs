@@ -8,9 +8,15 @@
 //!
 //! Registered for both a selected folder (`Directory`) and empty space inside
 //! a folder (`Directory\Background`).
+//!
+//! Also notifies Explorer when the app icon embedded in the exe changes, so
+//! desktop / Start / taskbar shortcuts pick up a new icon after an update
+//! without requiring a reinstall or manual icon-cache clear.
 
 use serde::Serialize;
 
+#[cfg(windows)]
+use std::os::windows::ffi::OsStrExt;
 #[cfg(windows)]
 use std::path::PathBuf;
 
@@ -112,6 +118,80 @@ pub fn set_verb(verb: ShellVerb, enabled: bool) -> Result<ShellIntegrationStatus
 #[cfg(not(windows))]
 pub fn set_verb(_verb: ShellVerb, _enabled: bool) -> Result<ShellIntegrationStatus, String> {
     Err("Explorer context menus are only available on Windows".into())
+}
+
+/// After an update, Windows often keeps showing the previous app icon.
+/// Call once per product version so Explorer reloads the icon from the exe.
+#[cfg(windows)]
+pub fn refresh_icons_if_needed(version: &str) {
+    if version.is_empty() {
+        return;
+    }
+    if icon_refresh_version().as_deref() == Some(version) {
+        return;
+    }
+    // Re-write Icon registry values for any installed verbs so they still
+    // point at the running binary (and index 0 of its icon resource).
+    for verb in [ShellVerb::Tab, ShellVerb::Window] {
+        if verb_installed(verb) {
+            let _ = install_verb(verb);
+        }
+    }
+    notify_shell_icons_changed();
+    let _ = store_icon_refresh_version(version);
+}
+
+#[cfg(not(windows))]
+pub fn refresh_icons_if_needed(_version: &str) {}
+
+#[cfg(windows)]
+fn notify_shell_icons_changed() {
+    use windows_sys::Win32::UI::Shell::{
+        SHChangeNotify, SHCNE_ASSOCCHANGED, SHCNE_UPDATEITEM, SHCNF_FLUSHNOWAIT, SHCNF_IDLIST,
+        SHCNF_PATHW,
+    };
+
+    unsafe {
+        if let Ok(exe) = current_exe() {
+            let wide: Vec<u16> = exe
+                .as_os_str()
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect();
+            SHChangeNotify(
+                SHCNE_UPDATEITEM as i32,
+                (SHCNF_PATHW | SHCNF_FLUSHNOWAIT) as u32,
+                wide.as_ptr().cast(),
+                std::ptr::null(),
+            );
+        }
+        // Broad association refresh — picks up shortcut / shell-extension icons.
+        SHChangeNotify(
+            SHCNE_ASSOCCHANGED as i32,
+            SHCNF_IDLIST as u32,
+            std::ptr::null(),
+            std::ptr::null(),
+        );
+    }
+}
+
+#[cfg(windows)]
+fn icon_refresh_version() -> Option<String> {
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    hkcu.open_subkey(PREFS_KEY)
+        .ok()
+        .and_then(|key| key.get_value::<String, _>("IconRefreshVersion").ok())
+}
+
+#[cfg(windows)]
+fn store_icon_refresh_version(version: &str) -> Result<(), String> {
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let key = hkcu
+        .create_subkey(PREFS_KEY)
+        .map_err(|error| format!("failed to open prefs key: {error}"))?
+        .0;
+    key.set_value("IconRefreshVersion", &version)
+        .map_err(|error| format!("failed to store icon refresh version: {error}"))
 }
 
 #[cfg(windows)]
