@@ -113,6 +113,12 @@ interface Session extends TermMeta {
    * Shared autosuggest history lives in {@link commandHistory}.
    */
   history: string[];
+  /**
+   * Unsent composer text for this session. Lives here (not in React state)
+   * so a layout remount — first split, drag, zoom — does not wipe a draft
+   * the user has not submitted yet.
+   */
+  draft: string;
   /** Persistent coding agent currently owning this PTY, if recognised. */
   agent: AgentKind | null;
   /** Deduplicates a log event and OSC notification for the same completed turn. */
@@ -701,6 +707,7 @@ function create(id: string, opts: { cwd?: string | null; shell?: string | null }
     ran: false,
     lastSubmitAt: 0,
     history: [],
+    draft: "",
     agent: null,
     lastAgentCompletionAt: 0,
     rawCommand: "",
@@ -1130,6 +1137,18 @@ export function registerInputPaste(id: string, pasteFn: (text: string) => void):
   return () => {
     if (inputPasters.get(id) === pasteFn) inputPasters.delete(id);
   };
+}
+
+/** Unsent composer buffer for this terminal (survives pane remounts). */
+export function getDraft(id: string): string {
+  return sessions.get(id)?.draft ?? "";
+}
+
+/** Keep the composer draft in session state so layout changes cannot discard it. */
+export function setDraft(id: string, text: string): void {
+  const session = sessions.get(id);
+  if (!session) return;
+  session.draft = text;
 }
 
 /** Prefer the command editor when active; otherwise the raw terminal. */

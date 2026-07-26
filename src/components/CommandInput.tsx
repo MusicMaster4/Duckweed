@@ -28,7 +28,10 @@ interface Props {
  * a running CLI owns the whole pane, and the composer is unmounted for it.
  */
 export function CommandInput({ termId, active, exited, highlight }: Props) {
-  const [value, setValue] = useState("");
+  // Seed from the session so a pane remount (first split, drag) keeps the
+  // unsent command instead of blanking the composer and stranding it on the
+  // old terminal only in the user's head.
+  const [value, setValueState] = useState(() => terminals.getDraft(termId));
   const [focused, setFocused] = useState(false);
   const [historyIndex, setHistoryIndex] = useState<number | null>(null);
   /** Bump when shared history may have changed (other panes submit). */
@@ -38,6 +41,25 @@ export function CommandInput({ termId, active, exited, highlight }: Props) {
   const valueRef = useRef(value);
   valueRef.current = value;
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  const setValue = useCallback(
+    (next: string | ((prev: string) => string)) => {
+      setValueState((prev) => {
+        const resolved = typeof next === "function" ? next(prev) : next;
+        terminals.setDraft(termId, resolved);
+        return resolved;
+      });
+    },
+    [termId],
+  );
+
+  // Leaf term swaps (drag-swap) reuse this component instance — reseed the
+  // buffer from the new session instead of carrying the previous pane's draft.
+  useEffect(() => {
+    setValueState(terminals.getDraft(termId));
+    setHistoryIndex(null);
+    draftRef.current = "";
+  }, [termId]);
 
   const resize = useCallback(() => {
     const el = textareaRef.current;

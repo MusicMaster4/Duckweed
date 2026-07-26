@@ -6,11 +6,11 @@ import type { DragState } from "../hooks/useDragPane";
 import { TerminalPane } from "./TerminalPane";
 
 /**
- * Space the divider takes out of the layout, in px. It is a hairline: the grab
- * area overhangs into the panes on both sides (see `.divider span`) instead of
- * pushing them apart, so splits read as one surface cut by a line.
+ * Space the divider takes out of the layout, in px. Must match `.divider`
+ * flex basis in styles.css. The grab area overhangs into the panes on both
+ * sides (see `.divider span`) instead of pushing them apart.
  */
-const DIVIDER = 1;
+const DIVIDER = 3;
 
 export interface PaneTreeShared {
   activeLeaf: string;
@@ -45,6 +45,10 @@ export const PaneTree = memo(function PaneTree({ node, shared }: { node: LayoutN
   if (node.kind === "leaf") {
     return (
       <TerminalPane
+        // Stable across layout reshapes so React can reconcile the same pane
+        // when a lone leaf becomes a child of a split (draft lives on the
+        // session either way; this just avoids extra detach/attach churn).
+        key={node.id}
         node={node}
         active={shared.activeLeaf === node.id}
         zoomed={shared.zoomedLeaf === node.id}

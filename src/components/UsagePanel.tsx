@@ -24,6 +24,14 @@ import {
   type UsageSettings,
 } from "../lib/usage";
 
+const totalOf = (row: {
+  input: number;
+  output: number;
+  reasoning: number;
+  cache_read: number;
+  cache_write: number;
+}) => row.input + row.output + row.reasoning + row.cache_read + row.cache_write;
+
 /**
  * What every coding agent on this machine has cost you.
  *
@@ -97,10 +105,14 @@ export function UsagePanel() {
 
   // ---- derived --------------------------------------------------------
   const value = useCallback(
-    (row: { cost: number; input: number; output: number; reasoning: number; cache_read: number; cache_write: number }) =>
-      metric === "cost"
-        ? row.cost
-        : row.input + row.output + row.reasoning + row.cache_read + row.cache_write,
+    (row: {
+      cost: number;
+      input: number;
+      output: number;
+      reasoning: number;
+      cache_read: number;
+      cache_write: number;
+    }) => (metric === "cost" ? row.cost : totalOf(row)),
     [metric],
   );
   const format = metric === "cost" ? formatUsd : formatTokens;
@@ -168,13 +180,20 @@ export function UsagePanel() {
       }));
   }, [snapshot, value, format, metric]);
 
-  const trend = useMemo(() => (snapshot ? snapshot.days.map((day) => value(day)) : []), [snapshot, value]);
+  // Both sparklines stay visible at the top regardless of which metric the
+  // charts below are currently showing.
+  const costTrend = useMemo(
+    () => (snapshot ? snapshot.days.map((day) => day.cost) : []),
+    [snapshot],
+  );
+  const tokenTrend = useMemo(
+    () => (snapshot ? snapshot.days.map((day) => totalOf(day)) : []),
+    [snapshot],
+  );
 
   const busiest = agentRows[0];
   const totals = snapshot?.totals;
-  const totalTokens = totals
-    ? totals.input + totals.output + totals.reasoning + totals.cache_read + totals.cache_write
-    : 0;
+  const totalTokens = totals ? totalOf(totals) : 0;
   const cacheShare =
     totals && totalTokens > 0 ? Math.round((totals.cache_read / totalTokens) * 100) : 0;
 
@@ -266,13 +285,13 @@ export function UsagePanel() {
             label={`Spend, last ${snapshot.range_days} days`}
             value={formatUsd(totals?.cost ?? 0)}
             detail="Estimated from list prices"
-            trend={metric === "cost" ? trend : undefined}
+            trend={costTrend}
           />
           <StatTile
             label="Tokens"
             value={formatTokens(totalTokens)}
             detail={`${cacheShare}% served from cache`}
-            trend={metric === "tokens" ? trend : undefined}
+            trend={tokenTrend}
           />
           <StatTile
             label="Requests"

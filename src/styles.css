@@ -1215,13 +1215,13 @@ svg.tab-glyph-fill path {
 }
 
 /*
- * A split is one surface cut by a 2px rule, with a grab area that reaches into
+ * A split is one surface cut by a 3px rule, with a grab area that reaches into
  * both neighbours. Hovering lights the line up — the only cue that it can be
  * dragged. (Command-block hairlines stay 1px; chrome rules are one step bolder.)
  */
 .divider {
   position: relative;
-  flex: 0 0 2px;
+  flex: 0 0 3px;
   /* A touch stronger than the outer frame: this line is the only thing telling
      two panes apart, so it has to read at a glance. */
   background: var(--border-strong);
@@ -1978,7 +1978,7 @@ svg.tab-glyph-fill path {
   flex-direction: column;
   gap: 7px;
   padding: 10px 14px 9px;
-  border-top: 2px solid var(--border);
+  border-top: 3px solid var(--border);
   background: var(--bg-pane);
 }
 
@@ -1987,10 +1987,10 @@ svg.tab-glyph-fill path {
 .command-input::before {
   content: "";
   position: absolute;
-  top: -2px;
+  top: -3px;
   left: 0;
   right: 0;
-  height: 2px;
+  height: 3px;
   background: var(--accent-line);
   opacity: 0;
   transition: opacity 140ms ease;
