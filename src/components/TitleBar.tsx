@@ -3,16 +3,16 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 
 interface Props {
   children: ReactNode;
-  settingsOpen: boolean;
-  onToggleSettings: () => void;
+  settingsActive: boolean;
+  onOpenSettings: () => void;
   toolsOpen: boolean;
   onToggleTools: () => void;
 }
 
 export function TitleBar({
   children,
-  settingsOpen,
-  onToggleSettings,
+  settingsActive,
+  onOpenSettings,
   toolsOpen,
   onToggleTools,
 }: Props) {
@@ -61,11 +61,11 @@ export function TitleBar({
       <div className="titlebar-right">
         <button
           type="button"
-          className={`win-btn settings-trigger ${settingsOpen ? "is-open" : ""}`}
+          className={`win-btn settings-trigger ${settingsActive ? "is-open" : ""}`}
           title="Settings"
           aria-label="Settings"
-          aria-expanded={settingsOpen}
-          onClick={onToggleSettings}
+          aria-pressed={settingsActive}
+          onClick={onOpenSettings}
         >
           {/*
             Six-tooth cog: flat tips with a deep root (tip r 6.7 vs root r 4.35)

@@ -33,6 +33,10 @@ interface Props {
   onPin: (tabId: string) => void;
   onColor: (tabId: string, colorId: string | null) => void;
   onIcon: (tabId: string, iconId: string | null) => void;
+  settingsOpen: boolean;
+  settingsActive: boolean;
+  onSelectSettings: () => void;
+  onCloseSettings: () => void;
 }
 
 /** Folder picker open on a tab. */
@@ -88,6 +92,10 @@ export function TabStrip({
   onPin,
   onColor,
   onIcon,
+  settingsOpen,
+  settingsActive,
+  onSelectSettings,
+  onCloseSettings,
 }: Props) {
   const stripRef = useRef<HTMLDivElement>(null);
   const reorder = useRef<{ tabId: string } | null>(null);
@@ -141,7 +149,7 @@ export function TabStrip({
       <div className="tabs" ref={stripRef} role="tablist" aria-label="Open tabs">
         {tabs.map((tab) => {
           const count = paneCounts[tab.id] ?? 0;
-          const isActive = tab.id === activeTabId;
+          const isActive = tab.id === activeTabId && !settingsActive;
           const accent = tabColorHex(tab.color);
           return (
             <div
@@ -240,6 +248,44 @@ export function TabStrip({
             </div>
           );
         })}
+
+        {settingsOpen && (
+          <div
+            role="tab"
+            aria-selected={settingsActive}
+            tabIndex={settingsActive ? 0 : -1}
+            className={`tab settings-tab ${settingsActive ? "is-active" : ""}`}
+            onPointerDown={(event) => {
+              if (event.button === 0) onSelectSettings();
+            }}
+            onKeyDown={(event) => {
+              if (event.key !== "Enter" && event.key !== " ") return;
+              event.preventDefault();
+              onSelectSettings();
+            }}
+          >
+            <span className="settings-tab-icon" aria-hidden="true">
+              <svg viewBox="0 0 16 16">
+                <circle cx="8" cy="8" r="2" />
+                <path d="M6.44 3.94 6.61 1.45h2.78l.17 2.49a4.35 4.35 0 0 1 1.18.68l2.24-1.1 1.39 2.41-2.07 1.39a4.35 4.35 0 0 1 0 1.36l2.07 1.39-1.39 2.41-2.24-1.1a4.35 4.35 0 0 1-1.18.68l-.17 2.49H6.61l-.17-2.49a4.35 4.35 0 0 1-1.18-.68l-2.24 1.1-1.39-2.41 2.07-1.39a4.35 4.35 0 0 1 0-1.36L1.63 5.93l1.39-2.41 2.24 1.1a4.35 4.35 0 0 1 1.18-.68z" />
+              </svg>
+            </span>
+            <span className="tab-title">Settings</span>
+            <button
+              type="button"
+              className="tab-close"
+              title="Close settings"
+              aria-label="Close settings"
+              onPointerDown={(event) => event.stopPropagation()}
+              onClick={(event) => {
+                event.stopPropagation();
+                onCloseSettings();
+              }}
+            >
+              ✕
+            </button>
+          </div>
+        )}
 
         <div className={`tab-new-wrap ${allowNewTab ? "" : "is-locked"}`}>
           <button

@@ -139,7 +139,8 @@ export default function App() {
   const [inputMode, setInputMode] = useState(initial.inputMode);
   const [booted, setBooted] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsTabOpen, setSettingsTabOpen] = useState(false);
+  const [settingsActive, setSettingsActive] = useState(false);
   const [changesOpen, setChangesOpen] = useState(false);
   const [toolsOpen, setToolsOpen] = useState(initial.toolsOpen);
   const [toolsWidth, setToolsWidth] = useState(
@@ -363,7 +364,19 @@ export default function App() {
 
   const selectTab = useCallback((id: string) => {
     if (id !== activeTabIdRef.current) terminals.clearAllBlockSelections();
+    setSettingsActive(false);
     setActiveTabId(id);
+  }, []);
+
+  const openSettings = useCallback(() => {
+    terminals.clearAllBlockSelections();
+    setSettingsTabOpen(true);
+    setSettingsActive(true);
+  }, []);
+
+  const closeSettings = useCallback(() => {
+    setSettingsTabOpen(false);
+    setSettingsActive(false);
   }, []);
 
   const selectTabIndex = useCallback((index: number) => {
@@ -1538,8 +1551,8 @@ export default function App() {
   return (
     <div className="app">
       <TitleBar
-        settingsOpen={settingsOpen}
-        onToggleSettings={() => setSettingsOpen((open) => !open)}
+        settingsActive={settingsActive}
+        onOpenSettings={openSettings}
         toolsOpen={toolsOpen}
         onToggleTools={() => setToolsOpen((open) => !open)}
       >
@@ -1559,13 +1572,17 @@ export default function App() {
           onPin={pinTab}
           onColor={colorTab}
           onIcon={iconTab}
+          settingsOpen={settingsTabOpen}
+          settingsActive={settingsActive}
+          onSelectSettings={openSettings}
+          onCloseSettings={closeSettings}
         />
       </TitleBar>
 
       {/* The dock shares the row with the grid rather than covering it, so a
           folder can be read while a command is still running. */}
       <div className="workbench">
-        {toolsOpen && (
+        {toolsOpen && !settingsActive && (
           <ToolsPanel
             project={project}
             width={toolsWidth}
@@ -1578,7 +1595,24 @@ export default function App() {
         )}
 
         <main className="workspace">
-          {!booted ? (
+          {settingsActive ? (
+            <SettingsMenu
+              fontSize={fontSize}
+              inputMode={inputMode}
+              highlight={highlight}
+              shell={shell}
+              shells={shells}
+              updateLabel={`${updater.channel === "testing" ? "Beta" : "Stable"}${updater.version ? ` · v${updater.version}` : ""}`}
+              onFontSize={applyFontSize}
+              onToggleInputMode={toggleInputMode}
+              onToggleHighlight={toggleHighlight}
+              onShell={(shellId) => {
+                setShell(shellId);
+                shellRef.current = shellId;
+              }}
+              onCheckUpdates={updater.check}
+            />
+          ) : !booted ? (
             <div className="booting">starting shell…</div>
           ) : zoomedNode && activeTab ? (
             <PaneTree node={zoomedNode} shared={shared} />
@@ -1613,26 +1647,6 @@ export default function App() {
       )}
 
       {paletteOpen && <CommandPalette actions={paletteActions} onClose={() => setPaletteOpen(false)} />}
-
-      {settingsOpen && (
-        <SettingsMenu
-          fontSize={fontSize}
-          inputMode={inputMode}
-          highlight={highlight}
-          shell={shell}
-          shells={shells}
-          updateLabel={`${updater.channel === "testing" ? "Beta" : "Stable"}${updater.version ? ` · v${updater.version}` : ""}`}
-          onFontSize={applyFontSize}
-          onToggleInputMode={toggleInputMode}
-          onToggleHighlight={toggleHighlight}
-          onShell={(shellId) => {
-            setShell(shellId);
-            shellRef.current = shellId;
-          }}
-          onCheckUpdates={updater.check}
-          onClose={() => setSettingsOpen(false)}
-        />
-      )}
 
       {changesOpen && project?.is_git && (
         <ChangesPanel

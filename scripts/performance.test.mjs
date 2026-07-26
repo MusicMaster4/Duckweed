@@ -54,6 +54,15 @@ describe("hot paths avoid global work", () => {
     expect(terminal).toContain("session.webgl?.dispose()");
   });
 
+  test("interactive CLIs suspend shell block chrome", () => {
+    const terminal = read("src/lib/terminals.ts");
+    const blocks = read("src/lib/blocks.ts");
+    expect(terminal).toContain("session.blocks.setEditorMode(enabled)");
+    expect(blocks).toContain("if (!this.editorMode)");
+    expect(blocks).toContain("if (busy)");
+    expect(blocks).toContain("this.hideChrome()");
+  });
+
   test("pointer gestures preview locally before committing state", () => {
     expect(read("src/hooks/useDragPane.ts")).toContain("--pane-drag-x");
     expect(read("src/components/ToolsPanel.tsx")).toContain("asideRef.current.style.width");

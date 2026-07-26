@@ -1047,6 +1047,10 @@ export function setEditorMode(id: string, enabled: boolean): void {
   if (!session) return;
   if (session.editorMode === enabled) return;
   session.editorMode = enabled;
+  // Shell blocks are useful in editor mode, but an interactive child (Codex,
+  // vim, less, etc.) owns the entire grid and must not have DOM block chrome
+  // painted over its status/footer rows.
+  session.blocks.setEditorMode(enabled);
   if (!enabled) {
     // Editor mode hides the visual caret in favor of the input bar.
     session.cursorFocused = true;

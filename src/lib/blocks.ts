@@ -47,6 +47,12 @@ export class BlockTracker {
   private layoutRaf: number | null = null;
   private readonly scrollDisposable: { dispose: () => void };
   private active = false;
+  /**
+   * Block chrome belongs to the shell editor, never to an interactive child
+   * process. TUIs such as Codex repaint arbitrary rows (especially their
+   * footer), so overlays above that grid cause false chunks and flicker.
+   */
+  private editorMode = true;
   /** True while we programmatically touch xterm selection (suppresses races). */
   private applyingSelection = false;
 
@@ -93,7 +99,7 @@ export class BlockTracker {
    * end sits on the last line of that command's output.
    */
   open(command: string): void {
-    if (this.term.buffer.active.type !== "normal") return;
+    if (!this.editorMode || this.term.buffer.active.type !== "normal") return;
     this.prune();
     // A new command replaces any prior chunk selection.
     if (this.selectedId !== null) {
@@ -169,22 +175,19 @@ export class BlockTracker {
     }
     this.prune();
 
+    if (!this.editorMode) {
+      this.hideChrome();
+      return;
+    }
+
     const screen = this.host.querySelector<HTMLElement>(".xterm-screen");
     if (!screen || screen.clientWidth <= 0 || screen.clientHeight <= 0) {
-      for (const b of this.blocks) {
-        b.cmdEl.hidden = true;
-        if (b.sepEl) b.sepEl.hidden = true;
-      }
-      this.promptCover.hidden = true;
+      this.hideChrome();
       return;
     }
 
     if (this.term.buffer.active.type !== "normal") {
-      for (const b of this.blocks) {
-        b.cmdEl.hidden = true;
-        if (b.sepEl) b.sepEl.hidden = true;
-      }
-      this.promptCover.hidden = true;
+      this.hideChrome();
       return;
     }
 
@@ -238,7 +241,7 @@ export class BlockTracker {
   }
 
   scheduleLayout(): void {
-    if (!this.active) return;
+    if (!this.active || !this.editorMode) return;
     if (this.layoutRaf !== null) return;
     this.layoutRaf = requestAnimationFrame(() => {
       this.layoutRaf = null;
@@ -259,13 +262,38 @@ export class BlockTracker {
   }
 
   /**
+   * A running/raw terminal owns every cell. Hide Duckweed's shell overlays
+   * immediately instead of waiting for another PTY paint.
+   */
+  setEditorMode(enabled: boolean): void {
+    if (this.editorMode === enabled) return;
+    this.editorMode = enabled;
+    if (enabled) {
+      this.scheduleLayout();
+      return;
+    }
+    if (this.layoutRaf !== null) {
+      cancelAnimationFrame(this.layoutRaf);
+      this.layoutRaf = null;
+    }
+    this.hideChrome();
+  }
+
+  /**
    * Process state is deliberately not a block boundary. A command can briefly
    * look idle while a wrapper hands work to another process, and PTY output may
    * still be queued after the process monitor reports idle. The live last block
    * therefore keeps following terminal output until the next command provides
    * an unambiguous boundary.
    */
-  busyChanged(_busy: boolean): void {
+  busyChanged(busy: boolean): void {
+    // The backend sees the child process before React has time to unmount the
+    // composer. Drop block chrome on that same event so a TUI never gets even
+    // one frame with the shell's prompt cover painted over its footer.
+    if (busy) {
+      this.setEditorMode(false);
+      return;
+    }
     this.scheduleLayout();
   }
 
@@ -414,6 +442,15 @@ export class BlockTracker {
     } finally {
       this.applyingSelection = false;
     }
+  }
+
+  private hideChrome(): void {
+    for (const block of this.blocks) {
+      block.cmdEl.hidden = true;
+      if (block.sepEl) block.sepEl.hidden = true;
+    }
+    this.promptCover.hidden = true;
+    this.selectOverlay.hidden = true;
   }
 
   /** True while we are clearing/setting xterm selection ourselves. */
