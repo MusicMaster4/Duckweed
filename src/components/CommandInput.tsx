@@ -4,24 +4,11 @@ import * as terminals from "../lib/terminals";
 
 interface Props {
   termId: string;
-  cwd: string;
-  shellLabel: string;
   active: boolean;
   exited: boolean;
 }
 
 const historyByTerm = new Map<string, string[]>();
-
-/**
- * Keep the tail of a long path — the part that says where you are. Leading
- * segments are what you can afford to lose in a chip a few centimetres wide.
- */
-function shortPath(path: string): string {
-  if (!path) return "";
-  const parts = path.replace(/[\\/]+$/, "").split(/[\\/]/);
-  if (parts.length <= 3) return path;
-  return `…${path.includes("\\") ? "\\" : "/"}${parts.slice(-2).join(path.includes("\\") ? "\\" : "/")}`;
-}
 
 /**
  * Warp-style command editor: a real text field for commands, separate from the
@@ -30,7 +17,7 @@ function shortPath(path: string): string {
  * It renders only while the pane is in editor mode (or the shell has exited) —
  * a running CLI owns the whole pane, and the composer is unmounted for it.
  */
-export function CommandInput({ termId, cwd, shellLabel, active, exited }: Props) {
+export function CommandInput({ termId, active, exited }: Props) {
   const [value, setValue] = useState("");
   const [focused, setFocused] = useState(false);
   const [historyIndex, setHistoryIndex] = useState<number | null>(null);
@@ -206,15 +193,6 @@ export function CommandInput({ termId, cwd, shellLabel, active, exited }: Props)
         .filter(Boolean)
         .join(" ")}
     >
-      <div className="command-input-chips">
-        <span className="composer-chip is-shell">{shellLabel || "shell"}</span>
-        {cwd && (
-          <span className="composer-chip is-cwd" title={cwd}>
-            {shortPath(cwd)}
-          </span>
-        )}
-      </div>
-
       <textarea
         ref={textareaRef}
         className="command-input-field"

@@ -27,6 +27,8 @@ export interface Tab {
   activeLeaf: string;
   /** Leaf id rendered full-tab, hiding its siblings. */
   zoomedLeaf: string | null;
+  /** Folder this tab works in. Each tab can hold a different project. */
+  project: ProjectInfo | null;
 }
 
 export interface ShellInfo {
@@ -41,6 +43,14 @@ export interface ProjectInfo {
   name: string;
   branch: string | null;
   is_git: boolean;
+}
+
+export interface Branches {
+  /** Branch HEAD points at, or null on a detached HEAD. */
+  current: string | null;
+  local: string[];
+  /** `origin/feature` names with no local branch yet. */
+  remote: string[];
 }
 
 export type DropZone = "left" | "right" | "top" | "bottom" | "center";

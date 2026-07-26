@@ -1,9 +1,14 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { ProjectInfo, ShellInfo } from "./types";
+import type { Branches, ProjectInfo, ShellInfo } from "./types";
 
 export const listShells = () => invoke<ShellInfo[]>("list_shells");
 export const homeDir = () => invoke<string>("home_dir");
 export const projectInfo = (path: string) => invoke<ProjectInfo>("project_info", { path });
+
+export const gitBranches = (path: string) => invoke<Branches>("git_branches", { path });
+
+export const gitCheckout = (path: string, branch: string) =>
+  invoke<void>("git_checkout", { path, branch });
 
 export interface SpawnResult {
   id: string;

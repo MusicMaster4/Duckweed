@@ -1,6 +1,7 @@
 // Hide the console window on Windows release builds.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod git;
 mod process_tree;
 mod project;
 mod pty;
@@ -10,6 +11,7 @@ use std::collections::HashMap;
 
 use tauri::{AppHandle, Manager, State};
 
+use git::Branches;
 use project::ProjectInfo;
 use pty::{PtyManager, SpawnResult};
 use shells::ShellInfo;
@@ -31,6 +33,17 @@ fn home_dir() -> String {
 #[tauri::command]
 fn project_info(path: String) -> Result<ProjectInfo, String> {
     project::info(&path)
+}
+
+/// Local and remote branches of the repo `path` sits in.
+#[tauri::command]
+fn git_branches(path: String) -> Result<Branches, String> {
+    git::branches(&path)
+}
+
+#[tauri::command]
+fn git_checkout(path: String, branch: String) -> Result<(), String> {
+    git::checkout(&path, &branch)
 }
 
 #[tauri::command]
@@ -116,6 +129,8 @@ fn main() {
             list_shells,
             home_dir,
             project_info,
+            git_branches,
+            git_checkout,
             pty_spawn,
             pty_write,
             pty_resize,

@@ -3,20 +3,17 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import appIcon from "../../src-tauri/icons/32x32.png";
 
 import { isFullscreen, toggleFullscreen } from "../lib/window";
-import type { ProjectInfo } from "../lib/types";
 
 interface Props {
-  project: ProjectInfo | null;
-  onOpenProject: () => void;
   onOpenPalette: () => void;
-  onOpenRecents: (e: React.MouseEvent) => void;
 }
 
-export function TitleBar({ project, onOpenProject, onOpenPalette, onOpenRecents }: Props) {
+export function TitleBar({ onOpenPalette }: Props) {
   const [maximized, setMaximized] = useState(false);
   const [fullscreen, setFullscreen] = useState(false);
 
   useEffect(() => {
+    if (!("__TAURI_INTERNALS__" in window)) return;
     const win = getCurrentWindow();
     let disposed = false;
     const sync = async () => {
@@ -41,29 +38,6 @@ export function TitleBar({ project, onOpenProject, onOpenPalette, onOpenRecents 
         <span className="brand" data-tauri-drag-region title="Duckweed">
           <img src={appIcon} alt="" draggable={false} />
         </span>
-
-        <button type="button" className="chip chip-project" onClick={onOpenProject} title="Open project (Ctrl+Shift+O)">
-          <svg viewBox="0 0 16 16" aria-hidden="true" className="chip-icon">
-            <path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h3l1.5 1.8h4.5A1.5 1.5 0 0 1 14 6.3v5.2A1.5 1.5 0 0 1 12.5 13h-9A1.5 1.5 0 0 1 2 11.5z" />
-          </svg>
-          <span className="chip-label">{project ? project.name : "Open project…"}</span>
-        </button>
-
-        {project?.branch && (
-          <span className="chip chip-branch" title={`git branch: ${project.branch}`}>
-            <svg viewBox="0 0 16 16" aria-hidden="true" className="chip-icon">
-              <circle cx="4.5" cy="4" r="1.8" />
-              <circle cx="4.5" cy="12" r="1.8" />
-              <circle cx="11.5" cy="7" r="1.8" />
-              <path d="M4.5 5.8v4.4M4.5 8.6h3.6a3 3 0 0 0 2.2-1" />
-            </svg>
-            <span className="chip-label">{project.branch}</span>
-          </span>
-        )}
-
-        <button type="button" className="chip chip-ghost" onClick={onOpenRecents} title="Recent projects">
-          Recents
-        </button>
       </div>
 
       <div className="titlebar-center" data-tauri-drag-region>

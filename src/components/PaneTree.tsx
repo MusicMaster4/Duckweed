@@ -1,7 +1,7 @@
 import { Fragment, useRef, useState } from "react";
 
 import { resizeSplit } from "../lib/layout";
-import type { DropZone, LayoutNode, LeafNode, SplitNode } from "../lib/types";
+import type { DropZone, LayoutNode, LeafNode, ProjectInfo, SplitNode } from "../lib/types";
 import type { DragState } from "../hooks/useDragPane";
 import { TerminalPane } from "./TerminalPane";
 
@@ -17,6 +17,11 @@ export interface PaneTreeShared {
   drag: DragState | null;
   /** Resolves the shell/cwd a not-yet-created terminal should start with. */
   spawnFor: (term: string) => { cwd: string | null; shell: string | null };
+  /** Folder of the tab being rendered; the empty pane offers to pick one. */
+  project: ProjectInfo | null;
+  recents: string[];
+  onBrowseProject: () => void;
+  onPickProject: (path: string) => void;
   zoomedLeaf: string | null;
   onActivate: (leafId: string) => void;
   onSplit: (leafId: string, zone: "right" | "bottom") => void;
@@ -43,6 +48,10 @@ export function PaneTree({ node, shared }: { node: LayoutNode; shared: PaneTreeS
         dropZone={dropZoneFor(shared.drag, node.id)}
         isSource={shared.drag?.leafId === node.id}
         spawn={shared.spawnFor(node.term)}
+        project={shared.project}
+        recents={shared.recents}
+        onBrowseProject={shared.onBrowseProject}
+        onPickProject={shared.onPickProject}
         onActivate={() => shared.onActivate(node.id)}
         onSplit={(zone) => shared.onSplit(node.id, zone)}
         onClose={() => shared.onClose(node.id)}

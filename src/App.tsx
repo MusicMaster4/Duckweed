@@ -37,6 +37,27 @@ interface SpawnOpts {
 }
 
 const DEFAULT_FONT_SIZE = 13.5;
+const TAURI_RUNTIME = "__TAURI_INTERNALS__" in window;
+
+/** How often the branch of the visible project is re-read from `.git/HEAD`. */
+const BRANCH_POLL_MS = 4000;
+
+function basename(path: string): string {
+  return path.split(/[\\/]/).filter(Boolean).pop() ?? path;
+}
+
+/**
+ * Stand-in for a restored tab's project until `project_info` answers. The folder
+ * name is all the chrome needs to draw, and the branch arrives a tick later.
+ */
+function provisionalProject(path: string): ProjectInfo {
+  return { path, name: basename(path), branch: null, is_git: false };
+}
+
+/** True for a title nobody chose, so pointing the tab at a folder may rename it. */
+function isAutoTitle(tab: Tab): boolean {
+  return /^Terminal \d+$/.test(tab.title) || tab.title === tab.project?.name;
+}
 
 function boot() {
   const saved = load();
@@ -49,13 +70,14 @@ function boot() {
         root,
         activeLeaf: leaves(root)[0].id,
         zoomedLeaf: null,
+        project: entry.project ? provisionalProject(entry.project) : null,
       };
     });
     const index = Math.min(Math.max(0, saved.activeTabIndex), tabs.length - 1);
     return {
       tabs,
       activeTabId: tabs[index].id,
-      projectPath: saved.project,
+      lastProject: saved.project,
       recents: saved.recents,
       fontSize: saved.fontSize,
       shell: saved.shell,
@@ -65,11 +87,18 @@ function boot() {
   }
   const term = terminals.newTermId();
   const root = leaf(term);
-  const tab: Tab = { id: uid("tab"), title: "Terminal 1", root, activeLeaf: root.id, zoomedLeaf: null };
+  const tab: Tab = {
+    id: uid("tab"),
+    title: "Terminal 1",
+    root,
+    activeLeaf: root.id,
+    zoomedLeaf: null,
+    project: null,
+  };
   return {
     tabs: [tab],
     activeTabId: tab.id,
-    projectPath: null as string | null,
+    lastProject: null as string | null,
     recents: [] as string[],
     fontSize: DEFAULT_FONT_SIZE,
     shell: null as string | null,
@@ -92,7 +121,6 @@ export default function App() {
 
   const [tabs, setTabs] = useState<Tab[]>(initial.tabs);
   const [activeTabId, setActiveTabId] = useState(initial.activeTabId);
-  const [project, setProject] = useState<ProjectInfo | null>(null);
   const [recents, setRecents] = useState<string[]>(initial.recents);
   const [shells, setShells] = useState<ShellInfo[]>([]);
   const [shell, setShell] = useState<string | null>(initial.shell);
@@ -101,7 +129,6 @@ export default function App() {
   const [inputMode, setInputMode] = useState(initial.inputMode);
   const [booted, setBooted] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
-  const [recentsMenu, setRecentsMenu] = useState<{ x: number; y: number } | null>(null);
   const updater = useUpdater();
 
   // Handlers read state through refs so keyboard shortcuts and pointer drags
@@ -110,15 +137,16 @@ export default function App() {
   tabsRef.current = tabs;
   const activeTabIdRef = useRef(activeTabId);
   activeTabIdRef.current = activeTabId;
-  const projectRef = useRef(project);
-  projectRef.current = project;
   const shellRef = useRef(shell);
   shellRef.current = shell;
+  /** Last folder opened in any tab — only ever used to seed the folder picker. */
+  const lastProject = useRef<string | null>(initial.lastProject);
 
   /** Spawn parameters for terminals that have not been created yet. */
   const spawnOpts = useRef(new Map<string, SpawnOpts>());
 
   const activeTab = tabs.find((t) => t.id === activeTabId) ?? tabs[0];
+  const project = activeTab?.project ?? null;
 
   const currentTab = useCallback(
     () => tabsRef.current.find((t) => t.id === activeTabIdRef.current) ?? tabsRef.current[0] ?? null,
@@ -129,15 +157,14 @@ export default function App() {
     setTabs((prev) => prev.map((t) => (t.id === tabId ? fn(t) : t)));
   }, []);
 
-  /** cwd a new pane should start in: follow the focused shell, then the project. */
+  /** cwd a new pane should start in: follow the focused shell, then the tab's project. */
   const inheritCwd = useCallback((): string | null => {
     const tab = currentTab();
-    if (tab) {
-      const active = findLeaf(tab.root, tab.activeLeaf);
-      const meta = active ? terminals.getMeta(active.term) : null;
-      if (meta?.cwd) return meta.cwd;
-    }
-    return projectRef.current?.path ?? null;
+    if (!tab) return null;
+    const active = findLeaf(tab.root, tab.activeLeaf);
+    const meta = active ? terminals.getMeta(active.term) : null;
+    if (meta?.cwd) return meta.cwd;
+    return tab.project?.path ?? null;
   }, [currentTab]);
 
   const createTerm = useCallback(
@@ -152,11 +179,14 @@ export default function App() {
     [inheritCwd],
   );
 
-  const spawnFor = useCallback(
-    (term: string): SpawnOpts =>
-      spawnOpts.current.get(term) ?? { cwd: projectRef.current?.path ?? null, shell: shellRef.current },
-    [],
-  );
+  const spawnFor = useCallback((term: string): SpawnOpts => {
+    const recorded = spawnOpts.current.get(term);
+    if (recorded) return recorded;
+    // A pane restored from disk records nothing, so its folder is the one
+    // belonging to the tab it was restored into — not whichever tab is active.
+    const owner = tabsRef.current.find((t) => leaves(t.root).some((n) => n.term === term));
+    return { cwd: owner?.project?.path ?? null, shell: shellRef.current };
+  }, []);
 
   const releaseTerm = useCallback((term: string) => {
     terminals.dispose(term);
@@ -165,14 +195,21 @@ export default function App() {
 
   // ---------------------------------------------------------------- tabs
 
+  // Like Warp's default new-tab action, this opens a fresh shell in the
+  // configured default directory (the backend resolves null to the user's
+  // home). Choosing a project is an explicit action on this tab.
   const newTab = useCallback(
     (shellId?: string | null) => {
-      const term = createTerm({ cwd: projectRef.current?.path ?? null, shell: shellId ?? shellRef.current });
+      const term = createTerm({ cwd: null, shell: shellId ?? shellRef.current });
       const root = leaf(term);
-      const title = projectRef.current
-        ? projectRef.current.name
-        : `Terminal ${tabsRef.current.length + 1}`;
-      const tab: Tab = { id: uid("tab"), title, root, activeLeaf: root.id, zoomedLeaf: null };
+      const tab: Tab = {
+        id: uid("tab"),
+        title: `Terminal ${tabsRef.current.length + 1}`,
+        root,
+        activeLeaf: root.id,
+        zoomedLeaf: null,
+        project: null,
+      };
       setTabs([...tabsRef.current, tab]);
       setActiveTabId(tab.id);
     },
@@ -212,14 +249,16 @@ export default function App() {
       const remaining = latest.filter((t) => t.id !== tabId);
 
       if (remaining.length === 0) {
-        const term = createTerm({ cwd: projectRef.current?.path ?? null });
+        // The window keeps one neutral tab open in the default directory.
+        const term = createTerm({ cwd: null });
         const root = leaf(term);
         const fresh: Tab = {
           id: uid("tab"),
-          title: projectRef.current?.name ?? "Terminal 1",
+          title: "Terminal 1",
           root,
           activeLeaf: root.id,
           zoomedLeaf: null,
+          project: null,
         };
         setTabs([fresh]);
         setActiveTabId(fresh.id);
@@ -428,12 +467,15 @@ export default function App() {
 
       let focus = targetTabId;
       if (!targetTabId) {
+        // The pane is still the same shell in the same folder — it just lives in
+        // its own tab now, so the project comes with it.
         const created: Tab = {
           id: uid("tab"),
-          title: `Terminal ${next.length + 1}`,
+          title: source.project?.name ?? `Terminal ${next.length + 1}`,
           root: moved,
           activeLeaf: moved.id,
           zoomedLeaf: null,
+          project: source.project,
         };
         next = [...next, created];
         focus = created.id;
@@ -505,45 +547,128 @@ export default function App() {
 
   // ------------------------------------------------------------- project
 
+  /**
+   * Move a pane's shell into `path`. Panes with a command running are left
+   * alone — the tab changed folders, that is no reason to interrupt a build.
+   */
+  const cdPane = useCallback(async (term: string, path: string) => {
+    // A restored/background terminal may not be mounted yet. In that case,
+    // change its spawn parameters instead of sending a command into nowhere.
+    if (!terminals.getMeta(term)) {
+      const recorded = spawnOpts.current.get(term);
+      spawnOpts.current.set(term, {
+        cwd: path,
+        shell: recorded?.shell ?? shellRef.current,
+      });
+      return;
+    }
+    if (await terminals.hasRunningProcess(term)) return;
+    // Double quotes are the one form cmd, PowerShell and POSIX shells all read
+    // as "one argument", which is what a path with spaces needs.
+    terminals.submitCommand(term, `cd "${path}"`);
+  }, []);
+
+  /**
+   * Point a tab at a folder. Opening a project is per-tab: each tab is its own
+   * project, the way a Warp window holds several at once.
+   */
   const applyProject = useCallback(
-    async (path: string, options: { openTab: boolean }) => {
+    async (path: string, options: { newTab?: boolean; tabId?: string } = {}) => {
+      let info: ProjectInfo;
       try {
-        const info = await projectInfo(path);
-        setProject(info);
-        projectRef.current = info;
-        setRecents((prev) => pushRecent(prev, info.path));
-        void getCurrentWindow().setTitle(`Duckweed — ${info.name}`);
-        if (options.openTab) {
-          const term = createTerm({ cwd: info.path });
-          const root = leaf(term);
-          const tab: Tab = {
-            id: uid("tab"),
-            title: info.name,
-            root,
-            activeLeaf: root.id,
-            zoomedLeaf: null,
-          };
-          setTabs([...tabsRef.current, tab]);
-          setActiveTabId(tab.id);
-        }
+        info = await projectInfo(path);
       } catch (error) {
         console.error("failed to open project", error);
         setRecents((prev) => prev.filter((p) => p !== path));
+        return;
       }
+
+      lastProject.current = info.path;
+      setRecents((prev) => pushRecent(prev, info.path));
+
+      if (options.newTab) {
+        // Spawning straight into the folder beats spawning then `cd`-ing.
+        const term = createTerm({ cwd: info.path });
+        const root = leaf(term);
+        const tab: Tab = {
+          id: uid("tab"),
+          title: info.name,
+          root,
+          activeLeaf: root.id,
+          zoomedLeaf: null,
+          project: info,
+        };
+        setTabs([...tabsRef.current, tab]);
+        setActiveTabId(tab.id);
+        return;
+      }
+
+      const tab = options.tabId
+        ? tabsRef.current.find((candidate) => candidate.id === options.tabId) ?? null
+        : currentTab();
+      if (!tab) return;
+      setTabs((prev) =>
+        prev.map((t) =>
+          t.id === tab.id ? { ...t, project: info, title: isAutoTitle(t) ? info.name : t.title } : t,
+        ),
+      );
+      for (const node of leaves(tab.root)) void cdPane(node.term, info.path);
     },
-    [createTerm],
+    [cdPane, createTerm, currentTab],
   );
 
-  const openProject = useCallback(async () => {
-    const selected = await openDialog({
-      directory: true,
-      multiple: false,
-      title: "Open project folder",
-      defaultPath: projectRef.current?.path,
-    });
-    if (typeof selected !== "string") return;
-    await applyProject(selected, { openTab: true });
-  }, [applyProject]);
+  const openProject = useCallback(
+    async (options: { newTab?: boolean; tabId?: string } = {}) => {
+      const target = options.tabId
+        ? tabsRef.current.find((tab) => tab.id === options.tabId) ?? null
+        : currentTab();
+      const selected = await openDialog({
+        directory: true,
+        multiple: false,
+        title: options.newTab ? "Choose a folder for the new tab" : "Choose a folder for this tab",
+        defaultPath: target?.project?.path ?? lastProject.current ?? undefined,
+      });
+      if (typeof selected !== "string") return;
+      await applyProject(selected, options);
+    },
+    [applyProject, currentTab],
+  );
+
+  /**
+   * Re-read the visible project. The branch it shows is whatever `.git/HEAD`
+   * says, and the shell in the pane below can change that at any moment — so
+   * this runs on a slow timer as well as on the events that obviously matter.
+   */
+  const refreshProject = useCallback(async (tabId?: string) => {
+    const tab = tabId
+      ? tabsRef.current.find((candidate) => candidate.id === tabId) ?? null
+      : currentTab();
+    const path = tab?.project?.path;
+    if (!path) return;
+    try {
+      const info = await projectInfo(path);
+      setTabs((prev) => {
+        let changed = false;
+        const next = prev.map((t) => {
+          const current = t.project;
+          if (current?.path !== path) return t;
+          if (
+            current.branch === info.branch &&
+            current.name === info.name &&
+            current.is_git === info.is_git
+          ) {
+            return t;
+          }
+          changed = true;
+          return { ...t, project: info };
+        });
+        // Same array back on a no-op poll: React bails out, and so does the save.
+        return changed ? next : prev;
+      });
+    } catch {
+      // The folder can be renamed or unmounted underneath us; keep what we have.
+    }
+  }, [currentTab]);
 
   // ----------------------------------------------------------- lifecycle
 
@@ -567,25 +692,50 @@ export default function App() {
       terminals.setHighlight(initial.highlight);
       terminals.setInputMode(initial.inputMode);
 
-      if (initial.projectPath) {
-        try {
-          const info = await projectInfo(initial.projectPath);
-          if (!cancelled) {
-            setProject(info);
-            projectRef.current = info;
-            void getCurrentWindow().setTitle(`Duckweed — ${info.name}`);
+      // Restored tabs carry only a path; fill in the real name and branch.
+      const paths = [...new Set(initial.tabs.map((t) => t.project?.path).filter(Boolean))] as string[];
+      await Promise.all(
+        paths.map(async (path) => {
+          try {
+            const info = await projectInfo(path);
+            if (!cancelled) {
+              setTabs((prev) => prev.map((t) => (t.project?.path === path ? { ...t, project: info } : t)));
+            }
+          } catch {
+            // Folder is gone — the tab keeps the name, and opening a new one is
+            // the user's move to make.
+            if (!cancelled) setRecents((prev) => prev.filter((p) => p !== path));
           }
-        } catch {
-          if (!cancelled) setRecents((prev) => prev.filter((p) => p !== initial.projectPath));
-        }
-      }
+        }),
+      );
 
       if (!cancelled) setBooted(true);
     })();
     return () => {
       cancelled = true;
     };
-  }, [initial.fontSize, initial.highlight, initial.inputMode, initial.projectPath]);
+  }, [initial]);
+
+  // The window title follows the tab you are looking at.
+  useEffect(() => {
+    if (!TAURI_RUNTIME) return;
+    void getCurrentWindow().setTitle(project ? `Duckweed — ${project.name}` : "Duckweed");
+  }, [project]);
+
+  // Keep the branch chip honest: on tab switch, when the window comes back, and
+  // on a slow poll for `git checkout` typed into the terminal itself.
+  useEffect(() => {
+    void refreshProject();
+    const onFocus = () => void refreshProject();
+    window.addEventListener("focus", onFocus);
+    const id = window.setInterval(() => {
+      if (document.hasFocus()) void refreshProject();
+    }, BRANCH_POLL_MS);
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      window.clearInterval(id);
+    };
+  }, [activeTabId, refreshProject]);
 
   // Persist the arrangement (never the processes). Debounced because dragging a
   // divider produces a state update per pointer move.
@@ -594,7 +744,7 @@ export default function App() {
     const id = window.setTimeout(
       () =>
         save({
-          project: project?.path ?? null,
+          project: lastProject.current,
           recents,
           fontSize,
           shell,
@@ -627,6 +777,7 @@ export default function App() {
 
   // Warn before quitting if any terminal still has a command running.
   useEffect(() => {
+    if (!TAURI_RUNTIME) return;
     let disposed = false;
     let unlisten: (() => void) | undefined;
     void getCurrentWindow()
@@ -872,9 +1023,16 @@ export default function App() {
       {
         id: "project.open",
         group: "Project",
-        title: "Open project folder…",
+        title: "Open project folder in this tab…",
+        subtitle: "Each tab has its own project",
         hint: "Ctrl+Shift+O",
         run: () => void openProject(),
+      },
+      {
+        id: "project.open.tab",
+        group: "Project",
+        title: "Open project folder in a new tab…",
+        run: () => void openProject({ newTab: true }),
       },
       { id: "tab.new", group: "Tab", title: "New tab", hint: "Ctrl+Shift+T", run: () => newTab(null) },
       {
@@ -1023,9 +1181,16 @@ export default function App() {
       actions.push({
         id: `recent.${path}`,
         group: "Recent",
-        title: path.split(/[\\/]/).filter(Boolean).pop() ?? path,
+        title: basename(path),
         subtitle: path,
-        run: () => void applyProject(path, { openTab: true }),
+        run: () => void applyProject(path),
+      });
+      actions.push({
+        id: `recent.tab.${path}`,
+        group: "Recent",
+        title: `${basename(path)} in a new tab`,
+        subtitle: path,
+        run: () => void applyProject(path, { newTab: true }),
       });
     }
 
@@ -1088,6 +1253,14 @@ export default function App() {
     activeLeaf: activeTab?.activeLeaf ?? "",
     drag,
     spawnFor,
+    project,
+    recents,
+    onBrowseProject: () => {
+      if (activeTab) void openProject({ tabId: activeTab.id });
+    },
+    onPickProject: (path) => {
+      if (activeTab) void applyProject(path, { tabId: activeTab.id });
+    },
     zoomedLeaf: activeTab?.zoomedLeaf ?? null,
     onActivate: activatePane,
     onSplit: (leafId, zone) => splitPane(leafId, zone),
@@ -1103,21 +1276,21 @@ export default function App() {
 
   return (
     <div className="app">
-      <TitleBar
-        project={project}
-        onOpenProject={() => void openProject()}
-        onOpenPalette={() => setPaletteOpen(true)}
-        onOpenRecents={(e) => {
-          const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-          setRecentsMenu({ x: rect.left, y: rect.bottom + 4 });
-        }}
-      />
+      <TitleBar onOpenPalette={() => setPaletteOpen(true)} />
 
       <TabStrip
         tabs={tabs}
         activeTabId={activeTabId}
         paneCounts={paneCounts}
         drag={drag}
+        projects={{
+          recents,
+          setFor: (tabId, path) => void applyProject(path, { tabId }),
+          browseFor: (tabId) => void openProject({ tabId }),
+          openInNewTab: (path) => void applyProject(path, { newTab: true }),
+          browseInNewTab: () => void openProject({ newTab: true }),
+          refresh: (tabId) => void refreshProject(tabId),
+        }}
         onSelect={setActiveTabId}
         onClose={(id) => void closeTab(id)}
         onNew={newTab}
@@ -1154,29 +1327,6 @@ export default function App() {
           </span>
           {drag.label}
         </div>
-      )}
-
-      {recentsMenu && (
-        <>
-          <div className="menu-backdrop" onPointerDown={() => setRecentsMenu(null)} />
-          <div className="menu menu-recents" style={{ left: recentsMenu.x, top: recentsMenu.y }}>
-            {recents.length === 0 && <div className="menu-empty">No recent projects</div>}
-            {recents.map((path) => (
-              <button
-                key={path}
-                type="button"
-                className="menu-item"
-                onClick={() => {
-                  setRecentsMenu(null);
-                  void applyProject(path, { openTab: true });
-                }}
-              >
-                <span>{path.split(/[\\/]/).filter(Boolean).pop()}</span>
-                <span className="menu-hint">{path}</span>
-              </button>
-            ))}
-          </div>
-        </>
       )}
 
       {paletteOpen && <CommandPalette actions={paletteActions} onClose={() => setPaletteOpen(false)} />}

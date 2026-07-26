@@ -5,8 +5,16 @@ import type { LayoutNode, Tab } from "./types";
 const KEY = "duckweed:state:v1";
 const MAX_RECENTS = 12;
 
+export interface PersistedTab {
+  title: string;
+  root: LayoutNode;
+  /** Folder this tab works in — projects belong to tabs, not to the window. */
+  project: string | null;
+}
+
 export interface Persisted {
   version: 1;
+  /** Last folder opened anywhere, used only to seed the folder picker. */
   project: string | null;
   recents: string[];
   fontSize: number;
@@ -16,7 +24,7 @@ export interface Persisted {
   /** Warp-style command editor, or a conventional raw terminal. */
   inputMode: InputMode;
   /** Layout only — processes are never restored, just the arrangement. */
-  tabs: { title: string; root: LayoutNode }[];
+  tabs: PersistedTab[];
   activeTabIndex: number;
 }
 
@@ -52,10 +60,15 @@ export function load(): Persisted | null {
     if (!raw) return null;
     const parsed = JSON.parse(raw) as Persisted;
     if (parsed.version !== 1) return null;
-    const tabs = (parsed.tabs ?? []).filter((t) => isLayout(t.root));
+    const project = typeof parsed.project === "string" ? parsed.project : null;
+    const tabs = (parsed.tabs ?? [])
+      .filter((t) => isLayout(t.root))
+      // Written before projects moved onto tabs: every tab was in the one
+      // window-wide project, so that is where they all belong now.
+      .map((t) => ({ ...t, project: typeof t.project === "string" ? t.project : project }));
     return {
       version: 1,
-      project: typeof parsed.project === "string" ? parsed.project : null,
+      project,
       recents: Array.isArray(parsed.recents) ? parsed.recents.slice(0, MAX_RECENTS) : [],
       fontSize: typeof parsed.fontSize === "number" ? parsed.fontSize : 13.5,
       shell: typeof parsed.shell === "string" ? parsed.shell : null,
@@ -88,7 +101,11 @@ export function save(state: {
       shell: state.shell,
       highlight: state.highlight,
       inputMode: state.inputMode,
-      tabs: state.tabs.map((t) => ({ title: t.title, root: t.root })),
+      tabs: state.tabs.map((t) => ({
+        title: t.title,
+        root: t.root,
+        project: t.project?.path ?? null,
+      })),
       activeTabIndex: Math.max(
         0,
         state.tabs.findIndex((t) => t.id === state.activeTabId),

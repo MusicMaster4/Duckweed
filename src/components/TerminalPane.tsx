@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import * as bus from "../lib/bus";
 import * as terminals from "../lib/terminals";
-import type { DropZone, LeafNode } from "../lib/types";
+import type { DropZone, LeafNode, ProjectInfo } from "../lib/types";
 import { CommandInput } from "./CommandInput";
 import { PaneWelcome } from "./PaneWelcome";
 import { SearchBar } from "./SearchBar";
@@ -16,11 +16,16 @@ interface Props {
   /** This pane is the one being dragged. */
   isSource: boolean;
   spawn: { cwd: string | null; shell: string | null };
+  /** Folder of the tab this pane belongs to — the empty state offers to set it. */
+  project: ProjectInfo | null;
+  recents: string[];
   onActivate: () => void;
   onSplit: (zone: "right" | "bottom") => void;
   onClose: () => void;
   onToggleZoom: () => void;
   onDragHandle: (e: React.PointerEvent) => void;
+  onBrowseProject: () => void;
+  onPickProject: (path: string) => void;
 }
 
 function basename(path: string): string {
@@ -36,11 +41,15 @@ export function TerminalPane({
   dropZone,
   isSource,
   spawn,
+  project,
+  recents,
   onActivate,
   onSplit,
   onClose,
   onToggleZoom,
   onDragHandle,
+  onBrowseProject,
+  onPickProject,
 }: Props) {
   const bodyRef = useRef<HTMLDivElement>(null);
   const [meta, setMeta] = useState(() => terminals.getMeta(node.term));
@@ -242,9 +251,11 @@ export function TerminalPane({
       >
         {blank && (
           <PaneWelcome
-            shellLabel={meta?.shellLabel || meta?.title || "shell"}
-            cwd={meta?.cwd ?? ""}
             active={active}
+            project={project}
+            recents={recents}
+            onBrowse={onBrowseProject}
+            onPickRecent={onPickProject}
           />
         )}
       </div>
@@ -252,8 +263,6 @@ export function TerminalPane({
       {showComposer && (
         <CommandInput
           termId={node.term}
-          cwd={meta?.cwd ?? ""}
-          shellLabel={meta?.shellLabel || meta?.title || "shell"}
           active={active && !searching}
           exited={!!meta?.exited}
         />
