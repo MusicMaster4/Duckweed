@@ -4,9 +4,11 @@
 mod agent_activity;
 mod fs;
 mod git;
+mod launch;
 mod process_tree;
 mod project;
 mod pty;
+mod shell_integration;
 mod shells;
 mod usage;
 mod watch;
@@ -20,6 +22,7 @@ use tauri::{ipc::Channel, AppHandle, Emitter, Manager, State};
 use agent_activity::AgentActivityManager;
 use fs::{DirEntry, FileContent};
 use git::{Branches, Diff, DiffStats, FileDiff};
+use launch::{LaunchIntent, PendingLaunch};
 use project::ProjectInfo;
 use pty::{PtyManager, SpawnResult};
 use shells::ShellInfo;
@@ -359,6 +362,45 @@ fn frontend_ready(app: AppHandle) -> Result<(), String> {
     window.set_focus().map_err(|error| error.to_string())
 }
 
+/// Cold-start folder request from Explorer / the CLI, consumed once.
+#[tauri::command]
+fn take_launch_intent(pending: State<'_, PendingLaunch>) -> Option<LaunchIntent> {
+    pending.0.lock().ok().and_then(|mut guard| guard.take())
+}
+
+/// Whether Explorer shows each Duckweed folder right-click verb.
+///
+/// `None` on non-Windows platforms where the setting does not apply.
+#[tauri::command]
+fn shell_integration_status() -> Option<shell_integration::ShellIntegrationStatus> {
+    #[cfg(windows)]
+    {
+        // First launch enables "new tab" only; "new window" stays opt-in.
+        match shell_integration::ensure_defaults() {
+            Ok(status) => Some(status),
+            Err(_) => Some(shell_integration::status()),
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
+/// Add or remove one Explorer verb (`"tab"` or `"window"`).
+#[tauri::command]
+fn shell_integration_set(
+    verb: String,
+    enabled: bool,
+) -> Result<shell_integration::ShellIntegrationStatus, String> {
+    let verb = match verb.as_str() {
+        "tab" => shell_integration::ShellVerb::Tab,
+        "window" => shell_integration::ShellVerb::Window,
+        other => return Err(format!("unknown shell verb: {other}")),
+    };
+    shell_integration::set_verb(verb, enabled)
+}
+
 #[tauri::command]
 fn watch_project(
     manager: State<'_, ProjectWatchManager>,
@@ -367,13 +409,47 @@ fn watch_project(
     manager.set(path)
 }
 
+fn focus_main_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
+fn emit_launch_intent(app: &AppHandle, intent: LaunchIntent) {
+    let _ = app.emit("launch-intent", intent);
+    focus_main_window(app);
+}
+
 fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let startup_intent = launch::parse_args(&args);
+    // A second process for "new window" must not be swallowed by the running
+    // instance — skip single-instance so Explorer can open a real second window.
+    let force_new_window = launch::wants_new_window(&args);
+
     let window_state_flags = tauri_plugin_window_state::StateFlags::SIZE
         | tauri_plugin_window_state::StateFlags::POSITION
         | tauri_plugin_window_state::StateFlags::MAXIMIZED
         | tauri_plugin_window_state::StateFlags::FULLSCREEN;
 
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+
+    // Single-instance must register first so a second Explorer click hands its
+    // argv to the running app instead of opening another process.
+    #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
+    if !force_new_window {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            if let Some(intent) = launch::parse_args(&argv) {
+                emit_launch_intent(app, intent);
+            } else {
+                focus_main_window(app);
+            }
+        }));
+    }
+
+    builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -389,6 +465,7 @@ fn main() {
         .manage(ProjectWatchManager::default())
         .manage(UsageState::default())
         .manage(DurableSettings::default())
+        .manage(PendingLaunch(Mutex::new(startup_intent)))
         .setup(|app| {
             if let (Some(window), Some(icon)) = (
                 app.get_webview_window("main"),
@@ -399,6 +476,8 @@ fn main() {
             pty::start_busy_monitor(app.handle().clone())?;
             agent_activity::start_monitor(app.handle().clone())?;
             watch::start_monitor(app.handle().clone())?;
+            // Register "Open Duckweed in new tab" on first Windows run.
+            let _ = shell_integration::ensure_defaults();
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -422,6 +501,9 @@ fn main() {
             agent_watch,
             agent_unwatch,
             frontend_ready,
+            take_launch_intent,
+            shell_integration_status,
+            shell_integration_set,
             watch_project,
             usage_scan,
             usage_pricing,

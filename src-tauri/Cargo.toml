@@ -12,6 +12,7 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 tauri-plugin-process = "2"
+tauri-plugin-single-instance = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-window-state = "2"
 serde = { version = "1", features = ["derive"] }
@@ -32,6 +33,7 @@ windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_System_Diagnostics_ToolHelp",
 ] }
+winreg = "0.55"
 
 [profile.release]
 codegen-units = 1

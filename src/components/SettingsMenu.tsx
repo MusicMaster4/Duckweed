@@ -1,6 +1,7 @@
 import { useState } from "react";
 
 import { UsagePanel } from "./UsagePanel";
+import type { ShellIntegrationStatus } from "../lib/ipc";
 import type { InputMode } from "../lib/terminals";
 import type { ShellInfo } from "../lib/types";
 
@@ -11,6 +12,8 @@ interface Props {
   completionHighlights: boolean;
   completionSoundEnabled: boolean;
   confirmCloseRunning: boolean;
+  /** Windows Explorer folder verbs; null when unavailable. */
+  explorerIntegration: ShellIntegrationStatus | null;
   shell: string | null;
   shells: ShellInfo[];
   updateLabel: string;
@@ -20,6 +23,8 @@ interface Props {
   onToggleCompletionHighlights: () => void;
   onToggleCompletionSound: () => void;
   onToggleConfirmCloseRunning: () => void;
+  onToggleExplorerTab: () => void;
+  onToggleExplorerWindow: () => void;
   /** Asks for confirmation first; resolves true when history was cleared. */
   onResetSuggestions: () => Promise<boolean>;
   onShell: (shellId: string | null) => void;
@@ -46,6 +51,7 @@ export function SettingsMenu({
   completionHighlights,
   completionSoundEnabled,
   confirmCloseRunning,
+  explorerIntegration,
   shell,
   shells,
   updateLabel,
@@ -55,6 +61,8 @@ export function SettingsMenu({
   onToggleCompletionHighlights,
   onToggleCompletionSound,
   onToggleConfirmCloseRunning,
+  onToggleExplorerTab,
+  onToggleExplorerWindow,
   onResetSuggestions,
   onShell,
   onCheckUpdates,
@@ -82,6 +90,12 @@ export function SettingsMenu({
       matches("default shell system powershell") ||
       matches(
         "confirm close running process warn quit tab pane don't show again dont show",
+      ) ||
+      matches(
+        "explorer open duckweed in new tab folder right click context menu shell integration",
+      ) ||
+      matches(
+        "explorer open duckweed in new window folder right click context menu shell integration",
       ) ||
       matches("reset suggestions ghost autocomplete history learning clear forget"));
   const showAbout =
@@ -257,6 +271,38 @@ export function SettingsMenu({
                   <Toggle enabled={confirmCloseRunning} />
                 </button>
               )}
+              {explorerIntegration !== null &&
+                matches(
+                  "explorer open duckweed in new tab folder right click context menu shell integration",
+                ) && (
+                  <button
+                    type="button"
+                    className="settings-row settings-action"
+                    onClick={onToggleExplorerTab}
+                  >
+                    <span className="settings-copy">
+                      <strong>Open in new tab</strong>
+                      <span>Show “Open Duckweed in new tab” when right-clicking a folder</span>
+                    </span>
+                    <Toggle enabled={explorerIntegration.tab} />
+                  </button>
+                )}
+              {explorerIntegration !== null &&
+                matches(
+                  "explorer open duckweed in new window folder right click context menu shell integration",
+                ) && (
+                  <button
+                    type="button"
+                    className="settings-row settings-action"
+                    onClick={onToggleExplorerWindow}
+                  >
+                    <span className="settings-copy">
+                      <strong>Open in new window</strong>
+                      <span>Show “Open Duckweed in new window” when right-clicking a folder</span>
+                    </span>
+                    <Toggle enabled={explorerIntegration.window} />
+                  </button>
+                )}
               {(section === "Terminal" || searching) &&
                 matches("reset suggestions ghost autocomplete history learning clear forget") && (
                 <button
