@@ -168,7 +168,7 @@ describe("quota forecasts", () => {
       NOW,
     );
     expect(copy.tone).toBe("ok");
-    expect(copy.text).toBe("60% by reset");
+    expect(copy.text).toBe("40% by reset");
   });
 
   test("a projection landing near the cap is flagged even though it holds", () => {
@@ -182,7 +182,7 @@ describe("quota forecasts", () => {
       NOW,
     );
     expect(copy.tone).toBe("warning");
-    expect(copy.text).toBe("95% by reset");
+    expect(copy.text).toBe("5% by reset");
   });
 
   // The old panel printed "stable" here, which told you nothing at all.
@@ -262,7 +262,7 @@ describe("quota forecasts", () => {
       NOW,
     );
     expect(copy.tone).toBe("ok");
-    expect(copy.text).toBe("55% by reset");
+    expect(copy.text).toBe("45% by reset");
     expect(copy.detail).toBe("2%/h");
   });
 
@@ -315,7 +315,7 @@ describe("quota forecasts", () => {
       NOW,
     );
     expect(copy.detail).toBe("21%/h");
-    expect(copy.text).toBe("93% by reset");
+    expect(copy.text).toBe("7% by reset");
   });
 
   test("nothing to project from falls back to plain facts", () => {
@@ -325,7 +325,7 @@ describe("quota forecasts", () => {
 
     const young = usage.describeForecast(limit(8, 4.9), NOW);
     expect(young.tone).toBe("muted");
-    expect(young.text).toBe("8% used");
+    expect(young.text).toBe("92% left");
     expect(young.detail).toBeNull();
   });
 });

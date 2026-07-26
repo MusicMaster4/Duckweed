@@ -423,7 +423,7 @@ function describePace(forecast: QuotaForecast): string {
  * The line under a quota bar.
  *
  * Forecasts use one compact format across all window sizes: time left if the
- * quota runs out first, otherwise projected utilization at reset.
+ * quota runs out first, otherwise the share still left when the window resets.
  */
 export function describeForecast(limit: QuotaLimit, now: number): ForecastCopy {
   const { forecast, resets_at: resets } = limit;
@@ -436,7 +436,11 @@ export function describeForecast(limit: QuotaLimit, now: number): ForecastCopy {
     if (limit.percent <= 0) {
       return { tone: "ok", text: "Unused", detail: null };
     }
-    return { tone: "muted", text: `${Math.round(limit.percent)}% used`, detail: null };
+    return {
+      tone: "muted",
+      text: `${Math.round(Math.max(0, 100 - limit.percent))}% left`,
+      detail: null,
+    };
   }
 
   const pace = describePace(forecast);
@@ -464,9 +468,12 @@ export function describeForecast(limit: QuotaLimit, now: number): ForecastCopy {
   if (projected == null) {
     return { tone: "ok", text: "Within limit", detail: pace };
   }
+  // The bar and its value both read as quota *left*, so the forecast has to
+  // land on the same scale — `projected_percent` is utilization.
+  const leftAtReset = Math.min(100, Math.max(0, 100 - projected));
   return {
-    tone: projected >= 90 ? "warning" : "ok",
-    text: `${Math.round(projected)}% by reset`,
+    tone: leftAtReset <= 10 ? "warning" : "ok",
+    text: `${Math.round(leftAtReset)}% by reset`,
     detail: pace,
   };
 }
