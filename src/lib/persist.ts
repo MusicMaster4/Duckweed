@@ -10,6 +10,9 @@ export interface PersistedTab {
   root: LayoutNode;
   /** Folder this tab works in — projects belong to tabs, not to the window. */
   project: string | null;
+  pinned?: boolean;
+  /** Tab accent color id, or null/absent for default. */
+  color?: string | null;
 }
 
 export interface Persisted {
@@ -65,7 +68,12 @@ export function load(): Persisted | null {
       .filter((t) => isLayout(t.root))
       // Written before projects moved onto tabs: every tab was in the one
       // window-wide project, so that is where they all belong now.
-      .map((t) => ({ ...t, project: typeof t.project === "string" ? t.project : project }));
+      .map((t) => ({
+        ...t,
+        project: typeof t.project === "string" ? t.project : project,
+        pinned: t.pinned === true,
+        color: typeof t.color === "string" ? t.color : null,
+      }));
     return {
       version: 1,
       project,
@@ -105,6 +113,8 @@ export function save(state: {
         title: t.title,
         root: t.root,
         project: t.project?.path ?? null,
+        pinned: t.pinned === true ? true : undefined,
+        color: t.color ?? null,
       })),
       activeTabIndex: Math.max(
         0,

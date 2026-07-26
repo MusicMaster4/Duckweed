@@ -29,6 +29,10 @@ export interface Tab {
   zoomedLeaf: string | null;
   /** Folder this tab works in. Each tab can hold a different project. */
   project: ProjectInfo | null;
+  /** Pinned tabs stay on the left of the strip. */
+  pinned?: boolean;
+  /** Optional accent color id for finding this tab at a glance. */
+  color?: string | null;
 }
 
 export interface ShellInfo {

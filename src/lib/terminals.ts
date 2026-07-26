@@ -876,6 +876,40 @@ export function submitCommand(id: string, command: string): void {
   }
 }
 
+/**
+ * Move a shell into `path`.
+ *
+ * A blank pane (nothing run yet) stays blank: opening a folder is not "using"
+ * the terminal, so the welcome duck stays up the same way a fresh split into
+ * that project would. Panes that already have history get a normal visible
+ * `cd` so the user sees the switch in the grid.
+ */
+export function changeDirectory(id: string, path: string): void {
+  const session = sessions.get(id);
+  if (!session || session.exited) return;
+
+  const command = `cd "${path}"`;
+
+  if (session.ran) {
+    submitCommand(id, command);
+    return;
+  }
+
+  // Under the welcome overlay — do not markRan, or the empty state vanishes.
+  send(session, `${command}\r`);
+  session.cwd = path;
+  notify();
+
+  // Once the shell has drawn the new prompt, drop the echoed `cd` so the first
+  // real command does not sit under a project-switch line.
+  window.setTimeout(() => {
+    const live = sessions.get(id);
+    if (!live || live.ran || live.exited) return;
+    live.term.clear();
+    notify();
+  }, 200);
+}
+
 /** Write raw bytes to the PTY (Ctrl+C, Ctrl+L, Ctrl+D, etc.). */
 export function writeRaw(id: string, data: string): void {
   const session = sessions.get(id);

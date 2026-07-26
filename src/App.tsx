@@ -7,6 +7,7 @@ import { PaneTree, type PaneTreeShared } from "./components/PaneTree";
 import { StatusBar } from "./components/StatusBar";
 import { TabStrip } from "./components/TabStrip";
 import { TitleBar } from "./components/TitleBar";
+import { SettingsMenu } from "./components/SettingsMenu";
 import { ConfirmCloseDialog } from "./components/ConfirmCloseDialog";
 import { UpdateDialog } from "./components/UpdateDialog";
 import { useDragPane, type DragState } from "./hooks/useDragPane";
@@ -71,6 +72,8 @@ function boot() {
         activeLeaf: leaves(root)[0].id,
         zoomedLeaf: null,
         project: entry.project ? provisionalProject(entry.project) : null,
+        pinned: entry.pinned === true,
+        color: entry.color ?? null,
       };
     });
     const index = Math.min(Math.max(0, saved.activeTabIndex), tabs.length - 1);
@@ -129,6 +132,7 @@ export default function App() {
   const [inputMode, setInputMode] = useState(initial.inputMode);
   const [booted, setBooted] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const updater = useUpdater();
 
   // Handlers read state through refs so keyboard shortcuts and pointer drags
@@ -282,6 +286,62 @@ export default function App() {
       return next;
     });
   }, []);
+
+  /** Pin moves the tab left of every unpinned tab; unpin leaves it where it is. */
+  const pinTab = useCallback((tabId: string) => {
+    setTabs((prev) => {
+      const index = prev.findIndex((t) => t.id === tabId);
+      if (index < 0) return prev;
+      const tab = prev[index];
+      if (tab.pinned) {
+        return prev.map((t) => (t.id === tabId ? { ...t, pinned: false } : t));
+      }
+      const rest = prev.filter((t) => t.id !== tabId);
+      const pinned = rest.filter((t) => t.pinned);
+      const unpinned = rest.filter((t) => !t.pinned);
+      return [...pinned, { ...tab, pinned: true }, ...unpinned];
+    });
+  }, []);
+
+  const colorTab = useCallback((tabId: string, colorId: string | null) => {
+    updateTab(tabId, (t) => ({ ...t, color: colorId }));
+  }, [updateTab]);
+
+  const closeOtherTabs = useCallback(
+    async (keepId: string) => {
+      const snapshot = tabsRef.current;
+      const others = snapshot.filter((t) => t.id !== keepId);
+      if (others.length === 0) return;
+
+      // One prompt for the whole batch — "this tab" wording is wrong here because
+      // the tabs being closed are the other ones, not the focused tab.
+      const termsToCheck = others.flatMap((t) => leaves(t.root).map((n) => n.term));
+      if (await terminals.anyHasRunningProcess(termsToCheck)) {
+        const n = others.length;
+        const ok = await confirmCloseRunning({
+          title: n === 1 ? "Close other tab?" : "Close other tabs?",
+          message:
+            n === 1
+              ? "That tab has a process running."
+              : "Some of those tabs have processes running.",
+          confirmLabel: n === 1 ? "Yes, close" : "Yes, close all",
+        });
+        if (!ok) return;
+      }
+
+      // Re-read after the dialog; keep only the tab that still exists.
+      const latest = tabsRef.current;
+      const keep = latest.find((t) => t.id === keepId);
+      if (!keep) return;
+      const stillOthers = latest.filter((t) => t.id !== keepId);
+      for (const tab of stillOthers) {
+        for (const node of leaves(tab.root)) releaseTerm(node.term);
+      }
+      setTabs([keep]);
+      setActiveTabId(keep.id);
+    },
+    [releaseTerm],
+  );
 
   const selectTabIndex = useCallback((index: number) => {
     const tab = tabsRef.current[index];
@@ -563,9 +623,9 @@ export default function App() {
       return;
     }
     if (await terminals.hasRunningProcess(term)) return;
-    // Double quotes are the one form cmd, PowerShell and POSIX shells all read
-    // as "one argument", which is what a path with spaces needs.
-    terminals.submitCommand(term, `cd "${path}"`);
+    // Blank panes keep the welcome duck (like a fresh split); used panes get a
+    // normal `cd` in the grid. Double quotes work for cmd, PowerShell and POSIX.
+    terminals.changeDirectory(term, path);
   }, []);
 
   /**
@@ -938,7 +998,8 @@ export default function App() {
             a.balancePanes();
             return take();
           case "t":
-            a.newTab(null);
+            // Empty tabs without a folder can't run commands — don't spawn more.
+            if (tab?.project) a.newTab(null);
             return take();
           case "q":
             if (tab) void a.closeTab(tab.id);
@@ -1034,7 +1095,9 @@ export default function App() {
         title: "Open project folder in a new tab…",
         run: () => void openProject({ newTab: true }),
       },
-      { id: "tab.new", group: "Tab", title: "New tab", hint: "Ctrl+Shift+T", run: () => newTab(null) },
+      ...(project
+        ? [{ id: "tab.new", group: "Tab", title: "New tab", hint: "Ctrl+Shift+T", run: () => newTab(null) }]
+        : []),
       {
         id: "tab.close",
         group: "Tab",
@@ -1169,12 +1232,14 @@ export default function App() {
           shellRef.current = info.id;
         },
       });
-      actions.push({
-        id: `shell.tab.${info.id}`,
-        group: "Shell",
-        title: `New tab with ${info.label}`,
-        run: () => newTab(info.id),
-      });
+      if (project) {
+        actions.push({
+          id: `shell.tab.${info.id}`,
+          group: "Shell",
+          title: `New tab with ${info.label}`,
+          run: () => newTab(info.id),
+        });
+      }
     }
 
     for (const path of recents) {
@@ -1276,27 +1341,34 @@ export default function App() {
 
   return (
     <div className="app">
-      <TitleBar onOpenPalette={() => setPaletteOpen(true)} />
-
-      <TabStrip
-        tabs={tabs}
-        activeTabId={activeTabId}
-        paneCounts={paneCounts}
-        drag={drag}
-        projects={{
-          recents,
-          setFor: (tabId, path) => void applyProject(path, { tabId }),
-          browseFor: (tabId) => void openProject({ tabId }),
-          openInNewTab: (path) => void applyProject(path, { newTab: true }),
-          browseInNewTab: () => void openProject({ newTab: true }),
-          refresh: (tabId) => void refreshProject(tabId),
-        }}
-        onSelect={setActiveTabId}
-        onClose={(id) => void closeTab(id)}
-        onNew={newTab}
-        onReorder={reorderTabs}
-        onRename={(id, title) => updateTab(id, (t) => ({ ...t, title }))}
-      />
+      <TitleBar
+        settingsOpen={settingsOpen}
+        onToggleSettings={() => setSettingsOpen((open) => !open)}
+      >
+        <TabStrip
+          tabs={tabs}
+          activeTabId={activeTabId}
+          paneCounts={paneCounts}
+          drag={drag}
+          projects={{
+            recents,
+            setFor: (tabId, path) => void applyProject(path, { tabId }),
+            browseFor: (tabId) => void openProject({ tabId }),
+            openInNewTab: (path) => void applyProject(path, { newTab: true }),
+            browseInNewTab: () => void openProject({ newTab: true }),
+            refresh: (tabId) => void refreshProject(tabId),
+          }}
+          allowNewTab={!!project}
+          onSelect={setActiveTabId}
+          onClose={(id) => void closeTab(id)}
+          onCloseOthers={(id) => void closeOtherTabs(id)}
+          onNew={newTab}
+          onReorder={reorderTabs}
+          onRename={(id, title) => updateTab(id, (t) => ({ ...t, title }))}
+          onPin={pinTab}
+          onColor={colorTab}
+        />
+      </TitleBar>
 
       <main className="workspace">
         {!booted ? (
@@ -1330,6 +1402,26 @@ export default function App() {
       )}
 
       {paletteOpen && <CommandPalette actions={paletteActions} onClose={() => setPaletteOpen(false)} />}
+
+      {settingsOpen && (
+        <SettingsMenu
+          fontSize={fontSize}
+          inputMode={inputMode}
+          highlight={highlight}
+          shell={shell}
+          shells={shells}
+          updateLabel={`${updater.channel === "testing" ? "Beta" : "Stable"}${updater.version ? ` · v${updater.version}` : ""}`}
+          onFontSize={applyFontSize}
+          onToggleInputMode={toggleInputMode}
+          onToggleHighlight={toggleHighlight}
+          onShell={(shellId) => {
+            setShell(shellId);
+            shellRef.current = shellId;
+          }}
+          onCheckUpdates={updater.check}
+          onClose={() => setSettingsOpen(false)}
+        />
+      )}
 
       {updater.dialogOpen && <UpdateDialog updater={updater} />}
       <ConfirmCloseDialog />

@@ -1,15 +1,16 @@
-import { useEffect, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import appIcon from "../../src-tauri/icons/32x32.png";
 
 import { isFullscreen, toggleFullscreen } from "../lib/window";
 
 interface Props {
-  onOpenPalette: () => void;
+  children: ReactNode;
+  settingsOpen: boolean;
+  onToggleSettings: () => void;
 }
 
-export function TitleBar({ onOpenPalette }: Props) {
-  const [maximized, setMaximized] = useState(false);
+export function TitleBar({ children, settingsOpen, onToggleSettings }: Props) {
   const [fullscreen, setFullscreen] = useState(false);
 
   useEffect(() => {
@@ -17,10 +18,8 @@ export function TitleBar({ onOpenPalette }: Props) {
     const win = getCurrentWindow();
     let disposed = false;
     const sync = async () => {
-      const [max, full] = await Promise.all([win.isMaximized(), isFullscreen()]);
-      if (disposed) return;
-      setMaximized(max);
-      setFullscreen(full);
+      const full = await isFullscreen();
+      if (!disposed) setFullscreen(full);
     };
     void sync();
     const unlisten = win.onResized(() => void sync());
@@ -40,16 +39,7 @@ export function TitleBar({ onOpenPalette }: Props) {
         </span>
       </div>
 
-      <div className="titlebar-center" data-tauri-drag-region>
-        <button type="button" className="omni" onClick={onOpenPalette} title="Command palette (Ctrl+Shift+P)">
-          <svg viewBox="0 0 16 16" aria-hidden="true">
-            <circle cx="7" cy="7" r="4.2" />
-            <path d="M10.2 10.2 13.5 13.5" />
-          </svg>
-          <span>Search actions…</span>
-          <kbd>Ctrl+Shift+P</kbd>
-        </button>
-      </div>
+      <div className="titlebar-tabs">{children}</div>
 
       <div className="titlebar-right">
         <button
@@ -79,19 +69,15 @@ export function TitleBar({ onOpenPalette }: Props) {
         </button>
         <button
           type="button"
-          className="win-btn"
-          title={maximized ? "Restore" : "Maximize"}
-          onClick={() => void win().toggleMaximize()}
+          className={`win-btn settings-trigger ${settingsOpen ? "is-open" : ""}`}
+          title="Settings"
+          aria-label="Settings"
+          aria-expanded={settingsOpen}
+          onClick={onToggleSettings}
         >
-          <svg viewBox="0 0 12 12" aria-hidden="true">
-            {maximized ? (
-              <>
-                <rect x="2" y="3.5" width="6" height="6" rx="1" />
-                <path d="M4.2 3.5V2.5h5.3v5.3H8.5" />
-              </>
-            ) : (
-              <rect x="2.5" y="2.5" width="7" height="7" rx="1" />
-            )}
+          <svg viewBox="0 0 16 16" aria-hidden="true">
+            <circle cx="8" cy="8" r="2.25" />
+            <path d="M6.9 2.1h2.2l.45 1.55c.3.12.58.28.84.48l1.55-.4 1.1 1.9-1.1 1.15c.03.2.05.4.05.62s-.02.42-.05.62l1.1 1.15-1.1 1.9-1.55-.4c-.26.2-.54.36-.84.48l-.45 1.55H6.9l-.45-1.55a4.3 4.3 0 0 1-.84-.48l-1.55.4-1.1-1.9 1.1-1.15A4 4 0 0 1 4 7.4c0-.21.02-.42.05-.62l-1.1-1.15 1.1-1.9 1.55.4c.26-.2.54-.36.84-.48z" />
           </svg>
         </button>
         <button type="button" className="win-btn win-close" title="Close" onClick={() => void win().close()}>

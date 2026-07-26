@@ -126,9 +126,10 @@ export function TerminalPane({
   /**
    * A running CLI owns the pane: the composer is unmounted so the program gets
    * every row, and nothing below it competes for the keyboard. An exited shell
-   * keeps the bar — it is the only thing left saying what happened.
+   * keeps the bar — it is the only thing left saying what happened. No project
+   * yet means no composer either: pick a folder before any command runs.
    */
-  const showComposer = inputMode === "editor" && !busy;
+  const showComposer = inputMode === "editor" && !busy && !!project;
   /** Nothing has been run — hide the shell's lone prompt behind the empty state. */
   const blank = !!meta && !meta.ran && !effectiveRaw;
 
@@ -222,6 +223,8 @@ export function TerminalPane({
         className="pane-body"
         ref={bodyRef}
         onPointerDown={() => {
+          // Unclaimed tabs have no composer — clicks stay on the empty state.
+          if (blank && !project) return;
           // Nothing has been run, so there is no output to select — a click on
           // the empty state means "let me type", not "let me grab the grid".
           if (blank) {

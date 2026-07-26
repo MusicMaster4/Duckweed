@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 
-import { randomGreeting } from "../lib/greetings";
+import { randomGreeting, randomUnclaimedGreeting } from "../lib/greetings";
 import { PaneDuck } from "./PaneDuck";
 import type { ProjectInfo } from "../lib/types";
 
@@ -57,9 +58,13 @@ function HintKeys({ keys }: { keys: readonly string[] }) {
 export function PaneWelcome({ active, project, recents, onBrowse, onPickRecent }: Props) {
   // Once per mount: a line that changes while you read it is a distraction.
   const greeting = useMemo(() => randomGreeting(), []);
+  const unclaimedLine = useMemo(() => randomUnclaimedGreeting(), []);
   const rootRef = useRef<HTMLDivElement>(null);
+  const pickRef = useRef(onPickRecent);
+  pickRef.current = onPickRecent;
   const [compact, setCompact] = useState(false);
   const [hintsOpen, setHintsOpen] = useState(false);
+  const [folderDrop, setFolderDrop] = useState(false);
 
   // A pane in a three-way split can be shorter than the hints are tall.
   useEffect(() => {
@@ -88,16 +93,66 @@ export function PaneWelcome({ active, project, recents, onBrowse, onPickRecent }
   }, [active]);
 
   /**
+   * OS folder drops arrive as Tauri events with real filesystem paths. While
+   * this focused tab still has no folder, any drop on the window claims it —
+   * no hit-test games with DPI / titlebar; the empty state is the whole point.
+   */
+  useEffect(() => {
+    if (!active || project) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+
+    void getCurrentWebview()
+      .onDragDropEvent((event) => {
+        const payload = event.payload;
+        if (payload.type === "leave") {
+          setFolderDrop(false);
+          return;
+        }
+        if (payload.type === "enter" || payload.type === "over") {
+          setFolderDrop(true);
+          return;
+        }
+        if (payload.type !== "drop") return;
+        setFolderDrop(false);
+        const path = payload.paths[0];
+        if (path) pickRef.current(path);
+      })
+      .then((fn) => {
+        if (disposed) fn();
+        else unlisten = fn;
+      });
+
+    return () => {
+      disposed = true;
+      setFolderDrop(false);
+      unlisten?.();
+    };
+  }, [active, project]);
+
+  /**
    * No folder yet: the duck is out of the water, and the pane offers the one
-   * thing this tab is missing. The shell below already works — a folder is an
-   * offer, not a gate, so this stays as quiet as the greeting it replaces.
+   * thing this tab is missing. Composer and new-tab are locked until a path is
+   * chosen — a folder is a gate, not a suggestion. Browse or drop both count.
    */
   if (!project) {
     return (
-      <div ref={rootRef} className={`pane-welcome is-unclaimed ${compact ? "is-compact" : ""}`}>
+      <div
+        ref={rootRef}
+        className={[
+          "pane-welcome",
+          "is-unclaimed",
+          compact ? "is-compact" : "",
+          folderDrop ? "is-folder-drop" : "",
+        ]
+          .filter(Boolean)
+          .join(" ")}
+      >
         <PaneDuck />
         <div className="pane-welcome-inner">
-          <p className="pane-welcome-greeting">Nowhere to swim yet.</p>
+          <p className="pane-welcome-greeting">
+            {folderDrop ? "Drop to open this folder." : unclaimedLine}
+          </p>
           <button type="button" className="pane-welcome-browse" onClick={onBrowse}>
             <svg viewBox="0 0 16 16" aria-hidden="true">
               <path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h3l1.5 1.8h4.5A1.5 1.5 0 0 1 14 6.3v5.2A1.5 1.5 0 0 1 12.5 13h-9A1.5 1.5 0 0 1 2 11.5z" />
@@ -105,6 +160,7 @@ export function PaneWelcome({ active, project, recents, onBrowse, onPickRecent }
             <span>Choose a folder for this tab</span>
             <kbd>Ctrl+Shift+O</kbd>
           </button>
+          <p className="pane-welcome-drop-hint">or drop a folder here</p>
           {recents.length > 0 && (
             <div className="pane-welcome-recents">
               {recents.slice(0, RECENT_CHIPS).map((path) => (

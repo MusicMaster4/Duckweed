@@ -29,8 +29,7 @@
     "Courier New", monospace;
 
   --radius: 9px;
-  --titlebar-h: 40px;
-  --tabstrip-h: 34px;
+  --titlebar-h: 48px;
   --status-h: 24px;
   --pane-header-h: 27px;
 
@@ -130,7 +129,7 @@ svg {
 .app {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  grid-template-rows: var(--titlebar-h) var(--tabstrip-h) minmax(0, 1fr) var(--status-h);
+  grid-template-rows: var(--titlebar-h) minmax(0, 1fr) var(--status-h);
   height: 100%;
   overflow: hidden;
   background: var(--bg);
@@ -140,9 +139,9 @@ svg {
 
 .titlebar {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   min-width: 0;
   padding-left: 10px;
   border-bottom: 1px solid var(--border);
@@ -162,12 +161,10 @@ svg {
   min-width: 0;
 }
 
-.titlebar-center {
-  display: flex;
-  justify-content: center;
-  align-items: center;
+.titlebar-tabs {
   min-width: 0;
   height: 100%;
+  overflow: hidden;
 }
 
 .titlebar-right {
@@ -248,44 +245,6 @@ button.chip:hover {
   border-color: transparent;
 }
 
-.omni {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: min(400px, 42vw);
-  height: 23px;
-  padding: 0 8px;
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  background: transparent;
-  color: var(--text-faint);
-  font-size: 12px;
-  min-width: 0;
-}
-
-.omni:hover {
-  border-color: var(--border-strong);
-  color: var(--text-dim);
-}
-
-.omni svg {
-  width: 12px;
-  height: 12px;
-  flex: none;
-}
-
-.omni span {
-  flex: 1;
-  text-align: left;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.omni kbd {
-  flex: none;
-}
-
 .win-btn {
   display: grid;
   place-items: center;
@@ -296,8 +255,8 @@ button.chip:hover {
 }
 
 .win-btn svg {
-  width: 11px;
-  height: 11px;
+  width: 12px;
+  height: 12px;
 }
 
 .win-btn:hover {
@@ -310,14 +269,24 @@ button.chip:hover {
   color: #ffeef0;
 }
 
+.settings-trigger svg {
+  width: 15px;
+  height: 15px;
+}
+
+.settings-trigger.is-open {
+  background: var(--hover);
+  color: var(--accent);
+}
+
 /* ------------------------------------------------------------ tab strip */
 
 .tabstrip {
   display: flex;
   align-items: center;
+  height: 100%;
   min-width: 0;
-  padding: 0 8px;
-  border-bottom: 1px solid var(--border);
+  padding: 0;
   overflow: hidden;
 }
 
@@ -336,22 +305,73 @@ button.chip:hover {
 }
 
 .tab {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 7px;
-  height: 25px;
+  height: 34px;
   max-width: 300px;
   min-width: 88px;
   padding: 0 5px 0 10px;
   border: 1px solid transparent;
-  border-radius: 7px;
+  border-radius: 8px;
   color: var(--text-faint);
   font-size: 12px;
   cursor: default;
   flex: none;
   transition:
     background 120ms ease,
-    color 120ms ease;
+    color 120ms ease,
+    border-color 120ms ease,
+    box-shadow 120ms ease;
+  overflow: hidden;
+}
+
+.tab.is-colored {
+  background: color-mix(in srgb, var(--tab-color) 11%, transparent);
+  border-color: color-mix(in srgb, var(--tab-color) 22%, transparent);
+  color: var(--text-dim);
+}
+
+.tab.is-colored:hover {
+  background: color-mix(in srgb, var(--tab-color) 16%, transparent);
+  color: var(--text);
+}
+
+.tab.is-colored.is-active {
+  background: color-mix(in srgb, var(--tab-color) 14%, var(--bg-raised));
+  border-color: color-mix(in srgb, var(--tab-color) 40%, transparent);
+  color: var(--text);
+  box-shadow: inset 0 -2px 0 0 var(--tab-color);
+}
+
+.tab.is-colored:not(.is-active) {
+  box-shadow: inset 0 -2px 0 0 color-mix(in srgb, var(--tab-color) 70%, transparent);
+}
+
+.tab.is-colored.is-active .tab-title::after {
+  background: var(--tab-color);
+  box-shadow: 0 0 5px color-mix(in srgb, var(--tab-color) 70%, transparent);
+}
+
+.tab-pin {
+  width: 11px;
+  height: 11px;
+  flex: none;
+  color: var(--text-faint);
+  opacity: 0.85;
+}
+
+.tab.is-colored .tab-pin {
+  color: var(--tab-color);
+}
+
+.tab.is-active .tab-pin {
+  color: var(--text-dim);
+}
+
+.tab.is-colored.is-active .tab-pin {
+  color: var(--tab-color);
 }
 
 .tab.is-unclaimed {
@@ -536,22 +556,264 @@ button.chip:hover {
   display: grid;
   place-items: center;
   width: 23px;
-  height: 23px;
+  height: 30px;
   border-radius: 7px;
   color: var(--text-faint);
   font-size: 15px;
   line-height: 1;
 }
 
-.tab-new:hover {
+.tab-new:hover:not(:disabled) {
   background: var(--hover);
   color: var(--text);
+}
+
+.tab-new:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.tab-new-wrap.is-locked {
+  opacity: 0.85;
 }
 
 .tab-new.is-drop {
   background: var(--accent-dim);
   color: var(--text);
   box-shadow: inset 0 0 0 1px var(--accent-line);
+}
+
+/* ----------------------------------------------------------- settings */
+
+.settings-backdrop {
+  position: fixed;
+  inset: var(--titlebar-h) 0 0;
+  z-index: 45;
+}
+
+.settings-menu {
+  position: absolute;
+  top: 6px;
+  right: 48px;
+  width: min(340px, calc(100vw - 20px));
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  background: var(--bg-elevated);
+  box-shadow: 0 20px 55px rgba(0, 0, 0, 0.6);
+  overflow: hidden;
+}
+
+.settings-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 13px 14px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.settings-header > div,
+.settings-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.settings-header strong {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.settings-header span,
+.settings-copy span {
+  color: var(--text-faint);
+  font-size: 10.5px;
+}
+
+.settings-close {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  color: var(--text-faint);
+  font-size: 17px;
+}
+
+.settings-close:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.settings-section {
+  padding: 10px 10px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.settings-section-title {
+  display: block;
+  padding: 0 4px 7px;
+  color: var(--text-faint);
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 43px;
+  width: 100%;
+  padding: 7px 8px;
+  border-radius: 8px;
+}
+
+.settings-copy {
+  text-align: left;
+}
+
+.settings-copy strong {
+  color: var(--text-dim);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.settings-action:hover {
+  background: var(--hover);
+}
+
+.settings-action:hover .settings-copy strong {
+  color: var(--text);
+}
+
+.settings-stepper {
+  display: grid;
+  grid-template-columns: 26px 52px 26px;
+  align-items: center;
+  height: 27px;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  overflow: hidden;
+  flex: none;
+}
+
+.settings-stepper button {
+  height: 100%;
+  color: var(--text-dim);
+  font-size: 15px;
+}
+
+.settings-stepper button:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.settings-stepper span {
+  color: var(--text-dim);
+  font-size: 10.5px;
+  text-align: center;
+}
+
+.settings-switch {
+  position: relative;
+  width: 30px;
+  height: 17px;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.11);
+  flex: none;
+  transition: background 120ms ease;
+}
+
+.settings-switch span {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: var(--text-faint);
+  transition:
+    transform 120ms ease,
+    background 120ms ease;
+}
+
+.settings-switch.is-on {
+  background: var(--accent-dim);
+  box-shadow: inset 0 0 0 1px var(--accent-line);
+}
+
+.settings-switch.is-on span {
+  transform: translateX(13px);
+  background: var(--accent);
+}
+
+.settings-field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 43px;
+  padding: 7px 8px;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.settings-field select {
+  max-width: 180px;
+  height: 28px;
+  padding: 0 27px 0 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  outline: none;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+}
+
+.settings-field select:focus {
+  border-color: var(--accent-line);
+}
+
+.settings-footer {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px;
+}
+
+.settings-update {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: 100%;
+  min-height: 36px;
+  padding: 7px 8px;
+  border-radius: 8px;
+  color: var(--text-dim);
+  text-align: left;
+}
+
+.settings-update:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.settings-update small {
+  color: var(--text-faint);
+  font-size: 10px;
+}
+
+.settings-shortcut {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 8px 2px;
+  color: var(--text-faint);
+  font-size: 10.5px;
 }
 
 /* ------------------------------------------------------------ workspace */
@@ -953,6 +1215,9 @@ button.chip:hover {
   align-items: center;
   padding-bottom: 18px;
   text-align: center;
+  transition:
+    background 140ms ease,
+    box-shadow 140ms ease;
 }
 
 .pane-welcome.is-unclaimed .pane-welcome-inner {
@@ -963,20 +1228,49 @@ button.chip:hover {
   pointer-events: auto;
 }
 
+/* OS folder hovering this empty tab — whole pane reads as the drop target. */
+.pane-welcome.is-unclaimed.is-folder-drop {
+  background: color-mix(in srgb, var(--accent-dim) 55%, var(--bg-pane));
+  box-shadow: inset 0 0 0 1.5px var(--accent-line);
+}
+
+.pane-welcome.is-unclaimed.is-folder-drop .pane-welcome-browse {
+  border-color: var(--accent-line);
+  background: var(--hover);
+  color: var(--text);
+}
+
+.pane-welcome-drop-hint {
+  margin: 10px 0 0;
+  font-size: 12px;
+  color: var(--text-faint);
+}
+
+.pane-welcome.is-unclaimed.is-folder-drop .pane-welcome-drop-hint {
+  color: var(--accent-strong);
+}
+
+.pane-welcome.is-unclaimed.is-compact .pane-welcome-drop-hint {
+  display: none;
+}
+
 .pane-welcome-browse {
   display: flex;
   align-items: center;
-  gap: 8px;
-  min-width: 260px;
+  gap: 12px;
+  min-width: 320px;
   max-width: 100%;
-  height: 34px;
-  margin-top: 14px;
-  padding: 0 10px;
+  height: 48px;
+  margin-top: 18px;
+  padding: 0 16px;
   border: 1px solid var(--border-strong);
-  border-radius: 8px;
+  border-radius: 10px;
   background: var(--bg-raised);
-  color: var(--text-dim);
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 500;
   text-align: left;
+  box-shadow: 0 1px 0 color-mix(in srgb, var(--text) 6%, transparent);
 }
 
 .pane-welcome-browse:hover {
@@ -986,8 +1280,8 @@ button.chip:hover {
 }
 
 .pane-welcome-browse svg {
-  width: 14px;
-  height: 14px;
+  width: 18px;
+  height: 18px;
   color: var(--amber);
   flex: none;
 }
@@ -999,22 +1293,27 @@ button.chip:hover {
   white-space: nowrap;
 }
 
+.pane-welcome-browse kbd {
+  font-size: 11px;
+  opacity: 0.75;
+}
+
 .pane-welcome-recents {
   display: flex;
   justify-content: center;
   flex-wrap: wrap;
-  gap: 5px;
+  gap: 6px;
   max-width: 100%;
-  margin-top: 9px;
+  margin-top: 12px;
 }
 
 .pane-welcome-recent {
-  max-width: 150px;
-  height: 23px;
-  padding: 0 8px;
-  border-radius: 6px;
+  max-width: 160px;
+  height: 26px;
+  padding: 0 10px;
+  border-radius: 7px;
   color: var(--text-faint);
-  font-size: 11px;
+  font-size: 12px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1027,7 +1326,10 @@ button.chip:hover {
 
 .pane-welcome.is-unclaimed.is-compact .pane-welcome-browse {
   min-width: 0;
-  margin-top: 8px;
+  height: 40px;
+  margin-top: 10px;
+  padding: 0 12px;
+  font-size: 13px;
 }
 
 .pane-welcome.is-unclaimed.is-compact .pane-welcome-recents,
@@ -1617,6 +1919,88 @@ body.is-resizing * {
   height: 1px;
   margin: 4px 3px;
   background: var(--border);
+}
+
+.menu-tab {
+  min-width: 210px;
+  max-width: 260px;
+  overflow: visible;
+}
+
+.menu-item-row {
+  flex-direction: row;
+  align-items: center;
+  padding: 7px 10px;
+  font-size: 12.5px;
+}
+
+.menu-item-row:disabled {
+  opacity: 0.35;
+  pointer-events: none;
+}
+
+.menu-colors {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 8px 6px;
+}
+
+.menu-color {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--swatch);
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.25);
+  flex: none;
+  transition:
+    transform 100ms ease,
+    box-shadow 100ms ease;
+}
+
+.menu-color:hover {
+  transform: scale(1.12);
+}
+
+.menu-color.is-selected {
+  box-shadow:
+    inset 0 0 0 1px rgba(0, 0, 0, 0.3),
+    0 0 0 2px var(--bg-elevated),
+    0 0 0 3.5px color-mix(in srgb, var(--swatch, var(--text)) 80%, white);
+}
+
+.menu-color-none {
+  display: grid;
+  place-items: center;
+  background: transparent;
+  border: 1.5px solid var(--text-faint);
+  box-shadow: none;
+  --swatch: var(--text-faint);
+}
+
+.menu-color-none:hover {
+  border-color: var(--text-dim);
+}
+
+.menu-color-none.is-selected {
+  border-color: var(--text);
+  box-shadow:
+    0 0 0 2px var(--bg-elevated),
+    0 0 0 3.5px var(--text-dim);
+}
+
+.menu-color-slash {
+  display: block;
+  width: 12px;
+  height: 1.5px;
+  border-radius: 1px;
+  background: var(--text-faint);
+  transform: rotate(-45deg);
+}
+
+.menu-color-none.is-selected .menu-color-slash {
+  background: var(--text-dim);
 }
 
 /* A recent project: the row opens it here, the action button in a new tab. */
