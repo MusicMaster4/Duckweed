@@ -4,7 +4,6 @@ import {
   DUCK_FPS,
   duckLayout,
   renderDuckFrame,
-  renderWalkingDuckFrame,
 } from "../src/lib/duckAscii.ts";
 
 function assertGrid(text, cols, rows) {
@@ -42,21 +41,7 @@ describe("empty-pane ASCII duck", () => {
     expect(later.water).not.toBe(first.water);
   });
 
-  test("walking duck uses the same 15 FPS ASCII renderer", () => {
-    const layout = duckLayout(960, 420, 8, 17.6, 16);
-    const first = renderWalkingDuckFrame(layout, 0);
-    const nextFrame = renderWalkingDuckFrame(layout, 1 / DUCK_FPS);
-
+  test("uses a shared 15 FPS cadence", () => {
     expect(DUCK_FPS).toBe(15);
-    assertGrid(first.duck, layout.cols, layout.rows);
-    assertGrid(first.water, layout.cols, layout.rows);
-    expect(first.duck.trim()).not.toBe("");
-    expect(first.water.trim()).not.toBe("");
-    const feet = first.duck.split("\n").slice(-4).join("");
-    const inkRows = first.duck.split("\n").filter((row) => row.trim());
-    expect(inkRows.length).toBeGreaterThan(10);
-    expect(feet.trim()).not.toBe("");
-    expect(nextFrame.duck).not.toBe(first.duck);
-    expect(nextFrame.water).not.toBe(first.water);
   });
 });

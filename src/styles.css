@@ -1063,7 +1063,6 @@ button.chip:hover {
   font-family: var(--font-mono);
   line-height: 1.1;
   color: var(--accent);
-  animation: duck-in 900ms ease-out both;
 }
 
 .duck-stage.is-animated {
@@ -1211,15 +1210,6 @@ button.chip:hover {
   }
   to {
     transform: translateY(-0.12em);
-  }
-}
-
-@keyframes duck-in {
-  from {
-    opacity: 0;
-  }
-  to {
-    opacity: 1;
   }
 }
 

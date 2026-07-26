@@ -65,6 +65,9 @@ const TAU = Math.PI * 2;
 /** Shared cadence for every animated duck in the app. */
 export const DUCK_FPS = 15;
 
+/** Retained for the standalone walking-frame renderer. */
+const WALK_CYCLE_SECONDS = 1.35;
+
 /** Water rows kept below the surface, for the swell to move through. */
 const ROWS_BELOW = 3;
 
@@ -246,12 +249,6 @@ export function renderDuckFrame(layout: DuckLayout, t: number): DuckFrame {
 
 type Point = readonly [number, number];
 
-function ellipse(x: number, y: number, cx: number, cy: number, rx: number, ry: number): boolean {
-  const dx = (x - cx) / rx;
-  const dy = (y - cy) / ry;
-  return dx * dx + dy * dy <= 1;
-}
-
 function capsule(
   x: number,
   y: number,
@@ -282,48 +279,9 @@ function polygon(x: number, y: number, points: readonly Point[]): boolean {
   return inside;
 }
 
-/**
- * A purpose-built walking silhouette, based on the supplied side-profile
- * reference: beak, rounded head, curved neck, breast, belly, pointed tail,
- * short legs, and broad webbed feet.
- */
-function walkingSilhouette(x: number, y: number, t: number): boolean {
-  const phase = TAU * t * 1.65;
-  const bob = 0.009 * (0.5 + 0.5 * Math.cos(phase * 2));
-  const bodyY = y - bob;
-
-  const body =
-    ellipse(x, bodyY, 0.59, 0.55, 0.36, 0.215) ||
-    ellipse(x, bodyY, 0.39, 0.52, 0.16, 0.19);
-  const neck =
-    capsule(x, bodyY, 0.36, 0.51, 0.29, 0.34, 0.07) ||
-    capsule(x, bodyY, 0.29, 0.34, 0.25, 0.21, 0.064);
-  const head = ellipse(x, bodyY, 0.225, 0.185, 0.088, 0.097);
-  const beak = polygon(x, bodyY, [
-    [0.17, 0.17],
-    [0.035, 0.22],
-    [0.17, 0.247],
-    [0.205, 0.224],
-  ]);
-  const tail =
-    polygon(x, bodyY, [
-      [0.77, 0.46],
-      [0.99, 0.445],
-      [0.82, 0.57],
-    ]) ||
-    polygon(x, bodyY, [
-      [0.8, 0.51],
-      [1, 0.53],
-      [0.79, 0.62],
-    ]) ||
-    polygon(x, bodyY, [
-      [0.77, 0.57],
-      [0.96, 0.63],
-      [0.72, 0.68],
-    ]);
-
-  if (body || neck || head || beak || tail) return true;
-
+/** Legs and feet added beneath the swimming duck's exact body silhouette. */
+function walkingLegs(x: number, y: number, t: number, bob: number): boolean {
+  const phase = (TAU * t) / WALK_CYCLE_SECONDS;
   // The feet face left with the duck. Each gait is half a cycle apart: the
   // planted foot stays broad on the floor while its partner shortens, lifts,
   // and moves forward before taking the weight.
@@ -331,8 +289,8 @@ function walkingSilhouette(x: number, y: number, t: number): boolean {
     const legPhase = phase + index * Math.PI;
     const swing = 0.048 * Math.cos(legPhase);
     const lift = 0.052 * Math.max(0, Math.sin(legPhase));
-    const hipX = index === 0 ? 0.46 : 0.6;
-    const hipY = 0.7 + bob;
+    const hipX = index === 0 ? 0.43 : 0.58;
+    const hipY = 0.665 + bob;
     const kneeX = hipX + swing * 0.38;
     const kneeY = 0.79 - lift * 0.25;
     const ankleX = hipX + swing;
@@ -379,26 +337,48 @@ const WALK_SAMPLES = 3;
 export function renderWalkingDuckFrame(layout: DuckLayout, t: number): DuckFrame {
   const { cols, rows, duckCols } = layout;
   const groundRow = Math.max(0, rows - 2);
-  const walkRows = Math.max(1, Math.min(groundRow + 1, Math.round(duckCols * 0.38)));
+  const walkRows = Math.max(1, Math.min(groundRow + 1, Math.round(duckCols * 0.35)));
   const top = groundRow - walkRows + 1;
   const left = Math.floor((cols - duckCols) / 2);
   const centre = clamp(left + (duckCols >> 1), 0, cols - 1);
   const bird = Array.from({ length: rows }, () => Array(cols).fill(" "));
   const ground = Array.from({ length: rows }, () => Array(cols).fill(" "));
+  const phase = (TAU * t) / WALK_CYCLE_SECONDS;
+  const bob = 0.006 * (0.5 + 0.5 * Math.cos(phase * 2));
+  // The same traced body the swimming renderer samples, placed high enough to
+  // leave room for the legs. Keeping this mapping intact makes head, beak,
+  // breast, belly, and tail match between the two empty states.
+  const bodyTop = 0.035 + bob;
+  const bodyBottom = 0.67 + bob;
 
   for (let r = Math.max(0, top); r <= groundRow; r++) {
     for (let dc = 0; dc < duckCols; dc++) {
       const c = left + dc;
       if (c < 0 || c >= cols) continue;
-      let hits = 0;
+      const x0 = dc / duckCols;
+      const x1 = (dc + 1) / duckCols;
+      const y0 = (r - top) / walkRows;
+      const y1 = (r - top + 1) / walkRows;
+      let bodyFill = 0;
+      if (y1 > bodyTop && y0 < bodyBottom) {
+        bodyFill = coverage(
+          x0 * SRC_W,
+          x1 * SRC_W,
+          ((y0 - bodyTop) / (bodyBottom - bodyTop)) * SRC_H,
+          ((y1 - bodyTop) / (bodyBottom - bodyTop)) * SRC_H,
+        );
+      }
+
+      let legHits = 0;
       for (let sy = 0; sy < WALK_SAMPLES; sy++) {
         for (let sx = 0; sx < WALK_SAMPLES; sx++) {
           const x = (dc + (sx + 0.5) / WALK_SAMPLES) / duckCols;
           const y = (r - top + (sy + 0.5) / WALK_SAMPLES) / walkRows;
-          if (walkingSilhouette(x, y, t)) hits++;
+          if (walkingLegs(x, y, t, bob)) legHits++;
         }
       }
-      const fill = hits / (WALK_SAMPLES * WALK_SAMPLES);
+      const legFill = legHits / (WALK_SAMPLES * WALK_SAMPLES);
+      const fill = 1 - (1 - bodyFill) * (1 - legFill);
       if (fill <= 0) continue;
       const textured = fill * (1 + SHIMMER * shimmer(c, r, t));
       const step = Math.max(1, Math.floor(textured * RAMP.length));
@@ -406,7 +386,7 @@ export function renderWalkingDuckFrame(layout: DuckLayout, t: number): DuckFrame
     }
   }
 
-  const offset = Math.floor(t * 7);
+  const offset = Math.floor(t * 3.2);
   const frameIndex = Math.floor(t * DUCK_FPS);
   const near = "__-___..";
   const far = " .     ";

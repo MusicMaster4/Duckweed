@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { randomGreeting } from "../lib/greetings";
-import { PaneDuck, PaneDuckWalking } from "./PaneDuck";
+import { PaneDuck } from "./PaneDuck";
 import type { ProjectInfo } from "../lib/types";
 
 interface Props {
@@ -95,7 +95,7 @@ export function PaneWelcome({ active, project, recents, onBrowse, onPickRecent }
   if (!project) {
     return (
       <div ref={rootRef} className={`pane-welcome is-unclaimed ${compact ? "is-compact" : ""}`}>
-        <PaneDuckWalking />
+        <PaneDuck />
         <div className="pane-welcome-inner">
           <p className="pane-welcome-greeting">Nowhere to swim yet.</p>
           <button type="button" className="pane-welcome-browse" onClick={onBrowse}>

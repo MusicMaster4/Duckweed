@@ -7,7 +7,6 @@ import {
   duckFontSize,
   duckLayout,
   renderDuckFrame,
-  renderWalkingDuckFrame,
 } from "../lib/duckAscii";
 
 /** Columns in the metrics probe: enough that rounding cannot skew the cell. */
@@ -23,16 +22,12 @@ function sameLayout(a: DuckLayout | null, b: DuckLayout): boolean {
   );
 }
 
-interface Props {
-  mode: "swim" | "walk";
-}
-
 /**
- * Both empty-state ducks use the same measured character grid and the same
- * 15 FPS clock. Their renderers return complete ASCII layers for each frame;
- * CSS only colors and stacks those layers.
+ * The empty-state duck uses a measured character grid and a 15 FPS clock.
+ * Its renderer returns complete ASCII layers for each frame; CSS only colors
+ * and stacks those layers.
  */
-function AnimatedDuck({ mode }: Props) {
+function AnimatedDuck() {
   const hostRef = useRef<HTMLDivElement>(null);
   const inkRef = useRef<HTMLPreElement>(null);
   const sceneRef = useRef<HTMLPreElement>(null);
@@ -71,9 +66,8 @@ function AnimatedDuck({ mode }: Props) {
     const scene = sceneRef.current;
     if (!layout || !ink || !scene) return;
 
-    const render = mode === "walk" ? renderWalkingDuckFrame : renderDuckFrame;
     const draw = (seconds: number) => {
-      const frame = render(layout, seconds);
+      const frame = renderDuckFrame(layout, seconds);
       ink.textContent = frame.duck;
       scene.textContent = frame.water;
     };
@@ -93,13 +87,13 @@ function AnimatedDuck({ mode }: Props) {
     };
     raf = requestAnimationFrame(step);
     return () => cancelAnimationFrame(raf);
-  }, [layout, mode, phase]);
+  }, [layout, phase]);
 
   return (
-    <div ref={hostRef} className={`duck-pond ${mode === "walk" ? "is-walk" : ""}`}>
+    <div ref={hostRef} className="duck-pond">
       {layout && (
         <div
-          className={`duck-stage is-animated ${mode === "walk" ? "is-walk" : ""}`}
+          className="duck-stage is-animated"
           style={
             {
               fontSize: `${layout.font}px`,
@@ -108,7 +102,7 @@ function AnimatedDuck({ mode }: Props) {
             } as CSSProperties
           }
         >
-          <pre ref={sceneRef} className={mode === "walk" ? "duck-ground" : "duck-water"} />
+          <pre ref={sceneRef} className="duck-water" />
           <pre ref={inkRef} className="duck-ink" />
         </div>
       )}
@@ -117,9 +111,5 @@ function AnimatedDuck({ mode }: Props) {
 }
 
 export function PaneDuck() {
-  return <AnimatedDuck mode="swim" />;
-}
-
-export function PaneDuckWalking() {
-  return <AnimatedDuck mode="walk" />;
+  return <AnimatedDuck />;
 }
