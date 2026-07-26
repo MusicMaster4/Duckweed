@@ -29,8 +29,6 @@ export interface CommandBlock {
   sepEl: HTMLDivElement | null;
 }
 
-type BusyFn = () => Promise<boolean>;
-
 export class BlockTracker {
   private blocks: CommandBlock[] = [];
   private nextId = 1;
@@ -38,29 +36,46 @@ export class BlockTracker {
   private selectedId: number | null = null;
   private readonly onMouseDown: (e: MouseEvent) => void;
   private readonly onMouseUp: (e: MouseEvent) => void;
+  private readonly onMouseMove: (e: MouseEvent) => void;
   private readonly onMouseLeave: () => void;
   private readonly onScroll: () => void;
-  private sealWatch: number | null = null;
+  private sealTimer: number | null = null;
+  private waitingForBusy = false;
   private wasBusy = false;
   /** Bumped on every open/clear so a delayed idle-seal cannot close a newer block. */
   private sealEpoch = 0;
   /** Covers the idle shell prompt under the last block (editor mode). */
   private readonly promptCover: HTMLDivElement;
+  /**
+   * Soft highlight over the selected block's visible output rows. Avoids
+   * `selectLines` for the full chunk (which jumps the viewport and freezes
+   * scroll on tall cargo/build output).
+   */
+  private readonly selectOverlay: HTMLDivElement;
   private layoutRaf: number | null = null;
   private readonly scrollDisposable: { dispose: () => void };
+  private active = false;
+  /** True while we programmatically touch xterm selection (suppresses races). */
+  private applyingSelection = false;
 
   constructor(
     private readonly term: Terminal,
     private readonly host: HTMLElement,
-    private readonly isBusy: BusyFn,
   ) {
     this.promptCover = document.createElement("div");
     this.promptCover.className = "command-block-prompt-cover";
     this.promptCover.hidden = true;
     this.host.appendChild(this.promptCover);
 
+    this.selectOverlay = document.createElement("div");
+    this.selectOverlay.className = "command-block-select-overlay";
+    this.selectOverlay.setAttribute("role", "presentation");
+    this.selectOverlay.hidden = true;
+    this.host.appendChild(this.selectOverlay);
+
     this.onMouseDown = (e) => this.handleMouseDown(e);
     this.onMouseUp = (e) => this.handleMouseUp(e);
+    this.onMouseMove = (e) => this.handleMouseMove(e);
     this.onMouseLeave = () => {
       this.press = null;
     };
@@ -70,6 +85,7 @@ export class BlockTracker {
     // dead rows first; we only see clicks that landed on real content.
     host.addEventListener("mousedown", this.onMouseDown);
     host.addEventListener("mouseup", this.onMouseUp);
+    host.addEventListener("mousemove", this.onMouseMove);
     host.addEventListener("mouseleave", this.onMouseLeave);
     this.scrollDisposable = this.term.onScroll(this.onScroll);
   }
@@ -82,6 +98,11 @@ export class BlockTracker {
     if (this.term.buffer.active.type !== "normal") return;
     this.prune();
     this.sealEpoch += 1;
+    // A new command replaces any prior chunk selection.
+    if (this.selectedId !== null) {
+      this.selectedId = null;
+      this.selectOverlay.hidden = true;
+    }
     this.sealOpen(-1);
 
     const start = this.term.registerMarker(0);
@@ -127,12 +148,14 @@ export class BlockTracker {
     this.press = null;
     this.selectedId = null;
     this.promptCover.hidden = true;
-    this.term.clearSelection();
+    this.selectOverlay.hidden = true;
+    this.clearXtermSelection();
   }
 
   dispose(): void {
     this.clear();
     this.promptCover.remove();
+    this.selectOverlay.remove();
     this.scrollDisposable.dispose();
     if (this.layoutRaf !== null) {
       cancelAnimationFrame(this.layoutRaf);
@@ -140,6 +163,7 @@ export class BlockTracker {
     }
     this.host.removeEventListener("mousedown", this.onMouseDown);
     this.host.removeEventListener("mouseup", this.onMouseUp);
+    this.host.removeEventListener("mousemove", this.onMouseMove);
     this.host.removeEventListener("mouseleave", this.onMouseLeave);
   }
 
@@ -215,14 +239,47 @@ export class BlockTracker {
     }
 
     this.layoutPromptCover(fullWidth, offsetY, cellHeight, viewportY, rows);
+    this.layoutSelectOverlay(fullWidth, offsetY, cellHeight, viewportY, rows);
   }
 
   scheduleLayout(): void {
+    if (!this.active) return;
     if (this.layoutRaf !== null) return;
     this.layoutRaf = requestAnimationFrame(() => {
       this.layoutRaf = null;
       this.layout();
     });
+  }
+
+  /** Suspend overlay layout while this terminal lives in the off-screen limbo. */
+  setActive(active: boolean): void {
+    if (this.active === active) return;
+    this.active = active;
+    if (active) {
+      this.scheduleLayout();
+    } else if (this.layoutRaf !== null) {
+      cancelAnimationFrame(this.layoutRaf);
+      this.layoutRaf = null;
+    }
+  }
+
+  /** Seal a submitted command when the app-wide process monitor reports idle. */
+  busyChanged(busy: boolean): void {
+    if (!this.waitingForBusy) return;
+    if (busy) {
+      this.wasBusy = true;
+      return;
+    }
+    if (!this.wasBusy) return;
+
+    this.waitingForBusy = false;
+    const epoch = this.sealEpoch;
+    if (this.sealTimer !== null) window.clearTimeout(this.sealTimer);
+    this.sealTimer = window.setTimeout(() => {
+      this.sealTimer = null;
+      if (epoch !== this.sealEpoch) return;
+      this.sealOpen(-1);
+    }, 100);
   }
 
   /** Absolute buffer line range of a block, or null if the markers are gone. */
@@ -239,15 +296,21 @@ export class BlockTracker {
     return { start, end };
   }
 
-  select(block: CommandBlock): boolean {
+  /**
+   * Select a command block.
+   *
+   * Click selects in place — the viewport must not jump (tall cargo output used
+   * to scroll to the block end and leave the grid feeling stuck). Keyboard nav
+   * may scroll so the command row is visible.
+   */
+  select(block: CommandBlock, opts: { scroll?: boolean } = {}): boolean {
     const range = this.range(block);
     if (!range) return false;
     this.selectedId = block.id;
-    // Select output rows in xterm (command row is covered by our label).
-    // start..end still selects the underlying cells for multi-line copy via
-    // xterm; {@link copyText} rebuilds a clean payload when a block is selected.
-    this.term.selectLines(range.start, range.end);
-    this.scrollBlockIntoView(range);
+    // Drop any free-range xterm selection so the soft overlay is the only
+    // highlight. Copy uses {@link copyText}, not xterm's selection text.
+    this.clearXtermSelection();
+    if (opts.scroll) this.scrollBlockIntoView(range);
     this.scheduleLayout();
     return true;
   }
@@ -267,11 +330,11 @@ export class BlockTracker {
     return this.selectedId !== null;
   }
 
-  selectById(id: number): boolean {
+  selectById(id: number, opts: { scroll?: boolean } = {}): boolean {
     this.prune();
     const block = this.blocks.find((b) => b.id === id);
     if (!block) return false;
-    return this.select(block);
+    return this.select(block, opts);
   }
 
   /**
@@ -281,22 +344,19 @@ export class BlockTracker {
   navigate(action: BlockNavAction): boolean {
     const target = nextBlockSelection(this.ids(), this.selectedId, action);
     if (target === null) return false;
-    return this.selectById(target);
+    return this.selectById(target, { scroll: true });
   }
 
-  /** Scroll so the block's start line is visible (prefer top of viewport). */
+  /**
+   * Bring the command row into view. Never jumps to the end of a tall block —
+   * that was the main source of "I clicked and can't scroll anymore".
+   */
   private scrollBlockIntoView(range: { start: number; end: number }): void {
     const viewportY = this.term.buffer.active.viewportY;
     const rows = this.term.rows;
     if (rows <= 0) return;
-    if (range.start < viewportY) {
+    if (range.start < viewportY || range.start >= viewportY + rows) {
       this.term.scrollToLine(range.start);
-      return;
-    }
-    if (range.end >= viewportY + rows) {
-      // Keep the end visible with a little headroom for the command row.
-      const top = Math.max(0, range.end - rows + 1);
-      this.term.scrollToLine(top);
     }
   }
 
@@ -324,16 +384,47 @@ export class BlockTracker {
     return lines.join("\n");
   }
 
-  /** True when the current xterm selection matches our selected block. */
+  /**
+   * True when a command block is selected for copy/nav. Independent of xterm's
+   * free-range selection so tall chunks stay copyable without selecting every
+   * cell (which broke scroll).
+   */
   hasBlockSelection(): boolean {
-    return this.selectedId !== null && this.term.hasSelection();
+    return this.selectedId !== null;
+  }
+
+  /** Drop block selection chrome only (leave any free-range xterm selection). */
+  dismissNavSelection(): void {
+    if (this.selectedId === null) return;
+    this.selectedId = null;
+    this.selectOverlay.hidden = true;
+    this.scheduleLayout();
   }
 
   clearSelection(): void {
-    if (this.selectedId === null) return;
+    if (this.selectedId === null) {
+      this.clearXtermSelection();
+      return;
+    }
     this.selectedId = null;
-    this.term.clearSelection();
+    this.selectOverlay.hidden = true;
+    this.clearXtermSelection();
     this.scheduleLayout();
+  }
+
+  private clearXtermSelection(): void {
+    if (this.applyingSelection) return;
+    this.applyingSelection = true;
+    try {
+      this.term.clearSelection();
+    } finally {
+      this.applyingSelection = false;
+    }
+  }
+
+  /** True while we are clearing/setting xterm selection ourselves. */
+  isApplyingSelection(): boolean {
+    return this.applyingSelection;
   }
 
   /** Find the block that owns an absolute buffer line. */
@@ -349,6 +440,45 @@ export class BlockTracker {
   }
 
   // ---------------------------------------------------------------------------
+
+  private layoutSelectOverlay(
+    fullWidth: number,
+    offsetY: number,
+    cellHeight: number,
+    viewportY: number,
+    rows: number,
+  ): void {
+    if (this.selectedId === null) {
+      this.selectOverlay.hidden = true;
+      return;
+    }
+    const block = this.blocks.find((b) => b.id === this.selectedId);
+    if (!block) {
+      this.selectOverlay.hidden = true;
+      return;
+    }
+    const range = this.range(block);
+    if (!range) {
+      this.selectOverlay.hidden = true;
+      return;
+    }
+
+    // Paint over the visible slice of the block, including the command row so
+    // the soft tint lines up with the is-selected label background.
+    const startRow = range.start - viewportY;
+    const endRow = range.end - viewportY;
+    const visStart = Math.max(0, startRow);
+    const visEnd = Math.min(rows - 1, endRow);
+    if (visEnd < visStart) {
+      this.selectOverlay.hidden = true;
+      return;
+    }
+
+    this.selectOverlay.hidden = false;
+    this.selectOverlay.style.transform = `translate3d(0, ${offsetY + visStart * cellHeight}px, 0)`;
+    this.selectOverlay.style.width = `${fullWidth}px`;
+    this.selectOverlay.style.height = `${(visEnd - visStart + 1) * cellHeight}px`;
+  }
 
   private layoutPromptCover(
     fullWidth: number,
@@ -442,31 +572,15 @@ export class BlockTracker {
    */
   private armSealWatch(): void {
     this.disarmSealWatch();
+    this.waitingForBusy = true;
     this.wasBusy = false;
-    const epoch = this.sealEpoch;
-
-    this.sealWatch = window.setInterval(() => {
-      void this.isBusy().then((busy) => {
-        if (epoch !== this.sealEpoch) return;
-        if (busy) {
-          this.wasBusy = true;
-          return;
-        }
-        if (this.wasBusy) {
-          this.disarmSealWatch();
-          window.setTimeout(() => {
-            if (epoch !== this.sealEpoch) return;
-            this.sealOpen(-1);
-          }, 100);
-        }
-      });
-    }, 250);
   }
 
   private disarmSealWatch(): void {
-    if (this.sealWatch !== null) {
-      window.clearInterval(this.sealWatch);
-      this.sealWatch = null;
+    this.waitingForBusy = false;
+    if (this.sealTimer !== null) {
+      window.clearTimeout(this.sealTimer);
+      this.sealTimer = null;
     }
     this.wasBusy = false;
   }
@@ -489,6 +603,21 @@ export class BlockTracker {
     this.press = { x: e.clientX, y: e.clientY, line };
   }
 
+  /**
+   * As soon as the pointer moves enough to count as a drag, drop the block
+   * chrome so free-range selection is the only highlight. Waiting for mouseup
+   * left a stuck block tint while xterm was selecting underneath.
+   */
+  private handleMouseMove(e: MouseEvent): void {
+    const press = this.press;
+    if (!press || this.selectedId === null) return;
+    const dx = e.clientX - press.x;
+    const dy = e.clientY - press.y;
+    if (dx * dx + dy * dy <= 25) return;
+    this.press = null;
+    this.dismissNavSelection();
+  }
+
   private handleMouseUp(e: MouseEvent): void {
     if (e.button !== 0) return;
     const press = this.press;
@@ -503,7 +632,7 @@ export class BlockTracker {
     const dx = e.clientX - press.x;
     const dy = e.clientY - press.y;
     if (dx * dx + dy * dy > 25) {
-      this.clearSelection();
+      this.dismissNavSelection();
       return;
     }
 
@@ -512,6 +641,7 @@ export class BlockTracker {
       this.clearSelection();
       return;
     }
+    // Click selects the chunk in place — no viewport jump.
     this.select(block);
   }
 }

@@ -4,16 +4,29 @@
 //! Direct children of the shell PID are enough: nested process trees still show
 //! up as at least one direct child of the shell.
 
+use std::collections::HashSet;
+
 /// True when `pid` currently has one or more direct child processes.
+#[cfg(test)]
 pub fn has_child_processes(pid: u32) -> bool {
-    if pid == 0 {
-        return false;
+    parents_with_children(&[pid]).contains(&pid)
+}
+
+/// Return the requested parent PIDs that currently own at least one child.
+///
+/// Busy state is sampled for every terminal at once. This matters on Windows,
+/// where taking the process snapshot is most of the cost; one monitor tick must
+/// not take one system-wide snapshot per pane.
+pub fn parents_with_children(pids: &[u32]) -> HashSet<u32> {
+    let wanted: HashSet<u32> = pids.iter().copied().filter(|pid| *pid != 0).collect();
+    if wanted.is_empty() {
+        return HashSet::new();
     }
-    platform_has_children(pid)
+    platform_parents_with_children(&wanted)
 }
 
 #[cfg(windows)]
-fn platform_has_children(pid: u32) -> bool {
+fn platform_parents_with_children(wanted: &HashSet<u32>) -> HashSet<u32> {
     use std::mem::{size_of, zeroed};
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
@@ -24,18 +37,20 @@ fn platform_has_children(pid: u32) -> bool {
     unsafe {
         let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
         if snap == INVALID_HANDLE_VALUE {
-            return false;
+            return HashSet::new();
         }
 
         let mut entry: PROCESSENTRY32W = zeroed();
         entry.dwSize = size_of::<PROCESSENTRY32W>() as u32;
 
-        let mut found = false;
+        let mut found = HashSet::new();
         if Process32FirstW(snap, &mut entry) != 0 {
             loop {
-                if entry.th32ParentProcessID == pid {
-                    found = true;
-                    break;
+                if wanted.contains(&entry.th32ParentProcessID) {
+                    found.insert(entry.th32ParentProcessID);
+                    if found.len() == wanted.len() {
+                        break;
+                    }
                 }
                 if Process32NextW(snap, &mut entry) == 0 {
                     break;
@@ -49,9 +64,10 @@ fn platform_has_children(pid: u32) -> bool {
 
 /// Linux: walk `/proc` and look for processes whose parent is `pid`.
 #[cfg(all(unix, not(target_os = "macos")))]
-fn platform_has_children(pid: u32) -> bool {
+fn platform_parents_with_children(wanted: &HashSet<u32>) -> HashSet<u32> {
+    let mut found = HashSet::new();
     let Ok(dir) = std::fs::read_dir("/proc") else {
-        return false;
+        return found;
     };
     for entry in dir.flatten() {
         let name = entry.file_name();
@@ -62,21 +78,34 @@ fn platform_has_children(pid: u32) -> bool {
         let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else {
             continue;
         };
-        if parse_ppid(&stat) == Some(pid) {
-            return true;
+        if let Some(ppid) = parse_ppid(&stat) {
+            if wanted.contains(&ppid) {
+                found.insert(ppid);
+                if found.len() == wanted.len() {
+                    break;
+                }
+            }
         }
     }
-    false
+    found
 }
 
-/// macOS has no `/proc`; fall back to `pgrep -P`.
+/// macOS has no `/proc`; one `ps` call is still cheaper than one `pgrep` per PTY.
 #[cfg(target_os = "macos")]
-fn platform_has_children(pid: u32) -> bool {
-    std::process::Command::new("pgrep")
-        .args(["-P", &pid.to_string()])
+fn platform_parents_with_children(wanted: &HashSet<u32>) -> HashSet<u32> {
+    std::process::Command::new("ps")
+        .args(["-Ao", "ppid="])
         .output()
-        .map(|out| out.status.success() && !out.stdout.is_empty())
-        .unwrap_or(false)
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| {
+            String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .filter_map(|line| line.trim().parse::<u32>().ok())
+                .filter(|pid| wanted.contains(pid))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Parse the parent pid from a Linux `/proc/<pid>/stat` line.
@@ -93,6 +122,12 @@ fn parse_ppid(stat: &str) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn empty_pid_set_is_empty() {
+        assert!(super::parents_with_children(&[]).is_empty());
+        assert!(!super::has_child_processes(0));
+    }
+
     #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn parse_ppid_handles_spaces_in_comm() {

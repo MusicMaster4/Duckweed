@@ -3,6 +3,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { appVersion, checkForUpdate, type AvailableUpdate } from "../lib/update";
 import { channelOf, type Channel } from "../lib/version";
 
+const TAURI_RUNTIME = "__TAURI_INTERNALS__" in window;
+
 export type UpdateStatus =
   | { kind: "idle" }
   | { kind: "checking" }
@@ -42,6 +44,7 @@ export function useUpdater(): Updater {
   const busy = useRef(false);
 
   useEffect(() => {
+    if (!TAURI_RUNTIME) return;
     let cancelled = false;
     void appVersion().then((v) => {
       if (!cancelled) setVersion(v);
@@ -52,6 +55,7 @@ export function useUpdater(): Updater {
   }, []);
 
   const run = useCallback(async (quiet: boolean) => {
+    if (!TAURI_RUNTIME) return;
     if (busy.current) return;
     busy.current = true;
     if (!quiet) setStatus({ kind: "checking" });
@@ -68,6 +72,7 @@ export function useUpdater(): Updater {
   }, []);
 
   useEffect(() => {
+    if (!TAURI_RUNTIME) return;
     const id = window.setTimeout(() => void run(true), 4000);
     return () => window.clearTimeout(id);
   }, [run]);

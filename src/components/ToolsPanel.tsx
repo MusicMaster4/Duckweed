@@ -52,12 +52,16 @@ export function ToolsPanel({
   const [section, setSection] = useState<SectionId>("files");
   const [dragging, setDragging] = useState(false);
   const start = useRef({ x: 0, width });
+  const asideRef = useRef<HTMLElement>(null);
+  const liveWidth = useRef(width);
+  if (!dragging) liveWidth.current = width;
 
   const onResizeDown = useCallback(
     (e: React.PointerEvent<HTMLDivElement>) => {
       e.preventDefault();
       e.currentTarget.setPointerCapture(e.pointerId);
       start.current = { x: e.clientX, width };
+      liveWidth.current = width;
       setDragging(true);
     },
     [width],
@@ -67,18 +71,25 @@ export function ToolsPanel({
     (e: React.PointerEvent<HTMLDivElement>) => {
       if (!e.currentTarget.hasPointerCapture(e.pointerId)) return;
       const next = start.current.width + (e.clientX - start.current.x);
-      onWidth(Math.min(TOOLS_MAX_WIDTH, Math.max(TOOLS_MIN_WIDTH, Math.round(next))));
+      liveWidth.current = Math.min(TOOLS_MAX_WIDTH, Math.max(TOOLS_MIN_WIDTH, Math.round(next)));
+      if (asideRef.current) asideRef.current.style.width = `${liveWidth.current}px`;
+    },
+    [],
+  );
+
+  const onResizeUp = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+        e.currentTarget.releasePointerCapture(e.pointerId);
+      }
+      setDragging(false);
+      onWidth(liveWidth.current);
     },
     [onWidth],
   );
 
-  const onResizeUp = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
-    e.currentTarget.releasePointerCapture(e.pointerId);
-    setDragging(false);
-  }, []);
-
   return (
-    <aside className="tools" style={{ width }}>
+    <aside ref={asideRef} className="tools" style={{ width }}>
       <header className="tools-rail">
         {SECTIONS.map((entry) => (
           <button

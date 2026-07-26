@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { FileEditor } from "./FileEditor";
+import { confirmCloseRunning } from "../lib/confirmClose";
 import { listDir } from "../lib/ipc";
 import type { DirEntry, ProjectInfo } from "../lib/types";
 
@@ -57,6 +59,10 @@ export function ProjectExplorer({ project, onInsertPath, onOpenFolder, onBrowseP
   const [cache, setCache] = useState<Record<string, Load>>({});
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [selected, setSelected] = useState<string | null>(null);
+  /** File open in the popup editor, if any. */
+  const [openFile, setOpenFile] = useState<string | null>(null);
+  /** Whether the open editor has unsaved edits (used when switching files). */
+  const editorDirty = useRef(false);
   /** Levels being read right now, so the fetch effect never asks twice. */
   const inflight = useRef(new Set<string>());
 
@@ -65,6 +71,7 @@ export function ProjectExplorer({ project, onInsertPath, onOpenFolder, onBrowseP
     inflight.current.clear();
     setCache({});
     setSelected(null);
+    setOpenFile(null);
     setExpanded(root ? new Set([root]) : new Set());
   }, [root]);
 
@@ -99,6 +106,20 @@ export function ProjectExplorer({ project, onInsertPath, onOpenFolder, onBrowseP
       return next;
     });
   }, []);
+
+  /** Open a file in the popup; confirm first if another dirty buffer is open. */
+  const openInEditor = useCallback(async (path: string) => {
+    if (openFile === path) return;
+    if (openFile && editorDirty.current) {
+      const ok = await confirmCloseRunning({
+        title: "Unsaved changes",
+        message: "The open file has unsaved edits. Discard them and open another?",
+        confirmLabel: "Discard",
+      });
+      if (!ok) return;
+    }
+    setOpenFile(path);
+  }, [openFile]);
 
   const rows = useMemo(() => {
     if (!root) return [];
@@ -191,11 +212,15 @@ export function ProjectExplorer({ project, onInsertPath, onOpenFolder, onBrowseP
                 title={
                   row.entry.is_dir
                     ? `${row.entry.path}\nDouble-click to cd here`
-                    : `${row.entry.path}\nDouble-click to put the path in the prompt`
+                    : `${row.entry.path}\nClick to open · double-click to put the path in the prompt`
                 }
                 onClick={() => {
                   setSelected(row.entry.path);
-                  if (row.entry.is_dir) toggle(row.entry.path);
+                  if (row.entry.is_dir) {
+                    toggle(row.entry.path);
+                  } else {
+                    void openInEditor(row.entry.path);
+                  }
                 }}
                 onDoubleClick={() =>
                   row.entry.is_dir ? onOpenFolder(row.entry.path) : onInsertPath(row.entry.path)
@@ -217,6 +242,17 @@ export function ProjectExplorer({ project, onInsertPath, onOpenFolder, onBrowseP
             ),
           )}
       </div>
+
+      {openFile && (
+        <FileEditor
+          key={openFile}
+          path={openFile}
+          onClose={() => setOpenFile(null)}
+          onDirtyChange={(dirty) => {
+            editorDirty.current = dirty;
+          }}
+        />
+      )}
     </>
   );
 }

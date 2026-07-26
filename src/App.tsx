@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { listen } from "@tauri-apps/api/event";
 
 import { ChangesPanel } from "./components/ChangesPanel";
 import { CommandPalette, type PaletteAction } from "./components/CommandPalette";
@@ -18,7 +19,7 @@ import { useUpdater } from "./hooks/useUpdater";
 import * as bus from "./lib/bus";
 import { confirmCloseRunning } from "./lib/confirmClose";
 import { clearGreetings } from "./lib/greetings";
-import { listShells, projectInfo } from "./lib/ipc";
+import { frontendReady, listShells, projectInfo, watchProject } from "./lib/ipc";
 import {
   balance,
   findLeaf,
@@ -43,9 +44,6 @@ interface SpawnOpts {
 
 const DEFAULT_FONT_SIZE = 13.5;
 const TAURI_RUNTIME = "__TAURI_INTERNALS__" in window;
-
-/** How often the branch of the visible project is re-read from `.git/HEAD`. */
-const BRANCH_POLL_MS = 4000;
 
 function basename(path: string): string {
   return path.split(/[\\/]/).filter(Boolean).pop() ?? path;
@@ -755,7 +753,15 @@ export default function App() {
   useEffect(() => {
     let cancelled = false;
     (async () => {
+      // Drawing and spawning do not depend on shell discovery or restored
+      // project metadata: null asks the backend for the same default shell.
+      terminals.setFontSize(initial.fontSize);
+      terminals.setHighlight(initial.highlight);
+      terminals.setInputMode(initial.inputMode);
+      if (!cancelled) setBooted(true);
+
       try {
+        if (!TAURI_RUNTIME) throw new Error("browser preview");
         const list = await listShells();
         if (!cancelled) {
           setShells(list);
@@ -765,16 +771,12 @@ export default function App() {
           }
         }
       } catch (error) {
-        console.error("failed to list shells", error);
+        if (TAURI_RUNTIME) console.error("failed to list shells", error);
       }
-
-      terminals.setFontSize(initial.fontSize);
-      terminals.setHighlight(initial.highlight);
-      terminals.setInputMode(initial.inputMode);
 
       // Restored tabs carry only a path; fill in the real name and branch.
       const paths = [...new Set(initial.tabs.map((t) => t.project?.path).filter(Boolean))] as string[];
-      await Promise.all(
+      void Promise.all(
         paths.map(async (path) => {
           try {
             const info = await projectInfo(path);
@@ -788,8 +790,6 @@ export default function App() {
           }
         }),
       );
-
-      if (!cancelled) setBooted(true);
     })();
     return () => {
       cancelled = true;
@@ -802,20 +802,41 @@ export default function App() {
     void getCurrentWindow().setTitle(project ? `Duckweed — ${project.name}` : "Duckweed");
   }, [project]);
 
-  // Keep the branch chip honest: on tab switch, when the window comes back, and
-  // on a slow poll for `git checkout` typed into the terminal itself.
+  // Watch only the visible project. Shell edits, checkouts and external tools
+  // arrive as one debounced event rather than two permanent polling loops.
+  useEffect(() => {
+    if (!TAURI_RUNTIME) return;
+    void watchProject(project?.path ?? null);
+  }, [project?.path]);
+
+  // Keep the branch chip honest on tab switch, focus and watcher notifications.
   useEffect(() => {
     void refreshProject();
     const onFocus = () => void refreshProject();
     window.addEventListener("focus", onFocus);
-    const id = window.setInterval(() => {
-      if (document.hasFocus()) void refreshProject();
-    }, BRANCH_POLL_MS);
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    if (TAURI_RUNTIME) {
+      void listen<string>("project:changed", (event) => {
+        if (event.payload === currentTab()?.project?.path) void refreshProject();
+      }).then((off) => {
+        if (disposed) off();
+        else unlisten = off;
+      });
+    }
     return () => {
+      disposed = true;
       window.removeEventListener("focus", onFocus);
-      window.clearInterval(id);
+      unlisten?.();
     };
-  }, [activeTabId, refreshProject]);
+  }, [activeTabId, currentTab, refreshProject]);
+
+  // The native window starts hidden so users never see a half-painted webview.
+  useEffect(() => {
+    if (!booted || !TAURI_RUNTIME) return;
+    const frame = requestAnimationFrame(() => void frontendReady());
+    return () => cancelAnimationFrame(frame);
+  }, [booted]);
 
   // A tab with no repo has nothing to review, and a panel that reappeared on
   // the way back would be showing another project's diff.
@@ -1432,27 +1453,68 @@ export default function App() {
     [tabs],
   );
 
-  const shared: PaneTreeShared = {
-    activeLeaf: activeTab?.activeLeaf ?? "",
-    drag,
-    spawnFor,
-    highlight,
-    project,
-    recents,
-    onBrowseProject: () => {
-      if (activeTab) void openProject({ tabId: activeTab.id });
+  const browseActiveProject = useCallback(() => {
+    const tab = currentTab();
+    if (tab) void openProject({ tabId: tab.id });
+  }, [currentTab, openProject]);
+  const pickActiveProject = useCallback(
+    (path: string) => {
+      const tab = currentTab();
+      if (tab) void applyProject(path, { tabId: tab.id });
     },
-    onPickProject: (path) => {
-      if (activeTab) void applyProject(path, { tabId: activeTab.id });
-    },
-    zoomedLeaf: activeTab?.zoomedLeaf ?? null,
-    onActivate: activatePane,
-    onSplit: (leafId, zone) => splitPane(leafId, zone),
-    onClose: (id) => void closePane(id),
-    onToggleZoom: toggleZoom,
-    onStartDrag,
-    onResize: resizeSplitSizes,
-  };
+    [applyProject, currentTab],
+  );
+  const splitAt = useCallback(
+    (leafId: string, zone: "right" | "bottom") => splitPane(leafId, zone),
+    [splitPane],
+  );
+  const closePaneById = useCallback((id: string) => void closePane(id), [closePane]);
+
+  const shared = useMemo<PaneTreeShared>(
+    () => ({
+      activeLeaf: activeTab?.activeLeaf ?? "",
+      drag,
+      spawnFor,
+      highlight,
+      project,
+      recents,
+      onBrowseProject: browseActiveProject,
+      onPickProject: pickActiveProject,
+      zoomedLeaf: activeTab?.zoomedLeaf ?? null,
+      onActivate: activatePane,
+      onSplit: splitAt,
+      onClose: closePaneById,
+      onToggleZoom: toggleZoom,
+      onStartDrag,
+      onResize: resizeSplitSizes,
+    }),
+    [
+      activeTab?.activeLeaf,
+      activeTab?.zoomedLeaf,
+      activatePane,
+      browseActiveProject,
+      closePaneById,
+      drag,
+      highlight,
+      onStartDrag,
+      pickActiveProject,
+      project,
+      recents,
+      resizeSplitSizes,
+      spawnFor,
+      splitAt,
+      toggleZoom,
+    ],
+  );
+
+  const tabProjects = useMemo(
+    () => ({
+      recents,
+      setFor: (tabId: string, path: string) => void applyProject(path, { tabId }),
+      browseFor: (tabId: string) => void openProject({ tabId }),
+    }),
+    [applyProject, openProject, recents],
+  );
 
   const zoomedNode =
     activeTab?.zoomedLeaf ? findLeaf(activeTab.root, activeTab.zoomedLeaf) : null;
@@ -1471,11 +1533,7 @@ export default function App() {
           activeTabId={activeTabId}
           paneCounts={paneCounts}
           drag={drag}
-          projects={{
-            recents,
-            setFor: (tabId, path) => void applyProject(path, { tabId }),
-            browseFor: (tabId) => void openProject({ tabId }),
-          }}
+          projects={tabProjects}
           allowNewTab={!!project}
           onSelect={setActiveTabId}
           onClose={(id) => void closeTab(id)}
@@ -1500,9 +1558,7 @@ export default function App() {
             onClose={() => setToolsOpen(false)}
             onInsertPath={insertPath}
             onOpenFolder={cdActivePane}
-            onBrowseProject={() => {
-              if (activeTab) void openProject({ tabId: activeTab.id });
-            }}
+            onBrowseProject={browseActiveProject}
           />
         )}
 
@@ -1531,7 +1587,7 @@ export default function App() {
       />
 
       {drag && (
-        <div className="drag-ghost" style={{ transform: `translate(${drag.x + 12}px, ${drag.y + 12}px)` }}>
+        <div className="drag-ghost">
           <span className="pane-grip" aria-hidden="true">
             <i />
             <i />

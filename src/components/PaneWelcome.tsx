@@ -100,7 +100,7 @@ export function PaneWelcome({ termId, active, project, recents, onBrowse, onPick
    * no hit-test games with DPI / titlebar; the empty state is the whole point.
    */
   useEffect(() => {
-    if (!active || project) return;
+    if (!active || project || !("__TAURI_INTERNALS__" in window)) return;
     let disposed = false;
     let unlisten: (() => void) | undefined;
 

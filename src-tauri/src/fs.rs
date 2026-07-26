@@ -1,8 +1,9 @@
-//! Directory listings for the tools panel's project explorer.
+//! Directory listings and simple file read/write for the tools panel.
 //!
 //! Reading a folder is one syscall per entry; the only interesting part is which
 //! entries git ignores, so the explorer can dim generated folders the way an
-//! editor's sidebar does.
+//! editor's sidebar does. File open goes through the same surface so the
+//! explorer can show a file in a popup without shelling out.
 
 use std::collections::HashSet;
 use std::io::Write;
@@ -10,6 +11,10 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 use serde::Serialize;
+
+/// Soft cap for the in-app file viewer. Past this the UI still reports size
+/// and refuses to load — a multi-megabyte lockfile is not worth painting.
+const MAX_EDIT_BYTES: u64 = 2 * 1024 * 1024;
 
 #[derive(Serialize, Clone, Debug)]
 pub struct DirEntry {
@@ -100,4 +105,78 @@ pub fn list_dir(path: &str) -> Result<Vec<DirEntry>, String> {
             .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
     });
     Ok(entries)
+}
+
+/// What the file editor needs to render a path: either UTF-8 text, or a reason
+/// the popup should stay read-only (binary / too large).
+#[derive(Serialize, Clone, Debug)]
+pub struct FileContent {
+    pub path: String,
+    /// Empty when `binary` or `too_large` is set.
+    pub content: String,
+    pub binary: bool,
+    pub too_large: bool,
+    /// Bytes on disk.
+    pub size: u64,
+}
+
+/// Read `path` as text for the project explorer's file popup.
+pub fn read_file(path: &str) -> Result<FileContent, String> {
+    let file = Path::new(path);
+    let meta = std::fs::metadata(file).map_err(|e| format!("could not open `{path}`: {e}"))?;
+    if meta.is_dir() {
+        return Err(format!("`{path}` is a folder"));
+    }
+    let size = meta.len();
+    if size > MAX_EDIT_BYTES {
+        return Ok(FileContent {
+            path: path.to_string(),
+            content: String::new(),
+            binary: false,
+            too_large: true,
+            size,
+        });
+    }
+
+    let bytes = std::fs::read(file).map_err(|e| format!("could not read `{path}`: {e}"))?;
+    // A null byte is enough to treat the file as binary — same rule editors use
+    // for "don't dump this into a text field".
+    if bytes.contains(&0) {
+        return Ok(FileContent {
+            path: path.to_string(),
+            content: String::new(),
+            binary: true,
+            too_large: false,
+            size,
+        });
+    }
+
+    match String::from_utf8(bytes) {
+        Ok(content) => Ok(FileContent {
+            path: path.to_string(),
+            content,
+            binary: false,
+            too_large: false,
+            size,
+        }),
+        Err(_) => Ok(FileContent {
+            path: path.to_string(),
+            content: String::new(),
+            binary: true,
+            too_large: false,
+            size,
+        }),
+    }
+}
+
+/// Overwrite `path` with UTF-8 `content`. Creates the file if it is missing;
+/// never creates parent folders — the explorer only opens paths that already exist.
+pub fn write_file(path: &str, content: String) -> Result<(), String> {
+    let file = Path::new(path);
+    if let Some(parent) = file.parent() {
+        if !parent.as_os_str().is_empty() && !parent.exists() {
+            return Err(format!("folder does not exist: {}", parent.display()));
+        }
+    }
+    std::fs::write(file, content.as_bytes()).map_err(|e| format!("could not write `{path}`: {e}"))
 }

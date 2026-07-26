@@ -22,7 +22,7 @@ interface Props {
  * terminal grid. Enter submits to the PTY; Shift+Enter inserts a newline.
  *
  * Ghost-text autosuggestions rank shared history (prefix, cwd, recency).
- * Ctrl+Up / ↑↓ navigate command blocks when present.
+ * ↑/↓ walk this pane's own submitted commands; Ctrl+Up selects blocks.
  *
  * It renders only while the pane is in editor mode (or the shell has exited) —
  * a running CLI owns the whole pane, and the composer is unmounted for it.
@@ -33,6 +33,7 @@ export function CommandInput({ termId, active, exited, highlight }: Props) {
   const [historyIndex, setHistoryIndex] = useState<number | null>(null);
   /** Bump when shared history may have changed (other panes submit). */
   const [historyEpoch, setHistoryEpoch] = useState(0);
+  const [terminalEpoch, setTerminalEpoch] = useState(0);
   const draftRef = useRef("");
   const valueRef = useRef(value);
   valueRef.current = value;
@@ -52,11 +53,14 @@ export function CommandInput({ termId, active, exited, highlight }: Props) {
   // Font size is applied via CSS variables from terminals.setFontSize; remeasure
   // the textarea so a larger/smaller face does not leave a stale height.
   useEffect(() => {
-    return terminals.subscribe(() => {
+    return terminals.subscribeSettings(() => {
       resize();
-      setHistoryEpoch((n) => n + 1);
     });
   }, [resize]);
+
+  useEffect(() => {
+    return terminals.subscribeSession(termId, () => setTerminalEpoch((n) => n + 1));
+  }, [termId]);
 
   useEffect(() => {
     return commandHistory.subscribe(() => setHistoryEpoch((n) => n + 1));
@@ -101,6 +105,7 @@ export function CommandInput({ termId, active, exited, highlight }: Props) {
     return () => window.clearTimeout(id);
   }, [active, exited, termId]);
 
+  void terminalEpoch;
   const cwd = terminals.getMeta(termId)?.cwd ?? null;
 
   const suggestion = useMemo(() => {
@@ -140,7 +145,7 @@ export function CommandInput({ termId, active, exited, highlight }: Props) {
     setValue("");
     setHistoryIndex(null);
     draftRef.current = "";
-    // History is recorded inside submitCommand (shared + cwd).
+    // History is recorded inside submitCommand (shared + per-pane).
     terminals.submitCommand(termId, command);
     // Keep focus in the editor so the next command is ready (Warp behavior).
     requestAnimationFrame(() => textareaRef.current?.focus());
@@ -235,7 +240,8 @@ export function CommandInput({ termId, active, exited, highlight }: Props) {
       if (el && (el.selectionStart !== 0 || el.selectionEnd !== 0) && value.includes("\n")) {
         return;
       }
-      const hist = commandHistory.commands();
+      // Per-pane history — not the shared autosuggest list.
+      const hist = terminals.localHistory(termId);
       if (hist.length === 0) return;
       e.preventDefault();
       e.stopPropagation();
@@ -248,7 +254,7 @@ export function CommandInput({ termId, active, exited, highlight }: Props) {
 
     if (e.key === "ArrowDown" && !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey) {
       if (historyIndex === null) return;
-      const hist = commandHistory.commands();
+      const hist = terminals.localHistory(termId);
       e.preventDefault();
       e.stopPropagation();
       if (historyIndex >= hist.length - 1) {

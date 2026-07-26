@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 import * as bus from "../lib/bus";
@@ -40,7 +40,7 @@ function basename(path: string): string {
   return parts[parts.length - 1] || path;
 }
 
-export function TerminalPane({
+export const TerminalPane = memo(function TerminalPane({
   node,
   active,
   zoomed,
@@ -63,7 +63,6 @@ export function TerminalPane({
   const [meta, setMeta] = useState(() => terminals.getMeta(node.term));
   const [searching, setSearching] = useState(false);
   const [inputMode, setInputMode] = useState(terminals.getInputMode);
-  const [busy, setBusy] = useState(false);
   const [copyToast, setCopyToast] = useState<CopyToast | null>(null);
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleMenu, setTitleMenu] = useState<TitleMenu | null>(null);
@@ -107,11 +106,18 @@ export function TerminalPane({
 
   useEffect(
     () =>
-      terminals.subscribe(() => {
+      terminals.subscribeSession(node.term, () => {
         setMeta(terminals.getMeta(node.term));
-        setInputMode(terminals.getInputMode());
       }),
     [node.term],
+  );
+
+  useEffect(
+    () =>
+      terminals.subscribeSettings(() => {
+        setInputMode(terminals.getInputMode());
+      }),
+    [],
   );
 
   useEffect(
@@ -122,24 +128,9 @@ export function TerminalPane({
     [node.id],
   );
 
-  // Poll for child processes — when something is running (vim, servers, …),
-  // hand the keyboard to the raw grid like Warp does for interactive programs.
-  useEffect(() => {
-    let cancelled = false;
-    const tick = async () => {
-      const running = await terminals.hasRunningProcess(node.term);
-      if (!cancelled) setBusy(running);
-    };
-    void tick();
-    const id = window.setInterval(() => void tick(), 500);
-    return () => {
-      cancelled = true;
-      window.clearInterval(id);
-    };
-  }, [node.term]);
-
   // The grid owns the keyboard when the app is set to raw input, while a child
   // process is running, or once the shell is gone.
+  const busy = meta?.busy ?? false;
   const effectiveRaw = inputMode === "raw" || busy || !!meta?.exited;
 
   useEffect(() => {
@@ -405,4 +396,4 @@ export function TerminalPane({
         )}
     </div>
   );
-}
+});

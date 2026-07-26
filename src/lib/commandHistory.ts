@@ -1,8 +1,9 @@
 /**
- * Shared command history for autosuggestions and ↑ history walk.
+ * Shared command history for ghost-text autosuggestions.
  *
  * Entries are app-wide (not per-pane) and durable in localStorage so a command
- * run in one pane can ghost-suggest in another after restarts.
+ * run in one pane can suggest in another after restarts. Per-pane ↑/↓ walk
+ * lives on each terminal session (see terminals.localHistory).
  */
 
 export interface HistoryEntry {
@@ -80,7 +81,7 @@ export function list(): readonly HistoryEntry[] {
   return entries;
 }
 
-/** Commands only, oldest first (for ↑ history navigation). */
+/** Commands only, oldest first (tests / callers that need bare strings). */
 export function commands(): string[] {
   return entries.map((e) => e.command);
 }

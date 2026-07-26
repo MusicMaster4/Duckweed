@@ -1,9 +1,10 @@
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import type {
   Branches,
   Diff,
   DiffStats,
   DirEntry,
+  FileContent,
   FileDiff,
   ProjectInfo,
   ShellInfo,
@@ -12,9 +13,18 @@ import type {
 export const listShells = () => invoke<ShellInfo[]>("list_shells");
 export const homeDir = () => invoke<string>("home_dir");
 export const projectInfo = (path: string) => invoke<ProjectInfo>("project_info", { path });
+export const watchProject = (path: string | null) => invoke<void>("watch_project", { path });
+export const frontendReady = () => invoke<void>("frontend_ready");
 
 /** One level of a folder: folders first, then files, ignored entries flagged. */
 export const listDir = (path: string) => invoke<DirEntry[]>("list_dir", { path });
+
+/** Read a file for the project explorer's popup editor. */
+export const readFile = (path: string) => invoke<FileContent>("read_file", { path });
+
+/** Save the popup editor's buffer. */
+export const writeFile = (path: string, content: string) =>
+  invoke<void>("write_file", { path, content });
 
 export const gitBranches = (path: string) => invoke<Branches>("git_branches", { path });
 
@@ -45,7 +55,13 @@ export const ptySpawn = (args: {
   shell?: string | null;
   cols: number;
   rows: number;
-}) => invoke<SpawnResult>("pty_spawn", { ...args, cols: Math.round(args.cols), rows: Math.round(args.rows) });
+}, onData: Channel<ArrayBuffer>) =>
+  invoke<SpawnResult>("pty_spawn", {
+    ...args,
+    onData,
+    cols: Math.round(args.cols),
+    rows: Math.round(args.rows),
+  });
 
 export const ptyWrite = (id: string, data: string) => invoke<void>("pty_write", { id, data });
 

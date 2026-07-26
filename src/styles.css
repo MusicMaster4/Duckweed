@@ -962,6 +962,8 @@ svg.tab-glyph-fill path {
 }
 
 .tree-row {
+  content-visibility: auto;
+  contain-intrinsic-size: 22px;
   display: flex;
   align-items: center;
   gap: 4px;
@@ -1028,6 +1030,8 @@ svg.tab-glyph-fill path {
 }
 
 .tree-note {
+  content-visibility: auto;
+  contain-intrinsic-size: 20px;
   flex: none;
   padding-right: 6px;
   color: var(--text-faint);
@@ -2076,8 +2080,26 @@ svg.tab-glyph-fill path {
 }
 
 .command-block-cmd.is-selected {
-  /* Match xterm selection tint so the covered command row feels selected too. */
+  /* Match the soft block overlay so the covered command row feels selected too. */
   background: color-mix(in srgb, var(--bg-pane) 72%, #7be05a 28%);
+}
+
+/*
+ * Soft highlight for a clicked/keyboard-selected command chunk. pointer-events
+ * none so wheel scroll and free-range drag still reach xterm. We paint this
+ * instead of selectLines over thousands of rows (which jumped the viewport and
+ * made tall cargo output feel stuck).
+ */
+.command-block-select-overlay {
+  position: absolute;
+  z-index: 2;
+  top: 0;
+  left: 0;
+  margin: 0;
+  padding: 0;
+  pointer-events: none;
+  background: color-mix(in srgb, transparent 78%, #7be05a 22%);
+  will-change: transform;
 }
 
 /*
@@ -2236,6 +2258,7 @@ body.is-resizing * {
 }
 
 .drag-ghost {
+  transform: translate(var(--pane-drag-x, -10000px), var(--pane-drag-y, -10000px));
   position: fixed;
   left: 0;
   top: 0;
@@ -3195,6 +3218,8 @@ body.is-resizing * {
 /* ------------------------------------------------------------ a file */
 
 .diff-file {
+  content-visibility: auto;
+  contain-intrinsic-size: 160px;
   /* A flex child shrinks by default. Left to it, every file in the list would
      be squeezed to a slice of itself and clipped, instead of the list scrolling. */
   flex: none;
@@ -3350,6 +3375,8 @@ body.is-resizing * {
 }
 
 .diff-line {
+  content-visibility: auto;
+  contain-intrinsic-size: 18px;
   display: flex;
   align-items: flex-start;
   /* Wider than the container when a line overflows, so the tint and the band
@@ -3427,4 +3454,222 @@ body.is-resizing * {
   color: var(--text-faint);
   font-size: 12px;
   text-align: center;
+}
+
+/* --------------------------------------------------- file editor popup */
+
+/* Full-window overlay; the card is truly centred (changes panel sits higher
+   on purpose because it shrinks with content — this one has a fixed height). */
+.file-editor-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 55;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 24px;
+  background: rgba(8, 9, 12, 0.55);
+}
+
+.file-editor {
+  width: min(960px, calc(100vw - 48px));
+  height: min(80vh, 900px);
+  max-height: calc(100vh - 48px);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: 13px;
+  background: var(--bg-elevated);
+  box-shadow: 0 26px 70px rgba(0, 0, 0, 0.6);
+  overflow: hidden;
+}
+
+.file-editor-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+  padding: 11px 12px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.file-editor-path {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  color: var(--text);
+}
+
+.file-editor-dir {
+  color: var(--text-faint);
+}
+
+.file-editor-name {
+  color: var(--text);
+}
+
+.file-editor-dirty {
+  margin-left: 6px;
+  color: var(--amber);
+  font-size: 10px;
+  vertical-align: middle;
+}
+
+.file-editor-meta {
+  flex: none;
+  color: var(--text-faint);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.file-editor-save.is-active {
+  color: var(--accent);
+}
+
+.file-editor-save:disabled {
+  opacity: 0.45;
+}
+
+.file-editor-banner {
+  flex: none;
+  padding: 7px 12px;
+  font-size: 12px;
+}
+
+.file-editor-banner.is-error {
+  background: rgba(242, 104, 111, 0.1);
+  color: var(--rose);
+  border-bottom: 1px solid rgba(242, 104, 111, 0.2);
+}
+
+.file-editor-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.file-editor-code {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  background: var(--bg-pane);
+  /* Code is the exception to the app-wide selection ban. */
+  user-select: text;
+}
+
+.file-editor-gutter {
+  flex: none;
+  overflow: hidden;
+  padding: 10px 0 10px 10px;
+  border-right: 1px solid var(--border);
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.55;
+  text-align: right;
+  white-space: pre;
+  user-select: none;
+  font-variant-numeric: tabular-nums;
+  /* Wide enough for ~4 digits; long files just keep padding. */
+  min-width: 3.2em;
+}
+
+/* Stack: painted mirror under a transparent textarea (same idea as the
+   command composer). Scroll lives on the textarea; mirror tracks it. */
+.file-editor-surface {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.file-editor-mirror,
+.file-editor-textarea {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  padding: 10px 12px;
+  border: 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.55;
+  letter-spacing: normal;
+  tab-size: 4;
+  white-space: pre;
+  overflow: auto;
+  box-sizing: border-box;
+}
+
+.file-editor-mirror {
+  pointer-events: none;
+  color: var(--text);
+  /* Keep the same overflow metrics as the textarea so glyphs stay aligned;
+     the textarea sits on top and owns interaction. */
+  overflow: auto;
+}
+
+.file-editor-textarea {
+  resize: none;
+  outline: none;
+  background: transparent;
+  /* Glyphs come from the mirror; only the caret and selection stay here. */
+  color: transparent;
+  caret-color: var(--accent);
+  -webkit-text-fill-color: transparent;
+  overflow: auto;
+}
+
+.file-editor-textarea::selection {
+  background: rgba(123, 224, 90, 0.28);
+  color: transparent;
+}
+
+/* Syntax token colours — same vocabulary as the terminal highlighter. */
+.code-token.token-plain {
+  color: var(--text);
+}
+
+.code-token.token-comment {
+  color: var(--text-faint);
+  font-style: italic;
+}
+
+.code-token.token-string,
+.code-token.token-regex {
+  color: #7dcea0;
+}
+
+.code-token.token-number {
+  color: #c792ea;
+}
+
+.code-token.token-keyword {
+  color: #82aaff;
+}
+
+.code-token.token-type {
+  color: #ffcb6b;
+}
+
+.code-token.token-property {
+  color: #89ddff;
+}
+
+.code-token.token-operator {
+  color: #89ddff;
+}
+
+.code-token.token-punct {
+  color: var(--text-dim);
+}
+
+.code-token.token-boolean {
+  color: #f78c6c;
 }

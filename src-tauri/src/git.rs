@@ -46,7 +46,12 @@ fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
 fn has_local(dir: &Path, name: &str) -> bool {
     git(
         dir,
-        &["show-ref", "--verify", "--quiet", &format!("refs/heads/{name}")],
+        &[
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{name}"),
+        ],
     )
     .is_ok()
 }
@@ -310,7 +315,20 @@ fn text_lines(path: &Path) -> Option<Vec<String>> {
 }
 
 fn count_lines(path: &Path) -> usize {
-    text_lines(path).map_or(0, |lines| lines.len())
+    let Ok(meta) = std::fs::metadata(path) else {
+        return 0;
+    };
+    if !meta.is_file() || meta.len() > MAX_PREVIEW_BYTES {
+        return 0;
+    }
+    let Ok(bytes) = std::fs::read(path) else {
+        return 0;
+    };
+    if bytes.is_empty() || bytes.iter().take(SNIFF_BYTES).any(|byte| *byte == 0) {
+        return 0;
+    }
+    let newlines = bytes.iter().filter(|byte| **byte == b'\n').count();
+    newlines + usize::from(bytes.last() != Some(&b'\n'))
 }
 
 /// The parts of a patch that only the patch knows — everything else about a
@@ -353,10 +371,14 @@ fn parse_patch(patch: &str) -> Vec<ParsedFile> {
             in_hunk = false;
             continue;
         }
-        let Some(file) = files.last_mut() else { continue };
+        let Some(file) = files.last_mut() else {
+            continue;
+        };
 
         if line.starts_with("@@") {
-            let Some((old, new)) = parse_hunk_header(line) else { continue };
+            let Some((old, new)) = parse_hunk_header(line) else {
+                continue;
+            };
             old_no = old;
             new_no = new;
             file.hunks.push(Hunk {
@@ -579,7 +601,8 @@ mod tests {
 
     impl TempRepo {
         fn new(name: &str) -> Self {
-            let dir = std::env::temp_dir().join(format!("duckweed-git-{name}-{}", std::process::id()));
+            let dir =
+                std::env::temp_dir().join(format!("duckweed-git-{name}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).expect("temp dir");
             let repo = Self { dir };
@@ -639,7 +662,10 @@ mod tests {
         repo.git(&["add", "-A"]);
         repo.git(&["commit", "-m", "first"]);
 
-        repo.write("edited.txt", &numbered(20).replace("line 10\n", "LINE TEN\n"));
+        repo.write(
+            "edited.txt",
+            &numbered(20).replace("line 10\n", "LINE TEN\n"),
+        );
         repo.git(&["rm", "-q", "removed.txt"]);
         repo.write("added.txt", "hello\nworld\n");
 
@@ -653,7 +679,10 @@ mod tests {
 
         let added = &diff.files[0];
         assert_eq!(added.status, "untracked");
-        assert_eq!((added.insertions, added.deletions, added.new_lines), (2, 0, 2));
+        assert_eq!(
+            (added.insertions, added.deletions, added.new_lines),
+            (2, 0, 2)
+        );
         let lines = &added.hunks[0].lines;
         assert_eq!(lines.len(), 2);
         assert!(lines.iter().all(|l| l.kind == "add"));
@@ -661,7 +690,10 @@ mod tests {
 
         let edited = &diff.files[1];
         assert_eq!(edited.status, "modified");
-        assert_eq!((edited.insertions, edited.deletions, edited.new_lines), (1, 1, 20));
+        assert_eq!(
+            (edited.insertions, edited.deletions, edited.new_lines),
+            (1, 1, 20)
+        );
         // Three lines of context each side of the one that changed.
         assert_eq!(edited.hunks.len(), 1);
         assert_eq!(edited.hunks[0].new_start, 7);
@@ -669,7 +701,10 @@ mod tests {
 
         let removed = &diff.files[2];
         assert_eq!(removed.status, "deleted");
-        assert_eq!((removed.insertions, removed.deletions, removed.new_lines), (0, 1, 0));
+        assert_eq!(
+            (removed.insertions, removed.deletions, removed.new_lines),
+            (0, 1, 0)
+        );
     }
 
     #[test]
@@ -757,7 +792,10 @@ mod tests {
 
     #[test]
     fn hunk_header_reads_both_starts() {
-        assert_eq!(parse_hunk_header("@@ -12,7 +14,9 @@ fn main() {"), Some((12, 14)));
+        assert_eq!(
+            parse_hunk_header("@@ -12,7 +14,9 @@ fn main() {"),
+            Some((12, 14))
+        );
         // A one-line range has no comma, and a new file starts the old side at 0.
         assert_eq!(parse_hunk_header("@@ -0,0 +1 @@"), Some((0, 1)));
         assert_eq!(parse_hunk_header("@@ nonsense"), None);
@@ -783,10 +821,22 @@ index 111..222 100644
         assert_eq!(lines.len(), 4);
         // Context advances both sides; a removal only the old, an addition only
         // the new — so the two columns drift apart exactly here.
-        assert_eq!((lines[0].kind, lines[0].old, lines[0].new), ("ctx", Some(10), Some(10)));
-        assert_eq!((lines[1].kind, lines[1].old, lines[1].new), ("del", Some(11), None));
-        assert_eq!((lines[2].kind, lines[2].old, lines[2].new), ("add", None, Some(11)));
-        assert_eq!((lines[3].kind, lines[3].old, lines[3].new), ("add", None, Some(12)));
+        assert_eq!(
+            (lines[0].kind, lines[0].old, lines[0].new),
+            ("ctx", Some(10), Some(10))
+        );
+        assert_eq!(
+            (lines[1].kind, lines[1].old, lines[1].new),
+            ("del", Some(11), None)
+        );
+        assert_eq!(
+            (lines[2].kind, lines[2].old, lines[2].new),
+            ("add", None, Some(11))
+        );
+        assert_eq!(
+            (lines[3].kind, lines[3].old, lines[3].new),
+            ("add", None, Some(12))
+        );
     }
 
     #[test]

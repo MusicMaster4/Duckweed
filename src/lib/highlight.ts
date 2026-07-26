@@ -198,7 +198,7 @@ export function createHighlighter() {
   }
 
   /** Returns the chunk to hand to xterm — untouched unless every rule allows it. */
-  return function process(chunk: string): string {
+  return function process(chunk: string, enabled = true): string {
     if (!chunk) return chunk;
 
     if (continuing || chunk.includes(ESC)) {
@@ -211,6 +211,9 @@ export function createHighlighter() {
       continuing = incompleteTailStart(chunk) >= 0;
       return chunk;
     }
+    // Highlighting can be disabled while mode/SGR tracking must stay current.
+    // Plain chunks need no vocabulary/token pass in that state.
+    if (!enabled) return chunk;
     if (altScreen || mouse || styled) return chunk;
     // Bare CR means an in-place redraw (spinners, progress bars); colouring a
     // line that is about to be overwritten just makes it flicker.

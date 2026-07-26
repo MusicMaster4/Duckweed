@@ -1,4 +1,4 @@
-import { Fragment, useRef, useState } from "react";
+import { Fragment, memo, useRef, useState } from "react";
 
 import { resizeSplit } from "../lib/layout";
 import type { DropZone, LayoutNode, LeafNode, ProjectInfo, SplitNode } from "../lib/types";
@@ -39,7 +39,7 @@ function dropZoneFor(drag: DragState | null, leafId: string): DropZone | null {
   return drag.target.zone;
 }
 
-export function PaneTree({ node, shared }: { node: LayoutNode; shared: PaneTreeShared }) {
+export const PaneTree = memo(function PaneTree({ node, shared }: { node: LayoutNode; shared: PaneTreeShared }) {
   if (node.kind === "leaf") {
     return (
       <TerminalPane
@@ -63,9 +63,9 @@ export function PaneTree({ node, shared }: { node: LayoutNode; shared: PaneTreeS
     );
   }
   return <SplitView node={node} shared={shared} />;
-}
+});
 
-function SplitView({ node, shared }: { node: SplitNode; shared: PaneTreeShared }) {
+const SplitView = memo(function SplitView({ node, shared }: { node: SplitNode; shared: PaneTreeShared }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const count = node.children.length;
 
@@ -98,7 +98,7 @@ function SplitView({ node, shared }: { node: SplitNode; shared: PaneTreeShared }
       })}
     </div>
   );
-}
+});
 
 interface DividerProps {
   dir: "row" | "col";
@@ -109,7 +109,8 @@ interface DividerProps {
 }
 
 function Divider({ dir, index, containerRef, sizes, onResize }: DividerProps) {
-  const drag = useRef<{ origin: number; total: number; base: number[] } | null>(null);
+  const drag = useRef<{ origin: number; total: number; base: number[]; next: number[] } | null>(null);
+  const previewFrame = useRef(0);
   // Keeps the line lit for the whole drag, including once the pointer has run
   // past the divider and is no longer hovering it.
   const [dragging, setDragging] = useState(false);
@@ -124,6 +125,7 @@ function Divider({ dir, index, containerRef, sizes, onResize }: DividerProps) {
       // Fractions are of the container box, dividers included — see gapShare.
       total: Math.max(1, dir === "row" ? container.clientWidth : container.clientHeight),
       base: [...sizes],
+      next: [...sizes],
     };
     e.currentTarget.setPointerCapture(e.pointerId);
     document.body.classList.add("is-resizing");
@@ -133,15 +135,40 @@ function Divider({ dir, index, containerRef, sizes, onResize }: DividerProps) {
     const state = drag.current;
     if (!state) return;
     const position = dir === "row" ? e.clientX : e.clientY;
-    onResize(resizeSplit(state.base, index, (position - state.origin) / state.total));
+    state.next = resizeSplit(state.base, index, (position - state.origin) / state.total);
+    cancelAnimationFrame(previewFrame.current);
+    previewFrame.current = requestAnimationFrame(() => preview(state.next));
   };
 
   const stop = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (!drag.current) return;
+    const state = drag.current;
+    if (!state) return;
+    cancelAnimationFrame(previewFrame.current);
+    preview(state.next);
     drag.current = null;
     setDragging(false);
     document.body.classList.remove("is-resizing");
-    e.currentTarget.releasePointerCapture(e.pointerId);
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    }
+    // Persist once. ResizeObserver has already kept both visible terminals fit
+    // while the lightweight DOM preview followed the pointer.
+    onResize(state.next);
+  };
+
+  const preview = (next: number[]) => {
+    const container = containerRef.current;
+    if (!container) return;
+    const cells = Array.from(container.children).filter(
+      (element): element is HTMLElement =>
+        element instanceof HTMLElement && element.classList.contains("split-cell"),
+    );
+    const gapShare = ((next.length - 1) * DIVIDER) / next.length;
+    for (const at of [index, index + 1]) {
+      const cell = cells[at];
+      if (!cell) continue;
+      cell.style.flexBasis = `calc(${((next[at] ?? 0) * 100).toFixed(4)}% - ${gapShare.toFixed(3)}px)`;
+    }
   };
 
   return (

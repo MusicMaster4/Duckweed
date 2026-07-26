@@ -1,10 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 
 import { gitDiffStats } from "../lib/ipc";
 import type { DiffStats, ProjectInfo } from "../lib/types";
-
-/** How often the working tree is re-measured while the window has focus. */
-const POLL_MS = 4000;
 
 export interface GitChanges {
   /** Null until the first read lands, and whenever the tab has no repo. */
@@ -16,10 +14,9 @@ export interface GitChanges {
  * How much uncommitted work sits in the tab you are looking at.
  *
  * The shell in the pane below can edit, stage or commit at any moment, and none
- * of that reaches us as an event — so, like the branch chip, this runs on a slow
- * poll. `git diff --numstat` is cheap but not free: it only runs while the
- * window has focus, and never twice at once, so a slow repo falls behind rather
- * than piling up.
+ * Filesystem notifications from the backend trigger refreshes. Focus remains a
+ * cheap correctness fallback for suspended machines and temporarily unavailable
+ * watchers; requests never overlap.
  */
 export function useGitChanges(project: ProjectInfo | null): GitChanges {
   const [stats, setStats] = useState<DiffStats | null>(null);
@@ -53,12 +50,18 @@ export function useGitChanges(project: ProjectInfo | null): GitChanges {
     refresh();
     const onFocus = () => refresh();
     window.addEventListener("focus", onFocus);
-    const id = window.setInterval(() => {
-      if (document.hasFocus()) refresh();
-    }, POLL_MS);
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listen<string>("project:changed", (event) => {
+      if (event.payload === path) refresh();
+    }).then((off) => {
+      if (disposed) off();
+      else unlisten = off;
+    });
     return () => {
+      disposed = true;
       window.removeEventListener("focus", onFocus);
-      window.clearInterval(id);
+      unlisten?.();
     };
   }, [path, refresh]);
 

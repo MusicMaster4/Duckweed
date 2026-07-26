@@ -11,6 +11,41 @@ import {
 
 /** Columns in the metrics probe: enough that rounding cannot skew the cell. */
 const PROBE_COLS = 64;
+type DuckTick = (seconds: number) => void;
+const ticks = new Set<DuckTick>();
+let clockRaf = 0;
+let clockLast = -Infinity;
+
+function clockStep(ms: number) {
+  if (document.hidden || ticks.size === 0) {
+    clockRaf = 0;
+    return;
+  }
+  clockRaf = requestAnimationFrame(clockStep);
+  if (ms - clockLast < 1000 / DUCK_FPS) return;
+  clockLast = ms;
+  for (const tick of ticks) tick(ms / 1000);
+}
+
+function ensureClock() {
+  if (!clockRaf && !document.hidden && ticks.size > 0) {
+    clockRaf = requestAnimationFrame(clockStep);
+  }
+}
+
+function subscribeClock(tick: DuckTick): () => void {
+  ticks.add(tick);
+  ensureClock();
+  return () => {
+    ticks.delete(tick);
+    if (ticks.size === 0 && clockRaf) {
+      cancelAnimationFrame(clockRaf);
+      clockRaf = 0;
+    }
+  };
+}
+
+document.addEventListener("visibilitychange", ensureClock);
 
 function sameLayout(a: DuckLayout | null, b: DuckLayout): boolean {
   return (
@@ -77,16 +112,25 @@ function AnimatedDuck() {
       return;
     }
 
-    let raf = 0;
-    let last = -Infinity;
-    const step = (ms: number) => {
-      raf = requestAnimationFrame(step);
-      if (ms - last < 1000 / DUCK_FPS) return;
-      last = ms;
-      draw(phase + ms / 1000);
+    // Paint immediately, then join one app-wide 15 FPS clock only while this
+    // pond intersects the viewport.
+    draw(phase);
+    const host = hostRef.current;
+    if (!host) return;
+    let offClock: (() => void) | null = null;
+    const observer = new IntersectionObserver(([entry]) => {
+      if (entry.isIntersecting && !offClock) {
+        offClock = subscribeClock((seconds) => draw(phase + seconds));
+      } else if (!entry.isIntersecting && offClock) {
+        offClock();
+        offClock = null;
+      }
+    });
+    observer.observe(host);
+    return () => {
+      observer.disconnect();
+      offClock?.();
     };
-    raf = requestAnimationFrame(step);
-    return () => cancelAnimationFrame(raf);
   }, [layout, phase]);
 
   return (

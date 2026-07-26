@@ -7,20 +7,32 @@ mod process_tree;
 mod project;
 mod pty;
 mod shells;
+mod watch;
 
 use std::collections::HashMap;
 
-use tauri::{AppHandle, Manager, State};
+use tauri::{ipc::Channel, AppHandle, Manager, State};
 
-use fs::DirEntry;
+use fs::{DirEntry, FileContent};
 use git::{Branches, Diff, DiffStats, FileDiff};
 use project::ProjectInfo;
 use pty::{PtyManager, SpawnResult};
 use shells::ShellInfo;
+use watch::ProjectWatchManager;
+
+async fn blocking<T, F>(job: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(job)
+        .await
+        .map_err(|error| error.to_string())?
+}
 
 #[tauri::command]
-fn list_shells() -> Vec<ShellInfo> {
-    shells::available_shells()
+async fn list_shells() -> Result<Vec<ShellInfo>, String> {
+    blocking(|| Ok(shells::available_shells())).await
 }
 
 #[tauri::command]
@@ -33,50 +45,63 @@ fn home_dir() -> String {
 }
 
 #[tauri::command]
-fn project_info(path: String) -> Result<ProjectInfo, String> {
-    project::info(&path)
+async fn project_info(path: String) -> Result<ProjectInfo, String> {
+    blocking(move || project::info(&path)).await
 }
 
 /// One level of a folder, for the tools panel's project explorer.
 #[tauri::command]
-fn list_dir(path: String) -> Result<Vec<DirEntry>, String> {
-    fs::list_dir(&path)
+async fn list_dir(path: String) -> Result<Vec<DirEntry>, String> {
+    blocking(move || fs::list_dir(&path)).await
+}
+
+/// Read a file as text for the project explorer's popup editor.
+#[tauri::command]
+async fn read_file(path: String) -> Result<FileContent, String> {
+    blocking(move || fs::read_file(&path)).await
+}
+
+/// Save the popup editor's buffer back to disk.
+#[tauri::command]
+async fn write_file(path: String, content: String) -> Result<(), String> {
+    blocking(move || fs::write_file(&path, content)).await
 }
 
 /// Local and remote branches of the repo `path` sits in.
 #[tauri::command]
-fn git_branches(path: String) -> Result<Branches, String> {
-    git::branches(&path)
+async fn git_branches(path: String) -> Result<Branches, String> {
+    blocking(move || git::branches(&path)).await
 }
 
 #[tauri::command]
-fn git_checkout(path: String, branch: String) -> Result<(), String> {
-    git::checkout(&path, &branch)
+async fn git_checkout(path: String, branch: String) -> Result<(), String> {
+    blocking(move || git::checkout(&path, &branch)).await
 }
 
 /// Counts for the status-bar chip: changed files, lines added, lines removed.
 #[tauri::command]
-fn git_diff_stats(path: String) -> Result<DiffStats, String> {
-    git::diff_stats(&path)
+async fn git_diff_stats(path: String) -> Result<DiffStats, String> {
+    blocking(move || git::diff_stats(&path)).await
 }
 
 /// Every uncommitted change, hunk by hunk, for the changes panel.
 #[tauri::command]
-fn git_diff(path: String) -> Result<Diff, String> {
-    git::diff(&path)
+async fn git_diff(path: String) -> Result<Diff, String> {
+    blocking(move || git::diff(&path)).await
 }
 
 /// One file with all of its unmodified lines, for expanding a collapsed run.
 #[tauri::command]
-fn git_file_diff(path: String, file: String) -> Result<FileDiff, String> {
-    git::file_diff(&path, &file)
+async fn git_file_diff(path: String, file: String) -> Result<FileDiff, String> {
+    blocking(move || git::file_diff(&path, &file)).await
 }
 
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
-fn pty_spawn(
+async fn pty_spawn(
     app: AppHandle,
     manager: State<'_, PtyManager>,
+    on_data: Channel<Vec<u8>>,
     id: String,
     cwd: Option<String>,
     shell: Option<String>,
@@ -84,7 +109,8 @@ fn pty_spawn(
     rows: u16,
     env: Option<HashMap<String, String>>,
 ) -> Result<SpawnResult, String> {
-    pty::spawn(&app, &manager, id, cwd, shell, cols, rows, env)
+    let manager = manager.inner().clone();
+    blocking(move || pty::spawn(&app, &manager, on_data, id, cwd, shell, cols, rows, env)).await
 }
 
 /// `data` is the raw keystroke text from xterm.js.
@@ -120,6 +146,24 @@ fn pty_any_busy(manager: State<'_, PtyManager>, ids: Vec<String>) -> bool {
     manager.any_busy(&ids)
 }
 
+/// Reveal the initially hidden window only after React has painted its shell.
+#[tauri::command]
+fn frontend_ready(app: AppHandle) -> Result<(), String> {
+    let Some(window) = app.get_webview_window("main") else {
+        return Ok(());
+    };
+    window.show().map_err(|error| error.to_string())?;
+    window.set_focus().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn watch_project(
+    manager: State<'_, ProjectWatchManager>,
+    path: Option<String>,
+) -> Result<(), String> {
+    manager.set(path)
+}
+
 fn main() {
     let window_state_flags = tauri_plugin_window_state::StateFlags::SIZE
         | tauri_plugin_window_state::StateFlags::POSITION
@@ -138,6 +182,7 @@ fn main() {
                 .build(),
         )
         .manage(PtyManager::default())
+        .manage(ProjectWatchManager::default())
         .setup(|app| {
             if let (Some(window), Some(icon)) = (
                 app.get_webview_window("main"),
@@ -145,10 +190,8 @@ fn main() {
             ) {
                 window.set_icon(icon)?;
             }
-            if let Some(window) = app.get_webview_window("main") {
-                window.show()?;
-                window.set_focus()?;
-            }
+            pty::start_busy_monitor(app.handle().clone())?;
+            watch::start_monitor(app.handle().clone())?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -156,6 +199,8 @@ fn main() {
             home_dir,
             project_info,
             list_dir,
+            read_file,
+            write_file,
             git_branches,
             git_checkout,
             git_diff_stats,
@@ -167,6 +212,8 @@ fn main() {
             pty_kill,
             pty_is_busy,
             pty_any_busy,
+            frontend_ready,
+            watch_project,
         ])
         .on_window_event(|window, event| {
             // Make sure we never leave orphaned shells behind.

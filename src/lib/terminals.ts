@@ -4,6 +4,7 @@ import { SearchAddon } from "@xterm/addon-search";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { WebglAddon } from "@xterm/addon-webgl";
+import { Channel } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import { BlockTracker } from "./blocks";
@@ -30,6 +31,8 @@ export interface TermMeta {
   exitCode: number | null;
   cols: number;
   rows: number;
+  /** A child process currently owns this terminal. */
+  busy: boolean;
   /**
    * Something has been sent to the shell since the pane opened (or since the
    * last clear). Until then the grid holds only a prompt, which the pane hides
@@ -45,11 +48,13 @@ interface Session extends TermMeta {
   term: Terminal;
   fit: FitAddon;
   search: SearchAddon;
+  webgl: WebglAddon | null;
   /** The element xterm renders into; it is moved between panes, never recreated. */
   host: HTMLDivElement;
   container: HTMLElement | null;
   observer: ResizeObserver | null;
   unlisten: UnlistenFn[];
+  dataChannel: Channel<ArrayBuffer> | null;
   spawned: boolean;
   /** Set once the spawn handshake starts; a second start would collide server-side. */
   starting: boolean;
@@ -85,6 +90,12 @@ interface Session extends TermMeta {
    * interrupts for a short window after submit, before the busy poll flips.
    */
   lastSubmitAt: number;
+  /**
+   * Commands submitted in this pane only (oldest first). Used by ↑/↓ history
+   * walk so each terminal recalls its own recent commands, not a global list.
+   * Shared autosuggest history lives in {@link commandHistory}.
+   */
+  history: string[];
 }
 
 /** Focus handlers for the per-pane command editor (Warp-style input). */
@@ -93,7 +104,9 @@ const inputFocusers = new Map<string, () => void>();
 const inputPasters = new Map<string, (text: string) => void>();
 
 const sessions = new Map<string, Session>();
-const listeners = new Set<() => void>();
+const sessionListeners = new Map<string, Set<() => void>>();
+const settingsListeners = new Set<() => void>();
+let busyUnlisten: Promise<UnlistenFn> | null = null;
 
 /**
  * How keystrokes reach the shell, app-wide.
@@ -112,6 +125,7 @@ export type InputMode = "editor" | "raw";
 let inputMode: InputMode = "editor";
 let fontSize = 13.5;
 let highlightEnabled = true;
+const TAURI_RUNTIME = "__TAURI_INTERNALS__" in window;
 const FONT_FAMILY =
   '"CaskaydiaCove Nerd Font", "Cascadia Code", "JetBrains Mono", "Fira Code", Consolas, "Courier New", monospace';
 /**
@@ -257,13 +271,30 @@ function limbo(): HTMLElement {
   return el;
 }
 
-function notify() {
-  for (const cb of listeners) cb();
+function notifySession(id: string) {
+  for (const cb of sessionListeners.get(id) ?? []) cb();
 }
 
-export function subscribe(cb: () => void): () => void {
+function notifySettings() {
+  for (const cb of settingsListeners) cb();
+}
+
+export function subscribeSession(id: string, cb: () => void): () => void {
+  let listeners = sessionListeners.get(id);
+  if (!listeners) {
+    listeners = new Set();
+    sessionListeners.set(id, listeners);
+  }
   listeners.add(cb);
-  return () => listeners.delete(cb);
+  return () => {
+    listeners?.delete(cb);
+    if (listeners?.size === 0) sessionListeners.delete(id);
+  };
+}
+
+export function subscribeSettings(cb: () => void): () => void {
+  settingsListeners.add(cb);
+  return () => settingsListeners.delete(cb);
 }
 
 export function getMeta(id: string): TermMeta | null {
@@ -277,6 +308,7 @@ export function getMeta(id: string): TermMeta | null {
     exitCode: s.exitCode,
     cols: s.cols,
     rows: s.rows,
+    busy: s.busy,
     ran: s.ran,
   };
 }
@@ -289,7 +321,7 @@ export function rename(id: string, title: string): void {
   session.titleLocked = true;
   if (session.title === clean) return;
   session.title = clean;
-  notify();
+  notifySession(id);
 }
 
 /**
@@ -309,7 +341,7 @@ function lastContentRow(term: Terminal): number {
 function markRan(session: Session): void {
   if (session.ran) return;
   session.ran = true;
-  notify();
+  notifySession(session.id);
 }
 
 export function newTermId(): string {
@@ -330,11 +362,24 @@ function prettyTitle(raw: string, fallback: string): string {
   return title;
 }
 
-function decodeBase64(data: string): Uint8Array {
-  const bin = atob(data);
-  const out = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-  return out;
+interface BusyPayload {
+  id: string;
+  busy: boolean;
+}
+
+/** One app-wide listener replaces the per-pane busy polling loops. */
+function ensureBusyListener(): void {
+  if (!TAURI_RUNTIME) return;
+  if (busyUnlisten) return;
+  busyUnlisten = listen<BusyPayload[]>("pty:busy", (event) => {
+    for (const state of event.payload) {
+      const session = sessions.get(state.id);
+      if (!session || session.busy === state.busy) continue;
+      session.busy = state.busy;
+      session.blocks.busyChanged(state.busy);
+      notifySession(state.id);
+    }
+  });
 }
 
 /** How long after the last keystroke before the caret returns to idle blinking. */
@@ -469,7 +514,7 @@ function scheduleVisualCursor(session: Session, forceSettle = false): void {
 function draw(session: Session, chunk: FrameWrite): void {
   // The highlighter needs to see every chunk, even while highlighting is off,
   // so its escape-sequence state stays in sync with the stream.
-  const painted = session.highlighter(chunk.text);
+  const painted = session.highlighter(chunk.text, highlightEnabled);
   const output = highlightEnabled ? painted : chunk.text;
   const stabilized = stabilizeCursorDuringFrame(
     output,
@@ -532,21 +577,17 @@ function create(id: string, opts: { cwd?: string | null; shell?: string | null }
   visualCursor.hidden = true;
   host.appendChild(visualCursor);
 
-  try {
-    term.loadAddon(new WebglAddon());
-  } catch {
-    // WebGL is optional; the DOM renderer is the fallback.
-  }
-
   const session: Session = {
     id,
     term,
     fit,
     search,
+    webgl: null,
     host,
     container: null,
     observer: null,
     unlisten: [],
+    dataChannel: null,
     spawned: false,
     starting: false,
     pending: [],
@@ -570,12 +611,14 @@ function create(id: string, opts: { cwd?: string | null; shell?: string | null }
     exitCode: null,
     cols: term.cols,
     rows: term.rows,
+    busy: false,
     ran: false,
     lastSubmitAt: 0,
+    history: [],
   };
   sessions.set(id, session);
-  // After insert so busy checks can resolve this session by id.
-  session.blocks = new BlockTracker(term, host, () => hasRunningProcess(id));
+  ensureBusyListener();
+  session.blocks = new BlockTracker(term, host);
 
   term.onData((data) => {
     markTyping(session);
@@ -699,7 +742,7 @@ function create(id: string, opts: { cwd?: string | null; shell?: string | null }
       event.preventDefault();
       event.stopPropagation();
       // Clicking away still dismisses whatever was selected before.
-      term.clearSelection();
+      session.blocks.clearSelection();
       focus(id);
     },
     true,
@@ -708,18 +751,23 @@ function create(id: string, opts: { cwd?: string | null; shell?: string | null }
   // Selections that start in real content can still be dragged down past it.
   // Anything that comes out as pure whitespace is dropped once the button is
   // released, so it never becomes a copyable "selection" of nothing.
+  //
+  // Block (chunk) selection is tracked separately from xterm's free-range
+  // selection so tall output can stay selected without selectLines locking the
+  // viewport. A real free-range selection dismisses the block chrome.
   term.onSelectionChange(() => {
     if (session.trimmingSelection) return;
-    if (!term.hasSelection()) {
-      session.blocks.clearSelection();
+    if (session.blocks.isApplyingSelection()) return;
+    if (!term.hasSelection()) return;
+    const text = term.getSelection();
+    if (/\S/.test(text)) {
+      // User dragged a free-range selection — drop block highlight.
+      session.blocks.dismissNavSelection();
       return;
     }
-    const text = term.getSelection();
-    if (/\S/.test(text)) return;
     session.trimmingSelection = true;
     try {
       term.clearSelection();
-      session.blocks.clearSelection();
     } finally {
       session.trimmingSelection = false;
     }
@@ -759,7 +807,7 @@ function create(id: string, opts: { cwd?: string | null; shell?: string | null }
     const clean = prettyTitle(title, session.shellLabel || session.title);
     if (clean && clean !== session.title) {
       session.title = clean;
-      notify();
+      notifySession(id);
     }
   });
 
@@ -767,7 +815,7 @@ function create(id: string, opts: { cwd?: string | null; shell?: string | null }
     session.cols = cols;
     session.rows = rows;
     if (session.spawned) void ptyResize(id, cols, rows);
-    notify();
+    notifySession(id);
   });
 
   // OSC 7 — file://host/path — the de-facto cwd reporting sequence.
@@ -777,7 +825,7 @@ function create(id: string, opts: { cwd?: string | null; shell?: string | null }
       let p = decodeURIComponent(match[1]);
       if (/^\/[a-zA-Z]:/.test(p)) p = p.slice(1).replace(/\//g, "\\");
       session.cwd = p;
-      notify();
+      notifySession(id);
     }
     return true;
   });
@@ -787,7 +835,7 @@ function create(id: string, opts: { cwd?: string | null; shell?: string | null }
     const match = /^9;(.+)$/.exec(payload);
     if (match) {
       session.cwd = match[1].replace(/^"|"$/g, "");
-      notify();
+      notifySession(id);
     }
     return false;
   });
@@ -803,15 +851,20 @@ async function start(session: Session, opts: { cwd?: string | null; shell?: stri
   // "already exists" and the pane would die with that message.
   if (session.starting || session.spawned) return;
   session.starting = true;
+  // Vite's browser preview has no native process behind it. Keeping the visual
+  // shell mountable makes layout/performance testing possible outside Tauri.
+  if (!TAURI_RUNTIME) return;
 
-  // Subscribe before spawning so no output can slip through.
-  const offData = await listen<string>(`pty:data:${id}`, (event) => {
+  // Create the raw channel before spawning so no output can slip through.
+  const dataChannel = new Channel<ArrayBuffer>();
+  dataChannel.onmessage = (payload) => {
     // Decoding moves here from xterm because everything downstream — frame
     // reassembly and the highlighter — works on text. `stream` keeps a UTF-8
     // character split across two PTY reads intact.
-    const text = session.decoder.decode(decodeBase64(event.payload), { stream: true });
+    const text = session.decoder.decode(new Uint8Array(payload), { stream: true });
     session.frames.push(text);
-  });
+  };
+  session.dataChannel = dataChannel;
   const offExit = await listen<{ code: number | null }>(`pty:exit:${id}`, (event) => {
     // A program killed mid-redraw leaves a frame open; draw it before the notice
     // so the last thing it managed to print stays above its own epitaph.
@@ -820,15 +873,17 @@ async function start(session: Session, opts: { cwd?: string | null; shell?: stri
     clearTyping(session);
     hideVisualCursor(session);
     session.exited = true;
+    session.busy = false;
+    session.blocks.busyChanged(false);
     session.ran = true;
     session.exitCode = event.payload.code ?? null;
     const code = session.exitCode;
     session.term.write(
       `\r\n\x1b[38;5;244m[process exited${code === null ? "" : ` with code ${code}`}]\x1b[0m\r\n`,
     );
-    notify();
+    notifySession(id);
   });
-  session.unlisten.push(offData, offExit);
+  session.unlisten.push(offExit);
 
   try {
     const args = {
@@ -840,14 +895,14 @@ async function start(session: Session, opts: { cwd?: string | null; shell?: stri
     };
     let result;
     try {
-      result = await ptySpawn(args);
+      result = await ptySpawn(args, dataChannel);
     } catch (error) {
       // A webview reload (Vite HMR, manual refresh) leaves the backend PTY
       // alive while this side starts from scratch — the restored pane asks for
       // an id the backend still owns. Kill the orphan and spawn again.
       if (!String(error).includes("already exists")) throw error;
       await ptyKill(id);
-      result = await ptySpawn(args);
+      result = await ptySpawn(args, dataChannel);
     }
     session.shellLabel = result.shell_label;
     if (!session.titleLocked) session.title = result.shell_label;
@@ -858,11 +913,11 @@ async function start(session: Session, opts: { cwd?: string | null; shell?: stri
     void ptyResize(id, session.term.cols, session.term.rows);
     for (const chunk of session.pending) void ptyWrite(id, chunk);
     session.pending = [];
-    notify();
+    notifySession(id);
   } catch (error) {
     session.exited = true;
     session.term.write(`\r\n\x1b[31mfailed to start shell: ${String(error)}\x1b[0m\r\n`);
-    notify();
+    notifySession(id);
   }
 }
 
@@ -882,6 +937,18 @@ export function attach(
     session.container = container;
   }
 
+  // Background tabs keep their buffer but release renderer/overlay work. Load
+  // WebGL again before paint when the pane becomes visible.
+  if (!session.webgl) {
+    try {
+      session.webgl = new WebglAddon();
+      session.term.loadAddon(session.webgl);
+    } catch {
+      session.webgl = null;
+      // WebGL is optional; xterm's DOM renderer is the fallback.
+    }
+  }
+  session.blocks.setActive(true);
   session.observer?.disconnect();
   const observer = new ResizeObserver(() => refit(id));
   observer.observe(container);
@@ -898,6 +965,9 @@ export function detach(id: string): void {
   session.observer?.disconnect();
   session.observer = null;
   session.container = null;
+  session.blocks.setActive(false);
+  session.webgl?.dispose();
+  session.webgl = null;
   hideVisualCursor(session);
   limbo().appendChild(session.host);
 }
@@ -982,11 +1052,34 @@ export function setEditorMode(id: string, enabled: boolean): void {
   } else {
     hideVisualCursor(session);
   }
-  notify();
+  notifySession(id);
 }
 
 export function getEditorMode(id: string): boolean {
   return sessions.get(id)?.editorMode ?? true;
+}
+
+/** Max commands kept for per-pane ↑/↓ history. */
+const MAX_LOCAL_HISTORY = 200;
+
+/**
+ * Record a command on this session only. Consecutive duplicates collapse to
+ * a single newest entry (shell-style). Empty/whitespace-only is ignored.
+ */
+function recordLocalHistory(session: Session, command: string): void {
+  const trimmed = command.replace(/\r\n/g, "\n").replace(/\r/g, "\n").trimEnd();
+  if (!trimmed.trim()) return;
+  const last = session.history[session.history.length - 1];
+  if (last === trimmed) return;
+  session.history = [...session.history, trimmed].slice(-MAX_LOCAL_HISTORY);
+}
+
+/**
+ * Commands submitted in this pane, oldest first — for ↑/↓ history navigation.
+ * Distinct from the shared {@link commandHistory} used for ghost suggestions.
+ */
+export function localHistory(id: string): readonly string[] {
+  return sessions.get(id)?.history ?? [];
 }
 
 /**
@@ -1005,10 +1098,12 @@ export function submitCommand(id: string, command: string): void {
   if (!text.trim()) {
     // Empty Enter — just send a newline so the shell re-draws the prompt.
     send(session, "\r");
+    session.term.scrollToBottom();
     return;
   }
-  // Shared history (autosuggest + ↑) — cwd when OSC 7 / spawn has reported it.
+  // Shared history (ghost autosuggest across panes) + per-pane ↑ walk.
   commandHistory.record(text, session.cwd || null);
+  recordLocalHistory(session, text);
   // Mark the block before writing so the start line is the prompt row that
   // will hold the echoed command.
   session.blocks.open(text);
@@ -1019,6 +1114,10 @@ export function submitCommand(id: string, command: string): void {
   } else {
     send(session, `${text}\r`);
   }
+  // Always follow the new command — if the user had scrolled up to read an
+  // older chunk, Enter should drop them back to the live bottom of the grid.
+  session.term.scrollToBottom();
+  session.blocks.scheduleLayout();
 }
 
 /**
@@ -1071,7 +1170,7 @@ export function changeDirectory(id: string, path: string): void {
   // Under the welcome overlay — do not markRan, or the empty state vanishes.
   send(session, `${command}\r`);
   session.cwd = path;
-  notify();
+  notifySession(id);
 
   // Once the shell has drawn the new prompt, drop the echoed `cd` so the first
   // real command does not sit under a project-switch line.
@@ -1079,7 +1178,7 @@ export function changeDirectory(id: string, path: string): void {
     const live = sessions.get(id);
     if (!live || live.ran || live.exited) return;
     live.term.clear();
-    notify();
+    notifySession(id);
   }, 200);
 }
 
@@ -1103,11 +1202,12 @@ export function dispose(id: string): void {
   inputFocusers.delete(id);
   inputPasters.delete(id);
   for (const off of session.unlisten) off();
-  void ptyKill(id);
+  session.dataChannel = null;
+  if (TAURI_RUNTIME) void ptyKill(id);
   session.term.dispose();
   session.host.remove();
   sessions.delete(id);
-  notify();
+  notifySession(id);
 }
 
 export function disposeAll(): void {
@@ -1150,7 +1250,7 @@ export function allSessionIds(): string[] {
 export function setInputMode(mode: InputMode): void {
   if (inputMode === mode) return;
   inputMode = mode;
-  notify();
+  notifySettings();
 }
 
 export function getInputMode(): InputMode {
@@ -1166,7 +1266,7 @@ export function setFontSize(size: number): void {
   // saved preference, and the command editor still needs the CSS variables.
   applyMetrics();
   for (const id of sessions.keys()) refit(id);
-  if (changed) notify();
+  if (changed) notifySettings();
 }
 
 export function getFontSize(): number {
@@ -1226,7 +1326,7 @@ function recolorSession(session: Session): void {
 
   // Always run the highlighter so its escape-sequence state tracks the stream;
   // only the painted form is optional (same rule as live `draw`).
-  const painted = session.highlighter(plain);
+  const painted = session.highlighter(plain, highlightEnabled);
   const output = highlightEnabled ? painted : plain;
   term.write(`\x1b[?25l${output}`, () => {
     session.cursorFocused = wasFocused;
@@ -1243,7 +1343,7 @@ export function setHighlight(enabled: boolean): void {
   if (highlightEnabled === enabled) return;
   highlightEnabled = enabled;
   for (const session of sessions.values()) recolorSession(session);
-  notify();
+  notifySettings();
 }
 
 export function getHighlight(): boolean {
@@ -1259,7 +1359,7 @@ export function clear(id: string): void {
   // it — exactly the state a pane opens in, so the empty state belongs back.
   if (session.ran && !session.exited) {
     session.ran = false;
-    notify();
+    notifySession(id);
   }
 }
 

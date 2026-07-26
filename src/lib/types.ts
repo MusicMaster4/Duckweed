@@ -61,6 +61,17 @@ export interface DirEntry {
   ignored: boolean;
 }
 
+/** What the project explorer's file popup loads from disk. */
+export interface FileContent {
+  path: string;
+  /** Empty when binary or too large. */
+  content: string;
+  binary: boolean;
+  too_large: boolean;
+  /** Bytes on disk. */
+  size: number;
+}
+
 export interface Branches {
   /** Branch HEAD points at, or null on a detached HEAD. */
   current: string | null;
