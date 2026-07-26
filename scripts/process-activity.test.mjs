@@ -5,6 +5,7 @@ import {
   didProcessFinish,
   isGenericOsc777Notification,
   parseAgentOsc777,
+  shouldPlayCompletionSound,
   shouldSignalCompletion,
 } from "../src/lib/processActivity.ts";
 
@@ -109,6 +110,54 @@ describe("completion sound and highlight eligibility", () => {
         now,
       ),
     ).toBe(true);
+  });
+});
+
+describe("completion sound eligibility", () => {
+  const now = 100_000;
+
+  test("does not play for jobs that ran one minute or less", () => {
+    expect(
+      shouldPlayCompletionSound(
+        state({ busy: true, processStartedAt: now - 60_000 }),
+        state({ processStartedAt: now - 60_000 }),
+        now,
+      ),
+    ).toBe(false);
+    expect(
+      shouldPlayCompletionSound(
+        state({ busy: true, agent: "codex", processStartedAt: now - 59_999 }),
+        state({ agent: "codex", processStartedAt: now - 59_999 }),
+        now,
+      ),
+    ).toBe(false);
+  });
+
+  test("plays for any finished job that ran more than one minute", () => {
+    expect(
+      shouldPlayCompletionSound(
+        state({ busy: true, processStartedAt: now - 60_001 }),
+        state({ processStartedAt: now - 60_001 }),
+        now,
+      ),
+    ).toBe(true);
+    expect(
+      shouldPlayCompletionSound(
+        state({ busy: true, agent: "claude", processStartedAt: now - 60_001 }),
+        state({ agent: "claude", processStartedAt: now - 60_001 }),
+        now,
+      ),
+    ).toBe(true);
+  });
+
+  test("does not play when the process did not finish", () => {
+    expect(
+      shouldPlayCompletionSound(
+        state({ processStartedAt: now - 120_000 }),
+        state({ busy: true, processStartedAt: now - 120_000 }),
+        now,
+      ),
+    ).toBe(false);
   });
 });
 

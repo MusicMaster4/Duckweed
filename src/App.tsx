@@ -41,7 +41,11 @@ import {
 } from "./lib/layout";
 import { toggleFullscreen } from "./lib/window";
 import { DEFAULT_TOOLS_WIDTH, load, pushRecent, rehydrate, save } from "./lib/persist";
-import { shouldSignalCompletion, type ProcessState } from "./lib/processActivity";
+import {
+  shouldPlayCompletionSound,
+  shouldSignalCompletion,
+  type ProcessState,
+} from "./lib/processActivity";
 import * as terminals from "./lib/terminals";
 import { loadSettings as loadUsageSettings, prefetchUsage } from "./lib/usage";
 import type { LeafNode, ProjectInfo, ShellInfo, Tab } from "./lib/types";
@@ -357,7 +361,14 @@ export default function App() {
       if (!previous) return;
 
       if (!shouldSignalCompletion(previous, meta)) return;
-      if (completionSoundEnabledRef.current) playCompletionSound();
+      // Sound only on the selected pane, and only after the job ran > 1 minute.
+      if (
+        completionSoundEnabledRef.current &&
+        isFocusedTerm(termId) &&
+        shouldPlayCompletionSound(previous, meta)
+      ) {
+        playCompletionSound();
+      }
       if (isFocusedTerm(termId)) {
         if (completionHighlightsRef.current) flashFocusedCompletion(termId);
         return;

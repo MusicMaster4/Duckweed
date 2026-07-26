@@ -21,9 +21,12 @@ export function didProcessFinish(previous: ProcessState, current: ProcessState):
 /** Ordinary terminal jobs must run longer than this before completion is signalled. */
 export const PROCESS_COMPLETION_MIN_MS = 30_000;
 
+/** Completion sound only after a job has been running for more than one minute. */
+export const COMPLETION_SOUND_MIN_MS = 60_000;
+
 /**
  * Coding-agent completions are always worth surfacing. Ordinary terminal
- * processes only earn the sound and visual marker after running for more than
+ * processes only earn the visual marker after running for more than
  * 30 seconds.
  */
 export function shouldSignalCompletion(
@@ -42,6 +45,20 @@ export function shouldSignalCompletion(
 
   const startedAt = previous.processStartedAt ?? current.processStartedAt;
   return startedAt !== null && now - startedAt > PROCESS_COMPLETION_MIN_MS;
+}
+
+/**
+ * Sound is stricter than the visual marker: the job must have run for more
+ * than one minute. Focus is checked separately so background panes stay quiet.
+ */
+export function shouldPlayCompletionSound(
+  previous: ProcessState,
+  current: ProcessState,
+  now = Date.now(),
+): boolean {
+  if (!didProcessFinish(previous, current)) return false;
+  const startedAt = previous.processStartedAt ?? current.processStartedAt;
+  return startedAt !== null && now - startedAt > COMPLETION_SOUND_MIN_MS;
 }
 
 export type AgentKind =

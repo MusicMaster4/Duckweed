@@ -201,7 +201,7 @@ export function SettingsMenu({
                 >
                   <span className="settings-copy">
                     <strong>Completion sound</strong>
-                    <span>Play for completed agent turns, or jobs that run over 30 seconds</span>
+                    <span>Play on the selected pane when a job has run for more than one minute</span>
                   </span>
                   <Toggle enabled={completionSoundEnabled} />
                 </button>
