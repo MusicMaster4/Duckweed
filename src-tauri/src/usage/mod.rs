@@ -43,6 +43,9 @@ const RECENT_DAYS: i64 = 8;
 /// How long a file's request ids are kept for cross-file duplicate detection.
 const DEDUP_DAYS: i64 = 30;
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+/// How far back the duty cycle looks. Kept inside [`RECENT_DAYS`] so every row
+/// it reads still has five-minute resolution rather than a collapsed day.
+const DUTY_DAYS: i64 = 7;
 const INDEX_VERSION: u32 = 1;
 
 // ---------------------------------------------------------------- tokens
@@ -448,6 +451,11 @@ pub fn scan(
     let mut last_used: HashMap<&'static str, i64> = HashMap::new();
     let mut by_model: HashMap<(&'static str, String), (Totals, bool)> = HashMap::new();
     let mut unpriced: HashSet<String> = HashSet::new();
+    // Which five-minute slots each agent was actually working in, for the duty
+    // cycle the quota forecasts project long windows with.
+    let duty_cutoff = now - DUTY_DAYS * DAY_MS;
+    let mut active_slots: HashMap<&'static str, HashSet<i64>> = HashMap::new();
+    let mut first_active: HashMap<&'static str, i64> = HashMap::new();
     for (key, entry) in index.files.iter() {
         let Some(&agent_id) = agent_by_key.get(key.as_str()) else {
             continue;
@@ -461,6 +469,17 @@ pub fn scan(
                 .entry(agent_id)
                 .and_modify(|last| *last = (*last).max(row.at))
                 .or_insert(row.at);
+
+            if row.at >= duty_cutoff && row.requests > 0 {
+                active_slots
+                    .entry(agent_id)
+                    .or_default()
+                    .insert(row.at - row.at.rem_euclid(SLOT_MS));
+                first_active
+                    .entry(agent_id)
+                    .and_modify(|first| *first = (*first).min(row.at))
+                    .or_insert(row.at);
+            }
 
             if row.at >= series_start {
                 if !priced && row.reported_cost.is_none() && row.tokens.total() > 0 {
@@ -559,11 +578,13 @@ pub fn scan(
     // Reuse discovery work from the index pass. Looking up the newest Codex
     // quota by recursively walking all sessions again added hundreds of
     // milliseconds on large histories.
+    let duty = duty_cycles(&active_slots, &first_active, now);
     let quotas = quota::build(
         &used_agents,
         home,
         &history_path,
         latest_codex.as_ref().map(|(_, path)| path.as_path()),
+        &duty,
     );
 
     // --- persist ----------------------------------------------------------
@@ -590,6 +611,35 @@ pub fn scan(
         unpriced,
         scan: stats,
     })
+}
+
+/// What share of the wall clock each agent actually spends burning tokens.
+///
+/// A quota forecast measured during a working session is a rate per hour of
+/// work. Stretched across a multi-day window it has to be deflated by this, or
+/// the projection assumes you keep going through the night. Slots come from the
+/// transcripts, so the measurement holds for sessions run while Duckweed was
+/// closed — which the quota sample history, by construction, cannot see.
+///
+/// The denominator is the observed span rather than a flat week: someone two
+/// days into using an agent is not idle for the five days before that.
+fn duty_cycles(
+    active_slots: &HashMap<&'static str, HashSet<i64>>,
+    first_active: &HashMap<&'static str, i64>,
+    now: i64,
+) -> HashMap<&'static str, f64> {
+    active_slots
+        .iter()
+        .filter_map(|(agent, slots)| {
+            let first = *first_active.get(agent)?;
+            let span = (now - first).clamp(DAY_MS, DUTY_DAYS * DAY_MS) as f64;
+            let active = slots.len() as f64 * SLOT_MS as f64;
+            // Floored well above zero: a duty cycle small enough to push a
+            // run-out date past the heat death of the universe is not an
+            // estimate, it is a rounding artefact of a very quiet week.
+            Some((*agent, (active / span).clamp(0.02, 1.0)))
+        })
+        .collect()
 }
 
 /// Parse the changed files across a small pool of threads.

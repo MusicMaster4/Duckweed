@@ -72,10 +72,22 @@ describe("channel isolation in the published releases", () => {
     expect(release.env.BETA_POINTER_TAG).toBe(BETA_POINTER_TAG);
     expect(endpointFor("testing")).toContain(`/releases/download/${release.env.BETA_POINTER_TAG}/latest.json`);
     expect(pointerStep.run).toContain("latest.json");
+    expect(pointerStep.run).toContain("duckweed-beta-setup.exe");
     expect(pointerStep.run).toContain("--clobber");
     // Created as a prerelease so it is skipped by the stable endpoint's
     // "latest release" lookup.
     expect(pointerStep.run).toContain("--prerelease");
+  });
+
+  test("keeps a permanent installer URL for the newest beta", () => {
+    const pointerStep = runSteps(release).find((s) => s.run.includes("release upload") && s.run.includes("BETA_POINTER"));
+    const readme = read("README.md");
+    const betaInstaller = `/releases/download/${BETA_POINTER_TAG}/duckweed-beta-setup.exe`;
+
+    expect(pointerStep.run).toContain('--pattern "*.exe"');
+    expect(pointerStep.run).toContain("mv");
+    expect(pointerStep.run).toContain("duckweed-beta-setup.exe");
+    expect(readme).toContain(betaInstaller);
   });
 
   test("the pointer is only ever written from the beta channel", () => {

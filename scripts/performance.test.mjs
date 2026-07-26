@@ -117,7 +117,7 @@ describe("large and blocking work is isolated", () => {
     expect(agents).toContain('"duckweed-node-compile-cache"');
   });
 
-  test("usage work waits for Settings entry and never polls while Settings stays open", () => {
+  test("usage work waits for Settings entry and polls only once a minute while open", () => {
     const app = read("src/App.tsx");
     const componentStart = app.indexOf("export default function App()");
     const openSettings = app.indexOf("const openSettings");
@@ -127,8 +127,8 @@ describe("large and blocking work is isolated", () => {
     const settings = read("src/components/SettingsMenu.tsx");
     expect(settings).toContain("{showUsage && <UsagePanel />}");
     const panel = read("src/components/UsagePanel.tsx");
-    expect(panel).not.toContain("setInterval(() => prefetchUsage");
-    expect(panel).not.toContain("setInterval(prefetchUsage");
+    expect(panel).toContain("prefetchUsage(days, 0)");
+    expect(panel).toContain("}, 60_000)");
   });
 
   test("a warm usage scan neither rewrites its index nor rediscovers Codex quotas", () => {

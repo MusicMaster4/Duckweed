@@ -118,17 +118,17 @@ describe("quota forecasts", () => {
     forecast,
   });
 
-  test("a spent window says when it comes back, not how fast it went", () => {
+  test("a spent window does not repeat its reset time", () => {
     const copy = usage.describeForecast(
       limit(100, 2, { per_hour: 0, basis: "exhausted", runs_out_at: NOW, projected_percent: 100 }),
       NOW,
     );
     expect(copy.tone).toBe("critical");
-    expect(copy.text).toBe("Spent for this window");
-    expect(copy.detail).toBe("back in 2h");
+    expect(copy.text).toBe("No quota left");
+    expect(copy.detail).toBeNull();
   });
 
-  test("a limit that empties before its reset reports the clock and the gap", () => {
+  test("a limit that empties before its reset reports one fixed duration", () => {
     // 40% left, burning 20%/h → 2h, an hour before the 3h reset.
     const copy = usage.describeForecast(
       limit(60, 3, {
@@ -140,9 +140,8 @@ describe("quota forecasts", () => {
       NOW,
     );
     expect(copy.tone).toBe("warning");
-    expect(copy.text).toContain("Runs out");
-    expect(copy.text).toContain("1h before reset");
-    expect(copy.detail).toBe("burning 20%/h");
+    expect(copy.text).toBe("2h left");
+    expect(copy.detail).toBe("20%/h");
   });
 
   test("under an hour of allowance left is critical, not merely a warning", () => {
@@ -169,7 +168,7 @@ describe("quota forecasts", () => {
       NOW,
     );
     expect(copy.tone).toBe("ok");
-    expect(copy.text).toBe("Resets first, at about 60% used");
+    expect(copy.text).toBe("60% by reset");
   });
 
   test("a projection landing near the cap is flagged even though it holds", () => {
@@ -183,7 +182,7 @@ describe("quota forecasts", () => {
       NOW,
     );
     expect(copy.tone).toBe("warning");
-    expect(copy.text).toContain("95% used");
+    expect(copy.text).toBe("95% by reset");
   });
 
   // The old panel printed "stable" here, which told you nothing at all.
@@ -197,11 +196,11 @@ describe("quota forecasts", () => {
       }),
       NOW,
     );
-    expect(copy.detail).toBe("10%/h average, idle this hour");
-    expect(copy.text).toContain("Resets first");
+    expect(copy.detail).toBe("10%/h");
+    expect(copy.text).toBe("50% by reset");
   });
 
-  test("an averaged run-out is hedged, a live one is not", () => {
+  test("an averaged run-out uses the same compact format", () => {
     const averaged = usage.describeForecast(
       limit(70, 4, {
         per_hour: 30,
@@ -211,18 +210,123 @@ describe("quota forecasts", () => {
       }),
       NOW,
     );
-    expect(averaged.text.startsWith("Would run out")).toBe(true);
+    expect(averaged.text).toBe("1h left");
+    expect(averaged.detail).toBe("30%/h");
+  });
+
+  // A weekly limit burning hard right now really is running out faster — but
+  // saying so as a date claims to know which days you work and how late.
+  const weekly = (percent, resetsInHours, forecast) => ({
+    id: "seven-day",
+    label: "7-day limit",
+    used: percent,
+    limit: 100,
+    percent,
+    unit: "percent",
+    resets_at: NOW + resetsInHours * HOUR,
+    window_ms: 7 * 24 * HOUR,
+    forecast,
+  });
+
+  test("a long window uses the same time-left format", () => {
+    const copy = usage.describeForecast(
+      weekly(60, 96, {
+        per_hour: 10,
+        basis: "recent",
+        confidence: 0.8,
+        usage_hours_left: 4,
+        // Four hours of work, but at a quarter duty that is sixteen on the
+        // clock — still short of the reset, so the limit does bind.
+        runs_out_at: NOW + 16 * HOUR,
+        projected_percent: 100,
+        duty: 0.25,
+      }),
+      NOW,
+    );
+    expect(copy.tone).toBe("warning");
+    expect(copy.text).toBe("4h left");
+    expect(copy.detail).toBe("10%/h");
+  });
+
+  test("a long window that outlasts its reset still shows the budget", () => {
+    const copy = usage.describeForecast(
+      weekly(30, 48, {
+        per_hour: 2,
+        basis: "recent",
+        confidence: 0.9,
+        usage_hours_left: 35,
+        runs_out_at: NOW + 140 * HOUR,
+        projected_percent: 55,
+        duty: 0.3,
+      }),
+      NOW,
+    );
+    expect(copy.tone).toBe("ok");
+    expect(copy.text).toBe("55% by reset");
+    expect(copy.detail).toBe("2%/h");
+  });
+
+  test("hours of use left is critical once it is down to an afternoon", () => {
+    const copy = usage.describeForecast(
+      weekly(95, 72, {
+        per_hour: 4,
+        basis: "recent",
+        confidence: 0.9,
+        usage_hours_left: 1.25,
+        runs_out_at: NOW + 5 * HOUR,
+        projected_percent: 100,
+        duty: 0.25,
+      }),
+      NOW,
+    );
+    expect(copy.tone).toBe("critical");
+    expect(copy.text).toBe("1h 15m left");
+  });
+
+  // A five-hour window is short enough that use and clock are the same thing,
+  // so it keeps the time you can plan an afternoon around.
+  test("a short window reports the same fixed duration", () => {
+    const copy = usage.describeForecast(
+      limit(60, 3, {
+        per_hour: 20,
+        basis: "recent",
+        confidence: 0.8,
+        usage_hours_left: 2,
+        runs_out_at: NOW + 2 * HOUR,
+        projected_percent: 120,
+        duty: null,
+      }),
+      NOW,
+    );
+    expect(copy.text).toBe("2h left");
+  });
+
+  test("a pace still being established omits redundant status copy", () => {
+    const copy = usage.describeForecast(
+      limit(50, 2, {
+        per_hour: 21.4,
+        basis: "blended",
+        confidence: 0.3,
+        usage_hours_left: 2.3,
+        runs_out_at: NOW + 2.3 * HOUR,
+        projected_percent: 93,
+        duty: null,
+      }),
+      NOW,
+    );
+    expect(copy.detail).toBe("21%/h");
+    expect(copy.text).toBe("93% by reset");
   });
 
   test("nothing to project from falls back to plain facts", () => {
     const untouched = usage.describeForecast(limit(0, 3), NOW);
-    expect(untouched.text).toBe("Untouched this window");
-    expect(untouched.detail).toBe("resets in 3h");
+    expect(untouched.text).toBe("Unused");
+    expect(untouched.detail).toBeNull();
 
     const young = usage.describeForecast(limit(8, 4.9), NOW);
     expect(young.tone).toBe("muted");
-    expect(young.text).toBe("8% used so far");
-    expect(young.detail).toBe("not enough history to project a pace");
+    expect(young.text).toBe("8% used");
+    expect(young.detail).toBeNull();
   });
 });
 
@@ -352,7 +456,7 @@ describe("usage wiring", () => {
     const quota = read("src-tauri/src/usage/quota.rs");
     expect(quota).toContain("https://api.anthropic.com/api/oauth/usage");
     expect(quota).toContain(".claude/.credentials.json");
-    expect(quota).toContain("CLAUDE_CACHE_TTL");
+    expect(quota).toContain("CLAUDE_CACHE_TTL: Duration = Duration::from_secs(60)");
     expect(quota).not.toContain('rename = "refreshToken"');
   });
 

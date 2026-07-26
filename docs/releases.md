@@ -86,8 +86,9 @@ bun run version:next -- --channel testing
    builds and signs the NSIS installer, then writes `latest.json`
    (`scripts/updater-manifest.mjs`) and uploads everything to the release.
 3. **Publish** — flips the draft off. Stable becomes the repository's *Latest*;
-   beta stays a *Pre-release* and is explicitly never marked latest, then the
-   permanent `channel-testing` release is repointed at the new beta.
+   beta stays a *Pre-release* and is explicitly never marked latest. The
+   permanent `channel-testing` release then receives the new beta manifest and
+   a copy of its installer under the fixed name `duckweed-beta-setup.exe`.
 
 Nothing is committed back to the branch: the version lives in the tags, and the
 stamped files only exist inside the build.
@@ -107,13 +108,18 @@ beta even in principle. Beta installs read a manifest that only beta runs ever
 write, and which is itself attached to a prerelease so it stays out of the stable
 lookup.
 
+The same permanent beta release also carries
+`duckweed-beta-setup.exe`. This gives the README a stable download URL for the
+newest beta even though GitHub has no `/releases/latest` equivalent for
+pre-releases.
+
 On top of that, the app checks the channel of any update it is offered
 (`src/lib/update.ts`) and refuses one from the other channel. Both locks are
 covered by tests.
 
-**Switching channels** is done by installing the other build by hand: grab the
-installer from a pre-release for beta, or from the latest release for stable. It
-overwrites the existing install and from then on the app follows that channel.
+**Switching channels** is done by installing the other build by hand: use the
+fixed beta installer link or the latest stable release. It overwrites the
+existing install and from then on the app follows that channel.
 
 ## Installing and updating without administrator rights
 

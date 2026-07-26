@@ -81,6 +81,28 @@ export function UsagePanel() {
 
   const { days, metric } = settings;
 
+  // Keep provider readings current while Usage is open. The shared scan queue
+  // coalesces this with a manual refresh if one is already running.
+  useEffect(() => {
+    let cancelled = false;
+    const timer = setInterval(() => {
+      prefetchUsage(days, 0)
+        .then((result) => {
+          if (cancelled) return;
+          setSnapshot(result);
+          setNow(Date.now());
+          setError(null);
+        })
+        .catch((cause: unknown) => {
+          if (!cancelled) setError(String(cause));
+        });
+    }, 60_000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [days]);
+
   useEffect(() => {
     let cancelled = false;
     const timer = setTimeout(() => {
@@ -363,11 +385,7 @@ export function UsagePanel() {
 
       <section className="settings-section usage-section">
         <h2>Quota management</h2>
-        <p className="usage-sub">
-          Provider-reported limits for agents used in the selected period. Duckweed never invents
-          a quota from transcript totals. The line under each bar projects that limit against its
-          own reset, from your measured burn rate.
-        </p>
+        <p className="usage-sub">Live limits reported by each provider.</p>
         {snapshot.quotas.length > 0 ? (
           <div className="usage-quota-grid">
             {snapshot.quotas.map((quota) => (

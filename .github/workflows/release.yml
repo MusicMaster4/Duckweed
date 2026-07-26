@@ -213,10 +213,17 @@ jobs:
         if: needs.version.outputs.channel == 'testing'
         run: |
           set -euo pipefail
-          gh release download "$TAG" --repo "$REPO" --pattern latest.json --dir .
+          mkdir -p beta-channel
+          gh release download "$TAG" --repo "$REPO" \
+            --pattern latest.json --pattern "*.exe" --dir beta-channel
+          INSTALLER="$(find beta-channel -maxdepth 1 -type f -name '*.exe' -print -quit)"
+          test -n "$INSTALLER"
+          mv "$INSTALLER" beta-channel/duckweed-beta-setup.exe
           if ! gh release view "$BETA_POINTER_TAG" --repo "$REPO" >/dev/null 2>&1; then
             gh release create "$BETA_POINTER_TAG" --repo "$REPO" --prerelease \
               --target "$GITHUB_SHA" --title "Beta channel manifest" \
-              --notes "Always carries the update manifest for the newest beta. Not a download — grab the installer from the release the manifest points to."
+              --notes "Permanent download and update pointer for the newest Duckweed beta."
           fi
-          gh release upload "$BETA_POINTER_TAG" latest.json --repo "$REPO" --clobber
+          gh release upload "$BETA_POINTER_TAG" \
+            beta-channel/latest.json beta-channel/duckweed-beta-setup.exe \
+            --repo "$REPO" --clobber

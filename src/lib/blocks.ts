@@ -18,6 +18,15 @@ import { nextBlockSelection, type BlockNavAction } from "./blockNav";
  * WebGL renderer and resize with the pane the same way the visual cursor does.
  */
 
+/**
+ * Padding on each side of the block hairline (px). Warp's default (non-compact)
+ * dividers sit in a short band with equal air above and below the 1px rule.
+ * xterm rows have no inter-row gap, so the upper half covers the bottom of the
+ * preceding output cell and the lower half reserves space before the command
+ * label — keep each side small enough that the label's font still fits the cell.
+ */
+const BLOCK_GAP = 5;
+
 export interface CommandBlock {
   id: number;
   command: string;
@@ -26,7 +35,7 @@ export interface CommandBlock {
   end: IMarker | null;
   /** Covers the prompt+echo row; shows only the command text. */
   cmdEl: HTMLDivElement;
-  /** Full-width hairline above the block (null for the first). */
+  /** Full-width hairline + gap above the block (null for the first). */
   sepEl: HTMLDivElement | null;
 }
 
@@ -216,28 +225,38 @@ export class BlockTracker {
       }
 
       const cmdRow = range.start - viewportY;
-      // The label and its boundary only exist while the command row is visible.
-      const cmdVisible = cmdRow >= 0 && cmdRow < rows;
+      // Gap band is 2×BLOCK_GAP and sits entirely above the command text, so it
+      // can poke a few px past the viewport top while the label is still useful.
+      const cmdVisible = cmdRow >= -1 && cmdRow < rows;
       if (cmdVisible) {
         const y = offsetY + cmdRow * cellHeight;
-        block.cmdEl.hidden = false;
-        block.cmdEl.classList.toggle(
-          "is-selected",
-          this.editorMode && block.id === this.selectedId,
-        );
-        block.cmdEl.style.transform = `translate3d(0, ${y}px, 0)`;
-        block.cmdEl.style.width = `${fullWidth}px`;
-        block.cmdEl.style.height = `${cellHeight}px`;
-        block.cmdEl.style.lineHeight = `${cellHeight}px`;
+        // Equal air above + below the hairline: expand the label upward by the
+        // full band (into the previous cell) so the command string keeps a full
+        // cell of line-height and is not clipped.
+        const band = block.sepEl ? BLOCK_GAP * 2 : 0;
+        // Label only when the command row itself is in view (not just the gap).
+        if (cmdRow >= 0) {
+          block.cmdEl.hidden = false;
+          block.cmdEl.classList.toggle(
+            "is-selected",
+            this.editorMode && block.id === this.selectedId,
+          );
+          block.cmdEl.style.transform = `translate3d(0, ${y - band}px, 0)`;
+          block.cmdEl.style.width = `${fullWidth}px`;
+          block.cmdEl.style.height = `${cellHeight + band}px`;
+          block.cmdEl.style.padding = `${band}px 6px 0`;
+          block.cmdEl.style.lineHeight = `${cellHeight}px`;
+        } else {
+          block.cmdEl.hidden = true;
+        }
 
         if (block.sepEl) {
-          // A real 1px boundary at the top of the command cell. The former
-          // 12px opaque "gap" sat on top of the preceding output row and cut
-          // through text because xterm's rows have no space between them.
+          // Hairline centered in the band: BLOCK_GAP above (previous output) and
+          // BLOCK_GAP below (before cmd text). Label paint fills the band.
           block.sepEl.hidden = false;
-          block.sepEl.style.transform = `translate3d(0, ${y}px, 0)`;
+          block.sepEl.style.transform = `translate3d(0, ${y - band}px, 0)`;
           block.sepEl.style.width = `${fullWidth}px`;
-          block.sepEl.style.height = "1px";
+          block.sepEl.style.height = `${band}px`;
         }
       } else {
         block.cmdEl.hidden = true;
@@ -509,8 +528,7 @@ export class BlockTracker {
       return;
     }
 
-    // Paint over the visible slice of the block, including the command row so
-    // the soft tint lines up with the is-selected label background.
+    // Soft tint over the visible slice of the block, including the command row.
     const startRow = range.start - viewportY;
     const endRow = range.end - viewportY;
     const visStart = Math.max(0, startRow);

@@ -2249,7 +2249,7 @@ svg.tab-glyph-fill path {
 /*
  * Warp-style block chrome, painted as DOM overlays above the xterm canvas
  * (same trick as the visual cursor). The command label hides the shell's
- * `PS path>` echo; the separator is a full-width 1px hairline.
+ * `PS path>` echo; the separator is a full-width hairline with padding.
  */
 .command-block-cmd {
   position: absolute;
@@ -2274,15 +2274,15 @@ svg.tab-glyph-fill path {
 }
 
 .command-block-cmd.is-selected {
-  /* Match the soft block overlay so the covered command row feels selected too. */
-  background: color-mix(in srgb, var(--bg-pane) 72%, #7be05a 28%);
+  /* Same soft green wash as the select overlay, so the command row matches. */
+  background: color-mix(in srgb, var(--bg-pane) 88%, var(--accent) 12%);
 }
 
 /*
- * Soft highlight for a clicked/keyboard-selected command chunk. pointer-events
- * none so wheel scroll and free-range drag still reach xterm. We paint this
- * instead of selectLines over thousands of rows (which jumped the viewport and
- * made tall cargo output feel stuck).
+ * Soft green wash over a clicked/keyboard-selected chunk. Nothing else — no
+ * border, no card. pointer-events none so wheel scroll and free-range drag
+ * still reach xterm. Painted instead of selectLines over thousands of rows
+ * (which jumped the viewport and froze tall cargo output).
  */
 .command-block-select-overlay {
   position: absolute;
@@ -2292,11 +2292,15 @@ svg.tab-glyph-fill path {
   margin: 0;
   padding: 0;
   pointer-events: none;
-  background: color-mix(in srgb, transparent 78%, #7be05a 22%);
+  background: color-mix(in srgb, transparent 88%, var(--accent) 12%);
   will-change: transform;
 }
 
-/* Hairline at the command-row boundary; it never covers the preceding output. */
+/*
+ * Gap band between blocks: the expanded command label paints the opaque fill
+ * (so selection tint covers the air too); this layer only centers the hairline
+ * with equal space above (previous output) and below (next command).
+ */
 .command-block-separator {
   position: absolute;
   z-index: 5;
@@ -2306,8 +2310,20 @@ svg.tab-glyph-fill path {
   padding: 0;
   border: none;
   pointer-events: none;
-  background: var(--block-separator);
+  background: transparent;
   will-change: transform;
+  display: flex;
+  align-items: center;
+}
+
+.command-block-separator::after {
+  content: "";
+  display: block;
+  width: 100%;
+  height: 1px;
+  flex-shrink: 0;
+  border: none;
+  background: var(--block-separator);
 }
 
 /* Hides the idle shell prompt under the last block in editor mode. */
