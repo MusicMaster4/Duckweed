@@ -10,6 +10,7 @@ export const COMMAND_HISTORY_KEY = "duckweed:command-history:v1";
 export const DURABLE_KEYS = [
   "duckweed:state:v1",
   "duckweed:usage:v1",
+  "duckweed:suggest-feedback:v1",
   COMMAND_HISTORY_KEY,
 ] as const;
 

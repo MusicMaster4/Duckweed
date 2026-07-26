@@ -65,6 +65,11 @@ type Reorder = {
   to: number;
   /** The strip as it was when the drag began; never re-measured. */
   slots: Slot[];
+  /**
+   * Count of pinned tabs at drag start. Unpinned tabs reorder only to the
+   * right of this block; pinned tabs never enter a drag at all.
+   */
+  pinnedCount: number;
   dragging: boolean;
 };
 
@@ -86,16 +91,10 @@ const TabGlyph = ({ iconId }: { iconId: string | null | undefined }) => {
   );
 };
 
+/** Upright pushpin — filled so the global stroke-only svg rule does not distort it. */
 const PinIcon = () => (
   <svg viewBox="0 0 16 16" aria-hidden="true" className="tab-pin">
-    <path
-      d="M9.6 2.4 8.2 3.8l.7 2.1-1.9 1.9-1.1-.4L4.5 8.8l2.7 2.7 1.4-1.4-.4-1.1 1.9-1.9 2.1.7 1.4-1.4zM5.2 11.5 3 13.7"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.25"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    />
+    <path d="M8 1.25c-1.52 0-2.75 1.23-2.75 2.75v1.1H4.5a.75.75 0 0 0 0 1.5h.42c.22 1.35 1.2 2.45 2.48 2.85v3.8a.75.75 0 0 0 1.5 0v-3.8c1.28-.4 2.26-1.5 2.48-2.85h.37a.75.75 0 0 0 0-1.5h-.75V4c0-1.52-1.23-2.75-2.75-2.75z" />
   </svg>
 );
 
@@ -152,22 +151,31 @@ export function TabStrip({
       const els = [...strip.querySelectorAll<HTMLElement>("[data-tab-id]")];
       const from = els.findIndex((el) => el.dataset.tabId === tabId);
       if (from < 0) return null;
+      // Pinned tabs are fixed — never start a drag for them.
+      if (els[from].dataset.pinned === "true") return null;
       const slots = els.map((el) => {
         const rect = el.getBoundingClientRect();
         return { el, left: rect.left, width: rect.width };
       });
-      return { slots, from };
+      // Contiguous pinned block on the left (pin/unpin always reorders this way).
+      let pinnedCount = 0;
+      for (const el of els) {
+        if (el.dataset.pinned !== "true") break;
+        pinnedCount++;
+      }
+      return { slots, from, pinnedCount };
     };
 
     /** Slide everything into the new order, then hand it to React. */
     const settle = (state: Reorder) => {
-      const { slots, from, to } = state;
+      const { slots, from, to, pinnedCount } = state;
       const width = slots[from].width;
       const rest = restingLeft(slots, from, to);
 
       for (let i = 0; i < slots.length; i++) {
         const { el } = slots[i];
-        const shift = i === from ? rest - slots[from].left : slotShift(i, from, to, width);
+        const shift =
+          i === from ? rest - slots[from].left : slotShift(i, from, to, width, pinnedCount);
         el.style.transition = `transform ${SLIDE_MS}ms ${SLIDE_EASE}`;
         el.style.transform = shift ? `translateX(${shift}px)` : "translateX(0px)";
       }
@@ -208,27 +216,32 @@ export function TabStrip({
       if (!state.dragging) {
         if (Math.abs(e.clientX - state.startX) < DRAG_SLOP) return;
         const shot = snapshot(state.tabId);
-        if (!shot) return;
+        if (!shot) {
+          // Pinned (or gone) — abandon the gesture so it never becomes a drag.
+          reorder.current = null;
+          return;
+        }
         state.dragging = true;
         state.slots = shot.slots;
         state.from = shot.from;
         state.to = shot.from;
+        state.pinnedCount = shot.pinnedCount;
         document.body.classList.add("is-dragging-tab");
         setDragTabId(state.tabId);
       }
 
-      const { slots, from } = state;
+      const { slots, from, pinnedCount } = state;
       const width = slots[from].width;
-      const left = clampLeft(slots, from, e.clientX - state.grabOffset);
-      const to = dropIndex(slots, from, left);
+      const left = clampLeft(slots, from, e.clientX - state.grabOffset, pinnedCount);
+      const to = dropIndex(slots, from, left, pinnedCount);
       state.to = to;
 
       // The dragged tab tracks the pointer exactly; the tabs it has passed
-      // step aside by its width and are eased there by CSS.
+      // step aside by its width and are eased there by CSS. Pinned tabs stay put.
       slots[from].el.style.transform = `translateX(${left - slots[from].left}px)`;
       for (let i = 0; i < slots.length; i++) {
         if (i === from) continue;
-        const shift = slotShift(i, from, to, width);
+        const shift = slotShift(i, from, to, width, pinnedCount);
         slots[i].el.style.transform = shift ? `translateX(${shift}px)` : "translateX(0px)";
       }
     };
@@ -280,6 +293,7 @@ export function TabStrip({
             <div
               key={tab.id}
               data-tab-id={tab.id}
+              data-pinned={tab.pinned ? "true" : undefined}
               role="tab"
               aria-selected={isActive}
               aria-label={
@@ -306,6 +320,11 @@ export function TabStrip({
                 // Land any drop still animating before measuring anything.
                 settling.current?.();
                 onSelect(tab.id);
+                // Pinned tabs stay put — select only, no reorder gesture.
+                if (tab.pinned) {
+                  reorder.current = null;
+                  return;
+                }
                 const rect = e.currentTarget.getBoundingClientRect();
                 reorder.current = {
                   tabId: tab.id,
@@ -314,6 +333,7 @@ export function TabStrip({
                   from: 0,
                   to: 0,
                   slots: [],
+                  pinnedCount: 0,
                   dragging: false,
                 };
               }}

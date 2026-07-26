@@ -17,5 +17,7 @@
     "noFallthroughCasesInSwitch": true,
     "exactOptionalPropertyTypes": false
   },
-  "include": ["src"]
+  "include": ["src"],
+  // Tests run under `bun test`, which supplies its own globals/types.
+  "exclude": ["src/**/*.test.ts", "src/**/*.test.tsx"]
 }

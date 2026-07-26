@@ -17,10 +17,30 @@ describe("settings tab", () => {
   test("settings are rendered in the workspace instead of a popup", () => {
     const app = read("src/App.tsx");
     const settings = read("src/components/SettingsMenu.tsx");
-    expect(app.indexOf("settingsActive ? (")).toBeLessThan(app.indexOf("<StatusBar"));
+    expect(app.indexOf("settingsTabOpen &&")).toBeLessThan(app.indexOf("<StatusBar"));
+    expect(app).toContain("settings-host");
     expect(settings).toContain('className="settings-sidebar"');
     expect(settings).toContain('className="settings-content"');
     expect(settings).not.toContain("settings-backdrop");
+  });
+
+  test("settings stay mounted while the tab is open so scroll is preserved", () => {
+    const app = read("src/App.tsx");
+    const settings = read("src/components/SettingsMenu.tsx");
+    const css = read("src/styles.css");
+    // Keep-alive: tab open mounts host; inactive only hides it (not unmount).
+    expect(app).toContain("settingsTabOpen &&");
+    expect(app).toContain("settings-host");
+    expect(app).toContain('is-active');
+    expect(app).toContain("active={settingsActive}");
+    expect(app).toContain("!settingsActive &&");
+    expect(css).toContain(".settings-host:not(.is-active)");
+    expect(css).not.toContain(".settings-host[hidden]");
+    // Section + scroll memory for close/reopen and sidebar section switches.
+    expect(settings).toContain("lastSettingsSection");
+    expect(settings).toContain("lastSettingsScroll");
+    expect(settings).toContain("onScroll={() => persistScroll()}");
+    expect(settings).toContain("ignoreScrollRef");
   });
 
   test("only the visible view reports an active tab", () => {

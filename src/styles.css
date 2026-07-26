@@ -466,12 +466,19 @@ body.is-dragging-tab .tab.is-reordering,
   color: #fff;
 }
 
+/* Filled pushpin — opt out of the global stroke-only svg rule. */
 .tab-pin {
-  width: 11px;
-  height: 11px;
+  width: 12px;
+  height: 12px;
   flex: none;
   color: var(--text-faint);
-  opacity: 0.85;
+  opacity: 0.9;
+}
+
+.tab-pin,
+.tab-pin path {
+  fill: currentColor;
+  stroke: none;
 }
 
 .tab.is-colored .tab-pin {
@@ -486,6 +493,11 @@ body.is-dragging-tab .tab.is-reordering,
   color: currentColor;
 }
 
+/* Pinned tabs sit fixed on the left — no grab cursor, no drag affordance. */
+.tab.is-pinned {
+  cursor: default;
+}
+
 .tab.is-unclaimed {
   color: var(--text-faint);
 }
@@ -497,7 +509,7 @@ body.is-dragging-tab .tab.is-reordering,
   height: 18px;
   margin-left: -3px;
   border-radius: 5px;
-  color: var(--amber);
+  color: var(--text-faint);
   flex: none;
 }
 
@@ -514,15 +526,6 @@ svg.tab-glyph-fill path {
 }
 
 .tab-folder:hover {
-  background: rgba(240, 192, 82, 0.11);
-  color: var(--amber);
-}
-
-.tab.is-unclaimed .tab-folder {
-  color: var(--text-faint);
-}
-
-.tab.is-unclaimed .tab-folder:hover {
   background: var(--hover);
   color: var(--text);
 }
@@ -672,6 +675,27 @@ svg.tab-glyph-fill path {
 }
 
 /* ----------------------------------------------------------- settings */
+
+/* Host keeps Settings mounted while the settings tab stays open. When inactive
+   it stays laid out (visibility/absolute) so scrollTop is not destroyed the way
+   display:none can be — that was landing users mid-page on return. */
+.settings-host {
+  display: flex;
+  flex-direction: column;
+}
+
+.settings-host:not(.is-active) {
+  position: absolute;
+  inset: 0;
+  visibility: hidden;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.settings-host > .settings-page {
+  flex: 1 1 auto;
+  min-height: 0;
+}
 
 .settings-page {
   display: flex;
@@ -1778,7 +1802,7 @@ svg.tab-glyph-fill path {
 .pane-welcome-browse svg {
   width: 18px;
   height: 18px;
-  color: var(--amber);
+  color: var(--text-faint);
   flex: none;
 }
 

@@ -77,3 +77,27 @@ describe("tab reorder geometry", () => {
     expect(restingLeft(slots, 1, 1)).toBe(60);
   });
 });
+
+describe("pinned tab reorder bounds", () => {
+  test("unpinned tabs cannot drop into the pinned block on the left", () => {
+    const slots = strip(4);
+    // Two pinned tabs at 0 and 1; drag tab 2 left as far as it goes.
+    expect(dropIndex(slots, 2, clampLeft(slots, 2, -999, 2), 2)).toBe(2);
+    expect(dropIndex(slots, 3, clampLeft(slots, 3, -999, 2), 2)).toBe(2);
+  });
+
+  test("clampLeft keeps unpinned tabs right of the pinned block", () => {
+    const slots = strip(4);
+    // First movable slot is index 2 (left = 200).
+    expect(clampLeft(slots, 3, -999, 2)).toBe(200);
+    expect(clampLeft(slots, 2, 0, 2)).toBe(200);
+  });
+
+  test("pinned tabs never step aside while an unpinned tab is dragged", () => {
+    // minIndex = 2 → indices 0 and 1 stay put regardless of from/to.
+    expect(slotShift(0, 3, 2, 100, 2)).toBe(0);
+    expect(slotShift(1, 3, 2, 100, 2)).toBe(0);
+    // Movable neighbour still shifts.
+    expect(slotShift(2, 3, 2, 100, 2)).toBe(100);
+  });
+});

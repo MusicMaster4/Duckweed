@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 
 import { UsagePanel } from "./UsagePanel";
 import type { ShellIntegrationStatus } from "../lib/ipc";
@@ -6,6 +6,8 @@ import type { InputMode } from "../lib/terminals";
 import type { ShellInfo } from "../lib/types";
 
 interface Props {
+  /** False while the settings tab exists but another tab is selected. */
+  active?: boolean;
   fontSize: number;
   inputMode: InputMode;
   highlight: boolean;
@@ -41,10 +43,20 @@ function Toggle({ enabled }: { enabled: boolean }) {
 
 type SettingsSection = "General" | "Appearance" | "Terminal" | "Usage" | "About";
 
-// Survive SettingsMenu unmount when the user leaves the Settings tab and comes back.
+// Survive SettingsMenu unmount when the settings tab is closed and reopened.
+// (While the tab stays open, App keeps this tree mounted so the browser holds
+// scroll natively when switching away to a terminal tab.)
 let lastSettingsSection: SettingsSection = "General";
+const lastSettingsScroll: Record<SettingsSection, number> = {
+  General: 0,
+  Appearance: 0,
+  Terminal: 0,
+  Usage: 0,
+  About: 0,
+};
 
 export function SettingsMenu({
+  active = true,
   fontSize,
   inputMode,
   highlight,
@@ -70,13 +82,43 @@ export function SettingsMenu({
   const [section, setSectionState] = useState<SettingsSection>(lastSettingsSection);
   const [query, setQuery] = useState("");
   const [suggestionsCleared, setSuggestionsCleared] = useState(false);
+  const contentRef = useRef<HTMLElement | null>(null);
+  const sectionRef = useRef(section);
+  const searchingRef = useRef(false);
+  const activeRef = useRef(active);
+  // While true, ignore scroll events so a clamped restore cannot overwrite the
+  // real saved offset (that was the "lands in the middle" bug).
+  const ignoreScrollRef = useRef(false);
+  sectionRef.current = section;
+  activeRef.current = active;
+
+  const persistScroll = (forSection: SettingsSection = sectionRef.current) => {
+    const el = contentRef.current;
+    // Skip while hidden: some engines reset scrollTop on display:none and that
+    // must not clobber the real offset we saved on deactivate.
+    if (!el || !activeRef.current || searchingRef.current || ignoreScrollRef.current) return;
+    lastSettingsScroll[forSection] = el.scrollTop;
+  };
+
   const setSection = (next: SettingsSection) => {
+    persistScroll(sectionRef.current);
     lastSettingsSection = next;
     setSectionState(next);
   };
+
+  // Capture the exact scrollTop at the moment the scrollport is detached so a
+  // full tab close still remembers position even if the last onScroll was missed.
+  const setContentNode = (node: HTMLElement | null) => {
+    if (contentRef.current && !node && activeRef.current && !searchingRef.current && !ignoreScrollRef.current) {
+      lastSettingsScroll[sectionRef.current] = contentRef.current.scrollTop;
+    }
+    contentRef.current = node;
+  };
+
   const roundedFontSize = Math.round(fontSize * 10) / 10;
   const normalizedQuery = query.trim().toLowerCase();
   const searching = normalizedQuery.length > 0;
+  searchingRef.current = searching;
   const matches = (text: string) => !searching || text.toLowerCase().includes(normalizedQuery);
   const showAppearance =
     (section === "General" || section === "Appearance" || searching) &&
@@ -107,6 +149,68 @@ export function SettingsMenu({
   const usageHit =
     searching && matches("usage statistics cost tokens spend quota limits agents models pricing");
   const visibleTitle = searching ? "Search results" : section;
+
+  // When the host is about to hide, lock in the current scroll before the
+  // engine can zero it via display:none.
+  useLayoutEffect(() => {
+    if (active) return;
+    const el = contentRef.current;
+    if (!el || searchingRef.current) return;
+    lastSettingsScroll[sectionRef.current] = el.scrollTop;
+  }, [active]);
+
+  // Restore scroll after remount, section switch, or becoming active again.
+  // Re-apply across frames while content is still shorter than the saved offset
+  // (async Usage content); never write those clamped values into the store.
+  useLayoutEffect(() => {
+    if (!active) return;
+    const el = contentRef.current;
+    if (!el) return;
+
+    if (searching) {
+      ignoreScrollRef.current = true;
+      el.scrollTop = 0;
+      window.queueMicrotask(() => {
+        ignoreScrollRef.current = false;
+      });
+      return;
+    }
+
+    const desired = lastSettingsScroll[section] ?? 0;
+    let cancelled = false;
+    let raf = 0;
+    let attempts = 0;
+
+    const apply = () => {
+      if (cancelled || !contentRef.current) return;
+      const node = contentRef.current;
+      // Always read the module store — not a closed-over stale number — in case
+      // the user scrolled during a previous frame of this same restore.
+      const target = lastSettingsScroll[section] ?? desired;
+      const max = Math.max(0, node.scrollHeight - node.clientHeight);
+      ignoreScrollRef.current = true;
+      node.scrollTop = Math.min(target, max);
+      window.queueMicrotask(() => {
+        if (!cancelled) ignoreScrollRef.current = false;
+      });
+
+      attempts += 1;
+      // Content still too short for the real position (e.g. Usage still loading).
+      if (target > max + 1 && attempts < 120) {
+        raf = window.requestAnimationFrame(apply);
+      }
+    };
+
+    apply();
+
+    return () => {
+      cancelled = true;
+      window.cancelAnimationFrame(raf);
+      // Do not persist here: by cleanup time React has already committed the
+      // next section's content, so scrollTop would belong to the wrong page.
+      ignoreScrollRef.current = false;
+    };
+  }, [active, section, searching, showUsage]);
 
   return (
     <div className="settings-page">
@@ -141,7 +245,12 @@ export function SettingsMenu({
         <div className="settings-sidebar-foot">duckweed</div>
       </aside>
 
-      <main className="settings-content" aria-label="Settings">
+      <main
+        ref={setContentNode}
+        className="settings-content"
+        aria-label="Settings"
+        onScroll={() => persistScroll()}
+      >
         <div className={`settings-content-inner${showUsage ? " is-wide" : ""}`}>
           <header className="settings-content-header">
             <span>Settings</span>

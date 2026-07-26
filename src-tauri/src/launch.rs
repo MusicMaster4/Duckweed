@@ -38,6 +38,10 @@ pub struct LaunchIntent {
 pub struct PendingLaunch(pub Mutex<Option<LaunchIntent>>);
 
 /// True when argv asks for an independent process rather than a new tab.
+///
+/// Only consulted from the release single-instance path; debug builds skip that
+/// plugin entirely so this can look unused when compiling `tauri dev`.
+#[cfg_attr(debug_assertions, allow(dead_code))]
 pub fn wants_new_window(args: &[String]) -> bool {
     parse_args(args)
         .as_ref()

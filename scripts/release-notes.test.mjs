@@ -137,7 +137,16 @@ describe("the prompt", () => {
     expect(user.role).toBe("user");
     expect(system.content).toContain("What's Changed");
     expect(system.content).toContain("Never invent");
+    expect(system.content).toContain("No user-facing changes in this release.");
+    expect(system.content).toContain("**Short title**");
     expect(user.content).toContain("What's Changed");
+    expect(user.content).toContain("user-noticeable");
+  });
+
+  test("shows worked examples so the model can match the house style", () => {
+    expect(system.content).toContain("Command history");
+    expect(system.content).toContain("Bad:");
+    expect(system.content).toContain("Good:");
   });
 });
 
