@@ -2998,8 +2998,8 @@ body.is-resizing * {
 /* -------------------------------------------------------------- updates */
 
 .update-dialog {
-  width: min(460px, 92vw);
-  max-height: 70vh;
+  width: min(380px, 90vw);
+  max-height: 60vh;
   display: flex;
   flex-direction: column;
   border: 1px solid var(--border-strong);
@@ -3013,7 +3013,7 @@ body.is-resizing * {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 12px 15px;
+  padding: 10px 13px;
   border-bottom: 1px solid var(--border);
 }
 
@@ -3045,7 +3045,7 @@ body.is-resizing * {
 }
 
 .update-body {
-  padding: 15px;
+  padding: 12px 13px;
   overflow-y: auto;
 }
 
@@ -3068,7 +3068,7 @@ body.is-resizing * {
 }
 
 .update-notes {
-  max-height: 30vh;
+  max-height: 24vh;
   margin: 0 0 10px;
   padding: 9px 11px;
   border-radius: 8px;
@@ -3115,7 +3115,7 @@ body.is-resizing * {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
-  padding: 11px 15px;
+  padding: 9px 13px;
   border-top: 1px solid var(--border);
 }
 

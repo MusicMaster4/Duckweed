@@ -25,7 +25,6 @@ import {
 } from "./lib/confirmClose";
 import { clearGreetings } from "./lib/greetings";
 import { frontendReady, listShells, projectInfo, watchProject } from "./lib/ipc";
-import { loadSettings as loadUsageSettings, prefetchUsage } from "./lib/usage";
 import {
   balance,
   findLeaf,
@@ -42,6 +41,7 @@ import { toggleFullscreen } from "./lib/window";
 import { DEFAULT_TOOLS_WIDTH, load, pushRecent, rehydrate, save } from "./lib/persist";
 import { didProcessFinish, type ProcessState } from "./lib/processActivity";
 import * as terminals from "./lib/terminals";
+import { loadSettings as loadUsageSettings, prefetchUsage } from "./lib/usage";
 import type { LeafNode, ProjectInfo, ShellInfo, Tab } from "./lib/types";
 
 interface SpawnOpts {
@@ -51,6 +51,17 @@ interface SpawnOpts {
 
 const DEFAULT_FONT_SIZE = 13.5;
 const TAURI_RUNTIME = "__TAURI_INTERNALS__" in window;
+
+async function confirmUpdateWithRunningProcesses(): Promise<boolean> {
+  const hasRunningProcesses = await terminals.anyHasRunningProcess(terminals.allSessionIds());
+  if (!hasRunningProcesses) return true;
+  return confirmCloseRunning({
+    title: "Install update?",
+    message:
+      "Some terminals still have running processes. If you update now, their progress will be lost.",
+    confirmLabel: "Update anyway",
+  });
+}
 
 function basename(path: string): string {
   return path.split(/[\\/]/).filter(Boolean).pop() ?? path;
@@ -143,14 +154,6 @@ function isTextField(target: EventTarget | null): boolean {
 export default function App() {
   const initial = useMemo(boot, []);
 
-  useEffect(() => {
-    // Build the incremental transcript index while the terminal UI becomes
-    // interactive. Usage can then paint from memory on its first visit.
-    void prefetchUsage(loadUsageSettings().days).catch(() => {
-      // The Usage panel owns the visible retry/error state.
-    });
-  }, []);
-
   const [tabs, setTabs] = useState<Tab[]>(initial.tabs);
   const [activeTabId, setActiveTabId] = useState(initial.activeTabId);
   const [recents, setRecents] = useState<string[]>(initial.recents);
@@ -175,7 +178,7 @@ export default function App() {
   const [toolsWidth, setToolsWidth] = useState(
     Math.min(TOOLS_MAX_WIDTH, Math.max(TOOLS_MIN_WIDTH, initial.toolsWidth)),
   );
-  const updater = useUpdater();
+  const updater = useUpdater({ beforeInstall: confirmUpdateWithRunningProcesses });
 
   // Handlers read state through refs so keyboard shortcuts and pointer drags
   // never act on a stale snapshot.
@@ -474,9 +477,10 @@ export default function App() {
 
   const openSettings = useCallback(() => {
     terminals.clearAllBlockSelections();
-    // Re-stat known transcripts in the background before the user reaches
-    // Usage. Unchanged files stay in the index and are never reopened.
-    void prefetchUsage(loadUsageSettings().days, 0).catch(() => {
+    // Warm Usage only when Settings is actually entered. The frontend cache
+    // coalesces repeated clicks and keeps quick reopenings from touching disk
+    // or provider endpoints again; leaving Settings open starts no polling.
+    void prefetchUsage(loadUsageSettings().days, 60_000).catch(() => {
       // The Usage panel owns the visible retry/error state.
     });
     setSettingsTabOpen(true);

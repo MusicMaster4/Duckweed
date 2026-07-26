@@ -60,8 +60,9 @@ export interface QuotaForecast {
   /** Utilization points consumed per hour. */
   per_hour: number;
   /**
-   * `recent` from the last hour of samples, `window` from the average since
-   * the window opened, `exhausted` when there is nothing left to burn.
+   * `recent` from the last hour of samples, weighted toward the newest ones,
+   * `window` from the average since the window opened, `exhausted` when there
+   * is nothing left to burn.
    */
   basis: "recent" | "window" | "exhausted";
   /** Epoch ms this limit would hit 100%; null when the pace never gets there. */
@@ -146,6 +147,7 @@ interface CachedSnapshot {
 const snapshotCache = new Map<number, CachedSnapshot>();
 const pendingScans = new Map<number, Promise<Snapshot>>();
 let scanQueue: Promise<void> = Promise.resolve();
+const DEFAULT_SNAPSHOT_MAX_AGE_MS = 60_000;
 
 /** A ready snapshot lets the Usage tab paint without a loading screen. */
 export function cachedUsage(days: number): Snapshot | null {
@@ -159,7 +161,10 @@ export function cachedUsage(days: number): Snapshot | null {
  * scanner owns one shared index. A warm pass stats files but opens only those
  * whose size or modification time changed.
  */
-export function prefetchUsage(days: number, maxAgeMs = 15_000): Promise<Snapshot> {
+export function prefetchUsage(
+  days: number,
+  maxAgeMs = DEFAULT_SNAPSHOT_MAX_AGE_MS,
+): Promise<Snapshot> {
   const cached = snapshotCache.get(days);
   if (cached && Date.now() - cached.cachedAt <= maxAgeMs) {
     return Promise.resolve(cached.value);
@@ -260,21 +265,22 @@ export const formatTokens = (value: number) => compactNumber(value);
 /** Full precision, for tooltips and tables where the exact figure matters. */
 export const formatExact = (value: number) => value.toLocaleString();
 
+const USAGE_DATE_LOCALE = "en-US";
+
 /** `Mon 21` — an axis tick for a daily series. */
 export function dayTick(date: string): string {
   const parsed = parseDay(date);
   if (!parsed) return date;
-  return parsed.toLocaleDateString(undefined, { weekday: "short", day: "numeric" });
+  const weekday = parsed.toLocaleDateString(USAGE_DATE_LOCALE, { weekday: "short" });
+  return `${weekday} ${parsed.getDate()}`;
 }
 
 export function dayFull(date: string): string {
   const parsed = parseDay(date);
   if (!parsed) return date;
-  return parsed.toLocaleDateString(undefined, {
-    weekday: "long",
-    month: "short",
-    day: "numeric",
-  });
+  const weekday = parsed.toLocaleDateString(USAGE_DATE_LOCALE, { weekday: "long" });
+  const month = parsed.toLocaleDateString(USAGE_DATE_LOCALE, { month: "short" });
+  return `${weekday}, ${month} ${parsed.getDate()}`;
 }
 
 function parseDay(date: string): Date | null {
@@ -356,7 +362,7 @@ export function quotaRemaining(
 export function formatEtaClock(at: number, now: number): string {
   if (at <= now + 30_000) return "now";
   const date = new Date(at);
-  const clock = date.toLocaleTimeString(undefined, {
+  const clock = date.toLocaleTimeString(USAGE_DATE_LOCALE, {
     hour: "numeric",
     minute: "2-digit",
   });
@@ -370,10 +376,10 @@ export function formatEtaClock(at: number, now: number): string {
   if (dayDelta === 0) return clock;
   if (dayDelta === 1) return `tomorrow ${clock}`;
   if (dayDelta > 1 && dayDelta < 7) {
-    const weekday = date.toLocaleDateString(undefined, { weekday: "short" });
+    const weekday = date.toLocaleDateString(USAGE_DATE_LOCALE, { weekday: "short" });
     return `${weekday} ${clock}`;
   }
-  const day = date.toLocaleDateString(undefined, {
+  const day = date.toLocaleDateString(USAGE_DATE_LOCALE, {
     month: "short",
     day: "numeric",
   });

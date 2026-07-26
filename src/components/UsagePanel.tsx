@@ -87,7 +87,10 @@ export function UsagePanel() {
       const ready = cachedUsage(days);
       if (ready) setSnapshot(ready);
       setLoading(!ready);
-      prefetchUsage(days, reload > 0 ? 0 : 15_000)
+      // Settings already warmed this range. Keep that result for a minute so
+      // navigating to Usage does not immediately repeat filesystem discovery;
+      // only the explicit refresh button bypasses the cache.
+      prefetchUsage(days, reload > 0 ? 0 : 60_000)
         .then((result) => {
           if (cancelled) return;
           setSnapshot(result);

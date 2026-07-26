@@ -7,9 +7,12 @@
 //! available instead of asking the user to invent a ceiling.
 //!
 //! Each successful snapshot is also appended to a small local history so we
-//! can estimate how long the remaining allowance lasts at the last hour's
-//! burn rate. A drop in utilization is treated as a window reset, not as
-//! "negative burn".
+//! can estimate how long the remaining allowance lasts at the recent burn
+//! rate. That rate still looks back an hour, but weights what happened in the
+//! last 30 minutes twice and the last 15 minutes three times, so a session
+//! that just picked up (or just stopped) moves the estimate quickly instead of
+//! being averaged away by the quiet part of the hour. A drop in utilization is
+//! treated as a window reset, not as "negative burn".
 //!
 //! An idle hour is not an answer, so when there is no recent burn we fall back
 //! to the average pace of the window so far — utilization divided by the time
@@ -31,8 +34,16 @@ const CLAUDE_USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 const CLAUDE_BETA: &str = "oauth-2025-04-20";
 const CLAUDE_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 
-/// Prefer a sample about one hour old when computing burn rate.
+/// Burn rate looks back at most this far.
 const LOOKBACK_MS: i64 = 60 * 60 * 1000;
+/// Recency bands for the burn rate, newest first: `(max age, weight)`. Time
+/// inside a band counts `weight` times, so the last quarter hour dominates
+/// while the rest of the hour still anchors the estimate.
+const BURN_WEIGHTS: [(i64, f64); 3] = [
+    (15 * 60 * 1000, 3.0),
+    (30 * 60 * 1000, 2.0),
+    (LOOKBACK_MS, 1.0),
+];
 /// Need at least this much elapsed time between baseline and now.
 const MIN_SPAN_MS: i64 = 15 * 60 * 1000;
 /// Utilization drop of this many points counts as a window reset.
@@ -98,21 +109,28 @@ pub struct Quota {
 
 /// Build one card for every agent with at least one request in the selected
 /// dashboard range. Empty/installed-only agents are deliberately omitted.
-pub fn build(used_agents: &HashSet<&'static str>, home: &Path, history_path: &Path) -> Vec<Quota> {
+pub fn build(
+    used_agents: &HashSet<&'static str>,
+    home: &Path,
+    history_path: &Path,
+    latest_codex_session: Option<&Path>,
+) -> Vec<Quota> {
     let now = Utc::now().timestamp_millis();
     let mut history = load_history(history_path);
     let mut quotas: Vec<Quota> = crate::usage::sources::AGENTS
         .iter()
         .filter(|agent| used_agents.contains(agent.id))
         .map(|agent| {
-            reported_for(agent.id, home).unwrap_or_else(|| Quota {
-                agent: agent.id.to_string(),
-                label: agent.label.to_string(),
-                source: "unavailable".into(),
-                plan: None,
-                message: Some(unavailable_message(agent.id).into()),
-                limits: Vec::new(),
-            })
+            reported_for_with_codex_session(agent.id, home, latest_codex_session).unwrap_or_else(
+                || Quota {
+                    agent: agent.id.to_string(),
+                    label: agent.label.to_string(),
+                    source: "unavailable".into(),
+                    plan: None,
+                    message: Some(unavailable_message(agent.id).into()),
+                    limits: Vec::new(),
+                },
+            )
         })
         .collect();
 
@@ -274,7 +292,15 @@ fn window_average_per_hour(limit: &QuotaLimit, now: i64) -> Option<f64> {
     (per_hour >= MIN_BURN_PER_HOUR).then_some(per_hour)
 }
 
-/// Percent-per-ms burn from a baseline sample ~1h ago, ignoring post-reset noise.
+/// Recency-weighted percent-per-ms burn over the last hour, ignoring post-reset
+/// noise.
+///
+/// Every gap between consecutive samples is one observed rate. Instead of
+/// averaging them by duration alone, each millisecond is weighted by how recent
+/// it is (`BURN_WEIGHTS`), so an hour that was idle until ten minutes ago
+/// reports the pace of those ten minutes rather than a sixth of it. A gap that
+/// straddles a band boundary is split across the bands, with its consumption
+/// spread evenly over its own duration.
 fn burn_rate_per_ms(
     agent: &str,
     limit: &QuotaLimit,
@@ -316,26 +342,47 @@ fn burn_rate_per_ms(
         return None;
     }
 
-    // Prefer the sample closest to one hour ago; otherwise the oldest kept one.
-    let target = now - LOOKBACK_MS;
-    let baseline = series
-        .iter()
-        .take(series.len() - 1)
-        .min_by_key(|(at, _)| (*at - target).abs())
-        .copied()?;
-    let (base_at, base_percent) = baseline;
-    let elapsed = now - base_at;
-    if elapsed < MIN_SPAN_MS {
-        return None;
+    let mut weighted_delta = 0.0;
+    let mut weighted_span = 0.0;
+    let mut covered = 0i64;
+    for pair in series.windows(2) {
+        let ((from_at, from_percent), (to_at, to_percent)) = (pair[0], pair[1]);
+        // Clip to the lookback; a gap reaching further back only counts the
+        // part of it that falls inside the hour.
+        let from_at = from_at.max(now - LOOKBACK_MS);
+        let span = to_at - from_at;
+        if span <= 0 {
+            continue;
+        }
+        // Consumption is spread evenly over the gap, so a slice of it carries
+        // the matching slice of the delta.
+        let rate = (to_percent - from_percent).max(0.0) / (to_at - pair[0].0) as f64;
+        covered += span;
+        let mut younger_than = 0i64;
+        for (age, weight) in BURN_WEIGHTS {
+            // Bands are exclusive: 0–15 min counts 3×, 15–30 min 2×, 30–60 min
+            // 1×, rather than stacking.
+            let band_start = (now - age).max(from_at);
+            let band_end = (now - younger_than).min(to_at);
+            younger_than = age;
+            let overlap = (band_end - band_start).max(0) as f64;
+            if overlap <= 0.0 {
+                continue;
+            }
+            weighted_delta += weight * rate * overlap;
+            weighted_span += weight * overlap;
+        }
     }
 
-    let delta = limit.percent - base_percent;
-    if delta <= 0.0 {
+    if covered < MIN_SPAN_MS || weighted_span <= 0.0 {
+        return None;
+    }
+    if weighted_delta <= 0.0 {
         // Flat or falling after reset filter → not burning.
         return Some(0.0);
     }
 
-    let per_ms = delta / elapsed as f64;
+    let per_ms = weighted_delta / weighted_span;
     let per_hour = per_ms * LOOKBACK_MS as f64;
     if per_hour < MIN_BURN_PER_HOUR {
         return Some(0.0);
@@ -345,9 +392,17 @@ fn burn_rate_per_ms(
 
 /// Pull the provider's own rate-limit state for CLIs that persist it.
 fn reported_for(agent_id: &str, home: &Path) -> Option<Quota> {
+    reported_for_with_codex_session(agent_id, home, None)
+}
+
+fn reported_for_with_codex_session(
+    agent_id: &str,
+    home: &Path,
+    latest_codex_session: Option<&Path>,
+) -> Option<Quota> {
     match agent_id {
         "claude" => claude_quota(home),
-        "codex" => codex_quota(home),
+        "codex" => codex_quota(home, latest_codex_session),
         "grok" => grok_quota(home),
         _ => None,
     }
@@ -520,8 +575,8 @@ fn claude_quota_from_payload(payload: &Value, plan: Option<String>) -> Option<Qu
     })
 }
 
-fn codex_quota(home: &Path) -> Option<Quota> {
-    let value = latest_codex_rate_limits(home)?;
+fn codex_quota(home: &Path, latest_session: Option<&Path>) -> Option<Quota> {
+    let value = latest_codex_rate_limits(home, latest_session)?;
     let plan = value
         .get("plan_type")
         .and_then(Value::as_str)
@@ -664,15 +719,21 @@ fn read_tail(path: &Path, bytes: u64) -> Option<String> {
 }
 
 /// The `rate_limits` payload from the newest Codex session.
-fn latest_codex_rate_limits(home: &Path) -> Option<Value> {
-    let newest = crate::usage::sources::discover("codex", home)
-        .into_iter()
-        .filter_map(|path| {
-            let modified = std::fs::metadata(&path).ok()?.modified().ok()?;
-            Some((modified, path))
-        })
-        .max_by_key(|(modified, _)| *modified)
-        .map(|(_, path)| path)?;
+fn latest_codex_rate_limits(home: &Path, latest_session: Option<&Path>) -> Option<Value> {
+    let discovered;
+    let newest = if let Some(path) = latest_session {
+        path
+    } else {
+        discovered = crate::usage::sources::discover("codex", home)
+            .into_iter()
+            .filter_map(|path| {
+                let modified = std::fs::metadata(&path).ok()?.modified().ok()?;
+                Some((modified, path))
+            })
+            .max_by_key(|(modified, _)| *modified)
+            .map(|(_, path)| path)?;
+        &discovered
+    };
 
     read_tail(&newest, 512 * 1024)?
         .lines()
@@ -716,7 +777,7 @@ mod tests {
             "duckweed-quota-history-empty-{}",
             std::process::id()
         ));
-        let quotas = build(&used, &empty, &history);
+        let quotas = build(&used, &empty, &history, None);
         assert_eq!(quotas.len(), 2);
         assert!(quotas.iter().all(|quota| quota.source == "unavailable"));
         assert!(!quotas.iter().any(|quota| quota.agent == "codex"));
@@ -820,6 +881,63 @@ mod tests {
             (eta_min - (1.0 / 9.0) * 60.0).abs() < 1.0,
             "expected weekly to bind near 6–7 min, got {eta_min}"
         );
+    }
+
+    /// Weighting by recency is the whole point: an hour that sat idle until the
+    /// last quarter should read much closer to the pace of that quarter than a
+    /// flat hourly average would.
+    #[test]
+    fn recent_minutes_outweigh_the_quiet_start_of_the_hour() {
+        let now = 1_700_000_000_000i64;
+        let minute = 60 * 1000;
+        let mut history = QuotaHistory {
+            samples: [60, 30, 15]
+                .into_iter()
+                .map(|ago| QuotaSample {
+                    at: now - ago * minute,
+                    agent: "claude".into(),
+                    limit_id: "five-hour".into(),
+                    percent: 20.0,
+                })
+                .collect(),
+        };
+        // Nothing for 45 minutes, then 10 points in the last 15.
+        let mut quota = sample_quota("claude", vec![("five-hour", 30.0)]);
+        apply_estimate(&mut quota, &mut history, now);
+
+        let forecast = quota.limits[0].forecast.as_ref().expect("forecast");
+        assert_eq!(forecast.basis, "recent");
+        // 10 points at weight 3 over 15 min, against 3×15 + 2×15 + 1×30 minutes
+        // of weighted time: 600/35 ≈ 17.1%/h, not the flat 10%/h.
+        assert!(
+            (forecast.per_hour - 600.0 / 35.0).abs() < 0.05,
+            "{forecast:?}"
+        );
+    }
+
+    /// The weights must not distort a steady pace — a limit burning evenly all
+    /// hour reports exactly that pace, whichever band the time falls in.
+    #[test]
+    fn a_steady_hour_is_unchanged_by_the_weights() {
+        let now = 1_700_000_000_000i64;
+        let minute = 60 * 1000;
+        let mut history = QuotaHistory {
+            samples: [60, 45, 30, 15]
+                .into_iter()
+                .map(|ago| QuotaSample {
+                    at: now - ago * minute,
+                    agent: "claude".into(),
+                    limit_id: "five-hour".into(),
+                    // 12%/h, sampled every quarter hour.
+                    percent: 20.0 + (60 - ago) as f64 * 0.2,
+                })
+                .collect(),
+        };
+        let mut quota = sample_quota("claude", vec![("five-hour", 32.0)]);
+        apply_estimate(&mut quota, &mut history, now);
+
+        let forecast = quota.limits[0].forecast.as_ref().expect("forecast");
+        assert!((forecast.per_hour - 12.0).abs() < 0.01, "{forecast:?}");
     }
 
     #[test]

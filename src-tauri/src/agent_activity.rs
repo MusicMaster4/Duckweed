@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime};
 
+use chrono::{DateTime, Datelike, Local, Utc};
 use serde::Serialize;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager};
@@ -539,20 +540,65 @@ fn home_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+/// Small roots that can contain the session launched for this watch.
+///
+/// Walking every historical transcript while an agent is starting competes
+/// with that same agent for disk access. Codex partitions sessions by date and
+/// Claude partitions them by project, so discovery can stay inside those live
+/// leaves. Local and UTC dates cover the two conventions around midnight.
+fn discovery_roots(watch: &Watch, home: &Path) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    match watch.agent.as_str() {
+        "codex" => {
+            let base = home.join(".codex/sessions");
+            let started_local = DateTime::<Local>::from(watch.started);
+            let started_utc = DateTime::<Utc>::from(watch.started);
+            let now_local = Local::now();
+            let now_utc = Utc::now();
+            for (year, month, day) in [
+                (
+                    started_local.year(),
+                    started_local.month(),
+                    started_local.day(),
+                ),
+                (started_utc.year(), started_utc.month(), started_utc.day()),
+                (now_local.year(), now_local.month(), now_local.day()),
+                (now_utc.year(), now_utc.month(), now_utc.day()),
+            ] {
+                let path = base
+                    .join(format!("{year:04}"))
+                    .join(format!("{month:02}"))
+                    .join(format!("{day:02}"));
+                if !roots.contains(&path) {
+                    roots.push(path);
+                }
+            }
+        }
+        "claude" => {
+            let slug = claude_project_slug(&watch.cwd);
+            roots.push(home.join(".claude/projects").join(&slug));
+            roots.push(home.join(".config/claude/projects").join(slug));
+        }
+        "grok" => roots.push(home.join(".grok/sessions")),
+        _ => {}
+    }
+    roots
+}
+
 fn discover_session(watch: &Watch, claimed: &HashSet<PathBuf>) -> Option<PathBuf> {
     let home = home_dir()?;
-    let root = match watch.agent.as_str() {
-        "codex" => home.join(".codex/sessions"),
-        "claude" => home.join(".claude/projects"),
-        "grok" => home.join(".grok/sessions"),
-        _ => return None,
-    };
+    let roots = discovery_roots(watch, &home);
+    if roots.is_empty() {
+        return None;
+    }
     let earliest = watch
         .started
         .checked_sub(START_TOLERANCE)
         .unwrap_or(SystemTime::UNIX_EPOCH);
     let mut candidates = Vec::new();
-    collect_recent(&root, &watch.agent, earliest, claimed, &mut candidates);
+    for root in roots {
+        collect_recent(&root, &watch.agent, earliest, claimed, &mut candidates);
+    }
     let matching: Vec<&SessionCandidate> = candidates
         .iter()
         .filter(|candidate| matches_cwd(&watch.agent, &candidate.path, &watch.cwd))
@@ -767,10 +813,10 @@ fn is_completion_line(agent: &str, line: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        claude_project_slug, gemini_defaults, install_antigravity_plugin, install_copilot_hook,
-        install_opencode_plugin, is_completion_line, nearest_new_session, parse_hook_event,
-        qwen_defaults, read_appended_lines, read_completions, write_hook_script, SessionCandidate,
-        Watch, START_TOLERANCE,
+        claude_project_slug, discovery_roots, gemini_defaults, install_antigravity_plugin,
+        install_copilot_hook, install_opencode_plugin, is_completion_line, nearest_new_session,
+        parse_hook_event, qwen_defaults, read_appended_lines, read_completions, write_hook_script,
+        SessionCandidate, Watch, START_TOLERANCE,
     };
     use std::fs::{self, OpenOptions};
     use std::io::Write;
@@ -834,6 +880,38 @@ mod tests {
             claude_project_slug(Path::new(r"H:\Python\Slop\duckweed")),
             "H--Python-Slop-duckweed"
         );
+    }
+
+    #[test]
+    fn session_discovery_stays_out_of_historical_roots() {
+        let home = Path::new(r"C:\Users\duck");
+        let started = SystemTime::now();
+        let codex = Watch {
+            agent: "codex".into(),
+            cwd: Path::new(r"H:\work").into(),
+            started,
+            next_discovery: Instant::now(),
+            file: None,
+            offset: 0,
+        };
+        let codex_roots = discovery_roots(&codex, home);
+        assert!(!codex_roots.is_empty());
+        assert!(codex_roots.len() <= 4);
+        assert!(codex_roots
+            .iter()
+            .all(|path| path.components().count() >= home.components().count() + 4));
+
+        let claude = Watch {
+            agent: "claude".into(),
+            cwd: Path::new(r"H:\Python\Slop\duckweed").into(),
+            started,
+            next_discovery: Instant::now(),
+            file: None,
+            offset: 0,
+        };
+        assert!(discovery_roots(&claude, home)
+            .iter()
+            .all(|path| path.ends_with("H--Python-Slop-duckweed")));
     }
 
     #[test]

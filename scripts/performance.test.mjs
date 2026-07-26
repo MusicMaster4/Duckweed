@@ -97,6 +97,28 @@ describe("large and blocking work is isolated", () => {
     expect(app).toContain("frontendReady()");
   });
 
+  test("usage work waits for Settings entry and never polls while Settings stays open", () => {
+    const app = read("src/App.tsx");
+    const componentStart = app.indexOf("export default function App()");
+    const openSettings = app.indexOf("const openSettings");
+    const prefetch = app.indexOf("prefetchUsage(", componentStart);
+    expect(prefetch).toBeGreaterThan(openSettings);
+    expect(app.slice(componentStart, openSettings)).not.toContain("prefetchUsage(");
+    const settings = read("src/components/SettingsMenu.tsx");
+    expect(settings).toContain("{showUsage && <UsagePanel />}");
+    const panel = read("src/components/UsagePanel.tsx");
+    expect(panel).not.toContain("setInterval(() => prefetchUsage");
+    expect(panel).not.toContain("setInterval(prefetchUsage");
+  });
+
+  test("a warm usage scan neither rewrites its index nor rediscovers Codex quotas", () => {
+    const usage = read("src-tauri/src/usage/mod.rs");
+    expect(usage).toContain("if index_dirty");
+    expect(usage).toContain("latest_codex.as_ref()");
+    const quota = read("src-tauri/src/usage/quota.rs");
+    expect(quota).toContain("latest_codex_session: Option<&Path>");
+  });
+
   test("release builds optimize runtime speed", () => {
     expect(read("src-tauri/Cargo.toml")).toMatch(/\[profile\.release\][\s\S]*opt-level\s*=\s*3/);
   });

@@ -23,6 +23,11 @@ globalThis.localStorage ??= {
 const usage = await import("../src/lib/usage.ts");
 
 describe("usage formatting", () => {
+  test("usage calendar labels always use English", () => {
+    expect(usage.dayTick("2026-07-20")).toBe("Mon 20");
+    expect(usage.dayFull("2026-07-20")).toBe("Monday, Jul 20");
+  });
+
   test("compacts numbers at the thresholds people read", () => {
     expect(usage.compactNumber(0)).toBe("0");
     expect(usage.compactNumber(999)).toBe("999");
@@ -318,10 +323,14 @@ describe("usage wiring", () => {
     expect(settings).toContain('const showUsage = section === "Usage" && !searching;');
   });
 
-  test("transcripts are prefetched on startup and whenever Settings opens", () => {
+  test("usage preloads on Settings entry but never during app startup", () => {
     const app = read("src/App.tsx");
-    expect(app).toContain("prefetchUsage(loadUsageSettings().days)");
-    expect(app).toContain("prefetchUsage(loadUsageSettings().days, 0)");
+    expect(app.match(/prefetchUsage/g)?.length).toBe(2);
+    expect(app).toContain("prefetchUsage(loadUsageSettings().days, 60_000)");
+    const settings = read("src/components/SettingsMenu.tsx");
+    expect(settings).toContain("{showUsage && <UsagePanel />}");
+    const panel = read("src/components/UsagePanel.tsx");
+    expect(panel).toContain("prefetchUsage(days");
     const usageLib = read("src/lib/usage.ts");
     expect(usageLib).toContain("const pendingScans = new Map");
     expect(usageLib).toContain("let scanQueue");

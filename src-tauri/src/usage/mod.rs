@@ -293,6 +293,7 @@ pub fn scan(
     let started = Instant::now();
     let now = now_ms();
     let recent_cutoff = now - RECENT_DAYS * DAY_MS;
+    let mut index_dirty = !index_path.is_file();
 
     let mut guard = state.inner.lock().map_err(|_| "usage index poisoned")?;
     if guard.is_none() || query.refresh {
@@ -309,6 +310,7 @@ pub fn scan(
     // --- plan every file -------------------------------------------------
     let mut jobs: Vec<Job> = Vec::new();
     let mut per_agent_files: HashMap<&str, u32> = HashMap::new();
+    let mut latest_codex: Option<(i64, PathBuf)> = None;
 
     for agent in &active {
         let files = sources::discover(agent.id, home);
@@ -324,6 +326,13 @@ pub fn scan(
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                 .map(|d| d.as_millis() as i64)
                 .unwrap_or(0);
+            if agent.id == "codex"
+                && latest_codex
+                    .as_ref()
+                    .map_or(true, |(latest, _)| mtime > *latest)
+            {
+                latest_codex = Some((mtime, path.clone()));
+            }
             let key = path.to_string_lossy().to_string();
 
             let plan = match index.files.get(&key) {
@@ -367,6 +376,7 @@ pub fn scan(
         .iter()
         .filter(|j| !matches!(j.plan, Plan::Reuse))
         .collect();
+    index_dirty |= !to_read.is_empty();
     let total_read = to_read.len() as u32;
     emit(0, total_read);
 
@@ -546,13 +556,23 @@ pub fn scan(
         .parent()
         .map(|parent| parent.join("quota-history.json"))
         .unwrap_or_else(|| PathBuf::from("quota-history.json"));
-    let quotas = quota::build(&used_agents, home, &history_path);
+    // Reuse discovery work from the index pass. Looking up the newest Codex
+    // quota by recursively walking all sessions again added hundreds of
+    // milliseconds on large histories.
+    let quotas = quota::build(
+        &used_agents,
+        home,
+        &history_path,
+        latest_codex.as_ref().map(|(_, path)| path.as_path()),
+    );
 
     // --- persist ----------------------------------------------------------
-    compact(index, recent_cutoff, now);
-    if let Err(error) = save_index(index_path, index) {
-        // A cache we could not write only costs time on the next scan.
-        eprintln!("duckweed: could not save usage index: {error}");
+    index_dirty |= compact(index, recent_cutoff, now);
+    if index_dirty {
+        if let Err(error) = save_index(index_path, index) {
+            // A cache we could not write only costs time on the next scan.
+            eprintln!("duckweed: could not save usage index: {error}");
+        }
     }
 
     stats.duration_ms = started.elapsed().as_millis() as u64;
@@ -630,12 +650,19 @@ fn parse_all(jobs: &[&Job], emit: &(dyn Fn(u32, u32) + Sync)) -> Vec<(Vec<Record
 }
 
 /// Collapse aged five-minute rows into daily ones and drop stale dedup ids.
-fn compact(index: &mut Index, recent_cutoff: i64, now: i64) {
+/// Compact old rows and report whether the persisted index actually changed.
+///
+/// Warm scans commonly touch no transcripts. Returning a dirty bit lets the
+/// caller avoid rewriting a multi-megabyte index merely because Settings was
+/// reopened.
+fn compact(index: &mut Index, recent_cutoff: i64, now: i64) -> bool {
     let dedup_cutoff = now - DEDUP_DAYS * DAY_MS;
+    let mut changed = false;
     for entry in index.files.values_mut() {
-        if entry.last_at < dedup_cutoff {
+        if entry.last_at < dedup_cutoff && !entry.ids.is_empty() {
             entry.ids.clear();
             entry.ids.shrink_to_fit();
+            changed = true;
         }
         let needs_collapse = entry
             .rows
@@ -644,6 +671,7 @@ fn compact(index: &mut Index, recent_cutoff: i64, now: i64) {
         if !needs_collapse {
             continue;
         }
+        changed = true;
         let mut merged: HashMap<(i64, String), Row> = HashMap::new();
         for row in entry.rows.drain(..) {
             let at = bucket(row.at, recent_cutoff);
@@ -664,6 +692,7 @@ fn compact(index: &mut Index, recent_cutoff: i64, now: i64) {
         }
         entry.rows = merged.into_values().collect();
     }
+    changed
 }
 
 fn load_index(path: &Path) -> Index {

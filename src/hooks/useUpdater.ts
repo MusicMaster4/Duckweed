@@ -18,10 +18,14 @@ export interface Updater {
   channel: Channel;
   status: UpdateStatus;
   dialogOpen: boolean;
-  /** User-initiated check — opens the dialog and reports whatever happens. */
   check: () => void;
   install: () => void;
   close: () => void;
+}
+
+export interface UpdaterOptions {
+  /** Called immediately before an available update starts downloading. */
+  beforeInstall?: () => boolean | Promise<boolean>;
 }
 
 function message(error: unknown): string {
@@ -30,18 +34,18 @@ function message(error: unknown): string {
 }
 
 /**
- * Drives the "check for updates" flow. One quiet check runs a few seconds after
- * launch — it never opens anything, it just lights up the version chip when
- * there is something to install.
+ * Drives the update flow. A quiet check shortly after launch lights up the
+ * version chip without opening the dialog.
  */
-export function useUpdater(): Updater {
+export function useUpdater(options: UpdaterOptions = {}): Updater {
   const [version, setVersion] = useState("");
   const [status, setStatus] = useState<UpdateStatus>({ kind: "idle" });
   const [dialogOpen, setDialogOpen] = useState(false);
 
   const statusRef = useRef(status);
   statusRef.current = status;
-  const busy = useRef(false);
+  const inFlight = useRef<Promise<void> | null>(null);
+  const visibleCheck = useRef(false);
 
   useEffect(() => {
     if (!TAURI_RUNTIME) return;
@@ -54,48 +58,62 @@ export function useUpdater(): Updater {
     };
   }, []);
 
-  const run = useCallback(async (quiet: boolean) => {
-    if (!TAURI_RUNTIME) return;
-    if (busy.current) return;
-    busy.current = true;
-    if (!quiet) setStatus({ kind: "checking" });
-    try {
-      const update = await checkForUpdate();
-      setStatus(update ? { kind: "available", update } : { kind: "current" });
-    } catch (error) {
-      // A quiet check that fails — offline, nothing released yet, running from
-      // `tauri dev` — is not worth telling anyone about.
-      setStatus(quiet ? { kind: "idle" } : { kind: "failed", message: message(error) });
-    } finally {
-      busy.current = false;
+  const run = useCallback((quiet: boolean): Promise<void> => {
+    if (!TAURI_RUNTIME) return Promise.resolve();
+    if (!quiet) {
+      visibleCheck.current = true;
+      setStatus({ kind: "checking" });
     }
+
+    // Promote the launch-time request when the user clicks instead of dropping
+    // the click and leaving the dialog in an unexplained idle state.
+    if (inFlight.current) return inFlight.current;
+
+    const request = (async () => {
+      try {
+        const update = await checkForUpdate();
+        setStatus(update ? { kind: "available", update } : { kind: "current" });
+      } catch (error) {
+        setStatus(
+          visibleCheck.current
+            ? { kind: "failed", message: message(error) }
+            : { kind: "idle" },
+        );
+      } finally {
+        inFlight.current = null;
+        visibleCheck.current = false;
+      }
+    })();
+    inFlight.current = request;
+    return request;
   }, []);
 
   useEffect(() => {
     if (!TAURI_RUNTIME) return;
-    const id = window.setTimeout(() => void run(true), 4000);
+    const id = window.setTimeout(() => void run(true), 750);
     return () => window.clearTimeout(id);
   }, [run]);
 
   const check = useCallback(() => {
     setDialogOpen(true);
-    // An update the quiet check already found is still the answer.
     const current = statusRef.current;
     if (current.kind === "available" || current.kind === "installing") return;
     void run(false);
   }, [run]);
 
-  const install = useCallback(() => {
+  const install = useCallback(async () => {
     const current = statusRef.current;
     if (current.kind !== "available") return;
+    if (options.beforeInstall && !(await options.beforeInstall())) return;
+
     const { update } = current;
     setStatus({ kind: "installing", version: update.version, fraction: null });
-    void update
+    await update
       .install((fraction) =>
         setStatus((prev) => (prev.kind === "installing" ? { ...prev, fraction } : prev)),
       )
       .catch((error) => setStatus({ kind: "failed", message: message(error) }));
-  }, []);
+  }, [options.beforeInstall]);
 
   const close = useCallback(() => setDialogOpen(false), []);
 
