@@ -436,6 +436,16 @@ export default function App() {
       const tab = prev.find((t) => t.id === tabId);
       if (!tab) return;
 
+      // Pinned tabs always ask first — they are sticky by design.
+      if (tab.pinned) {
+        const ok = await confirmCloseRunning({
+          title: "Close pinned tab?",
+          message: `“${tab.title}” is pinned. Close it anyway?`,
+          confirmLabel: "Yes, close",
+        });
+        if (!ok) return;
+      }
+
       const termsToCheck = leaves(tab.root)
         .map((n) => n.term)
         .filter((t) => !skipTerms.includes(t));
@@ -491,14 +501,19 @@ export default function App() {
   const reorderTabs = useCallback((from: number, to: number) => {
     setTabs((prev) => {
       if (from === to || from < 0 || to < 0 || from >= prev.length || to >= prev.length) return prev;
+      // Pinned tabs are immovable; unpinned tabs stay to their right.
+      if (prev[from]?.pinned) return prev;
+      const pinnedCount = prev.filter((t) => t.pinned).length;
+      const clampedTo = Math.max(to, pinnedCount);
+      if (from === clampedTo) return prev;
       const next = [...prev];
       const [moved] = next.splice(from, 1);
-      next.splice(to, 0, moved);
+      next.splice(clampedTo, 0, moved);
       return next;
     });
   }, []);
 
-  /** Pin moves the tab left of every unpinned tab; unpin leaves it where it is. */
+  /** Pin moves the tab to the leftmost free pin slot (after other pins); unpin leaves it. */
   const pinTab = useCallback((tabId: string) => {
     setTabs((prev) => {
       const index = prev.findIndex((t) => t.id === tabId);
@@ -510,6 +525,7 @@ export default function App() {
       const rest = prev.filter((t) => t.id !== tabId);
       const pinned = rest.filter((t) => t.pinned);
       const unpinned = rest.filter((t) => !t.pinned);
+      // New pin lands just after existing pins — the left-most free pin slot.
       return [...pinned, { ...tab, pinned: true }, ...unpinned];
     });
   }, []);
@@ -527,6 +543,20 @@ export default function App() {
       const snapshot = tabsRef.current;
       const others = snapshot.filter((t) => t.id !== keepId);
       if (others.length === 0) return;
+
+      const pinnedOthers = others.filter((t) => t.pinned);
+      if (pinnedOthers.length > 0) {
+        const n = pinnedOthers.length;
+        const ok = await confirmCloseRunning({
+          title: n === 1 ? "Close pinned tab?" : "Close pinned tabs?",
+          message:
+            n === 1
+              ? `“${pinnedOthers[0].title}” is pinned. Close other tabs anyway?`
+              : `${n} of those tabs are pinned. Close them anyway?`,
+          confirmLabel: "Yes, close",
+        });
+        if (!ok) return;
+      }
 
       // One prompt for the whole batch — "this tab" wording is wrong here because
       // the tabs being closed are the other ones, not the focused tab.

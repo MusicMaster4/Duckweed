@@ -5,6 +5,9 @@
  * are being pushed around by transforms while the gesture runs, so measuring
  * them live would feed the gesture its own output. Everything here works off
  * that frozen layout, which makes it plain arithmetic — and testable.
+ *
+ * Pinned tabs occupy a fixed block on the left. Unpinned tabs can only reorder
+ * among themselves; `minIndex` (count of pinned tabs) clamps every calculation.
  */
 
 /** Where a tab sat when the drag began. */
@@ -13,10 +16,16 @@ export interface TabSlot {
   width: number;
 }
 
-/** Clamp the dragged tab so it can reach the far edges of the strip, no further. */
-export function clampLeft(slots: TabSlot[], from: number, wanted: number): number {
+/** Clamp the dragged tab so it can reach the far edges of the movable range. */
+export function clampLeft(
+  slots: TabSlot[],
+  from: number,
+  wanted: number,
+  minIndex = 0,
+): number {
+  const first = slots[Math.min(Math.max(minIndex, 0), slots.length - 1)];
   const last = slots[slots.length - 1];
-  const minLeft = slots[0].left;
+  const minLeft = first.left;
   const maxLeft = Math.max(minLeft, last.left + last.width - slots[from].width);
   return Math.min(Math.max(wanted, minLeft), maxLeft);
 }
@@ -30,11 +39,19 @@ export function clampLeft(slots: TabSlot[], from: number, wanted: number): numbe
  * centre against its neighbours' centres instead, as this used to, is not:
  * the clamp that keeps the tab inside the strip stops it exactly on the outer
  * neighbours' midpoints, a hair short of ever swapping with them.
+ *
+ * `minIndex` keeps unpinned tabs from landing inside the pinned block.
  */
-export function dropIndex(slots: TabSlot[], from: number, left: number): number {
-  let to = 0;
+export function dropIndex(
+  slots: TabSlot[],
+  from: number,
+  left: number,
+  minIndex = 0,
+): number {
+  const lo = Math.min(Math.max(minIndex, 0), slots.length - 1);
+  let to = lo;
   let best = Infinity;
-  for (let i = 0; i < slots.length; i++) {
+  for (let i = lo; i < slots.length; i++) {
     const gap = Math.abs(left - restingLeft(slots, from, i));
     if (gap < best) {
       best = gap;
@@ -44,8 +61,18 @@ export function dropIndex(slots: TabSlot[], from: number, left: number): number 
   return to;
 }
 
-/** How far tab `i` steps aside while the dragged tab travels from `from` to `to`. */
-export function slotShift(i: number, from: number, to: number, width: number): number {
+/**
+ * How far tab `i` steps aside while the dragged tab travels from `from` to `to`.
+ * Tabs at index < `minIndex` (pinned) never shift.
+ */
+export function slotShift(
+  i: number,
+  from: number,
+  to: number,
+  width: number,
+  minIndex = 0,
+): number {
+  if (i < minIndex) return 0;
   if (i > from && i <= to) return -width;
   if (i < from && i >= to) return width;
   return 0;
