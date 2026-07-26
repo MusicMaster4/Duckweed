@@ -20,6 +20,8 @@ interface Props {
   onToggleCompletionHighlights: () => void;
   onToggleCompletionSound: () => void;
   onToggleConfirmCloseRunning: () => void;
+  /** Asks for confirmation first; resolves true when history was cleared. */
+  onResetSuggestions: () => Promise<boolean>;
   onShell: (shellId: string | null) => void;
   onCheckUpdates: () => void;
 }
@@ -53,11 +55,13 @@ export function SettingsMenu({
   onToggleCompletionHighlights,
   onToggleCompletionSound,
   onToggleConfirmCloseRunning,
+  onResetSuggestions,
   onShell,
   onCheckUpdates,
 }: Props) {
   const [section, setSectionState] = useState<SettingsSection>(lastSettingsSection);
   const [query, setQuery] = useState("");
+  const [suggestionsCleared, setSuggestionsCleared] = useState(false);
   const setSection = (next: SettingsSection) => {
     lastSettingsSection = next;
     setSectionState(next);
@@ -78,7 +82,8 @@ export function SettingsMenu({
       matches("default shell system powershell") ||
       matches(
         "confirm close running process warn quit tab pane don't show again dont show",
-      ));
+      ) ||
+      matches("reset suggestions ghost autocomplete history learning clear forget"));
   const showAbout =
     (section === "General" || section === "About" || searching) &&
     matches("about updates version stable beta command palette");
@@ -201,7 +206,7 @@ export function SettingsMenu({
                 >
                   <span className="settings-copy">
                     <strong>Completion sound</strong>
-                    <span>Play for completed agent turns, or jobs that run over 30 seconds</span>
+                    <span>Play on the selected pane when a job has run for more than one minute</span>
                   </span>
                   <Toggle enabled={completionSoundEnabled} />
                 </button>
@@ -250,6 +255,26 @@ export function SettingsMenu({
                     <span>Warn when a pane, tab, or the window still has a process running</span>
                   </span>
                   <Toggle enabled={confirmCloseRunning} />
+                </button>
+              )}
+              {(section === "Terminal" || searching) &&
+                matches("reset suggestions ghost autocomplete history learning clear forget") && (
+                <button
+                  type="button"
+                  className="settings-row settings-action"
+                  onClick={() => {
+                    void onResetSuggestions().then((cleared) => {
+                      if (!cleared) return;
+                      setSuggestionsCleared(true);
+                      window.setTimeout(() => setSuggestionsCleared(false), 2000);
+                    });
+                  }}
+                >
+                  <span className="settings-copy">
+                    <strong>Reset suggestions</strong>
+                    <span>Forget learned commands so ghost suggestions start fresh</span>
+                  </span>
+                  <small className="settings-value">{suggestionsCleared ? "Cleared" : "Reset"}</small>
                 </button>
               )}
             </section>
