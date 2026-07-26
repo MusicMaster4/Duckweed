@@ -214,7 +214,7 @@ export function UsagePanel() {
       }));
   }, [snapshot, value, format, metric]);
 
-  // Both sparklines stay visible at the top regardless of which metric the
+  // All three sparklines stay visible at the top regardless of which metric the
   // charts below are currently showing.
   const costTrend = useMemo(
     () => (snapshot ? snapshot.days.map((day) => day.cost) : []),
@@ -222,6 +222,10 @@ export function UsagePanel() {
   );
   const tokenTrend = useMemo(
     () => (snapshot ? snapshot.days.map((day) => totalOf(day)) : []),
+    [snapshot],
+  );
+  const requestTrend = useMemo(
+    () => (snapshot ? snapshot.days.map((day) => day.requests) : []),
     [snapshot],
   );
 
@@ -331,6 +335,7 @@ export function UsagePanel() {
             label="Requests"
             value={formatExact(totals?.requests ?? 0)}
             detail={`across ${agentRows.length} agent${agentRows.length === 1 ? "" : "s"}`}
+            trend={requestTrend}
           />
           <StatTile
             label="Most used"

@@ -29,8 +29,6 @@ command.
   <img src="docs/images/duckweed-workspace.png" alt="Duckweed running a project in a three-pane terminal workspace" width="100%" />
 </a>
 
-<sub>A throwaway demo project is used in this screenshot. No personal sessions or project data are shown.</sub>
-
 <br /><br />
 
 <a href="#download">Download</a> ·
@@ -224,4 +222,11 @@ operating system, shell, reproduction steps, and relevant terminal output.
 
 ## License
 
-No license has been declared yet. Until one is added, all rights are reserved.
+Duckweed is source-available under the
+[Duckweed Source-Available License 1.0](LICENSE.md). You may use, study, modify,
+fork, and share the source for free. Selling Duckweed, charging for access to it,
+or offering it as a paid service is not permitted.
+
+This is not an open-source license as defined by the Open Source Initiative.
+Future Duckweed releases may use revised terms; a release you already received
+remains under the license that accompanied it.
