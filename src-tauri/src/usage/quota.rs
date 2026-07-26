@@ -391,6 +391,7 @@ fn burn_rate_per_ms(
 }
 
 /// Pull the provider's own rate-limit state for CLIs that persist it.
+#[cfg(test)]
 fn reported_for(agent_id: &str, home: &Path) -> Option<Quota> {
     reported_for_with_codex_session(agent_id, home, None)
 }
