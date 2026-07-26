@@ -40,7 +40,7 @@ import {
 } from "./lib/layout";
 import { toggleFullscreen } from "./lib/window";
 import { DEFAULT_TOOLS_WIDTH, load, pushRecent, rehydrate, save } from "./lib/persist";
-import { didProcessFinish, type ProcessState } from "./lib/processActivity";
+import { shouldSignalCompletion, type ProcessState } from "./lib/processActivity";
 import * as terminals from "./lib/terminals";
 import { loadSettings as loadUsageSettings, prefetchUsage } from "./lib/usage";
 import type { LeafNode, ProjectInfo, ShellInfo, Tab } from "./lib/types";
@@ -343,11 +343,12 @@ export default function App() {
         busy: meta.busy,
         exited: meta.exited,
         completionSeq: meta.completionSeq,
+        agent: meta.agent,
+        processStartedAt: meta.processStartedAt,
       });
       if (!previous) return;
 
-      const finished = didProcessFinish(previous, meta);
-      if (!finished) return;
+      if (!shouldSignalCompletion(previous, meta)) return;
       if (completionSoundEnabledRef.current) playCompletionSound();
       if (isFocusedTerm(termId)) {
         if (completionHighlightsRef.current) flashFocusedCompletion(termId);

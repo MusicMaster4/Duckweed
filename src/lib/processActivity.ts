@@ -3,6 +3,10 @@ export interface ProcessState {
   exited: boolean;
   /** Increments when a persistent CLI agent finishes a turn or needs attention. */
   completionSeq: number;
+  /** Recognised coding agent currently responsible for the terminal activity. */
+  agent: AgentKind | null;
+  /** Wall-clock captured when a child process first became active. */
+  processStartedAt: number | null;
 }
 
 /** True only on the edge where a child finishes or the terminal shell exits. */
@@ -12,6 +16,32 @@ export function didProcessFinish(previous: ProcessState, current: ProcessState):
     (!previous.exited && current.exited) ||
     current.completionSeq > previous.completionSeq
   );
+}
+
+/** Ordinary terminal jobs must run longer than this before completion is signalled. */
+export const PROCESS_COMPLETION_MIN_MS = 30_000;
+
+/**
+ * Coding-agent completions are always worth surfacing. Ordinary terminal
+ * processes only earn the sound and visual marker after running for more than
+ * 30 seconds.
+ */
+export function shouldSignalCompletion(
+  previous: ProcessState,
+  current: ProcessState,
+  now = Date.now(),
+): boolean {
+  if (!didProcessFinish(previous, current)) return false;
+  if (
+    current.completionSeq > previous.completionSeq ||
+    previous.agent !== null ||
+    current.agent !== null
+  ) {
+    return true;
+  }
+
+  const startedAt = previous.processStartedAt ?? current.processStartedAt;
+  return startedAt !== null && now - startedAt > PROCESS_COMPLETION_MIN_MS;
 }
 
 export type AgentKind =

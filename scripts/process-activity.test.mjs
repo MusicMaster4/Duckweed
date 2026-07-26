@@ -5,14 +5,24 @@ import {
   didProcessFinish,
   isGenericOsc777Notification,
   parseAgentOsc777,
+  shouldSignalCompletion,
 } from "../src/lib/processActivity.ts";
+
+const state = (overrides = {}) => ({
+  busy: false,
+  exited: false,
+  completionSeq: 0,
+  agent: null,
+  processStartedAt: null,
+  ...overrides,
+});
 
 describe("terminal completion activity", () => {
   test("a child process changing from running to idle finishes", () => {
     expect(
       didProcessFinish(
-        { busy: true, exited: false, completionSeq: 0 },
-        { busy: false, exited: false, completionSeq: 0 },
+        state({ busy: true }),
+        state(),
       ),
     ).toBe(true);
   });
@@ -20,8 +30,8 @@ describe("terminal completion activity", () => {
   test("an exited shell finishes even when it had no busy child", () => {
     expect(
       didProcessFinish(
-        { busy: false, exited: false, completionSeq: 0 },
-        { busy: false, exited: true, completionSeq: 0 },
+        state(),
+        state({ exited: true }),
       ),
     ).toBe(true);
   });
@@ -29,14 +39,14 @@ describe("terminal completion activity", () => {
   test("starting and unchanged idle states do not finish", () => {
     expect(
       didProcessFinish(
-        { busy: false, exited: false, completionSeq: 0 },
-        { busy: true, exited: false, completionSeq: 0 },
+        state(),
+        state({ busy: true }),
       ),
     ).toBe(false);
     expect(
       didProcessFinish(
-        { busy: false, exited: false, completionSeq: 0 },
-        { busy: false, exited: false, completionSeq: 0 },
+        state(),
+        state(),
       ),
     ).toBe(false);
   });
@@ -44,8 +54,59 @@ describe("terminal completion activity", () => {
   test("a persistent agent completing a turn finishes without exiting", () => {
     expect(
       didProcessFinish(
-        { busy: true, exited: false, completionSeq: 4 },
-        { busy: true, exited: false, completionSeq: 5 },
+        state({ busy: true, completionSeq: 4 }),
+        state({ busy: true, completionSeq: 5 }),
+      ),
+    ).toBe(true);
+  });
+});
+
+describe("completion sound and highlight eligibility", () => {
+  const now = 100_000;
+
+  test("ignores ordinary terminal processes that ran for 30 seconds or less", () => {
+    expect(
+      shouldSignalCompletion(
+        state({ busy: true, processStartedAt: now - 29_999 }),
+        state({ processStartedAt: now - 29_999 }),
+        now,
+      ),
+    ).toBe(false);
+    expect(
+      shouldSignalCompletion(
+        state({ busy: true, processStartedAt: now - 30_000 }),
+        state({ processStartedAt: now - 30_000 }),
+        now,
+      ),
+    ).toBe(false);
+  });
+
+  test("signals ordinary terminal processes that ran for more than 30 seconds", () => {
+    expect(
+      shouldSignalCompletion(
+        state({ busy: true, processStartedAt: now - 30_001 }),
+        state({ processStartedAt: now - 30_001 }),
+        now,
+      ),
+    ).toBe(true);
+  });
+
+  test("signals recognised coding agents regardless of runtime", () => {
+    expect(
+      shouldSignalCompletion(
+        state({ busy: true, agent: "codex", processStartedAt: now - 1 }),
+        state({ agent: "codex", processStartedAt: now - 1 }),
+        now,
+      ),
+    ).toBe(true);
+  });
+
+  test("signals persistent agent turns regardless of process runtime", () => {
+    expect(
+      shouldSignalCompletion(
+        state({ busy: true, completionSeq: 4, processStartedAt: now - 1 }),
+        state({ busy: true, completionSeq: 5, processStartedAt: now - 1 }),
+        now,
       ),
     ).toBe(true);
   });

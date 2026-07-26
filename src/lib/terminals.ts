@@ -48,8 +48,12 @@ export interface TermMeta {
   rows: number;
   /** A child process currently owns this terminal. */
   busy: boolean;
+  /** Wall-clock captured when the current child process first became active. */
+  processStartedAt: number | null;
   /** Persistent CLI-agent turns completed while the process remains alive. */
   completionSeq: number;
+  /** Recognised coding agent currently responsible for the terminal activity. */
+  agent: AgentKind | null;
   /**
    * Something has been sent to the shell since the pane opened (or since the
    * last clear). Until then the grid holds only a prompt, which the pane hides
@@ -103,7 +107,7 @@ interface Session extends TermMeta {
    */
   blocks: BlockTracker;
   /**
-   * Wall-clock of the last non-empty {@link submitCommand}. Empty Ctrl+C still
+   * Wall-clock of the last non-empty command submission. Empty Ctrl+C still
    * interrupts for a short window after submit, before the busy poll flips.
    */
   lastSubmitAt: number;
@@ -119,8 +123,6 @@ interface Session extends TermMeta {
    * the user has not submitted yet.
    */
   draft: string;
-  /** Persistent coding agent currently owning this PTY, if recognised. */
-  agent: AgentKind | null;
   /** Deduplicates a log event and OSC notification for the same completed turn. */
   lastAgentCompletionAt: number;
   /** Command assembled while the conventional raw terminal owns shell input. */
@@ -339,7 +341,9 @@ export function getMeta(id: string): TermMeta | null {
     cols: s.cols,
     rows: s.rows,
     busy: s.busy,
+    processStartedAt: s.processStartedAt,
     completionSeq: s.completionSeq,
+    agent: s.agent,
     ran: s.ran,
   };
 }
@@ -426,6 +430,7 @@ function captureRawAgentCommand(session: Session, data: string): void {
   if (session.editorMode || session.busy || session.agent) return;
   for (const char of data) {
     if (char === "\r" || char === "\n") {
+      if (session.rawCommand.trim()) session.lastSubmitAt = Date.now();
       bindAgentCommand(session, session.rawCommand);
       session.rawCommand = "";
     } else if (char === "\x7f" || char === "\b") {
@@ -466,9 +471,24 @@ function ensureBusyListener(): void {
       if (!session || session.busy === state.busy) continue;
       const wasBusy = session.busy;
       session.busy = state.busy;
+      if (state.busy) {
+        const now = Date.now();
+        // The native busy monitor samples twice a second. Prefer the command
+        // submission time when it is recent so the 30-second threshold is not
+        // shortened by that polling delay.
+        session.processStartedAt =
+          session.lastSubmitAt > 0 && now - session.lastSubmitAt < 5_000
+            ? session.lastSubmitAt
+            : now;
+      }
       session.blocks.busyChanged(state.busy);
-      if (wasBusy && !state.busy) unbindAgent(session);
       notifySession(state.id);
+      // Completion subscribers read these synchronously from the notification.
+      // Clear them afterwards so they can still classify the process that ended.
+      if (wasBusy && !state.busy) {
+        session.processStartedAt = null;
+        unbindAgent(session);
+      }
     }
   });
 }
@@ -703,6 +723,7 @@ function create(id: string, opts: { cwd?: string | null; shell?: string | null }
     cols: term.cols,
     rows: term.rows,
     busy: false,
+    processStartedAt: null,
     completionSeq: 0,
     ran: false,
     lastSubmitAt: 0,
@@ -1015,6 +1036,8 @@ async function start(session: Session, opts: { cwd?: string | null; shell?: stri
       `\r\n\x1b[38;5;244m[process exited${code === null ? "" : ` with code ${code}`}]\x1b[0m\r\n`,
     );
     notifySession(id);
+    session.processStartedAt = null;
+    unbindAgent(session);
   });
   session.unlisten.push(offExit);
 

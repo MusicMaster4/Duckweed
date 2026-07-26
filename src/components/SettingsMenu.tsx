@@ -188,7 +188,7 @@ export function SettingsMenu({
                 >
                   <span className="settings-copy">
                     <strong>Completion highlights</strong>
-                    <span>Outline finished panes and mark their tab until you review them</span>
+                    <span>Mark completed agent turns, or jobs that run over 30 seconds</span>
                   </span>
                   <Toggle enabled={completionHighlights} />
                 </button>
@@ -201,7 +201,7 @@ export function SettingsMenu({
                 >
                   <span className="settings-copy">
                     <strong>Completion sound</strong>
-                    <span>Play a sound when a process or agent finishes</span>
+                    <span>Play for completed agent turns, or jobs that run over 30 seconds</span>
                   </span>
                   <Toggle enabled={completionSoundEnabled} />
                 </button>

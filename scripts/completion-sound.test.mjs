@@ -64,11 +64,11 @@ describe("completion sound", () => {
 
   test("every detected completion can play before focus only affects its visual marker", () => {
     const app = read("src/App.tsx");
-    const finish = app.indexOf("const finished = didProcessFinish(previous, meta);");
-    const sound = app.indexOf("playCompletionSound();", finish);
-    const focus = app.indexOf("if (isFocusedTerm(termId)) {", finish);
-    expect(finish).toBeGreaterThan(-1);
-    expect(sound).toBeGreaterThan(finish);
+    const signal = app.indexOf("if (!shouldSignalCompletion(previous, meta)) return;");
+    const sound = app.indexOf("playCompletionSound();", signal);
+    const focus = app.indexOf("if (isFocusedTerm(termId)) {", signal);
+    expect(signal).toBeGreaterThan(-1);
+    expect(sound).toBeGreaterThan(signal);
     expect(sound).toBeLessThan(focus);
   });
 });
