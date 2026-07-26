@@ -1,5 +1,12 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
+import {
+  acceptFull,
+  acceptPartialComponent,
+  ghostSuffix,
+  suggest,
+} from "../lib/autosuggest";
+import * as commandHistory from "../lib/commandHistory";
 import * as terminals from "../lib/terminals";
 
 interface Props {
@@ -8,11 +15,12 @@ interface Props {
   exited: boolean;
 }
 
-const historyByTerm = new Map<string, string[]>();
-
 /**
  * Warp-style command editor: a real text field for commands, separate from the
  * terminal grid. Enter submits to the PTY; Shift+Enter inserts a newline.
+ *
+ * Ghost-text autosuggestions rank shared history (prefix, cwd, recency).
+ * Ctrl+Up / ↑↓ navigate command blocks when present.
  *
  * It renders only while the pane is in editor mode (or the shell has exited) —
  * a running CLI owns the whole pane, and the composer is unmounted for it.
@@ -21,6 +29,8 @@ export function CommandInput({ termId, active, exited }: Props) {
   const [value, setValue] = useState("");
   const [focused, setFocused] = useState(false);
   const [historyIndex, setHistoryIndex] = useState<number | null>(null);
+  /** Bump when shared history may have changed (other panes submit). */
+  const [historyEpoch, setHistoryEpoch] = useState(0);
   const draftRef = useRef("");
   const valueRef = useRef(value);
   valueRef.current = value;
@@ -40,7 +50,10 @@ export function CommandInput({ termId, active, exited }: Props) {
   // Font size is applied via CSS variables from terminals.setFontSize; remeasure
   // the textarea so a larger/smaller face does not leave a stale height.
   useEffect(() => {
-    return terminals.subscribe(() => resize());
+    return terminals.subscribe(() => {
+      resize();
+      setHistoryEpoch((n) => n + 1);
+    });
   }, [resize]);
 
   useEffect(() => {
@@ -82,21 +95,42 @@ export function CommandInput({ termId, active, exited }: Props) {
     return () => window.clearTimeout(id);
   }, [active, exited, termId]);
 
-  const pushHistory = (command: string) => {
-    const trimmed = command.trimEnd();
-    if (!trimmed) return;
-    const prev = historyByTerm.get(termId) ?? [];
-    if (prev[prev.length - 1] === trimmed) return;
-    historyByTerm.set(termId, [...prev, trimmed].slice(-200));
+  const cwd = terminals.getMeta(termId)?.cwd ?? null;
+
+  const suggestion = useMemo(() => {
+    void historyEpoch;
+    if (exited || historyIndex !== null) return null;
+    return suggest(value, commandHistory.list(), { cwd });
+  }, [value, cwd, exited, historyIndex, historyEpoch]);
+
+  const ghost = ghostSuffix(value, suggestion);
+
+  const cursorAtEnd = (): boolean => {
+    const el = textareaRef.current;
+    if (!el) return true;
+    const end = valueRef.current.length;
+    return el.selectionStart === end && el.selectionEnd === end;
+  };
+
+  const applyValue = (next: string, cursor?: number) => {
+    setValue(next);
+    setHistoryIndex(null);
+    requestAnimationFrame(() => {
+      const el = textareaRef.current;
+      if (!el) return;
+      const pos = cursor ?? next.length;
+      el.focus();
+      el.setSelectionRange(pos, pos);
+    });
   };
 
   const submit = () => {
     if (exited) return;
     const command = value;
-    pushHistory(command);
     setValue("");
     setHistoryIndex(null);
     draftRef.current = "";
+    // History is recorded inside submitCommand (shared + cwd).
     terminals.submitCommand(termId, command);
     // Keep focus in the editor so the next command is ready (Warp behavior).
     requestAnimationFrame(() => textareaRef.current?.focus());
@@ -105,9 +139,82 @@ export function CommandInput({ termId, active, exited }: Props) {
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     // Keep app-level shortcuts (Ctrl+Shift+…) working from the capture phase
     // in App.tsx; stop only the keys we fully handle so they do not reach xterm.
+
+    // --- Block navigation (Warp-style) ------------------------------------
+    // Ctrl+Up: select most recent block. While a block is selected, plain
+    // Up/Down move selection; Escape clears it back to the editor.
+    if (e.key === "ArrowUp" && e.ctrlKey && !e.shiftKey && !e.altKey && !e.metaKey) {
+      e.preventDefault();
+      e.stopPropagation();
+      terminals.selectLastBlock(termId);
+      return;
+    }
+
+    if (terminals.hasBlockNavSelection(termId)) {
+      if (e.key === "ArrowUp" && !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey) {
+        e.preventDefault();
+        e.stopPropagation();
+        terminals.selectPrevBlock(termId);
+        return;
+      }
+      if (e.key === "ArrowDown" && !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey) {
+        e.preventDefault();
+        e.stopPropagation();
+        terminals.selectNextBlock(termId);
+        return;
+      }
+      if (e.key === "Escape" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        e.preventDefault();
+        e.stopPropagation();
+        terminals.clearBlockSelection(termId);
+        textareaRef.current?.focus();
+        return;
+      }
+    }
+
+    // --- Autosuggest accept (Warp keys) -----------------------------------
+    // Full: Tab, Right (cursor at end), or Ctrl+F.
+    // Partial: Ctrl+Right (Windows: Ctrl+Shift+Right also accepted).
+    if (suggestion && ghost && cursorAtEnd()) {
+      const fullAcceptTab =
+        e.key === "Tab" && !e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey;
+      const fullAcceptRight =
+        e.key === "ArrowRight" && !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey;
+      const fullAcceptCtrlF =
+        (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "f";
+      if (fullAcceptTab || fullAcceptRight || fullAcceptCtrlF) {
+        e.preventDefault();
+        e.stopPropagation();
+        applyValue(acceptFull(value, suggestion));
+        return;
+      }
+
+      const partial =
+        e.key === "ArrowRight" &&
+        (e.ctrlKey || e.metaKey) &&
+        !e.altKey &&
+        // Warp Windows uses Ctrl+Shift+Right; Ctrl+Right alone is fine too.
+        true;
+      if (partial) {
+        e.preventDefault();
+        e.stopPropagation();
+        const next = acceptPartialComponent(value, suggestion);
+        applyValue(next);
+        return;
+      }
+    }
+
+    // Without a ghost suggestion, keep Tab from leaving the composer (no focus trap).
+    if (e.key === "Tab" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+
     if (e.key === "Enter" && !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey) {
       e.preventDefault();
       e.stopPropagation();
+      terminals.clearBlockSelection(termId);
       submit();
       return;
     }
@@ -118,30 +225,30 @@ export function CommandInput({ termId, active, exited }: Props) {
       if (el && (el.selectionStart !== 0 || el.selectionEnd !== 0) && value.includes("\n")) {
         return;
       }
-      const history = historyByTerm.get(termId) ?? [];
-      if (history.length === 0) return;
+      const hist = commandHistory.commands();
+      if (hist.length === 0) return;
       e.preventDefault();
       e.stopPropagation();
       if (historyIndex === null) draftRef.current = value;
-      const next = historyIndex === null ? history.length - 1 : Math.max(0, historyIndex - 1);
+      const next = historyIndex === null ? hist.length - 1 : Math.max(0, historyIndex - 1);
       setHistoryIndex(next);
-      setValue(history[next] ?? "");
+      setValue(hist[next] ?? "");
       return;
     }
 
     if (e.key === "ArrowDown" && !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey) {
       if (historyIndex === null) return;
-      const history = historyByTerm.get(termId) ?? [];
+      const hist = commandHistory.commands();
       e.preventDefault();
       e.stopPropagation();
-      if (historyIndex >= history.length - 1) {
+      if (historyIndex >= hist.length - 1) {
         setHistoryIndex(null);
         setValue(draftRef.current);
         return;
       }
       const next = historyIndex + 1;
       setHistoryIndex(next);
-      setValue(history[next] ?? "");
+      setValue(hist[next] ?? "");
       return;
     }
 
@@ -196,6 +303,16 @@ export function CommandInput({ termId, active, exited }: Props) {
     }
   };
 
+  const showGhost = Boolean(ghost) && !exited && historyIndex === null;
+  // Transparent textarea text when ghost is showing so the mirror layer paints
+  // both typed + ghost; caret stays visible via caret-color.
+  const fieldClass = [
+    "command-input-field",
+    showGhost ? "has-ghost" : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+
   return (
     <div
       className={[
@@ -206,29 +323,58 @@ export function CommandInput({ termId, active, exited }: Props) {
         .filter(Boolean)
         .join(" ")}
     >
-      <textarea
-        ref={textareaRef}
-        className="command-input-field"
-        value={value}
-        disabled={exited}
-        rows={1}
-        spellCheck={false}
-        autoCapitalize="off"
-        autoCorrect="off"
-        autoComplete="off"
-        placeholder={exited ? "Session ended" : "Run a command"}
-        onChange={(e) => {
-          setValue(e.target.value);
-          setHistoryIndex(null);
-        }}
-        onKeyDown={onKeyDown}
-        onFocus={() => setFocused(true)}
-        onBlur={() => setFocused(false)}
-      />
+      <div className="command-input-editor">
+        {showGhost && (
+          <div className="command-input-mirror" aria-hidden="true">
+            <span className="command-input-typed">{value}</span>
+            <span className="command-input-ghost">{ghost}</span>
+          </div>
+        )}
+        <textarea
+          ref={textareaRef}
+          className={fieldClass}
+          value={value}
+          disabled={exited}
+          rows={1}
+          spellCheck={false}
+          autoCapitalize="off"
+          autoCorrect="off"
+          autoComplete="off"
+          placeholder={exited ? "Session ended" : "Run a command"}
+          onChange={(e) => {
+            terminals.clearBlockSelection(termId);
+            setValue(e.target.value);
+            setHistoryIndex(null);
+          }}
+          onKeyDown={onKeyDown}
+          onFocus={() => setFocused(true)}
+          onBlur={() => setFocused(false)}
+          onScroll={(e) => {
+            // Keep ghost mirror scrolled in sync with the textarea.
+            const mirror = e.currentTarget.previousElementSibling;
+            if (mirror instanceof HTMLElement && mirror.classList.contains("command-input-mirror")) {
+              mirror.scrollTop = e.currentTarget.scrollTop;
+              mirror.scrollLeft = e.currentTarget.scrollLeft;
+            }
+          }}
+        />
+      </div>
 
       <div className="command-input-hint">
         {exited ? (
           "This shell has exited"
+        ) : showGhost ? (
+          <>
+            <kbd>Tab</kbd> accept
+            <span className="hint-sep" />
+            <kbd>→</kbd> accept
+            <span className="hint-sep" />
+            <kbd>Ctrl</kbd>
+            <kbd>→</kbd> word
+            <span className="hint-sep" />
+            <kbd>Ctrl</kbd>
+            <kbd>↑</kbd> blocks
+          </>
         ) : (
           <>
             <kbd>Enter</kbd> run
@@ -237,6 +383,9 @@ export function CommandInput({ termId, active, exited }: Props) {
             <kbd>Enter</kbd> newline
             <span className="hint-sep" />
             <kbd>↑</kbd> history
+            <span className="hint-sep" />
+            <kbd>Ctrl</kbd>
+            <kbd>↑</kbd> blocks
           </>
         )}
       </div>

@@ -154,6 +154,12 @@ export function TerminalPane({
   const showComposer = inputMode === "editor" && !busy && !!project;
   /** Nothing has been run — hide the shell's lone prompt behind the empty state. */
   const blank = !!meta && !meta.ran && !effectiveRaw;
+  /**
+   * Shell title / cwd / split chrome is for the raw terminal. With the command
+   * editor on, that bar is redundant (open-folder gate, composer, shortcuts).
+   * It only comes back when Command Editor is disabled.
+   */
+  const showHeader = inputMode === "raw";
 
   return (
     <div
@@ -172,77 +178,79 @@ export function TerminalPane({
         if (!active) onActivate();
       }}
     >
-      <div
-        className="pane-header"
-        onPointerDown={onDragHandle}
-        onDoubleClick={onToggleZoom}
-        title="Drag to move this terminal"
-      >
-        <span className="pane-grip" aria-hidden="true">
-          <i />
-          <i />
-          <i />
-        </span>
-        <span className="pane-title">{title}</span>
-        {cwdLabel && <span className="pane-cwd">{cwdLabel}</span>}
-        {meta?.exited && <span className="pane-badge">exited</span>}
-        {busy && !meta?.exited && <span className="pane-badge pane-badge-busy">running</span>}
-        <span className="pane-spacer" />
-        <button
-          type="button"
-          className="pane-btn"
-          title="Split right (Ctrl+Shift+D)"
-          onPointerDown={(e) => e.stopPropagation()}
-          onClick={() => onSplit("right")}
+      {showHeader && (
+        <div
+          className="pane-header"
+          onPointerDown={onDragHandle}
+          onDoubleClick={onToggleZoom}
+          title="Drag to move this terminal"
         >
-          <svg viewBox="0 0 14 14" aria-hidden="true">
-            <rect x="1.5" y="2" width="11" height="10" rx="1.5" />
-            <line x1="7" y1="2" x2="7" y2="12" />
-          </svg>
-        </button>
-        <button
-          type="button"
-          className="pane-btn"
-          title="Split down (Ctrl+Shift+E)"
-          onPointerDown={(e) => e.stopPropagation()}
-          onClick={() => onSplit("bottom")}
-        >
-          <svg viewBox="0 0 14 14" aria-hidden="true">
-            <rect x="1.5" y="2" width="11" height="10" rx="1.5" />
-            <line x1="1.5" y1="7" x2="12.5" y2="7" />
-          </svg>
-        </button>
-        <button
-          type="button"
-          className="pane-btn"
-          title={zoomed ? "Restore (Ctrl+Shift+Z)" : "Zoom pane (Ctrl+Shift+Z)"}
-          onPointerDown={(e) => e.stopPropagation()}
-          onClick={onToggleZoom}
-        >
-          <svg viewBox="0 0 14 14" aria-hidden="true">
-            {zoomed ? (
-              <>
-                <rect x="4.5" y="1.75" width="7" height="7" rx="1" />
-                <rect x="1.75" y="4.5" width="7" height="7" rx="1" />
-              </>
-            ) : (
+          <span className="pane-grip" aria-hidden="true">
+            <i />
+            <i />
+            <i />
+          </span>
+          <span className="pane-title">{title}</span>
+          {cwdLabel && <span className="pane-cwd">{cwdLabel}</span>}
+          {meta?.exited && <span className="pane-badge">exited</span>}
+          {busy && !meta?.exited && <span className="pane-badge pane-badge-busy">running</span>}
+          <span className="pane-spacer" />
+          <button
+            type="button"
+            className="pane-btn"
+            title="Split right (Ctrl+Shift+D)"
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={() => onSplit("right")}
+          >
+            <svg viewBox="0 0 14 14" aria-hidden="true">
               <rect x="1.5" y="2" width="11" height="10" rx="1.5" />
-            )}
-          </svg>
-        </button>
-        <button
-          type="button"
-          className="pane-btn pane-btn-danger"
-          title="Close pane (Ctrl+Shift+W)"
-          onPointerDown={(e) => e.stopPropagation()}
-          onClick={onClose}
-        >
-          <svg viewBox="0 0 14 14" aria-hidden="true">
-            <line x1="3.5" y1="3.5" x2="10.5" y2="10.5" />
-            <line x1="10.5" y1="3.5" x2="3.5" y2="10.5" />
-          </svg>
-        </button>
-      </div>
+              <line x1="7" y1="2" x2="7" y2="12" />
+            </svg>
+          </button>
+          <button
+            type="button"
+            className="pane-btn"
+            title="Split down (Ctrl+Shift+E)"
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={() => onSplit("bottom")}
+          >
+            <svg viewBox="0 0 14 14" aria-hidden="true">
+              <rect x="1.5" y="2" width="11" height="10" rx="1.5" />
+              <line x1="1.5" y1="7" x2="12.5" y2="7" />
+            </svg>
+          </button>
+          <button
+            type="button"
+            className="pane-btn"
+            title={zoomed ? "Restore (Ctrl+Shift+Z)" : "Zoom pane (Ctrl+Shift+Z)"}
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={onToggleZoom}
+          >
+            <svg viewBox="0 0 14 14" aria-hidden="true">
+              {zoomed ? (
+                <>
+                  <rect x="4.5" y="1.75" width="7" height="7" rx="1" />
+                  <rect x="1.75" y="4.5" width="7" height="7" rx="1" />
+                </>
+              ) : (
+                <rect x="1.5" y="2" width="11" height="10" rx="1.5" />
+              )}
+            </svg>
+          </button>
+          <button
+            type="button"
+            className="pane-btn pane-btn-danger"
+            title="Close pane (Ctrl+Shift+W)"
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={onClose}
+          >
+            <svg viewBox="0 0 14 14" aria-hidden="true">
+              <line x1="3.5" y1="3.5" x2="10.5" y2="10.5" />
+              <line x1="10.5" y1="3.5" x2="3.5" y2="10.5" />
+            </svg>
+          </button>
+        </div>
+      )}
 
       <div
         className="pane-body"

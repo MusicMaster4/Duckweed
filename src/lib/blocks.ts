@@ -1,5 +1,7 @@
 import type { IMarker, Terminal } from "@xterm/xterm";
 
+import { nextBlockSelection, type BlockNavAction } from "./blockNav";
+
 /**
  * Warp-style command blocks for the editor flow.
  *
@@ -245,8 +247,57 @@ export class BlockTracker {
     // start..end still selects the underlying cells for multi-line copy via
     // xterm; {@link copyText} rebuilds a clean payload when a block is selected.
     this.term.selectLines(range.start, range.end);
+    this.scrollBlockIntoView(range);
     this.scheduleLayout();
     return true;
+  }
+
+  /** Block ids oldest → newest (prunes disposed markers first). */
+  ids(): number[] {
+    this.prune();
+    return this.blocks.map((b) => b.id);
+  }
+
+  selectedBlockId(): number | null {
+    return this.selectedId;
+  }
+
+  /** True when a block is keyboard/click selected (may outlive xterm selection). */
+  hasNavSelection(): boolean {
+    return this.selectedId !== null;
+  }
+
+  selectById(id: number): boolean {
+    this.prune();
+    const block = this.blocks.find((b) => b.id === id);
+    if (!block) return false;
+    return this.select(block);
+  }
+
+  /**
+   * Keyboard block navigation. `selectLast` is Ctrl+Up; `prev`/`next` are
+   * Up/Down while a block is selected. Empty list is a no-op.
+   */
+  navigate(action: BlockNavAction): boolean {
+    const target = nextBlockSelection(this.ids(), this.selectedId, action);
+    if (target === null) return false;
+    return this.selectById(target);
+  }
+
+  /** Scroll so the block's start line is visible (prefer top of viewport). */
+  private scrollBlockIntoView(range: { start: number; end: number }): void {
+    const viewportY = this.term.buffer.active.viewportY;
+    const rows = this.term.rows;
+    if (rows <= 0) return;
+    if (range.start < viewportY) {
+      this.term.scrollToLine(range.start);
+      return;
+    }
+    if (range.end >= viewportY + rows) {
+      // Keep the end visible with a little headroom for the command row.
+      const top = Math.max(0, range.end - rows + 1);
+      this.term.scrollToLine(top);
+    }
   }
 
   /**
@@ -281,6 +332,7 @@ export class BlockTracker {
   clearSelection(): void {
     if (this.selectedId === null) return;
     this.selectedId = null;
+    this.term.clearSelection();
     this.scheduleLayout();
   }
 

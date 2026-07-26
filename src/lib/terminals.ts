@@ -7,6 +7,7 @@ import { WebglAddon } from "@xterm/addon-webgl";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import { BlockTracker } from "./blocks";
+import * as commandHistory from "./commandHistory";
 import { createCursorSettler, type CursorSettler } from "./cursor";
 import {
   createFrameBuffer,
@@ -604,6 +605,33 @@ function create(id: string, opts: { cwd?: string | null; shell?: string | null }
     }
 
     if (!session.editorMode) return true;
+
+    // Keyboard block navigation while focus sits on the grid (after a click
+    // select). Ctrl+Up always selects the latest block; plain Up/Down walk.
+    if (event.key === "ArrowUp" && ctrl && !event.shiftKey && !event.altKey) {
+      event.preventDefault();
+      session.blocks.navigate("selectLast");
+      return false;
+    }
+    if (session.blocks.hasNavSelection()) {
+      if (event.key === "ArrowUp" && !ctrl && !event.shiftKey && !event.altKey) {
+        event.preventDefault();
+        session.blocks.navigate("prev");
+        return false;
+      }
+      if (event.key === "ArrowDown" && !ctrl && !event.shiftKey && !event.altKey) {
+        event.preventDefault();
+        session.blocks.navigate("next");
+        return false;
+      }
+      if (event.key === "Escape" && !ctrl && !event.altKey) {
+        event.preventDefault();
+        session.blocks.clearSelection();
+        inputFocusers.get(session.id)?.();
+        return false;
+      }
+    }
+
     // App shortcuts and remaining copy/paste are handled elsewhere.
     if (ctrl || event.altKey) return true;
     if (VIEWPORT_KEYS.has(event.key)) return true;
@@ -954,6 +982,8 @@ export function submitCommand(id: string, command: string): void {
     send(session, "\r");
     return;
   }
+  // Shared history (autosuggest + ↑) — cwd when OSC 7 / spawn has reported it.
+  commandHistory.record(text, session.cwd || null);
   // Mark the block before writing so the start line is the prompt row that
   // will hold the echoed command.
   session.blocks.open(text);
@@ -1219,6 +1249,30 @@ export function selection(id: string): string {
     if (blockText !== null) return blockText;
   }
   return session.term.getSelection();
+}
+
+/** Keyboard block nav: true when a block is currently selected in this pane. */
+export function hasBlockNavSelection(id: string): boolean {
+  return sessions.get(id)?.blocks.hasNavSelection() ?? false;
+}
+
+export function clearBlockSelection(id: string): void {
+  sessions.get(id)?.blocks.clearSelection();
+}
+
+/** Ctrl+Up — select the most recent block (and scroll it into view). */
+export function selectLastBlock(id: string): boolean {
+  return sessions.get(id)?.blocks.navigate("selectLast") ?? false;
+}
+
+/** Up while a block is selected — move to an older block. */
+export function selectPrevBlock(id: string): boolean {
+  return sessions.get(id)?.blocks.navigate("prev") ?? false;
+}
+
+/** Down while a block is selected — move to a newer block. */
+export function selectNextBlock(id: string): boolean {
+  return sessions.get(id)?.blocks.navigate("next") ?? false;
 }
 
 export function paste(id: string, text: string): void {

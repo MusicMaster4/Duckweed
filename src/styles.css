@@ -1634,7 +1634,43 @@ button.chip:hover {
   opacity: 0.6;
 }
 
+/* Dual-layer editor: mirror paints typed + muted ghost; textarea sits on top. */
+.command-input-editor {
+  position: relative;
+  display: block;
+  width: 100%;
+}
+
+.command-input-mirror {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  padding: 0;
+  border: none;
+  overflow: hidden;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  pointer-events: none;
+  font-family: var(--font-mono);
+  font-size: var(--terminal-font-size);
+  line-height: var(--terminal-line-height);
+  color: var(--text);
+  z-index: 0;
+}
+
+.command-input-typed {
+  color: var(--text);
+}
+
+.command-input-ghost {
+  color: var(--text-faint);
+  opacity: 0.75;
+}
+
 .command-input-field {
+  position: relative;
+  z-index: 1;
   display: block;
   width: 100%;
   min-height: var(--terminal-line-height);
@@ -1651,7 +1687,21 @@ button.chip:hover {
   line-height: var(--terminal-line-height);
   caret-color: var(--accent);
   overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
   user-select: text;
+}
+
+/* When ghost text is active the mirror owns visible glyphs; keep the caret. */
+.command-input-field.has-ghost {
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+}
+
+.command-input-field.has-ghost::placeholder {
+  color: transparent;
+  -webkit-text-fill-color: transparent;
 }
 
 .command-input-field::placeholder {
