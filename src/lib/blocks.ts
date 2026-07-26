@@ -14,9 +14,6 @@ import { nextBlockSelection, type BlockNavAction } from "./blockNav";
  * WebGL renderer and resize with the pane the same way the visual cursor does.
  */
 
-/** Vertical breathing room above each block after the first (px). */
-const BLOCK_GAP = 12;
-
 export interface CommandBlock {
   id: number;
   command: string;
@@ -25,7 +22,7 @@ export interface CommandBlock {
   end: IMarker | null;
   /** Covers the prompt+echo row; shows only the command text. */
   cmdEl: HTMLDivElement;
-  /** Full-width hairline + gap above the block (null for the first). */
+  /** Full-width hairline above the block (null for the first). */
   sepEl: HTMLDivElement | null;
 }
 
@@ -39,11 +36,6 @@ export class BlockTracker {
   private readonly onMouseMove: (e: MouseEvent) => void;
   private readonly onMouseLeave: () => void;
   private readonly onScroll: () => void;
-  private sealTimer: number | null = null;
-  private waitingForBusy = false;
-  private wasBusy = false;
-  /** Bumped on every open/clear so a delayed idle-seal cannot close a newer block. */
-  private sealEpoch = 0;
   /** Covers the idle shell prompt under the last block (editor mode). */
   private readonly promptCover: HTMLDivElement;
   /**
@@ -61,6 +53,12 @@ export class BlockTracker {
   constructor(
     private readonly term: Terminal,
     private readonly host: HTMLElement,
+    /**
+     * Fired when a block becomes selected (click or keyboard). Used by the
+     * session registry to drop chunk selection in every other terminal so only
+     * one pane owns the selection at a time.
+     */
+    private readonly onSelect?: () => void,
   ) {
     this.promptCover = document.createElement("div");
     this.promptCover.className = "command-block-prompt-cover";
@@ -97,7 +95,6 @@ export class BlockTracker {
   open(command: string): void {
     if (this.term.buffer.active.type !== "normal") return;
     this.prune();
-    this.sealEpoch += 1;
     // A new command replaces any prior chunk selection.
     if (this.selectedId !== null) {
       this.selectedId = null;
@@ -135,14 +132,11 @@ export class BlockTracker {
     };
 
     this.blocks.push(block);
-    this.armSealWatch();
     this.scheduleLayout();
   }
 
   /** Drop every block (clear screen, dispose session). */
   clear(): void {
-    this.sealEpoch += 1;
-    this.disarmSealWatch();
     for (const b of this.blocks) disposeBlock(b);
     this.blocks = [];
     this.press = null;
@@ -213,9 +207,8 @@ export class BlockTracker {
       }
 
       const cmdRow = range.start - viewportY;
-      // Command label stays visible if any of its cell is on-screen; the gap
-      // strip may extend slightly above the viewport top.
-      const cmdVisible = cmdRow >= -1 && cmdRow < rows;
+      // The label and its boundary only exist while the command row is visible.
+      const cmdVisible = cmdRow >= 0 && cmdRow < rows;
       if (cmdVisible) {
         const y = offsetY + cmdRow * cellHeight;
         block.cmdEl.hidden = false;
@@ -226,11 +219,13 @@ export class BlockTracker {
         block.cmdEl.style.lineHeight = `${cellHeight}px`;
 
         if (block.sepEl) {
-          // Opaque gap + hairline above the command row, full width.
+          // A real 1px boundary at the top of the command cell. The former
+          // 12px opaque "gap" sat on top of the preceding output row and cut
+          // through text because xterm's rows have no space between them.
           block.sepEl.hidden = false;
-          block.sepEl.style.transform = `translate3d(0, ${y - BLOCK_GAP}px, 0)`;
+          block.sepEl.style.transform = `translate3d(0, ${y}px, 0)`;
           block.sepEl.style.width = `${fullWidth}px`;
-          block.sepEl.style.height = `${BLOCK_GAP}px`;
+          block.sepEl.style.height = "1px";
         }
       } else {
         block.cmdEl.hidden = true;
@@ -263,23 +258,15 @@ export class BlockTracker {
     }
   }
 
-  /** Seal a submitted command when the app-wide process monitor reports idle. */
-  busyChanged(busy: boolean): void {
-    if (!this.waitingForBusy) return;
-    if (busy) {
-      this.wasBusy = true;
-      return;
-    }
-    if (!this.wasBusy) return;
-
-    this.waitingForBusy = false;
-    const epoch = this.sealEpoch;
-    if (this.sealTimer !== null) window.clearTimeout(this.sealTimer);
-    this.sealTimer = window.setTimeout(() => {
-      this.sealTimer = null;
-      if (epoch !== this.sealEpoch) return;
-      this.sealOpen(-1);
-    }, 100);
+  /**
+   * Process state is deliberately not a block boundary. A command can briefly
+   * look idle while a wrapper hands work to another process, and PTY output may
+   * still be queued after the process monitor reports idle. The live last block
+   * therefore keeps following terminal output until the next command provides
+   * an unambiguous boundary.
+   */
+  busyChanged(_busy: boolean): void {
+    this.scheduleLayout();
   }
 
   /** Absolute buffer line range of a block, or null if the markers are gone. */
@@ -292,6 +279,10 @@ export class BlockTracker {
     } else {
       end = liveEndLine(this.term, start);
     }
+    // Sealed markers can land on the idle `PS path>` (seal race / off-by-one).
+    // Never treat shell chrome as part of the chunk — it shows through the soft
+    // select overlay and looks like a raw terminal when you scroll a selection.
+    end = trimTrailingPrompt(this.term, start, end);
     if (end < start) end = start;
     return { start, end };
   }
@@ -310,6 +301,9 @@ export class BlockTracker {
     // Drop any free-range xterm selection so the soft overlay is the only
     // highlight. Copy uses {@link copyText}, not xterm's selection text.
     this.clearXtermSelection();
+    // Other terminals must not keep a chunk selected — selection is exclusive
+    // to this pane (multi-chunk, if added later, stays inside one terminal).
+    this.onSelect?.();
     if (opts.scroll) this.scrollBlockIntoView(range);
     this.scheduleLayout();
     return true;
@@ -504,26 +498,40 @@ export class BlockTracker {
 
     const buf = this.term.buffer.active;
     const cursorLine = buf.baseY + buf.cursorY;
-    // Everything after the block's content up to (and including) the cursor
-    // line is fair game to cover when it looks like an idle prompt.
-    const from = range.end + 1;
-    if (cursorLine < from) {
+    // Cover from the first line after the last chunk through the live cursor.
+    // Also scan one line *into* the chunk end: a sealed marker that landed on
+    // `PS path>` is trimmed from `range`, but the absolute buffer line is still
+    // there and must be painted over when it scrolls into view.
+    const from = range.end;
+    const scanEnd = Math.max(cursorLine, viewportY + rows - 1);
+    if (scanEnd < from) {
       this.promptCover.hidden = true;
       return;
     }
 
-    // Find the first coverable prompt/empty line at or after `from`.
+    // Cover every idle prompt / blank run after the real chunk content. Skip
+    // non-prompt text still belonging to the last output line at `range.end`.
     let coverStart = -1;
     let coverEnd = -1;
-    for (let y = from; y <= cursorLine; y++) {
+    for (let y = from; y <= scanEnd; y++) {
       const line = buf.getLine(y);
       const text = line ? line.translateToString(true) : "";
-      if (text.trim() === "" || looksLikePrompt(text)) {
+      const blank = text.trim() === "";
+      const prompt = looksLikePrompt(text);
+      // The line at range.end is only coverable when it is itself a prompt
+      // (seal off-by-one). Blank padding that is still part of the chunk stays.
+      if (y === range.end && !prompt) continue;
+      if (y > range.end && (blank || prompt)) {
         if (coverStart < 0) coverStart = y;
         coverEnd = y;
-      } else if (coverStart >= 0) {
-        break;
+        continue;
       }
+      if (prompt) {
+        if (coverStart < 0) coverStart = y;
+        coverEnd = y;
+        continue;
+      }
+      if (coverStart >= 0 && y > range.end) break;
     }
 
     if (coverStart < 0 || coverEnd < 0) {
@@ -532,10 +540,12 @@ export class BlockTracker {
     }
 
     const startRow = coverStart - viewportY;
-    const endRow = coverEnd - viewportY;
-    // Clip to the visible viewport.
+    // Clip the top to the viewport, but paint through the bottom of the
+    // visible area. Selecting a chunk and scrolling to its end used to reveal
+    // the raw `PS path>` plus empty grid rows under it — keep that chrome
+    // covered so the pane still reads as a block list, not a live shell.
     const visStart = Math.max(0, startRow);
-    const visEnd = Math.min(rows - 1, endRow);
+    const visEnd = rows - 1;
     if (visEnd < visStart) {
       this.promptCover.hidden = true;
       return;
@@ -548,7 +558,6 @@ export class BlockTracker {
   }
 
   private sealOpen(cursorYOffset: number): void {
-    this.disarmSealWatch();
     const open = this.blocks[this.blocks.length - 1];
     if (!open || open.end) return;
     if (open.start.isDisposed || open.start.line < 0) return;
@@ -562,27 +571,37 @@ export class BlockTracker {
       this.scheduleLayout();
       return;
     }
+
+    // If the marker landed on an idle prompt (cursor was one row below it, or
+    // ConPTY reported a soft wrap), walk back so the chunk ends on real output.
+    let line = end.line;
+    const startLine = open.start.line;
+    while (line > startLine) {
+      const row = this.term.buffer.active.getLine(line);
+      const text = row ? row.translateToString(true) : "";
+      if (!looksLikePrompt(text)) break;
+      line -= 1;
+    }
+    if (line !== end.line) {
+      end.dispose();
+      // registerMarker is relative to the cursor; compute offset from cursor.
+      const cursorLine = this.term.buffer.active.baseY + this.term.buffer.active.cursorY;
+      const offset = line - cursorLine;
+      const fixed = this.term.registerMarker(offset);
+      if (!fixed || fixed.isDisposed || fixed.line < startLine) {
+        fixed?.dispose();
+        // Fallback: keep the original marker even if it includes the prompt;
+        // range() trims prompts for layout/selection either way.
+        open.end = this.term.registerMarker(cursorYOffset);
+      } else {
+        open.end = fixed;
+      }
+      this.scheduleLayout();
+      return;
+    }
+
     open.end = end;
     this.scheduleLayout();
-  }
-
-  /**
-   * Watch for a child process to start and finish. Builtins that never fork
-   * stay open until the next `open()` seals them.
-   */
-  private armSealWatch(): void {
-    this.disarmSealWatch();
-    this.waitingForBusy = true;
-    this.wasBusy = false;
-  }
-
-  private disarmSealWatch(): void {
-    this.waitingForBusy = false;
-    if (this.sealTimer !== null) {
-      window.clearTimeout(this.sealTimer);
-      this.sealTimer = null;
-    }
-    this.wasBusy = false;
   }
 
   private prune(): void {
@@ -668,12 +687,23 @@ function liveEndLine(term: Terminal, start: number): number {
       break;
     }
   }
-  if (end > start) {
-    const line = buf.getLine(end);
+  return trimTrailingPrompt(term, start, end);
+}
+
+/**
+ * Walk `end` back while the line is an idle shell prompt so chunks never own
+ * the `PS path>` chrome that sits under the composer.
+ */
+function trimTrailingPrompt(term: Terminal, start: number, end: number): number {
+  let e = end;
+  if (e < start) return start;
+  while (e > start) {
+    const line = term.buffer.active.getLine(e);
     const text = line ? line.translateToString(true) : "";
-    if (looksLikePrompt(text)) return end - 1;
+    if (!looksLikePrompt(text)) break;
+    e -= 1;
   }
-  return end;
+  return e;
 }
 
 function bufferLineFromEvent(
@@ -691,14 +721,21 @@ function bufferLineFromEvent(
 }
 
 /** Heuristic for an idle PowerShell / bash / zsh prompt line. */
-function looksLikePrompt(text: string): boolean {
+export function looksLikePrompt(text: string): boolean {
   const t = text.trimEnd();
-  if (!t) return true;
-  // PowerShell interrupt echo: `PS H:\path> ^C` (still chrome, not output).
-  if (/\^C\s*$/i.test(t) && t.length < 200) return true;
-  // PowerShell: `PS H:\path>` (and variants with brackets, extra spaces).
-  if (/^PS\b/i.test(t) && t.includes(">") && t.length < 200) return true;
-  // bash/zsh-ish: user@host:path$  or path %
-  if (/[$#%>]\s*$/.test(t) && t.length < 120) return true;
+  if (!t) return false;
+  // PowerShell idle prompt, optionally prefixed by an environment name, and
+  // its Ctrl+C echo. Requiring the prompt glyph to be at the end prevents
+  // `PS path> command` from being mistaken for shell chrome.
+  if (
+    /^(?:(?:\([^)]*\)|\[[^\]]*\])\s*)*PS(?:\s+[^>\r\n]*)?>\s*(?:\^C\s*)?$/i.test(t) &&
+    t.length < 200
+  ) {
+    return true;
+  }
+  // bash/zsh-ish: user@host:path$  or path % (optional space before the glyph).
+  // Keep the prefix tight so log lines ending in `>` are not swallowed.
+  if (/^[\w.@~\/\\:-]+(\s*)[$#%]\s*$/.test(t) && t.length < 120) return true;
+  if (/^[\w.@~\/\\:-]+>+\s*$/.test(t) && t.length < 120) return true;
   return false;
 }

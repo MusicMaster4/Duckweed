@@ -618,7 +618,9 @@ function create(id: string, opts: { cwd?: string | null; shell?: string | null }
   };
   sessions.set(id, session);
   ensureBusyListener();
-  session.blocks = new BlockTracker(term, host);
+  // Selecting a chunk here drops chunk selection everywhere else so two panes
+  // never show a selected block at the same time.
+  session.blocks = new BlockTracker(term, host, () => clearOtherBlockSelections(id));
 
   term.onData((data) => {
     markTyping(session);
@@ -1382,6 +1384,21 @@ export function hasBlockNavSelection(id: string): boolean {
 
 export function clearBlockSelection(id: string): void {
   sessions.get(id)?.blocks.clearSelection();
+}
+
+/** Drop chunk selection in every terminal (pane/tab focus moved away). */
+export function clearAllBlockSelections(): void {
+  for (const session of sessions.values()) {
+    session.blocks.clearSelection();
+  }
+}
+
+/** Drop chunk selection in every terminal except `exceptId`. */
+export function clearOtherBlockSelections(exceptId: string): void {
+  for (const [id, session] of sessions) {
+    if (id === exceptId) continue;
+    session.blocks.clearSelection();
+  }
 }
 
 /** Ctrl+Up — select the most recent block (and scroll it into view). */

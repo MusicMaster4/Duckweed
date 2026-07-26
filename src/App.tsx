@@ -361,17 +361,22 @@ export default function App() {
     [releaseTerm],
   );
 
+  const selectTab = useCallback((id: string) => {
+    if (id !== activeTabIdRef.current) terminals.clearAllBlockSelections();
+    setActiveTabId(id);
+  }, []);
+
   const selectTabIndex = useCallback((index: number) => {
     const tab = tabsRef.current[index];
-    if (tab) setActiveTabId(tab.id);
-  }, []);
+    if (tab) selectTab(tab.id);
+  }, [selectTab]);
 
   const cycleTab = useCallback((step: 1 | -1) => {
     const prev = tabsRef.current;
     const index = prev.findIndex((t) => t.id === activeTabIdRef.current);
     if (index < 0) return;
-    setActiveTabId(prev[(index + step + prev.length) % prev.length].id);
-  }, []);
+    selectTab(prev[(index + step + prev.length) % prev.length].id);
+  }, [selectTab]);
 
   // --------------------------------------------------------------- panes
 
@@ -436,6 +441,9 @@ export default function App() {
     (leafId: string) => {
       const tab = currentTab();
       if (!tab || tab.activeLeaf === leafId) return;
+      // Leaving a pane (or tab leaf) drops its chunk selection — only one
+      // terminal may own a selected block, and clicking another pane clears it.
+      terminals.clearAllBlockSelections();
       updateTab(tab.id, (t) => ({ ...t, activeLeaf: leafId }));
     },
     [currentTab, updateTab],
@@ -445,6 +453,7 @@ export default function App() {
     (leafId: string) => {
       const tab = currentTab();
       if (!tab) return;
+      if (tab.activeLeaf !== leafId) terminals.clearAllBlockSelections();
       updateTab(tab.id, (t) => ({
         ...t,
         activeLeaf: leafId,
@@ -494,7 +503,10 @@ export default function App() {
         const score = forward + off * 3;
         if (!best || score < best.score) best = { id, score };
       }
-      if (best) updateTab(tab.id, (t) => ({ ...t, activeLeaf: best.id }));
+      if (best) {
+        terminals.clearAllBlockSelections();
+        updateTab(tab.id, (t) => ({ ...t, activeLeaf: best.id }));
+      }
     },
     [currentTab, updateTab],
   );
@@ -504,7 +516,10 @@ export default function App() {
       const tab = currentTab();
       if (!tab) return;
       const next = nextLeaf(tab.root, tab.activeLeaf, step);
-      if (next) updateTab(tab.id, (t) => ({ ...t, activeLeaf: next }));
+      if (next && next !== tab.activeLeaf) {
+        terminals.clearAllBlockSelections();
+        updateTab(tab.id, (t) => ({ ...t, activeLeaf: next }));
+      }
     },
     [currentTab, updateTab],
   );
@@ -1402,7 +1417,7 @@ export default function App() {
         group: "Go to",
         title: `Tab: ${t.title}`,
         hint: i < 9 ? `Ctrl+${i + 1}` : undefined,
-        run: () => setActiveTabId(t.id),
+        run: () => selectTab(t.id),
       });
     });
 
@@ -1535,7 +1550,7 @@ export default function App() {
           drag={drag}
           projects={tabProjects}
           allowNewTab={!!project}
-          onSelect={setActiveTabId}
+          onSelect={selectTab}
           onClose={(id) => void closeTab(id)}
           onCloseOthers={(id) => void closeOtherTabs(id)}
           onNew={newTab}
