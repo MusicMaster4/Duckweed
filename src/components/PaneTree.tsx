@@ -1,22 +1,32 @@
-import { Fragment, useRef, useState } from "react";
+import { Fragment, memo, useRef, useState } from "react";
 
 import { resizeSplit } from "../lib/layout";
-import type { DropZone, LayoutNode, LeafNode, SplitNode } from "../lib/types";
+import type { DropZone, LayoutNode, LeafNode, ProjectInfo, SplitNode } from "../lib/types";
 import type { DragState } from "../hooks/useDragPane";
 import { TerminalPane } from "./TerminalPane";
 
 /**
- * Space the divider takes out of the layout, in px. It is a hairline: the grab
- * area overhangs into the panes on both sides (see `.divider span`) instead of
- * pushing them apart, so splits read as one surface cut by a line.
+ * Space the divider takes out of the layout, in px. Must match `.divider`
+ * flex basis in styles.css. The grab area overhangs into the panes on both
+ * sides (see `.divider span`) instead of pushing them apart.
  */
-const DIVIDER = 1;
+const DIVIDER = 3;
 
 export interface PaneTreeShared {
   activeLeaf: string;
   drag: DragState | null;
   /** Resolves the shell/cwd a not-yet-created terminal should start with. */
   spawnFor: (term: string) => { cwd: string | null; shell: string | null };
+  highlight: boolean;
+  /** Terminals whose most recent completion has not been reviewed yet. */
+  unreadTerms: ReadonlySet<string>;
+  /** One-shot animation pulse for a completion in the currently focused pane. */
+  completionFlashes: ReadonlyMap<string, number>;
+  /** Folder of the tab being rendered; the empty pane offers to pick one. */
+  project: ProjectInfo | null;
+  recents: string[];
+  onBrowseProject: () => void;
+  onPickProject: (path: string) => void;
   zoomedLeaf: string | null;
   onActivate: (leafId: string) => void;
   onSplit: (leafId: string, zone: "right" | "bottom") => void;
@@ -33,16 +43,27 @@ function dropZoneFor(drag: DragState | null, leafId: string): DropZone | null {
   return drag.target.zone;
 }
 
-export function PaneTree({ node, shared }: { node: LayoutNode; shared: PaneTreeShared }) {
+export const PaneTree = memo(function PaneTree({ node, shared }: { node: LayoutNode; shared: PaneTreeShared }) {
   if (node.kind === "leaf") {
     return (
       <TerminalPane
+        // Stable across layout reshapes so React can reconcile the same pane
+        // when a lone leaf becomes a child of a split (draft lives on the
+        // session either way; this just avoids extra detach/attach churn).
+        key={node.id}
         node={node}
         active={shared.activeLeaf === node.id}
         zoomed={shared.zoomedLeaf === node.id}
         dropZone={dropZoneFor(shared.drag, node.id)}
         isSource={shared.drag?.leafId === node.id}
         spawn={shared.spawnFor(node.term)}
+        highlight={shared.highlight}
+        unread={shared.unreadTerms.has(node.term)}
+        completionFlash={shared.completionFlashes.get(node.term) ?? 0}
+        project={shared.project}
+        recents={shared.recents}
+        onBrowseProject={shared.onBrowseProject}
+        onPickProject={shared.onPickProject}
         onActivate={() => shared.onActivate(node.id)}
         onSplit={(zone) => shared.onSplit(node.id, zone)}
         onClose={() => shared.onClose(node.id)}
@@ -52,9 +73,9 @@ export function PaneTree({ node, shared }: { node: LayoutNode; shared: PaneTreeS
     );
   }
   return <SplitView node={node} shared={shared} />;
-}
+});
 
-function SplitView({ node, shared }: { node: SplitNode; shared: PaneTreeShared }) {
+const SplitView = memo(function SplitView({ node, shared }: { node: SplitNode; shared: PaneTreeShared }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const count = node.children.length;
 
@@ -87,7 +108,7 @@ function SplitView({ node, shared }: { node: SplitNode; shared: PaneTreeShared }
       })}
     </div>
   );
-}
+});
 
 interface DividerProps {
   dir: "row" | "col";
@@ -98,7 +119,8 @@ interface DividerProps {
 }
 
 function Divider({ dir, index, containerRef, sizes, onResize }: DividerProps) {
-  const drag = useRef<{ origin: number; total: number; base: number[] } | null>(null);
+  const drag = useRef<{ origin: number; total: number; base: number[]; next: number[] } | null>(null);
+  const previewFrame = useRef(0);
   // Keeps the line lit for the whole drag, including once the pointer has run
   // past the divider and is no longer hovering it.
   const [dragging, setDragging] = useState(false);
@@ -113,6 +135,7 @@ function Divider({ dir, index, containerRef, sizes, onResize }: DividerProps) {
       // Fractions are of the container box, dividers included — see gapShare.
       total: Math.max(1, dir === "row" ? container.clientWidth : container.clientHeight),
       base: [...sizes],
+      next: [...sizes],
     };
     e.currentTarget.setPointerCapture(e.pointerId);
     document.body.classList.add("is-resizing");
@@ -122,15 +145,40 @@ function Divider({ dir, index, containerRef, sizes, onResize }: DividerProps) {
     const state = drag.current;
     if (!state) return;
     const position = dir === "row" ? e.clientX : e.clientY;
-    onResize(resizeSplit(state.base, index, (position - state.origin) / state.total));
+    state.next = resizeSplit(state.base, index, (position - state.origin) / state.total);
+    cancelAnimationFrame(previewFrame.current);
+    previewFrame.current = requestAnimationFrame(() => preview(state.next));
   };
 
   const stop = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (!drag.current) return;
+    const state = drag.current;
+    if (!state) return;
+    cancelAnimationFrame(previewFrame.current);
+    preview(state.next);
     drag.current = null;
     setDragging(false);
     document.body.classList.remove("is-resizing");
-    e.currentTarget.releasePointerCapture(e.pointerId);
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    }
+    // Persist once. ResizeObserver has already kept both visible terminals fit
+    // while the lightweight DOM preview followed the pointer.
+    onResize(state.next);
+  };
+
+  const preview = (next: number[]) => {
+    const container = containerRef.current;
+    if (!container) return;
+    const cells = Array.from(container.children).filter(
+      (element): element is HTMLElement =>
+        element instanceof HTMLElement && element.classList.contains("split-cell"),
+    );
+    const gapShare = ((next.length - 1) * DIVIDER) / next.length;
+    for (const at of [index, index + 1]) {
+      const cell = cells[at];
+      if (!cell) continue;
+      cell.style.flexBasis = `calc(${((next[at] ?? 0) * 100).toFixed(4)}% - ${gapShare.toFixed(3)}px)`;
+    }
   };
 
   return (

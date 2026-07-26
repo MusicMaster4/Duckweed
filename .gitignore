@@ -3,3 +3,8 @@ dist
 src-tauri/target
 *.log
 .DS_Store
+
+# Release build output — the workflow uploads these, they are never committed.
+latest.json
+*.key
+*.key.pub

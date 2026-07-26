@@ -1,21 +1,172 @@
 // Hide the console window on Windows release builds.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod agent_activity;
+mod fs;
+mod git;
+mod process_tree;
 mod project;
 mod pty;
 mod shells;
+mod usage;
+mod watch;
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
-use tauri::{AppHandle, Manager, State};
+use tauri::{ipc::Channel, AppHandle, Emitter, Manager, State};
 
+use agent_activity::AgentActivityManager;
+use fs::{DirEntry, FileContent};
+use git::{Branches, Diff, DiffStats, FileDiff};
 use project::ProjectInfo;
 use pty::{PtyManager, SpawnResult};
 use shells::ShellInfo;
+use usage::{pricing, Query, Snapshot, UsageState};
+use watch::ProjectWatchManager;
+
+#[derive(Default)]
+struct DurableSettings(Mutex<()>);
+
+const COMMAND_HISTORY_KEY: &str = "duckweed:command-history:v1";
+
+const DURABLE_SETTING_KEYS: [&str; 3] = [
+    "duckweed:state:v1",
+    "duckweed:usage:v1",
+    COMMAND_HISTORY_KEY,
+];
+
+/// Keep the stored list bounded; oldest entries drop first.
+const MAX_HISTORY_ENTRIES: usize = 500;
+
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+struct HistoryEntry {
+    command: String,
+    #[serde(default)]
+    cwd: Option<String>,
+    at: i64,
+}
+
+fn parse_history(raw: &str) -> Vec<HistoryEntry> {
+    serde_json::from_str(raw).unwrap_or_default()
+}
+
+/// Union of the stored history and an incoming snapshot, oldest first.
+///
+/// Ghost-text history has several writers — a second window, or an installed
+/// build and a dev build, which use different WebView origins and therefore
+/// different localStorage. Replacing the file with whichever snapshot saved
+/// last would drop the other writer's commands, so entries are merged instead;
+/// the same command in the same directory collapses to its newest timestamp,
+/// which keeps re-saving an unchanged list idempotent.
+fn merge_history(stored: &str, incoming: &str) -> String {
+    let mut merged: Vec<HistoryEntry> = Vec::new();
+    let mut index: HashMap<(String, String), usize> = HashMap::new();
+
+    for entry in parse_history(stored).into_iter().chain(parse_history(incoming)) {
+        if entry.command.trim().is_empty() {
+            continue;
+        }
+        let key = (entry.command.clone(), entry.cwd.clone().unwrap_or_default());
+        match index.get(&key) {
+            Some(&at) if merged[at].at > entry.at => {}
+            Some(&at) => merged[at] = entry,
+            None => {
+                index.insert(key, merged.len());
+                merged.push(entry);
+            }
+        }
+    }
+
+    merged.sort_by_key(|entry| entry.at);
+    if merged.len() > MAX_HISTORY_ENTRIES {
+        merged.drain(..merged.len() - MAX_HISTORY_ENTRIES);
+    }
+    serde_json::to_string(&merged).unwrap_or_else(|_| incoming.to_string())
+}
+
+fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_data_dir()
+        .map(|dir| dir.join("durable-settings.json"))
+        .map_err(|error| error.to_string())
+}
+
+fn read_settings(path: &Path) -> HashMap<String, String> {
+    let parse = |candidate: &Path| {
+        std::fs::read_to_string(candidate)
+            .ok()
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+    };
+    parse(path)
+        .or_else(|| parse(&path.with_extension("json.bak")))
+        .unwrap_or_default()
+}
 
 #[tauri::command]
-fn list_shells() -> Vec<ShellInfo> {
-    shells::available_shells()
+fn settings_load(
+    app: AppHandle,
+    state: State<'_, DurableSettings>,
+) -> Result<HashMap<String, String>, String> {
+    let _guard = state.0.lock().map_err(|error| error.to_string())?;
+    Ok(read_settings(&settings_path(&app)?))
+}
+
+#[tauri::command]
+fn settings_save(
+    app: AppHandle,
+    state: State<'_, DurableSettings>,
+    key: String,
+    value: String,
+    replace: Option<bool>,
+) -> Result<(), String> {
+    if !DURABLE_SETTING_KEYS.contains(&key.as_str()) {
+        return Err("unsupported settings key".into());
+    }
+    // Reject corrupt payloads before they can replace the last good copy.
+    serde_json::from_str::<serde_json::Value>(&value).map_err(|error| error.to_string())?;
+
+    let _guard = state.0.lock().map_err(|error| error.to_string())?;
+    let path = settings_path(&app)?;
+    let mut settings = read_settings(&path);
+
+    // History accumulates across windows, builds and updates; everything else
+    // is a single-writer snapshot that simply replaces the stored copy.
+    let value = if key == COMMAND_HISTORY_KEY && !replace.unwrap_or(false) {
+        merge_history(settings.get(&key).map(String::as_str).unwrap_or("[]"), &value)
+    } else {
+        value
+    };
+
+    settings.insert(key, value);
+    let raw = serde_json::to_vec_pretty(&settings).map_err(|error| error.to_string())?;
+    let parent = path.parent().ok_or("settings path has no parent")?;
+    std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+
+    let temporary = path.with_extension("json.tmp");
+    let backup = path.with_extension("json.bak");
+    std::fs::write(&temporary, raw).map_err(|error| error.to_string())?;
+    if path.exists() {
+        std::fs::copy(&path, &backup).map_err(|error| error.to_string())?;
+        std::fs::remove_file(&path).map_err(|error| error.to_string())?;
+    }
+    std::fs::rename(&temporary, &path).map_err(|error| error.to_string())
+}
+
+async fn blocking<T, F>(job: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(job)
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn list_shells() -> Result<Vec<ShellInfo>, String> {
+    blocking(|| Ok(shells::available_shells())).await
 }
 
 #[tauri::command]
@@ -28,15 +179,63 @@ fn home_dir() -> String {
 }
 
 #[tauri::command]
-fn project_info(path: String) -> Result<ProjectInfo, String> {
-    project::info(&path)
+async fn project_info(path: String) -> Result<ProjectInfo, String> {
+    blocking(move || project::info(&path)).await
+}
+
+/// One level of a folder, for the tools panel's project explorer.
+#[tauri::command]
+async fn list_dir(path: String) -> Result<Vec<DirEntry>, String> {
+    blocking(move || fs::list_dir(&path)).await
+}
+
+/// Read a file as text for the project explorer's popup editor.
+#[tauri::command]
+async fn read_file(path: String) -> Result<FileContent, String> {
+    blocking(move || fs::read_file(&path)).await
+}
+
+/// Save the popup editor's buffer back to disk.
+#[tauri::command]
+async fn write_file(path: String, content: String) -> Result<(), String> {
+    blocking(move || fs::write_file(&path, content)).await
+}
+
+/// Local and remote branches of the repo `path` sits in.
+#[tauri::command]
+async fn git_branches(path: String) -> Result<Branches, String> {
+    blocking(move || git::branches(&path)).await
+}
+
+#[tauri::command]
+async fn git_checkout(path: String, branch: String) -> Result<(), String> {
+    blocking(move || git::checkout(&path, &branch)).await
+}
+
+/// Counts for the status-bar chip: changed files, lines added, lines removed.
+#[tauri::command]
+async fn git_diff_stats(path: String) -> Result<DiffStats, String> {
+    blocking(move || git::diff_stats(&path)).await
+}
+
+/// Every uncommitted change, hunk by hunk, for the changes panel.
+#[tauri::command]
+async fn git_diff(path: String) -> Result<Diff, String> {
+    blocking(move || git::diff(&path)).await
+}
+
+/// One file with all of its unmodified lines, for expanding a collapsed run.
+#[tauri::command]
+async fn git_file_diff(path: String, file: String) -> Result<FileDiff, String> {
+    blocking(move || git::file_diff(&path, &file)).await
 }
 
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
-fn pty_spawn(
+async fn pty_spawn(
     app: AppHandle,
     manager: State<'_, PtyManager>,
+    on_data: Channel<Vec<u8>>,
     id: String,
     cwd: Option<String>,
     shell: Option<String>,
@@ -44,7 +243,8 @@ fn pty_spawn(
     rows: u16,
     env: Option<HashMap<String, String>>,
 ) -> Result<SpawnResult, String> {
-    pty::spawn(&app, &manager, id, cwd, shell, cols, rows, env)
+    let manager = manager.inner().clone();
+    blocking(move || pty::spawn(&app, &manager, on_data, id, cwd, shell, cols, rows, env)).await
 }
 
 /// `data` is the raw keystroke text from xterm.js.
@@ -68,10 +268,127 @@ fn pty_kill(manager: State<'_, PtyManager>, id: String) -> Result<(), String> {
     manager.kill(&id)
 }
 
+/// Whether the shell for `id` currently has a child process running.
+#[tauri::command]
+fn pty_is_busy(manager: State<'_, PtyManager>, id: String) -> bool {
+    manager.is_busy(&id)
+}
+
+/// Whether any of the listed sessions has a child process running.
+#[tauri::command]
+fn pty_any_busy(manager: State<'_, PtyManager>, ids: Vec<String>) -> bool {
+    manager.any_busy(&ids)
+}
+
+#[tauri::command]
+fn agent_watch(manager: State<'_, AgentActivityManager>, id: String, agent: String, cwd: String) {
+    manager.watch(id, agent, cwd);
+}
+
+#[tauri::command]
+fn agent_unwatch(manager: State<'_, AgentActivityManager>, id: String) {
+    manager.unwatch(&id);
+}
+
+fn home_path() -> PathBuf {
+    PathBuf::from(home_dir())
+}
+
+/// Where the usage index and the user's price overrides live.
+fn usage_paths(app: &AppHandle) -> (PathBuf, PathBuf) {
+    let base = app
+        .path()
+        .app_data_dir()
+        .unwrap_or_else(|_| std::env::temp_dir().join("duckweed"));
+    (
+        base.join("usage-index.json"),
+        base.join("usage-pricing.json"),
+    )
+}
+
+/// Token and cost totals across every installed coding agent.
+///
+/// The first call builds the index and can take a while — it reads every
+/// transcript on disk — so progress arrives on the `usage:progress` event.
+/// Later calls only re-read files that changed.
+#[tauri::command]
+async fn usage_scan(
+    app: AppHandle,
+    state: State<'_, UsageState>,
+    query: Query,
+) -> Result<Snapshot, String> {
+    let (index_path, pricing_path) = usage_paths(&app);
+    let state = state.inner().clone();
+    blocking(move || {
+        let overrides = pricing::load_overrides(&pricing_path);
+        let emit = |done: u32, total: u32| {
+            let _ = app.emit("usage:progress", (done, total));
+        };
+        usage::scan(&home_path(), &index_path, &overrides, &state, &query, &emit)
+    })
+    .await
+}
+
+/// The price overrides the user has saved, plus the models we ship rates for.
+#[tauri::command]
+async fn usage_pricing(app: AppHandle) -> Result<(Vec<String>, pricing::Overrides), String> {
+    let (_, pricing_path) = usage_paths(&app);
+    blocking(move || {
+        Ok((
+            pricing::known_models(),
+            pricing::load_overrides(&pricing_path),
+        ))
+    })
+    .await
+}
+
+/// Replace the saved price overrides.
+#[tauri::command]
+async fn usage_set_pricing(app: AppHandle, overrides: pricing::Overrides) -> Result<(), String> {
+    let (_, pricing_path) = usage_paths(&app);
+    blocking(move || pricing::save_overrides(&pricing_path, &overrides)).await
+}
+
+/// Reveal the initially hidden window only after React has painted its shell.
+#[tauri::command]
+fn frontend_ready(app: AppHandle) -> Result<(), String> {
+    let Some(window) = app.get_webview_window("main") else {
+        return Ok(());
+    };
+    window.show().map_err(|error| error.to_string())?;
+    window.set_focus().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn watch_project(
+    manager: State<'_, ProjectWatchManager>,
+    path: Option<String>,
+) -> Result<(), String> {
+    manager.set(path)
+}
+
 fn main() {
+    let window_state_flags = tauri_plugin_window_state::StateFlags::SIZE
+        | tauri_plugin_window_state::StateFlags::POSITION
+        | tauri_plugin_window_state::StateFlags::MAXIMIZED
+        | tauri_plugin_window_state::StateFlags::FULLSCREEN;
+
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        // Register this before setup so it receives the initial window-ready
+        // event and the final app-exit event.
+        .plugin(
+            tauri_plugin_window_state::Builder::default()
+                .with_state_flags(window_state_flags)
+                .build(),
+        )
         .manage(PtyManager::default())
+        .manage(AgentActivityManager::default())
+        .manage(ProjectWatchManager::default())
+        .manage(UsageState::default())
+        .manage(DurableSettings::default())
         .setup(|app| {
             if let (Some(window), Some(icon)) = (
                 app.get_webview_window("main"),
@@ -79,16 +396,38 @@ fn main() {
             ) {
                 window.set_icon(icon)?;
             }
+            pty::start_busy_monitor(app.handle().clone())?;
+            agent_activity::start_monitor(app.handle().clone())?;
+            watch::start_monitor(app.handle().clone())?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             list_shells,
             home_dir,
             project_info,
+            list_dir,
+            read_file,
+            write_file,
+            git_branches,
+            git_checkout,
+            git_diff_stats,
+            git_diff,
+            git_file_diff,
             pty_spawn,
             pty_write,
             pty_resize,
             pty_kill,
+            pty_is_busy,
+            pty_any_busy,
+            agent_watch,
+            agent_unwatch,
+            frontend_ready,
+            watch_project,
+            usage_scan,
+            usage_pricing,
+            usage_set_pricing,
+            settings_load,
+            settings_save,
         ])
         .on_window_event(|window, event| {
             // Make sure we never leave orphaned shells behind.
@@ -100,4 +439,54 @@ fn main() {
         })
         .run(tauri::generate_context!())
         .expect("error while running duckweed");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn commands(raw: &str) -> Vec<String> {
+        parse_history(raw).into_iter().map(|e| e.command).collect()
+    }
+
+    #[test]
+    fn merge_keeps_commands_a_stale_snapshot_never_saw() {
+        let stored = r#"[{"command":"cargo build","cwd":"/a","at":1}]"#;
+        let incoming = r#"[{"command":"npm test","cwd":"/a","at":2}]"#;
+        assert_eq!(commands(&merge_history(stored, incoming)), ["cargo build", "npm test"]);
+    }
+
+    #[test]
+    fn merge_is_idempotent_and_ordered_by_recency() {
+        let stored = r#"[{"command":"ls","cwd":"/a","at":5},{"command":"pwd","cwd":"/a","at":1}]"#;
+        let once = merge_history(stored, stored);
+        assert_eq!(commands(&once), ["pwd", "ls"]);
+        assert_eq!(commands(&merge_history(&once, stored)), ["pwd", "ls"]);
+    }
+
+    #[test]
+    fn merge_bumps_recency_but_keeps_other_directories() {
+        let stored = r#"[{"command":"ls","cwd":"/a","at":1}]"#;
+        let incoming = r#"[{"command":"ls","cwd":"/a","at":9},{"command":"ls","cwd":"/b","at":4}]"#;
+        let merged = parse_history(&merge_history(stored, incoming));
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].cwd.as_deref(), Some("/b"));
+        assert_eq!(merged[1].at, 9);
+    }
+
+    #[test]
+    fn merge_caps_the_stored_list_at_the_newest_entries() {
+        let entries: Vec<String> = (0..MAX_HISTORY_ENTRIES + 20)
+            .map(|i| format!(r#"{{"command":"c{i}","cwd":null,"at":{i}}}"#))
+            .collect();
+        let merged = parse_history(&merge_history("[]", &format!("[{}]", entries.join(","))));
+        assert_eq!(merged.len(), MAX_HISTORY_ENTRIES);
+        assert_eq!(merged[0].command, "c20");
+    }
+
+    #[test]
+    fn merge_survives_a_corrupt_stored_copy() {
+        let incoming = r#"[{"command":"ls","cwd":null,"at":1}]"#;
+        assert_eq!(commands(&merge_history("not json", incoming)), ["ls"]);
+    }
 }

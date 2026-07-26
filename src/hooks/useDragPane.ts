@@ -63,7 +63,19 @@ export function useDragPane(onDrop: (drag: DragState) => void) {
 
   const update = useCallback((next: DragState | null) => {
     dragRef.current = next;
-    setDrag(next);
+    if (next) {
+      document.documentElement.style.setProperty("--pane-drag-x", `${next.x + 12}px`);
+      document.documentElement.style.setProperty("--pane-drag-y", `${next.y + 12}px`);
+    } else {
+      document.documentElement.style.removeProperty("--pane-drag-x");
+      document.documentElement.style.removeProperty("--pane-drag-y");
+    }
+    // Pointer coordinates move the ghost through CSS. React only needs a new
+    // tree when the drop target changes and panes/tabs must update their hint.
+    setDrag((previous) => {
+      if (!previous || !next) return next;
+      return sameTarget(previous.target, next.target) ? previous : next;
+    });
   }, []);
 
   useEffect(() => {
@@ -117,4 +129,14 @@ export function useDragPane(onDrop: (drag: DragState) => void) {
   }, []);
 
   return { drag, startDrag };
+}
+
+function sameTarget(a: DragTarget | null, b: DragTarget | null): boolean {
+  if (a === b) return true;
+  if (!a || !b || a.kind !== b.kind) return false;
+  if (a.kind === "pane" && b.kind === "pane") {
+    return a.paneId === b.paneId && a.zone === b.zone;
+  }
+  if (a.kind === "tab" && b.kind === "tab") return a.tabId === b.tabId;
+  return a.kind === "newTab" && b.kind === "newTab";
 }

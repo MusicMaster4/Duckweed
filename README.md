@@ -1,97 +1,133 @@
 <div align="center">
 
-<img src="duckweed_icon.ico" alt="Duckweed icon" width="112" />
+<img src="duckweed_icon.ico" alt="Duckweed" width="112" />
 
 # Duckweed
 
-### The terminal workspace for vibe coding
+### A local terminal workspace for vibe coding
 
-Organize real shells, projects, and AI coding agents in draggable panes and tabs —
-without breaking your flow.
-
-<p>
-  <img src="https://img.shields.io/badge/Tauri_2-24C8DB?logo=tauri&logoColor=white" alt="Tauri 2" />
-  <img src="https://img.shields.io/badge/Rust-000000?logo=rust&logoColor=white" alt="Rust" />
-  <img src="https://img.shields.io/badge/React-20232A?logo=react&logoColor=61DAFB" alt="React" />
-  <img src="https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white" alt="TypeScript" />
-  <img src="https://img.shields.io/badge/xterm.js-terminal-0f172a" alt="xterm.js" />
-</p>
+Open a folder and start working. Duckweed keeps real shells, coding agents, Git
+context, diffs, tabs, and panes in one place. There is no Duckweed account to
+create, no cloud workspace to set up, and nothing to sync before your first
+command.
 
 <p>
-  <a href="#quick-start">Quick start</a> ·
-  <a href="#features">Features</a> ·
-  <a href="#keyboard-shortcuts">Shortcuts</a> ·
-  <a href="#how-it-works">Architecture</a>
+  <a href="https://github.com/MusicMaster4/Duckweed/releases/latest">
+    <img src="https://img.shields.io/badge/Download-stable-78dc50?style=for-the-badge&logo=windows&logoColor=111511" alt="Download the latest stable release" />
+  </a>
+  &nbsp;
+  <a href="https://github.com/MusicMaster4/Duckweed/releases/download/channel-testing/duckweed-beta-setup.exe">
+    <img src="https://img.shields.io/badge/Try_the-beta-bca56a?style=for-the-badge&logo=github&logoColor=111511" alt="Download the latest beta release" />
+  </a>
 </p>
+
+<sub>Windows installer · installs without administrator rights · updates from inside the app</sub>
+
+<br /><br />
+
+<a href="docs/images/duckweed-workspace.png">
+  <img src="docs/images/duckweed-workspace.png" alt="Duckweed running a project in a three-pane terminal workspace" width="100%" />
+</a>
+
+<br /><br />
+
+<a href="#download">Download</a> ·
+<a href="#what-it-does">What it does</a> ·
+<a href="#agent-usage">Agent usage</a> ·
+<a href="#keyboard-shortcuts">Shortcuts</a> ·
+<a href="#building-from-source">Build from source</a>
 
 </div>
 
-<br />
+## Why Duckweed exists
 
-> A calm, capable terminal for the messy middle of building things.
+Vibe-coding sessions get messy fast. One agent is implementing a change, another
+shell is running tests, logs are moving in a third pane, and the Git diff is
+somewhere behind all of them.
 
-## The idea
+Duckweed is the terminal workspace I wanted for that kind of work. It has the
+freedom of a tiling layout, but it still behaves like a regular terminal. Open
+your project, arrange the panes once, and let each agent or command have its own
+space.
 
-Vibe coding is faster when your terminal keeps up with your thoughts. Duckweed is a
-focused, native desktop terminal built around the way modern development actually
-happens: multiple repositories, several shells, quick experiments, and an AI coding
-agent running alongside you.
+Duckweed does not host your repository or wrap your coding tools in another
+service. It runs the shells and CLIs already installed on your computer. Layouts
+and settings are saved locally, and agent usage is calculated from the local
+session files those tools already keep.
 
-It gives you the flexibility of a tiling workspace with the familiarity of a regular
-terminal, while staying small, fast, and keyboard-friendly.
+## Download
 
-<table>
-  <tr>
-    <td width="33%" align="center"><strong>⚡ Stay in flow</strong><br /><sub>Keep your editor, shell, logs, and agent sessions one shortcut away.</sub></td>
-    <td width="33%" align="center"><strong>🧭 See the whole project</strong><br /><sub>Project names, Git branches, tabs, and panes stay visible together.</sub></td>
-    <td width="33%" align="center"><strong>🪶 Keep it light</strong><br /><sub>A native Tauri shell with a focused interface and no hosted workspace.</sub></td>
-  </tr>
-</table>
+### Stable
 
-## Features
+**[Download the latest stable release](https://github.com/MusicMaster4/Duckweed/releases/latest)**
 
-<table>
-  <tr>
-    <td width="50%"><strong>🗂 Project-aware sessions</strong><br /><sub>Open a folder and see its project name and Git branch in the title bar.</sub></td>
-    <td width="50%"><strong>🖥 Real native shells</strong><br /><sub>PTY-backed sessions with ConPTY on Windows and <code>openpty</code> on Linux/macOS.</sub></td>
-  </tr>
-  <tr>
-    <td><strong>▦ Flexible pane layouts</strong><br /><sub>Split, resize, swap, drag, and temporarily zoom any pane.</sub></td>
-    <td><strong>⌘ Command palette</strong><br /><sub>Reach every action, shell, project, tab, and pane with <code>Ctrl+Shift+P</code>.</sub></td>
-  </tr>
-  <tr>
-    <td><strong>⌕ Searchable scrollback</strong><br /><sub>Find terminal output instantly with <code>Ctrl+Shift+F</code>.</sub></td>
-    <td><strong>◎ Readable output</strong><br /><sub>Optional highlighting for paths, URLs, flags, hashes, diffs, and warnings.</sub></td>
-  </tr>
-  <tr>
-    <td><strong>☷ Shell discovery</strong><br /><sub>Detect PowerShell, <code>cmd</code>, Git Bash, WSL, Nushell, Bash, Zsh, and Fish.</sub></td>
-    <td><strong>↺ Persistent layouts</strong><br /><sub>Restore your arrangement between launches without reviving old processes.</sub></td>
-  </tr>
-</table>
+This is the normal install and the recommended choice. The link is permanent:
+GitHub always sends it to the newest stable Duckweed release. The first stable
+release is being prepared, so the page may be empty until it is published.
 
-## Quick start
+### Beta
 
-### Requirements
+**[Download the newest beta installer](https://github.com/MusicMaster4/Duckweed/releases/download/channel-testing/duckweed-beta-setup.exe)**
 
-- [Bun](https://bun.sh/)
-- [Rust](https://www.rust-lang.org/tools/install)
-- [Tauri 2 prerequisites](https://v2.tauri.app/start/prerequisites/)
+Beta builds ship earlier and may be rough around the edges. They follow their own
+update channel, so a beta install receives beta updates and a stable install only
+receives stable ones. Install the other build manually whenever you want to
+switch channels. The beta download URL stays the same while the file behind it is
+replaced on every beta release. You can browse the
+[beta release notes](https://github.com/MusicMaster4/Duckweed/releases?q=prerelease%3Atrue)
+before installing.
 
-### Run locally
+The Windows installer is per-user. It does not ask for administrator access, and
+later updates can be installed from the version chip in the status bar or from
+**Check for updates** in the command palette.
 
-```bash
-bun install
-bun run app
-```
+> Windows SmartScreen may warn on the first install because the installer is not
+> yet code-signed. Duckweed's built-in updater still verifies every update with
+> the project's update signature.
 
-### Build an installer
+## What it does
 
-```bash
-bun run app:build
-```
+- **Real terminal sessions.** Every pane owns a PTY-backed shell: ConPTY on
+  Windows and `openpty` on Linux and macOS.
+- **Layouts that keep up.** Split, resize, swap, drag, or zoom panes without
+  killing the process or losing its scrollback.
+- **Project context at a glance.** The current project, Git branch, changed-file
+  count, line totals, shell, tab, and pane count stay visible.
+- **Diff review inside the workspace.** Open the complete uncommitted diff from
+  the status bar or press `Ctrl+Shift+G`.
+- **A useful command palette.** Projects, shells, tabs, panes, settings, and
+  updates are available through `Ctrl+Shift+P`.
+- **Search and readable output.** Search terminal scrollback and optionally
+  highlight paths, URLs, flags, hashes, diffs, warnings, and errors.
+- **Shell discovery.** Duckweed finds PowerShell, `cmd`, Git Bash, WSL, Nushell,
+  Bash, Zsh, and Fish when they are installed.
+- **Local persistence.** Pane arrangements come back after a restart without
+  pretending the old processes are still alive.
 
-On Windows, this produces an NSIS installer. The native shell used by each pane is
-selected from the shells installed on your machine.
+## Agent usage
+
+Open **Settings → Usage** to compare token use and estimated cost over the last
+7, 14, 30, or 90 days. Duckweed groups the numbers by day, model, and agent, and
+keeps exact values available in a table.
+
+Current local-session support includes:
+
+- Claude Code, Codex CLI, Gemini CLI, OpenCode, and Grok CLI
+- Factory Droid, Kilo Code, Kimi CLI, Antigravity CLI, and Pi Coding Agent
+
+The scanner reads the transcripts these tools already store on your machine. It
+does not upload their contents. The first scan builds a local index; later scans
+only revisit files that changed and resume append-only JSONL logs from their
+last complete line.
+
+Cost figures are estimates based on published per-token prices unless a provider
+records an actual cost in the transcript. Unknown models still appear with their
+tokens counted and their cost marked as unpriced.
+
+Quota cards use provider information only when it is available locally. Claude
+can query the official usage endpoint with Claude Code's existing OAuth session;
+Codex and Grok use the latest quota snapshots saved by their CLIs. Duckweed does
+not invent limits for agents that do not expose them.
 
 ## Keyboard shortcuts
 
@@ -108,6 +144,7 @@ selected from the shells installed on your machine.
 | `Ctrl+1` … `Ctrl+9` | Go to tab N |
 | `Ctrl+Shift+O` | Open a project |
 | `Ctrl+Shift+P` | Open the command palette |
+| `Ctrl+Shift+G` | Review uncommitted changes |
 | `Ctrl+Shift+F` | Search terminal output |
 | `Ctrl+Shift+K` | Clear the focused pane |
 | `Ctrl+Shift+H` | Toggle output highlighting |
@@ -116,49 +153,80 @@ selected from the shells installed on your machine.
 
 Right-click copies a selection. With no selection, it pastes from the clipboard.
 
+## Building from source
+
+You will need [Bun](https://bun.sh/), [Rust](https://www.rust-lang.org/tools/install),
+and the [Tauri 2 prerequisites](https://v2.tauri.app/start/prerequisites/) for
+your operating system.
+
+```bash
+git clone https://github.com/MusicMaster4/Duckweed.git
+cd Duckweed
+bun install
+bun run app
+```
+
+Build the native installer or application bundle with:
+
+```bash
+bun run app:build
+```
+
 ## How it works
 
-Duckweed combines a React + TypeScript interface with a Rust backend through Tauri 2.
-Each pane owns a real PTY process, while the terminal instances live outside the React
-render tree so dragging or rearranging a pane does not destroy its process or scrollback.
+Duckweed has a React and TypeScript interface backed by Rust through Tauri 2.
+Terminal instances live outside the React render tree, so rearranging a pane does
+not recreate its process or scrollback.
 
 ```text
 src/
-├── components/       UI: title bar, tabs, panes, search, palette, status bar
-├── hooks/             drag-and-drop behavior
-└── lib/               layout, terminal registry, persistence, IPC, themes, highlighting
+├── components/       workspace UI, settings, palette, search, diffs, updates
+├── hooks/            drag-and-drop behavior and update checks
+└── lib/              layouts, terminal registry, persistence, IPC, highlighting
 
 src-tauri/src/
-├── main.rs            Tauri commands and IPC
-├── pty.rs             One PTY session per pane
-├── shells.rs          Installed-shell discovery
-└── project.rs         Project name and Git branch detection
+├── main.rs           Tauri commands and IPC
+├── pty.rs            one PTY session per pane
+├── shells.rs         installed-shell discovery
+├── project.rs        project and Git branch detection
+└── usage/            local agent transcript and quota readers
 ```
 
-The PTY stream is transported as base64 and decoded incrementally, so split UTF-8
-characters are preserved even during large bursts of output. Pane sizing uses explicit
-flex bases and `minmax(0, 1fr)` to keep dense layouts inside the window.
+The PTY stream is transported as base64 and decoded incrementally, which keeps
+split UTF-8 characters intact during large bursts of output.
 
 ## Development checks
 
 ```bash
 bun run typecheck
+bun test
 cd src-tauri && cargo check
 ```
 
+Release builds come from two branches: `main` publishes stable releases and
+`testing` publishes beta releases. The full versioning, signing, and updater
+setup is documented in [docs/releases.md](docs/releases.md).
+
 ## Current scope
 
-Duckweed is an active, experimental project. The core workspace experience — projects,
-tabs, panes, native shells, search, and layout persistence — is implemented.
+Duckweed is an active project. Projects, tabs, panes, real shells, search, Git
+diffs, local usage analytics, updates, and layout persistence are implemented.
 
-Warp-style command blocks (grouping each command and its output into a navigable card)
-are not implemented yet. They require shell integration through OSC 133 and prompt hooks.
+Command blocks currently group commands submitted through Duckweed's composer.
+Grouping raw-mode input the same way still needs OSC 133 shell integration.
 
 ## Contributing
 
-Issues, ideas, and pull requests are welcome. If you find a bug, include your operating
-system, shell, reproduction steps, and any relevant terminal output.
+Issues, ideas, and pull requests are welcome. For bug reports, please include the
+operating system, shell, reproduction steps, and relevant terminal output.
 
 ## License
 
-No license has been declared yet. Until one is added, all rights are reserved.
+Duckweed is source-available under the
+[Duckweed Source-Available License 1.0](LICENSE.md). You may use, study, modify,
+fork, and share the source for free. Selling Duckweed, charging for access to it,
+or offering it as a paid service is not permitted.
+
+This is not an open-source license as defined by the Open Source Initiative.
+Future Duckweed releases may use revised terms; a release you already received
+remains under the license that accompanied it.

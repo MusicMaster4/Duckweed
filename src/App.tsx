@@ -1,15 +1,32 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { listen } from "@tauri-apps/api/event";
 
+import { ChangesPanel } from "./components/ChangesPanel";
 import { CommandPalette, type PaletteAction } from "./components/CommandPalette";
+import { FileEditor } from "./components/FileEditor";
 import { PaneTree, type PaneTreeShared } from "./components/PaneTree";
 import { StatusBar } from "./components/StatusBar";
 import { TabStrip } from "./components/TabStrip";
 import { TitleBar } from "./components/TitleBar";
+import { SettingsMenu } from "./components/SettingsMenu";
+import { ToolsPanel, TOOLS_MAX_WIDTH, TOOLS_MIN_WIDTH } from "./components/ToolsPanel";
+import { ConfirmCloseDialog } from "./components/ConfirmCloseDialog";
+import { UpdateDialog } from "./components/UpdateDialog";
 import { useDragPane, type DragState } from "./hooks/useDragPane";
+import { useGitChanges } from "./hooks/useGitChanges";
+import { useUpdater } from "./hooks/useUpdater";
 import * as bus from "./lib/bus";
-import { listShells, projectInfo } from "./lib/ipc";
+import {
+  confirmCloseRunning,
+  isConfirmCloseRunningEnabled,
+  setConfirmCloseRunningEnabled,
+  subscribeConfirmClosePref,
+} from "./lib/confirmClose";
+import { playCompletionSound, preloadCompletionSound } from "./lib/completionSound";
+import { clearGreetings } from "./lib/greetings";
+import { frontendReady, listShells, projectInfo, watchProject } from "./lib/ipc";
 import {
   balance,
   findLeaf,
@@ -23,8 +40,10 @@ import {
   uid,
 } from "./lib/layout";
 import { toggleFullscreen } from "./lib/window";
-import { load, pushRecent, rehydrate, save } from "./lib/persist";
+import { DEFAULT_TOOLS_WIDTH, load, pushRecent, rehydrate, save } from "./lib/persist";
+import { shouldSignalCompletion, type ProcessState } from "./lib/processActivity";
 import * as terminals from "./lib/terminals";
+import { loadSettings as loadUsageSettings, prefetchUsage } from "./lib/usage";
 import type { LeafNode, ProjectInfo, ShellInfo, Tab } from "./lib/types";
 
 interface SpawnOpts {
@@ -33,6 +52,35 @@ interface SpawnOpts {
 }
 
 const DEFAULT_FONT_SIZE = 13.5;
+const TAURI_RUNTIME = "__TAURI_INTERNALS__" in window;
+
+async function confirmUpdateWithRunningProcesses(): Promise<boolean> {
+  const hasRunningProcesses = await terminals.anyHasRunningProcess(terminals.allSessionIds());
+  if (!hasRunningProcesses) return true;
+  return confirmCloseRunning({
+    title: "Install update?",
+    message:
+      "Some terminals still have running processes. If you update now, their progress will be lost.",
+    confirmLabel: "Update anyway",
+  });
+}
+
+function basename(path: string): string {
+  return path.split(/[\\/]/).filter(Boolean).pop() ?? path;
+}
+
+/**
+ * Stand-in for a restored tab's project until `project_info` answers. The folder
+ * name is all the chrome needs to draw, and the branch arrives a tick later.
+ */
+function provisionalProject(path: string): ProjectInfo {
+  return { path, name: basename(path), branch: null, is_git: false };
+}
+
+/** True for a title nobody chose, so pointing the tab at a folder may rename it. */
+function isAutoTitle(tab: Tab): boolean {
+  return /^Terminal \d+$/.test(tab.title) || tab.title === tab.project?.name;
+}
 
 function boot() {
   const saved = load();
@@ -45,32 +93,60 @@ function boot() {
         root,
         activeLeaf: leaves(root)[0].id,
         zoomedLeaf: null,
+        project: entry.project ? provisionalProject(entry.project) : null,
+        pinned: entry.pinned === true,
+        color: entry.color ?? null,
+        icon: entry.icon ?? null,
       };
     });
     const index = Math.min(Math.max(0, saved.activeTabIndex), tabs.length - 1);
     return {
       tabs,
       activeTabId: tabs[index].id,
-      projectPath: saved.project,
+      lastProject: saved.project,
       recents: saved.recents,
       fontSize: saved.fontSize,
       shell: saved.shell,
       highlight: saved.highlight,
+      completionHighlights: saved.completionHighlights,
+      completionSoundEnabled: saved.completionSoundEnabled,
+      inputMode: saved.inputMode,
+      confirmCloseRunning: saved.confirmCloseRunning,
+      toolsOpen: saved.toolsOpen,
+      toolsWidth: saved.toolsWidth,
     };
   }
   const term = terminals.newTermId();
   const root = leaf(term);
-  const tab: Tab = { id: uid("tab"), title: "Terminal 1", root, activeLeaf: root.id, zoomedLeaf: null };
+  const tab: Tab = {
+    id: uid("tab"),
+    title: "Terminal 1",
+    root,
+    activeLeaf: root.id,
+    zoomedLeaf: null,
+    project: null,
+  };
   return {
     tabs: [tab],
     activeTabId: tab.id,
-    projectPath: null as string | null,
+    lastProject: null as string | null,
     recents: [] as string[],
     fontSize: DEFAULT_FONT_SIZE,
     shell: null as string | null,
     highlight: true,
+    completionHighlights: true,
+    completionSoundEnabled: true,
+    inputMode: "editor" as terminals.InputMode,
+    confirmCloseRunning: true,
+    toolsOpen: false,
+    toolsWidth: DEFAULT_TOOLS_WIDTH,
   };
 }
+
+/** Stable empty set so hiding completion marks does not churn PaneTree memos. */
+const NO_UNREAD_TERMS: ReadonlySet<string> = new Set();
+/** Stable empty map used while focused completion flashes are hidden. */
+const NO_COMPLETION_FLASHES: ReadonlyMap<string, number> = new Map();
 
 /**
  * True for a field the user is typing into. xterm's hidden helper textarea is
@@ -86,15 +162,40 @@ export default function App() {
 
   const [tabs, setTabs] = useState<Tab[]>(initial.tabs);
   const [activeTabId, setActiveTabId] = useState(initial.activeTabId);
-  const [project, setProject] = useState<ProjectInfo | null>(null);
   const [recents, setRecents] = useState<string[]>(initial.recents);
   const [shells, setShells] = useState<ShellInfo[]>([]);
   const [shell, setShell] = useState<string | null>(initial.shell);
   const [fontSize, setFontSize] = useState(initial.fontSize);
   const [highlight, setHighlight] = useState(initial.highlight);
+  const [completionHighlights, setCompletionHighlights] = useState(initial.completionHighlights);
+  const [completionSoundEnabled, setCompletionSoundEnabled] = useState(
+    initial.completionSoundEnabled,
+  );
+  const [inputMode, setInputMode] = useState(initial.inputMode);
+  const [confirmCloseRunningPref, setConfirmCloseRunningPref] = useState(() => {
+    // Honour the saved preference before any close handler can run.
+    setConfirmCloseRunningEnabled(initial.confirmCloseRunning);
+    return initial.confirmCloseRunning;
+  });
   const [booted, setBooted] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
-  const [recentsMenu, setRecentsMenu] = useState<{ x: number; y: number } | null>(null);
+  const [settingsTabOpen, setSettingsTabOpen] = useState(false);
+  const [settingsActive, setSettingsActive] = useState(false);
+  const [changesOpen, setChangesOpen] = useState(false);
+  const [toolsOpen, setToolsOpen] = useState(initial.toolsOpen);
+  const [unreadTermIds, setUnreadTermIds] = useState<Set<string>>(() => new Set());
+  const [completionFlashes, setCompletionFlashes] = useState<Map<string, number>>(
+    () => new Map(),
+  );
+  const [toolsWidth, setToolsWidth] = useState(
+    Math.min(TOOLS_MAX_WIDTH, Math.max(TOOLS_MIN_WIDTH, initial.toolsWidth)),
+  );
+  /**
+   * Popup file editor path. Held here (not inside the tools panel) so Ctrl+Tab,
+   * hiding the explorer, or opening settings cannot unmount a dirty buffer.
+   */
+  const [openFile, setOpenFile] = useState<string | null>(null);
+  const updater = useUpdater({ beforeInstall: confirmUpdateWithRunningProcesses });
 
   // Handlers read state through refs so keyboard shortcuts and pointer drags
   // never act on a stale snapshot.
@@ -102,15 +203,28 @@ export default function App() {
   tabsRef.current = tabs;
   const activeTabIdRef = useRef(activeTabId);
   activeTabIdRef.current = activeTabId;
-  const projectRef = useRef(project);
-  projectRef.current = project;
+  const settingsActiveRef = useRef(settingsActive);
+  settingsActiveRef.current = settingsActive;
   const shellRef = useRef(shell);
   shellRef.current = shell;
+  const completionSoundEnabledRef = useRef(completionSoundEnabled);
+  completionSoundEnabledRef.current = completionSoundEnabled;
+  const completionHighlightsRef = useRef(completionHighlights);
+  completionHighlightsRef.current = completionHighlights;
+  const completionFlashSeq = useRef(0);
+  const completionFlashTimers = useRef(new Map<string, number>());
+  /** Dirty flag for the lifted file editor (file switches confirm through this). */
+  const editorDirtyRef = useRef(false);
+  const processState = useRef(new Map<string, ProcessState>());
+  /** Last folder opened in any tab — only ever used to seed the folder picker. */
+  const lastProject = useRef<string | null>(initial.lastProject);
 
   /** Spawn parameters for terminals that have not been created yet. */
   const spawnOpts = useRef(new Map<string, SpawnOpts>());
 
   const activeTab = tabs.find((t) => t.id === activeTabId) ?? tabs[0];
+  const project = activeTab?.project ?? null;
+  const changes = useGitChanges(project);
 
   const currentTab = useCallback(
     () => tabsRef.current.find((t) => t.id === activeTabIdRef.current) ?? tabsRef.current[0] ?? null,
@@ -121,15 +235,58 @@ export default function App() {
     setTabs((prev) => prev.map((t) => (t.id === tabId ? fn(t) : t)));
   }, []);
 
-  /** cwd a new pane should start in: follow the focused shell, then the project. */
+  const acknowledgeTerm = useCallback((termId: string) => {
+    setUnreadTermIds((prev) => {
+      if (!prev.has(termId)) return prev;
+      const next = new Set(prev);
+      next.delete(termId);
+      return next;
+    });
+  }, []);
+
+  const flashFocusedCompletion = useCallback((termId: string) => {
+    const previousTimer = completionFlashTimers.current.get(termId);
+    if (previousTimer !== undefined) window.clearTimeout(previousTimer);
+
+    const pulse = ++completionFlashSeq.current;
+    setCompletionFlashes((previous) => {
+      const next = new Map(previous);
+      next.set(termId, pulse);
+      return next;
+    });
+
+    completionFlashTimers.current.set(
+      termId,
+      window.setTimeout(() => {
+        completionFlashTimers.current.delete(termId);
+        setCompletionFlashes((previous) => {
+          if (!previous.has(termId)) return previous;
+          const next = new Map(previous);
+          next.delete(termId);
+          return next;
+        });
+      }, 1500),
+    );
+  }, []);
+
+  /** A terminal is being watched only when its pane and app window both have focus. */
+  const isFocusedTerm = useCallback((termId: string): boolean => {
+    if (!document.hasFocus() || settingsActiveRef.current) return false;
+    const tab = tabsRef.current.find((candidate) =>
+      leaves(candidate.root).some((node) => node.term === termId),
+    );
+    if (!tab || tab.id !== activeTabIdRef.current) return false;
+    return findLeaf(tab.root, tab.activeLeaf)?.term === termId;
+  }, []);
+
+  /** cwd a new pane should start in: follow the focused shell, then the tab's project. */
   const inheritCwd = useCallback((): string | null => {
     const tab = currentTab();
-    if (tab) {
-      const active = findLeaf(tab.root, tab.activeLeaf);
-      const meta = active ? terminals.getMeta(active.term) : null;
-      if (meta?.cwd) return meta.cwd;
-    }
-    return projectRef.current?.path ?? null;
+    if (!tab) return null;
+    const active = findLeaf(tab.root, tab.activeLeaf);
+    const meta = active ? terminals.getMeta(active.term) : null;
+    if (meta?.cwd) return meta.cwd;
+    return tab.project?.path ?? null;
   }, [currentTab]);
 
   const createTerm = useCallback(
@@ -144,27 +301,103 @@ export default function App() {
     [inheritCwd],
   );
 
-  const spawnFor = useCallback(
-    (term: string): SpawnOpts =>
-      spawnOpts.current.get(term) ?? { cwd: projectRef.current?.path ?? null, shell: shellRef.current },
-    [],
-  );
+  const spawnFor = useCallback((term: string): SpawnOpts => {
+    const recorded = spawnOpts.current.get(term);
+    if (recorded) return recorded;
+    // A pane restored from disk records nothing, so its folder is the one
+    // belonging to the tab it was restored into — not whichever tab is active.
+    const owner = tabsRef.current.find((t) => leaves(t.root).some((n) => n.term === term));
+    return { cwd: owner?.project?.path ?? null, shell: shellRef.current };
+  }, []);
 
   const releaseTerm = useCallback((term: string) => {
     terminals.dispose(term);
     spawnOpts.current.delete(term);
-  }, []);
+    processState.current.delete(term);
+    const flashTimer = completionFlashTimers.current.get(term);
+    if (flashTimer !== undefined) {
+      window.clearTimeout(flashTimer);
+      completionFlashTimers.current.delete(term);
+    }
+    setCompletionFlashes((previous) => {
+      if (!previous.has(term)) return previous;
+      const next = new Map(previous);
+      next.delete(term);
+      return next;
+    });
+    acknowledgeTerm(term);
+    clearGreetings(term);
+  }, [acknowledgeTerm]);
+
+  const termIds = useMemo(
+    () => tabs.flatMap((tab) => leaves(tab.root).map((node) => node.term)),
+    [tabs],
+  );
+  const termIdsKey = termIds.join("\0");
+
+  // Background tabs remain subscribed to the app-wide PTY busy monitor so a
+  // running -> idle transition can leave a durable "not reviewed yet" marker.
+  useEffect(() => {
+    const readState = (termId: string) => {
+      const meta = terminals.getMeta(termId);
+      if (!meta) {
+        processState.current.delete(termId);
+        acknowledgeTerm(termId);
+        return;
+      }
+
+      const previous = processState.current.get(termId);
+      processState.current.set(termId, {
+        busy: meta.busy,
+        exited: meta.exited,
+        completionSeq: meta.completionSeq,
+        agent: meta.agent,
+        processStartedAt: meta.processStartedAt,
+      });
+      if (!previous) return;
+
+      if (!shouldSignalCompletion(previous, meta)) return;
+      if (completionSoundEnabledRef.current) playCompletionSound();
+      if (isFocusedTerm(termId)) {
+        if (completionHighlightsRef.current) flashFocusedCompletion(termId);
+        return;
+      }
+      setUnreadTermIds((prev) => {
+        if (prev.has(termId)) return prev;
+        const next = new Set(prev);
+        next.add(termId);
+        return next;
+      });
+    };
+
+    const unsubscribers = termIds.map((termId) => {
+      readState(termId);
+      return terminals.subscribeSession(termId, () => readState(termId));
+    });
+    return () => {
+      for (const unsubscribe of unsubscribers) unsubscribe();
+    };
+    // Tab metadata changes must not tear down every terminal subscription.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [termIdsKey, acknowledgeTerm, flashFocusedCompletion, isFocusedTerm]);
 
   // ---------------------------------------------------------------- tabs
 
+  // Like Warp's default new-tab action, this opens a fresh shell in the
+  // configured default directory (the backend resolves null to the user's
+  // home). Choosing a project is an explicit action on this tab.
   const newTab = useCallback(
     (shellId?: string | null) => {
-      const term = createTerm({ cwd: projectRef.current?.path ?? null, shell: shellId ?? shellRef.current });
+      const term = createTerm({ cwd: null, shell: shellId ?? shellRef.current });
       const root = leaf(term);
-      const title = projectRef.current
-        ? projectRef.current.name
-        : `Terminal ${tabsRef.current.length + 1}`;
-      const tab: Tab = { id: uid("tab"), title, root, activeLeaf: root.id, zoomedLeaf: null };
+      const tab: Tab = {
+        id: uid("tab"),
+        title: `Terminal ${tabsRef.current.length + 1}`,
+        root,
+        activeLeaf: root.id,
+        zoomedLeaf: null,
+        project: null,
+      };
       setTabs([...tabsRef.current, tab]);
       setActiveTabId(tab.id);
     },
@@ -172,25 +405,49 @@ export default function App() {
   );
 
   const closeTab = useCallback(
-    (tabId: string, skipTerms: string[] = []) => {
+    async (tabId: string, skipTerms: string[] = []) => {
       const prev = tabsRef.current;
       const tab = prev.find((t) => t.id === tabId);
       if (!tab) return;
-      for (const node of leaves(tab.root)) {
+
+      const termsToCheck = leaves(tab.root)
+        .map((n) => n.term)
+        .filter((t) => !skipTerms.includes(t));
+      if (await terminals.anyHasRunningProcess(termsToCheck)) {
+        const ok = await confirmCloseRunning({
+          title: "Close tab?",
+          message:
+            termsToCheck.length === 1
+              ? "You have a process running in this tab."
+              : "You have processes running in this tab.",
+          confirmLabel: "Yes, close",
+          allowDontShowAgain: true,
+        });
+        if (!ok) return;
+      }
+
+      // Re-read after the dialog — the user may have restructured tabs meanwhile.
+      const latest = tabsRef.current;
+      const still = latest.find((t) => t.id === tabId);
+      if (!still) return;
+
+      for (const node of leaves(still.root)) {
         if (!skipTerms.includes(node.term)) releaseTerm(node.term);
       }
-      const index = prev.findIndex((t) => t.id === tabId);
-      const remaining = prev.filter((t) => t.id !== tabId);
+      const index = latest.findIndex((t) => t.id === tabId);
+      const remaining = latest.filter((t) => t.id !== tabId);
 
       if (remaining.length === 0) {
-        const term = createTerm({ cwd: projectRef.current?.path ?? null });
+        // The window keeps one neutral tab open in the default directory.
+        const term = createTerm({ cwd: null });
         const root = leaf(term);
         const fresh: Tab = {
           id: uid("tab"),
-          title: projectRef.current?.name ?? "Terminal 1",
+          title: "Terminal 1",
           root,
           activeLeaf: root.id,
           zoomedLeaf: null,
+          project: null,
         };
         setTabs([fresh]);
         setActiveTabId(fresh.id);
@@ -215,17 +472,104 @@ export default function App() {
     });
   }, []);
 
+  /** Pin moves the tab left of every unpinned tab; unpin leaves it where it is. */
+  const pinTab = useCallback((tabId: string) => {
+    setTabs((prev) => {
+      const index = prev.findIndex((t) => t.id === tabId);
+      if (index < 0) return prev;
+      const tab = prev[index];
+      if (tab.pinned) {
+        return prev.map((t) => (t.id === tabId ? { ...t, pinned: false } : t));
+      }
+      const rest = prev.filter((t) => t.id !== tabId);
+      const pinned = rest.filter((t) => t.pinned);
+      const unpinned = rest.filter((t) => !t.pinned);
+      return [...pinned, { ...tab, pinned: true }, ...unpinned];
+    });
+  }, []);
+
+  const colorTab = useCallback((tabId: string, colorId: string | null) => {
+    updateTab(tabId, (t) => ({ ...t, color: colorId }));
+  }, [updateTab]);
+
+  const iconTab = useCallback((tabId: string, iconId: string | null) => {
+    updateTab(tabId, (t) => ({ ...t, icon: iconId }));
+  }, [updateTab]);
+
+  const closeOtherTabs = useCallback(
+    async (keepId: string) => {
+      const snapshot = tabsRef.current;
+      const others = snapshot.filter((t) => t.id !== keepId);
+      if (others.length === 0) return;
+
+      // One prompt for the whole batch — "this tab" wording is wrong here because
+      // the tabs being closed are the other ones, not the focused tab.
+      const termsToCheck = others.flatMap((t) => leaves(t.root).map((n) => n.term));
+      if (await terminals.anyHasRunningProcess(termsToCheck)) {
+        const n = others.length;
+        const ok = await confirmCloseRunning({
+          title: n === 1 ? "Close other tab?" : "Close other tabs?",
+          message:
+            n === 1
+              ? "That tab has a process running."
+              : "Some of those tabs have processes running.",
+          confirmLabel: n === 1 ? "Yes, close" : "Yes, close all",
+          allowDontShowAgain: true,
+        });
+        if (!ok) return;
+      }
+
+      // Re-read after the dialog; keep only the tab that still exists.
+      const latest = tabsRef.current;
+      const keep = latest.find((t) => t.id === keepId);
+      if (!keep) return;
+      const stillOthers = latest.filter((t) => t.id !== keepId);
+      for (const tab of stillOthers) {
+        for (const node of leaves(tab.root)) releaseTerm(node.term);
+      }
+      setTabs([keep]);
+      setActiveTabId(keep.id);
+    },
+    [releaseTerm],
+  );
+
+  const selectTab = useCallback((id: string) => {
+    if (id !== activeTabIdRef.current) terminals.clearAllBlockSelections();
+    const tab = tabsRef.current.find((candidate) => candidate.id === id);
+    const term = tab ? findLeaf(tab.root, tab.activeLeaf)?.term : null;
+    if (term) acknowledgeTerm(term);
+    setSettingsActive(false);
+    setActiveTabId(id);
+  }, [acknowledgeTerm]);
+
+  const openSettings = useCallback(() => {
+    terminals.clearAllBlockSelections();
+    // Warm Usage only when Settings is actually entered. The frontend cache
+    // coalesces repeated clicks and keeps quick reopenings from touching disk
+    // or provider endpoints again; leaving Settings open starts no polling.
+    void prefetchUsage(loadUsageSettings().days, 60_000).catch(() => {
+      // The Usage panel owns the visible retry/error state.
+    });
+    setSettingsTabOpen(true);
+    setSettingsActive(true);
+  }, []);
+
+  const closeSettings = useCallback(() => {
+    setSettingsTabOpen(false);
+    setSettingsActive(false);
+  }, []);
+
   const selectTabIndex = useCallback((index: number) => {
     const tab = tabsRef.current[index];
-    if (tab) setActiveTabId(tab.id);
-  }, []);
+    if (tab) selectTab(tab.id);
+  }, [selectTab]);
 
   const cycleTab = useCallback((step: 1 | -1) => {
     const prev = tabsRef.current;
     const index = prev.findIndex((t) => t.id === activeTabIdRef.current);
     if (index < 0) return;
-    setActiveTabId(prev[(index + step + prev.length) % prev.length].id);
-  }, []);
+    selectTab(prev[(index + step + prev.length) % prev.length].id);
+  }, [selectTab]);
 
   // --------------------------------------------------------------- panes
 
@@ -245,22 +589,39 @@ export default function App() {
   );
 
   const closePane = useCallback(
-    (leafId: string) => {
+    async (leafId: string) => {
       const tab = currentTab();
       if (!tab) return;
       const node = findLeaf(tab.root, leafId);
       if (!node) return;
-      const nextRoot = removeLeaf(tab.root, leafId);
+
+      if (await terminals.hasRunningProcess(node.term)) {
+        const ok = await confirmCloseRunning({
+          title: "Close pane?",
+          message: "You have a process running in this pane.",
+          confirmLabel: "Yes, close",
+          allowDontShowAgain: true,
+        });
+        if (!ok) return;
+      }
+
+      // Re-read after the dialog — the layout may have changed while it was open.
+      const tabNow = currentTab();
+      if (!tabNow || tabNow.id !== tab.id) return;
+      const nodeNow = findLeaf(tabNow.root, leafId);
+      if (!nodeNow) return;
+      const nextRoot = removeLeaf(tabNow.root, leafId);
 
       if (!nextRoot) {
-        releaseTerm(node.term);
-        closeTab(tab.id, [node.term]);
+        releaseTerm(nodeNow.term);
+        // Term already checked above; skip a second busy prompt in closeTab.
+        void closeTab(tabNow.id, [nodeNow.term]);
         return;
       }
 
-      releaseTerm(node.term);
+      releaseTerm(nodeNow.term);
       const fallback = leaves(nextRoot)[0].id;
-      updateTab(tab.id, (t) => ({
+      updateTab(tabNow.id, (t) => ({
         ...t,
         root: nextRoot,
         activeLeaf: findLeaf(nextRoot, t.activeLeaf) ? t.activeLeaf : fallback,
@@ -273,23 +634,33 @@ export default function App() {
   const activatePane = useCallback(
     (leafId: string) => {
       const tab = currentTab();
-      if (!tab || tab.activeLeaf === leafId) return;
+      if (!tab) return;
+      const node = findLeaf(tab.root, leafId);
+      if (!node) return;
+      acknowledgeTerm(node.term);
+      if (tab.activeLeaf === leafId) return;
+      // Leaving a pane (or tab leaf) drops its chunk selection — only one
+      // terminal may own a selected block, and clicking another pane clears it.
+      terminals.clearAllBlockSelections();
       updateTab(tab.id, (t) => ({ ...t, activeLeaf: leafId }));
     },
-    [currentTab, updateTab],
+    [acknowledgeTerm, currentTab, updateTab],
   );
 
   const toggleZoom = useCallback(
     (leafId: string) => {
       const tab = currentTab();
       if (!tab) return;
+      const node = findLeaf(tab.root, leafId);
+      if (node) acknowledgeTerm(node.term);
+      if (tab.activeLeaf !== leafId) terminals.clearAllBlockSelections();
       updateTab(tab.id, (t) => ({
         ...t,
         activeLeaf: leafId,
         zoomedLeaf: t.zoomedLeaf === leafId ? null : leafId,
       }));
     },
-    [currentTab, updateTab],
+    [acknowledgeTerm, currentTab, updateTab],
   );
 
   const balancePanes = useCallback(() => {
@@ -332,9 +703,11 @@ export default function App() {
         const score = forward + off * 3;
         if (!best || score < best.score) best = { id, score };
       }
-      if (best) updateTab(tab.id, (t) => ({ ...t, activeLeaf: best.id }));
+      if (best) {
+        activatePane(best.id);
+      }
     },
-    [currentTab, updateTab],
+    [activatePane, currentTab],
   );
 
   const cyclePane = useCallback(
@@ -342,9 +715,9 @@ export default function App() {
       const tab = currentTab();
       if (!tab) return;
       const next = nextLeaf(tab.root, tab.activeLeaf, step);
-      if (next) updateTab(tab.id, (t) => ({ ...t, activeLeaf: next }));
+      if (next && next !== tab.activeLeaf) activatePane(next);
     },
-    [currentTab, updateTab],
+    [activatePane, currentTab],
   );
 
   // ---------------------------------------------------------- drag & drop
@@ -383,12 +756,15 @@ export default function App() {
 
       let focus = targetTabId;
       if (!targetTabId) {
+        // The pane is still the same shell in the same folder — it just lives in
+        // its own tab now, so the project comes with it.
         const created: Tab = {
           id: uid("tab"),
-          title: `Terminal ${next.length + 1}`,
+          title: source.project?.name ?? `Terminal ${next.length + 1}`,
           root: moved,
           activeLeaf: moved.id,
           zoomedLeaf: null,
+          project: source.project,
         };
         next = [...next, created];
         focus = created.id;
@@ -460,52 +836,144 @@ export default function App() {
 
   // ------------------------------------------------------------- project
 
+  /**
+   * Move a pane's shell into `path`. Panes with a command running are left
+   * alone — the tab changed folders, that is no reason to interrupt a build.
+   */
+  const cdPane = useCallback(async (term: string, path: string) => {
+    // A restored/background terminal may not be mounted yet. In that case,
+    // change its spawn parameters instead of sending a command into nowhere.
+    if (!terminals.getMeta(term)) {
+      const recorded = spawnOpts.current.get(term);
+      spawnOpts.current.set(term, {
+        cwd: path,
+        shell: recorded?.shell ?? shellRef.current,
+      });
+      return;
+    }
+    if (await terminals.hasRunningProcess(term)) return;
+    // Blank panes keep the welcome duck (like a fresh split); used panes get a
+    // normal `cd` in the grid. Quoting is shell-specific (see buildCdCommand).
+    terminals.changeDirectory(term, path);
+  }, []);
+
+  /**
+   * Point a tab at a folder. Opening a project is per-tab: each tab is its own
+   * project, the way a Warp window holds several at once.
+   */
   const applyProject = useCallback(
-    async (path: string, options: { openTab: boolean }) => {
+    async (path: string, options: { newTab?: boolean; tabId?: string } = {}) => {
+      let info: ProjectInfo;
       try {
-        const info = await projectInfo(path);
-        setProject(info);
-        projectRef.current = info;
-        setRecents((prev) => pushRecent(prev, info.path));
-        void getCurrentWindow().setTitle(`${info.name} — Duckweed`);
-        if (options.openTab) {
-          const term = createTerm({ cwd: info.path });
-          const root = leaf(term);
-          const tab: Tab = {
-            id: uid("tab"),
-            title: info.name,
-            root,
-            activeLeaf: root.id,
-            zoomedLeaf: null,
-          };
-          setTabs([...tabsRef.current, tab]);
-          setActiveTabId(tab.id);
-        }
+        info = await projectInfo(path);
       } catch (error) {
         console.error("failed to open project", error);
         setRecents((prev) => prev.filter((p) => p !== path));
+        return;
       }
+
+      lastProject.current = info.path;
+      setRecents((prev) => pushRecent(prev, info.path));
+
+      if (options.newTab) {
+        // Spawning straight into the folder beats spawning then `cd`-ing.
+        const term = createTerm({ cwd: info.path });
+        const root = leaf(term);
+        const tab: Tab = {
+          id: uid("tab"),
+          title: info.name,
+          root,
+          activeLeaf: root.id,
+          zoomedLeaf: null,
+          project: info,
+        };
+        setTabs([...tabsRef.current, tab]);
+        setActiveTabId(tab.id);
+        return;
+      }
+
+      const tab = options.tabId
+        ? tabsRef.current.find((candidate) => candidate.id === options.tabId) ?? null
+        : currentTab();
+      if (!tab) return;
+      setTabs((prev) =>
+        prev.map((t) =>
+          t.id === tab.id ? { ...t, project: info, title: isAutoTitle(t) ? info.name : t.title } : t,
+        ),
+      );
+      for (const node of leaves(tab.root)) void cdPane(node.term, info.path);
     },
-    [createTerm],
+    [cdPane, createTerm, currentTab],
   );
 
-  const openProject = useCallback(async () => {
-    const selected = await openDialog({
-      directory: true,
-      multiple: false,
-      title: "Open project folder",
-      defaultPath: projectRef.current?.path,
-    });
-    if (typeof selected !== "string") return;
-    await applyProject(selected, { openTab: true });
-  }, [applyProject]);
+  const openProject = useCallback(
+    async (options: { newTab?: boolean; tabId?: string } = {}) => {
+      const target = options.tabId
+        ? tabsRef.current.find((tab) => tab.id === options.tabId) ?? null
+        : currentTab();
+      const selected = await openDialog({
+        directory: true,
+        multiple: false,
+        title: options.newTab ? "Choose a folder for the new tab" : "Choose a folder for this tab",
+        defaultPath: target?.project?.path ?? lastProject.current ?? undefined,
+      });
+      if (typeof selected !== "string") return;
+      await applyProject(selected, options);
+    },
+    [applyProject, currentTab],
+  );
+
+  /**
+   * Re-read the visible project. The branch it shows is whatever `.git/HEAD`
+   * says, and the shell in the pane below can change that at any moment — so
+   * this runs on a slow timer as well as on the events that obviously matter.
+   */
+  const refreshProject = useCallback(async (tabId?: string) => {
+    const tab = tabId
+      ? tabsRef.current.find((candidate) => candidate.id === tabId) ?? null
+      : currentTab();
+    const path = tab?.project?.path;
+    if (!path) return;
+    try {
+      const info = await projectInfo(path);
+      setTabs((prev) => {
+        let changed = false;
+        const next = prev.map((t) => {
+          const current = t.project;
+          if (current?.path !== path) return t;
+          if (
+            current.branch === info.branch &&
+            current.name === info.name &&
+            current.is_git === info.is_git
+          ) {
+            return t;
+          }
+          changed = true;
+          return { ...t, project: info };
+        });
+        // Same array back on a no-op poll: React bails out, and so does the save.
+        return changed ? next : prev;
+      });
+    } catch {
+      // The folder can be renamed or unmounted underneath us; keep what we have.
+    }
+  }, [currentTab]);
 
   // ----------------------------------------------------------- lifecycle
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
+      // Drawing and spawning do not depend on shell discovery or restored
+      // project metadata: null asks the backend for the same default shell.
+      terminals.setFontSize(initial.fontSize);
+      terminals.setHighlight(initial.highlight);
+      terminals.setInputMode(initial.inputMode);
+      preloadCompletionSound();
+      if (!cancelled) setBooted(true);
+
       try {
+        if (!TAURI_RUNTIME) throw new Error("browser preview");
         const list = await listShells();
         if (!cancelled) {
           setShells(list);
@@ -515,31 +983,91 @@ export default function App() {
           }
         }
       } catch (error) {
-        console.error("failed to list shells", error);
+        if (TAURI_RUNTIME) console.error("failed to list shells", error);
       }
 
-      terminals.setFontSize(initial.fontSize);
-      terminals.setHighlight(initial.highlight);
-
-      if (initial.projectPath) {
-        try {
-          const info = await projectInfo(initial.projectPath);
-          if (!cancelled) {
-            setProject(info);
-            projectRef.current = info;
-            void getCurrentWindow().setTitle(`${info.name} — Duckweed`);
+      // Restored tabs carry only a path; fill in the real name and branch.
+      const paths = [...new Set(initial.tabs.map((t) => t.project?.path).filter(Boolean))] as string[];
+      void Promise.all(
+        paths.map(async (path) => {
+          try {
+            const info = await projectInfo(path);
+            if (!cancelled) {
+              setTabs((prev) => prev.map((t) => (t.project?.path === path ? { ...t, project: info } : t)));
+            }
+          } catch {
+            // Folder is gone — the tab keeps the name, and opening a new one is
+            // the user's move to make.
+            if (!cancelled) setRecents((prev) => prev.filter((p) => p !== path));
           }
-        } catch {
-          if (!cancelled) setRecents((prev) => prev.filter((p) => p !== initial.projectPath));
-        }
-      }
-
-      if (!cancelled) setBooted(true);
+        }),
+      );
     })();
     return () => {
       cancelled = true;
     };
-  }, [initial.fontSize, initial.highlight, initial.projectPath]);
+  }, [initial]);
+
+  // The window title follows the tab you are looking at.
+  useEffect(() => {
+    if (!TAURI_RUNTIME) return;
+    void getCurrentWindow().setTitle(project ? `Duckweed — ${project.name}` : "Duckweed");
+  }, [project]);
+
+  // Watch only the visible project. Shell edits, checkouts and external tools
+  // arrive as one debounced event rather than two permanent polling loops.
+  useEffect(() => {
+    if (!TAURI_RUNTIME) return;
+    void watchProject(project?.path ?? null);
+  }, [project?.path]);
+
+  // Keep the branch chip honest on tab switch, focus and watcher notifications.
+  useEffect(() => {
+    void refreshProject();
+    const onFocus = () => void refreshProject();
+    window.addEventListener("focus", onFocus);
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    if (TAURI_RUNTIME) {
+      void listen<string>("project:changed", (event) => {
+        if (event.payload === currentTab()?.project?.path) void refreshProject();
+      }).then((off) => {
+        if (disposed) off();
+        else unlisten = off;
+      });
+    }
+    return () => {
+      disposed = true;
+      window.removeEventListener("focus", onFocus);
+      unlisten?.();
+    };
+  }, [activeTabId, currentTab, refreshProject]);
+
+  // The native window starts hidden so users never see a half-painted webview.
+  useEffect(() => {
+    if (!booted || !TAURI_RUNTIME) return;
+    const frame = requestAnimationFrame(() => void frontendReady());
+    return () => cancelAnimationFrame(frame);
+  }, [booted]);
+
+  // A tab with no repo has nothing to review, and a panel that reappeared on
+  // the way back would be showing another project's diff.
+  useEffect(() => {
+    if (!project?.is_git) setChangesOpen(false);
+  }, [project?.is_git]);
+
+  // Settings toggle -> module flag used by confirmCloseRunning().
+  useEffect(() => {
+    setConfirmCloseRunningEnabled(confirmCloseRunningPref);
+  }, [confirmCloseRunningPref]);
+
+  // Dialog "Don't show this again" flips the module flag; mirror into React so
+  // Settings and localStorage stay honest.
+  useEffect(() => {
+    return subscribeConfirmClosePref(() => {
+      setConfirmCloseRunningPref(isConfirmCloseRunningEnabled());
+    });
+  }, []);
 
   // Persist the arrangement (never the processes). Debounced because dragging a
   // divider produces a state update per pointer move.
@@ -547,11 +1075,47 @@ export default function App() {
     if (!booted) return;
     const id = window.setTimeout(
       () =>
-        save({ project: project?.path ?? null, recents, fontSize, shell, highlight, tabs, activeTabId }),
+        save({
+          project: lastProject.current,
+          recents,
+          fontSize,
+          shell,
+          highlight,
+          completionHighlights,
+          completionSoundEnabled,
+          inputMode,
+          confirmCloseRunning: confirmCloseRunningPref,
+          toolsOpen,
+          toolsWidth,
+          tabs,
+          activeTabId,
+        }),
       400,
     );
     return () => window.clearTimeout(id);
-  }, [booted, project, recents, fontSize, shell, highlight, tabs, activeTabId]);
+  }, [
+    booted,
+    project,
+    recents,
+    fontSize,
+    shell,
+    highlight,
+    completionHighlights,
+    completionSoundEnabled,
+    inputMode,
+    confirmCloseRunningPref,
+    toolsOpen,
+    toolsWidth,
+    tabs,
+    activeTabId,
+  ]);
+
+  // The grid just lost (or got back) horizontal room; the per-pane observers see
+  // it, but re-measuring on the next frame keeps the reflow to a single pass.
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => terminals.refitAll());
+    return () => cancelAnimationFrame(frame);
+  }, [toolsOpen, toolsWidth]);
 
   // Keep the OS focus on the terminal the UI considers active.
   const focusKey = activeTab ? `${activeTab.id}:${activeTab.activeLeaf}` : "";
@@ -568,6 +1132,32 @@ export default function App() {
     const cleanup = () => terminals.disposeAll();
     window.addEventListener("beforeunload", cleanup);
     return () => window.removeEventListener("beforeunload", cleanup);
+  }, []);
+
+  // Warn before quitting if any terminal still has a command running.
+  useEffect(() => {
+    if (!TAURI_RUNTIME) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void getCurrentWindow()
+      .onCloseRequested(async (event) => {
+        if (!(await terminals.anyHasRunningProcess(terminals.allSessionIds()))) return;
+        const ok = await confirmCloseRunning({
+          title: "Quit Duckweed?",
+          message: "You have processes running in open terminals.",
+          confirmLabel: "Yes, quit",
+          allowDontShowAgain: true,
+        });
+        if (!ok) event.preventDefault();
+      })
+      .then((fn) => {
+        if (disposed) fn();
+        else unlisten = fn;
+      });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
   }, []);
 
   // Each pane has a ResizeObserver, but maximize/fullscreen/DPI changes can land
@@ -597,6 +1187,80 @@ export default function App() {
     setHighlight(next);
   }, []);
 
+  const toggleCompletionHighlights = useCallback(() => {
+    setCompletionHighlights((prev) => !prev);
+  }, []);
+
+  useEffect(() => {
+    if (completionHighlights) return;
+    for (const timer of completionFlashTimers.current.values()) {
+      window.clearTimeout(timer);
+    }
+    completionFlashTimers.current.clear();
+    setCompletionFlashes((previous) => (previous.size === 0 ? previous : new Map()));
+  }, [completionHighlights]);
+
+  useEffect(
+    () => () => {
+      for (const timer of completionFlashTimers.current.values()) {
+        window.clearTimeout(timer);
+      }
+      completionFlashTimers.current.clear();
+    },
+    [],
+  );
+
+  const toggleCompletionSound = useCallback(() => {
+    setCompletionSoundEnabled((prev) => !prev);
+  }, []);
+
+  const toggleInputMode = useCallback(() => {
+    const next = terminals.getInputMode() === "editor" ? "raw" : "editor";
+    terminals.setInputMode(next);
+    setInputMode(next);
+  }, []);
+
+  // --------------------------------------------------------- tools panel
+
+  /** Hand a path from the explorer to the prompt of the focused pane. */
+  const insertPath = useCallback(
+    (path: string) => {
+      const tab = currentTab();
+      const node = tab ? findLeaf(tab.root, tab.activeLeaf) : null;
+      if (!node) return;
+      terminals.paste(node.term, /\s/.test(path) ? `"${path}"` : path);
+      terminals.focus(node.term);
+    },
+    [currentTab],
+  );
+
+  /** `cd` the focused pane, the same way opening a project moves its panes. */
+  const cdActivePane = useCallback(
+    (path: string) => {
+      const tab = currentTab();
+      const node = tab ? findLeaf(tab.root, tab.activeLeaf) : null;
+      if (node) void cdPane(node.term, path);
+    },
+    [cdPane, currentTab],
+  );
+
+  /** Open a path in the popup editor; confirm first if another dirty buffer is open. */
+  const openExplorerFile = useCallback(
+    async (path: string) => {
+      if (openFile === path) return;
+      if (openFile && editorDirtyRef.current) {
+        const ok = await confirmCloseRunning({
+          title: "Unsaved changes",
+          message: "The open file has unsaved edits. Discard them and open another?",
+          confirmLabel: "Discard",
+        });
+        if (!ok) return;
+      }
+      setOpenFile(path);
+    },
+    [openFile],
+  );
+
   // ----------------------------------------------------------- shortcuts
 
   const actions = {
@@ -615,6 +1279,8 @@ export default function App() {
     toggleHighlight,
     currentTab,
     setPaletteOpen,
+    setChangesOpen,
+    setToolsOpen,
   };
   const actionsRef = useRef(actions);
   actionsRef.current = actions;
@@ -676,10 +1342,25 @@ export default function App() {
       // the clipboard synchronously — those tools put the user's previous
       // clipboard back a couple of hundred milliseconds later, which an async
       // navigator.clipboard read can easily lose the race to.
+      // Plain Ctrl+V. Prefer the command editor (or raw grid) of the active pane.
+      // Left alone, xterm swallows Ctrl+V into a literal ^V for the shell.
       if (ctrl && !e.shiftKey && !e.altKey && key === "v" && !isTextField(e.target)) {
         if (activeTerm) terminals.focus(activeTerm);
         e.stopPropagation();
         return;
+      }
+
+      // Plain Ctrl+C with a grid selection: copy, never interrupt. Without this,
+      // focus-on-xterm after a drag turns Ctrl+C into \x03 and PowerShell paints
+      // a stack of `PS …> ^C` lines under the blocks.
+      if (ctrl && !e.shiftKey && !e.altKey && key === "c" && !isTextField(e.target)) {
+        if (activeTerm) {
+          const text = terminals.selection(activeTerm);
+          if (text) {
+            void navigator.clipboard.writeText(text);
+            return take();
+          }
+        }
       }
 
       if (ctrl && e.shiftKey) {
@@ -691,7 +1372,7 @@ export default function App() {
             if (activeLeaf) a.splitPane(activeLeaf, "bottom");
             return take();
           case "w":
-            if (activeLeaf) a.closePane(activeLeaf);
+            if (activeLeaf) void a.closePane(activeLeaf);
             return take();
           case "z":
             if (activeLeaf) a.toggleZoom(activeLeaf);
@@ -700,16 +1381,25 @@ export default function App() {
             a.balancePanes();
             return take();
           case "t":
-            a.newTab(null);
+            // Empty tabs without a folder can't run commands — don't spawn more.
+            if (tab?.project) a.newTab(null);
             return take();
           case "q":
-            if (tab) a.closeTab(tab.id);
+            if (tab) void a.closeTab(tab.id);
             return take();
           case "o":
             void a.openProject();
             return take();
           case "p":
             a.setPaletteOpen(true);
+            return take();
+          case "g":
+            // Only a repo has changes to review; in anything else the key does
+            // nothing rather than opening an empty panel.
+            if (tab?.project?.is_git) a.setChangesOpen((open) => !open);
+            return take();
+          case "x":
+            a.setToolsOpen((open) => !open);
             return take();
           case "f":
             if (activeLeaf) bus.emit("pane:search", { leafId: activeLeaf });
@@ -785,17 +1475,42 @@ export default function App() {
       {
         id: "project.open",
         group: "Project",
-        title: "Open project folder…",
+        title: "Open project folder in this tab…",
+        subtitle: "Each tab has its own project",
         hint: "Ctrl+Shift+O",
         run: () => void openProject(),
       },
-      { id: "tab.new", group: "Tab", title: "New tab", hint: "Ctrl+Shift+T", run: () => newTab(null) },
+      {
+        id: "project.open.tab",
+        group: "Project",
+        title: "Open project folder in a new tab…",
+        run: () => void openProject({ newTab: true }),
+      },
+      ...(project?.is_git
+        ? [
+            {
+              id: "git.changes",
+              group: "Git",
+              title: "Review uncommitted changes",
+              subtitle: changes.stats
+                ? `${changes.stats.files} file${changes.stats.files === 1 ? "" : "s"} · +${changes.stats.insertions} −${changes.stats.deletions}`
+                : project.path,
+              hint: "Ctrl+Shift+G",
+              run: () => setChangesOpen(true),
+            },
+          ]
+        : []),
+      ...(project
+        ? [{ id: "tab.new", group: "Tab", title: "New tab", hint: "Ctrl+Shift+T", run: () => newTab(null) }]
+        : []),
       {
         id: "tab.close",
         group: "Tab",
         title: "Close tab",
         hint: "Ctrl+Shift+Q",
-        run: () => tab && closeTab(tab.id),
+        run: () => {
+          if (tab) void closeTab(tab.id);
+        },
       },
       {
         id: "pane.right",
@@ -842,7 +1557,9 @@ export default function App() {
         group: "Pane",
         title: "Close pane",
         hint: "Ctrl+Shift+W",
-        run: () => activeLeaf && closePane(activeLeaf),
+        run: () => {
+          if (activeLeaf) void closePane(activeLeaf);
+        },
       },
       {
         id: "pane.search",
@@ -850,6 +1567,14 @@ export default function App() {
         title: "Find in terminal",
         hint: "Ctrl+Shift+F",
         run: () => activeLeaf && bus.emit("pane:search", { leafId: activeLeaf }),
+      },
+      {
+        id: "view.tools",
+        group: "View",
+        title: toolsOpen ? "Hide the tools panel" : "Show the tools panel",
+        subtitle: "Project explorer beside the grid",
+        hint: "Ctrl+Shift+X",
+        run: () => setToolsOpen((open) => !open),
       },
       {
         id: "view.fullscreen",
@@ -880,6 +1605,26 @@ export default function App() {
         run: () => applyFontSize(DEFAULT_FONT_SIZE),
       },
       {
+        id: "app.update",
+        group: "App",
+        title: "Check for updates",
+        subtitle: `${updater.channel === "testing" ? "Beta" : "Stable"} channel${updater.version ? ` · v${updater.version}` : ""}`,
+        run: updater.check,
+      },
+      {
+        id: "view.inputmode",
+        group: "View",
+        title:
+          inputMode === "editor"
+            ? "Use the raw terminal for input"
+            : "Use the command editor for input",
+        subtitle:
+          inputMode === "editor"
+            ? "Type straight into the grid, like a conventional terminal"
+            : "Compose commands in a text field below the grid (Warp-style)",
+        run: toggleInputMode,
+      },
+      {
         id: "view.highlight",
         group: "View",
         title: highlight ? "Turn off syntax highlighting" : "Turn on syntax highlighting",
@@ -900,21 +1645,30 @@ export default function App() {
           shellRef.current = info.id;
         },
       });
-      actions.push({
-        id: `shell.tab.${info.id}`,
-        group: "Shell",
-        title: `New tab with ${info.label}`,
-        run: () => newTab(info.id),
-      });
+      if (project) {
+        actions.push({
+          id: `shell.tab.${info.id}`,
+          group: "Shell",
+          title: `New tab with ${info.label}`,
+          run: () => newTab(info.id),
+        });
+      }
     }
 
     for (const path of recents) {
       actions.push({
         id: `recent.${path}`,
         group: "Recent",
-        title: path.split(/[\\/]/).filter(Boolean).pop() ?? path,
+        title: basename(path),
         subtitle: path,
-        run: () => void applyProject(path, { openTab: true }),
+        run: () => void applyProject(path),
+      });
+      actions.push({
+        id: `recent.tab.${path}`,
+        group: "Recent",
+        title: `${basename(path)} in a new tab`,
+        subtitle: path,
+        run: () => void applyProject(path, { newTab: true }),
       });
     }
 
@@ -924,7 +1678,7 @@ export default function App() {
         group: "Go to",
         title: `Tab: ${t.title}`,
         hint: i < 9 ? `Ctrl+${i + 1}` : undefined,
-        run: () => setActiveTabId(t.id),
+        run: () => selectTab(t.id),
       });
     });
 
@@ -948,9 +1702,11 @@ export default function App() {
     applyFontSize,
     applyProject,
     balancePanes,
+    changes.stats,
     closePane,
     closeTab,
     highlight,
+    inputMode,
     newTab,
     openProject,
     recents,
@@ -958,7 +1714,12 @@ export default function App() {
     splitPane,
     tabs,
     toggleHighlight,
+    toggleInputMode,
     toggleZoom,
+    toolsOpen,
+    updater.channel,
+    updater.check,
+    updater.version,
   ]);
 
   // --------------------------------------------------------------- render
@@ -967,19 +1728,85 @@ export default function App() {
     () => Object.fromEntries(tabs.map((t) => [t.id, leaves(t.root).length])),
     [tabs],
   );
+  const unreadCounts = useMemo(
+    () =>
+      Object.fromEntries(
+        tabs.map((tab) => [
+          tab.id,
+          leaves(tab.root).filter((node) => unreadTermIds.has(node.term)).length,
+        ]),
+      ),
+    [tabs, unreadTermIds],
+  );
 
-  const shared: PaneTreeShared = {
-    activeLeaf: activeTab?.activeLeaf ?? "",
-    drag,
-    spawnFor,
-    zoomedLeaf: activeTab?.zoomedLeaf ?? null,
-    onActivate: activatePane,
-    onSplit: (leafId, zone) => splitPane(leafId, zone),
-    onClose: closePane,
-    onToggleZoom: toggleZoom,
-    onStartDrag,
-    onResize: resizeSplitSizes,
-  };
+  const browseActiveProject = useCallback(() => {
+    const tab = currentTab();
+    if (tab) void openProject({ tabId: tab.id });
+  }, [currentTab, openProject]);
+  const pickActiveProject = useCallback(
+    (path: string) => {
+      const tab = currentTab();
+      if (tab) void applyProject(path, { tabId: tab.id });
+    },
+    [applyProject, currentTab],
+  );
+  const splitAt = useCallback(
+    (leafId: string, zone: "right" | "bottom") => splitPane(leafId, zone),
+    [splitPane],
+  );
+  const closePaneById = useCallback((id: string) => void closePane(id), [closePane]);
+
+  const shared = useMemo<PaneTreeShared>(
+    () => ({
+      activeLeaf: activeTab?.activeLeaf ?? "",
+      drag,
+      spawnFor,
+      highlight,
+      // Tracking still runs; the setting only hides the rose chrome.
+      unreadTerms: completionHighlights ? unreadTermIds : NO_UNREAD_TERMS,
+      completionFlashes: completionHighlights ? completionFlashes : NO_COMPLETION_FLASHES,
+      project,
+      recents,
+      onBrowseProject: browseActiveProject,
+      onPickProject: pickActiveProject,
+      zoomedLeaf: activeTab?.zoomedLeaf ?? null,
+      onActivate: activatePane,
+      onSplit: splitAt,
+      onClose: closePaneById,
+      onToggleZoom: toggleZoom,
+      onStartDrag,
+      onResize: resizeSplitSizes,
+    }),
+    [
+      activeTab?.activeLeaf,
+      activeTab?.zoomedLeaf,
+      activatePane,
+      browseActiveProject,
+      closePaneById,
+      completionFlashes,
+      completionHighlights,
+      drag,
+      highlight,
+      onStartDrag,
+      pickActiveProject,
+      project,
+      recents,
+      resizeSplitSizes,
+      spawnFor,
+      splitAt,
+      toggleZoom,
+      unreadTermIds,
+    ],
+  );
+
+  const tabProjects = useMemo(
+    () => ({
+      recents,
+      setFor: (tabId: string, path: string) => void applyProject(path, { tabId }),
+      browseFor: (tabId: string) => void openProject({ tabId }),
+    }),
+    [applyProject, openProject, recents],
+  );
 
   const zoomedNode =
     activeTab?.zoomedLeaf ? findLeaf(activeTab.root, activeTab.zoomedLeaf) : null;
@@ -988,38 +1815,87 @@ export default function App() {
   return (
     <div className="app">
       <TitleBar
-        project={project}
-        onOpenProject={() => void openProject()}
-        onOpenPalette={() => setPaletteOpen(true)}
-        onOpenRecents={(e) => {
-          const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-          setRecentsMenu({ x: rect.left, y: rect.bottom + 4 });
-        }}
-      />
+        settingsActive={settingsActive}
+        onOpenSettings={openSettings}
+        toolsOpen={toolsOpen}
+        onToggleTools={() => setToolsOpen((open) => !open)}
+      >
+        <TabStrip
+          tabs={tabs}
+          activeTabId={activeTabId}
+          paneCounts={paneCounts}
+          unreadCounts={unreadCounts}
+          completionHighlights={completionHighlights}
+          drag={drag}
+          projects={tabProjects}
+          allowNewTab={!!project}
+          onSelect={selectTab}
+          onClose={(id) => void closeTab(id)}
+          onCloseOthers={(id) => void closeOtherTabs(id)}
+          onNew={newTab}
+          onReorder={reorderTabs}
+          onRename={(id, title) => updateTab(id, (t) => ({ ...t, title }))}
+          onPin={pinTab}
+          onColor={colorTab}
+          onIcon={iconTab}
+          settingsOpen={settingsTabOpen}
+          settingsActive={settingsActive}
+          onSelectSettings={openSettings}
+          onCloseSettings={closeSettings}
+        />
+      </TitleBar>
 
-      <TabStrip
-        tabs={tabs}
-        activeTabId={activeTabId}
-        paneCounts={paneCounts}
-        shells={shells}
-        activeShell={shell}
-        drag={drag}
-        onSelect={setActiveTabId}
-        onClose={(id) => closeTab(id)}
-        onNew={newTab}
-        onReorder={reorderTabs}
-        onRename={(id, title) => updateTab(id, (t) => ({ ...t, title }))}
-      />
+      {/* The dock shares the row with the grid rather than covering it, so a
+          folder can be read while a command is still running. */}
+      <div className="workbench">
+        {toolsOpen && !settingsActive && (
+          <ToolsPanel
+            project={project}
+            width={toolsWidth}
+            onWidth={setToolsWidth}
+            onClose={() => setToolsOpen(false)}
+            onInsertPath={insertPath}
+            onOpenFolder={cdActivePane}
+            onBrowseProject={browseActiveProject}
+            onOpenFile={(path) => void openExplorerFile(path)}
+          />
+        )}
 
-      <main className="workspace">
-        {!booted ? (
-          <div className="booting">starting shell…</div>
-        ) : zoomedNode && activeTab ? (
-          <PaneTree node={zoomedNode} shared={shared} />
-        ) : activeTab ? (
-          <PaneTree node={activeTab.root} shared={shared} />
-        ) : null}
-      </main>
+        <main className="workspace">
+          {settingsActive ? (
+            <SettingsMenu
+              fontSize={fontSize}
+              inputMode={inputMode}
+              highlight={highlight}
+              completionHighlights={completionHighlights}
+              completionSoundEnabled={completionSoundEnabled}
+              confirmCloseRunning={confirmCloseRunningPref}
+              shell={shell}
+              shells={shells}
+              updateLabel={`${updater.channel === "testing" ? "Beta" : "Stable"}${updater.version ? ` · v${updater.version}` : ""}`}
+              onFontSize={applyFontSize}
+              onToggleInputMode={toggleInputMode}
+              onToggleHighlight={toggleHighlight}
+              onToggleCompletionHighlights={toggleCompletionHighlights}
+              onToggleCompletionSound={toggleCompletionSound}
+              onToggleConfirmCloseRunning={() =>
+                setConfirmCloseRunningPref((prev) => !prev)
+              }
+              onShell={(shellId) => {
+                setShell(shellId);
+                shellRef.current = shellId;
+              }}
+              onCheckUpdates={updater.check}
+            />
+          ) : !booted ? (
+            <div className="booting">starting shell…</div>
+          ) : zoomedNode && activeTab ? (
+            <PaneTree node={zoomedNode} shared={shared} />
+          ) : activeTab ? (
+            <PaneTree node={activeTab.root} shared={shared} />
+          ) : null}
+        </main>
+      </div>
 
       <StatusBar
         project={project}
@@ -1028,10 +1904,14 @@ export default function App() {
         activeTerm={activeTerm}
         fontSize={fontSize}
         onFontSize={applyFontSize}
+        updater={updater}
+        changes={changes.stats}
+        onOpenChanges={() => setChangesOpen(true)}
+        onProjectRefresh={() => void refreshProject(activeTab?.id)}
       />
 
       {drag && (
-        <div className="drag-ghost" style={{ transform: `translate(${drag.x + 12}px, ${drag.y + 12}px)` }}>
+        <div className="drag-ghost">
           <span className="pane-grip" aria-hidden="true">
             <i />
             <i />
@@ -1041,30 +1921,33 @@ export default function App() {
         </div>
       )}
 
-      {recentsMenu && (
-        <>
-          <div className="menu-backdrop" onPointerDown={() => setRecentsMenu(null)} />
-          <div className="menu menu-recents" style={{ left: recentsMenu.x, top: recentsMenu.y }}>
-            {recents.length === 0 && <div className="menu-empty">No recent projects</div>}
-            {recents.map((path) => (
-              <button
-                key={path}
-                type="button"
-                className="menu-item"
-                onClick={() => {
-                  setRecentsMenu(null);
-                  void applyProject(path, { openTab: true });
-                }}
-              >
-                <span>{path.split(/[\\/]/).filter(Boolean).pop()}</span>
-                <span className="menu-hint">{path}</span>
-              </button>
-            ))}
-          </div>
-        </>
+      {paletteOpen && <CommandPalette actions={paletteActions} onClose={() => setPaletteOpen(false)} />}
+
+      {changesOpen && project?.is_git && (
+        <ChangesPanel
+          project={project}
+          onClose={() => {
+            setChangesOpen(false);
+            // Whatever happened in there — a commit, a discard — the chip is
+            // one poll behind until it re-reads.
+            changes.refresh();
+          }}
+        />
       )}
 
-      {paletteOpen && <CommandPalette actions={paletteActions} onClose={() => setPaletteOpen(false)} />}
+      {openFile && (
+        <FileEditor
+          key={openFile}
+          path={openFile}
+          onClose={() => setOpenFile(null)}
+          onDirtyChange={(dirty) => {
+            editorDirtyRef.current = dirty;
+          }}
+        />
+      )}
+
+      {updater.dialogOpen && <UpdateDialog updater={updater} />}
+      <ConfirmCloseDialog />
     </div>
   );
 }

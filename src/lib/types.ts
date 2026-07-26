@@ -27,6 +27,14 @@ export interface Tab {
   activeLeaf: string;
   /** Leaf id rendered full-tab, hiding its siblings. */
   zoomedLeaf: string | null;
+  /** Folder this tab works in. Each tab can hold a different project. */
+  project: ProjectInfo | null;
+  /** Pinned tabs stay on the left of the strip. */
+  pinned?: boolean;
+  /** Optional accent color id for finding this tab at a glance. */
+  color?: string | null;
+  /** Optional tab icon id; null/absent keeps the default folder. */
+  icon?: string | null;
 }
 
 export interface ShellInfo {
@@ -41,6 +49,81 @@ export interface ProjectInfo {
   name: string;
   branch: string | null;
   is_git: boolean;
+}
+
+/** One row of the project explorer's tree. */
+export interface DirEntry {
+  name: string;
+  /** Absolute path — the tree never joins paths itself. */
+  path: string;
+  is_dir: boolean;
+  /** git ignores this entry; still listed, just dimmed. */
+  ignored: boolean;
+}
+
+/** What the project explorer's file popup loads from disk. */
+export interface FileContent {
+  path: string;
+  /** Empty when binary or too large. */
+  content: string;
+  binary: boolean;
+  too_large: boolean;
+  /** Bytes on disk. */
+  size: number;
+}
+
+export interface Branches {
+  /** Branch HEAD points at, or null on a detached HEAD. */
+  current: string | null;
+  local: string[];
+  /** `origin/feature` names with no local branch yet. */
+  remote: string[];
+}
+
+/** What the status-bar chip counts: uncommitted work, at a glance. */
+export interface DiffStats {
+  files: number;
+  insertions: number;
+  deletions: number;
+}
+
+export interface DiffLine {
+  kind: "ctx" | "add" | "del";
+  /** Number this line had before the change — null on an added line. */
+  old: number | null;
+  /** Number this line has now — null on a removed line. */
+  new: number | null;
+  text: string;
+}
+
+export interface DiffHunk {
+  old_start: number;
+  new_start: number;
+  lines: DiffLine[];
+}
+
+export type FileStatus = "modified" | "added" | "deleted" | "renamed" | "untracked";
+
+export interface FileDiff {
+  /** Relative to the repo root, in git's forward-slash form. */
+  path: string;
+  /** Where a renamed file came from. */
+  old_path: string | null;
+  status: FileStatus;
+  insertions: number;
+  deletions: number;
+  /** Nothing to show: a binary file, or one too large to read. */
+  binary: boolean;
+  /** Lines the file has now — what sizes the run after the last hunk. */
+  new_lines: number;
+  hunks: DiffHunk[];
+}
+
+export interface Diff {
+  /** Repo root; the paths inside are relative to it, not to the tab's folder. */
+  root: string;
+  stats: DiffStats;
+  files: FileDiff[];
 }
 
 export type DropZone = "left" | "right" | "top" | "bottom" | "center";

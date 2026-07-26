@@ -1,29 +1,30 @@
-import { useEffect, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import appIcon from "../../src-tauri/icons/32x32.png";
-
-import { isFullscreen, toggleFullscreen } from "../lib/window";
-import type { ProjectInfo } from "../lib/types";
 
 interface Props {
-  project: ProjectInfo | null;
-  onOpenProject: () => void;
-  onOpenPalette: () => void;
-  onOpenRecents: (e: React.MouseEvent) => void;
+  children: ReactNode;
+  settingsActive: boolean;
+  onOpenSettings: () => void;
+  toolsOpen: boolean;
+  onToggleTools: () => void;
 }
 
-export function TitleBar({ project, onOpenProject, onOpenPalette, onOpenRecents }: Props) {
+export function TitleBar({
+  children,
+  settingsActive,
+  onOpenSettings,
+  toolsOpen,
+  onToggleTools,
+}: Props) {
   const [maximized, setMaximized] = useState(false);
-  const [fullscreen, setFullscreen] = useState(false);
 
   useEffect(() => {
+    if (!("__TAURI_INTERNALS__" in window)) return;
     const win = getCurrentWindow();
     let disposed = false;
     const sync = async () => {
-      const [max, full] = await Promise.all([win.isMaximized(), isFullscreen()]);
-      if (disposed) return;
-      setMaximized(max);
-      setFullscreen(full);
+      const max = await win.isMaximized();
+      if (!disposed) setMaximized(max);
     };
     void sync();
     const unlisten = win.onResized(() => void sync());
@@ -38,64 +39,42 @@ export function TitleBar({ project, onOpenProject, onOpenPalette, onOpenRecents 
   return (
     <header className="titlebar" data-tauri-drag-region>
       <div className="titlebar-left">
-        <span className="brand" data-tauri-drag-region title="Duckweed">
-          <img src={appIcon} alt="" draggable={false} />
-        </span>
-
-        <button type="button" className="chip chip-project" onClick={onOpenProject} title="Open project (Ctrl+Shift+O)">
-          <svg viewBox="0 0 16 16" aria-hidden="true" className="chip-icon">
-            <path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h3l1.5 1.8h4.5A1.5 1.5 0 0 1 14 6.3v5.2A1.5 1.5 0 0 1 12.5 13h-9A1.5 1.5 0 0 1 2 11.5z" />
-          </svg>
-          <span className="chip-label">{project ? project.name : "Open project…"}</span>
-        </button>
-
-        {project?.branch && (
-          <span className="chip chip-branch" title={`git branch: ${project.branch}`}>
-            <svg viewBox="0 0 16 16" aria-hidden="true" className="chip-icon">
-              <circle cx="4.5" cy="4" r="1.8" />
-              <circle cx="4.5" cy="12" r="1.8" />
-              <circle cx="11.5" cy="7" r="1.8" />
-              <path d="M4.5 5.8v4.4M4.5 8.6h3.6a3 3 0 0 0 2.2-1" />
-            </svg>
-            <span className="chip-label">{project.branch}</span>
-          </span>
-        )}
-
-        <button type="button" className="chip chip-ghost" onClick={onOpenRecents} title="Recent projects">
-          Recents
-        </button>
-      </div>
-
-      <div className="titlebar-center" data-tauri-drag-region>
-        <button type="button" className="omni" onClick={onOpenPalette} title="Command palette (Ctrl+Shift+P)">
+        {/* Where the app icon used to sit. Warp puts its tool dock here too, and
+            the corner is worth more as a control than as a logo. */}
+        <button
+          type="button"
+          className={`tools-trigger ${toolsOpen ? "is-open" : ""}`}
+          title={`${toolsOpen ? "Hide" : "Show"} the tools panel (Ctrl+Shift+X)`}
+          aria-label="Tools panel"
+          aria-expanded={toolsOpen}
+          onClick={onToggleTools}
+        >
           <svg viewBox="0 0 16 16" aria-hidden="true">
-            <circle cx="7" cy="7" r="4.2" />
-            <path d="M10.2 10.2 13.5 13.5" />
+            <rect x="2" y="2.5" width="12" height="11" rx="2" />
+            <path d="M6.5 2.5v11" />
           </svg>
-          <span>Search actions…</span>
-          <kbd>Ctrl+Shift+P</kbd>
         </button>
       </div>
+
+      <div className="titlebar-tabs">{children}</div>
 
       <div className="titlebar-right">
         <button
           type="button"
-          className="win-btn"
-          title={fullscreen ? "Exit fullscreen (F11)" : "Fullscreen (F11)"}
-          onClick={() => void toggleFullscreen().then(setFullscreen)}
+          className={`win-btn settings-trigger ${settingsActive ? "is-open" : ""}`}
+          title="Settings"
+          aria-label="Settings"
+          aria-pressed={settingsActive}
+          onClick={onOpenSettings}
         >
-          <svg viewBox="0 0 12 12" aria-hidden="true">
-            {fullscreen ? (
-              <>
-                <path d="M5 1.5v3.5H1.5" />
-                <path d="M7 10.5V7h3.5" />
-              </>
-            ) : (
-              <>
-                <path d="M4.5 1.5H1.5V4.5" />
-                <path d="M7.5 10.5h3v-3" />
-              </>
-            )}
+          {/*
+            Six-tooth cog: flat tips with a deep root (tip r 6.7 vs root r 4.35)
+            so the teeth still read as teeth once the 1.4 stroke is applied at
+            15px — the old shallow-tooth path collapsed into a blob.
+          */}
+          <svg viewBox="0 0 16 16" aria-hidden="true">
+            <circle cx="8" cy="8" r="2" />
+            <path d="M6.44 3.94 6.61 1.45h2.78l.17 2.49a4.35 4.35 0 0 1 1.18.68l2.24-1.1 1.39 2.41-2.07 1.39a4.35 4.35 0 0 1 0 1.36l2.07 1.39-1.39 2.41-2.24-1.1a4.35 4.35 0 0 1-1.18.68l-.17 2.49H6.61l-.17-2.49a4.35 4.35 0 0 1-1.18-.68l-2.24 1.1-1.39-2.41 2.07-1.39a4.35 4.35 0 0 1 0-1.36L1.63 5.93l1.39-2.41 2.24 1.1a4.35 4.35 0 0 1 1.18-.68z" />
           </svg>
         </button>
         <button type="button" className="win-btn" title="Minimize" onClick={() => void win().minimize()}>
@@ -112,11 +91,16 @@ export function TitleBar({ project, onOpenProject, onOpenPalette, onOpenRecents 
           <svg viewBox="0 0 12 12" aria-hidden="true">
             {maximized ? (
               <>
-                <rect x="2" y="3.5" width="6" height="6" rx="1" />
-                <path d="M4.2 3.5V2.5h5.3v5.3H8.5" />
+                {/*
+                  The back square is drawn open — only the part that escapes the
+                  front square. Two full rects overlapping read as a grid, not as
+                  one window sitting on another.
+                */}
+                <path d="M4.25 3.75V2.25h5.5v5.5h-1.5" />
+                <rect x="2.25" y="4.25" width="5.5" height="5.5" rx=".45" />
               </>
             ) : (
-              <rect x="2.5" y="2.5" width="7" height="7" rx="1" />
+              <rect x="2.25" y="2.25" width="7.5" height="7.5" rx="1.2" />
             )}
           </svg>
         </button>

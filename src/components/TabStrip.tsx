@@ -1,103 +1,338 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type MouseEvent } from "react";
 
-import type { ShellInfo, Tab } from "../lib/types";
+import type { Tab } from "../lib/types";
+import { tabColorHex } from "../lib/tabColors";
+import { tabIconDef } from "../lib/tabIcons";
+import { clampLeft, dropIndex, restingLeft, slotShift } from "../lib/tabReorder";
 import type { DragState } from "../hooks/useDragPane";
+import { CompletionDot } from "./CompletionDot";
+import { ProjectMenu } from "./ProjectMenu";
+import { TabContextMenu } from "./TabContextMenu";
+
+/** Everything the tab strip needs to say which folder a tab is working in. */
+export interface ProjectActions {
+  recents: string[];
+  /** Point an existing tab at a folder. */
+  setFor: (tabId: string, path: string) => void;
+  /** Open the folder picker for an existing tab. */
+  browseFor: (tabId: string) => void;
+}
 
 interface Props {
   tabs: Tab[];
   activeTabId: string;
   paneCounts: Record<string, number>;
-  shells: ShellInfo[];
-  activeShell: string | null;
+  unreadCounts: Record<string, number>;
+  /** When false, hide completion dots (tracking still runs in the app). */
+  completionHighlights: boolean;
   drag: DragState | null;
+  projects: ProjectActions;
+  /** New empty tabs are locked until the active tab has a folder. */
+  allowNewTab: boolean;
   onSelect: (tabId: string) => void;
   onClose: (tabId: string) => void;
+  onCloseOthers: (tabId: string) => void;
   onNew: (shellId?: string | null) => void;
   onReorder: (from: number, to: number) => void;
   onRename: (tabId: string, title: string) => void;
+  onPin: (tabId: string) => void;
+  onColor: (tabId: string, colorId: string | null) => void;
+  onIcon: (tabId: string, iconId: string | null) => void;
+  settingsOpen: boolean;
+  settingsActive: boolean;
+  onSelectSettings: () => void;
+  onCloseSettings: () => void;
 }
 
+/** Folder picker open on a tab. */
+type Picker = { tabId: string; x: number; y: number };
+
+type ContextMenu = { tabId: string; x: number; y: number };
+
+/** Where a tab sat when the drag began. */
+type Slot = { el: HTMLElement; left: number; width: number };
+
+/** A tab being dragged along the strip. */
+type Reorder = {
+  tabId: string;
+  /** Pointer x at pointerdown, measured against the slop threshold. */
+  startX: number;
+  /** Distance from the pointer to the tab's left edge — held constant. */
+  grabOffset: number;
+  /** Index the drag started from. */
+  from: number;
+  /** Index the tab would land on if dropped now. */
+  to: number;
+  /** The strip as it was when the drag began; never re-measured. */
+  slots: Slot[];
+  dragging: boolean;
+};
+
+/** Pointer travel before a press turns into a drag. */
+const DRAG_SLOP = 4;
+
+/** How long tabs take to slide into a new order. */
+const SLIDE_MS = 170;
+const SLIDE_EASE = "cubic-bezier(0.22, 1, 0.36, 1)";
+
+const TabGlyph = ({ iconId }: { iconId: string | null | undefined }) => {
+  const def = tabIconDef(iconId);
+  return (
+    <svg viewBox="0 0 16 16" aria-hidden="true" className="tab-glyph-fill">
+      {def.paths.map((d, i) => (
+        <path key={i} d={d} fillRule={def.evenodd ? "evenodd" : undefined} />
+      ))}
+    </svg>
+  );
+};
+
+const PinIcon = () => (
+  <svg viewBox="0 0 16 16" aria-hidden="true" className="tab-pin">
+    <path
+      d="M9.6 2.4 8.2 3.8l.7 2.1-1.9 1.9-1.1-.4L4.5 8.8l2.7 2.7 1.4-1.4-.4-1.1 1.9-1.9 2.1.7 1.4-1.4zM5.2 11.5 3 13.7"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.25"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+  </svg>
+);
+
+/**
+ * The tab strip is where a project lives.
+ *
+ * Every tab carries its own folder, so the folder is drawn inside the tab —
+ * icon, name, and (on the tab you are in) the git branch. Warp puts the same
+ * two facts in its tabs, and it is the one place the association cannot be
+ * misread as a window-wide setting.
+ */
 export function TabStrip({
   tabs,
   activeTabId,
   paneCounts,
-  shells,
-  activeShell,
+  unreadCounts,
+  completionHighlights,
   drag,
+  projects,
+  allowNewTab,
   onSelect,
   onClose,
+  onCloseOthers,
   onNew,
   onReorder,
   onRename,
+  onPin,
+  onColor,
+  onIcon,
+  settingsOpen,
+  settingsActive,
+  onSelectSettings,
+  onCloseSettings,
 }: Props) {
   const stripRef = useRef<HTMLDivElement>(null);
-  const reorder = useRef<{ tabId: string } | null>(null);
+  const reorder = useRef<Reorder | null>(null);
+  /** Drop animation in flight — run it early if another gesture starts. */
+  const settling = useRef<(() => void) | null>(null);
+  const [dragTabId, setDragTabId] = useState<string | null>(null);
   const [editing, setEditing] = useState<string | null>(null);
-  const [shellMenu, setShellMenu] = useState(false);
+  const [picker, setPicker] = useState<Picker | null>(null);
+  const [context, setContext] = useState<ContextMenu | null>(null);
 
   useEffect(() => {
-    if (!shellMenu) return;
-    const close = () => setShellMenu(false);
-    window.addEventListener("pointerdown", close);
-    return () => window.removeEventListener("pointerdown", close);
-  }, [shellMenu]);
+    /**
+     * Snapshot the strip once, when the gesture turns into a drag. Every later
+     * decision is made against this frozen layout: the tabs are being moved
+     * around by transforms, so live rects would feed the gesture its own
+     * output and the drag would fight itself.
+     */
+    const snapshot = (tabId: string) => {
+      const strip = stripRef.current;
+      if (!strip) return null;
+      const els = [...strip.querySelectorAll<HTMLElement>("[data-tab-id]")];
+      const from = els.findIndex((el) => el.dataset.tabId === tabId);
+      if (from < 0) return null;
+      const slots = els.map((el) => {
+        const rect = el.getBoundingClientRect();
+        return { el, left: rect.left, width: rect.width };
+      });
+      return { slots, from };
+    };
 
-  useEffect(() => {
+    /** Slide everything into the new order, then hand it to React. */
+    const settle = (state: Reorder) => {
+      const { slots, from, to } = state;
+      const width = slots[from].width;
+      const rest = restingLeft(slots, from, to);
+
+      for (let i = 0; i < slots.length; i++) {
+        const { el } = slots[i];
+        const shift = i === from ? rest - slots[from].left : slotShift(i, from, to, width);
+        el.style.transition = `transform ${SLIDE_MS}ms ${SLIDE_EASE}`;
+        el.style.transform = shift ? `translateX(${shift}px)` : "translateX(0px)";
+      }
+
+      // The transforms are only a preview: once they have played out the tabs
+      // are already sitting in the new order, so dropping them and letting
+      // React re-render the real order is invisible.
+      const commit = () => {
+        settling.current = null;
+        for (const { el } of slots) {
+          el.style.transition = "";
+          el.style.transform = "";
+        }
+        document.body.classList.remove("is-dragging-tab");
+        setDragTabId(null);
+        if (to !== from) onReorder(from, to);
+      };
+      settling.current = commit;
+      window.setTimeout(() => {
+        if (settling.current === commit) commit();
+      }, SLIDE_MS);
+    };
+
+    /** End the gesture — dropping the tab where it currently reads as being. */
+    const finish = () => {
+      const state = reorder.current;
+      reorder.current = null;
+      if (!state) return;
+      if (!state.dragging) return; // A plain click: nothing was ever moved.
+      settle(state);
+    };
+
     const move = (e: PointerEvent) => {
       const state = reorder.current;
-      const strip = stripRef.current;
-      if (!state || !strip) return;
-      const buttons = [...strip.querySelectorAll<HTMLElement>("[data-tab-id]")];
-      const from = buttons.findIndex((b) => b.dataset.tabId === state.tabId);
-      if (from < 0) return;
-      let to = from;
-      for (let i = 0; i < buttons.length; i++) {
-        const rect = buttons[i].getBoundingClientRect();
-        if (e.clientX > rect.left + rect.width / 2) to = i;
+      if (!state) return;
+      // A click is a click until the pointer has travelled far enough that the
+      // user clearly means to move the tab rather than just select it.
+      if (!state.dragging) {
+        if (Math.abs(e.clientX - state.startX) < DRAG_SLOP) return;
+        const shot = snapshot(state.tabId);
+        if (!shot) return;
+        state.dragging = true;
+        state.slots = shot.slots;
+        state.from = shot.from;
+        state.to = shot.from;
+        document.body.classList.add("is-dragging-tab");
+        setDragTabId(state.tabId);
       }
-      if (e.clientX < buttons[0].getBoundingClientRect().left) to = 0;
-      if (to !== from) onReorder(from, to);
+
+      const { slots, from } = state;
+      const width = slots[from].width;
+      const left = clampLeft(slots, from, e.clientX - state.grabOffset);
+      const to = dropIndex(slots, from, left);
+      state.to = to;
+
+      // The dragged tab tracks the pointer exactly; the tabs it has passed
+      // step aside by its width and are eased there by CSS.
+      slots[from].el.style.transform = `translateX(${left - slots[from].left}px)`;
+      for (let i = 0; i < slots.length; i++) {
+        if (i === from) continue;
+        const shift = slotShift(i, from, to, width);
+        slots[i].el.style.transform = shift ? `translateX(${shift}px)` : "translateX(0px)";
+      }
     };
-    const up = () => {
+
+    /** Escape puts the tab back where the drag started. */
+    const key = (e: KeyboardEvent) => {
+      const state = reorder.current;
+      if (!state || !state.dragging || e.key !== "Escape") return;
       reorder.current = null;
-      document.body.classList.remove("is-dragging-tab");
+      state.to = state.from;
+      settle(state);
     };
+
     window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", up);
+    window.addEventListener("pointerup", finish);
+    window.addEventListener("pointercancel", finish);
+    window.addEventListener("keydown", key);
     return () => {
       window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointerup", finish);
+      window.removeEventListener("pointercancel", finish);
+      window.removeEventListener("keydown", key);
     };
   }, [onReorder]);
 
   const paneDropTab = drag?.target?.kind === "tab" ? drag.target.tabId : null;
   const paneDropNew = drag?.target?.kind === "newTab";
 
+  /** Hang the folder picker under whatever was clicked. */
+  const openPicker = (e: MouseEvent, tabId: string) => {
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    setContext(null);
+    setPicker({ tabId, x: rect.left, y: rect.bottom + 6 });
+  };
+
+  const pickerTab = picker ? tabs.find((t) => t.id === picker.tabId) : null;
+  const contextTab = context ? tabs.find((t) => t.id === context.tabId) : null;
+
   return (
     <div className="tabstrip">
-      <div className="tabs" ref={stripRef}>
+      <div className="tabs" ref={stripRef} role="tablist" aria-label="Open tabs">
         {tabs.map((tab) => {
           const count = paneCounts[tab.id] ?? 0;
+          const unread = unreadCounts[tab.id] ?? 0;
+          const showUnread = completionHighlights && unread > 0;
+          const isActive = tab.id === activeTabId && !settingsActive;
+          const accent = tabColorHex(tab.color);
           return (
             <div
               key={tab.id}
               data-tab-id={tab.id}
+              role="tab"
+              aria-selected={isActive}
+              aria-label={
+                showUnread
+                  ? `${tab.title}, ${unread} finished terminal${unread === 1 ? "" : "s"} not reviewed`
+                  : tab.title
+              }
+              tabIndex={isActive ? 0 : -1}
               className={[
                 "tab",
-                tab.id === activeTabId ? "is-active" : "",
+                isActive ? "is-active" : "",
                 paneDropTab === tab.id ? "is-drop" : "",
+                tab.project ? "" : "is-unclaimed",
+                tab.pinned ? "is-pinned" : "",
+                accent ? "is-colored" : "",
+                showUnread ? "is-unread" : "",
+                dragTabId === tab.id ? "is-reordering" : "",
               ]
                 .filter(Boolean)
                 .join(" ")}
+              style={accent ? ({ "--tab-color": accent } as CSSProperties) : undefined}
               onPointerDown={(e) => {
                 if (e.button !== 0) return;
+                // Land any drop still animating before measuring anything.
+                settling.current?.();
                 onSelect(tab.id);
-                reorder.current = { tabId: tab.id };
-                document.body.classList.add("is-dragging-tab");
+                const rect = e.currentTarget.getBoundingClientRect();
+                reorder.current = {
+                  tabId: tab.id,
+                  startX: e.clientX,
+                  grabOffset: e.clientX - rect.left,
+                  from: 0,
+                  to: 0,
+                  slots: [],
+                  dragging: false,
+                };
               }}
               onDoubleClick={() => setEditing(tab.id)}
+              onKeyDown={(e) => {
+                if (e.target !== e.currentTarget) return;
+                if (e.key !== "Enter" && e.key !== " ") return;
+                e.preventDefault();
+                onSelect(tab.id);
+              }}
               onAuxClick={(e) => {
                 if (e.button === 1) onClose(tab.id);
+              }}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                onSelect(tab.id);
+                setPicker(null);
+                setContext({ tabId: tab.id, x: e.clientX, y: e.clientY });
               }}
             >
               {editing === tab.id ? (
@@ -118,8 +353,32 @@ export function TabStrip({
                 />
               ) : (
                 <>
+                  {tab.pinned && <PinIcon />}
+                  <button
+                    type="button"
+                    className="tab-folder"
+                    title={
+                      tab.project
+                        ? `${tab.project.path} — click to change this tab's folder`
+                        : "This tab has no folder — click to choose one"
+                    }
+                    onPointerDown={(e) => e.stopPropagation()}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onSelect(tab.id);
+                      openPicker(e, tab.id);
+                    }}
+                  >
+                    <TabGlyph iconId={tab.icon} />
+                  </button>
                   <span className="tab-title">{tab.title}</span>
                   {count > 1 && <span className="tab-count">{count}</span>}
+                  <CompletionDot
+                    active={showUnread}
+                    className="tab-completion-dot"
+                    title={`${unread} finished terminal${unread === 1 ? "" : "s"} not reviewed`}
+                    aria-hidden="true"
+                  />
                   <button
                     type="button"
                     className="tab-close"
@@ -138,49 +397,92 @@ export function TabStrip({
           );
         })}
 
-        <div className="tab-new-wrap">
+        {settingsOpen && (
+          <div
+            role="tab"
+            aria-selected={settingsActive}
+            tabIndex={settingsActive ? 0 : -1}
+            className={`tab settings-tab ${settingsActive ? "is-active" : ""}`}
+            onPointerDown={(event) => {
+              if (event.button === 0) onSelectSettings();
+            }}
+            onKeyDown={(event) => {
+              if (event.key !== "Enter" && event.key !== " ") return;
+              event.preventDefault();
+              onSelectSettings();
+            }}
+          >
+            <span className="settings-tab-icon" aria-hidden="true">
+              <svg viewBox="0 0 16 16">
+                <circle cx="8" cy="8" r="2" />
+                <path d="M6.44 3.94 6.61 1.45h2.78l.17 2.49a4.35 4.35 0 0 1 1.18.68l2.24-1.1 1.39 2.41-2.07 1.39a4.35 4.35 0 0 1 0 1.36l2.07 1.39-1.39 2.41-2.24-1.1a4.35 4.35 0 0 1-1.18.68l-.17 2.49H6.61l-.17-2.49a4.35 4.35 0 0 1-1.18-.68l-2.24 1.1-1.39-2.41 2.07-1.39a4.35 4.35 0 0 1 0-1.36L1.63 5.93l1.39-2.41 2.24 1.1a4.35 4.35 0 0 1 1.18-.68z" />
+              </svg>
+            </span>
+            <span className="tab-title">Settings</span>
+            <button
+              type="button"
+              className="tab-close"
+              title="Close settings"
+              aria-label="Close settings"
+              onPointerDown={(event) => event.stopPropagation()}
+              onClick={(event) => {
+                event.stopPropagation();
+                onCloseSettings();
+              }}
+            >
+              ✕
+            </button>
+          </div>
+        )}
+
+        <div className={`tab-new-wrap ${allowNewTab ? "" : "is-locked"}`}>
           <button
             type="button"
-            data-new-tab=""
-            className={`tab-new ${paneDropNew ? "is-drop" : ""}`}
-            title="New tab (Ctrl+Shift+T)"
-            onClick={() => onNew(null)}
+            {...(allowNewTab ? { "data-new-tab": "" } : {})}
+            className={`tab-new ${paneDropNew && allowNewTab ? "is-drop" : ""}`}
+            title={
+              allowNewTab
+                ? "New tab in the default folder (Ctrl+Shift+T)"
+                : "Choose a folder for this tab before opening another"
+            }
+            disabled={!allowNewTab}
+            onClick={() => {
+              if (allowNewTab) onNew(null);
+            }}
           >
             +
           </button>
-          {shells.length > 1 && (
-            <button
-              type="button"
-              className="tab-new tab-new-caret"
-              title="New tab with a specific shell"
-              onPointerDown={(e) => {
-                e.stopPropagation();
-                setShellMenu((v) => !v);
-              }}
-            >
-              ⌄
-            </button>
-          )}
-          {shellMenu && (
-            <div className="menu menu-shells" onPointerDown={(e) => e.stopPropagation()}>
-              {shells.map((shell) => (
-                <button
-                  key={shell.id}
-                  type="button"
-                  className={`menu-item ${shell.id === activeShell ? "is-current" : ""}`}
-                  onClick={() => {
-                    setShellMenu(false);
-                    onNew(shell.id);
-                  }}
-                >
-                  <span>{shell.label}</span>
-                  <span className="menu-hint">{shell.program}</span>
-                </button>
-              ))}
-            </div>
-          )}
         </div>
       </div>
+
+      {picker && pickerTab && (
+        <ProjectMenu
+          anchor={picker}
+          scope={`Folder for “${pickerTab.title}”`}
+          recents={projects.recents}
+          current={pickerTab.project?.path ?? null}
+          onPick={(path) => projects.setFor(pickerTab.id, path)}
+          onBrowse={() => projects.browseFor(pickerTab.id)}
+          onClose={() => setPicker(null)}
+        />
+      )}
+
+      {context && contextTab && (
+        <TabContextMenu
+          anchor={context}
+          pinned={contextTab.pinned === true}
+          color={contextTab.color ?? null}
+          icon={contextTab.icon ?? null}
+          canCloseOthers={tabs.length > 1}
+          onPin={() => onPin(contextTab.id)}
+          onRename={() => setEditing(contextTab.id)}
+          onColor={(colorId) => onColor(contextTab.id, colorId)}
+          onIcon={(iconId) => onIcon(contextTab.id, iconId)}
+          onClose={() => onClose(contextTab.id)}
+          onCloseOthers={() => onCloseOthers(contextTab.id)}
+          onDismiss={() => setContext(null)}
+        />
+      )}
     </div>
   );
 }

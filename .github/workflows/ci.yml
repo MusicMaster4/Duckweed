@@ -1,0 +1,33 @@
+name: CI
+
+# Typecheck and tests for work that is not (yet) a release. Pushes to `main` and
+# `testing` skip this: the Release workflow runs the same checks before it
+# builds, so running them here as well would just duplicate the work.
+on:
+  push:
+    branches-ignore:
+      - main
+      - testing
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Typecheck and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - run: bun install --frozen-lockfile
+
+      - run: bun run typecheck
+
+      - run: bun test

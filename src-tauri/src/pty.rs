@@ -1,18 +1,19 @@
 //! PTY session management.
 //!
 //! Every terminal pane in the UI owns one session here. Output is streamed to
-//! the webview as base64 chunks on a per-session event channel
-//! (`pty:data:<id>`) so panes never see each other's bytes.
+//! the webview through a raw IPC channel owned by that session, so panes never
+//! see each other's bytes and output does not need a Base64 round-trip.
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
-use base64::Engine as _;
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
-use tauri::{AppHandle, Emitter};
+use tauri::{ipc::Channel, AppHandle, Emitter, Manager};
 
+use crate::process_tree;
 use crate::shells;
 
 /// How much PTY output we buffer before flushing an event to the webview.
@@ -22,17 +23,40 @@ const READ_BUF: usize = 16 * 1024;
 /// still arrives in pieces the UI can render as they land.
 const EMIT_MAX: usize = 256 * 1024;
 
+/// Back-pressure ceiling per PTY. A process that prints faster than the webview
+/// can consume is slowed down by its terminal, instead of growing RAM forever.
+const OUTPUT_QUEUE_CHUNKS: usize = 64;
+
+/// Coalesce writes that land a moment apart into one webview event.
+const EMIT_BATCH_WINDOW: Duration = Duration::from_millis(1);
+
+/// Busy changes do not need per-pane polling. One snapshot covers every PTY.
+///
+/// A process snapshot walks the system-wide process table on Windows. Twice a
+/// second keeps the pane state responsive while avoiding five global walks per
+/// second whenever Duckweed is merely open. Close/update checks still take an
+/// immediate fresh snapshot rather than relying on this cached UI state.
+const BUSY_POLL: Duration = Duration::from_millis(500);
+
 pub struct Session {
     writer: Box<dyn Write + Send>,
     master: Box<dyn MasterPty + Send>,
     killer: Box<dyn ChildKiller + Send + Sync>,
+    /// Shell process id, used to detect in-flight commands (child processes).
+    pid: Option<u32>,
     cols: u16,
     rows: u16,
 }
 
 #[derive(Default)]
+struct PtyInner {
+    sessions: Mutex<HashMap<String, Arc<Mutex<Session>>>>,
+    busy: Mutex<HashMap<String, bool>>,
+}
+
+#[derive(Clone, Default)]
 pub struct PtyManager {
-    sessions: Mutex<HashMap<String, Session>>,
+    inner: Arc<PtyInner>,
 }
 
 #[derive(Serialize, Clone)]
@@ -50,20 +74,35 @@ struct ExitPayload {
     code: Option<u32>,
 }
 
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct BusyPayload {
+    id: String,
+    busy: bool,
+}
+
 fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
 }
 
 impl PtyManager {
     fn insert(&self, id: String, session: Session) {
-        self.sessions.lock().unwrap().insert(id, session);
+        self.inner
+            .sessions
+            .lock()
+            .unwrap()
+            .insert(id.clone(), Arc::new(Mutex::new(session)));
+        self.inner.busy.lock().unwrap().insert(id, false);
+    }
+
+    fn session(&self, id: &str) -> Option<Arc<Mutex<Session>>> {
+        self.inner.sessions.lock().unwrap().get(id).cloned()
     }
 
     pub fn write(&self, id: &str, data: &[u8]) -> Result<(), String> {
-        let mut guard = self.sessions.lock().unwrap();
-        let session = guard
-            .get_mut(id)
+        let handle = self
+            .session(id)
             .ok_or_else(|| format!("no pty session `{id}`"))?;
+        let mut session = handle.lock().unwrap();
         session.writer.write_all(data).map_err(err)?;
         session.writer.flush().map_err(err)
     }
@@ -71,10 +110,10 @@ impl PtyManager {
     pub fn resize(&self, id: &str, cols: u16, rows: u16) -> Result<(), String> {
         let cols = cols.max(2);
         let rows = rows.max(1);
-        let mut guard = self.sessions.lock().unwrap();
-        let session = guard
-            .get_mut(id)
+        let handle = self
+            .session(id)
             .ok_or_else(|| format!("no pty session `{id}`"))?;
+        let mut session = handle.lock().unwrap();
         if session.cols == cols && session.rows == rows {
             return Ok(());
         }
@@ -93,29 +132,114 @@ impl PtyManager {
     }
 
     pub fn kill(&self, id: &str) -> Result<(), String> {
-        let mut session = match self.sessions.lock().unwrap().remove(id) {
+        let handle = match self.inner.sessions.lock().unwrap().remove(id) {
             Some(s) => s,
             // Killing an already-dead pane is not an error; the UI does it on
             // every pane close, including panes whose shell already exited.
             None => return Ok(()),
         };
+        self.inner.busy.lock().unwrap().remove(id);
+        let mut session = handle.lock().unwrap();
         let _ = session.killer.kill();
         let _ = session.writer.flush();
         Ok(())
     }
 
     pub fn kill_all(&self) {
-        let ids: Vec<String> = self.sessions.lock().unwrap().keys().cloned().collect();
+        let ids: Vec<String> = self
+            .inner
+            .sessions
+            .lock()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
         for id in ids {
             let _ = self.kill(&id);
         }
     }
+
+    /// True when the shell for `id` still has a child process (a command running).
+    pub fn is_busy(&self, id: &str) -> bool {
+        self.busy_snapshot(Some(&[id.to_string()]))
+            .into_iter()
+            .any(|state| state.busy)
+    }
+
+    /// True when any of the given sessions has a command still running.
+    pub fn any_busy(&self, ids: &[String]) -> bool {
+        self.busy_snapshot(Some(ids))
+            .into_iter()
+            .any(|state| state.busy)
+    }
+
+    fn busy_snapshot(&self, only: Option<&[String]>) -> Vec<BusyPayload> {
+        let handles: Vec<(String, Arc<Mutex<Session>>)> = {
+            let sessions = self.inner.sessions.lock().unwrap();
+            sessions
+                .iter()
+                .filter(|(id, _)| match only {
+                    Some(ids) => ids.contains(id),
+                    None => true,
+                })
+                .map(|(id, session)| (id.clone(), session.clone()))
+                .collect()
+        };
+        let with_pids: Vec<(String, u32)> = handles
+            .into_iter()
+            .filter_map(|(id, session)| session.lock().unwrap().pid.map(|pid| (id, pid)))
+            .collect();
+        let pids: Vec<u32> = with_pids.iter().map(|(_, pid)| *pid).collect();
+        let parents = process_tree::parents_with_children(&pids);
+        with_pids
+            .into_iter()
+            .map(|(id, pid)| BusyPayload {
+                id,
+                busy: parents.contains(&pid),
+            })
+            .collect()
+    }
+
+    fn refresh_busy(&self) -> Vec<BusyPayload> {
+        let snapshot = self.busy_snapshot(None);
+        let mut known = self.inner.busy.lock().unwrap();
+        let mut changed = Vec::new();
+        for state in snapshot {
+            if known.get(&state.id).copied() != Some(state.busy) {
+                known.insert(state.id.clone(), state.busy);
+                changed.push(state);
+            }
+        }
+        changed
+    }
+}
+
+/// Start the single app-wide busy monitor. It exits with the main webview.
+pub fn start_busy_monitor(app: AppHandle) -> Result<(), String> {
+    std::thread::Builder::new()
+        .name("pty-busy-monitor".into())
+        .spawn(move || loop {
+            std::thread::sleep(BUSY_POLL);
+            if app.get_webview_window("main").is_none() {
+                break;
+            }
+            let Some(manager) = app.try_state::<PtyManager>() else {
+                continue;
+            };
+            let changed = manager.refresh_busy();
+            if !changed.is_empty() && app.emit("pty:busy", changed).is_err() {
+                break;
+            }
+        })
+        .map(|_| ())
+        .map_err(err)
 }
 
 /// Spawn a shell attached to a fresh PTY and start streaming its output.
 pub fn spawn(
     app: &AppHandle,
     manager: &PtyManager,
+    on_data: Channel<Vec<u8>>,
     id: String,
     cwd: Option<String>,
     shell_id: Option<String>,
@@ -123,7 +247,7 @@ pub fn spawn(
     rows: u16,
     env: Option<HashMap<String, String>>,
 ) -> Result<SpawnResult, String> {
-    if manager.sessions.lock().unwrap().contains_key(&id) {
+    if manager.inner.sessions.lock().unwrap().contains_key(&id) {
         return Err(format!("pty session `{id}` already exists"));
     }
 
@@ -164,6 +288,9 @@ pub fn spawn(
     cmd.env("CLICOLOR", "1");
     cmd.env("TERM_PROGRAM", "Duckweed");
     cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
+    for (key, value) in crate::agent_activity::terminal_env(app, &id) {
+        cmd.env(key, value);
+    }
     if let Some(env) = env {
         for (k, v) in env {
             cmd.env(k, v);
@@ -172,6 +299,7 @@ pub fn spawn(
 
     let mut child = pair.slave.spawn_command(cmd).map_err(err)?;
     let killer = child.clone_killer();
+    let pid = child.process_id();
     // Dropping the slave lets the shell see EOF once it exits.
     drop(pair.slave);
 
@@ -184,14 +312,16 @@ pub fn spawn(
             writer,
             master: pair.master,
             killer,
+            pid,
             cols,
             rows,
         },
     );
 
-    // Reader thread: block on the PTY and hand whatever arrives straight over,
-    // so a slow webview can never stall the read side into losing output.
-    let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+    // Reader thread: a bounded queue keeps bulk output from consuming unbounded
+    // memory. Back-pressure is normal terminal behaviour and never drops bytes.
+    let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(OUTPUT_QUEUE_CHUNKS);
+    let (recycle_tx, recycle_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(OUTPUT_QUEUE_CHUNKS);
     std::thread::Builder::new()
         .name(format!("pty-read-{id}"))
         .spawn(move || {
@@ -200,16 +330,21 @@ pub fn spawn(
                 match reader.read(&mut buf) {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
-                        if tx.send(buf[..n].to_vec()).is_err() {
+                        buf.truncate(n);
+                        if tx.send(buf).is_err() {
                             break;
                         }
+                        buf = recycle_rx
+                            .try_recv()
+                            .unwrap_or_else(|_| vec![0u8; READ_BUF]);
+                        buf.resize(READ_BUF, 0);
                     }
                 }
             }
         })
         .map_err(err)?;
 
-    // Emitter thread: bytes -> base64 -> webview event, one event per batch.
+    // Emitter thread: raw bytes -> webview channel, one message per batch.
     //
     // A program flushes a single redraw in many small writes and the PTY hands
     // each one over the moment it lands. Emitting them one by one spreads one
@@ -217,23 +352,33 @@ pub fn spawn(
     // — a part-drawn frame every time. Draining the queue coalesces them without
     // waiting for anything: a batch only ever holds bytes that had already
     // arrived, so this costs no latency, only round trips.
-    let data_event = format!("pty:data:{id}");
-    let emit_app = app.clone();
     std::thread::Builder::new()
         .name(format!("pty-emit-{id}"))
         .spawn(move || {
             while let Ok(first) = rx.recv() {
                 let mut batch = first;
+                let deadline = Instant::now() + EMIT_BATCH_WINDOW;
                 while batch.len() < EMIT_MAX {
-                    match rx.try_recv() {
-                        Ok(more) => batch.extend_from_slice(&more),
+                    let now = Instant::now();
+                    if now >= deadline {
+                        break;
+                    }
+                    match rx.recv_timeout(deadline - now) {
+                        Ok(mut more) => {
+                            batch.extend_from_slice(&more);
+                            more.clear();
+                            more.resize(READ_BUF, 0);
+                            let _ = recycle_tx.try_send(more);
+                        }
                         Err(_) => break,
                     }
                 }
-                let encoded = base64::engine::general_purpose::STANDARD.encode(&batch);
-                if emit_app.emit(&data_event, encoded).is_err() {
+                if on_data.send(batch.clone()).is_err() {
                     break;
                 }
+                batch.clear();
+                batch.resize(READ_BUF, 0);
+                let _ = recycle_tx.try_send(batch);
             }
         })
         .map_err(err)?;

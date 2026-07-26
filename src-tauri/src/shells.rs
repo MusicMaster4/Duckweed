@@ -1,6 +1,7 @@
 //! Discovery of the shells we can spawn on this machine.
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use serde::Serialize;
 
@@ -69,7 +70,7 @@ fn push_if_in_path(out: &mut Vec<ShellInfo>, id: &str, label: &str, exe: &str, a
 }
 
 #[cfg(windows)]
-pub fn available_shells() -> Vec<ShellInfo> {
+fn discover_shells() -> Vec<ShellInfo> {
     let mut out = Vec::new();
 
     push_if_in_path(&mut out, "pwsh", "PowerShell 7", "pwsh", &["-NoLogo"]);
@@ -100,7 +101,7 @@ pub fn available_shells() -> Vec<ShellInfo> {
 }
 
 #[cfg(not(windows))]
-pub fn available_shells() -> Vec<ShellInfo> {
+fn discover_shells() -> Vec<ShellInfo> {
     let mut out = Vec::new();
 
     // The user's configured login shell always comes first.
@@ -136,6 +137,17 @@ pub fn available_shells() -> Vec<ShellInfo> {
     }
 
     out
+}
+
+/// Installed shells are stable for the lifetime of the app. Keep one catalog
+/// instead of walking every PATH directory again whenever a pane starts.
+///
+/// Apart from avoiding filesystem traffic on the PTY hot path, this also makes
+/// several panes opened together share the same result. A newly installed
+/// shell becomes available after Duckweed restarts, just like a PATH change.
+pub fn available_shells() -> Vec<ShellInfo> {
+    static SHELLS: OnceLock<Vec<ShellInfo>> = OnceLock::new();
+    SHELLS.get_or_init(discover_shells).clone()
 }
 
 /// The shell we spawn when the frontend does not ask for anything specific.

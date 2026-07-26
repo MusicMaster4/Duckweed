@@ -21,7 +21,8 @@
         "decorations": false,
         "transparent": false,
         "center": true,
-        "dragDropEnabled": false,
+        "visible": false,
+        "dragDropEnabled": true,
         "backgroundColor": "#0f120f"
       }
     ],
@@ -31,13 +32,37 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis", "deb", "appimage", "dmg"],
+    "targets": [
+      "nsis",
+      "deb",
+      "appimage",
+      "dmg"
+    ],
+    "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "installerIcon": "icons/icon.ico",
+        "displayLanguageSelector": false
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDJGMjU3NjhGNkREQzZBQjEKUldTeGF0eHRqM1lsTDZ0NmVrSE84Y1kwdEhYOG96cmkzSlBHczdkRGRkZk1qcUJjR3pGVWVycGoK",
+      "endpoints": [
+        "https://github.com/MusicMaster4/Duckweed/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

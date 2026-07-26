@@ -1,0 +1,231 @@
+name: Release
+
+# Self-versioning Windows builds for Duckweed's two release channels.
+#
+#   • push to `main`    → stable release  vX.Y.Z            (marked "Latest")
+#   • push to `testing` → beta release    vX.Y.Z-testing.N  (marked "Pre-release")
+#
+# No other branch publishes anything: the channel comes from the branch name via
+# scripts/release-version.mjs, which fails on anything but those two.
+#
+# Versioning (scripts/release-version.mjs, src/lib/version.ts):
+#   • The first push/merged PR to `main` publishes v1.0.0. Later stable pushes
+#     publish v1.0.1, v1.0.2, and so on.
+#   • Both channels count from the newest stable tag. patch fills 0..99 and then
+#     carries into minor, minor fills 0..99 and then carries into major.
+#   • A beta is the *next* stable version plus a counter: after v1.0.3, the first
+#     push to `testing` publishes v1.0.4-testing.1, then -testing.2, … and the
+#     next push to `main` publishes v1.0.4 — which restarts the beta counter.
+#   • Need an exact number? Set it in package.json, higher than the latest stable
+#     tag, and that run uses it as-is.
+#
+# Channel isolation (scripts/apply-version.mjs):
+#   Each build is compiled with exactly one updater endpoint. Stable builds read
+#   /releases/latest/download/latest.json, which GitHub resolves to the newest
+#   non-prerelease release — betas are prereleases, so stable installs cannot see
+#   them. Beta builds read the manifest on the permanent `channel-testing`
+#   prerelease, which only this workflow's beta runs ever write. Neither build
+#   knows the other channel's URL, so an install stays on the channel it was
+#   installed from.
+on:
+  push:
+    branches:
+      - main
+      - testing
+    paths-ignore:
+      - "**.md"
+      - ".gitignore"
+      - "docs/**"
+      - "LICENSE"
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Version increment (relative to the latest stable release)"
+        type: choice
+        default: patch
+        options:
+          - patch
+          - minor
+          - major
+      publish:
+        description: "Publish a release (uncheck for a test build)"
+        type: boolean
+        default: true
+
+run-name: Release ${{ github.ref_name }} (${{ github.ref_name == 'main' && 'stable' || 'beta' }})
+
+permissions:
+  contents: write
+
+# Two runs on the same branch would race for the same version number.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  BETA_POINTER_TAG: channel-testing
+
+jobs:
+  # Work out the version, tag it, and open a draft release for the build to
+  # upload into. A draft is invisible to /releases/latest, so a half-finished
+  # release can never be handed to the updater.
+  version:
+    name: Resolve version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.calc.outputs.version }}
+      tag: ${{ steps.calc.outputs.tag }}
+      channel: ${{ steps.calc.outputs.channel }}
+      publish: ${{ steps.calc.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0 # every tag, to find the latest release of each channel
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Resolve the next version
+        id: calc
+        run: |
+          set -euo pipefail
+          # Refuses to release from any branch other than main/testing.
+          bun scripts/release-version.mjs --branch "$GITHUB_REF_NAME" --bump "${{ inputs.bump }}"
+          PUBLISH="${{ inputs.publish }}"
+          echo "publish=${PUBLISH:-true}" >> "$GITHUB_OUTPUT"
+
+      - name: Tag the release and open it as a draft
+        if: steps.calc.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.calc.outputs.tag }}
+          CHANNEL: ${{ steps.calc.outputs.channel }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if ! git rev-parse "$TAG" >/dev/null 2>&1; then
+            git tag "$TAG"
+            git push origin "$TAG"
+          fi
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            if [ "$CHANNEL" = "testing" ]; then
+              gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --prerelease \
+                --title "Duckweed $TAG (beta)" --generate-notes
+            else
+              gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft \
+                --title "Duckweed $TAG" --generate-notes
+            fi
+          fi
+
+  build:
+    name: Build Windows installer
+    needs: version
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # Stamps the version into package.json / tauri.conf.json / Cargo.toml and
+      # compiles in this channel's updater endpoint. Nothing is committed.
+      - name: Apply version and update channel
+        run: |
+          bun scripts/apply-version.mjs \
+            --version "${{ needs.version.outputs.version }}" \
+            --channel "${{ needs.version.outputs.channel }}" \
+            --repo "$GITHUB_REPOSITORY"
+
+      - name: Typecheck and test
+        run: |
+          bun run typecheck
+          bun test
+
+      - name: Build installer
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: bun run tauri build --bundles nsis
+
+      - name: Build the update manifest
+        run: |
+          bun scripts/updater-manifest.mjs \
+            --version "${{ needs.version.outputs.version }}" \
+            --tag "${{ needs.version.outputs.tag }}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --notes "$(git log -1 --pretty=%s)"
+
+      - name: Upload the installer and manifest to the release
+        if: needs.version.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release upload "${{ needs.version.outputs.tag }}" \
+            src-tauri/target/release/bundle/nsis/* latest.json \
+            --repo "$GITHUB_REPOSITORY" --clobber
+
+      - name: Keep the installer as an artifact (test build)
+        if: needs.version.outputs.publish != 'true'
+        uses: actions/upload-artifact@v5
+        with:
+          name: duckweed-windows-${{ needs.version.outputs.channel }}
+          path: |
+            src-tauri/target/release/bundle/nsis/*
+            latest.json
+          if-no-files-found: error
+
+  # Everything is uploaded: make the release visible, and — on the beta channel —
+  # repoint the permanent manifest beta installs read.
+  publish:
+    name: Publish
+    needs: [version, build]
+    if: needs.version.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TAG: ${{ needs.version.outputs.tag }}
+      REPO: ${{ github.repository }}
+    steps:
+      - name: Publish the stable release
+        if: needs.version.outputs.channel == 'stable'
+        run: gh release edit "$TAG" --repo "$REPO" --draft=false --latest
+
+      # Never --latest: that is what keeps betas out of the stable endpoint.
+      - name: Publish the beta release
+        if: needs.version.outputs.channel == 'testing'
+        run: gh release edit "$TAG" --repo "$REPO" --draft=false --prerelease --latest=false
+
+      - name: Point the beta channel at this release
+        if: needs.version.outputs.channel == 'testing'
+        run: |
+          set -euo pipefail
+          mkdir -p beta-channel
+          gh release download "$TAG" --repo "$REPO" \
+            --pattern latest.json --pattern "*.exe" --dir beta-channel
+          INSTALLER="$(find beta-channel -maxdepth 1 -type f -name '*.exe' -print -quit)"
+          test -n "$INSTALLER"
+          mv "$INSTALLER" beta-channel/duckweed-beta-setup.exe
+          if ! gh release view "$BETA_POINTER_TAG" --repo "$REPO" >/dev/null 2>&1; then
+            gh release create "$BETA_POINTER_TAG" --repo "$REPO" --prerelease \
+              --target "$GITHUB_SHA" --title "Beta channel manifest" \
+              --notes "Permanent download and update pointer for the newest Duckweed beta."
+          fi
+          gh release upload "$BETA_POINTER_TAG" \
+            beta-channel/latest.json beta-channel/duckweed-beta-setup.exe \
+            --repo "$REPO" --clobber
