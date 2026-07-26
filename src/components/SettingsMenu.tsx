@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 
 import { UsagePanel } from "./UsagePanel";
 import type { ShellIntegrationStatus } from "../lib/ipc";
@@ -6,6 +6,8 @@ import type { InputMode } from "../lib/terminals";
 import type { ShellInfo } from "../lib/types";
 
 interface Props {
+  /** False while the settings tab exists but another tab is selected. */
+  active?: boolean;
   fontSize: number;
   inputMode: InputMode;
   highlight: boolean;
@@ -41,7 +43,9 @@ function Toggle({ enabled }: { enabled: boolean }) {
 
 type SettingsSection = "General" | "Appearance" | "Terminal" | "Usage" | "About";
 
-// Survive SettingsMenu unmount when the user leaves the Settings tab and comes back.
+// Survive SettingsMenu unmount when the settings tab is closed and reopened.
+// (While the tab stays open, App keeps this tree mounted so the browser holds
+// scroll natively when switching away to a terminal tab.)
 let lastSettingsSection: SettingsSection = "General";
 const lastSettingsScroll: Record<SettingsSection, number> = {
   General: 0,
@@ -52,6 +56,7 @@ const lastSettingsScroll: Record<SettingsSection, number> = {
 };
 
 export function SettingsMenu({
+  active = true,
   fontSize,
   inputMode,
   highlight,
@@ -77,24 +82,37 @@ export function SettingsMenu({
   const [section, setSectionState] = useState<SettingsSection>(lastSettingsSection);
   const [query, setQuery] = useState("");
   const [suggestionsCleared, setSuggestionsCleared] = useState(false);
-  const contentRef = useRef<HTMLElement>(null);
+  const contentRef = useRef<HTMLElement | null>(null);
   const sectionRef = useRef(section);
   const searchingRef = useRef(false);
-  // Ignore scroll events fired while we re-apply a saved offset (browsers clamp
-  // scrollTop when content is still short, which would erase the real target).
-  const restoringRef = useRef(false);
+  const activeRef = useRef(active);
+  // While true, ignore scroll events so a clamped restore cannot overwrite the
+  // real saved offset (that was the "lands in the middle" bug).
+  const ignoreScrollRef = useRef(false);
   sectionRef.current = section;
+  activeRef.current = active;
 
-  const saveScroll = (forSection: SettingsSection = sectionRef.current) => {
+  const persistScroll = (forSection: SettingsSection = sectionRef.current) => {
     const el = contentRef.current;
-    if (!el || searchingRef.current || restoringRef.current) return;
+    // Skip while hidden: some engines reset scrollTop on display:none and that
+    // must not clobber the real offset we saved on deactivate.
+    if (!el || !activeRef.current || searchingRef.current || ignoreScrollRef.current) return;
     lastSettingsScroll[forSection] = el.scrollTop;
   };
 
   const setSection = (next: SettingsSection) => {
-    saveScroll(sectionRef.current);
+    persistScroll(sectionRef.current);
     lastSettingsSection = next;
     setSectionState(next);
+  };
+
+  // Capture the exact scrollTop at the moment the scrollport is detached so a
+  // full tab close still remembers position even if the last onScroll was missed.
+  const setContentNode = (node: HTMLElement | null) => {
+    if (contentRef.current && !node && activeRef.current && !searchingRef.current && !ignoreScrollRef.current) {
+      lastSettingsScroll[sectionRef.current] = contentRef.current.scrollTop;
+    }
+    contentRef.current = node;
   };
 
   const roundedFontSize = Math.round(fontSize * 10) / 10;
@@ -132,67 +150,67 @@ export function SettingsMenu({
     searching && matches("usage statistics cost tokens spend quota limits agents models pricing");
   const visibleTitle = searching ? "Search results" : section;
 
-  // Restore the last scroll for this section after remount or section switch.
-  // Usage content can grow after the first paint, so re-apply on rAF and while
-  // the scrollport's content height is still catching up — stop if the user scrolls.
+  // When the host is about to hide, lock in the current scroll before the
+  // engine can zero it via display:none.
   useLayoutEffect(() => {
+    if (active) return;
+    const el = contentRef.current;
+    if (!el || searchingRef.current) return;
+    lastSettingsScroll[sectionRef.current] = el.scrollTop;
+  }, [active]);
+
+  // Restore scroll after remount, section switch, or becoming active again.
+  // Re-apply across frames while content is still shorter than the saved offset
+  // (async Usage content); never write those clamped values into the store.
+  useLayoutEffect(() => {
+    if (!active) return;
     const el = contentRef.current;
     if (!el) return;
 
     if (searching) {
-      restoringRef.current = true;
+      ignoreScrollRef.current = true;
       el.scrollTop = 0;
       window.queueMicrotask(() => {
-        restoringRef.current = false;
+        ignoreScrollRef.current = false;
       });
       return;
     }
 
-    const target = lastSettingsScroll[section] ?? 0;
+    const desired = lastSettingsScroll[section] ?? 0;
     let cancelled = false;
-    let userMoved = false;
+    let raf = 0;
+    let attempts = 0;
 
     const apply = () => {
-      if (cancelled || userMoved || !contentRef.current) return;
-      restoringRef.current = true;
-      contentRef.current.scrollTop = target;
+      if (cancelled || !contentRef.current) return;
+      const node = contentRef.current;
+      // Always read the module store — not a closed-over stale number — in case
+      // the user scrolled during a previous frame of this same restore.
+      const target = lastSettingsScroll[section] ?? desired;
+      const max = Math.max(0, node.scrollHeight - node.clientHeight);
+      ignoreScrollRef.current = true;
+      node.scrollTop = Math.min(target, max);
       window.queueMicrotask(() => {
-        if (!cancelled) restoringRef.current = false;
+        if (!cancelled) ignoreScrollRef.current = false;
       });
+
+      attempts += 1;
+      // Content still too short for the real position (e.g. Usage still loading).
+      if (target > max + 1 && attempts < 120) {
+        raf = window.requestAnimationFrame(apply);
+      }
     };
 
     apply();
-    const frame = window.requestAnimationFrame(apply);
-
-    let observer: ResizeObserver | undefined;
-    const onUserScroll = () => {
-      if (restoringRef.current) return;
-      userMoved = true;
-      observer?.disconnect();
-    };
-    el.addEventListener("scroll", onUserScroll);
-
-    const inner = el.firstElementChild;
-    if (inner && target > 0) {
-      observer = new ResizeObserver(() => apply());
-      observer.observe(inner);
-    }
 
     return () => {
       cancelled = true;
-      restoringRef.current = false;
-      window.cancelAnimationFrame(frame);
-      el.removeEventListener("scroll", onUserScroll);
-      observer?.disconnect();
+      window.cancelAnimationFrame(raf);
+      // Do not persist here: by cleanup time React has already committed the
+      // next section's content, so scrollTop would belong to the wrong page.
+      ignoreScrollRef.current = false;
     };
-  }, [section, searching, showUsage]);
-
-  // Persist scroll when leaving the Settings tab entirely.
-  useEffect(() => {
-    return () => {
-      saveScroll(sectionRef.current);
-    };
-  }, []);
+  }, [active, section, searching, showUsage]);
 
   return (
     <div className="settings-page">
@@ -228,10 +246,10 @@ export function SettingsMenu({
       </aside>
 
       <main
-        ref={contentRef}
+        ref={setContentNode}
         className="settings-content"
         aria-label="Settings"
-        onScroll={() => saveScroll()}
+        onScroll={() => persistScroll()}
       >
         <div className={`settings-content-inner${showUsage ? " is-wide" : ""}`}>
           <header className="settings-content-header">

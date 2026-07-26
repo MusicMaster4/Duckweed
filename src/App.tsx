@@ -1967,62 +1967,72 @@ export default function App() {
         )}
 
         <main className="workspace">
-          {settingsActive ? (
-            <SettingsMenu
-              fontSize={fontSize}
-              inputMode={inputMode}
-              highlight={highlight}
-              completionHighlights={completionHighlights}
-              completionSoundEnabled={completionSoundEnabled}
-              confirmCloseRunning={confirmCloseRunningPref}
-              explorerIntegration={explorerIntegration}
-              shell={shell}
-              shells={shells}
-              updateLabel={`${updater.channel === "testing" ? "Beta" : "Stable"}${updater.version ? ` · v${updater.version}` : ""}`}
-              onFontSize={applyFontSize}
-              onToggleInputMode={toggleInputMode}
-              onToggleHighlight={toggleHighlight}
-              onToggleCompletionHighlights={toggleCompletionHighlights}
-              onToggleCompletionSound={toggleCompletionSound}
-              onToggleConfirmCloseRunning={() =>
-                setConfirmCloseRunningPref((prev) => !prev)
-              }
-              onToggleExplorerTab={() => {
-                if (explorerIntegration === null) return;
-                void shellIntegrationSet("tab", !explorerIntegration.tab)
-                  .then((status) => setExplorerIntegration(status))
-                  .catch((error) => console.error("shell integration", error));
-              }}
-              onToggleExplorerWindow={() => {
-                if (explorerIntegration === null) return;
-                void shellIntegrationSet("window", !explorerIntegration.window)
-                  .then((status) => setExplorerIntegration(status))
-                  .catch((error) => console.error("shell integration", error));
-              }}
-              onResetSuggestions={() =>
-                confirmCloseRunning({
-                  title: "Reset suggestions?",
-                  message:
-                    "Duckweed will forget every command it learned. Ghost suggestions start fresh. This can't be undone.",
-                  confirmLabel: "Reset",
-                }).then((ok) => {
-                  if (ok) commandHistory.clear();
-                  return ok;
-                })
-              }
-              onShell={(shellId) => {
-                setShell(shellId);
-                shellRef.current = shellId;
-              }}
-              onCheckUpdates={updater.check}
-            />
-          ) : !booted ? (
-            <div className="booting">starting shell…</div>
-          ) : zoomedNode && activeTab ? (
-            <PaneTree node={zoomedNode} shared={shared} />
-          ) : activeTab ? (
-            <PaneTree node={activeTab.root} shared={shared} />
-          ) : null}
+          {/* Keep Settings mounted while its tab exists so scroll position is
+              preserved natively when switching to a terminal tab and back. */}
+          {settingsTabOpen && (
+            <div
+              className={`settings-host${settingsActive ? " is-active" : ""}`}
+              aria-hidden={!settingsActive}
+            >
+              <SettingsMenu
+                active={settingsActive}
+                fontSize={fontSize}
+                inputMode={inputMode}
+                highlight={highlight}
+                completionHighlights={completionHighlights}
+                completionSoundEnabled={completionSoundEnabled}
+                confirmCloseRunning={confirmCloseRunningPref}
+                explorerIntegration={explorerIntegration}
+                shell={shell}
+                shells={shells}
+                updateLabel={`${updater.channel === "testing" ? "Beta" : "Stable"}${updater.version ? ` · v${updater.version}` : ""}`}
+                onFontSize={applyFontSize}
+                onToggleInputMode={toggleInputMode}
+                onToggleHighlight={toggleHighlight}
+                onToggleCompletionHighlights={toggleCompletionHighlights}
+                onToggleCompletionSound={toggleCompletionSound}
+                onToggleConfirmCloseRunning={() =>
+                  setConfirmCloseRunningPref((prev) => !prev)
+                }
+                onToggleExplorerTab={() => {
+                  if (explorerIntegration === null) return;
+                  void shellIntegrationSet("tab", !explorerIntegration.tab)
+                    .then((status) => setExplorerIntegration(status))
+                    .catch((error) => console.error("shell integration", error));
+                }}
+                onToggleExplorerWindow={() => {
+                  if (explorerIntegration === null) return;
+                  void shellIntegrationSet("window", !explorerIntegration.window)
+                    .then((status) => setExplorerIntegration(status))
+                    .catch((error) => console.error("shell integration", error));
+                }}
+                onResetSuggestions={() =>
+                  confirmCloseRunning({
+                    title: "Reset suggestions?",
+                    message:
+                      "Duckweed will forget every command it learned. Ghost suggestions start fresh. This can't be undone.",
+                    confirmLabel: "Reset",
+                  }).then((ok) => {
+                    if (ok) commandHistory.clear();
+                    return ok;
+                  })
+                }
+                onShell={(shellId) => {
+                  setShell(shellId);
+                  shellRef.current = shellId;
+                }}
+                onCheckUpdates={updater.check}
+              />
+            </div>
+          )}
+          {!settingsActive &&
+            (!booted ? (
+              <div className="booting">starting shell…</div>
+            ) : zoomedNode && activeTab ? (
+              <PaneTree node={zoomedNode} shared={shared} />
+            ) : activeTab ? (
+              <PaneTree node={activeTab.root} shared={shared} />
+            ) : null)}
         </main>
       </div>
 

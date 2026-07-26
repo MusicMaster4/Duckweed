@@ -676,6 +676,27 @@ svg.tab-glyph-fill path {
 
 /* ----------------------------------------------------------- settings */
 
+/* Host keeps Settings mounted while the settings tab stays open. When inactive
+   it stays laid out (visibility/absolute) so scrollTop is not destroyed the way
+   display:none can be — that was landing users mid-page on return. */
+.settings-host {
+  display: flex;
+  flex-direction: column;
+}
+
+.settings-host:not(.is-active) {
+  position: absolute;
+  inset: 0;
+  visibility: hidden;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.settings-host > .settings-page {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
 .settings-page {
   display: flex;
   width: 100%;

@@ -10,13 +10,21 @@
  * Partial accept: Ctrl+Right (one path/word component).
  *
  * Completions menus and path/flag engines are out of scope — history only.
+ *
+ * Ranking also *unlearns*: commands the user is repeatedly shown and ignores
+ * are demoted and eventually skipped (see {@link ./suggestFeedback}).
  */
 
 import type { HistoryEntry } from "./commandHistory";
+import * as suggestFeedback from "./suggestFeedback";
 
 export interface SuggestOptions {
   /** Current pane cwd; same-cwd history ranks higher when set. */
   cwd?: string | null;
+  /** Ranking cost for an ignored command; defaults to the learned table. */
+  demotion?: (command: string) => number;
+  /** Whether a command has been unlearned; defaults to the learned table. */
+  suppressed?: (command: string) => boolean;
 }
 
 /**
@@ -30,14 +38,19 @@ export function suggest(
 ): string | null {
   if (!buffer) return null;
 
+  const suppressed = options.suppressed ?? suggestFeedback.isSuppressed;
+  const demotion = options.demotion ?? suggestFeedback.demotion;
+
   let best: HistoryEntry | null = null;
   let bestScore = -Infinity;
 
   for (const entry of history) {
     if (entry.command === buffer) continue;
     if (!entry.command.startsWith(buffer)) continue;
+    // Fully unlearned — the user has ignored this one too many times.
+    if (suppressed(entry.command)) continue;
 
-    const score = rankEntry(entry, options.cwd ?? null);
+    const score = rankEntry(entry, options.cwd ?? null) - demotion(entry.command);
     // Prefer higher score; on ties keep the later entry (more recently recorded).
     if (score >= bestScore) {
       bestScore = score;

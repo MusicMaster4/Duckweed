@@ -8,6 +8,7 @@ import {
 } from "../lib/autosuggest";
 import * as commandHistory from "../lib/commandHistory";
 import { highlightCommand } from "../lib/commandSyntax";
+import * as suggestFeedback from "../lib/suggestFeedback";
 import * as terminals from "../lib/terminals";
 
 interface Props {
@@ -36,6 +37,8 @@ export function CommandInput({ termId, active, exited, highlight }: Props) {
   const [historyIndex, setHistoryIndex] = useState<number | null>(null);
   /** Bump when shared history may have changed (other panes submit). */
   const [historyEpoch, setHistoryEpoch] = useState(0);
+  /** Bump when a suggestion is demoted/unlearned (here or in another pane). */
+  const [feedbackEpoch, setFeedbackEpoch] = useState(0);
   const [terminalEpoch, setTerminalEpoch] = useState(0);
   const draftRef = useRef("");
   const valueRef = useRef(value);
@@ -89,6 +92,10 @@ export function CommandInput({ termId, active, exited, highlight }: Props) {
   }, []);
 
   useEffect(() => {
+    return suggestFeedback.subscribe(() => setFeedbackEpoch((n) => n + 1));
+  }, []);
+
+  useEffect(() => {
     return terminals.registerInputFocus(termId, () => {
       if (exited) {
         terminals.focusTerminal(termId);
@@ -132,9 +139,10 @@ export function CommandInput({ termId, active, exited, highlight }: Props) {
 
   const suggestion = useMemo(() => {
     void historyEpoch;
+    void feedbackEpoch;
     if (exited || historyIndex !== null) return null;
     return suggest(value, commandHistory.list(), { cwd });
-  }, [value, cwd, exited, historyIndex, historyEpoch]);
+  }, [value, cwd, exited, historyIndex, historyEpoch, feedbackEpoch]);
 
   const ghost = ghostSuffix(value, suggestion);
   const highlighted = useMemo(
@@ -164,6 +172,11 @@ export function CommandInput({ termId, active, exited, highlight }: Props) {
   const submit = () => {
     if (exited) return;
     const command = value;
+    // A ghost was on screen and the user ran something else — one reject. A
+    // fully accepted suggestion leaves no ghost, so it never lands here.
+    if (suggestion && ghost) suggestFeedback.recordReject(suggestion);
+    // Running a demoted command by hand means the user still wants it.
+    suggestFeedback.recordUsed(command);
     setValue("");
     setHistoryIndex(null);
     draftRef.current = "";
@@ -222,6 +235,7 @@ export function CommandInput({ termId, active, exited, highlight }: Props) {
       if (fullAcceptTab || fullAcceptRight || fullAcceptCtrlF) {
         e.preventDefault();
         e.stopPropagation();
+        suggestFeedback.recordAccept(suggestion);
         applyValue(acceptFull(value, suggestion));
         return;
       }
@@ -235,6 +249,8 @@ export function CommandInput({ termId, active, exited, highlight }: Props) {
       if (partial) {
         e.preventDefault();
         e.stopPropagation();
+        // Partial accept is still interest — clear any reject streak.
+        suggestFeedback.recordAccept(suggestion);
         const next = acceptPartialComponent(value, suggestion);
         applyValue(next);
         return;
@@ -335,6 +351,8 @@ export function CommandInput({ termId, active, exited, highlight }: Props) {
     if (e.key === "Escape" && !e.ctrlKey && !e.metaKey && !e.altKey && value.length > 0) {
       e.preventDefault();
       e.stopPropagation();
+      // Throwing the draft away with a ghost on screen rejects it too.
+      if (suggestion && ghost) suggestFeedback.recordReject(suggestion);
       setValue("");
       setHistoryIndex(null);
       draftRef.current = "";

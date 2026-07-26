@@ -409,6 +409,7 @@ fn watch_project(
     manager.set(path)
 }
 
+#[cfg(not(debug_assertions))]
 fn focus_main_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.unminimize();
@@ -417,37 +418,63 @@ fn focus_main_window(app: &AppHandle) {
     }
 }
 
+#[cfg(not(debug_assertions))]
 fn emit_launch_intent(app: &AppHandle, intent: LaunchIntent) {
     let _ = app.emit("launch-intent", intent);
     focus_main_window(app);
 }
 
+/// Give the dev binary its own WebView2 profile so it can run beside an
+/// installed Duckweed. Both use identifier `dev.slop.duckweed`; sharing one
+/// user-data folder makes the second process exit immediately on Windows.
+#[cfg(all(windows, debug_assertions))]
+fn isolate_dev_webview_profile() {
+    let dir = std::env::temp_dir().join("duckweed-dev-webview");
+    if let Err(error) = std::fs::create_dir_all(&dir) {
+        eprintln!("duckweed: could not create dev webview profile dir: {error}");
+        return;
+    }
+    // Official WebView2 env var — must be set before the runtime is created.
+    std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", &dir);
+}
+
 fn main() {
+    #[cfg(all(windows, debug_assertions))]
+    isolate_dev_webview_profile();
+
     let args: Vec<String> = std::env::args().collect();
     let startup_intent = launch::parse_args(&args);
-    // A second process for "new window" must not be swallowed by the running
-    // instance — skip single-instance so Explorer can open a real second window.
-    let force_new_window = launch::wants_new_window(&args);
 
     let window_state_flags = tauri_plugin_window_state::StateFlags::SIZE
         | tauri_plugin_window_state::StateFlags::POSITION
         | tauri_plugin_window_state::StateFlags::MAXIMIZED
         | tauri_plugin_window_state::StateFlags::FULLSCREEN;
 
-    let mut builder = tauri::Builder::default();
+    let builder = tauri::Builder::default();
 
-    // Single-instance must register first so a second Explorer click hands its
-    // argv to the running app instead of opening another process.
-    #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
-    if !force_new_window {
-        builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
-            if let Some(intent) = launch::parse_args(&argv) {
-                emit_launch_intent(app, intent);
-            } else {
-                focus_main_window(app);
-            }
-        }));
-    }
+    // Single-instance is release-only and must register first so a second
+    // Explorer click hands its argv to the running app. Debug/dev builds skip
+    // it so `bun run app` can run next to an installed Duckweed while coding.
+    // In release, "new window" still bypasses the plugin so Explorer can open
+    // a real second process.
+    #[cfg(all(
+        any(target_os = "macos", windows, target_os = "linux"),
+        not(debug_assertions)
+    ))]
+    let builder = {
+        let force_new_window = launch::wants_new_window(&args);
+        if !force_new_window {
+            builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+                if let Some(intent) = launch::parse_args(&argv) {
+                    emit_launch_intent(app, intent);
+                } else {
+                    focus_main_window(app);
+                }
+            }))
+        } else {
+            builder
+        }
+    };
 
     builder
         .plugin(tauri_plugin_dialog::init())
