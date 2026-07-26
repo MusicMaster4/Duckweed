@@ -9,6 +9,8 @@ name: Release
 # scripts/release-version.mjs, which fails on anything but those two.
 #
 # Versioning (scripts/release-version.mjs, src/lib/version.ts):
+#   • The first push/merged PR to `main` publishes v1.0.0. Later stable pushes
+#     publish v1.0.1, v1.0.2, and so on.
 #   • Both channels count from the newest stable tag. patch fills 0..99 and then
 #     carries into minor, minor fills 0..99 and then carries into major.
 #   • A beta is the *next* stable version plus a counter: after v1.0.3, the first

@@ -60,6 +60,10 @@ testing:         └─► v1.0.4-testing.1 ─► …-testing.2 ─┘  └─�
 Publishing `v1.0.4` from `main` restarts the beta counter, because the betas now
 work toward `v1.0.5`.
 
+Before any stable tag exists, the first PR merged into `main` publishes
+`v1.0.0`. Later merges publish `v1.0.1`, `v1.0.2`, and so on. GitHub Actions
+runs this on the merge's push to `main`, not when the PR is merely opened.
+
 Two ways to steer it:
 
 - **A bigger jump for one release**: run the workflow by hand

@@ -13,6 +13,8 @@
  */
 
 export const BETA_CHANNEL = "testing";
+/** First production release, published by the first merge/push to `main`. */
+export const INITIAL_STABLE_VERSION = "1.0.0";
 /** Highest patch before it carries into minor. */
 export const PATCH_MAX = 99;
 /** Highest minor before it carries into major. */
@@ -153,7 +155,9 @@ export interface ResolveOptions {
  *
  * Both channels count from the latest *stable* tag, so the beta base is always
  * the release the betas lead to. A package.json version higher than the latest
- * stable tag wins, which is how you jump to an exact number by hand.
+ * stable tag wins, which is how you jump to an exact number by hand. Before any
+ * stable tag exists, testing keeps using package.json while the first main
+ * release is explicitly 1.0.0.
  */
 export function resolveVersion({ channel, tags, packageVersion, level = "patch" }: ResolveOptions): string {
   const parsedPackage = parseVersion(packageVersion);
@@ -162,7 +166,11 @@ export function resolveVersion({ channel, tags, packageVersion, level = "patch" 
   const stable = latestStable(tags);
 
   let base: Version;
-  if (stable === null) base = pkg;
+  if (stable === null && channel === "stable") {
+    // Beta tags deliberately do not affect this check. They are development
+    // builds, so the first merged PR that reaches main is still the 1.0 release.
+    base = baseOf(parseVersion(INITIAL_STABLE_VERSION)!);
+  } else if (stable === null) base = pkg;
   else if (compareVersions(pkg, stable) > 0) base = pkg;
   else base = bump(stable, level);
 

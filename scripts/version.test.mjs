@@ -142,9 +142,21 @@ describe("reading the tag list", () => {
 });
 
 describe("resolving the next release", () => {
-  test("the first release of each channel comes from package.json", () => {
-    expect(resolveVersion({ channel: "stable", tags: [], packageVersion: "0.1.0" })).toBe("0.1.0");
+  test("the first main release is 1.0.0 while testing still comes from package.json", () => {
+    expect(resolveVersion({ channel: "stable", tags: [], packageVersion: "0.1.0" })).toBe("1.0.0");
     expect(resolveVersion({ channel: "testing", tags: [], packageVersion: "0.1.0" })).toBe("0.1.0-testing.1");
+  });
+
+  test("beta tags do not stop the first main merge from becoming 1.0.0", () => {
+    const tags = ["v0.1.0-testing.1", "v0.1.0-testing.17"];
+    expect(resolveVersion({ channel: "stable", tags, packageVersion: "0.1.0" })).toBe("1.0.0");
+  });
+
+  test("stable releases after 1.0.0 increment the patch", () => {
+    expect(resolveVersion({ channel: "stable", tags: ["v1.0.0"], packageVersion: "0.1.0" })).toBe("1.0.1");
+    expect(resolveVersion({ channel: "stable", tags: ["v1.0.0", "v1.0.1"], packageVersion: "0.1.0" })).toBe(
+      "1.0.2",
+    );
   });
 
   test("stable steps one patch past the latest stable tag", () => {
@@ -172,7 +184,7 @@ describe("resolving the next release", () => {
     expect(resolveVersion({ channel: "stable", tags, packageVersion: "0.1.0" })).toBe("1.0.1");
   });
 
-  test("a higher package.json version wins, on both channels", () => {
+  test("a higher package.json version wins on both channels after stable releases begin", () => {
     const tags = ["v1.0.0"];
     expect(resolveVersion({ channel: "stable", tags, packageVersion: "2.5.0" })).toBe("2.5.0");
     expect(resolveVersion({ channel: "testing", tags, packageVersion: "2.5.0" })).toBe("2.5.0-testing.1");
