@@ -23,6 +23,15 @@ describe("settings tab", () => {
     expect(settings).not.toContain("settings-backdrop");
   });
 
+  test("settings remember the active section and scroll position across remounts", () => {
+    const settings = read("src/components/SettingsMenu.tsx");
+    expect(settings).toContain("lastSettingsSection");
+    expect(settings).toContain("lastSettingsScroll");
+    expect(settings).toContain("contentRef");
+    expect(settings).toContain("onScroll={() => saveScroll()}");
+    expect(settings).toContain("contentRef.current.scrollTop = target");
+  });
+
   test("only the visible view reports an active tab", () => {
     const strip = read("src/components/TabStrip.tsx");
     expect(strip).toContain("tab.id === activeTabId && !settingsActive");

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { UsagePanel } from "./UsagePanel";
 import type { ShellIntegrationStatus } from "../lib/ipc";
@@ -43,6 +43,13 @@ type SettingsSection = "General" | "Appearance" | "Terminal" | "Usage" | "About"
 
 // Survive SettingsMenu unmount when the user leaves the Settings tab and comes back.
 let lastSettingsSection: SettingsSection = "General";
+const lastSettingsScroll: Record<SettingsSection, number> = {
+  General: 0,
+  Appearance: 0,
+  Terminal: 0,
+  Usage: 0,
+  About: 0,
+};
 
 export function SettingsMenu({
   fontSize,
@@ -70,13 +77,30 @@ export function SettingsMenu({
   const [section, setSectionState] = useState<SettingsSection>(lastSettingsSection);
   const [query, setQuery] = useState("");
   const [suggestionsCleared, setSuggestionsCleared] = useState(false);
+  const contentRef = useRef<HTMLElement>(null);
+  const sectionRef = useRef(section);
+  const searchingRef = useRef(false);
+  // Ignore scroll events fired while we re-apply a saved offset (browsers clamp
+  // scrollTop when content is still short, which would erase the real target).
+  const restoringRef = useRef(false);
+  sectionRef.current = section;
+
+  const saveScroll = (forSection: SettingsSection = sectionRef.current) => {
+    const el = contentRef.current;
+    if (!el || searchingRef.current || restoringRef.current) return;
+    lastSettingsScroll[forSection] = el.scrollTop;
+  };
+
   const setSection = (next: SettingsSection) => {
+    saveScroll(sectionRef.current);
     lastSettingsSection = next;
     setSectionState(next);
   };
+
   const roundedFontSize = Math.round(fontSize * 10) / 10;
   const normalizedQuery = query.trim().toLowerCase();
   const searching = normalizedQuery.length > 0;
+  searchingRef.current = searching;
   const matches = (text: string) => !searching || text.toLowerCase().includes(normalizedQuery);
   const showAppearance =
     (section === "General" || section === "Appearance" || searching) &&
@@ -107,6 +131,68 @@ export function SettingsMenu({
   const usageHit =
     searching && matches("usage statistics cost tokens spend quota limits agents models pricing");
   const visibleTitle = searching ? "Search results" : section;
+
+  // Restore the last scroll for this section after remount or section switch.
+  // Usage content can grow after the first paint, so re-apply on rAF and while
+  // the scrollport's content height is still catching up — stop if the user scrolls.
+  useLayoutEffect(() => {
+    const el = contentRef.current;
+    if (!el) return;
+
+    if (searching) {
+      restoringRef.current = true;
+      el.scrollTop = 0;
+      window.queueMicrotask(() => {
+        restoringRef.current = false;
+      });
+      return;
+    }
+
+    const target = lastSettingsScroll[section] ?? 0;
+    let cancelled = false;
+    let userMoved = false;
+
+    const apply = () => {
+      if (cancelled || userMoved || !contentRef.current) return;
+      restoringRef.current = true;
+      contentRef.current.scrollTop = target;
+      window.queueMicrotask(() => {
+        if (!cancelled) restoringRef.current = false;
+      });
+    };
+
+    apply();
+    const frame = window.requestAnimationFrame(apply);
+
+    let observer: ResizeObserver | undefined;
+    const onUserScroll = () => {
+      if (restoringRef.current) return;
+      userMoved = true;
+      observer?.disconnect();
+    };
+    el.addEventListener("scroll", onUserScroll);
+
+    const inner = el.firstElementChild;
+    if (inner && target > 0) {
+      observer = new ResizeObserver(() => apply());
+      observer.observe(inner);
+    }
+
+    return () => {
+      cancelled = true;
+      restoringRef.current = false;
+      window.cancelAnimationFrame(frame);
+      el.removeEventListener("scroll", onUserScroll);
+      observer?.disconnect();
+    };
+  }, [section, searching, showUsage]);
+
+  // Persist scroll when leaving the Settings tab entirely.
+  useEffect(() => {
+    return () => {
+      saveScroll(sectionRef.current);
+    };
+  }, []);
 
   return (
     <div className="settings-page">
@@ -141,7 +227,12 @@ export function SettingsMenu({
         <div className="settings-sidebar-foot">duckweed</div>
       </aside>
 
-      <main className="settings-content" aria-label="Settings">
+      <main
+        ref={contentRef}
+        className="settings-content"
+        aria-label="Settings"
+        onScroll={() => saveScroll()}
+      >
         <div className={`settings-content-inner${showUsage ? " is-wide" : ""}`}>
           <header className="settings-content-header">
             <span>Settings</span>
