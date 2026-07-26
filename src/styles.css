@@ -3063,10 +3063,12 @@ body.is-resizing * {
 
 /* -------------------------------------------------------------- updates */
 
+.update-backdrop {
+  align-items: center;
+  padding-top: 0;
+}
+
 .update-dialog {
-  /* align-self: flex-start so the palette backdrop (align-items: stretch) does not
-     force this to max-height even when content is short ("up to date" etc.). */
-  align-self: flex-start;
   width: min(380px, 90vw);
   max-height: 60vh;
   display: flex;

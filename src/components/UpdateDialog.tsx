@@ -27,7 +27,7 @@ export function UpdateDialog({ updater }: { updater: Updater }) {
       : null;
 
   return (
-    <div className="palette-backdrop" onPointerDown={close}>
+    <div className="palette-backdrop update-backdrop" onPointerDown={close}>
       <div className="update-dialog" onPointerDown={(e) => e.stopPropagation()}>
         <header className="update-head">
           <span className="update-title">Updates</span>
