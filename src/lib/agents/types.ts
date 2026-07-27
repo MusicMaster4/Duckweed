@@ -160,6 +160,20 @@ export interface AgentUsage {
   contextUsed: number | null;
 }
 
+/**
+ * One switchable model, with the effort levels that model accepts.
+ *
+ * Adapters fill this from their protocol (`model/list`, ACP `modelState`, …)
+ * so the header pickers and the `/model` / `/effort` composer menus can offer
+ * real choices instead of dumping a wall of text into the transcript.
+ */
+export interface AgentModelChoice {
+  id: string;
+  /** Short label for the UI; falls back to {@link id}. */
+  label: string;
+  efforts: string[];
+}
+
 export interface AgentSessionState {
   /** Terminal this session replaced. */
   termId: string;
@@ -171,6 +185,12 @@ export interface AgentSessionState {
   model: string | null;
   /** Reasoning effort in effect, when the agent exposes one. */
   effort: string | null;
+  /**
+   * Models the user can switch to in this session. Empty until the adapter
+   * learns them (or a static fallback is seeded); the UI treats an empty list
+   * as "no interactive picker yet".
+   */
+  models: AgentModelChoice[];
   /** Provider-side session id, shown so a transcript can be found later. */
   sessionId: string | null;
   items: AgentItem[];
@@ -194,6 +214,39 @@ export interface AgentSessionState {
   commands: { name: string; description: string }[];
   /** True once any turn has run — the empty state steps aside. */
   started: boolean;
+}
+
+/** Effort levels the current model (or any known model) accepts. */
+export function effortsFor(state: Pick<AgentSessionState, "model" | "models">): string[] {
+  if (!state.models.length) return [];
+  const active =
+    (state.model &&
+      state.models.find(
+        (model) =>
+          model.id === state.model ||
+          model.label === state.model ||
+          model.id.endsWith(`/${state.model}`),
+      )) ||
+    null;
+  if (active?.efforts.length) return active.efforts;
+  // Fall back to the union so a session that only knows efforts on a sibling
+  // model still offers something useful in the picker.
+  const seen = new Set<string>();
+  const efforts: string[] = [];
+  for (const model of state.models) {
+    for (const effort of model.efforts) {
+      if (seen.has(effort)) continue;
+      seen.add(effort);
+      efforts.push(effort);
+    }
+  }
+  return efforts;
+}
+
+/** Compact a long provider/model id for the header chip. */
+export function shortModelLabel(model: string): string {
+  const slash = model.lastIndexOf("/");
+  return slash >= 0 ? model.slice(slash + 1) : model;
 }
 
 export function emptyUsage(): AgentUsage {

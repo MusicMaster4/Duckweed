@@ -411,7 +411,8 @@ export function createClaudeAdapter(): AgentAdapter {
     start: (ctx) => {
       // Nothing to hand shake: the CLI is ready as soon as it is up, and the
       // `system/init` frame that names the model only arrives with the first
-      // turn. Opening prompts are sent by the session, not here.
+      // turn. Opening prompts are sent by the session, not here. The session
+      // already seeded Claude's model aliases so the picker works immediately.
       ctx.emit({ type: "status", status: "idle" });
     },
 

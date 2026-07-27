@@ -157,6 +157,16 @@ export function createCodexAdapter(): AgentAdapter {
               isDefault: model.isDefault === true,
             }))
             .filter((model) => model.id);
+          if (models.length) {
+            ctx.emit({
+              type: "session",
+              models: models.map((model) => ({
+                id: model.id,
+                label: model.displayName || model.id,
+                efforts: [...model.efforts],
+              })),
+            });
+          }
         })
         .catch(() => {
           // A server too old for model/list just leaves validation lenient.

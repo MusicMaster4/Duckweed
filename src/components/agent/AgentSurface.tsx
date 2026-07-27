@@ -6,6 +6,7 @@ import type { AgentSessionState } from "../../lib/agents/types";
 import { AgentComposer } from "./AgentComposer";
 import { AgentPermission } from "./AgentPermission";
 import { AgentTimeline } from "./AgentTimeline";
+import { shortModelLabel } from "../../lib/agents/types";
 
 interface Props {
   termId: string;
@@ -89,7 +90,13 @@ export function AgentSurface({ termId, active, onClose }: Props) {
           {definition.mark}
         </span>
         <span className="agent-name">{session.label}</span>
-        {session.model && <span className="agent-model">{session.model}</span>}
+        {/* Read-only identity in the head — interactive pickers live in the
+            composer footer (T3 Code layout: model + effort next to send). */}
+        {session.model && (
+          <span className="agent-model" title={session.model}>
+            {shortModelLabel(session.model)}
+          </span>
+        )}
         {session.effort && (
           <span className="agent-effort" title="Reasoning effort">
             {session.effort}

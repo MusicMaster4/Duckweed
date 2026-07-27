@@ -35,6 +35,7 @@ function harness() {
       cwd: "H:/project",
       model: null,
       effort: null,
+      models: [],
       sessionId: null,
       items: [],
       pending: [],

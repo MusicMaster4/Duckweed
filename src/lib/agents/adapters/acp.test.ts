@@ -37,6 +37,7 @@ function harness(overrides: Partial<AgentLaunch> = {}) {
       cwd: "H:/project",
       model: null,
       effort: null,
+      models: [],
       sessionId: null,
       items: [],
       pending: [],
@@ -270,6 +271,9 @@ describe("acp adapter", () => {
     const state = h.state();
     expect(state.model).toBe("grok-4.5");
     expect(state.effort).toBe("high");
+    expect(state.models.length).toBeGreaterThan(0);
+    expect(state.models.some((model) => model.id === "grok-4.5")).toBe(true);
+    expect(state.models.find((model) => model.id === "grok-4.5")?.efforts).toContain("high");
   });
 
   test("reads the model out of opencode-style configOptions", async () => {

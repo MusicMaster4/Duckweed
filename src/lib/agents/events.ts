@@ -1,6 +1,7 @@
 import { mergeCommands } from "./slashCatalog";
 import type {
   AgentFileChange,
+  AgentModelChoice,
   AgentPermission,
   AgentPlanStep,
   AgentSessionState,
@@ -28,6 +29,8 @@ export type AgentEvent =
       effort?: string;
       cwd?: string;
       commands?: { name: string; description: string }[];
+      /** Replaces the switchable-model list when the adapter learns it. */
+      models?: AgentModelChoice[];
     }
   | { type: "status"; status: AgentStatus; error?: string }
   /** The user's own message, echoed into the transcript. */
@@ -93,6 +96,9 @@ export function applyEvent(state: AgentSessionState, event: AgentEvent): AgentSe
         effort: event.effort ?? state.effort,
         cwd: event.cwd ?? state.cwd,
         commands: event.commands ? mergeCommands(state.commands, event.commands) : state.commands,
+        // A non-empty list wins; adapters re-emit the full set whenever it
+        // changes rather than patching individual rows.
+        models: event.models && event.models.length ? event.models : state.models,
       };
 
     case "status":

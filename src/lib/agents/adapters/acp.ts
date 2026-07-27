@@ -149,7 +149,20 @@ export function createAcpAdapter(): AgentAdapter {
    * Grok's `modelState` (and the standard `models` field on `session/new`):
    * current model, switchable models, and each one's reasoning efforts.
    */
-  function readModelState(raw: unknown): { model?: string; effort?: string } {
+  /** Map the adapter's internal model list onto the session event shape. */
+  function modelsForUi() {
+    return availableModels.map((model) => ({
+      id: model.id,
+      label: model.name || model.id,
+      efforts: [...model.efforts],
+    }));
+  }
+
+  function readModelState(raw: unknown): {
+    model?: string;
+    effort?: string;
+    models?: ReturnType<typeof modelsForUi>;
+  } {
     const state = asRecord(raw);
     if (!state) return {};
     const current = asString(state.currentModelId);
@@ -178,6 +191,7 @@ export function createAcpAdapter(): AgentAdapter {
     return {
       ...(current ? { model: current } : {}),
       ...(effort ? { effort } : {}),
+      ...(availableModels.length ? { models: modelsForUi() } : {}),
     };
   }
 
@@ -185,7 +199,10 @@ export function createAcpAdapter(): AgentAdapter {
    * OpenCode's answer to the same question: `configOptions` on `session/new`
    * carries a `model` category with the current value and every choice.
    */
-  function readConfigOptions(raw: unknown): { model?: string } {
+  function readConfigOptions(raw: unknown): {
+    model?: string;
+    models?: ReturnType<typeof modelsForUi>;
+  } {
     const option = asArray(raw)
       .map((entry) => asRecord(entry))
       .find((entry) => entry?.category === "model");
@@ -204,7 +221,10 @@ export function createAcpAdapter(): AgentAdapter {
     // richer source wins if an agent ever sends both.
     if (models.length && !availableModels.length) availableModels = models;
     if (current) currentModelId = current;
-    return current ? { model: current } : {};
+    return {
+      ...(current ? { model: current } : {}),
+      ...(availableModels.length ? { models: modelsForUi() } : {}),
+    };
   }
 
   /** `initialize` → `session/new` → launch-time model/effort → ready. */

@@ -36,6 +36,7 @@ function harness(overrides: Partial<AgentLaunch> = {}) {
       cwd: "H:/project",
       model: null,
       effort: null,
+      models: [],
       sessionId: null,
       items: [],
       pending: [],
@@ -129,6 +130,16 @@ describe("codex adapter", () => {
     const h = harness();
     await h.handshake();
     expect(h.state()).toMatchObject({ model: "gpt-5.6-sol", effort: "high" });
+  });
+
+  test("publishes model/list rows for the header and composer pickers", async () => {
+    const h = harness();
+    await h.handshake();
+    await h.loadModels();
+    const models = h.state().models;
+    expect(models.map((model) => model.id)).toEqual(["gpt-5.6-sol", "gpt-5.5"]);
+    expect(models[0].efforts).toEqual(["low", "medium", "high"]);
+    expect(models[0].label).toBe("GPT-5.6-Sol");
   });
 
   test("passes a requested model into the thread", async () => {

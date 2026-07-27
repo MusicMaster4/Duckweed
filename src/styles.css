@@ -4699,8 +4699,9 @@ body.is-resizing * {
   white-space: nowrap;
 }
 
+/* Read-only model/effort identity in the header (pickers live in composer). */
 .agent-model {
-  max-width: 180px;
+  max-width: 140px;
   overflow: hidden;
   font-family: var(--font-mono);
   font-size: 10.5px;
@@ -4712,12 +4713,151 @@ body.is-resizing * {
 .agent-effort {
   padding: 0 6px;
   border-radius: 4px;
-  background: color-mix(in srgb, var(--agent-accent) 14%, transparent);
+  background: color-mix(in srgb, var(--agent-accent) 12%, transparent);
   color: var(--agent-accent);
   font-family: var(--font-mono);
   font-size: 10px;
   line-height: 16px;
   white-space: nowrap;
+}
+
+/*
+ * Model + effort pickers — T3 Code composer-footer pattern:
+ * muted ghost triggers, menus that open upward, section titles, radio rows.
+ * Flat surfaces only (no accent glow).
+ */
+.agent-controls {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+}
+
+.agent-control-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 168px;
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-faint);
+  font-size: 11.5px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.agent-control-chip-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.agent-control-chip:not(.is-static):hover,
+.agent-control-chip.is-open {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text);
+}
+
+.agent-control-chip.is-static {
+  cursor: default;
+  opacity: 0.85;
+}
+
+.agent-control-chevron {
+  flex: none;
+  width: 8px;
+  height: 5px;
+  opacity: 0.55;
+}
+
+.agent-control-menu {
+  position: absolute;
+  left: 0;
+  z-index: 30;
+  min-width: 196px;
+  max-width: 300px;
+  max-height: 260px;
+  overflow-y: auto;
+  padding: 4px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--bg-elevated);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.45);
+}
+
+/* Composer footer: open above the triggers (T3). */
+.agent-controls.is-composer .agent-control-menu {
+  bottom: calc(100% + 6px);
+  top: auto;
+}
+
+/* Header placement (if reused): open below. */
+.agent-controls.is-header .agent-control-menu {
+  top: calc(100% + 4px);
+  bottom: auto;
+}
+
+.agent-control-menu-title {
+  padding: 5px 8px 4px;
+  color: var(--text-faint);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.agent-control-menu button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 6px 8px;
+  border-radius: 5px;
+  text-align: left;
+  color: var(--text);
+  font-size: 11.5px;
+}
+
+.agent-control-menu button.is-active {
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.agent-control-menu button.is-current .agent-control-option-label {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.agent-control-option-main {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  flex: 1;
+}
+
+.agent-control-option-label {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.25;
+}
+
+.agent-control-option-detail {
+  overflow: hidden;
+  color: var(--text-faint);
+  font-size: 10px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.agent-control-option-check {
+  flex: none;
+  color: var(--agent-accent);
+  font-size: 12px;
 }
 
 .agent-state {
@@ -4879,7 +5019,7 @@ body.is-resizing * {
   opacity: 0.75;
 }
 
-/* ── Starting state: the agent mark breathes while a thin accent bar runs ── */
+/* ── Starting state: soft opacity pulse + thin accent bar (no glow) ── */
 
 .agent-empty.is-starting .agent-empty-mark {
   animation: agent-start-breathe 2.4s ease-in-out infinite;
@@ -4888,12 +5028,12 @@ body.is-resizing * {
 @keyframes agent-start-breathe {
   0%,
   100% {
-    box-shadow: 0 0 0 0 color-mix(in srgb, var(--agent-accent) 24%, transparent);
+    opacity: 0.55;
     transform: scale(1);
   }
   50% {
-    box-shadow: 0 0 22px 3px color-mix(in srgb, var(--agent-accent) 42%, transparent);
-    transform: scale(1.05);
+    opacity: 1;
+    transform: scale(1.04);
   }
 }
 
@@ -5484,7 +5624,16 @@ body.is-resizing * {
   display: flex;
   align-items: flex-end;
   gap: 8px;
-  padding: 8px 9px;
+  padding: 8px 9px 4px;
+}
+
+/* T3-style control strip under the input: model + effort always one click away. */
+.agent-composer-footer {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 28px;
+  padding: 0 6px 6px;
 }
 
 .agent-composer-input {
@@ -5548,7 +5697,7 @@ body.is-resizing * {
   background: currentColor;
 }
 
-/* ── Slash-command completion ── */
+/* ── Slash-command + guided arg completion ── */
 
 .agent-commands {
   position: absolute;
@@ -5564,6 +5713,22 @@ body.is-resizing * {
   box-shadow: 0 12px 28px rgba(0, 0, 0, 0.42);
 }
 
+.agent-commands-hint {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 3px 8px 5px;
+  color: var(--text-faint);
+  font-size: 10px;
+  letter-spacing: 0.2px;
+}
+
+.agent-commands-hint span {
+  font-family: var(--font-mono);
+  opacity: 0.75;
+}
+
 .agent-commands button {
   display: flex;
   align-items: baseline;
@@ -5575,7 +5740,11 @@ body.is-resizing * {
 }
 
 .agent-commands button.is-active {
-  background: var(--accent-dim);
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.agent-commands button.is-current .agent-command-name {
+  color: var(--agent-accent);
 }
 
 .agent-command-name {
@@ -5583,6 +5752,13 @@ body.is-resizing * {
   color: var(--text);
   font-family: var(--font-mono);
   font-size: 11.5px;
+}
+
+.agent-command-current {
+  flex: none;
+  margin-left: auto;
+  color: var(--agent-accent);
+  font-size: 11px;
 }
 
 .agent-command-desc {

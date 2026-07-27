@@ -219,9 +219,13 @@ export class BlockTracker {
 
     // Command labels always cover `PS path> cmd`, even while a child is
     // running — otherwise the raw echo bleeds through the moment we drop the
-    // editor chrome (Codex, cargo, long builds). Selection/prompt covers are
-    // editor-only: they paint free-floating rows and flicker on TUI footers.
-    for (const block of this.blocks) {
+    // editor chrome (Codex, cargo, long builds). Hairlines and selection/
+    // prompt covers are editor-only: a TUI on the normal buffer rewrites the
+    // same absolute lines, and a free-floating hairline would strike through
+    // mid-output that is no longer a chunk boundary.
+    const buf = this.term.buffer.active;
+    for (let i = 0; i < this.blocks.length; i++) {
+      const block = this.blocks[i];
       const range = this.range(block);
       if (!range) {
         block.cmdEl.hidden = true;
@@ -230,53 +234,54 @@ export class BlockTracker {
       }
 
       // Fold orphan idle prompts directly above the echo row into this block's
-      // header. An empty Enter (or the prompt re-drawn after ^C) leaves a
-      // `PS path>` row that belongs to no chunk: the previous block's range is
-      // trimmed of shell chrome and the prompt cover only paints after the
-      // last block, so it would sit raw between two chunks.
-      const buf = this.term.buffer.active;
-      let coverStart = range.start;
-      while (coverStart > 0) {
-        const line = buf.getLine(coverStart - 1);
-        const text = line ? line.translateToString(true) : "";
-        if (!looksLikePrompt(text)) break;
-        coverStart -= 1;
-      }
+      // header — but never walk into the previous chunk. Empty Enter / ^C leave
+      // `PS path>` rows that belong to no chunk; anything still owned by the
+      // previous block stays there so the hairline cannot land mid-output.
+      const prevEnd = this.previousBlockEnd(i);
+      const coverStart = foldOrphanPrompts(
+        (y) => {
+          const line = buf.getLine(y);
+          return line ? line.translateToString(true) : "";
+        },
+        range.start,
+        prevEnd + 1,
+      );
 
       const cmdRow = range.start - viewportY;
       const coverRow = coverStart - viewportY;
-      // Gap band is 2×BLOCK_GAP and sits entirely above the covered rows, so
-      // it can poke a few px past the viewport top while the label is still
-      // useful.
-      const cmdVisible = cmdRow >= -1 && cmdRow < rows;
-      if (cmdVisible) {
-        const band = block.sepEl ? BLOCK_GAP * 2 : 0;
+      // Label tracks the command row only while that row is on-screen. Do not
+      // keep a lone hairline when the command has scrolled one row off (that
+      // used to paint a free-floating rule over whatever content sits at the
+      // top of the viewport).
+      const cmdOnScreen = cmdRow >= 0 && cmdRow < rows;
+      if (cmdOnScreen) {
         const coveredRows = cmdRow - coverRow;
         const y = offsetY + coverRow * cellHeight;
-        // Label only when the command row itself is in view (not just the gap).
-        if (cmdRow >= 0) {
-          block.cmdEl.hidden = false;
-          block.cmdEl.classList.toggle(
-            "is-selected",
-            this.editorMode && block.id === this.selectedId,
-          );
-          block.cmdEl.style.transform = `translate3d(0, ${y}px, 0)`;
-          block.cmdEl.style.width = `${fullWidth}px`;
-          block.cmdEl.style.height = `${(coveredRows + 1) * cellHeight}px`;
-          block.cmdEl.style.padding = `${coveredRows * cellHeight}px 6px 0`;
-          block.cmdEl.style.lineHeight = `${cellHeight}px`;
-        } else {
-          block.cmdEl.hidden = true;
-        }
+        block.cmdEl.hidden = false;
+        block.cmdEl.classList.toggle(
+          "is-selected",
+          this.editorMode && block.id === this.selectedId,
+        );
+        block.cmdEl.style.transform = `translate3d(0, ${y}px, 0)`;
+        block.cmdEl.style.width = `${fullWidth}px`;
+        block.cmdEl.style.height = `${(coveredRows + 1) * cellHeight}px`;
+        block.cmdEl.style.padding = `${coveredRows * cellHeight}px 6px 0`;
+        block.cmdEl.style.lineHeight = `${cellHeight}px`;
 
         if (block.sepEl) {
-          // The band is transparent (see BLOCK_GAP): the previous chunk's last
-          // line shows through uncut and only the hairline is painted, snug at
-          // the band's bottom edge.
-          block.sepEl.hidden = false;
-          block.sepEl.style.transform = `translate3d(0, ${y - band}px, 0)`;
-          block.sepEl.style.width = `${fullWidth}px`;
-          block.sepEl.style.height = `${band}px`;
+          // Hairline only in editor mode, only with its command label, and
+          // only at the top of the header band (true chunk boundary). The
+          // band itself stays transparent so the previous line's descenders
+          // are not sliced by an opaque fill.
+          if (this.editorMode) {
+            const band = BLOCK_GAP * 2;
+            block.sepEl.hidden = false;
+            block.sepEl.style.transform = `translate3d(0, ${y - band}px, 0)`;
+            block.sepEl.style.width = `${fullWidth}px`;
+            block.sepEl.style.height = `${band}px`;
+          } else {
+            block.sepEl.hidden = true;
+          }
         }
       } else {
         block.cmdEl.hidden = true;
@@ -317,17 +322,22 @@ export class BlockTracker {
   }
 
   /**
-   * Toggle editor-only chrome (prompt cover + block selection). Command labels
-   * that hide the shell echo stay up either way — see {@link layout}.
+   * Toggle editor-only chrome (prompt cover + block selection + hairlines).
+   * Command labels that hide the shell echo stay up either way — see
+   * {@link layout}.
    */
   setEditorMode(enabled: boolean): void {
     if (this.editorMode === enabled) return;
     this.editorMode = enabled;
     if (!enabled) {
-      // Drop selection chrome immediately so it never sits on a TUI frame.
+      // Drop selection + hairlines immediately so a TUI never gets even one
+      // frame with a rule painted through mid-output that rewrote those lines.
       this.selectedId = null;
       this.selectOverlay.hidden = true;
       this.promptCover.hidden = true;
+      for (const block of this.blocks) {
+        if (block.sepEl) block.sepEl.hidden = true;
+      }
     }
     this.scheduleLayout();
   }
@@ -522,6 +532,19 @@ export class BlockTracker {
       if (line >= range.start && line <= range.end) return block;
     }
     return null;
+  }
+
+  /**
+   * Absolute end line of the block before `index`, or `-1` when this is the
+   * first live block. Clamps orphan-prompt folding so a hairline cannot climb
+   * into the previous chunk's output.
+   */
+  private previousBlockEnd(index: number): number {
+    for (let i = index - 1; i >= 0; i--) {
+      const range = this.range(this.blocks[i]);
+      if (range) return range.end;
+    }
+    return -1;
   }
 
   // ---------------------------------------------------------------------------
@@ -761,6 +784,27 @@ function disposeBlock(block: CommandBlock): void {
   block.sepEl?.remove();
   block.end?.dispose();
   block.start.dispose();
+}
+
+/**
+ * Extend a block header upward through consecutive idle prompt rows sitting
+ * between chunks, stopping at `minLine` so we never steal lines from the
+ * previous block (or from buffer start).
+ *
+ * Pure helper so the clamp can be unit-tested without a Terminal.
+ */
+export function foldOrphanPrompts(
+  getLine: (y: number) => string,
+  commandStart: number,
+  minLine: number,
+): number {
+  let coverStart = commandStart;
+  const floor = Math.max(0, minLine);
+  while (coverStart > floor) {
+    if (!looksLikePrompt(getLine(coverStart - 1))) break;
+    coverStart -= 1;
+  }
+  return coverStart;
 }
 
 /**

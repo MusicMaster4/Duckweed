@@ -15,7 +15,7 @@ import { createCodexAdapter } from "./adapters/codex";
 import { AGENTS, AGENT_IDS } from "./catalog";
 import { applyEvent, type AgentEvent } from "./events";
 import type { AgentLaunch } from "./launch";
-import { fallbackCommands } from "./slashCatalog";
+import { fallbackCommands, fallbackModels } from "./slashCatalog";
 import { emptyUsage, type AgentId, type AgentSessionState } from "./types";
 
 /**
@@ -265,6 +265,9 @@ export async function start(
       cwd,
       model: launch.model,
       effort: launch.effort,
+      // Live model lists from the adapter replace this; Claude starts with
+      // its known aliases so the picker works before the first turn.
+      models: fallbackModels(launch.agent),
       sessionId: null,
       items: [],
       pending: [],
