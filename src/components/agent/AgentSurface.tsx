@@ -10,6 +10,7 @@ import {
 import { canResume } from "../../lib/agents/history";
 import * as agents from "../../lib/agents/session";
 import type { AgentSessionState } from "../../lib/agents/types";
+import { confirmCloseRunning } from "../../lib/confirmClose";
 import { AgentComposer } from "./AgentComposer";
 import { AgentPermission } from "./AgentPermission";
 import { AgentSessions } from "./AgentSessions";
@@ -90,6 +91,22 @@ export function AgentSurface({ termId, active, onClose }: Props) {
   const tokens = usage.inputTokens + usage.outputTokens;
   const ended = session.status === "exited" || session.status === "error";
   const resumable = canResume(session.agent);
+
+  /** End the session only after the user confirms — closing kills the agent. */
+  const requestClose = () => {
+    if (ended) {
+      onClose();
+      return;
+    }
+    void confirmCloseRunning({
+      title: "Close agent?",
+      message: `${session.label} is still open. Closing ends the session.`,
+      confirmLabel: "Yes, close",
+      allowDontShowAgain: true,
+    }).then((ok) => {
+      if (ok) onClose();
+    });
+  };
 
   /**
    * `/resume` is answered by the app, not the agent: no CLI advertises its
@@ -183,7 +200,7 @@ export function AgentSurface({ termId, active, onClose }: Props) {
         <button
           type="button"
           className="agent-head-btn"
-          onClick={onClose}
+          onClick={requestClose}
           title="Close the agent and return to the shell"
         >
           <svg viewBox="0 0 14 14" aria-hidden="true">
