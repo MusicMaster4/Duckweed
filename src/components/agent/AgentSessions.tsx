@@ -4,6 +4,7 @@ import { AGENTS } from "../../lib/agents/catalog";
 import * as history from "../../lib/agents/history";
 import type { AgentSessionSummary } from "../../lib/agents/history";
 import type { AgentId } from "../../lib/agents/types";
+import { AgentProviderIcon } from "./AgentProviderIcon";
 
 interface Props {
   agent: AgentId;
@@ -11,10 +12,9 @@ interface Props {
   cwd: string;
   /**
    * Branding for the picker chrome. Defaults to the catalog agent; wrappers
-   * like Claudex pass their own label/mark so the dialog does not say Claude Code.
+   * like Claudex pass their own label so the dialog does not say Claude Code.
    */
   label?: string;
-  mark?: string;
   /** Text typed after `/resume`, used as the opening filter. */
   initialQuery?: string;
   onPick: (session: AgentSessionSummary) => void;
@@ -34,7 +34,6 @@ export function AgentSessions({
   agent,
   cwd,
   label,
-  mark,
   initialQuery = "",
   onPick,
   onClose,
@@ -50,7 +49,6 @@ export function AgentSessions({
 
   const definition = AGENTS[agent];
   const displayLabel = label ?? definition.label;
-  const displayMark = mark ?? definition.mark;
 
   useEffect(() => {
     let live = true;
@@ -130,7 +128,10 @@ export function AgentSessions({
       >
         <header className="agent-sessions-head">
           <span className="agent-sessions-mark" aria-hidden="true">
-            {displayMark}
+            <AgentProviderIcon
+              agent={agent}
+              program={displayLabel === "Claudex" ? "claudex" : definition.binaries[0]}
+            />
           </span>
           <div className="agent-sessions-title">
             <strong>Resume a session</strong>

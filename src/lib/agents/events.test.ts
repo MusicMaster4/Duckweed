@@ -51,3 +51,36 @@ describe("resumed", () => {
     });
   });
 });
+
+describe("transient notices", () => {
+  test("picker confirmations disappear when real work starts", () => {
+    const configured = applyEvent(blank(), {
+      type: "notice",
+      tone: "info",
+      transient: true,
+      text: "Effort set to high.",
+    });
+    const prompted = applyEvent(configured, { type: "user", text: "Explain this repo" });
+
+    expect(prompted.items).toHaveLength(1);
+    expect(prompted.items[0]).toMatchObject({ kind: "user", text: "Explain this repo" });
+  });
+
+  test("dismisses exit hints without removing durable errors", () => {
+    let state = applyEvent(blank(), {
+      type: "notice",
+      tone: "error",
+      text: "A durable failure",
+    });
+    state = applyEvent(state, {
+      type: "notice",
+      tone: "info",
+      transient: true,
+      text: "Press Ctrl+C again to exit.",
+    });
+    state = applyEvent(state, { type: "dismiss-transient-notices" });
+
+    expect(state.items).toHaveLength(1);
+    expect(state.items[0]).toMatchObject({ tone: "error", text: "A durable failure" });
+  });
+});

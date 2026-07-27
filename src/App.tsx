@@ -7,6 +7,7 @@ import { ChangesPanel } from "./components/ChangesPanel";
 import { CommandPalette, type PaletteAction } from "./components/CommandPalette";
 import { FileEditor } from "./components/FileEditor";
 import { PaneTree, type PaneTreeShared } from "./components/PaneTree";
+import { PowerWatchBanner } from "./components/PowerWatchBanner";
 import { StatusBar } from "./components/StatusBar";
 import { TabStrip } from "./components/TabStrip";
 import { TitleBar } from "./components/TitleBar";
@@ -18,6 +19,9 @@ import { useDragPane, type DragState } from "./hooks/useDragPane";
 import { useGitChanges } from "./hooks/useGitChanges";
 import { useUpdater } from "./hooks/useUpdater";
 import * as bus from "./lib/bus";
+import * as checklist from "./lib/checklist";
+import * as powerWatch from "./lib/powerWatch";
+import * as agentSessions from "./lib/agents/session";
 import {
   confirmCloseRunning,
   isConfirmCloseRunningEnabled,
@@ -30,6 +34,7 @@ import { clearGreetings } from "./lib/greetings";
 import {
   frontendReady,
   listShells,
+  powerAction,
   projectInfo,
   shellIntegrationSet,
   shellIntegrationStatus,
@@ -108,7 +113,8 @@ function boot() {
     const tabs: Tab[] = saved.tabs.map((entry, i) => {
       const root = rehydrate(entry.root);
       return {
-        id: uid("tab"),
+        // Keep the saved id: per-tab checklists are filed under it.
+        id: entry.id ?? uid("tab"),
         title: entry.title || `Terminal ${i + 1}`,
         root,
         activeLeaf: leaves(root)[0].id,
@@ -431,6 +437,67 @@ export default function App() {
     // Tab metadata changes must not tear down every terminal subscription.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [termIdsKey, acknowledgeTerm, flashFocusedCompletion, isFocusedTerm, isSelectedTerm]);
+
+  // ---------------------------------------------------------- power watch
+
+  /**
+   * Everything still doing work, across every tab — the power watch's whole
+   * view of the app.
+   *
+   * Three kinds of pane, and the difference matters:
+   *
+   * - A pane the custom agent UI owns reports its own status, so `working`,
+   *   `starting` and `waiting` are read straight off the session. `waiting`
+   *   counts as busy: an agent blocked on a permission prompt has not finished,
+   *   and suspending the machine under it would strand the turn.
+   * - A pane running an agent CLI in the terminal stays "busy" for as long as
+   *   the CLI is open, so outstanding turns are what count instead.
+   * - Anything else is an ordinary command: `busy` means a child process.
+   */
+  const probeActivity = useCallback((): powerWatch.BusyEntry[] => {
+    const entries: powerWatch.BusyEntry[] = [];
+    for (const tab of tabsRef.current) {
+      const panes = leaves(tab.root);
+      panes.forEach((node, index) => {
+        const meta = terminals.getMeta(node.term);
+        if (!meta || meta.exited) return;
+        const where = panes.length > 1 ? `${tab.title} · pane ${index + 1}` : tab.title;
+
+        const agent = agentSessions.get(node.term);
+        if (agent) {
+          const reason =
+            agent.status === "working"
+              ? "agent-working"
+              : agent.status === "starting"
+                ? "agent-starting"
+                : agent.status === "waiting"
+                  ? "agent-waiting"
+                  : null;
+          if (reason) entries.push({ termId: node.term, label: `${where} · ${agent.label}`, reason });
+          return;
+        }
+
+        if (meta.agent) {
+          if (terminals.hasPendingAgentTurn(node.term)) {
+            entries.push({
+              termId: node.term,
+              label: `${where} · ${meta.agent}`,
+              reason: "agent-working",
+            });
+          }
+          return;
+        }
+
+        if (meta.busy) entries.push({ termId: node.term, label: where, reason: "process" });
+      });
+    }
+    return entries;
+  }, []);
+
+  useEffect(
+    () => powerWatch.connect({ probe: probeActivity, fire: powerAction }),
+    [probeActivity],
+  );
 
   // ---------------------------------------------------------------- tabs
 
@@ -1098,6 +1165,9 @@ export default function App() {
       terminals.setAgentUi(initial.customAgentUi);
       terminals.setInputMode(initial.inputMode);
       preloadCompletionSound();
+      // Durable storage has been restored into the WebView copy by now, so the
+      // saved lists are the ones that survived the last update.
+      checklist.init();
       if (!cancelled) setBooted(true);
 
       try {
@@ -1280,6 +1350,14 @@ export default function App() {
     tabs,
     activeTabId,
   ]);
+
+  // A closed tab takes its checklist with it. Deferred to a settled tab list so
+  // an intermediate state during a reorder or a close cannot drop a live list.
+  useEffect(() => {
+    if (!booted) return;
+    const id = window.setTimeout(() => checklist.prune(tabs.map((tab) => tab.id)), 800);
+    return () => window.clearTimeout(id);
+  }, [booted, tabs]);
 
   // The grid just lost (or got back) horizontal room; the per-pane observers see
   // it, but re-measuring on the next frame keeps the reflow to a single pass.
@@ -1536,7 +1614,28 @@ export default function App() {
       // Plain Ctrl+C with a grid selection: copy, never interrupt. Without this,
       // focus-on-xterm after a drag turns Ctrl+C into \x03 and PowerShell paints
       // a stack of `PS …> ^C` lines under the blocks.
-      if (ctrl && !e.shiftKey && !e.altKey && key === "c" && !isTextField(e.target)) {
+      if (ctrl && !e.shiftKey && !e.altKey && key === "c") {
+        // A custom surface is still a terminal harness. With no selection,
+        // Ctrl+C exits it; Claude and Grok arm a quick second press first.
+        const field = isTextField(e.target)
+          ? (e.target as HTMLInputElement | HTMLTextAreaElement)
+          : null;
+        const fieldHasSelection =
+          field !== null &&
+          field.selectionStart !== null &&
+          field.selectionEnd !== null &&
+          field.selectionStart !== field.selectionEnd;
+        const pageHasSelection = Boolean(window.getSelection()?.toString());
+        if (
+          activeTerm &&
+          !fieldHasSelection &&
+          !pageHasSelection &&
+          terminals.requestCloseAgentUi(activeTerm)
+        ) {
+          return take();
+        }
+
+        if (field) return;
         if (activeTerm) {
           const text = terminals.selection(activeTerm);
           if (text) {
@@ -2044,6 +2143,8 @@ export default function App() {
         {toolsOpen && !settingsActive && (
           <ToolsPanel
             project={project}
+            tabId={activeTab?.id ?? null}
+            tabTitle={activeTab?.title ?? ""}
             width={toolsWidth}
             onWidth={setToolsWidth}
             onClose={() => setToolsOpen(false)}
@@ -2176,6 +2277,9 @@ export default function App() {
       )}
 
       {updater.dialogOpen && <UpdateDialog updater={updater} />}
+      {/* Floats over the grid so an armed watch can be called off from
+          anywhere, not only from the panel that armed it. */}
+      <PowerWatchBanner />
       <ConfirmCloseDialog />
     </div>
   );

@@ -1,10 +1,17 @@
-import { type ReactNode, useCallback, useRef, useState } from "react";
+import { type ReactNode, useCallback, useRef, useState, useSyncExternalStore } from "react";
 
+import { ChecklistTool } from "./ChecklistTool";
+import { PowerWatchTool } from "./PowerWatchTool";
 import { ProjectExplorer } from "./ProjectExplorer";
+import * as checklist from "../lib/checklist";
+import * as powerWatch from "../lib/powerWatch";
 import type { ProjectInfo } from "../lib/types";
 
 interface Props {
   project: ProjectInfo | null;
+  /** Visible tab — checklists are filed per tab, and named after it. */
+  tabId: string | null;
+  tabTitle: string;
   width: number;
   onWidth: (width: number) => void;
   onClose: () => void;
@@ -17,21 +24,45 @@ interface Props {
 export const TOOLS_MIN_WIDTH = 190;
 export const TOOLS_MAX_WIDTH = 560;
 
-type SectionId = "files";
+type SectionId = "files" | "checklist" | "power";
 
 /**
- * The rail at the top of the panel. One entry today; the shape is the point —
- * anything else that wants a sidebar (a chat, a search, a runbook) becomes a
- * section here rather than another modal.
+ * The picker at the top of the panel: every tool the dock holds, named, in one
+ * row of clickable chips. Icons alone stop being legible the moment there is
+ * more than one of them, and this list is meant to grow.
  */
-const SECTIONS: { id: SectionId; label: string; icon: ReactNode }[] = [
+const SECTIONS: { id: SectionId; label: string; hint: string; icon: ReactNode }[] = [
   {
     id: "files",
-    label: "Project explorer",
+    label: "Files",
+    hint: "Project explorer — the folder this tab works in",
     icon: (
       <svg viewBox="0 0 16 16" aria-hidden="true">
         <path d="M9 2H4.5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h7a1 1 0 0 0 1-1V5.5z" />
         <path d="M9 2v3.5h3.5" />
+      </svg>
+    ),
+  },
+  {
+    id: "checklist",
+    label: "Checklist",
+    hint: "A list of your own for this tab",
+    icon: (
+      <svg viewBox="0 0 16 16" aria-hidden="true">
+        <path d="M2.5 4.5l1.5 1.5 2.5-3" />
+        <path d="M2.5 11l1.5 1.5 2.5-3" />
+        <path d="M8.5 4.5h5M8.5 11h5" />
+      </svg>
+    ),
+  },
+  {
+    id: "power",
+    label: "Power",
+    hint: "Sleep or shut down once everything finishes",
+    icon: (
+      <svg viewBox="0 0 16 16" aria-hidden="true">
+        <path d="M8 2v5" />
+        <path d="M4.9 4.4a5 5 0 1 0 6.2 0" />
       </svg>
     ),
   },
@@ -43,6 +74,8 @@ const SECTIONS: { id: SectionId; label: string; icon: ReactNode }[] = [
  */
 export function ToolsPanel({
   project,
+  tabId,
+  tabTitle,
   width,
   onWidth,
   onClose,
@@ -57,6 +90,16 @@ export function ToolsPanel({
   const asideRef = useRef<HTMLElement>(null);
   const liveWidth = useRef(width);
   if (!dragging) liveWidth.current = width;
+
+  // Badges on the picker, so a list with work left in it and an armed power
+  // watch are both visible from whichever tool happens to be open.
+  const readOpenItems = useCallback(() => (tabId ? checklist.openCount(tabId) : 0), [tabId]);
+  const openItems = useSyncExternalStore(checklist.subscribe, readOpenItems, readOpenItems);
+  const watchPhase = useSyncExternalStore(
+    powerWatch.subscribe,
+    () => powerWatch.getState().phase,
+    () => powerWatch.getState().phase,
+  );
 
   const onResizeDown = useCallback(
     (e: React.PointerEvent<HTMLDivElement>) => {
@@ -90,26 +133,44 @@ export function ToolsPanel({
     [onWidth],
   );
 
+  const badgeFor = (id: SectionId): ReactNode => {
+    if (id === "checklist" && openItems > 0) {
+      return <span className="tools-tab-badge">{openItems}</span>;
+    }
+    if (id === "power" && (watchPhase === "armed" || watchPhase === "countdown")) {
+      return (
+        <span
+          className={`tools-tab-dot ${watchPhase === "countdown" ? "is-hot" : ""}`}
+          aria-label="armed"
+        />
+      );
+    }
+    return null;
+  };
+
   return (
     <aside ref={asideRef} className="tools" style={{ width }}>
       <header className="tools-rail">
-        {SECTIONS.map((entry) => (
-          <button
-            key={entry.id}
-            type="button"
-            className={`tools-tab ${section === entry.id ? "is-active" : ""}`}
-            title={entry.label}
-            aria-label={entry.label}
-            aria-pressed={section === entry.id}
-            onClick={() => setSection(entry.id)}
-          >
-            {entry.icon}
-          </button>
-        ))}
-        <span className="tools-spacer" />
+        <div className="tools-picker" role="tablist" aria-label="Tools">
+          {SECTIONS.map((entry) => (
+            <button
+              key={entry.id}
+              type="button"
+              role="tab"
+              className={`tools-tab ${section === entry.id ? "is-active" : ""}`}
+              title={entry.hint}
+              aria-selected={section === entry.id}
+              onClick={() => setSection(entry.id)}
+            >
+              {entry.icon}
+              <span className="tools-tab-label">{entry.label}</span>
+              {badgeFor(entry.id)}
+            </button>
+          ))}
+        </div>
         <button
           type="button"
-          className="tools-tab"
+          className="tools-hide"
           title="Hide the tools panel (Ctrl+Shift+X)"
           aria-label="Hide the tools panel"
           onClick={onClose}
@@ -130,6 +191,8 @@ export function ToolsPanel({
             onOpenFile={onOpenFile}
           />
         )}
+        {section === "checklist" && <ChecklistTool scope={tabId} scopeLabel={tabTitle} />}
+        {section === "power" && <PowerWatchTool />}
       </div>
 
       <div

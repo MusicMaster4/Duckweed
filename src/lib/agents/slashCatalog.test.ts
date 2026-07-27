@@ -1,7 +1,12 @@
 import { describe, expect, test } from "bun:test";
 
 import { canResume } from "./history";
-import { fallbackCommands, fallbackModels, GUIDED_ARG_COMMANDS } from "./slashCatalog";
+import {
+  fallbackCommands,
+  fallbackModels,
+  formatSessionUsage,
+  GUIDED_ARG_COMMANDS,
+} from "./slashCatalog";
 import { effortsFor, shortModelLabel } from "./types";
 
 describe("slashCatalog", () => {
@@ -9,6 +14,31 @@ describe("slashCatalog", () => {
     for (const agent of ["claude", "codex", "grok", "opencode", "cursor"] as const) {
       expect(fallbackCommands(agent).some((command) => command.name === "/model")).toBe(true);
     }
+  });
+
+  test("offers app-owned /usage to every agent", () => {
+    for (const agent of ["claude", "codex", "grok", "opencode", "cursor"] as const) {
+      expect(fallbackCommands(agent).some((command) => command.name === "/usage")).toBe(true);
+    }
+  });
+
+  test("formats partial and empty usage without depending on a CLI", () => {
+    expect(
+      formatSessionUsage({
+        inputTokens: 12_400,
+        outputTokens: 600,
+        contextUsed: 0.42,
+        costUsd: 0.091,
+      }),
+    ).toBe("Usage this session · 12.4k input · 600 output · 13.0k total · 42% context · $0.09");
+    expect(
+      formatSessionUsage({
+        inputTokens: 0,
+        outputTokens: 0,
+        contextUsed: null,
+        costUsd: null,
+      }),
+    ).toContain("no token data");
   });
 
   test("claude seeds the real CLI model aliases and effort levels", () => {

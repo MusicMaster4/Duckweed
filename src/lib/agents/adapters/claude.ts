@@ -246,7 +246,10 @@ export function createClaudeAdapter(): AgentAdapter {
         // (or refuses ultracode / a bad level).
         const setEffort = /Set effort level to (\w+)/i.exec(text);
         if (setEffort) {
-          ctx.emit({ type: "session", effort: setEffort[1].toLowerCase() });
+          const effort = setEffort[1].toLowerCase();
+          ctx.emit({ type: "session", effort });
+          ctx.emit({ type: "notice", tone: "info", text: `Effort set to ${effort}.` });
+          return;
         }
         const refused = /needs dynamic workflows|Invalid argument|Valid options are/i.test(text);
         ctx.emit({ type: "notice", tone: refused ? "error" : "info", text });

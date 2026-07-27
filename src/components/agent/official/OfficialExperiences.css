@@ -22,6 +22,7 @@
   border-radius: 18px;
   color: var(--text);
   background: rgba(255, 255, 255, 0.075);
+  font-size: 13px;
   user-select: text;
 }
 
@@ -49,18 +50,103 @@
   color: var(--text);
   font-size: 13px;
   line-height: 1.62;
-  white-space: pre-wrap;
   overflow-wrap: anywhere;
   user-select: text;
 }
 
 .official-answer--claude {
-  font-size: 13.5px;
-  line-height: 1.66;
+  font-size: 13px;
+  line-height: 1.62;
 }
 
 .official-answer--grok {
-  font-size: 13.25px;
+  font-size: 13px;
+}
+
+.official-markdown {
+  min-width: 0;
+}
+
+.official-markdown > :first-child {
+  margin-top: 0;
+}
+
+.official-markdown > :last-child {
+  margin-bottom: 0;
+}
+
+.official-markdown p {
+  margin: 0 0 0.72em;
+}
+
+.official-markdown h1,
+.official-markdown h2,
+.official-markdown h3,
+.official-markdown h4 {
+  margin: 1.15em 0 0.42em;
+  color: var(--text);
+  font: inherit;
+  font-weight: 650;
+  line-height: 1.35;
+}
+
+.official-markdown h1 {
+  font-size: 1.18em;
+}
+
+.official-markdown h2 {
+  font-size: 1.1em;
+}
+
+.official-markdown h3,
+.official-markdown h4 {
+  font-size: 1em;
+}
+
+.official-markdown ul,
+.official-markdown ol {
+  margin: 0.25em 0 0.8em;
+  padding-left: 1.55em;
+}
+
+.official-markdown li + li {
+  margin-top: 0.18em;
+}
+
+.official-markdown blockquote {
+  margin: 0.45em 0 0.8em;
+  padding-left: 0.8em;
+  border-left: 2px solid color-mix(in srgb, var(--agent-accent) 48%, var(--border));
+  color: var(--text-dim);
+}
+
+.official-markdown pre {
+  overflow: auto;
+  max-width: 100%;
+  margin: 0.45em 0 0.85em;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.22);
+  font-family: var(--font-mono);
+  font-size: 0.88em;
+  line-height: 1.55;
+  white-space: pre;
+}
+
+.official-markdown :not(pre) > code {
+  padding: 0.08em 0.32em;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.055);
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+}
+
+.official-markdown a {
+  color: color-mix(in srgb, var(--agent-accent) 72%, white);
+  text-decoration: underline;
+  text-underline-offset: 2px;
 }
 
 .official-stream-caret {
@@ -100,7 +186,9 @@
 
 .official-empty {
   display: flex;
-  min-height: 62vh;
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 100%;
   flex-direction: column;
   align-items: center;
   justify-content: center;
@@ -119,8 +207,11 @@
   border-radius: 12px;
   color: var(--agent-accent);
   background: color-mix(in srgb, var(--agent-accent) 15%, transparent);
-  font-size: 14px;
-  font-weight: 750;
+}
+
+.official-empty-mark .agent-provider-icon {
+  width: 23px;
+  height: 23px;
 }
 
 .official-empty strong {
@@ -139,6 +230,86 @@
   font-family: var(--font-mono);
   font-size: 10.5px;
   opacity: 0.72;
+}
+
+/* Startup animation. The <pre> is a live field render from AgentAsciiLoader, so
+   the styling only has to supply the edge fade and the sweep bar. The art reads
+   on its own ink; a glow behind it would only smear the character grid. */
+.agent-ascii-loader {
+  --ascii-ink: color-mix(in srgb, var(--agent-accent) 78%, var(--text-dim));
+  display: grid;
+  place-items: center;
+  gap: 8px;
+  margin: 9px 0 2px;
+  color: var(--ascii-ink);
+}
+
+.agent-ascii-loader pre {
+  margin: 0;
+  color: inherit;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1;
+  letter-spacing: 0;
+  text-align: left;
+  white-space: pre;
+  -webkit-mask-image: radial-gradient(ellipse 76% 88% at 50% 50%, #000 52%, transparent 100%);
+  mask-image: radial-gradient(ellipse 76% 88% at 50% 50%, #000 52%, transparent 100%);
+}
+
+.agent-ascii-bar {
+  position: relative;
+  overflow: hidden;
+  width: 96px;
+  height: 2px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--agent-accent) 16%, transparent);
+}
+
+.agent-ascii-bar::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  width: 42%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, transparent, var(--agent-accent), transparent);
+  animation: agent-ascii-sweep 1.4s ease-in-out infinite;
+}
+
+@keyframes agent-ascii-sweep {
+  from {
+    transform: translateX(-115%);
+  }
+  to {
+    transform: translateX(285%);
+  }
+}
+
+.agent-ascii-label {
+  color: var(--text-faint);
+  font-size: 10px;
+  letter-spacing: 0.02em;
+}
+
+.agent-ascii-loader.is-claude {
+  --ascii-ink: #d97757;
+}
+
+.agent-ascii-loader.is-grok {
+  --ascii-ink: color-mix(in srgb, var(--text) 76%, transparent);
+}
+
+.agent-ascii-loader.is-opencode pre {
+  font-size: 9.5px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-ascii-bar::after {
+    width: 100%;
+    animation: none;
+    opacity: 0.55;
+  }
 }
 
 /* Shared workflow/task tracker. It is fed by provider plan events and never
@@ -315,6 +486,7 @@
 
 .official-tool-head {
   display: flex;
+  overflow: hidden;
   width: 100%;
   min-width: 0;
   align-items: center;
@@ -376,6 +548,8 @@
 }
 
 .official-tool-copy strong {
+  display: block;
+  width: 100%;
   overflow: hidden;
   color: var(--text-dim);
   font-family: var(--font-mono);
@@ -397,6 +571,10 @@
   gap: 5px;
   font-family: var(--font-mono);
   font-size: 9.5px;
+}
+
+.official-tool-head > .official-chevron {
+  margin-left: 1px;
 }
 
 .official-tool-stats .is-add {
@@ -555,6 +733,15 @@
   text-align: left;
 }
 
+.official-empty .chatgpt-starting {
+  align-self: center;
+}
+
+.chatgpt-thinking-inline {
+  min-width: 0;
+  max-width: 100%;
+}
+
 button.chatgpt-thinking-row {
   max-width: 100%;
   border-radius: 7px;
@@ -567,7 +754,41 @@ button.chatgpt-thinking-row.is-selected {
   background: rgba(255, 255, 255, 0.035);
 }
 
-.chatgpt-thinking-row > span:last-child {
+.chatgpt-inline-chevron {
+  width: 6px;
+  height: 6px;
+  flex: none;
+  margin: 0 3px 0 1px;
+  border-right: 1px solid currentColor;
+  border-bottom: 1px solid currentColor;
+  opacity: 0.48;
+  transform: rotate(-45deg);
+  transition: transform 130ms ease;
+}
+
+.chatgpt-thinking-inline.is-open .chatgpt-inline-chevron {
+  transform: rotate(45deg);
+}
+
+.chatgpt-thinking-body {
+  max-width: 760px;
+  margin: 3px 0 5px 28px;
+  padding: 7px 10px;
+  border-left: 1px solid rgba(255, 255, 255, 0.1);
+  color: var(--text-faint);
+  font-size: 11.5px;
+  line-height: 1.55;
+}
+
+.chatgpt-thinking-body .official-markdown > :first-child {
+  margin-top: 0;
+}
+
+.chatgpt-thinking-body .official-markdown > :last-child {
+  margin-bottom: 0;
+}
+
+.chatgpt-thinking-row > span:nth-child(2) {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -940,8 +1161,25 @@ button.chatgpt-thinking-row.is-selected {
   background: transparent;
 }
 
-.claude-latest-tool {
-  margin: 1px 0 0 28px;
+.claude-live-tools,
+.claude-completed-tools {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-top: 4px;
+}
+
+.claude-live-tools {
+  margin-left: 28px;
+}
+
+.claude-completed-tools {
+  padding-left: 1px;
+}
+
+.claude-live-tools .official-tool,
+.claude-completed-tools .official-tool {
+  background: color-mix(in srgb, var(--bg-elevated) 58%, transparent);
 }
 
 .official-tool--claude.is-compact .official-tool-copy strong {
@@ -984,8 +1222,40 @@ button.chatgpt-thinking-row.is-selected {
   cursor: default;
 }
 
+.grok-trace {
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.065);
+  border-radius: 12px;
+  background:
+    linear-gradient(135deg, rgba(113, 137, 177, 0.055), transparent 52%),
+    rgba(255, 255, 255, 0.018);
+}
+
+.grok-trace-head {
+  width: 100%;
+}
+
 .grok-trace-head:not(:disabled) {
   cursor: pointer;
+}
+
+.grok-trace.is-finished {
+  padding-block: 5px;
+  background: rgba(255, 255, 255, 0.012);
+}
+
+.grok-trace.is-finished .grok-trace-head {
+  color: color-mix(in srgb, var(--text-faint) 64%, transparent);
+  font-size: 11px;
+}
+
+.grok-trace.is-finished .grok-loader-slot {
+  opacity: 0.58;
+}
+
+.grok-trace.is-finished .grok-trace-timeline {
+  opacity: 0.66;
 }
 
 .grok-loader-slot {
@@ -1034,7 +1304,24 @@ button.chatgpt-thinking-row.is-selected {
   transform: rotate(-180deg);
 }
 
-.grok-trace-head > span:last-child {
+.grok-trace-copy {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.grok-trace-kicker {
+  flex: none;
+  color: color-mix(in srgb, var(--agent-accent) 65%, var(--text-dim));
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
+.grok-trace-title {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1119,11 +1406,40 @@ button.chatgpt-thinking-row.is-selected {
   display: none;
 }
 
+.grok-answer-layer {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.grok-answer-divider {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: var(--text-faint);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.grok-answer-divider::after {
+  height: 1px;
+  flex: 1;
+  content: "";
+  background: linear-gradient(to right, rgba(255, 255, 255, 0.1), transparent);
+}
+
+.grok-answer-layer .official-answer {
+  padding-top: 0;
+}
+
 .official-tool--grok.is-compact .official-tool-copy strong {
   color: #9e9e9e;
 }
 
-@media (max-width: 720px) {
+@container agent-pane (max-width: 720px) {
   .official-user {
     max-width: 90%;
   }
@@ -1149,6 +1465,40 @@ button.chatgpt-thinking-row.is-selected {
     right: 0;
     width: min(94%, 430px);
     height: min(680px, 100%);
+  }
+}
+
+@container agent-pane (max-width: 440px) {
+  .agent-experience {
+    width: 100%;
+  }
+
+  .official-transcript {
+    gap: 10px;
+    padding-top: 4px;
+  }
+
+  .official-user {
+    max-width: 94%;
+    padding: 8px 11px;
+  }
+
+  .official-empty {
+    gap: 6px;
+    padding: 18px 10px;
+  }
+
+  .official-empty > span:not(.official-empty-mark) {
+    max-width: 100%;
+  }
+
+  .official-plan-head,
+  .official-tool-head {
+    padding-inline: 7px;
+  }
+
+  .grok-collapsed-steps {
+    margin-left: 24px;
   }
 }
 

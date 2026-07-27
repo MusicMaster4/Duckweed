@@ -999,6 +999,32 @@ button.cx-sub-head:hover {
   transform-origin: 10px 10px;
 }
 
+.oc-frame {
+  fill: var(--text-faint);
+  transform-box: view-box;
+  transform-origin: 10px 10px;
+}
+
+.oc-mark[data-phase="starting"] .oc-frame,
+.oc-mark[data-phase="thinking"] .oc-frame,
+.oc-mark[data-phase="writing"] .oc-frame,
+.oc-mark[data-phase="tool"] .oc-frame {
+  fill: var(--oc-ink);
+  animation: oc-clamp 1.6s ease-in-out infinite;
+}
+
+.oc-mark[data-phase="ready"] .oc-frame {
+  fill: color-mix(in srgb, var(--oc-ink) 55%, transparent);
+}
+
+.oc-mark[data-phase="waiting"] .oc-frame {
+  fill: var(--oc-warn);
+}
+
+.oc-mark[data-phase="failed"] .oc-frame {
+  fill: var(--oc-bad);
+}
+
 .oc-mark[data-phase="starting"] .oc-corner,
 .oc-mark[data-phase="thinking"] .oc-corner,
 .oc-mark[data-phase="writing"] .oc-corner,
@@ -1401,16 +1427,16 @@ button.cx-sub-head:hover {
   border-left-color: color-mix(in srgb, var(--oc-bad) 45%, transparent);
 }
 
-/* A cell running down the rule of the live module: the terminal is busy here. */
+/* The live lane stays marked, but no scan line travels through the prose. */
 .oc-mod[data-live] .oc-mod-body::before {
   content: "";
   position: absolute;
   left: -1px;
   top: 0;
   width: 1px;
-  height: 18px;
+  height: 100%;
   background: var(--oc-ink);
-  animation: oc-drop 2s linear infinite;
+  opacity: 0.42;
 }
 
 @keyframes oc-drop {
@@ -1453,6 +1479,24 @@ button.cx-sub-head:hover {
   white-space: pre-wrap;
   word-break: break-word;
   user-select: text;
+}
+
+.oc-prose .official-markdown,
+.cx-prose .official-markdown,
+.oc-think-text .official-markdown {
+  white-space: normal;
+}
+
+.oc-prose .official-markdown > :first-child,
+.cx-prose .official-markdown > :first-child,
+.oc-think-text .official-markdown > :first-child {
+  margin-top: 0;
+}
+
+.oc-prose .official-markdown > :last-child,
+.cx-prose .official-markdown > :last-child,
+.oc-think-text .official-markdown > :last-child {
+  margin-bottom: 0;
 }
 
 .oc-prose.is-streaming::after {
@@ -1882,8 +1926,6 @@ button.oc-sub-head:hover {
   }
 
   .oc-mod[data-live] .oc-mod-body::before {
-    top: 0;
-    height: 100%;
     opacity: 0.5;
   }
 
@@ -2026,9 +2068,55 @@ button.oc-sub-head:hover {
   font-size: 12px;
 }
 
-.oc-think-head .oc-mark {
+.oc-think-loader {
+  display: inline-flex;
   width: 18px;
   height: 18px;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  border: 1px solid color-mix(in srgb, var(--oc-ink) 32%, transparent);
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--oc-ink) 7%, transparent);
+}
+
+.oc-think-loader > span {
+  width: 2px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--oc-ink);
+  opacity: 0.28;
+}
+
+.oc-think-loader.is-active > span {
+  animation: oc-think-pulse 1.15s ease-in-out infinite;
+}
+
+.oc-think-loader.is-active > span:nth-child(2) {
+  animation-delay: 120ms;
+}
+
+.oc-think-loader.is-active > span:nth-child(3) {
+  animation-delay: 240ms;
+}
+
+.oc-think-loader.is-settled > span {
+  opacity: 0.5;
+}
+
+@keyframes oc-think-pulse {
+  0%,
+  58%,
+  100% {
+    opacity: 0.2;
+    transform: translateY(0);
+  }
+
+  28% {
+    opacity: 1;
+    transform: translateY(-2px);
+  }
 }
 
 .oc-think-head .oc-chevron {
@@ -2057,6 +2145,14 @@ button.oc-sub-head:hover {
 .oc-think-text {
   font-style: normal;
   line-height: 1.55;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .oc-think-loader.is-active > span {
+    animation: none;
+    opacity: 0.55;
+    transform: none;
+  }
 }
 
 .oc-plan {

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import type { AgentId, AgentItem, AgentSessionState } from "../../lib/agents/types";
 import { emptyUsage, makeChange } from "../../lib/agents/types";
+import { AgentProviderIcon } from "./AgentProviderIcon";
 import { AgentTimeline } from "./AgentTimeline";
 import "./AgentExperiencePreview.css";
 
@@ -52,9 +53,11 @@ function previewItems(): AgentItem[] {
       callId: "preview-command",
       name: "shell",
       tool: "execute",
-      title: "bun test src/lib/agents",
+      title:
+        '"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "Get-ChildItem -Force -Name"',
       status: "done",
-      command: "bun test src/lib/agents",
+      command:
+        '"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "Get-ChildItem -Force -Name"',
       output: "42 pass\n0 fail",
       changes: [],
     },
@@ -97,6 +100,14 @@ function previewItems(): AgentItem[] {
         ),
       ],
     },
+    {
+      kind: "assistant",
+      id: "preview-answer",
+      at: now - 2_000,
+      text:
+        "### Result\nThe parser now keeps **backwards compatibility** while normalizing streamed frames.\n\n- Existing payloads still pass\n- Tool and thought events remain separate",
+      streaming: false,
+    },
   ];
 }
 
@@ -105,6 +116,7 @@ export function AgentExperiencePreview() {
   const requested = query.get("provider") as AgentId | null;
   const playTurn = query.get("play") === "1";
   const completed = query.get("complete") === "1";
+  const starting = query.get("starting") === "1";
   const [agent, setAgent] = useState<AgentId>(
     PROVIDERS.some((provider) => provider.id === requested) && requested ? requested : "codex",
   );
@@ -126,7 +138,7 @@ export function AgentExperiencePreview() {
 
   useEffect(() => {
     if (!playTurn) return;
-    const timers = [900, 1450, 2050, 2700, 3300, 3900].map((delay, index) =>
+    const timers = [900, 1450, 2050, 2700, 3300, 3900, 4550].map((delay, index) =>
       window.setTimeout(() => setVisibleCount(index + 2), delay),
     );
     return () => timers.forEach((timer) => window.clearTimeout(timer));
@@ -135,12 +147,17 @@ export function AgentExperiencePreview() {
   const replay = () => {
     setVisibleCount(0);
     window.requestAnimationFrame(() => setVisibleCount(1));
-    [900, 1450, 2050, 2700, 3300, 3900].forEach((delay, index) => {
+    [900, 1450, 2050, 2700, 3300, 3900, 4550].forEach((delay, index) => {
       window.setTimeout(() => setVisibleCount(index + 2), delay);
     });
   };
 
-  const status: AgentSessionState["status"] = completed ? "idle" : "working";
+  const status: AgentSessionState["status"] = starting
+    ? "starting"
+    : completed
+      ? "idle"
+      : "working";
+  const visibleItems = starting ? [] : items;
   const session: AgentSessionState = {
     termId: "agent-experience-preview",
     agent,
@@ -154,7 +171,7 @@ export function AgentExperiencePreview() {
     effort: "high",
     models: [],
     sessionId: "preview-session",
-    items,
+    items: visibleItems,
     pending: [],
     permission: null,
     usage: {
@@ -164,7 +181,7 @@ export function AgentExperiencePreview() {
     },
     error: null,
     commands: [],
-    started: true,
+    started: !starting,
   };
 
   return (
@@ -191,12 +208,13 @@ export function AgentExperiencePreview() {
         data-agent={provider.id}
       >
         <header className="agent-head">
-          <span className="agent-badge">{provider.mark}</span>
+          <span className="agent-badge">
+            <AgentProviderIcon agent={provider.id} program={provider.id} />
+          </span>
           <span className="agent-name">{provider.label}</span>
-          <span className="agent-model">{provider.model}</span>
           <span className={`agent-state is-${status}`}>
             {status === "working" && <span className="agent-pulse" />}
-            {status === "working" ? "working" : "ready"}
+            {status === "working" ? "working" : status === "starting" ? "starting" : "ready"}
           </span>
           <span className="agent-head-spacer" />
           <span className="agent-usage">12.4k in · 2.1k out</span>
@@ -204,25 +222,28 @@ export function AgentExperiencePreview() {
         <div className="agent-scroll">
           <AgentTimeline
             session={session}
-            items={items}
+            items={visibleItems}
             agent={provider.id}
             status={status}
-            started
+            started={!starting}
             label={provider.label}
             mark={provider.mark}
+            program={provider.id}
             cwd="H:\\Python\\Slop\\duckweed"
           />
         </div>
-        <footer className="agent-preview-composer" aria-label="Unchanged composer area">
-          <textarea readOnly placeholder={`Message ${provider.label}…`} />
-          <div>
-            <span>{provider.model}</span>
-            <span>High</span>
-            <button type="button" aria-label="Stop preview">
-              ■
-            </button>
-          </div>
-        </footer>
+        {!starting && (
+          <footer className="agent-preview-composer" aria-label="Unchanged composer area">
+            <textarea readOnly placeholder={`Message ${provider.label}…`} />
+            <div>
+              <span>{provider.model}</span>
+              <span>High</span>
+              <button type="button" aria-label="Stop preview">
+                ■
+              </button>
+            </div>
+          </footer>
+        )}
       </section>
     </main>
   );

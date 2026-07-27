@@ -1015,14 +1015,25 @@ svg.tab-glyph-fill path {
   overflow: hidden;
 }
 
+/* The tool picker. Chips wrap onto as many rows as the panel's width needs;
+   the hide button keeps its corner regardless. */
 .tools-rail {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 2px;
   flex: none;
-  height: 34px;
-  padding: 0 4px;
+  min-height: 34px;
+  padding: 4px;
   border-bottom: 1px solid var(--border);
+}
+
+.tools-picker {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px;
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .tools-spacer {
@@ -1030,18 +1041,25 @@ svg.tab-glyph-fill path {
 }
 
 .tools-tab {
-  display: grid;
-  place-items: center;
-  width: 27px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
   height: 25px;
   flex: none;
+  padding: 0 8px;
   border-radius: 6px;
   color: var(--text-faint);
+  font-size: 11.5px;
 }
 
 .tools-tab svg {
   width: 14px;
   height: 14px;
+  flex: none;
+}
+
+.tools-tab-label {
+  white-space: nowrap;
 }
 
 .tools-tab:hover {
@@ -1054,13 +1072,70 @@ svg.tab-glyph-fill path {
   color: var(--accent);
 }
 
+/* Open checklist items, so the count is readable from another tool. */
+.tools-tab-badge {
+  min-width: 15px;
+  padding: 0 4px;
+  border-radius: 7px;
+  background: var(--hover);
+  color: var(--text-dim);
+  font-size: 10px;
+  line-height: 15px;
+  text-align: center;
+}
+
+.tools-tab.is-active .tools-tab-badge {
+  background: var(--accent-line);
+  color: var(--bg);
+}
+
+.tools-tab-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.tools-tab-dot.is-hot {
+  background: var(--amber);
+}
+
+.tools-hide {
+  display: grid;
+  place-items: center;
+  width: 25px;
+  height: 25px;
+  flex: none;
+  border-radius: 6px;
+  color: var(--text-faint);
+}
+
+.tools-hide svg {
+  width: 14px;
+  height: 14px;
+}
+
+.tools-hide:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
 .tools-section-head {
   display: flex;
   align-items: center;
   gap: 8px;
   flex: none;
-  height: 26px;
+  min-height: 26px;
   padding: 0 4px 0 8px;
+}
+
+/* Which tab a per-tab tool is showing. */
+.tools-section-note {
+  overflow: hidden;
+  color: var(--text-faint);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .tools-section-title {
@@ -1119,6 +1194,402 @@ svg.tab-glyph-fill path {
 .tools-resize:hover,
 .tools-resize.is-dragging {
   background: var(--accent-line);
+}
+
+/* ------------------------------------------------------------- checklist */
+
+.check-add {
+  display: flex;
+  gap: 5px;
+  flex: none;
+  padding: 2px 8px 8px;
+}
+
+.check-add input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 25px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-pane);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12px;
+}
+
+.check-add input::placeholder {
+  color: var(--text-faint);
+}
+
+.check-add input:focus {
+  border-color: var(--accent-line);
+  outline: none;
+}
+
+.tools-btn:disabled {
+  color: var(--text-faint);
+  cursor: default;
+  opacity: 0.5;
+}
+
+.tools-btn:disabled:hover {
+  background: none;
+  border-color: var(--border);
+  color: var(--text-faint);
+}
+
+.check-list {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1 1 auto;
+  padding: 0 4px 6px;
+  overflow-y: auto;
+}
+
+.check-blank {
+  margin: 0;
+  padding: 6px 8px;
+  color: var(--text-faint);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.check-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  flex: none;
+  padding: 3px 4px;
+  border-radius: 6px;
+}
+
+.check-row:hover {
+  background: var(--hover);
+}
+
+.check-box {
+  display: grid;
+  place-items: center;
+  width: 14px;
+  height: 14px;
+  flex: none;
+  margin-top: 2px;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  color: var(--accent);
+}
+
+.check-box:hover {
+  border-color: var(--accent-line);
+}
+
+.check-row.is-done .check-box {
+  border-color: var(--accent-line);
+}
+
+.check-mark {
+  width: 11px;
+  height: 11px;
+}
+
+.check-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.45;
+  text-align: left;
+  word-break: break-word;
+}
+
+.check-row.is-done .check-text {
+  color: var(--text-faint);
+  text-decoration: line-through;
+}
+
+.check-edit {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 0 4px;
+  border: 1px solid var(--accent-line);
+  border-radius: 4px;
+  background: var(--bg-pane);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.check-edit:focus {
+  outline: none;
+}
+
+.check-remove {
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  flex: none;
+  margin-top: 1px;
+  border-radius: 4px;
+  color: var(--text-faint);
+  opacity: 0;
+}
+
+.check-remove svg {
+  width: 11px;
+  height: 11px;
+}
+
+.check-row:hover .check-remove {
+  opacity: 1;
+}
+
+.check-remove:hover {
+  background: var(--hover);
+  color: var(--rose);
+}
+
+.check-foot {
+  flex: none;
+  padding: 5px 12px;
+  border-top: 1px solid var(--border);
+  color: var(--text-faint);
+  font-size: 10.5px;
+}
+
+/* ----------------------------------------------------------- power watch */
+
+.power-state {
+  padding: 1px 6px;
+  border-radius: 5px;
+  background: var(--hover);
+  color: var(--text-faint);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.power-state.is-armed {
+  background: var(--accent-dim);
+  color: var(--accent);
+}
+
+.power-state.is-countdown,
+.power-state.is-firing {
+  background: rgba(240, 192, 82, 0.16);
+  color: var(--amber);
+}
+
+.power-state.is-failed {
+  background: rgba(242, 104, 111, 0.16);
+  color: var(--rose);
+}
+
+.power-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+  flex: 1 1 auto;
+  padding: 4px 12px 14px;
+  overflow-y: auto;
+}
+
+.power-lede,
+.power-note {
+  margin: 0;
+  color: var(--text-faint);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.power-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  border: none;
+}
+
+.power-group legend {
+  padding: 0;
+  color: var(--text-faint);
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.power-group:disabled .power-choice {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.power-choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.power-choice {
+  padding: 3px 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-dim);
+  font-size: 11.5px;
+}
+
+.power-group:not(:disabled) .power-choice:hover {
+  background: var(--hover);
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+.power-choice.is-active {
+  background: var(--accent-dim);
+  border-color: var(--accent-line);
+  color: var(--accent);
+}
+
+.power-arm {
+  height: 28px;
+  border: 1px solid var(--accent-line);
+  border-radius: 7px;
+  background: var(--accent-dim);
+  color: var(--accent);
+  font-size: 12px;
+}
+
+.power-arm:hover {
+  background: rgba(123, 224, 90, 0.2);
+}
+
+.power-arm.is-armed {
+  border-color: rgba(242, 104, 111, 0.4);
+  background: rgba(242, 104, 111, 0.12);
+  color: var(--rose);
+}
+
+.power-arm.is-armed:hover {
+  background: rgba(242, 104, 111, 0.2);
+}
+
+.power-countdown {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid rgba(240, 192, 82, 0.3);
+  border-radius: 7px;
+  background: rgba(240, 192, 82, 0.1);
+  color: var(--text-dim);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.power-countdown strong {
+  color: var(--amber);
+  font-variant-numeric: tabular-nums;
+}
+
+.power-error {
+  margin: 0;
+  color: var(--rose);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.power-watching {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.power-watching-title {
+  color: var(--text-faint);
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.power-busy {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+}
+
+.power-dot {
+  width: 6px;
+  height: 6px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+/* Blocked on the user, not on the machine — worth telling apart at a glance,
+   because it is the one state that will never clear on its own. */
+.power-dot.is-agent-waiting {
+  background: var(--amber);
+}
+
+.power-busy-label {
+  overflow: hidden;
+  flex: 1 1 auto;
+  color: var(--text-dim);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.power-busy-reason {
+  flex: none;
+  color: var(--text-faint);
+  font-size: 10.5px;
+}
+
+/* The countdown, over the grid, so it is cancellable with the dock closed. */
+.power-banner {
+  position: fixed;
+  bottom: calc(var(--status-h) + 12px);
+  left: 50%;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px 7px 12px;
+  border: 1px solid rgba(240, 192, 82, 0.34);
+  border-radius: 9px;
+  background: var(--bg-elevated);
+  color: var(--text-dim);
+  font-size: 12px;
+  transform: translateX(-50%);
+}
+
+.power-banner strong {
+  color: var(--amber);
+  font-variant-numeric: tabular-nums;
+}
+
+.power-banner-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--amber);
+}
+
+.power-banner-cancel {
+  padding: 2px 9px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 11.5px;
+}
+
+.power-banner-cancel:hover {
+  background: var(--hover);
 }
 
 /* ------------------------------------------------------------------ tree */
@@ -4672,6 +5143,8 @@ body.is-resizing * {
   flex-direction: column;
   min-height: 0;
   background: var(--bg-pane);
+  container-name: agent-pane;
+  container-type: inline-size;
   /* Each agent tints its own chrome; everything else stays duckweed green. */
   --agent-accent: var(--accent);
 }
@@ -4703,11 +5176,45 @@ body.is-resizing * {
   width: 20px;
   height: 20px;
   border-radius: 6px;
-  background: color-mix(in srgb, var(--agent-accent) 22%, transparent);
+  background: color-mix(in srgb, var(--agent-accent) 14%, transparent);
   color: var(--agent-accent);
-  font-size: 9.5px;
-  font-weight: 700;
-  letter-spacing: 0.4px;
+}
+
+.agent-provider-icon {
+  display: grid;
+  overflow: hidden;
+  width: 16px;
+  height: 16px;
+  flex: none;
+  place-items: center;
+  color: currentColor;
+}
+
+.agent-provider-icon svg {
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  fill: currentColor;
+  stroke: none;
+}
+
+.agent-provider-icon.is-claudex {
+  filter: saturate(0.35) hue-rotate(165deg) brightness(1.25);
+}
+
+.agent-provider-icon.is-cursor svg {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.55;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.agent-provider-icon.is-claude svg,
+.agent-provider-icon.is-grok svg,
+.agent-provider-icon.is-opencode svg {
+  fill: currentColor;
+  stroke: none;
 }
 
 .agent-name {
@@ -5022,6 +5529,7 @@ body.is-resizing * {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  overflow-anchor: none;
   overscroll-behavior: contain;
   padding: 12px 14px 16px;
 }
@@ -5670,6 +6178,51 @@ body.is-resizing * {
 
 /* ── Composer ── */
 
+.agent-composer-shell {
+  position: relative;
+  z-index: 3;
+  flex: none;
+}
+
+.agent-jump-bottom {
+  position: absolute;
+  top: -38px;
+  left: 12px;
+  display: inline-flex;
+  height: 29px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 9px 0 7px;
+  border: 1px solid rgba(255, 255, 255, 0.11);
+  border-radius: 9px;
+  color: var(--text-dim);
+  background: color-mix(in srgb, var(--bg-elevated) 94%, white 2%);
+  box-shadow:
+    0 5px 18px rgba(0, 0, 0, 0.3),
+    inset 0 1px rgba(255, 255, 255, 0.035);
+  font-size: 10.5px;
+  transition:
+    color 120ms ease,
+    border-color 120ms ease,
+    transform 120ms ease;
+}
+
+.agent-jump-bottom:hover {
+  border-color: color-mix(in srgb, var(--agent-accent) 35%, rgba(255, 255, 255, 0.12));
+  color: var(--text);
+  transform: translateY(-1px);
+}
+
+.agent-jump-bottom svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
 /* Matches the shell's command bar: same 3px rule, same resting height, so the
    seam reads as one line across a split. The paddings below are trimmed to
    land just under `--composer-h`, which then sets the exact height — the
@@ -5729,25 +6282,100 @@ body.is-resizing * {
    permanent third of the row that repeats a key everyone already presses. */
 .agent-composer-stop {
   flex: none;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 11px;
-  border: 1px solid rgba(242, 104, 111, 0.42);
-  border-radius: 6px;
-  color: #f3a9ad;
-  font-size: 11.5px;
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  color: var(--text-dim);
+  background: color-mix(in srgb, var(--bg-elevated) 86%, white 4%);
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.035);
+  transition:
+    border-color 120ms ease,
+    background 120ms ease,
+    color 120ms ease;
 }
 
 .agent-composer-stop:hover {
-  background: rgba(242, 104, 111, 0.14);
+  border-color: rgba(255, 255, 255, 0.2);
+  color: var(--text);
+  background: color-mix(in srgb, var(--bg-elevated) 78%, white 8%);
 }
 
 .agent-stop-glyph {
-  width: 8px;
-  height: 8px;
+  width: 9px;
+  height: 9px;
   border-radius: 2px;
   background: currentColor;
+}
+
+@container agent-pane (max-width: 560px) {
+  .agent-head {
+    gap: 6px;
+    padding-inline: 7px;
+  }
+
+  .agent-scroll {
+    padding: 8px 9px 12px;
+  }
+
+  .agent-usage,
+  .agent-context {
+    display: none;
+  }
+
+  .agent-composer-row {
+    gap: 5px;
+    padding-inline: 7px;
+  }
+
+  .agent-control-chip {
+    max-width: 132px;
+    padding-inline: 6px;
+  }
+}
+
+@container agent-pane (max-width: 360px) {
+  .agent-name {
+    overflow: hidden;
+    max-width: 112px;
+    text-overflow: ellipsis;
+  }
+
+  .agent-state {
+    overflow: hidden;
+    width: 8px;
+    padding: 0;
+    color: transparent;
+  }
+
+  .agent-jump-bottom span {
+    display: none;
+  }
+
+  .agent-jump-bottom {
+    width: 29px;
+    padding: 0;
+    justify-content: center;
+  }
+
+  .agent-state:not(.is-working)::before {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    content: "";
+    background: var(--text-faint);
+  }
+
+  .agent-controls {
+    max-width: 100%;
+  }
+
+  .agent-control-chip {
+    max-width: min(42cqw, 126px);
+  }
 }
 
 /* ── Slash-command + guided arg completion ── */
@@ -5875,11 +6503,8 @@ body.is-resizing * {
   width: 22px;
   height: 22px;
   border-radius: 6px;
-  background: color-mix(in srgb, var(--agent-accent) 22%, transparent);
+  background: color-mix(in srgb, var(--agent-accent) 14%, transparent);
   color: var(--agent-accent);
-  font-size: 9.5px;
-  font-weight: 700;
-  letter-spacing: 0.4px;
 }
 
 .agent-sessions-title {

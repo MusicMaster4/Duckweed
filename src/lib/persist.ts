@@ -8,6 +8,12 @@ const MAX_RECENTS = 12;
 export const DEFAULT_TOOLS_WIDTH = 260;
 
 export interface PersistedTab {
+  /**
+   * The tab's id, kept across restarts so per-tab data — checklists today —
+   * finds its tab again. Absent in saves written before this existed; boot
+   * mints a fresh one then, which loses nothing that was ever stored.
+   */
+  id?: string;
   title: string;
   root: LayoutNode;
   /** Folder this tab works in — projects belong to tabs, not to the window. */
@@ -95,6 +101,7 @@ export function load(): Persisted | null {
       // window-wide project, so that is where they all belong now.
       .map((t) => ({
         ...t,
+        id: typeof t.id === "string" && t.id ? t.id : undefined,
         project: typeof t.project === "string" ? t.project : project,
         pinned: t.pinned === true,
         color: typeof t.color === "string" ? t.color : null,
@@ -159,6 +166,7 @@ export function save(state: {
       toolsOpen: state.toolsOpen,
       toolsWidth: state.toolsWidth,
       tabs: state.tabs.map((t) => ({
+        id: t.id,
         title: t.title,
         root: t.root,
         project: t.project?.path ?? null,

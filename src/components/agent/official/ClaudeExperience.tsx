@@ -3,7 +3,7 @@ import { useMemo, useState } from "react";
 import claudeWritingMark from "../../../assets/claude-writing.svg";
 import type { ThinkingItem, ToolItem } from "../../../lib/agents/types";
 import {
-  activityItems,
+  activityGroups,
   Chevron,
   MessageItem,
   PlanTracker,
@@ -50,9 +50,21 @@ function ClaudeTrace({
   const thoughts = activities.filter((item): item is ThinkingItem => item.kind === "thinking");
   const tools = activities.filter((item): item is ToolItem => item.kind === "tool");
   const latestThought = thoughts[thoughts.length - 1];
-  const latestTool = tools[tools.length - 1];
   const summary = latestThought ? traceSummary(latestThought.text) : "Thinking";
   const streaming = working || latestThought?.streaming;
+
+  // A completed turn has no live "Thinking" state. Preserve every command in
+  // the transcript as normal expandable activity rows instead.
+  if (!working) {
+    if (!tools.length) return null;
+    return (
+      <div className="claude-completed-tools">
+        {tools.map((item) => (
+          <ToolActivity key={item.id} item={item} variant="claude" />
+        ))}
+      </div>
+    );
+  }
 
   return (
     <section className={`claude-trace${open ? " is-open" : ""}`}>
@@ -70,17 +82,10 @@ function ClaudeTrace({
       </button>
       {open && (
         <div className="claude-trace-timeline">
-          {activities.map((item) =>
-            item.kind === "thinking" ? (
-              <ThinkingStep key={item.id} item={item} />
-            ) : (
-              <div className="claude-trace-tool" key={item.id}>
-                <span className="claude-trace-node is-tool" aria-hidden="true" />
-                <ToolActivity item={item} variant="claude" />
-              </div>
-            ),
-          )}
-          {!activities.length && (
+          {thoughts.map((item) => (
+            <ThinkingStep key={item.id} item={item} />
+          ))}
+          {!thoughts.length && (
             <div className="claude-trace-step is-streaming">
               <span className="claude-trace-node" aria-hidden="true" />
               <p>Thinking</p>
@@ -88,34 +93,54 @@ function ClaudeTrace({
           )}
         </div>
       )}
-      {!open && latestTool && (
-        <div className="claude-latest-tool">
-          <ToolActivity item={latestTool} variant="claude" compact />
+      {tools.length > 0 && (
+        <div className="claude-live-tools">
+          {tools.map((item) => (
+            <ToolActivity key={item.id} item={item} variant="claude" />
+          ))}
         </div>
       )}
     </section>
   );
 }
 
-export function ClaudeExperience({ items, status, started, label, mark, cwd }: ExperienceProps) {
-  const activities = useMemo(() => activityItems(items), [items]);
-  const firstActivityId = activities[0]?.id ?? null;
-  const shouldShowTrace = activities.length > 0 || status === "working";
-  let traceRendered = false;
+export function ClaudeExperience({
+  items,
+  status,
+  started,
+  agent,
+  label,
+  program,
+  cwd,
+}: ExperienceProps) {
+  const groups = useMemo(() => activityGroups(items), [items]);
+  const groupByActivity = useMemo(
+    () =>
+      new Map(
+        groups.flatMap((group) =>
+          group.activities.map((activity) => [activity.id, group] as const),
+        ),
+      ),
+    [groups],
+  );
+  let latestUserIndex = -1;
+  for (let index = 0; index < items.length; index += 1) {
+    if (items[index].kind === "user") latestUserIndex = index;
+  }
+  let liveGroup: (typeof groups)[number] | undefined;
+  for (const group of groups) {
+    if (group.firstIndex > latestUserIndex) liveGroup = group;
+  }
+  const needsEmptyLiveTrace = status === "working" && !liveGroup;
 
   if (!started && status !== "error") {
     return (
       <ProviderEmpty
+        agent={agent}
         label={label}
-        mark={mark}
+        program={program}
         cwd={cwd}
         status={status}
-        loader={
-          <span className="claude-starting">
-            <ClaudeSpark />
-            <span className="claude-shimmer">Starting up…</span>
-          </span>
-        }
       />
     );
   }
@@ -125,13 +150,13 @@ export function ClaudeExperience({ items, status, started, label, mark, cwd }: E
       <div className="official-transcript">
         {items.map((item) => {
           if (item.kind === "thinking" || item.kind === "tool") {
-            if (traceRendered || item.id !== firstActivityId) return null;
-            traceRendered = true;
+            const group = groupByActivity.get(item.id);
+            if (!group || item.id !== group.firstId) return null;
             return (
               <ClaudeTrace
-                key="claude-trace"
-                activities={activities}
-                working={status === "working"}
+                key={`claude-trace-${group.firstId}`}
+                activities={group.activities}
+                working={status === "working" && group === liveGroup}
               />
             );
           }
@@ -140,8 +165,8 @@ export function ClaudeExperience({ items, status, started, label, mark, cwd }: E
           }
           return <MessageItem key={item.id} item={item} variant="claude" />;
         })}
-        {shouldShowTrace && !traceRendered && (
-          <ClaudeTrace activities={activities} working={status === "working"} />
+        {needsEmptyLiveTrace && (
+          <ClaudeTrace activities={[]} working />
         )}
       </div>
     </div>

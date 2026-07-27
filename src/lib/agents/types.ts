@@ -124,6 +124,8 @@ export interface NoticeItem extends ItemBase {
   kind: "notice";
   text: string;
   tone: "info" | "error";
+  /** Short-lived UI feedback such as a model/effort picker confirmation. */
+  transient?: boolean;
 }
 
 export type AgentItem =

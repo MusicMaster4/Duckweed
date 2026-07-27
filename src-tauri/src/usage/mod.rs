@@ -998,12 +998,13 @@ mod tests {
         assert_eq!(proxied.agent, "claudex");
         assert!(proxied.priced);
         // Anthropic's quota endpoint must not be asked about a proxied agent.
-        let claudex_quota = snapshot
+        // Proxies have no account-wide limit source of their own, so the
+        // quota surface omits them instead of drawing a permanent unavailable
+        // card (the usage totals above still keep the agent visible).
+        assert!(snapshot
             .quotas
             .iter()
-            .find(|quota| quota.agent == "claudex")
-            .unwrap();
-        assert_eq!(claudex_quota.source, "unavailable");
+            .all(|quota| quota.agent != "claudex"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

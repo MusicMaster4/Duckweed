@@ -11,6 +11,9 @@ export const DURABLE_KEYS = [
   "duckweed:state:v1",
   "duckweed:usage:v1",
   "duckweed:suggest-feedback:v1",
+  // Per-tab checklists. These are the user's own notes rather than app state,
+  // so an update that changes the WebView origin must not lose them.
+  "duckweed:checklist:v1",
   COMMAND_HISTORY_KEY,
 ] as const;
 

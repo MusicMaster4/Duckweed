@@ -9,8 +9,8 @@ import {
 
 interface Props {
   session: AgentSessionState;
-  /** Apply a slash command (e.g. `/model opus`) through the normal dispatch path. */
-  onSelect: (command: string) => void;
+  /** Apply a picker choice without exposing its internal slash syntax as chat. */
+  onSelect: (kind: "model" | "effort", value: string) => void;
   /**
    * Where the menus open relative to the triggers.
    * Composer footer (T3-style) opens upward; header opens downward.
@@ -34,8 +34,8 @@ const SEARCH_THRESHOLD = 8;
  * Model + effort pickers, shaped after T3 Code's composer footer:
  * ghost triggers with the current value + chevron, popover menus with a
  * section label and a radio-style list. Choices still go through `/model`
- * and `/effort` so every adapter's existing slash handling stays the single
- * source of truth.
+ * and `/effort` through the adapter while keeping that implementation syntax
+ * out of the conversation.
  */
 export function AgentControls({ session, onSelect, placement = "composer" }: Props) {
   const [menu, setMenu] = useState<MenuKind>(null);
@@ -123,7 +123,7 @@ export function AgentControls({ session, onSelect, placement = "composer" }: Pro
   const pick = (kind: "model" | "effort", id: string) => {
     setMenu(null);
     setQuery("");
-    onSelect(kind === "model" ? `/model ${id}` : `/effort ${id}`);
+    onSelect(kind, id);
   };
 
   const onMenuKeyDown = (event: React.KeyboardEvent) => {

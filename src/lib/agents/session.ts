@@ -21,6 +21,7 @@ import {
   claudexDefaultModel,
   fallbackCommands,
   fallbackModels,
+  formatSessionUsage,
   isClaudexProgram,
 } from "./slashCatalog";
 import { emptyUsage, type AgentId, type AgentItem, type AgentSessionState } from "./types";
@@ -44,8 +45,8 @@ interface Session {
   launch: AgentLaunch;
   /** Diagnostics kept only to explain a start that never got anywhere. */
   stderr: string[];
-  /** Prompts submitted before the handshake finished. */
-  queued: string[];
+  /** Prompts submitted before the handshake finished or while a turn runs. */
+  queued: Array<{ text: string; echoed: boolean }>;
   /** Unsent composer text, so a pane remount never loses a draft. */
   draft: string;
   /**
@@ -68,6 +69,12 @@ interface Session {
    * reuse the flag and fire a completion for work nobody asked for.
    */
   userInitiatedTurn: boolean;
+  /** A picker command is negotiating with the CLI without becoming a chat turn. */
+  configuring: boolean;
+  /** Increments whenever real user work starts, invalidating late picker notices. */
+  interactionEpoch: number;
+  /** Claude/Grok mirror their TUI's two-press exit gesture. */
+  exitArmedUntil: number;
   disposed: boolean;
 }
 
@@ -269,10 +276,28 @@ export function isAvailable(agent: AgentId): boolean {
  * answer) says so, and anything else flows on as a normal prompt for agents
  * that read slash text themselves.
  */
-function dispatch(session: Session, text: string): void {
+function contextWithoutUserEcho(session: Session): AdapterContext {
+  return {
+    ...session.context,
+    emit: (event) => {
+      if (event.type !== "user") session.context.emit(event);
+    },
+  };
+}
+
+function dispatch(session: Session, text: string, echoUser = true): void {
   // Whatever the last turn's ending was, this one is the user's own request.
   session.interrupted = false;
-  if (text.startsWith("/") && session.adapter.command?.(text, session.context) === "handled") {
+  const context = echoUser ? session.context : contextWithoutUserEcho(session);
+  if (/^\/usage$/i.test(text.trim())) {
+    emit(session, {
+      type: "notice",
+      tone: "info",
+      text: formatSessionUsage(session.state.usage),
+    });
+    return;
+  }
+  if (text.startsWith("/") && session.adapter.command?.(text, context) === "handled") {
     // Local answer only (notice, model switch over RPC). No working stretch,
     // so nothing to announce when it "finishes".
     return;
@@ -281,11 +306,35 @@ function dispatch(session: Session, text: string): void {
   // text the CLI will interpret (`/effort high` on Claude, advertised ACP
   // commands). Announceability still filters pure meta slashes later.
   session.userInitiatedTurn = true;
-  session.adapter.prompt(text, session.context);
+  session.interactionEpoch += 1;
+  session.adapter.prompt(text, context);
 }
 
 function emit(session: Session, event: AgentEvent): void {
   if (session.disposed) return;
+
+  // Claude applies /effort as a tiny protocol turn. Keep that implementation
+  // detail out of the UI: no red Stop flicker, no working badge, and no
+  // completion sound. A prompt submitted meanwhile waits a few milliseconds
+  // and is released as soon as the result frame closes the config turn.
+  if (session.configuring) {
+    if (event.type === "user") return;
+    if (event.type === "status" && event.status === "working") return;
+    if (event.type === "notice") event = { ...event, transient: true };
+    if (event.type === "turn-end") {
+      session.configuring = false;
+      const queued = session.queued.shift();
+      if (queued) {
+        if (!queued.echoed) {
+          session.state = applyEvent(session.state, { type: "unqueue" });
+        }
+        dispatch(session, queued.text, !queued.echoed);
+      }
+      notify(session);
+      return;
+    }
+  }
+
   const before = session.state.status;
   const next = applyEvent(session.state, event);
   if (next === session.state) return;
@@ -326,9 +375,11 @@ function emit(session: Session, event: AgentEvent): void {
   };
   const ended = isTurnEnd(turnEnd);
   if (releasingQueued) {
-    const text = session.queued.shift() as string;
-    session.state = applyEvent(session.state, { type: "unqueue" });
-    dispatch(session, text);
+    const queued = session.queued.shift() as { text: string; echoed: boolean };
+    if (!queued.echoed) {
+      session.state = applyEvent(session.state, { type: "unqueue" });
+    }
+    dispatch(session, queued.text, !queued.echoed);
   }
   notify(session);
 
@@ -413,6 +464,9 @@ export async function start(
     notifyHandle: null,
     interrupted: false,
     userInitiatedTurn: false,
+    configuring: false,
+    interactionEpoch: 0,
+    exitArmedUntil: 0,
     disposed: false,
     state: {
       termId,
@@ -536,14 +590,84 @@ export function submit(termId: string, text: string): void {
   if (!trimmed) return;
   session.draft = "";
   if (session.state.status === "exited" || session.state.status === "error") return;
+  if (/^\/usage$/i.test(trimmed)) {
+    emit(session, {
+      type: "notice",
+      tone: "info",
+      text: formatSessionUsage(session.state.usage),
+    });
+    return;
+  }
+  if (session.configuring) {
+    session.queued.push({ text: trimmed, echoed: false });
+    emit(session, { type: "queue", text: trimmed });
+    return;
+  }
+  if (session.state.status === "starting") {
+    // Show the opening prompt immediately. The handshake still owns when it
+    // can actually be sent, but the adapter's later echo is suppressed so the
+    // optimistic bubble becomes the real turn instead of being duplicated.
+    session.queued.push({ text: trimmed, echoed: true });
+    emit(session, { type: "user", text: trimmed });
+    return;
+  }
   if (session.state.status !== "idle") {
-    // Still handshaking, or mid-turn. Hold it and show it holding, so the
-    // pane never looks like it swallowed a prompt.
-    session.queued.push(trimmed);
+    // A turn is already running. Hold the follow-up and show it holding, so
+    // the pane never looks like it swallowed a prompt.
+    session.queued.push({ text: trimmed, echoed: false });
     emit(session, { type: "queue", text: trimmed });
     return;
   }
   dispatch(session, trimmed);
+}
+
+/**
+ * Apply a composer dropdown choice without turning implementation syntax such
+ * as `/effort high` into a user chat bubble.
+ */
+export function configure(
+  termId: string,
+  kind: "model" | "effort",
+  value: string,
+): void {
+  const session = sessions.get(termId);
+  if (!session || session.disposed || !value.trim()) return;
+  if (session.state.status !== "idle") {
+    emit(session, {
+      type: "notice",
+      tone: "error",
+      text: `Wait for the current ${session.state.label} turn to finish before changing ${kind}.`,
+    });
+    return;
+  }
+
+  const command = `/${kind} ${value.trim()}`;
+  const epoch = session.interactionEpoch;
+  const baseContext = contextWithoutUserEcho(session);
+  const context: AdapterContext = {
+    ...baseContext,
+    emit: (event) => {
+      // An ACP setter may resolve after the user has already started real
+      // work. Its stale confirmation must not materialize inside that turn.
+      if (event.type === "notice") {
+        if (session.interactionEpoch !== epoch) return;
+        baseContext.emit({ ...event, transient: true });
+        return;
+      }
+      baseContext.emit(event);
+    },
+  };
+  const handled = session.adapter.command?.(command, context);
+  if (handled === "prompt") {
+    session.configuring = true;
+    session.adapter.prompt(command, context);
+  } else if (handled !== "handled") {
+    emit(session, {
+      type: "notice",
+      tone: "error",
+      text: `${session.state.label} does not support changing ${kind} here.`,
+    });
+  }
 }
 
 /**
@@ -640,6 +764,37 @@ export function interrupt(termId: string): void {
   if (!session || session.disposed) return;
   session.interrupted = true;
   session.adapter.interrupt(session.context);
+}
+
+/**
+ * Ctrl+C from a custom UI means "leave the harness", matching its terminal
+ * gesture instead of merely stopping the current turn. Claude and Grok guard
+ * exits with a quick second press; the other harnesses close immediately.
+ */
+export function requestExit(termId: string): "armed" | "close" | "none" {
+  const session = sessions.get(termId);
+  if (!session || session.disposed) return "none";
+  if (session.state.agent !== "claude" && session.state.agent !== "grok") return "close";
+
+  const now = Date.now();
+  if (session.exitArmedUntil >= now) {
+    session.exitArmedUntil = 0;
+    return "close";
+  }
+
+  session.exitArmedUntil = now + 1800;
+  emit(session, {
+    type: "notice",
+    tone: "info",
+    transient: true,
+    text: "Press Ctrl+C again to exit.",
+  });
+  window.setTimeout(() => {
+    if (session.disposed || session.exitArmedUntil > Date.now()) return;
+    session.exitArmedUntil = 0;
+    emit(session, { type: "dismiss-transient-notices" });
+  }, 1900);
+  return "armed";
 }
 
 export function respond(termId: string, permissionId: string, optionId: string): void {

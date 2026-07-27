@@ -1,6 +1,8 @@
 import { memo, useMemo, useState } from "react";
 
 import type { AgentItem, ToolItem, ToolStatus } from "../../../lib/agents/types";
+import { AgentAsciiLoader } from "../AgentAsciiLoader";
+import { AssistantMarkdown } from "../official/OfficialShared";
 import { ChangeSet, Disclosure, ScreenReaderText, useTicker } from "./ProviderExperienceParts";
 import {
   activitySummary,
@@ -311,7 +313,9 @@ const CursorNode = memo(function CursorNode({ item, now }: { item: AgentItem; no
       <div className="cx-body">
         {item.kind === "user" && <p className="cx-said">{item.text}</p>}
         {item.kind === "assistant" && (
-          <div className={`cx-prose${item.streaming ? " is-streaming" : ""}`}>{item.text}</div>
+          <div className={`cx-prose${item.streaming ? " is-streaming" : ""}`}>
+            <AssistantMarkdown text={item.text} />
+          </div>
         )}
         {item.kind === "thinking" && <CursorThinking text={item.text} streaming={item.streaming} />}
         {item.kind === "plan" && <CursorPlan steps={item.steps} />}
@@ -344,11 +348,11 @@ export function CursorExperience({ session, items, className }: ProviderExperien
           <CursorOrbit phase={phase.kind} large />
           <div className="cx-open-text">
             <strong>{session.label}</strong>
-            <span>
-              {phase.kind === "starting"
-                ? "Opening a session in this folder…"
-                : "Describe what you want changed. It runs commands and edits files here."}
-            </span>
+            {phase.kind === "starting" ? (
+              <AgentAsciiLoader agent="cursor" label="Starting session" />
+            ) : (
+              <span>Describe what you want changed. It runs commands and edits files here.</span>
+            )}
             <code>{session.cwd}</code>
           </div>
         </div>

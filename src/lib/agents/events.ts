@@ -59,7 +59,9 @@ export type AgentEvent =
       changes?: AgentFileChange[];
     }
   | { type: "plan"; steps: AgentPlanStep[] }
-  | { type: "notice"; text: string; tone: "info" | "error" }
+  | { type: "notice"; text: string; tone: "info" | "error"; transient?: boolean }
+  /** Remove picker confirmations and double-Ctrl+C hints without touching errors. */
+  | { type: "dismiss-transient-notices" }
   /**
    * A past conversation was picked up. Marks the transcript so what follows
    * reads as a continuation rather than a first turn, whether or not the
@@ -220,7 +222,7 @@ export function applyEvent(state: AgentSessionState, event: AgentEvent): AgentSe
         ...state,
         started: true,
         items: [
-          ...state.items,
+          ...state.items.filter((item) => item.kind !== "notice" || !item.transient),
           { kind: "user", id: nextId(state), at: Date.now(), text: event.text },
         ],
       };
@@ -334,9 +336,21 @@ export function applyEvent(state: AgentSessionState, event: AgentEvent): AgentSe
         ...state,
         items: [
           ...state.items,
-          { kind: "notice", id: nextId(state), at: Date.now(), text: event.text, tone: event.tone },
+          {
+            kind: "notice",
+            id: nextId(state),
+            at: Date.now(),
+            text: event.text,
+            tone: event.tone,
+            transient: event.transient,
+          },
         ],
       };
+
+    case "dismiss-transient-notices": {
+      const items = state.items.filter((item) => item.kind !== "notice" || !item.transient);
+      return items.length === state.items.length ? state : { ...state, items };
+    }
 
     case "resumed":
       return {

@@ -406,7 +406,7 @@ describe("claude adapter", () => {
     expect(h.state().items[0]).toMatchObject({
       kind: "notice",
       tone: "info",
-      text: "Set effort level to high (this session only)",
+      text: "Effort set to high.",
     });
   });
 });

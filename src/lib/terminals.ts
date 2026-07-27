@@ -645,6 +645,15 @@ export function closeAgentUi(id: string): void {
   focus(id);
 }
 
+/** Handle the custom surface's terminal-style Ctrl+C exit gesture. */
+export function requestCloseAgentUi(id: string): boolean {
+  const session = sessions.get(id);
+  if (!session?.agentUi) return false;
+  const result = agentSessions.requestExit(id);
+  if (result === "close") closeAgentUi(id);
+  return result !== "none";
+}
+
 function unbindAgent(session: Session): void {
   if (!session.agent) return;
   session.agent = null;
@@ -1740,6 +1749,23 @@ export function runningAgentLabel(ids: string[]): string | null {
     if (state) return state.label;
   }
   return null;
+}
+
+/**
+ * True when a CLI agent bound to this pane still owes the user an answer.
+ *
+ * A persistent agent keeps its process alive between turns, so `busy` says
+ * "the CLI is open", not "it is thinking". The turn credits are the difference:
+ * one per prompt the user handed it, spent when a completion arrives. The power
+ * watch needs that distinction — an agent parked at its prompt is finished, and
+ * waiting for its process to exit would mean waiting forever.
+ *
+ * A completion nobody detected leaves a credit outstanding, which keeps the
+ * pane looking busy. That is the safe direction to be wrong in.
+ */
+export function hasPendingAgentTurn(id: string): boolean {
+  const session = sessions.get(id);
+  return !!session?.agent && session.agentTurnCredits > 0;
 }
 
 /** Every live session id — used when quitting the app. */

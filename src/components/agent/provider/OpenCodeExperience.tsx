@@ -1,6 +1,8 @@
 import { memo, useMemo, useState } from "react";
 
 import type { AgentItem, AgentPlanStep, ToolItem, ToolStatus } from "../../../lib/agents/types";
+import { AgentAsciiLoader } from "../AgentAsciiLoader";
+import { AssistantMarkdown } from "../official/OfficialShared";
 import { ChangeSet, Disclosure, ScreenReaderText, useTicker } from "./ProviderExperienceParts";
 import {
   activitySummary,
@@ -8,7 +10,6 @@ import {
   formatElapsed,
   phaseOf,
   planSummary,
-  splitModel,
   tailLine,
   turnStart,
   type PhaseKind,
@@ -131,12 +132,7 @@ function toModules(items: AgentItem[]): Module[] {
   return modules;
 }
 
-/**
- * Four corners closing on a block.
- *
- * A ring would read as "loading a page"; brackets closing on a cursor read as
- * a terminal taking hold of something, which is what OpenCode is doing.
- */
+/** OpenCode's official nested-square mark, animated only through its fill. */
 function OpenCodeMark({ phase, large }: { phase: PhaseKind; large?: boolean }) {
   return (
     <svg
@@ -145,11 +141,12 @@ function OpenCodeMark({ phase, large }: { phase: PhaseKind; large?: boolean }) {
       viewBox="0 0 20 20"
       aria-hidden="true"
     >
-      <path className="oc-corner is-tl" d="M2.5 6.5v-4h4" />
-      <path className="oc-corner is-tr" d="M13.5 2.5h4v4" />
-      <path className="oc-corner is-br" d="M17.5 13.5v4h-4" />
-      <path className="oc-corner is-bl" d="M6.5 17.5h-4v-4" />
-      <rect className="oc-core" x="8" y="8" width="4" height="4" rx="0.5" />
+      <path
+        className="oc-frame"
+        fillRule="evenodd"
+        d="M17.5 17.5h-15v-15h15v15Zm-3.75-11.25h-7.5v7.5h7.5v-7.5Z"
+      />
+      <rect className="oc-core" x="7.5" y="8.75" width="5" height="5" />
     </svg>
   );
 }
@@ -236,7 +233,14 @@ function OpenCodeThinking({ text, streaming }: { text: string; streaming: boolea
         panelClassName="oc-think-body"
         head={
           <>
-            <OpenCodeMark phase={streaming ? "thinking" : "ready"} />
+            <span
+              className={`oc-think-loader${streaming ? " is-active" : " is-settled"}`}
+              aria-hidden="true"
+            >
+              <span />
+              <span />
+              <span />
+            </span>
             <span className="oc-chevron" aria-hidden="true" data-open={open} />
             {open ? <span className="oc-think-label">reasoning</span> : null}
             {!open && <span className="oc-think-peek">{tailLine(text)}</span>}
@@ -244,7 +248,9 @@ function OpenCodeThinking({ text, streaming }: { text: string; streaming: boolea
         }
         label="Reasoning"
       >
-        <div className="oc-think-text">{text}</div>
+        <div className="oc-think-text">
+          <AssistantMarkdown text={text} />
+        </div>
       </Disclosure>
     </div>
   );
@@ -384,7 +390,11 @@ function OpenCodeItem({ item, now }: { item: AgentItem; now: number }) {
     case "user":
       return <p className="oc-said">{item.text}</p>;
     case "assistant":
-      return <div className={`oc-prose${item.streaming ? " is-streaming" : ""}`}>{item.text}</div>;
+      return (
+        <div className={`oc-prose${item.streaming ? " is-streaming" : ""}`}>
+          <AssistantMarkdown text={item.text} />
+        </div>
+      );
     case "thinking":
       return <OpenCodeThinking text={item.text} streaming={item.streaming} />;
     case "plan":
@@ -462,7 +472,6 @@ export function OpenCodeExperience({ session, items, className }: ProviderExperi
   const now = useTicker(phase.busy);
   const started = turnStart(list);
   const turnFor = phase.busy && started !== null ? formatElapsed(now - started) : null;
-  const { provider, name } = splitModel(session.model);
 
   return (
     <section className={`oc${className ? ` ${className}` : ""}`} data-phase={phase.kind}>
@@ -471,11 +480,11 @@ export function OpenCodeExperience({ session, items, className }: ProviderExperi
           <OpenCodeMark phase={phase.kind} large />
           <div className="oc-open-text">
             <strong>{session.label}</strong>
-            <span>
-              {phase.kind === "starting"
-                ? "Bringing up the session…"
-                : "Say what to build. Any provider, any model, this folder."}
-            </span>
+            {phase.kind === "starting" ? (
+              <AgentAsciiLoader agent="opencode" label="Starting session" />
+            ) : (
+              <span>Say what to build. Any provider, any model, this folder.</span>
+            )}
             <code>{session.cwd}</code>
           </div>
         </div>
@@ -495,13 +504,6 @@ export function OpenCodeExperience({ session, items, className }: ProviderExperi
             )}
             <span className="oc-bar-gap" />
             {turnFor && <span className="oc-bar-time">{turnFor}</span>}
-            {name && (
-              <span className="oc-ident" title={session.model ?? undefined}>
-                {provider && <span className="oc-ident-provider">{provider}</span>}
-                <span className="oc-ident-model">{name}</span>
-                {session.effort && <span className="oc-ident-effort">{session.effort}</span>}
-              </span>
-            )}
           </div>
           {(activity.tallies.length > 0 || activity.files.length > 0) && (
             <div className="oc-tallies">

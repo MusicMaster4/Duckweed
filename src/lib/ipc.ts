@@ -19,6 +19,15 @@ export const frontendReady = () => invoke<void>("frontend_ready");
 /** Open an http(s) URL in the system default browser (Ctrl/Cmd-click on links). */
 export const openUrl = (url: string) => invoke<void>("open_url", { url });
 
+/**
+ * Suspend or shut the machine down, for the power watch.
+ *
+ * A sleep only resolves once the machine wakes up again — the caller should
+ * treat resolution as "the OS took it", not as "it happened just now".
+ */
+export const powerAction = (action: "suspend" | "shutdown") =>
+  invoke<void>("power_action", { action });
+
 /** Folder request from Explorer / the CLI, if the app was cold-started with one. */
 export type LaunchAction = "new_tab" | "new_window";
 

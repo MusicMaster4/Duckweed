@@ -1,4 +1,11 @@
-import type { AgentId, AgentModelChoice } from "./types";
+import type { AgentId, AgentModelChoice, AgentUsage } from "./types";
+
+const LOCAL_COMMANDS = [
+  {
+    name: "/usage",
+    description: "Show token, cost, and context usage reported for this session",
+  },
+] as const;
 
 /**
  * Static slash-command catalogs, one per agent.
@@ -163,7 +170,10 @@ export function fallbackCommands(
   agent: AgentId,
   program?: string,
 ): { name: string; description: string }[] {
-  const commands = FALLBACKS[agent].map((command) => ({ ...command }));
+  const commands = [
+    ...FALLBACKS[agent].map((command) => ({ ...command })),
+    ...LOCAL_COMMANDS.map((command) => ({ ...command })),
+  ];
   if (!isClaudexProgram(program)) return commands;
   // Same slash surface as Claude Code, reworded so /resume does not claim to
   // open a plain Anthropic Claude session.
@@ -172,6 +182,37 @@ export function fallbackCommands(
       ? { ...command, description: "Continue a past Claudex session in this folder" }
       : command,
   );
+}
+
+function formatUsageCount(count: number): string {
+  if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(1)}M`;
+  if (count >= 1_000) return `${(count / 1_000).toFixed(1)}k`;
+  return String(count);
+}
+
+/** App-owned `/usage`, available even when the underlying CLI has no command. */
+export function formatSessionUsage(usage: AgentUsage): string {
+  const total = usage.inputTokens + usage.outputTokens;
+  if (
+    total === 0 &&
+    usage.costUsd === null &&
+    usage.contextUsed === null
+  ) {
+    return "Usage this session: no token data has been reported yet.";
+  }
+
+  const parts = [
+    `${formatUsageCount(usage.inputTokens)} input`,
+    `${formatUsageCount(usage.outputTokens)} output`,
+    `${formatUsageCount(total)} total`,
+  ];
+  if (usage.contextUsed !== null) {
+    parts.push(`${Math.round(usage.contextUsed * 100)}% context`);
+  }
+  if (usage.costUsd !== null) {
+    parts.push(`$${usage.costUsd.toFixed(usage.costUsd < 0.01 ? 4 : 2)}`);
+  }
+  return `Usage this session · ${parts.join(" · ")}`;
 }
 
 /** Models/efforts known before the agent reports its own list. */

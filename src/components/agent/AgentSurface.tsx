@@ -13,9 +13,9 @@ import type { AgentSessionState } from "../../lib/agents/types";
 import { confirmCloseRunning } from "../../lib/confirmClose";
 import { AgentComposer } from "./AgentComposer";
 import { AgentPermission } from "./AgentPermission";
+import { AgentProviderIcon } from "./AgentProviderIcon";
 import { AgentSessions } from "./AgentSessions";
 import { AgentTimeline } from "./AgentTimeline";
-import { shortModelLabel } from "../../lib/agents/types";
 
 interface Props {
   termId: string;
@@ -40,6 +40,41 @@ const STATUS_LABEL: Record<AgentSessionState["status"], string> = {
   error: "failed",
 };
 
+/** A compact signal for streamed text, tool output, diffs, and plan updates. */
+export function agentTimelineRevision(items: AgentSessionState["items"]): number {
+  let revision = items.length;
+  for (const item of items) {
+    revision += item.id.length + item.kind.length;
+    if (item.kind === "tool") {
+      revision +=
+        item.title.length +
+        item.output.length +
+        (item.command?.length ?? 0) +
+        item.status.length +
+        item.changes.reduce(
+          (sum, change) =>
+            sum +
+            change.path.length +
+            (change.before?.length ?? 0) +
+            (change.after?.length ?? 0) +
+            (change.diff?.length ?? 0),
+          0,
+        );
+    } else if (item.kind === "plan") {
+      revision += item.steps.reduce(
+        (sum, step) => sum + step.text.length + step.status.length,
+        0,
+      );
+    } else {
+      revision += item.text.length;
+      if (item.kind === "assistant" || item.kind === "thinking") {
+        revision += item.streaming ? 1 : 0;
+      }
+    }
+  }
+  return revision;
+}
+
 /**
  * The custom agent UI: a layer over the terminal that ran the agent.
  *
@@ -61,27 +96,32 @@ export function AgentSurface({ termId, active, onClose }: Props) {
   // Following the stream is the default, but scrolling up to read something is
   // a deliberate act — new output must not yank the view back down.
   const pinnedRef = useRef(true);
-  const itemCount = session?.items.length ?? 0;
-  const lastItem = session?.items[itemCount - 1];
-  const tail =
-    lastItem && (lastItem.kind === "assistant" || lastItem.kind === "thinking")
-      ? lastItem.text.length
-      : 0;
+  const [followingBottom, setFollowingBottom] = useState(true);
+  const timelineRevision = agentTimelineRevision(session?.items ?? []);
 
   useLayoutEffect(() => {
     const node = scrollRef.current;
     if (!node || !pinnedRef.current) return;
     node.scrollTop = node.scrollHeight;
-  }, [itemCount, tail, session?.permission?.id]);
+  }, [
+    timelineRevision,
+    session?.status,
+    session?.pending.length,
+    session?.permission?.id,
+    session?.error,
+  ]);
 
   useEffect(() => {
     const node = scrollRef.current;
     if (!node) return;
     const onScroll = () => {
       const distance = node.scrollHeight - node.scrollTop - node.clientHeight;
-      pinnedRef.current = distance < 40;
+      const following = distance < 40;
+      pinnedRef.current = following;
+      setFollowingBottom((current) => (current === following ? current : following));
     };
     node.addEventListener("scroll", onScroll, { passive: true });
+    onScroll();
     return () => node.removeEventListener("scroll", onScroll);
   }, []);
 
@@ -119,7 +159,19 @@ export function AgentSurface({ termId, active, onClose }: Props) {
       return;
     }
     pinnedRef.current = true;
+    setFollowingBottom(true);
     agents.submit(termId, text);
+  };
+
+  const jumpToBottom = () => {
+    const node = scrollRef.current;
+    if (!node) return;
+    pinnedRef.current = true;
+    setFollowingBottom(true);
+    node.scrollTo({
+      top: node.scrollHeight,
+      behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+    });
   };
 
   /**
@@ -146,21 +198,9 @@ export function AgentSurface({ termId, active, onClose }: Props) {
     >
       <header className="agent-head">
         <span className="agent-badge" aria-hidden="true">
-          {session.mark}
+          <AgentProviderIcon agent={session.agent} program={session.program} />
         </span>
         <span className="agent-name">{session.label}</span>
-        {/* Read-only identity in the head — interactive pickers live in the
-            composer footer (T3 Code layout: model + effort under the input). */}
-        {session.model && (
-          <span className="agent-model" title={session.model}>
-            {shortModelLabel(session.model)}
-          </span>
-        )}
-        {session.effort && (
-          <span className="agent-effort" title="Reasoning effort">
-            {session.effort}
-          </span>
-        )}
         <span className={`agent-state is-${session.status}`}>
           {session.status === "working" && <span className="agent-pulse" aria-hidden="true" />}
           {STATUS_LABEL[session.status]}
@@ -210,7 +250,15 @@ export function AgentSurface({ termId, active, onClose }: Props) {
         </button>
       </header>
 
-      <div className="agent-scroll" ref={scrollRef}>
+      <div
+        className="agent-scroll"
+        ref={scrollRef}
+        onWheelCapture={(event) => {
+          if (event.deltaY >= 0) return;
+          pinnedRef.current = false;
+          setFollowingBottom(false);
+        }}
+      >
         <AgentTimeline
           session={session}
           items={session.items}
@@ -219,6 +267,7 @@ export function AgentSurface({ termId, active, onClose }: Props) {
           started={session.started}
           label={session.label}
           mark={session.mark}
+          program={session.program}
           cwd={session.cwd}
         />
 
@@ -256,25 +305,43 @@ export function AgentSurface({ termId, active, onClose }: Props) {
         )}
       </div>
 
-      <AgentComposer
-        session={session}
-        active={active && !session.permission && resumeQuery === null}
-        inputRef={composerRef}
-        onSubmit={submit}
-        onInterrupt={() => agents.interrupt(termId)}
-      />
+      {session.status !== "starting" && (
+        <div className="agent-composer-shell">
+          {!followingBottom && (
+            <button
+              type="button"
+              className="agent-jump-bottom"
+              onClick={jumpToBottom}
+              title="Jump to bottom"
+              aria-label="Jump to bottom"
+            >
+              <svg viewBox="0 0 16 16" aria-hidden="true">
+                <path d="M3.5 6 8 10.5 12.5 6" />
+              </svg>
+              <span>Jump to bottom</span>
+            </button>
+          )}
+          <AgentComposer
+            session={session}
+            active={active && !session.permission && resumeQuery === null}
+            inputRef={composerRef}
+            onSubmit={submit}
+            onInterrupt={() => agents.interrupt(termId)}
+          />
+        </div>
+      )}
 
       {resumeQuery !== null && (
         <AgentSessions
           agent={session.agent}
           cwd={session.cwd}
           label={session.label}
-          mark={session.mark}
           initialQuery={resumeQuery}
           onClose={() => setResumeQuery(null)}
           onPick={(chosen) => {
             setResumeQuery(null);
             pinnedRef.current = true;
+            setFollowingBottom(true);
             void agents.resume(termId, chosen.id, chosen.title).then((failure) => {
               // Only the relaunching agents can fail this way, and a failed
               // relaunch leaves no session to render the reason in. Handing

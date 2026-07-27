@@ -8,7 +8,9 @@ import type {
   ToolItem,
   ToolKind,
 } from "../../../lib/agents/types";
+import { AgentAsciiLoader } from "../AgentAsciiLoader";
 import { AgentDiff } from "../AgentDiff";
+import { AgentProviderIcon } from "../AgentProviderIcon";
 
 export interface ExperienceProps {
   items: AgentItem[];
@@ -17,6 +19,7 @@ export interface ExperienceProps {
   started: boolean;
   label: string;
   mark: string;
+  program: string;
   cwd: string;
 }
 
@@ -102,6 +105,166 @@ export function traceSummary(text: string, fallback = "Thinking"): string {
   return cleaned.length > 132 ? `${cleaned.slice(0, 129).trimEnd()}…` : cleaned;
 }
 
+function inlineMarkdown(text: string, keyPrefix: string): ReactNode[] {
+  const nodes: ReactNode[] = [];
+  const token =
+    /(`[^`\n]+`|\*\*[^*\n]+\*\*|__[^_\n]+__|\[[^\]\n]+\]\(https?:\/\/[^)\s]+\)|\*[^*\n]+\*|_[^_\n]+_)/g;
+  let cursor = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = token.exec(text))) {
+    if (match.index > cursor) nodes.push(text.slice(cursor, match.index));
+    const value = match[0];
+    const key = `${keyPrefix}-${match.index}`;
+    if (value.startsWith("`")) {
+      nodes.push(<code key={key}>{value.slice(1, -1)}</code>);
+    } else if (value.startsWith("**") || value.startsWith("__")) {
+      nodes.push(<strong key={key}>{value.slice(2, -2)}</strong>);
+    } else if (value.startsWith("[")) {
+      const link = /^\[([^\]]+)\]\((https?:\/\/[^)]+)\)$/.exec(value);
+      nodes.push(
+        link ? (
+          <a key={key} href={link[2]} target="_blank" rel="noreferrer">
+            {link[1]}
+          </a>
+        ) : (
+          value
+        ),
+      );
+    } else {
+      nodes.push(<em key={key}>{value.slice(1, -1)}</em>);
+    }
+    cursor = match.index + value.length;
+  }
+  if (cursor < text.length) nodes.push(text.slice(cursor));
+  return nodes;
+}
+
+function paragraphLines(lines: string[], key: string): ReactNode {
+  return (
+    <p key={key}>
+      {lines.map((line, index) => (
+        <span key={`${key}-${index}`}>
+          {index > 0 && <br />}
+          {inlineMarkdown(line, `${key}-${index}`)}
+        </span>
+      ))}
+    </p>
+  );
+}
+
+/**
+ * Safe, deliberately small Markdown renderer for streamed agent prose. It
+ * covers the structures coding agents actually emit without injecting HTML.
+ */
+export function AssistantMarkdown({ text }: { text: string }) {
+  const lines = text.replace(/\r\n?/g, "\n").split("\n");
+  const blocks: ReactNode[] = [];
+  let index = 0;
+
+  while (index < lines.length) {
+    const line = lines[index];
+    if (!line.trim()) {
+      index += 1;
+      continue;
+    }
+
+    const fence = /^```([\w.+-]*)\s*$/.exec(line);
+    if (fence) {
+      const code: string[] = [];
+      index += 1;
+      while (index < lines.length && !/^```\s*$/.test(lines[index])) {
+        code.push(lines[index]);
+        index += 1;
+      }
+      if (index < lines.length) index += 1;
+      blocks.push(
+        <pre key={`code-${index}`} data-language={fence[1] || undefined}>
+          <code>{code.join("\n")}</code>
+        </pre>,
+      );
+      continue;
+    }
+
+    const heading = /^(#{1,6})\s+(.+)$/.exec(line);
+    if (heading) {
+      const level = Math.min(heading[1].length, 4);
+      const Tag = `h${level}` as "h1" | "h2" | "h3" | "h4";
+      blocks.push(
+        <Tag key={`heading-${index}`}>
+          {inlineMarkdown(heading[2], `heading-${index}`)}
+        </Tag>,
+      );
+      index += 1;
+      continue;
+    }
+
+    if (/^\s*[-*+]\s+/.test(line)) {
+      const entries: string[] = [];
+      while (index < lines.length && /^\s*[-*+]\s+/.test(lines[index])) {
+        entries.push(lines[index].replace(/^\s*[-*+]\s+/, ""));
+        index += 1;
+      }
+      blocks.push(
+        <ul key={`ul-${index}`}>
+          {entries.map((entry, entryIndex) => (
+            <li key={entryIndex}>{inlineMarkdown(entry, `ul-${index}-${entryIndex}`)}</li>
+          ))}
+        </ul>,
+      );
+      continue;
+    }
+
+    if (/^\s*\d+[.)]\s+/.test(line)) {
+      const entries: string[] = [];
+      while (index < lines.length && /^\s*\d+[.)]\s+/.test(lines[index])) {
+        entries.push(lines[index].replace(/^\s*\d+[.)]\s+/, ""));
+        index += 1;
+      }
+      blocks.push(
+        <ol key={`ol-${index}`}>
+          {entries.map((entry, entryIndex) => (
+            <li key={entryIndex}>{inlineMarkdown(entry, `ol-${index}-${entryIndex}`)}</li>
+          ))}
+        </ol>,
+      );
+      continue;
+    }
+
+    if (/^\s*>\s?/.test(line)) {
+      const quote: string[] = [];
+      while (index < lines.length && /^\s*>\s?/.test(lines[index])) {
+        quote.push(lines[index].replace(/^\s*>\s?/, ""));
+        index += 1;
+      }
+      blocks.push(
+        <blockquote key={`quote-${index}`}>
+          {paragraphLines(quote, `quote-copy-${index}`)}
+        </blockquote>,
+      );
+      continue;
+    }
+
+    const paragraph: string[] = [line];
+    index += 1;
+    while (
+      index < lines.length &&
+      lines[index].trim() &&
+      !/^```/.test(lines[index]) &&
+      !/^(#{1,6})\s+/.test(lines[index]) &&
+      !/^\s*[-*+]\s+/.test(lines[index]) &&
+      !/^\s*\d+[.)]\s+/.test(lines[index]) &&
+      !/^\s*>\s?/.test(lines[index])
+    ) {
+      paragraph.push(lines[index]);
+      index += 1;
+    }
+    blocks.push(paragraphLines(paragraph, `paragraph-${index}`));
+  }
+
+  return <div className="official-markdown">{blocks}</div>;
+}
+
 export function MessageItem({
   item,
   variant,
@@ -131,7 +294,7 @@ export function MessageItem({
           item.streaming ? " is-streaming" : ""
         }${className ? ` ${className}` : ""}`}
       >
-        {item.text}
+        <AssistantMarkdown text={item.text} />
         {item.streaming && <span className="official-stream-caret" aria-hidden="true" />}
       </article>
     );
@@ -284,20 +447,24 @@ export function ToolActivity({
 }
 
 export function ProviderEmpty({
+  agent,
   label,
-  mark,
+  program,
   cwd,
   status,
-  loader,
-}: Pick<ExperienceProps, "label" | "mark" | "cwd" | "status"> & { loader: ReactNode }) {
+}: Pick<ExperienceProps, "agent" | "label" | "program" | "cwd" | "status">) {
   const starting = status === "starting";
   return (
     <div className={`official-empty${starting ? " is-starting" : ""}`}>
       <span className="official-empty-mark" aria-hidden="true">
-        {mark}
+        <AgentProviderIcon agent={agent} program={program} />
       </span>
       <strong>{label}</strong>
-      {starting ? loader : <span>Describe what you want changed and it will work in this folder.</span>}
+      {starting ? (
+        <AgentAsciiLoader agent={agent} label="Starting session" />
+      ) : (
+        <span>Describe what you want changed and it will work in this folder.</span>
+      )}
       <code>{cwd}</code>
     </div>
   );
@@ -315,4 +482,55 @@ export function activityItems(items: AgentItem[]): Array<ToolItem | Extract<Agen
     (item): item is ToolItem | Extract<AgentItem, { kind: "thinking" }> =>
       item.kind === "tool" || item.kind === "thinking",
   );
+}
+
+export interface ActivityGroup {
+  firstId: string;
+  firstIndex: number;
+  activities: Array<ToolItem | Extract<AgentItem, { kind: "thinking" }>>;
+  /** First assistant message after the final activity in this user turn. */
+  answerId: string | null;
+}
+
+/**
+ * Keep reasoning/tool activity scoped to the user turn that produced it.
+ * Without this, later commands migrate into the first trace in the session.
+ */
+export function activityGroups(items: AgentItem[]): ActivityGroup[] {
+  const groups: ActivityGroup[] = [];
+  let turnStart = 0;
+
+  const collectTurn = (start: number, end: number) => {
+    const indexed = items
+      .slice(start, end)
+      .map((item, offset) => ({ item, index: start + offset }));
+    const activity = indexed.filter(
+      (
+        entry,
+      ): entry is {
+        item: ToolItem | Extract<AgentItem, { kind: "thinking" }>;
+        index: number;
+      } => entry.item.kind === "tool" || entry.item.kind === "thinking",
+    );
+    if (!activity.length) return;
+    const finalActivityIndex = activity[activity.length - 1].index;
+    const answer =
+      indexed.find(
+        ({ item, index }) => index > finalActivityIndex && item.kind === "assistant",
+      )?.item ?? null;
+    groups.push({
+      firstId: activity[0].item.id,
+      firstIndex: activity[0].index,
+      activities: activity.map(({ item }) => item),
+      answerId: answer?.kind === "assistant" ? answer.id : null,
+    });
+  };
+
+  for (let index = 1; index < items.length; index += 1) {
+    if (items[index].kind !== "user") continue;
+    collectTurn(turnStart, index);
+    turnStart = index;
+  }
+  collectTurn(turnStart, items.length);
+  return groups;
 }

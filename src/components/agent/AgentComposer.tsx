@@ -325,20 +325,20 @@ export function AgentComposer({ session, active, inputRef, onSubmit, onInterrupt
             className="agent-composer-stop"
             onClick={onInterrupt}
             title="Stop this turn (Ctrl+C)"
+            aria-label="Stop this turn"
           >
             <span className="agent-stop-glyph" aria-hidden="true" />
-            Stop
           </button>
         )}
       </div>
       {/* T3-style footer: model + effort always available under the input.
-          Goes through onSubmit so slash dispatch runs, without clearing the
-          draft the user may already be typing. */}
+          Picker changes use the adapter directly, without clearing the draft
+          or exposing an internal slash command as a chat turn. */}
       <div className="agent-composer-footer">
         <AgentControls
           session={session}
           placement="composer"
-          onSelect={(command) => onSubmit(command)}
+          onSelect={(kind, value) => agents.configure(session.termId, kind, value)}
         />
       </div>
     </div>

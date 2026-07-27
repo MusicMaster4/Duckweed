@@ -7,6 +7,7 @@ mod agent_sessions;
 mod fs;
 mod git;
 mod launch;
+mod power;
 mod process_tree;
 mod project;
 mod pty;
@@ -38,9 +39,10 @@ struct DurableSettings(Mutex<()>);
 
 const COMMAND_HISTORY_KEY: &str = "duckweed:command-history:v1";
 
-const DURABLE_SETTING_KEYS: [&str; 3] = [
+const DURABLE_SETTING_KEYS: [&str; 4] = [
     "duckweed:state:v1",
     "duckweed:usage:v1",
+    "duckweed:checklist:v1",
     COMMAND_HISTORY_KEY,
 ];
 
@@ -425,6 +427,17 @@ fn open_url(url: String) -> Result<(), String> {
     open_external_url(&url)
 }
 
+/// Suspend or shut the machine down for the power watch.
+///
+/// Runs on a blocking task: a Windows sleep does not return until the machine
+/// wakes, and holding the IPC thread there would freeze the window that is
+/// about to be suspended.
+#[tauri::command]
+async fn power_action(action: String) -> Result<(), String> {
+    let action = power::Action::parse(&action)?;
+    blocking(move || power::run(action)).await
+}
+
 /// Validate and hand `url` to the OS default handler.
 fn open_external_url(url: &str) -> Result<(), String> {
     let url = url.trim();
@@ -667,6 +680,7 @@ fn main() {
             agent_proc_stop,
             frontend_ready,
             open_url,
+            power_action,
             take_launch_intent,
             shell_integration_status,
             shell_integration_set,

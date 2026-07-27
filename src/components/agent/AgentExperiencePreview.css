@@ -40,6 +40,8 @@
   display: flex;
   overflow: hidden;
   min-height: 0;
+  container-name: agent-pane;
+  container-type: inline-size;
   flex-direction: column;
   background: var(--bg-pane);
 }

@@ -4,3 +4,7 @@ If the user requests a feature similar from Warp, you can take a look at Warp's 
 
 If the user requests a feature similar from T3 code, you can look at T3 code's code here https://github.com/pingdotgg/t3code
 
+Everything in the app must be written in english.
+
+Do not use glow on UI elements.
+

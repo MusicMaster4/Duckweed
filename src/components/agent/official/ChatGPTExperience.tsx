@@ -1,8 +1,8 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
-import type { AgentItem, ThinkingItem, ToolItem } from "../../../lib/agents/types";
+import type { ThinkingItem, ToolItem } from "../../../lib/agents/types";
 import {
-  activityItems,
+  AssistantMarkdown,
   MessageItem,
   PlanTracker,
   ProviderEmpty,
@@ -31,114 +31,50 @@ function OpenAIActivityIcon({ tool }: { tool?: ToolItem["tool"] }) {
 
 function ThinkingRow({
   item,
-  selected,
-  onSelect,
 }: {
   item: ThinkingItem;
-  selected: boolean;
-  onSelect: () => void;
 }) {
+  const [open, setOpen] = useState(false);
   return (
-    <button
-      type="button"
-      className={`chatgpt-thinking-row${item.streaming ? " is-streaming" : ""}${
-        selected ? " is-selected" : ""
+    <section
+      className={`chatgpt-thinking-inline${item.streaming ? " is-streaming" : ""}${
+        open ? " is-open" : ""
       }`}
-      onClick={onSelect}
-      aria-expanded={selected}
     >
-      <OpenAIActivityIcon />
-      <span className={item.streaming ? "chatgpt-shimmer" : ""}>{traceSummary(item.text)}</span>
-    </button>
-  );
-}
-
-function secondsLabel(value: number): string {
-  if (value < 60) return `${value}s`;
-  return `${Math.floor(value / 60)}m ${value % 60}s`;
-}
-
-function useActivitySeconds(items: AgentItem[], running: boolean): number {
-  const first = items.find((item) => item.kind === "thinking" || item.kind === "tool");
-  const [now, setNow] = useState(() => Date.now());
-
-  useEffect(() => {
-    if (!running) return;
-    const timer = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(timer);
-  }, [running]);
-
-  if (!first) return 0;
-  return Math.max(0, Math.round(((running ? now : Date.now()) - first.at) / 1000));
-}
-
-function ChatGPTDetails({
-  items,
-  selectedId,
-  running,
-  onClose,
-}: {
-  items: AgentItem[];
-  selectedId: string;
-  running: boolean;
-  onClose: () => void;
-}) {
-  const activities = useMemo(() => activityItems(items), [items]);
-  const seconds = useActivitySeconds(items, running);
-
-  useEffect(() => {
-    const close = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", close);
-    return () => window.removeEventListener("keydown", close);
-  }, [onClose]);
-
-  return (
-    <aside className="chatgpt-details" role="region" aria-label="Thinking details">
-      <header>
-        <div>
-          <strong>Activity</strong>
-          <span>· {secondsLabel(seconds)}</span>
+      <button
+        type="button"
+        className="chatgpt-thinking-row"
+        onClick={() => setOpen((value) => !value)}
+        aria-expanded={open}
+      >
+        <OpenAIActivityIcon />
+        <span className={item.streaming ? "chatgpt-shimmer" : ""}>
+          {traceSummary(item.text)}
+        </span>
+        <span className="chatgpt-inline-chevron" aria-hidden="true" />
+      </button>
+      {open && (
+        <div className="chatgpt-thinking-body">
+          <AssistantMarkdown text={item.text} />
         </div>
-        <button type="button" onClick={onClose} aria-label="Close activity details">
-          <svg viewBox="0 0 16 16" aria-hidden="true">
-            <path d="m4 4 8 8m0-8-8 8" />
-          </svg>
-        </button>
-      </header>
-      <div className="chatgpt-details-body">
-        {activities.map((item) =>
-          item.kind === "thinking" ? (
-            <section
-              key={item.id}
-              className={`chatgpt-detail-phase${item.id === selectedId ? " is-selected" : ""}`}
-            >
-              <div className="chatgpt-detail-title">
-                <OpenAIActivityIcon />
-                <strong>{traceSummary(item.text)}</strong>
-              </div>
-              <p>{item.text}</p>
-            </section>
-          ) : (
-            <section
-              key={item.id}
-              className={`chatgpt-detail-phase is-tool${
-                item.id === selectedId ? " is-selected" : ""
-              }`}
-            >
-              <ToolActivity item={item} variant="chatgpt" />
-            </section>
-          ),
-        )}
-      </div>
-    </aside>
+      )}
+    </section>
   );
+}
+
+export function shouldDockCodexPrompt(
+  status: ExperienceProps["status"],
+  hasUserPrompt: boolean,
+  hasActivityAfterPrompt: boolean,
+  pendingThinkingVisible: boolean,
+): boolean {
+  if (!hasUserPrompt || hasActivityAfterPrompt) return false;
+  if (status === "starting") return true;
+  return status === "working" && !pendingThinkingVisible;
 }
 
 export function ChatGPTExperience(props: ExperienceProps) {
-  const { items, status, started, label, mark, cwd } = props;
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const { items, status, started, agent, label, program, cwd } = props;
   const [pendingThinkingVisible, setPendingThinkingVisible] = useState(false);
   const latestUserRef = useRef<HTMLElement>(null);
   const dockedRectRef = useRef<DOMRect | null>(null);
@@ -158,12 +94,17 @@ export function ChatGPTExperience(props: ExperienceProps) {
   });
   const waitingForActivity =
     status === "working" && latestUserIndex >= 0 && !hasActivityAfterPrompt;
-  const promptDocked = waitingForActivity && !pendingThinkingVisible;
+  const promptDocked = shouldDockCodexPrompt(
+    status,
+    latestUserIndex >= 0,
+    hasActivityAfterPrompt,
+    pendingThinkingVisible,
+  );
 
   useEffect(() => {
     setPendingThinkingVisible(false);
     if (!waitingForActivity || !latestUserId) return;
-    const timer = window.setTimeout(() => setPendingThinkingVisible(true), 210);
+    const timer = window.setTimeout(() => setPendingThinkingVisible(true), 80);
     return () => window.clearTimeout(timer);
   }, [latestUserId, waitingForActivity]);
 
@@ -198,7 +139,7 @@ export function ChatGPTExperience(props: ExperienceProps) {
         { transform: "translateY(0)", offset: 1 },
       ],
       {
-        duration: 280,
+        duration: 220,
         easing: "cubic-bezier(0.2, 0.82, 0.2, 1)",
       },
     );
@@ -207,16 +148,11 @@ export function ChatGPTExperience(props: ExperienceProps) {
   if (!started && status !== "error") {
     return (
       <ProviderEmpty
+        agent={agent}
         label={label}
-        mark={mark}
+        program={program}
         cwd={cwd}
         status={status}
-        loader={
-          <span className="chatgpt-starting">
-            <OpenAIActivityIcon />
-            <span className="chatgpt-shimmer">Starting up…</span>
-          </span>
-        }
       />
     );
   }
@@ -224,28 +160,17 @@ export function ChatGPTExperience(props: ExperienceProps) {
   return (
     <div
       className={`agent-experience chatgpt-experience${
-        selectedId ? " has-details" : ""
-      }${promptDocked ? " is-prompt-docked" : ""}`}
+        promptDocked ? " is-prompt-docked" : ""
+      }`}
     >
       <div className="official-transcript">
         {items.map((item, index) => {
           if (item.kind === "thinking") {
-            return (
-              <ThinkingRow
-                key={item.id}
-                item={item}
-                selected={item.id === selectedId}
-                onSelect={() => setSelectedId(item.id === selectedId ? null : item.id)}
-              />
-            );
+            return <ThinkingRow key={item.id} item={item} />;
           }
           if (item.kind === "tool") {
             return (
-              <div
-                key={item.id}
-                className={item.id === selectedId ? "chatgpt-tool-wrap is-selected" : "chatgpt-tool-wrap"}
-                onFocus={() => setSelectedId(item.id)}
-              >
+              <div key={item.id} className="chatgpt-tool-wrap">
                 <ToolActivity item={item} variant="chatgpt" compact />
               </div>
             );
@@ -274,22 +199,6 @@ export function ChatGPTExperience(props: ExperienceProps) {
           </div>
         )}
       </div>
-      {selectedId && (
-        <>
-          <button
-            type="button"
-            className="chatgpt-details-scrim"
-            onClick={() => setSelectedId(null)}
-            aria-label="Close activity details"
-          />
-          <ChatGPTDetails
-            items={items}
-            selectedId={selectedId}
-            running={status === "working"}
-            onClose={() => setSelectedId(null)}
-          />
-        </>
-      )}
     </div>
   );
 }
