@@ -69,6 +69,17 @@ describe("parseAgentLaunch", () => {
     expect(parseAgentLaunch("claude --resume abc123")?.prompt).toBeNull();
   });
 
+  test("keeps the session id when one was named", () => {
+    expect(parseAgentLaunch("claude --resume abc123")?.resumeId).toBe("abc123");
+    // Bare `--resume` means "the most recent one", which has no id yet.
+    expect(parseAgentLaunch("claude --resume")?.resumeId).toBeNull();
+    expect(parseAgentLaunch("claude -c")?.resumeId).toBeNull();
+    // OpenCode's `-s` continues a session; Grok's `--session-id` starts one.
+    expect(parseAgentLaunch("opencode -s ses_abc")?.resumeId).toBe("ses_abc");
+    expect(parseAgentLaunch("opencode --session ses_abc")?.resumeId).toBe("ses_abc");
+    expect(parseAgentLaunch("grok --session-id 019fa342")?.resumeId).toBeNull();
+  });
+
   test("treats codex's -c as a config override, not continue", () => {
     const launch = parseAgentLaunch("codex -c model_reasoning_effort=high");
     expect(launch?.resume).toBe(false);

@@ -327,6 +327,14 @@ export const TerminalPane = memo(function TerminalPane({
             terminals.focusTerminal(node.term);
           }
         }}
+        onClick={() => {
+          // A press focuses the grid so a drag can select; a click that
+          // selected nothing was the user asking to type, so the composer
+          // takes the keyboard back rather than making them click it too.
+          if (blank || busy || meta?.exited || agentUi) return;
+          if (terminals.selection(node.term)) return;
+          terminals.focus(node.term);
+        }}
         onContextMenu={(e) => {
           // Terminal convention: right-click copies a selection, else pastes.
           e.preventDefault();

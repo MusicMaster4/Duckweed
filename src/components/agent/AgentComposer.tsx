@@ -13,6 +13,8 @@ interface Props {
   session: AgentSessionState;
   /** The pane holding this composer has the keyboard. */
   active: boolean;
+  /** Shared with the surface, so a click anywhere quiet can focus the input. */
+  inputRef?: React.RefObject<HTMLTextAreaElement>;
   onSubmit: (text: string) => void;
   onInterrupt: () => void;
 }
@@ -93,8 +95,9 @@ function buildMenu(value: string, session: AgentSessionState): Menu | null {
   return rows.length ? { kind: "commands", rows } : null;
 }
 
-export function AgentComposer({ session, active, onSubmit, onInterrupt }: Props) {
-  const ref = useRef<HTMLTextAreaElement>(null);
+export function AgentComposer({ session, active, inputRef, onSubmit, onInterrupt }: Props) {
+  const own = useRef<HTMLTextAreaElement>(null);
+  const ref = inputRef ?? own;
   const [value, setValue] = useState(() => agents.getDraft(session.termId));
   const [highlighted, setHighlighted] = useState(0);
 
@@ -270,7 +273,9 @@ export function AgentComposer({ session, active, onSubmit, onInterrupt }: Props)
           onChange={(event) => change(event.target.value)}
           onKeyDown={onKeyDown}
         />
-        {working ? (
+        {/* No send button: Enter submits, and a button that only ever repeats
+            a key everybody already presses is a permanent third of the row. */}
+        {working && (
           <button
             type="button"
             className="agent-composer-stop"
@@ -279,16 +284,6 @@ export function AgentComposer({ session, active, onSubmit, onInterrupt }: Props)
           >
             <span className="agent-stop-glyph" aria-hidden="true" />
             Stop
-          </button>
-        ) : (
-          <button
-            type="button"
-            className="agent-composer-send"
-            onClick={() => commit(value)}
-            disabled={!value.trim()}
-            title="Send (Enter)"
-          >
-            Send
           </button>
         )}
       </div>

@@ -243,10 +243,23 @@ export function effortsFor(state: Pick<AgentSessionState, "model" | "models">): 
   return efforts;
 }
 
-/** Compact a long provider/model id for the header chip. */
+/** Compact a long provider/model id for the header / trigger chip. */
 export function shortModelLabel(model: string): string {
   const slash = model.lastIndexOf("/");
-  return slash >= 0 ? model.slice(slash + 1) : model;
+  const base = slash >= 0 ? model.slice(slash + 1) : model;
+  // Claude-style ids: `claude-opus-5[1m]` / `opus[1m]` → readable short form.
+  const lower = base.toLowerCase();
+  if (lower.includes("fable")) return lower.includes("1m") ? "Fable 5 (1M)" : "Fable 5";
+  if (lower.includes("opus") && !lower.includes("plan")) {
+    return lower.includes("1m") ? "Opus 5 (1M)" : "Opus 5";
+  }
+  if (lower.includes("sonnet")) return lower.includes("1m") ? "Sonnet 5 (1M)" : "Sonnet 5";
+  if (lower.includes("haiku")) return "Haiku 4.5";
+  if (lower === "default") return "Default";
+  if (lower === "best") return "Best";
+  if (lower === "opusplan") return "Opus Plan";
+  // OpenCode Zen labels often arrive as the full id; keep the tail readable.
+  return base.replace(/^claude-/, "").replace(/-/g, " ");
 }
 
 export function emptyUsage(): AgentUsage {

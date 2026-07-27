@@ -13,6 +13,7 @@ const launch: AgentLaunch = {
   model: null,
   effort: null,
   resume: false,
+  resumeId: null,
 };
 
 function harness() {
@@ -309,6 +310,20 @@ describe("claude adapter", () => {
     expect(adapter.args(launch)).toEqual([]);
   });
 
+  test("resumes a named session with --resume, not --continue", () => {
+    const adapter = createClaudeAdapter();
+    expect(adapter.args({ ...launch, resumeId: "abc123" })).toEqual(["--resume", "abc123"]);
+    // A picked session wins over "the most recent one".
+    expect(adapter.args({ ...launch, resume: true, resumeId: "abc123" })).toEqual([
+      "--resume",
+      "abc123",
+    ]);
+  });
+
+  test("has no in-protocol resume, so the session store relaunches the CLI", () => {
+    expect(createClaudeAdapter().resume).toBeUndefined();
+  });
+
   test("passes a requested effort through as an argument", () => {
     const adapter = createClaudeAdapter();
     expect(adapter.args({ ...launch, effort: "high" })).toEqual(["--effort", "high"]);
@@ -369,7 +384,7 @@ describe("claude adapter", () => {
     expect(h.sent).toHaveLength(0);
     expect(h.state().items.find((item) => item.kind === "notice")).toMatchObject({
       tone: "error",
-      text: 'Unknown effort "ludicrous" — pick low, medium, high, xhigh, max, or auto.',
+      text: 'Unknown effort "ludicrous" — pick low, medium, high, xhigh, max, auto, or ultracode.',
     });
   });
 

@@ -13,8 +13,10 @@ import { createAcpAdapter } from "./adapters/acp";
 import { createClaudeAdapter } from "./adapters/claude";
 import { createCodexAdapter } from "./adapters/codex";
 import { AGENTS, AGENT_IDS } from "./catalog";
-import { applyEvent, type AgentEvent } from "./events";
+import { applyEvent, isTurnEnd, type AgentEvent } from "./events";
+import { latest as latestSession } from "./history";
 import type { AgentLaunch } from "./launch";
+import { loadClaudeSettingsDefaults } from "./claudeSettings";
 import { fallbackCommands, fallbackModels } from "./slashCatalog";
 import { emptyUsage, type AgentId, type AgentSessionState } from "./types";
 
@@ -35,20 +37,57 @@ interface Session {
   adapter: AgentAdapter;
   context: AdapterContext;
   launch: AgentLaunch;
-  listeners: Set<() => void>;
   /** Diagnostics kept only to explain a start that never got anywhere. */
   stderr: string[];
   /** Prompts submitted before the handshake finished. */
   queued: string[];
   /** Unsent composer text, so a pane remount never loses a draft. */
   draft: string;
+  /**
+   * A conversation to pick up as soon as the handshake finishes. Resuming
+   * before the agent is ready would be answered with "no session", and the
+   * user may have asked for it (`--continue`) before there was a protocol to
+   * ask on.
+   */
+  pendingResume: { id: string; title: string } | null;
   /** Coalesces streamed deltas into one notification per frame. */
   notifyHandle: number | null;
+  /**
+   * The user interrupted the turn in flight. The idle that follows is them
+   * stopping the agent, not the agent finishing, so it must not be announced.
+   */
+  interrupted: boolean;
   disposed: boolean;
 }
 
 const sessions = new Map<string, Session>();
+/**
+ * Subscribers per pane, kept outside the session they watch.
+ *
+ * Resuming a Claude conversation means relaunching the CLI, which replaces the
+ * `Session` object behind a pane that never unmounted. Listeners stored on the
+ * session would go with it and the pane would freeze on the old transcript, so
+ * they live here — keyed by terminal id, which is the thing that persists.
+ */
+const paneListeners = new Map<string, Set<() => void>>();
 const globalListeners = new Set<() => void>();
+const turnEndListeners = new Set<(termId: string) => void>();
+
+/**
+ * "This pane finished a turn, or is now blocked on the user."
+ *
+ * The protocol says so directly here — no log tailing, no heuristics — which
+ * makes it the most precise completion signal in the app. `terminals` turns it
+ * into the same sound and unread marker a raw CLI pane gets.
+ */
+export function subscribeTurnEnd(callback: (termId: string) => void): () => void {
+  turnEndListeners.add(callback);
+  return () => turnEndListeners.delete(callback);
+}
+
+function announceTurnEnd(session: Session): void {
+  for (const listener of turnEndListeners) listener(session.termId);
+}
 
 /** Subscribe to "any session appeared, changed, or ended". */
 export function subscribeAll(callback: () => void): () => void {
@@ -57,15 +96,15 @@ export function subscribeAll(callback: () => void): () => void {
 }
 
 export function subscribe(termId: string, callback: () => void): () => void {
-  const session = sessions.get(termId);
-  if (!session) {
-    // The pane can subscribe before the session exists (or after it ended);
-    // the global channel still tells it when that changes.
-    return subscribeAll(callback);
+  let listeners = paneListeners.get(termId);
+  if (!listeners) {
+    listeners = new Set();
+    paneListeners.set(termId, listeners);
   }
-  session.listeners.add(callback);
+  listeners.add(callback);
   return () => {
-    session.listeners.delete(callback);
+    listeners.delete(callback);
+    if (listeners.size === 0) paneListeners.delete(termId);
   };
 }
 
@@ -91,12 +130,17 @@ export function setDraft(termId: string, text: string): void {
   if (session) session.draft = text;
 }
 
+function announce(termId: string): void {
+  const listeners = paneListeners.get(termId);
+  if (listeners) for (const listener of [...listeners]) listener();
+  for (const listener of globalListeners) listener();
+}
+
 function notify(session: Session): void {
   if (session.notifyHandle !== null) return;
   session.notifyHandle = window.requestAnimationFrame(() => {
     session.notifyHandle = null;
-    for (const listener of session.listeners) listener();
-    for (const listener of globalListeners) listener();
+    announce(session.termId);
   });
 }
 
@@ -106,8 +150,7 @@ function notifyNow(session: Session): void {
     window.cancelAnimationFrame(session.notifyHandle);
     session.notifyHandle = null;
   }
-  for (const listener of session.listeners) listener();
-  for (const listener of globalListeners) listener();
+  announce(session.termId);
 }
 
 function createAdapter(agent: AgentId): AgentAdapter {
@@ -174,6 +217,8 @@ export function isAvailable(agent: AgentId): boolean {
  * that read slash text themselves.
  */
 function dispatch(session: Session, text: string): void {
+  // Whatever the last turn's ending was, this one is the user's own request.
+  session.interrupted = false;
   if (text.startsWith("/") && session.adapter.command?.(text, session.context) === "handled") {
     return;
   }
@@ -182,19 +227,44 @@ function dispatch(session: Session, text: string): void {
 
 function emit(session: Session, event: AgentEvent): void {
   if (session.disposed) return;
+  const before = session.state.status;
   const next = applyEvent(session.state, event);
   if (next === session.state) return;
   session.state = next;
+
+  // A resume waiting on the handshake goes first: a prompt released into the
+  // new session must land in the conversation the user asked to continue.
+  if (next.status === "idle" && session.pendingResume) {
+    const wanted = session.pendingResume;
+    session.pendingResume = null;
+    notify(session);
+    applyResume(session, wanted.id, wanted.title);
+    return;
+  }
+
   // A prompt sent before the handshake landed, or while a turn was still
   // running, waits here. Exactly one is released per idle moment: every
   // protocol we speak runs one turn at a time, so pushing the whole backlog
   // would just make the agent reject the rest.
-  if (next.status === "idle" && session.queued.length > 0) {
+  const releasingQueued = next.status === "idle" && session.queued.length > 0;
+  const ended = isTurnEnd({
+    before,
+    after: next.status,
+    permission: next.permission !== null,
+    releasingQueued,
+    interrupted: session.interrupted,
+  });
+  if (releasingQueued) {
     const text = session.queued.shift() as string;
     session.state = applyEvent(session.state, { type: "unqueue" });
     dispatch(session, text);
   }
   notify(session);
+
+  // The interrupt is spent on the idle it produced, so the next real turn end
+  // is announced normally.
+  if (next.status === "idle") session.interrupted = false;
+  if (ended) announceTurnEnd(session);
 }
 
 function handleFrame(session: Session, frame: AgentFrame): void {
@@ -251,11 +321,12 @@ export async function start(
     termId,
     adapter,
     launch,
-    listeners: new Set(),
     stderr: [],
     queued: [],
     draft: "",
+    pendingResume: null,
     notifyHandle: null,
+    interrupted: false,
     disposed: false,
     state: {
       termId,
@@ -293,7 +364,7 @@ export async function start(
   };
 
   sessions.set(termId, session);
-  for (const listener of globalListeners) listener();
+  announce(termId);
 
   const channel = new Channel<AgentFrame>();
   channel.onmessage = (frame) => handleFrame(session, frame);
@@ -310,11 +381,53 @@ export async function start(
     );
   } catch (error) {
     sessions.delete(termId);
-    for (const listener of globalListeners) listener();
+    announce(termId);
     return error instanceof Error ? error.message : String(error);
   }
 
   adapter.start(session.context);
+
+  // Claude only reports model/effort on the first turn's system/init. Until
+  // then, seed the header and pickers from the same settings file the real
+  // TUI reads (`~/.claude/settings.json`), overridden by launch flags.
+  if (launch.agent === "claude") {
+    void loadClaudeSettingsDefaults().then((defaults) => {
+      if (session.disposed) return;
+      const model = launch.model ?? defaults.model;
+      const effort = launch.effort ?? defaults.effort;
+      if (!model && !effort) return;
+      // Don't clobber values the adapter already learned from the wire.
+      const nextModel = session.state.model ?? model;
+      const nextEffort = session.state.effort ?? effort;
+      if (nextModel === session.state.model && nextEffort === session.state.effort) return;
+      emit(session, {
+        type: "session",
+        ...(nextModel ? { model: nextModel } : {}),
+        ...(nextEffort ? { effort: nextEffort } : {}),
+      });
+    });
+  }
+
+  // `--continue` / `--resume <id>` for the agents that resume over their
+  // protocol. Claude took the same request as a launch flag above, so it is
+  // already resuming and must not be asked twice.
+  if (adapter.resume && (launch.resumeId || launch.resume)) {
+    if (launch.resumeId) {
+      session.pendingResume = { id: launch.resumeId, title: "" };
+    } else {
+      void latestSession(launch.agent, cwd).then((found) => {
+        if (session.disposed || !found) return;
+        // The handshake may already be done; `pendingResume` is only read on
+        // the transition into idle, so a late answer applies itself.
+        if (session.state.status === "starting") {
+          session.pendingResume = { id: found.id, title: found.title };
+        } else {
+          applyResume(session, found.id, found.title);
+        }
+      });
+    }
+  }
+
   if (launch.prompt) submit(termId, launch.prompt);
   return null;
 }
@@ -336,9 +449,99 @@ export function submit(termId: string, text: string): void {
   dispatch(session, trimmed);
 }
 
+/**
+ * Hand a stored conversation to a running agent, in whatever way it accepts
+ * one. Emits the transcript marker only once the agent has taken it.
+ */
+function applyResume(session: Session, sessionId: string, title: string): void {
+  if (session.adapter.resume?.(sessionId, session.context)) {
+    emit(session, { type: "resumed", sessionId, title });
+    return;
+  }
+  // An ACP agent that never advertised `loadSession`, and no CLI flag to fall
+  // back on in its headless mode. Saying so beats a picker that does nothing.
+  emit(session, {
+    type: "notice",
+    tone: "error",
+    text: `${session.state.label} cannot resume a session from the custom UI.`,
+  });
+}
+
+/**
+ * Continue a past conversation in this pane.
+ *
+ * Two shapes, decided by the adapter: Codex and the ACP agents swap threads
+ * over their protocol, so the process (and everything it has already learned)
+ * survives. Claude has no such method — its resume is a launch flag — so the
+ * CLI is relaunched with `--resume <id>` and the pane starts a fresh
+ * transcript against the same conversation.
+ *
+ * Resolves to null on success, or the reason it could not happen.
+ */
+export async function resume(
+  termId: string,
+  sessionId: string,
+  title = "",
+): Promise<string | null> {
+  const session = sessions.get(termId);
+  if (!session || session.disposed) return "this pane has no agent session";
+  if (!sessionId) return "no session was chosen";
+
+  // Swapping the conversation under a running turn would strand it — the
+  // agent would go on working against a thread nothing is listening to.
+  if (session.state.status === "working" || session.state.status === "waiting") {
+    emit(session, {
+      type: "notice",
+      tone: "error",
+      text: "Stop the current turn before resuming another session.",
+    });
+    return null;
+  }
+
+  if (session.adapter.resume) {
+    if (session.state.status === "starting") {
+      // Not ready to be told anything yet; the handshake picks this up.
+      session.pendingResume = { id: sessionId, title };
+      return null;
+    }
+    applyResume(session, sessionId, title);
+    return null;
+  }
+
+  // Relaunch path (Claude). Everything typed at launch is kept except the
+  // opening prompt, which already ran in the session being replaced.
+  const { launch } = session;
+  const cwd = session.state.cwd;
+  // Awaited, not fired and forgotten: the backend refuses a second process
+  // under the same pane id, so the old one has to be gone first. Nothing is
+  // announced in between either — a pane that blinked back to its shell and
+  // then to the agent would read as a crash.
+  session.disposed = true;
+  sessions.delete(termId);
+  if (TAURI_RUNTIME) {
+    if (session.adapter.endsOnStdinClose) {
+      await agentProcCloseStdin(termId).catch(() => {});
+    }
+    await agentProcStop(termId).catch(() => {});
+  }
+  const failure = await start(
+    termId,
+    { ...launch, prompt: null, resume: false, resumeId: sessionId },
+    cwd,
+  );
+  if (failure) {
+    announce(termId);
+    return failure;
+  }
+  const restarted = sessions.get(termId);
+  if (restarted) emit(restarted, { type: "resumed", sessionId, title });
+  return null;
+}
+
 export function interrupt(termId: string): void {
   const session = sessions.get(termId);
   if (!session || session.disposed) return;
+  session.interrupted = true;
   session.adapter.interrupt(session.context);
 }
 

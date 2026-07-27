@@ -71,8 +71,8 @@ describe("completion sound", () => {
 
   test("sound requires the selected pane and a job longer than one minute", () => {
     const app = read("src/App.tsx");
-    const signal = app.indexOf("if (!shouldSignalCompletion(previous, meta)) return;");
-    const soundGate = app.indexOf("shouldPlayCompletionSound(previous, meta)", signal);
+    const signal = app.indexOf("if (!shouldSignalCompletion(previous, current)) return;");
+    const soundGate = app.indexOf("shouldPlayCompletionSound(previous, current)", signal);
     const sound = app.indexOf("playCompletionSound();", signal);
     const selectedGate = app.indexOf("isSelectedTerm(termId)", signal);
     const focusGate = app.indexOf("isFocusedTerm(termId)", signal);

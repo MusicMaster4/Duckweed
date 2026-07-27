@@ -26,7 +26,11 @@ export type AgentEvent =
       type: "session";
       sessionId?: string;
       model?: string;
-      effort?: string;
+      /**
+       * `null` clears a previously known effort (e.g. OpenCode model with no
+       * thought_level option). `undefined` leaves the current value alone.
+       */
+      effort?: string | null;
       cwd?: string;
       commands?: { name: string; description: string }[];
       /** Replaces the switchable-model list when the adapter learns it. */
@@ -56,6 +60,12 @@ export type AgentEvent =
     }
   | { type: "plan"; steps: AgentPlanStep[] }
   | { type: "notice"; text: string; tone: "info" | "error" }
+  /**
+   * A past conversation was picked up. Marks the transcript so what follows
+   * reads as a continuation rather than a first turn, whether or not the
+   * agent could replay the history behind it.
+   */
+  | { type: "resumed"; sessionId: string; title: string }
   | { type: "permission"; permission: AgentPermission | null }
   | { type: "usage"; usage: Partial<AgentUsage> }
   /** A follow-up the user sent while a turn was still running. */
@@ -79,6 +89,41 @@ function nextId(state: AgentSessionState): string {
   return `i${state.items.length}-${Date.now().toString(36)}`;
 }
 
+/** Everything a status change needs to say whether the user is owed a nudge. */
+export interface TurnEndInput {
+  before: AgentStatus;
+  after: AgentStatus;
+  /** The new status came with a permission prompt the user has to answer. */
+  permission: boolean;
+  /** A prompt queued during the turn left immediately after it. */
+  releasingQueued: boolean;
+  /** The user stopped this turn themselves. */
+  interrupted: boolean;
+}
+
+/**
+ * True when a pane just became worth returning to.
+ *
+ * Precision is the whole point of this predicate — a sound and a highlight for
+ * a turn that did not end is worse than none at all — so every ending that is
+ * not the agent handing work back to the user is excluded:
+ *
+ * - `starting` → `idle` is the handshake, not a turn.
+ * - `exited` / `error` is the user quitting the CLI, or a crash the pane
+ *   already shows.
+ * - An interrupt is the user's own keystroke; they are already looking.
+ * - A queued follow-up leaves as the turn ends, so the agent is still working.
+ */
+export function isTurnEnd(input: TurnEndInput): boolean {
+  if (input.interrupted) return false;
+  if (input.after === "waiting") {
+    return input.permission && input.before !== "waiting";
+  }
+  if (input.after !== "idle") return false;
+  if (input.before !== "working" && input.before !== "waiting") return false;
+  return !input.releasingQueued;
+}
+
 /**
  * Fold one event into the session.
  *
@@ -93,7 +138,7 @@ export function applyEvent(state: AgentSessionState, event: AgentEvent): AgentSe
         ...state,
         sessionId: event.sessionId ?? state.sessionId,
         model: event.model ?? state.model,
-        effort: event.effort ?? state.effort,
+        effort: event.effort !== undefined ? event.effort : state.effort,
         cwd: event.cwd ?? state.cwd,
         commands: event.commands ? mergeCommands(state.commands, event.commands) : state.commands,
         // A non-empty list wins; adapters re-emit the full set whenever it
@@ -229,6 +274,25 @@ export function applyEvent(state: AgentSessionState, event: AgentEvent): AgentSe
         items: [
           ...state.items,
           { kind: "notice", id: nextId(state), at: Date.now(), text: event.text, tone: event.tone },
+        ],
+      };
+
+    case "resumed":
+      return {
+        ...state,
+        sessionId: event.sessionId,
+        // The empty state offers to start something new; a resumed pane is
+        // the opposite of that even before its first reply lands.
+        started: true,
+        items: [
+          ...state.items,
+          {
+            kind: "notice",
+            id: nextId(state),
+            at: Date.now(),
+            tone: "info",
+            text: event.title ? `Resumed “${event.title}”` : "Resumed the previous session",
+          },
         ],
       };
 

@@ -104,12 +104,29 @@ export function createAcpAdapter(): AgentAdapter {
   let currentModelId: string | null = null;
   let currentEffort: string | null = null;
   /**
+   * OpenCode advertises effort as a `configOptions` entry (`id: "effort"`,
+   * category `thought_level`) rather than Grok's `session/set_mode`. When
+   * present, model/effort changes go through `session/set_config_option` so
+   * the response can refresh the option list (effort levels depend on model).
+   */
+  let usesConfigOptions = false;
+  /**
    * Slash commands an agent intercepts can legitimately produce no output
    * (grok's `/context` renders in its TUI only). When a slash turn comes
    * back empty, say so instead of leaving a lone echo on screen.
    */
   let slashPending = false;
   let turnHadContent = false;
+  /** The agent advertised `session/load` — see {@link AgentAdapter.resume}. */
+  let canLoadSession = false;
+  /**
+   * A `session/load` is in flight, so the `session/update` notifications
+   * arriving are the stored conversation being replayed rather than live work.
+   * The replayed user turns are chunked, so they are buffered and flushed as
+   * one message each — see {@link flushReplayedUser}.
+   */
+  let loading = false;
+  let replayedUser = "";
 
   function request(
     ctx: AdapterContext,
@@ -196,35 +213,129 @@ export function createAcpAdapter(): AgentAdapter {
   }
 
   /**
-   * OpenCode's answer to the same question: `configOptions` on `session/new`
-   * carries a `model` category with the current value and every choice.
+   * OpenCode's answer to model/effort: `configOptions` on `session/new` (and
+   * on every `session/set_config_option` result). Model is always present;
+   * effort (`category: "thought_level"`) appears only for models that support
+   * thinking budgets — switching to big-pickle drops it, switching to Opus
+   * brings it back (verified against opencode 1.18).
    */
   function readConfigOptions(raw: unknown): {
     model?: string;
+    effort?: string | null;
     models?: ReturnType<typeof modelsForUi>;
   } {
-    const option = asArray(raw)
+    const options = asArray(raw)
       .map((entry) => asRecord(entry))
-      .find((entry) => entry?.category === "model");
-    if (!option) return {};
-    const current = asString(option.currentValue);
-    const models = asArray(option.options)
-      .map((entry) => asRecord(entry))
-      .filter((model): model is Record<string, unknown> => model !== null)
-      .map((model) => ({
-        id: asString(model.value) ?? "",
-        name: asString(model.name) ?? asString(model.value) ?? "",
-        efforts: [],
-      }))
-      .filter((model) => model.id);
-    // A `models` field carries effort levels; configOptions do not, so the
-    // richer source wins if an agent ever sends both.
-    if (models.length && !availableModels.length) availableModels = models;
-    if (current) currentModelId = current;
+      .filter((entry): entry is Record<string, unknown> => entry !== null);
+    if (!options.length) return {};
+    usesConfigOptions = true;
+
+    const modelOption = options.find(
+      (entry) => entry.category === "model" || asString(entry.id) === "model",
+    );
+    const effortOption = options.find(
+      (entry) =>
+        entry.category === "thought_level" ||
+        asString(entry.id) === "effort" ||
+        asString(entry.id) === "reasoning",
+    );
+
+    const efforts = effortOption
+      ? asArray(effortOption.options)
+          .map((entry) => asRecord(entry))
+          .filter((entry): entry is Record<string, unknown> => entry !== null)
+          .map((entry) => asString(entry.value) ?? "")
+          .filter(Boolean)
+      : [];
+
+    if (modelOption) {
+      const current = asString(modelOption.currentValue);
+      const models = asArray(modelOption.options)
+        .map((entry) => asRecord(entry))
+        .filter((model): model is Record<string, unknown> => model !== null)
+        .map((model) => ({
+          id: asString(model.value) ?? "",
+          name: asString(model.name) ?? asString(model.value) ?? "",
+          // Effort levels are per active model on the wire, but the picker
+          // needs them on the current row; attach the live list to every
+          // entry so switching model keeps the effort chip usable until the
+          // next configOptions refresh replaces it.
+          efforts: [...efforts],
+        }))
+        .filter((model) => model.id);
+      if (models.length) availableModels = models;
+      if (current) currentModelId = current;
+    } else if (efforts.length && currentModelId) {
+      // Only effort changed; stamp the new list onto the active model.
+      availableModels = availableModels.map((model) =>
+        model.id === currentModelId ? { ...model, efforts: [...efforts] } : model,
+      );
+    }
+
+    let effort: string | null | undefined;
+    if (effortOption) {
+      const value = asString(effortOption.currentValue);
+      if (value) {
+        currentEffort = value;
+        effort = value;
+      }
+    } else if (modelOption) {
+      // Model config refreshed without an effort option — this model has none.
+      currentEffort = null;
+      effort = null;
+    }
+
     return {
-      ...(current ? { model: current } : {}),
+      ...(currentModelId ? { model: currentModelId } : {}),
+      ...(effort !== undefined ? { effort } : {}),
       ...(availableModels.length ? { models: modelsForUi() } : {}),
     };
+  }
+
+  /** Apply a set_config_option result that may carry a refreshed option list. */
+  function applyConfigResult(result: Record<string, unknown>, ctx: AdapterContext) {
+    const update = readConfigOptions(result.configOptions);
+    if (Object.keys(update).length) ctx.emit({ type: "session", ...update });
+  }
+
+  async function setModel(modelId: string, ctx: AdapterContext): Promise<void> {
+    if (!sessionId) return;
+    if (usesConfigOptions) {
+      const result = await request(ctx, "session/set_config_option", {
+        sessionId,
+        configId: "model",
+        value: modelId,
+      });
+      currentModelId = modelId;
+      applyConfigResult(result, ctx);
+      if (!result.configOptions) {
+        ctx.emit({ type: "session", model: modelId });
+      }
+      return;
+    }
+    await request(ctx, "session/set_model", { sessionId, modelId });
+    currentModelId = modelId;
+    ctx.emit({ type: "session", model: modelId });
+  }
+
+  async function setEffort(level: string, ctx: AdapterContext): Promise<void> {
+    if (!sessionId) return;
+    if (usesConfigOptions) {
+      const result = await request(ctx, "session/set_config_option", {
+        sessionId,
+        configId: "effort",
+        value: level,
+      });
+      currentEffort = level;
+      applyConfigResult(result, ctx);
+      if (!result.configOptions) {
+        ctx.emit({ type: "session", effort: level });
+      }
+      return;
+    }
+    await request(ctx, "session/set_mode", { sessionId, modeId: level });
+    currentEffort = level;
+    ctx.emit({ type: "session", effort: level });
   }
 
   /** `initialize` → `session/new` → launch-time model/effort → ready. */
@@ -241,6 +352,10 @@ export function createAcpAdapter(): AgentAdapter {
         },
         clientInfo: { name: "duckweed", title: "Duckweed", version: "0.1.0" },
       });
+
+      // Only agents that say they can load a session get a resume offer;
+      // calling `session/load` on one that cannot is a hard JSON-RPC error.
+      canLoadSession = asRecord(initialized.agentCapabilities)?.loadSession === true;
 
       const meta = asRecord(initialized._meta);
       const identity = readModelState(meta?.modelState);
@@ -278,57 +393,70 @@ export function createAcpAdapter(): AgentAdapter {
   async function applyLaunchSettings(ctx: AdapterContext) {
     if (ctx.launch.model) {
       const model = ctx.launch.model;
-      await request(ctx, "session/set_model", { sessionId, modelId: model })
-        .then(() => {
-          currentModelId = model;
-          ctx.emit({ type: "session", model });
-        })
-        .catch((error: unknown) => {
-          const record = asRecord(error);
-          ctx.emit({
-            type: "notice",
-            tone: "error",
-            text: `Could not set model "${model}": ${asString(record?.message) ?? "rejected"}.`,
-          });
+      await setModel(model, ctx).catch((error: unknown) => {
+        const record = asRecord(error);
+        ctx.emit({
+          type: "notice",
+          tone: "error",
+          text: `Could not set model "${model}": ${asString(record?.message) ?? "rejected"}.`,
         });
+      });
     }
     if (ctx.launch.effort) {
       const effort = ctx.launch.effort.toLowerCase();
       const efforts = availableModels.find((model) => model.id === currentModelId)?.efforts ?? [];
-      if (!efforts.length) {
+      if (!efforts.length && !usesConfigOptions) {
         ctx.emit({
           type: "notice",
           tone: "error",
           text: "This agent does not expose effort levels over its protocol.",
         });
-      } else if (!efforts.includes(effort)) {
+      } else if (efforts.length && !efforts.includes(effort)) {
         ctx.emit({
           type: "notice",
           tone: "error",
           text: `Unknown effort "${effort}" — pick ${efforts.join(", ")}.`,
         });
       } else {
-        await request(ctx, "session/set_mode", { sessionId, modeId: effort })
-          .then(() => {
-            currentEffort = effort;
-            ctx.emit({ type: "session", effort });
-          })
-          .catch((error: unknown) => {
-            const record = asRecord(error);
-            ctx.emit({
-              type: "notice",
-              tone: "error",
-              text: `Could not set effort "${effort}": ${asString(record?.message) ?? "rejected"}.`,
-            });
+        await setEffort(effort, ctx).catch((error: unknown) => {
+          const record = asRecord(error);
+          ctx.emit({
+            type: "notice",
+            tone: "error",
+            text: `Could not set effort "${effort}": ${asString(record?.message) ?? "rejected"}.`,
           });
+        });
       }
     }
+  }
+
+  /**
+   * Emit the buffered replay of one past user turn.
+   *
+   * `session/load` replays a conversation as the same chunked updates a live
+   * turn produces, so a single prompt can arrive as a dozen `user_message_chunk`
+   * frames. Buffering them and flushing on the next non-user update keeps one
+   * transcript row per message, and bumps the turn counter so the reply that
+   * follows opens its own bubble instead of merging into the previous one.
+   */
+  function flushReplayedUser(ctx: AdapterContext) {
+    if (!replayedUser) return;
+    const text = replayedUser;
+    replayedUser = "";
+    turnSeq += 1;
+    ctx.emit({ type: "user", text });
   }
 
   function handleSessionUpdate(params: Record<string, unknown>, ctx: AdapterContext) {
     const update = asRecord(params.update);
     if (!update) return;
     const kind = asString(update.sessionUpdate);
+
+    if (kind === "user_message_chunk") {
+      replayedUser += readContentText(update.content);
+      return;
+    }
+    flushReplayedUser(ctx);
 
     switch (kind) {
       case "agent_message_chunk": {
@@ -520,10 +648,8 @@ export function createAcpAdapter(): AgentAdapter {
       }
       const modelId = match === null ? arg : match.id;
       if (!sessionId) return "handled";
-      void request(ctx, "session/set_model", { sessionId, modelId })
+      void setModel(modelId, ctx)
         .then(() => {
-          currentModelId = modelId;
-          ctx.emit({ type: "session", model: modelId });
           ctx.emit({ type: "notice", tone: "info", text: `Model set to ${modelId}.` });
         })
         .catch((error: unknown) => {
@@ -543,7 +669,7 @@ export function createAcpAdapter(): AgentAdapter {
         ctx.emit({
           type: "notice",
           tone: "error",
-          text: "This agent does not expose effort levels over its protocol.",
+          text: "This model does not expose effort levels over its protocol.",
         });
         return "handled";
       }
@@ -565,10 +691,8 @@ export function createAcpAdapter(): AgentAdapter {
         return "handled";
       }
       if (!sessionId) return "handled";
-      void request(ctx, "session/set_mode", { sessionId, modeId: level })
+      void setEffort(level, ctx)
         .then(() => {
-          currentEffort = level;
-          ctx.emit({ type: "session", effort: level });
           ctx.emit({ type: "notice", tone: "info", text: `Effort set to ${level}.` });
         })
         .catch((error: unknown) => {
@@ -677,8 +801,47 @@ export function createAcpAdapter(): AgentAdapter {
 
     command: handleCommand,
 
+    /**
+     * ACP's own resume: the agent adopts the stored session and replays it as
+     * `session/update` notifications, which the handler above turns into the
+     * same timeline rows a live turn produces. The conversation therefore
+     * comes back with its history, not just its id.
+     */
+    resume: (id, ctx) => {
+      if (!canLoadSession) return false;
+      loading = true;
+      replayedUser = "";
+      ctx.emit({ type: "status", status: "working" });
+      request(ctx, "session/load", { sessionId: id, cwd: ctx.cwd, mcpServers: [] })
+        .then((result) => {
+          sessionId = id;
+          flushReplayedUser(ctx);
+          const identity = {
+            ...readModelState(result.models),
+            ...readConfigOptions(result.configOptions),
+          };
+          ctx.emit({ type: "session", sessionId: id, ...identity });
+          ctx.emit({ type: "turn-end" });
+        })
+        .catch((error: unknown) => {
+          const record = asRecord(error);
+          flushReplayedUser(ctx);
+          ctx.emit({
+            type: "notice",
+            tone: "error",
+            text: asString(record?.message) ?? "The agent could not load that session.",
+          });
+          ctx.emit({ type: "turn-end" });
+        })
+        .finally(() => {
+          loading = false;
+        });
+      return true;
+    },
+
     interrupt: (ctx) => {
-      if (!sessionId) return;
+      // Cancelling during a replay would abandon a half-drawn transcript.
+      if (!sessionId || loading) return;
       notify(ctx, "session/cancel", { sessionId });
     },
 

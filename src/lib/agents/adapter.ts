@@ -40,6 +40,15 @@ export interface AgentAdapter {
    * slash text themselves (Claude, ACP) receive their commands.
    */
   command?: (text: string, ctx: AdapterContext) => "handled" | "prompt";
+  /**
+   * Continue a past conversation, in-protocol.
+   *
+   * Codex (`thread/resume`) and ACP agents that advertise `loadSession`
+   * (`session/load`) can swap conversations without restarting; returning
+   * `false` — or leaving this out, as Claude does — tells the session store to
+   * relaunch the CLI with its resume flag instead.
+   */
+  resume?: (sessionId: string, ctx: AdapterContext) => boolean;
   /** The user asked the current turn to stop. */
   interrupt: (ctx: AdapterContext) => void;
   /** The user answered a permission prompt. */

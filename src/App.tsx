@@ -377,22 +377,24 @@ export default function App() {
       }
 
       const previous = processState.current.get(termId);
-      processState.current.set(termId, {
+      const current = {
         busy: meta.busy,
         exited: meta.exited,
         completionSeq: meta.completionSeq,
         agent: meta.agent,
+        agentUi: meta.agentUi !== null,
         processStartedAt: meta.processStartedAt,
-      });
+      };
+      processState.current.set(termId, current);
       if (!previous) return;
 
-      if (!shouldSignalCompletion(previous, meta)) return;
+      if (!shouldSignalCompletion(previous, current)) return;
       // Sound on the selected pane even when the window is in the background —
       // that is when a long-job cue is most useful. Still quiet for other panes.
       if (
         completionSoundEnabledRef.current &&
         isSelectedTerm(termId) &&
-        shouldPlayCompletionSound(previous, meta)
+        shouldPlayCompletionSound(previous, current)
       ) {
         playCompletionSound();
       }
@@ -462,10 +464,12 @@ export default function App() {
         .map((n) => n.term)
         .filter((t) => !skipTerms.includes(t));
       if (await terminals.anyHasRunningProcess(termsToCheck)) {
+        const agent = terminals.runningAgentLabel(termsToCheck);
         const ok = await confirmCloseRunning({
           title: "Close tab?",
-          message:
-            termsToCheck.length === 1
+          message: agent
+            ? `${agent} is still open in this tab. Closing ends the session.`
+            : termsToCheck.length === 1
               ? "You have a process running in this tab."
               : "You have processes running in this tab.",
           confirmLabel: "Yes, close",
@@ -664,9 +668,12 @@ export default function App() {
       if (!node) return;
 
       if (await terminals.hasRunningProcess(node.term)) {
+        const agent = terminals.runningAgentLabel([node.term]);
         const ok = await confirmCloseRunning({
           title: "Close pane?",
-          message: "You have a process running in this pane.",
+          message: agent
+            ? `${agent} is still open in this pane. Closing ends the session.`
+            : "You have a process running in this pane.",
           confirmLabel: "Yes, close",
           allowDontShowAgain: true,
         });
@@ -1261,10 +1268,14 @@ export default function App() {
     let unlisten: (() => void) | undefined;
     void getCurrentWindow()
       .onCloseRequested(async (event) => {
-        if (!(await terminals.anyHasRunningProcess(terminals.allSessionIds()))) return;
+        const ids = terminals.allSessionIds();
+        if (!(await terminals.anyHasRunningProcess(ids))) return;
+        const agent = terminals.runningAgentLabel(ids);
         const ok = await confirmCloseRunning({
           title: "Quit Duckweed?",
-          message: "You have processes running in open terminals.",
+          message: agent
+            ? `${agent} is still open in a terminal. Quitting ends the session.`
+            : "You have processes running in open terminals.",
           confirmLabel: "Yes, quit",
           allowDontShowAgain: true,
         });

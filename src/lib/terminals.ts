@@ -34,6 +34,7 @@ import {
 } from "./ipc";
 import {
   detectAgent,
+  isAgentPromptSubmission,
   isGenericOsc777Notification,
   parseAgentOsc777,
   type AgentKind,
@@ -140,6 +141,18 @@ interface Session extends TermMeta {
   draft: string;
   /** Deduplicates a log event and OSC notification for the same completed turn. */
   lastAgentCompletionAt: number;
+  /**
+   * Turns the user is still owed an answer for in this pane.
+   *
+   * A completed turn is only worth announcing when the user actually asked for
+   * something: one credit per prompt submitted to a bound agent (plus one for
+   * the launch itself, which often carries the first prompt). Detection has
+   * several independent channels — session logs, hook bridge, OSC 777 — and a
+   * mis-bound transcript belonging to another copy of the same CLI is the one
+   * failure mode none of them can see. Spending a credit per notification
+   * makes every extra signal silent instead of a second sound and flash.
+   */
+  agentTurnCredits: number;
   /** Command assembled while the conventional raw terminal owns shell input. */
   rawCommand: string;
   /** Agent whose custom UI currently covers this pane. */
@@ -156,6 +169,7 @@ const sessionListeners = new Map<string, Set<() => void>>();
 const settingsListeners = new Set<() => void>();
 let busyUnlisten: Promise<UnlistenFn> | null = null;
 let agentUnlisten: Promise<UnlistenFn> | null = null;
+let agentUiUnsubscribe: (() => void) | null = null;
 
 /**
  * How keystrokes reach the shell, app-wide.
@@ -434,9 +448,33 @@ interface AgentCompletionPayload {
   agent: AgentKind;
 }
 
-function markAgentComplete(session: Session): void {
+/**
+ * A turn cannot end before the user asked for one, and one prompt can only
+ * finish once. Two channels reporting the same turn — Gemini writes OSC 777
+ * *and* runs the completion hook — must still be a single notification.
+ */
+const MAX_AGENT_TURN_CREDITS = 8;
+
+function creditAgentTurn(session: Session): void {
+  if (!session.agent) return;
+  session.agentTurnCredits = Math.min(session.agentTurnCredits + 1, MAX_AGENT_TURN_CREDITS);
+}
+
+/**
+ * @param trusted The turn end came from the agent's own protocol (the custom
+ * UI), not from a log or hook line that could belong to another process. Such
+ * a signal is already exact and is not rationed against submitted prompts.
+ */
+function markAgentComplete(session: Session, trusted = false): void {
   const now = Date.now();
   if (now - session.lastAgentCompletionAt < 1200) return;
+  if (!trusted) {
+    // Nothing was asked of this agent, so nothing of ours finished: a stale
+    // hook line, a replayed log tail, or a transcript that belongs to another
+    // instance of the same CLI running in this project.
+    if (session.agentTurnCredits <= 0) return;
+    session.agentTurnCredits -= 1;
+  }
   session.lastAgentCompletionAt = now;
   session.completionSeq += 1;
   notifySession(session.id);
@@ -445,6 +483,9 @@ function markAgentComplete(session: Session): void {
 function bindAgentKind(session: Session, agent: AgentKind): void {
   if (session.agent === agent) return;
   session.agent = agent;
+  // `claude "fix the build"` carries its prompt on the command line, so the
+  // launch itself is worth one completion.
+  session.agentTurnCredits = 1;
   if (TAURI_RUNTIME) void agentWatch(session.id, agent, session.cwd);
 }
 
@@ -506,6 +547,11 @@ function startAgentUi(session: Session, command: string): boolean {
   // first paint instead of flashing an empty frame.
   const starting = agentSessions.start(session.id, launch, session.cwd);
   session.agentUi = launch.agent;
+  // The agent runs beside the PTY, so the busy monitor never sees it. Record
+  // the start anyway: completion sound and duration gates read this, and an
+  // agent in this pane should not sound different because it has no shell
+  // process behind it.
+  session.processStartedAt = Date.now();
   markRan(session);
   notifySession(session.id);
 
@@ -541,6 +587,8 @@ function unbindAgent(session: Session): void {
   if (!session.agent) return;
   session.agent = null;
   session.rawCommand = "";
+  // Late log/hook lines for the CLI the user just quit have nothing to say.
+  session.agentTurnCredits = 0;
   if (TAURI_RUNTIME) void agentUnwatch(session.id);
 }
 
@@ -554,6 +602,18 @@ function ensureAgentListener(): void {
     // used to invent another completion and double the sound/highlight.
     if (!session.agent || session.agent !== event.payload.agent) return;
     markAgentComplete(session);
+  });
+}
+
+/**
+ * Panes running the custom agent UI have no PTY child to watch: their agent
+ * speaks a protocol, and the session module knows exactly when a turn ends.
+ */
+function ensureAgentUiListener(): void {
+  if (agentUiUnsubscribe) return;
+  agentUiUnsubscribe = agentSessions.subscribeTurnEnd((termId) => {
+    const session = sessions.get(termId);
+    if (session) markAgentComplete(session, true);
   });
 }
 
@@ -829,12 +889,14 @@ function create(id: string, opts: { cwd?: string | null; shell?: string | null }
     draft: "",
     agent: null,
     lastAgentCompletionAt: 0,
+    agentTurnCredits: 0,
     rawCommand: "",
     agentUi: null,
   };
   sessions.set(id, session);
   ensureBusyListener();
   ensureAgentListener();
+  ensureAgentUiListener();
   // Cached after the first call: the answer decides whether typing `claude`
   // opens the custom UI, and that has to be known before the first command is
   // submitted rather than resolved while it is in flight.
@@ -850,6 +912,9 @@ function create(id: string, opts: { cwd?: string | null; shell?: string | null }
     // shell should act on.
     if (session.agentUi) return;
     if (captureRawAgentCommand(session, data)) return;
+    // Everything typed into a bound agent goes straight to its PTY, so this is
+    // the only place a prompt (or a permission answer) can be observed.
+    if (session.agent && isAgentPromptSubmission(data)) creditAgentTurn(session);
     send(session, data);
   });
 
@@ -1508,10 +1573,16 @@ export function disposeAll(): void {
 }
 
 /**
- * True when the shell for `id` still has a child process (a command running).
- * Sessions that never spawned or already exited are never busy.
+ * True when `id` still has work in it: a child process in its shell, or a live
+ * agent session on top of it.
+ *
+ * The agent half matters because the custom UI runs its CLI beside the PTY
+ * rather than inside it, so the shell looks idle the whole time an agent is
+ * mid-task. Without this, closing a pane holding a running Claude or Codex
+ * session would take it down without a word.
  */
 export async function hasRunningProcess(id: string): Promise<boolean> {
+  if (agentSessions.isActive(id)) return true;
   const session = sessions.get(id);
   if (!session || session.exited || !session.spawned) return false;
   try {
@@ -1521,8 +1592,9 @@ export async function hasRunningProcess(id: string): Promise<boolean> {
   }
 }
 
-/** True when any of the listed terminals has a command still running. */
+/** True when any of the listed terminals has a command or an agent running. */
 export async function anyHasRunningProcess(ids: string[]): Promise<boolean> {
+  if (ids.some((id) => agentSessions.isActive(id))) return true;
   const live = ids.filter((id) => {
     const s = sessions.get(id);
     return s && s.spawned && !s.exited;
@@ -1533,6 +1605,18 @@ export async function anyHasRunningProcess(ids: string[]): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/**
+ * The agent running in one of `ids`, if any, so a close prompt can name what
+ * it is about to end instead of saying "a process".
+ */
+export function runningAgentLabel(ids: string[]): string | null {
+  for (const id of ids) {
+    const state = agentSessions.get(id);
+    if (state) return state.label;
+  }
+  return null;
 }
 
 /** Every live session id — used when quitting the app. */

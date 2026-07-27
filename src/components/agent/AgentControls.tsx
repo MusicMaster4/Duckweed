@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import {
   effortsFor,
@@ -27,6 +27,9 @@ type MenuItem = {
   current: boolean;
 };
 
+/** Show a filter field once the list is longer than a glanceable menu. */
+const SEARCH_THRESHOLD = 8;
+
 /**
  * Model + effort pickers, shaped after T3 Code's composer footer:
  * ghost triggers with the current value + chevron, popover menus with a
@@ -37,36 +40,64 @@ type MenuItem = {
 export function AgentControls({ session, onSelect, placement = "composer" }: Props) {
   const [menu, setMenu] = useState<MenuKind>(null);
   const [highlighted, setHighlighted] = useState(0);
+  const [query, setQuery] = useState("");
   const rootRef = useRef<HTMLDivElement>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
 
   const models = session.models;
   const efforts = effortsFor(session);
   const canPickModel = models.length > 0;
   const canPickEffort = efforts.length > 0;
   const ended = session.status === "exited" || session.status === "error";
+  const showSearch = menu === "model" && models.length > SEARCH_THRESHOLD;
 
-  const items: MenuItem[] =
-    menu === "model"
-      ? models.map((model) => ({
-          id: model.id,
-          label: model.label || shortModelLabel(model.id),
-          detail: model.id !== model.label ? model.id : null,
-          current: isCurrentModel(session.model, model),
-        }))
-      : menu === "effort"
-        ? efforts.map((effort) => ({
-            id: effort,
-            label: titleCase(effort),
-            detail: null,
-            current: session.effort === effort,
-          }))
-        : [];
+  const allItems: MenuItem[] = useMemo(() => {
+    if (menu === "model") {
+      return models.map((model) => ({
+        id: model.id,
+        label: model.label || shortModelLabel(model.id),
+        detail: model.id !== model.label ? model.id : null,
+        current: isCurrentModel(session.model, model),
+      }));
+    }
+    if (menu === "effort") {
+      return efforts.map((effort) => ({
+        id: effort,
+        label: formatEffortLabel(effort),
+        detail: null,
+        current: session.effort === effort,
+      }));
+    }
+    return [];
+  }, [menu, models, efforts, session.model, session.effort]);
+
+  const items = useMemo(() => {
+    if (!query.trim() || menu !== "model") return allItems;
+    const q = query.trim().toLowerCase();
+    return allItems.filter(
+      (item) =>
+        item.label.toLowerCase().includes(q) ||
+        item.id.toLowerCase().includes(q) ||
+        (item.detail?.toLowerCase().includes(q) ?? false),
+    );
+  }, [allItems, query, menu]);
 
   useEffect(() => {
-    if (!menu) return;
+    if (!menu) {
+      setQuery("");
+      return;
+    }
     const currentIndex = items.findIndex((item) => item.current);
     setHighlighted(currentIndex >= 0 ? currentIndex : 0);
-  }, [menu]);
+    if (showSearch) {
+      // Next frame so the input is mounted.
+      requestAnimationFrame(() => searchRef.current?.focus());
+    }
+  }, [menu, showSearch]);
+
+  useEffect(() => {
+    setHighlighted(0);
+  }, [query]);
 
   useEffect(() => {
     if (!menu) return;
@@ -91,6 +122,7 @@ export function AgentControls({ session, onSelect, placement = "composer" }: Pro
 
   const pick = (kind: "model" | "effort", id: string) => {
     setMenu(null);
+    setQuery("");
     onSelect(kind === "model" ? `/model ${id}` : `/effort ${id}`);
   };
 
@@ -110,12 +142,12 @@ export function AgentControls({ session, onSelect, placement = "composer" }: Pro
   };
 
   const modelLabel = session.model
-    ? shortModelLabel(session.model)
+    ? displayModelLabel(session.model, models)
     : canPickModel
       ? "Model"
       : null;
   const effortLabel = session.effort
-    ? titleCase(session.effort)
+    ? formatEffortLabel(session.effort)
     : canPickEffort
       ? "Effort"
       : null;
@@ -148,44 +180,67 @@ export function AgentControls({ session, onSelect, placement = "composer" }: Pro
           onToggle={() => setMenu((current) => (current === "effort" ? null : "effort"))}
         />
       )}
-      {menu && items.length > 0 && (
-        <div
-          className="agent-control-menu"
-          role="listbox"
-          aria-label={menuTitle}
-        >
+      {menu && (
+        <div className="agent-control-menu" role="listbox" aria-label={menuTitle}>
           <div className="agent-control-menu-title">{menuTitle}</div>
-          {items.map((item, index) => (
-            <button
-              key={item.id}
-              type="button"
-              role="option"
-              aria-selected={index === highlighted}
-              className={[
-                index === highlighted ? "is-active" : "",
-                item.current ? "is-current" : "",
-              ]
-                .filter(Boolean)
-                .join(" ")}
-              onMouseEnter={() => setHighlighted(index)}
-              onMouseDown={(event) => {
-                event.preventDefault();
-                pick(menu, item.id);
-              }}
-            >
-              <span className="agent-control-option-main">
-                <span className="agent-control-option-label">{item.label}</span>
-                {item.detail && (
-                  <span className="agent-control-option-detail">{item.detail}</span>
-                )}
-              </span>
-              {item.current && (
-                <span className="agent-control-option-check" aria-hidden="true">
-                  ✓
+          {showSearch && (
+            <div className="agent-control-search">
+              <input
+                ref={searchRef}
+                type="text"
+                value={query}
+                spellCheck={false}
+                placeholder="Search models…"
+                aria-label="Search models"
+                onChange={(event) => setQuery(event.target.value)}
+                onKeyDown={(event) => {
+                  // Keep ↑↓/Enter on the list; don't let them leave the input.
+                  if (
+                    event.key === "ArrowDown" ||
+                    event.key === "ArrowUp" ||
+                    event.key === "Enter"
+                  ) {
+                    onMenuKeyDown(event);
+                  }
+                }}
+              />
+            </div>
+          )}
+          {items.length === 0 ? (
+            <div className="agent-control-empty">No matches</div>
+          ) : (
+            items.map((item, index) => (
+              <button
+                key={item.id}
+                type="button"
+                role="option"
+                aria-selected={index === highlighted}
+                className={[
+                  index === highlighted ? "is-active" : "",
+                  item.current ? "is-current" : "",
+                ]
+                  .filter(Boolean)
+                  .join(" ")}
+                onMouseEnter={() => setHighlighted(index)}
+                onMouseDown={(event) => {
+                  event.preventDefault();
+                  pick(menu, item.id);
+                }}
+              >
+                <span className="agent-control-option-main">
+                  <span className="agent-control-option-label">{item.label}</span>
+                  {item.detail && (
+                    <span className="agent-control-option-detail">{item.detail}</span>
+                  )}
                 </span>
-              )}
-            </button>
-          ))}
+                {item.current && (
+                  <span className="agent-control-option-check" aria-hidden="true">
+                    ✓
+                  </span>
+                )}
+              </button>
+            ))
+          )}
         </div>
       )}
     </div>
@@ -240,15 +295,40 @@ function ControlTrigger({
 
 function isCurrentModel(current: string | null, model: AgentModelChoice): boolean {
   if (!current) return false;
-  return (
-    model.id === current ||
-    model.label === current ||
-    model.id.endsWith(`/${current}`) ||
-    current.endsWith(`/${model.id}`)
-  );
+  const cur = current.toLowerCase();
+  const id = model.id.toLowerCase();
+  const label = model.label.toLowerCase();
+  if (id === cur || label === cur) return true;
+  if (id.endsWith(`/${cur}`) || cur.endsWith(`/${id}`)) return true;
+  // Claude: settings `opus[1m]` vs init `claude-opus-5[1m]` vs picker `opus[1m]`.
+  // Compare family + optional 1m flag only — never substring-match full ids
+  // (that would mark opus-4-8 as current for opus-5).
+  const familyOf = (value: string): string | null => {
+    for (const family of ["fable", "opus", "sonnet", "haiku"] as const) {
+      if (value.includes(family)) return family;
+    }
+    return null;
+  };
+  const family = familyOf(cur);
+  if (family && family === familyOf(id)) {
+    const curOneM = cur.includes("1m") || cur.includes("[1m]");
+    const idOneM = id.includes("1m") || id.includes("[1m]");
+    // Alias `opus` matches any non-1m opus id; `opus[1m]` only the 1m variants.
+    if (id === family || id === `${family}[1m]`) return curOneM === idOneM || id === family;
+    if (cur === family || cur === `${family}[1m]`) return curOneM === idOneM || cur === family;
+  }
+  return false;
 }
 
-function titleCase(value: string): string {
+function displayModelLabel(current: string, models: AgentModelChoice[]): string {
+  const match = models.find((model) => isCurrentModel(current, model));
+  if (match?.label) return match.label;
+  return shortModelLabel(current);
+}
+
+function formatEffortLabel(value: string): string {
   if (!value) return value;
+  if (value.toLowerCase() === "ultracode") return "Ultracode";
+  if (value.toLowerCase() === "xhigh") return "XHigh";
   return value.charAt(0).toUpperCase() + value.slice(1);
 }

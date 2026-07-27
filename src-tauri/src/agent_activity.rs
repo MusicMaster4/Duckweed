@@ -27,6 +27,12 @@ use tauri::{AppHandle, Emitter, Manager};
 
 const POLL: Duration = Duration::from_millis(350);
 const DISCOVERY_POLL: Duration = Duration::from_secs(2);
+/// Cadence for a pane that is following a transcript it is not sure about.
+/// Agents like Claude Code only create their session file with the first
+/// prompt, which the user may not send for minutes, so the search never stops
+/// — it just stops costing a directory walk every two seconds.
+const WEAK_RECHECK_POLL: Duration = Duration::from_secs(15);
+const WEAK_RECHECK_AFTER: Duration = Duration::from_secs(60);
 const DISCOVERY_START_DELAY: Duration = Duration::from_secs(1);
 const START_TOLERANCE: Duration = Duration::from_secs(3);
 /// Codex auto-continues within ~5–10 ms of `task_complete`. A short quiet
@@ -53,6 +59,14 @@ struct Watch {
     next_discovery: Instant,
     file: Option<PathBuf>,
     offset: u64,
+    /// The transcript was matched by creation time, so it is certainly the
+    /// session this pane launched. A `false` here means the pane fell back to
+    /// "most recently written transcript for this project", which can belong
+    /// to another copy of the same CLI — an editor's integrated terminal, a
+    /// second Duckweed window — because agents like Claude Code only create
+    /// their transcript once the first prompt is sent, several seconds after
+    /// discovery starts. Weak matches keep looking for the real one.
+    strong: bool,
     /// Candidate turn end waiting for a quiet period before emit.
     pending_complete: Option<Instant>,
 }
@@ -122,6 +136,7 @@ impl AgentActivityManager {
                 next_discovery: Instant::now() + DISCOVERY_START_DELAY,
                 file: None,
                 offset: 0,
+                strong: false,
                 pending_complete: None,
             },
         );
@@ -140,35 +155,37 @@ impl AgentActivityManager {
             .collect();
 
         for (id, watch) in watches.iter_mut() {
-            if watch.file.is_none() {
-                if !LOG_AGENTS.contains(&watch.agent.as_str()) {
-                    continue;
-                }
-                if Instant::now() < watch.next_discovery {
-                    continue;
-                }
-                watch.next_discovery = Instant::now() + DISCOVERY_POLL;
-                let Some(path) = discover_session(watch, &claimed) else {
-                    continue;
-                };
-                watch.offset = fs::metadata(&path)
-                    .map(|meta| {
-                        let new_session = meta.created().ok().is_some_and(|created| {
-                            created
-                                >= watch
-                                    .started
-                                    .checked_sub(START_TOLERANCE)
-                                    .unwrap_or(SystemTime::UNIX_EPOCH)
-                        });
-                        if new_session {
-                            0
+            // Keep searching while nothing is bound, and also while the bound
+            // transcript is only a guess: the pane's own session file may not
+            // have existed yet when the first search ran.
+            if !watch.strong && LOG_AGENTS.contains(&watch.agent.as_str()) {
+                if Instant::now() >= watch.next_discovery {
+                    let waited = SystemTime::now()
+                        .duration_since(watch.started)
+                        .unwrap_or_default();
+                    watch.next_discovery = Instant::now()
+                        + if waited > WEAK_RECHECK_AFTER {
+                            WEAK_RECHECK_POLL
                         } else {
-                            meta.len()
+                            DISCOVERY_POLL
+                        };
+                    if let Some((path, strong)) = discover_session(watch, &claimed) {
+                        // A guess never replaces a guess — that would only
+                        // trade one wrong transcript for another and reset the
+                        // read offset each time.
+                        if watch.file.is_none() || strong {
+                            watch.offset = initial_offset(&path, watch.started);
+                            watch.pending_complete = None;
+                            watch.strong = strong;
+                            claimed.insert(path.clone());
+                            watch.file = Some(path);
                         }
-                    })
-                    .unwrap_or(0);
-                claimed.insert(path.clone());
-                watch.file = Some(path);
+                    }
+                }
+                if watch.file.is_none() {
+                    continue;
+                }
+            } else if watch.file.is_none() {
                 continue;
             }
 
@@ -730,7 +747,29 @@ fn discovery_roots(watch: &Watch, home: &Path) -> Vec<PathBuf> {
     roots
 }
 
-fn discover_session(watch: &Watch, claimed: &HashSet<PathBuf>) -> Option<PathBuf> {
+/// Start at the beginning of a transcript created for this pane, and at the end
+/// of one that was already running — its history is somebody else's turn.
+fn initial_offset(path: &Path, started: SystemTime) -> u64 {
+    fs::metadata(path)
+        .map(|meta| {
+            let new_session = meta.created().ok().is_some_and(|created| {
+                created
+                    >= started
+                        .checked_sub(START_TOLERANCE)
+                        .unwrap_or(SystemTime::UNIX_EPOCH)
+            });
+            if new_session {
+                0
+            } else {
+                meta.len()
+            }
+        })
+        .unwrap_or(0)
+}
+
+/// Returns the transcript to follow and whether the match is a certain one
+/// (see [`Watch::strong`]).
+fn discover_session(watch: &Watch, claimed: &HashSet<PathBuf>) -> Option<(PathBuf, bool)> {
     let home = home_dir()?;
     let roots = discovery_roots(watch, &home);
     if roots.is_empty() {
@@ -753,15 +792,15 @@ fn discover_session(watch: &Watch, claimed: &HashSet<PathBuf>) -> Option<PathBuf
     // watching it. Prefer that creation-time correlation over last-modified:
     // another Codex/Claude/Grok process in the same project may be writing at
     // the same time and would otherwise steal this pane's watch.
-    nearest_new_session(watch.started, earliest, &matching)
-        .or_else(|| {
-            matching
-                .iter()
-                .max_by_key(|candidate| candidate.modified)
-                .copied()
-        })
+    if let Some(candidate) = nearest_new_session(watch.started, earliest, &matching) {
+        return Some((candidate.path.clone(), true));
+    }
+    matching
+        .iter()
+        .max_by_key(|candidate| candidate.modified)
+        .copied()
         .or_else(|| (candidates.len() == 1).then(|| &candidates[0]))
-        .map(|candidate| candidate.path.clone())
+        .map(|candidate| (candidate.path.clone(), false))
 }
 
 fn nearest_new_session<'a>(
@@ -958,8 +997,15 @@ fn classify_codex(value: &Value) -> LineSignal {
         // Auto-continue starts the next task within milliseconds of complete.
         Some("task_started") => LineSignal::Working,
         Some("task_complete") => LineSignal::Completed,
-        // Interrupted turns still hand the prompt back to the user.
-        Some("turn_aborted") => LineSignal::Completed,
+        Some("turn_aborted") => match value.pointer("/payload/reason").and_then(Value::as_str) {
+            // The user pressed Esc, or sent a new prompt over the running
+            // turn. They are at the keyboard: nothing finished, and a sound
+            // for their own keystroke is pure noise.
+            Some("interrupted") | Some("replaced") => LineSignal::Working,
+            // Aborted for any other reason (an error, a refused turn) still
+            // hands the prompt back and is worth surfacing.
+            _ => LineSignal::Completed,
+        },
         _ => LineSignal::None,
     }
 }
@@ -992,8 +1038,14 @@ fn classify_claude(value: &Value) -> LineSignal {
         }
         // Tool results and follow-up user turns mean work is still flowing.
         Some("user") => {
-            if value
-                .pointer("/message/content")
+            let content = value.pointer("/message/content");
+            // Esc during a turn: Claude Code records the interruption as a
+            // user message. The user stopped the work themselves, so a pending
+            // completion for that turn must be dropped, not announced.
+            if content.is_some_and(content_is_interrupt) {
+                return LineSignal::Working;
+            }
+            if content
                 .map(|content| content_has_tool_result(content))
                 .unwrap_or(false)
             {
@@ -1003,6 +1055,21 @@ fn classify_claude(value: &Value) -> LineSignal {
             }
         }
         _ => LineSignal::None,
+    }
+}
+
+/// Claude Code's marker for a turn the user stopped, as plain text or as a
+/// single text block.
+fn content_is_interrupt(content: &Value) -> bool {
+    const MARKER: &str = "[Request interrupted by user";
+    match content {
+        Value::String(text) => text.starts_with(MARKER),
+        Value::Array(items) => items.iter().any(|item| {
+            item.get("text")
+                .and_then(Value::as_str)
+                .is_some_and(|text| text.starts_with(MARKER))
+        }),
+        _ => false,
     }
 }
 
@@ -1078,6 +1145,7 @@ mod tests {
             next_discovery: Instant::now(),
             file,
             offset,
+            strong: true,
             pending_complete: None,
         }
     }
@@ -1152,6 +1220,27 @@ mod tests {
             "grok",
             br#"{"params":{"update":{"sessionUpdate":"turn_completed","prompt_id":"task-completed-call-99f7904f-2551-46b0-aeb6-cf7ede36dbad-27"}}}"#,
         ));
+        // Esc during a turn: the user is at the keyboard and stopped the work
+        // themselves, and a pending completion for that turn must be dropped.
+        assert_eq!(
+            classify_session_line(
+                "codex",
+                br#"{"type":"event_msg","payload":{"type":"turn_aborted","reason":"interrupted"}}"#,
+            ),
+            LineSignal::Working
+        );
+        assert_eq!(
+            classify_session_line(
+                "claude",
+                br#"{"type":"user","message":{"content":[{"type":"text","text":"[Request interrupted by user]"}]}}"#,
+            ),
+            LineSignal::Working
+        );
+        // An abort Codex reports for its own reasons still hands back control.
+        assert!(is_completion_line(
+            "codex",
+            br#"{"type":"event_msg","payload":{"type":"turn_aborted","reason":"error"}}"#,
+        ));
         assert_eq!(
             classify_session_line(
                 "grok",
@@ -1188,6 +1277,7 @@ mod tests {
             next_discovery: Instant::now(),
             file: None,
             offset: 0,
+            strong: false,
             pending_complete: None,
         };
         assert!(discovery_roots(&claude, home)

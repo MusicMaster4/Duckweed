@@ -13,6 +13,7 @@ const launch: AgentLaunch = {
   model: null,
   effort: null,
   resume: false,
+  resumeId: null,
 };
 
 function harness(overrides: Partial<AgentLaunch> = {}) {
@@ -442,5 +443,46 @@ describe("codex adapter", () => {
     await Promise.resolve();
     await Promise.resolve();
     expect(h.state()).toMatchObject({ status: "error", error: "not logged in" });
+  });
+  test("resumes a stored thread over the protocol, keeping the process", async () => {
+    const h = harness();
+    await h.handshake();
+    const before = h.sent.length;
+
+    expect(h.adapter.resume?.("thread_old", h.ctx)).toBe(true);
+    const call = h.sent.slice(before).find((message) => message.method === "thread/resume");
+    expect(call?.params).toEqual({ threadId: "thread_old" });
+
+    h.feed({
+      jsonrpc: "2.0",
+      id: (call as { id: number }).id,
+      result: { thread: { id: "thread_old", sessionId: "sess_old" }, model: "gpt-5.6" },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(h.state()).toMatchObject({ sessionId: "sess_old", model: "gpt-5.6", status: "idle" });
+
+    // Later turns must run against the thread that was resumed.
+    h.adapter.prompt("carry on", h.ctx);
+    expect(h.sent.at(-1)).toMatchObject({
+      method: "turn/start",
+      params: expect.objectContaining({ threadId: "thread_old" }),
+    });
+  });
+
+  test("says so when a thread cannot be resumed", async () => {
+    const h = harness();
+    await h.handshake();
+    h.adapter.resume?.("gone", h.ctx);
+    const call = h.sent.find((message) => message.method === "thread/resume") as { id: number };
+    h.feed({ jsonrpc: "2.0", id: call.id, error: { message: "thread not found" } });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(h.state().items.at(-1)).toMatchObject({
+      kind: "notice",
+      tone: "error",
+      text: "thread not found",
+    });
+    expect(h.state().status).toBe("idle");
   });
 });

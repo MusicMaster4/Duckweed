@@ -241,7 +241,16 @@ export function createClaudeAdapter(): AgentAdapter {
         .filter(Boolean)
         .join("\n")
         .trim();
-      if (text) ctx.emit({ type: "notice", tone: "info", text });
+      if (text) {
+        // Keep the header in sync when the CLI confirms an effort change
+        // (or refuses ultracode / a bad level).
+        const setEffort = /Set effort level to (\w+)/i.exec(text);
+        if (setEffort) {
+          ctx.emit({ type: "session", effort: setEffort[1].toLowerCase() });
+        }
+        const refused = /needs dynamic workflows|Invalid argument|Valid options are/i.test(text);
+        ctx.emit({ type: "notice", tone: refused ? "error" : "info", text });
+      }
       return;
     }
     for (const raw of asArray(message.content)) {
@@ -350,8 +359,12 @@ export function createClaudeAdapter(): AgentAdapter {
     }
   }
 
-  /** Effort levels `/effort` accepts — the CLI prints this exact set on a bare `/effort`. */
-  const EFFORT_LEVELS = new Set(["low", "medium", "high", "xhigh", "max", "auto"]);
+  /**
+   * Effort levels `/effort` accepts. The CLI usage line lists
+   * low|medium|high|xhigh|max|auto; `ultracode` is plan/workflow-gated and
+   * returns a clear refusal when unavailable (verified against claude 2.1.220).
+   */
+  const EFFORT_LEVELS = new Set(["low", "medium", "high", "xhigh", "max", "auto", "ultracode"]);
 
   function handleCommand(text: string, ctx: AdapterContext): "handled" | "prompt" {
     const space = text.search(/\s/);
@@ -381,7 +394,7 @@ export function createClaudeAdapter(): AgentAdapter {
         ctx.emit({
           type: "notice",
           tone: "error",
-          text: `Unknown effort "${arg}" — pick low, medium, high, xhigh, max, or auto.`,
+          text: `Unknown effort "${arg}" — pick low, medium, high, xhigh, max, auto, or ultracode.`,
         });
         return "handled";
       }
@@ -400,11 +413,15 @@ export function createClaudeAdapter(): AgentAdapter {
   return {
     endsOnStdinClose: true,
 
+    // No `resume` here on purpose: `stream-json` has no method for swapping
+    // conversations, so the session store relaunches the CLI with the flags
+    // below. That is also what `claude --resume <id>` does interactively.
     args: (launch: AgentLaunch) => {
       const extra: string[] = [];
       if (launch.model) extra.push("--model", launch.model);
       if (launch.effort) extra.push("--effort", launch.effort);
-      if (launch.resume) extra.push("--continue");
+      if (launch.resumeId) extra.push("--resume", launch.resumeId);
+      else if (launch.resume) extra.push("--continue");
       return extra;
     },
 
@@ -428,6 +445,8 @@ export function createClaudeAdapter(): AgentAdapter {
             .map((name) => asString(name))
             .filter((name): name is string => name !== null)
             .map((name) => ({ name: `/${name}`, description: "" }));
+          // Prefer the raw model id from init (`claude-opus-5[1m]`); the
+          // session already seeded the alias list for the picker.
           ctx.emit({
             type: "session",
             sessionId: asString(frame.session_id) ?? undefined,

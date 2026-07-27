@@ -5,6 +5,8 @@ export interface ProcessState {
   completionSeq: number;
   /** Recognised coding agent currently responsible for the terminal activity. */
   agent: AgentKind | null;
+  /** The custom agent UI owns this pane, so its shell is not what finishes. */
+  agentUi: boolean;
   /** Wall-clock captured when a child process first became active. */
   processStartedAt: number | null;
 }
@@ -34,6 +36,9 @@ export const COMPLETION_SOUND_MIN_MS = 60_000;
  * via completionSeq from session logs, hooks, or OSC notifications. Treating
  * process exit as completion falsely played the sound and flash on quit, and
  * stacked with a late agent:complete for agents like Grok.
+ *
+ * The same holds under the custom agent UI, where the shell sitting behind the
+ * pane is not what the user is waiting on at all.
  */
 export function shouldSignalCompletion(
   previous: ProcessState,
@@ -44,6 +49,7 @@ export function shouldSignalCompletion(
   if (!didProcessFinish(previous, current)) return false;
   // Agent process left the tree (or the shell died while one was bound).
   if (previous.agent !== null || current.agent !== null) return false;
+  if (previous.agentUi || current.agentUi) return false;
 
   const startedAt = previous.processStartedAt ?? current.processStartedAt;
   return startedAt !== null && now - startedAt > PROCESS_COMPLETION_MIN_MS;
@@ -62,6 +68,26 @@ export function shouldPlayCompletionSound(
   if (!shouldSignalCompletion(previous, current, now)) return false;
   const startedAt = previous.processStartedAt ?? current.processStartedAt;
   return startedAt !== null && now - startedAt > COMPLETION_SOUND_MIN_MS;
+}
+
+/**
+ * True when raw terminal input is the user handing work to a bound agent.
+ *
+ * Enter submits a prompt in every CLI agent we recognise, and it is also how a
+ * permission prompt is answered. Escape sequences are stripped first: xterm
+ * answers ConPTY's device queries through the same channel, and full-screen
+ * agents turn on mouse reporting, neither of which is the user asking for
+ * anything. Over-counting only allows a notification the agent still has to
+ * earn; under-counting would swallow a real one, so anything Enter-shaped
+ * counts.
+ */
+export function isAgentPromptSubmission(data: string): boolean {
+  const typed = data
+    // CSI (mouse reports, cursor position replies, bracketed paste markers).
+    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "")
+    // OSC and other string sequences, up to their terminator.
+    .replace(/\x1b][\s\S]*?(?:\x07|\x1b\\)/g, "");
+  return /[\r\n]/.test(typed);
 }
 
 export type AgentKind =

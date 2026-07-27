@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import {
   detectAgent,
   didProcessFinish,
+  isAgentPromptSubmission,
   isGenericOsc777Notification,
   parseAgentOsc777,
   shouldPlayCompletionSound,
@@ -14,6 +15,7 @@ const state = (overrides = {}) => ({
   exited: false,
   completionSeq: 0,
   agent: null,
+  agentUi: false,
   processStartedAt: null,
   ...overrides,
 });
@@ -115,6 +117,33 @@ describe("completion sound and highlight eligibility", () => {
         now,
       ),
     ).toBe(false);
+  });
+
+  test("the shell behind a custom agent UI pane is never the completion", () => {
+    // The agent runs beside the PTY, so the shell dying (or the pane's last
+    // command finishing before the UI took over) says nothing about the turn.
+    expect(
+      shouldSignalCompletion(
+        state({ busy: true, agentUi: true, processStartedAt: now - 120_000 }),
+        state({ agentUi: true, processStartedAt: now - 120_000 }),
+        now,
+      ),
+    ).toBe(false);
+    expect(
+      shouldSignalCompletion(
+        state({ agentUi: true, processStartedAt: now - 120_000 }),
+        state({ exited: true, agentUi: true, processStartedAt: now - 120_000 }),
+        now,
+      ),
+    ).toBe(false);
+    // Its own protocol-reported turn still counts.
+    expect(
+      shouldSignalCompletion(
+        state({ agentUi: true, completionSeq: 1, processStartedAt: now - 120_000 }),
+        state({ agentUi: true, completionSeq: 2, processStartedAt: now - 120_000 }),
+        now,
+      ),
+    ).toBe(true);
   });
 
   test("signals persistent agent turns regardless of process runtime", () => {
@@ -252,6 +281,24 @@ describe("CLI agent signals", () => {
       'notify;warp://cli-agent;{"v":1,"agent":"codex","event":"prompt_submit"}',
     );
     expect(event).toEqual({ agent: "codex", needsAttention: false });
+  });
+
+  test("counts Enter into a bound agent as a prompt, and terminal chatter as nothing", () => {
+    expect(isAgentPromptSubmission("\r")).toBe(true);
+    expect(isAgentPromptSubmission("fix the build\r")).toBe(true);
+    // Answering a permission prompt is also work handed back to the agent.
+    expect(isAgentPromptSubmission("2\r")).toBe(true);
+    // Bracketed paste of a multi-line prompt.
+    expect(isAgentPromptSubmission("\x1b[200~one\ntwo\x1b[201~\r")).toBe(true);
+
+    expect(isAgentPromptSubmission("hello")).toBe(false);
+    expect(isAgentPromptSubmission("\x03")).toBe(false);
+    // Arrow keys and mouse reports full-screen agents ask for.
+    expect(isAgentPromptSubmission("\x1b[A")).toBe(false);
+    expect(isAgentPromptSubmission("\x1b[<0;12;24M")).toBe(false);
+    // xterm answering ConPTY's startup queries is not the user typing.
+    expect(isAgentPromptSubmission("\x1b[24;80R")).toBe(false);
+    expect(isAgentPromptSubmission("\x1b]11;rgb:1e1e/1e1e/1e1e\x07")).toBe(false);
   });
 
   test("recognises generic OSC 777 terminal notifications", () => {

@@ -12,12 +12,19 @@ import type { AgentId, AgentModelChoice } from "./types";
  *
  * Only commands the session can actually dispatch belong here — either the
  * protocol carries them (Claude interprets slash text itself, ACP agents
- * intercept advertised names) or the adapter wires them to an RPC
- * (`/model`, `/effort`, `/compact`). Names verified against the installed
- * CLIs (claude 2.1, codex 0.145, grok 0.2.112, opencode 1.18).
+ * intercept advertised names), the adapter wires them to an RPC (`/model`,
+ * `/effort`, `/compact`), or the app answers them itself (`/resume`, which
+ * opens the session picker and never reaches the agent). Names verified
+ * against the installed CLIs (claude 2.1, codex 0.145, grok 0.2.112,
+ * opencode 1.18).
+ *
+ * The lists are per agent on purpose: a pane running Grok must offer Grok's
+ * commands and nothing else, because a command from another CLI either fails
+ * or, worse, is chatted to the model at full price.
  */
 const FALLBACKS: Record<AgentId, { name: string; description: string }[]> = {
   claude: [
+    { name: "/resume", description: "Continue a past Claude Code session in this folder" },
     { name: "/model", description: "Change the model for this session" },
     { name: "/effort", description: "Set effort: low, medium, high, xhigh, max, auto" },
     { name: "/compact", description: "Compact the conversation to free context" },
@@ -33,11 +40,13 @@ const FALLBACKS: Record<AgentId, { name: string; description: string }[]> = {
     { name: "/help", description: "Show help" },
   ],
   codex: [
+    { name: "/resume", description: "Continue a past Codex thread in this folder" },
     { name: "/model", description: "Change the model for later turns" },
     { name: "/effort", description: "Set reasoning effort for later turns" },
     { name: "/compact", description: "Compact the conversation to free context" },
   ],
   grok: [
+    { name: "/resume", description: "Continue a past Grok Build session in this folder" },
     { name: "/model", description: "Change the model for this session" },
     { name: "/effort", description: "Set reasoning effort: low, medium, high" },
     { name: "/compact", description: "Compress conversation history" },
@@ -45,7 +54,9 @@ const FALLBACKS: Record<AgentId, { name: string; description: string }[]> = {
     { name: "/session-info", description: "Show session details" },
   ],
   opencode: [
+    { name: "/resume", description: "Continue a past OpenCode session in this folder" },
     { name: "/model", description: "Change the model for this session" },
+    { name: "/effort", description: "Set thinking effort for the current model" },
     { name: "/compact", description: "Compact the conversation to free context" },
   ],
   cursor: [{ name: "/model", description: "Change the model for this session" }],
@@ -53,16 +64,52 @@ const FALLBACKS: Record<AgentId, { name: string; description: string }[]> = {
 
 /**
  * Claude's stream-json init never lists switchable models, only the one in
- * use. These short aliases are what `/model` and the control request accept
- * (verified against claude 2.1), so the picker has something to offer before
- * the user has to invent an id.
+ * use. These aliases are exactly what bare `/model` advertises (verified
+ * against claude 2.1.220): short names, 1M variants, and plan-gated extras.
+ *
+ * Effort levels match `/effort` usage plus `ultracode` (needs dynamic
+ * workflows / plan — still listed so the picker mirrors the CLI; rejected
+ * levels surface as a notice rather than vanishing from the UI).
  */
-const CLAUDE_EFFORTS = ["low", "medium", "high", "xhigh", "max", "auto"];
+const CLAUDE_EFFORTS = ["low", "medium", "high", "xhigh", "max", "auto", "ultracode"];
 const CLAUDE_MODELS: AgentModelChoice[] = [
-  { id: "opus", label: "Opus", efforts: CLAUDE_EFFORTS },
-  { id: "sonnet", label: "Sonnet", efforts: CLAUDE_EFFORTS },
-  { id: "haiku", label: "Haiku", efforts: CLAUDE_EFFORTS },
+  { id: "default", label: "Default (recommended)", efforts: CLAUDE_EFFORTS },
+  { id: "sonnet", label: "Sonnet 5", efforts: CLAUDE_EFFORTS },
+  { id: "fable", label: "Fable 5", efforts: CLAUDE_EFFORTS },
+  { id: "opus", label: "Opus 5", efforts: CLAUDE_EFFORTS },
+  { id: "haiku", label: "Haiku 4.5", efforts: CLAUDE_EFFORTS },
+  { id: "opus[1m]", label: "Opus 5 (1M context)", efforts: CLAUDE_EFFORTS },
+  { id: "sonnet[1m]", label: "Sonnet 5 (1M context)", efforts: CLAUDE_EFFORTS },
+  { id: "fable[1m]", label: "Fable 5 (1M context)", efforts: CLAUDE_EFFORTS },
+  { id: "best", label: "Best available", efforts: CLAUDE_EFFORTS },
+  { id: "opusplan", label: "Opus Plan", efforts: CLAUDE_EFFORTS },
 ];
+
+/** Friendly labels for Claude model ids that arrive from init / settings. */
+export function claudeModelLabel(id: string): string {
+  const lower = id.toLowerCase();
+  const exact = CLAUDE_MODELS.find((model) => model.id.toLowerCase() === lower);
+  if (exact) return exact.label;
+  // Full ids from system/init: `claude-opus-5[1m]`, `claude-sonnet-5`, …
+  if (lower.includes("fable")) return lower.includes("1m") ? "Fable 5 (1M context)" : "Fable 5";
+  if (lower.includes("opus")) return lower.includes("1m") ? "Opus 5 (1M context)" : "Opus 5";
+  if (lower.includes("sonnet")) return lower.includes("1m") ? "Sonnet 5 (1M context)" : "Sonnet 5";
+  if (lower.includes("haiku")) return "Haiku 4.5";
+  return id;
+}
+
+/** Map a full Claude model id onto the short alias the picker uses. */
+export function claudeModelAlias(id: string): string {
+  const lower = id.toLowerCase();
+  if (lower === "default" || lower === "best" || lower === "opusplan") return lower;
+  const oneM = lower.includes("[1m]") || lower.includes("1m");
+  if (lower.includes("fable")) return oneM ? "fable[1m]" : "fable";
+  if (lower.includes("opus") && lower.includes("plan")) return "opusplan";
+  if (lower.includes("opus")) return oneM ? "opus[1m]" : "opus";
+  if (lower.includes("sonnet")) return oneM ? "sonnet[1m]" : "sonnet";
+  if (lower.includes("haiku")) return "haiku";
+  return id;
+}
 
 /**
  * Seed models/efforts when the protocol has not (yet) sent any. Live lists

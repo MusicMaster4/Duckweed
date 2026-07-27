@@ -3,6 +3,7 @@
 
 mod agent_activity;
 mod agent_proc;
+mod agent_sessions;
 mod fs;
 mod git;
 mod launch;
@@ -22,6 +23,7 @@ use tauri::{ipc::Channel, AppHandle, Emitter, Manager, State};
 
 use agent_activity::AgentActivityManager;
 use agent_proc::{AgentAvailability, AgentFrame, AgentProcManager, AgentSpawnOptions, AgentStarted};
+use agent_sessions::AgentSessionSummary;
 use fs::{DirEntry, FileContent};
 use git::{Branches, Diff, DiffStats, FileDiff};
 use launch::{LaunchIntent, PendingLaunch};
@@ -293,6 +295,16 @@ fn agent_watch(manager: State<'_, AgentActivityManager>, id: String, agent: Stri
 #[tauri::command]
 fn agent_unwatch(manager: State<'_, AgentActivityManager>, id: String) {
     manager.unwatch(&id);
+}
+
+/// Past conversations `agent` recorded for `cwd`, so the custom UI can offer
+/// to resume one. Reads the CLI's own session store — no agent is started.
+#[tauri::command]
+async fn agent_sessions_list(
+    agent: String,
+    cwd: String,
+) -> Result<Vec<AgentSessionSummary>, String> {
+    blocking(move || agent_sessions::list(&agent, &cwd)).await
 }
 
 /// Which headless agent CLIs this machine has, so the custom UI only takes
@@ -573,6 +585,7 @@ fn main() {
             pty_any_busy,
             agent_watch,
             agent_unwatch,
+            agent_sessions_list,
             agent_proc_probe,
             agent_proc_start,
             agent_proc_send,

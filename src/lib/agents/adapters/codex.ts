@@ -608,6 +608,40 @@ export function createCodexAdapter(): AgentAdapter {
 
     command: handleCommand,
 
+    /**
+     * `thread/resume` swaps the live thread for a stored one, so the running
+     * process keeps its handshake, model list, and sandbox decision. It does
+     * not replay the old items — Codex answers with the thread record only —
+     * which is why the UI shows a resumed marker rather than a transcript.
+     */
+    resume: (sessionId, ctx) => {
+      void request(ctx, "thread/resume", { threadId: sessionId })
+        .then((result) => {
+          const thread = asRecord(result.thread) ?? result;
+          threadId = asString(thread.id) ?? sessionId;
+          // `thread/start` reports the model beside the thread, `thread/resume`
+          // inside it; neither is guaranteed, so take whichever is there.
+          const model = asString(result.model) ?? asString(thread.model);
+          if (model) currentModel = model;
+          ctx.emit({
+            type: "session",
+            sessionId: asString(thread.sessionId) ?? threadId,
+            ...(model ? { model } : {}),
+          });
+          ctx.emit({ type: "status", status: "idle" });
+        })
+        .catch((error: unknown) => {
+          const record = asRecord(error);
+          ctx.emit({
+            type: "notice",
+            tone: "error",
+            text: asString(record?.message) ?? "Codex could not resume that thread.",
+          });
+          ctx.emit({ type: "status", status: "idle" });
+        });
+      return true;
+    },
+
     interrupt: (ctx) => {
       if (!threadId || !currentTurnId) return;
       void request(ctx, "turn/interrupt", { threadId, turnId: currentTurnId }).catch(() => {

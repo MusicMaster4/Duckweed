@@ -127,6 +127,26 @@ export interface AgentStarted {
   pid: number | null;
 }
 
+/** One resumable conversation, read from an agent CLI's own session store. */
+export interface AgentSessionSummary {
+  /** What that agent's resume takes — a CLI flag value or a protocol id. */
+  id: string;
+  title: string;
+  /** Epoch milliseconds of the newest activity. */
+  updatedAt: number;
+  /** Epoch milliseconds, or 0 when the record does not say. */
+  createdAt: number;
+  /** 0 when counting would have meant reading the whole transcript. */
+  messageCount: number;
+  /** Empty unless the record names the model it ran with. */
+  model: string;
+  path: string;
+}
+
+/** Past sessions `agent` recorded for `cwd`, newest first. Starts nothing. */
+export const agentSessionsList = (agent: string, cwd: string) =>
+  invoke<AgentSessionSummary[]>("agent_sessions_list", { agent, cwd });
+
 /** Which agent CLIs this machine has, without starting any of them. */
 export const agentProcProbe = (names: string[]) =>
   invoke<AgentAvailability[]>("agent_proc_probe", { names });

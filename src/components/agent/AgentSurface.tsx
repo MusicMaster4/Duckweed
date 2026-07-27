@@ -1,10 +1,19 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useSyncExternalStore } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 
 import { AGENTS } from "../../lib/agents/catalog";
+import { canResume } from "../../lib/agents/history";
 import * as agents from "../../lib/agents/session";
 import type { AgentSessionState } from "../../lib/agents/types";
 import { AgentComposer } from "./AgentComposer";
 import { AgentPermission } from "./AgentPermission";
+import { AgentSessions } from "./AgentSessions";
 import { AgentTimeline } from "./AgentTimeline";
 import { shortModelLabel } from "../../lib/agents/types";
 
@@ -46,6 +55,9 @@ export function AgentSurface({ termId, active, onClose }: Props) {
   );
 
   const scrollRef = useRef<HTMLDivElement>(null);
+  const composerRef = useRef<HTMLTextAreaElement>(null);
+  /** Open with the text typed after `/resume`, so it doubles as a filter. */
+  const [resumeQuery, setResumeQuery] = useState<string | null>(null);
   // Following the stream is the default, but scrolling up to read something is
   // a deliberate act — new output must not yank the view back down.
   const pinnedRef = useRef(true);
@@ -78,12 +90,41 @@ export function AgentSurface({ termId, active, onClose }: Props) {
   const definition = AGENTS[session.agent];
   const { usage } = session;
   const tokens = usage.inputTokens + usage.outputTokens;
+  const ended = session.status === "exited" || session.status === "error";
+  const resumable = canResume(session.agent);
+
+  /**
+   * `/resume` is answered by the app, not the agent: no CLI advertises its
+   * own history over the protocols we speak, so the text never leaves here.
+   */
+  const submit = (text: string) => {
+    const match = /^\/resume(?:\s+(.*))?$/i.exec(text.trim());
+    if (match) {
+      setResumeQuery(match[1]?.trim() ?? "");
+      return;
+    }
+    pinnedRef.current = true;
+    agents.submit(termId, text);
+  };
+
+  /**
+   * Clicking anywhere quiet in the transcript hands the keyboard back to the
+   * composer, the way a chat pane does. A drag that selected text is exempt —
+   * that click was for the selection, and stealing focus would clear it.
+   */
+  const focusComposer = (event: React.MouseEvent) => {
+    if (ended || session.permission || resumeQuery !== null) return;
+    if ((event.target as HTMLElement).closest("button, a, input, textarea, pre, code")) return;
+    if (window.getSelection()?.toString()) return;
+    composerRef.current?.focus();
+  };
 
   return (
     <div
       className={`agent-surface is-${session.status}`}
       style={{ ["--agent-accent" as string]: definition.accent }}
       data-agent={session.agent}
+      onMouseUp={focusComposer}
     >
       <header className="agent-head">
         <span className="agent-badge" aria-hidden="true">
@@ -91,7 +132,7 @@ export function AgentSurface({ termId, active, onClose }: Props) {
         </span>
         <span className="agent-name">{session.label}</span>
         {/* Read-only identity in the head — interactive pickers live in the
-            composer footer (T3 Code layout: model + effort next to send). */}
+            composer footer (T3 Code layout: model + effort under the input). */}
         {session.model && (
           <span className="agent-model" title={session.model}>
             {shortModelLabel(session.model)}
@@ -120,6 +161,23 @@ export function AgentSurface({ termId, active, onClose }: Props) {
               style={{ width: `${Math.round(usage.contextUsed * 100)}%` }}
             />
           </span>
+        )}
+        {/* Hidden mid-turn: resuming would strand the work in flight, and an
+            action that is refused every time is worse than one that waits. */}
+        {resumable && !ended && session.status !== "working" && (
+          <button
+            type="button"
+            className="agent-head-btn is-quiet"
+            onClick={() => setResumeQuery("")}
+            title={`Resume a past ${definition.label} session (/resume)`}
+            aria-label="Resume a past session"
+          >
+            <svg viewBox="0 0 14 14" aria-hidden="true">
+              <path d="M2 7a5 5 0 1 0 1.6-3.7" fill="none" />
+              <path d="M2 1.8V4.4H4.6" fill="none" />
+              <path d="M7 4.4V7l1.9 1.1" fill="none" />
+            </svg>
+          </button>
         )}
         <button
           type="button"
@@ -193,13 +251,30 @@ export function AgentSurface({ termId, active, onClose }: Props) {
 
       <AgentComposer
         session={session}
-        active={active && !session.permission}
-        onSubmit={(text) => {
-          pinnedRef.current = true;
-          agents.submit(termId, text);
-        }}
+        active={active && !session.permission && resumeQuery === null}
+        inputRef={composerRef}
+        onSubmit={submit}
         onInterrupt={() => agents.interrupt(termId)}
       />
+
+      {resumeQuery !== null && (
+        <AgentSessions
+          agent={session.agent}
+          cwd={session.cwd}
+          initialQuery={resumeQuery}
+          onClose={() => setResumeQuery(null)}
+          onPick={(chosen) => {
+            setResumeQuery(null);
+            pinnedRef.current = true;
+            void agents.resume(termId, chosen.id, chosen.title).then((failure) => {
+              // Only the relaunching agents can fail this way, and a failed
+              // relaunch leaves no session to render the reason in. Handing
+              // the pane back to its shell beats leaving it blank.
+              if (failure) onClose();
+            });
+          }}
+        />
+      )}
     </div>
   );
 }

@@ -13,6 +13,7 @@ const launch: AgentLaunch = {
   model: null,
   effort: null,
   resume: false,
+  resumeId: null,
 };
 
 function harness(overrides: Partial<AgentLaunch> = {}) {
@@ -296,6 +297,104 @@ describe("acp adapter", () => {
       },
     );
     expect(h.state().model).toBe("opencode/big-pickle");
+    expect(h.state().models.map((model) => model.id)).toContain("opencode/claude-haiku-4-5");
+  });
+
+  test("reads OpenCode thought_level effort from configOptions", async () => {
+    const h = harness({ agent: "opencode" });
+    await h.handshake(
+      {},
+      {
+        configOptions: [
+          {
+            id: "model",
+            category: "model",
+            type: "select",
+            currentValue: "opencode/claude-opus-5",
+            options: [
+              { value: "opencode/big-pickle", name: "Big Pickle" },
+              { value: "opencode/claude-opus-5", name: "Claude Opus 5" },
+            ],
+          },
+          {
+            id: "effort",
+            name: "Effort",
+            category: "thought_level",
+            type: "select",
+            currentValue: "medium",
+            options: [
+              { value: "low", name: "Low" },
+              { value: "medium", name: "Medium" },
+              { value: "high", name: "High" },
+              { value: "xhigh", name: "Xhigh" },
+              { value: "max", name: "Max" },
+            ],
+          },
+        ],
+      },
+    );
+    expect(h.state().model).toBe("opencode/claude-opus-5");
+    expect(h.state().effort).toBe("medium");
+    expect(h.state().models.find((model) => model.id === "opencode/claude-opus-5")?.efforts).toEqual(
+      ["low", "medium", "high", "xhigh", "max"],
+    );
+  });
+
+  test("switches OpenCode effort through set_config_option", async () => {
+    const h = harness({ agent: "opencode" });
+    await h.handshake(
+      {},
+      {
+        configOptions: [
+          {
+            id: "model",
+            category: "model",
+            currentValue: "opencode/claude-opus-5",
+            options: [{ value: "opencode/claude-opus-5", name: "Claude Opus 5" }],
+          },
+          {
+            id: "effort",
+            category: "thought_level",
+            currentValue: "low",
+            options: [
+              { value: "low", name: "Low" },
+              { value: "high", name: "High" },
+            ],
+          },
+        ],
+      },
+    );
+    expect(h.adapter.command?.("/effort high", h.ctx)).toBe("handled");
+    expect(h.sent.at(-1)).toMatchObject({
+      method: "session/set_config_option",
+      params: { sessionId: "s1", configId: "effort", value: "high" },
+    });
+    h.feed({
+      jsonrpc: "2.0",
+      id: 3,
+      result: {
+        configOptions: [
+          {
+            id: "model",
+            category: "model",
+            currentValue: "opencode/claude-opus-5",
+            options: [{ value: "opencode/claude-opus-5", name: "Claude Opus 5" }],
+          },
+          {
+            id: "effort",
+            category: "thought_level",
+            currentValue: "high",
+            options: [
+              { value: "low", name: "Low" },
+              { value: "high", name: "High" },
+            ],
+          },
+        ],
+      },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(h.state().effort).toBe("high");
   });
 
   test("applies a launch-time model over the protocol", async () => {
@@ -353,11 +452,32 @@ describe("acp adapter", () => {
     );
 
     expect(h.adapter.command?.("/model claude-haiku-4-5", h.ctx)).toBe("handled");
+    // OpenCode-style configOptions → set_config_option, not set_model.
     expect(h.sent.at(-1)).toMatchObject({
-      method: "session/set_model",
-      params: { modelId: "opencode/claude-haiku-4-5" },
+      method: "session/set_config_option",
+      params: {
+        sessionId: "s1",
+        configId: "model",
+        value: "opencode/claude-haiku-4-5",
+      },
     });
-    h.feed({ jsonrpc: "2.0", id: 3, result: {} });
+    h.feed({
+      jsonrpc: "2.0",
+      id: 3,
+      result: {
+        configOptions: [
+          {
+            id: "model",
+            category: "model",
+            currentValue: "opencode/claude-haiku-4-5",
+            options: [
+              { value: "opencode/big-pickle", name: "Big Pickle" },
+              { value: "opencode/claude-haiku-4-5", name: "Claude Haiku 4.5" },
+            ],
+          },
+        ],
+      },
+    });
     await Promise.resolve();
     await Promise.resolve();
     expect(h.state().model).toBe("opencode/claude-haiku-4-5");
@@ -441,5 +561,47 @@ describe("acp adapter", () => {
     await Promise.resolve();
     await Promise.resolve();
     expect(h.state().items.find((item) => item.kind === "notice")).toBeUndefined();
+  });
+  test("loads a stored session when the agent advertises loadSession", async () => {
+    const h = harness();
+    await h.handshake({ agentCapabilities: { loadSession: true } });
+
+    expect(h.adapter.resume?.("old-1", h.ctx)).toBe(true);
+    const load = h.sent.find((message) => message.method === "session/load");
+    expect(load?.params).toMatchObject({ sessionId: "old-1", cwd: "H:/project" });
+
+    // The replay arrives as the same chunked updates a live turn produces.
+    h.update({ sessionUpdate: "user_message_chunk", content: { type: "text", text: "Fix the " } });
+    h.update({ sessionUpdate: "user_message_chunk", content: { type: "text", text: "parser" } });
+    h.update({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Done." } });
+    h.feed({ jsonrpc: "2.0", id: 3, result: {} });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const items = h.state().items;
+    // Chunks of one past prompt collapse into a single transcript row.
+    expect(items.filter((item) => item.kind === "user")).toEqual([
+      expect.objectContaining({ kind: "user", text: "Fix the parser" }),
+    ]);
+    expect(items.at(-1)).toMatchObject({ kind: "assistant", text: "Done." });
+    expect(h.state().status).toBe("idle");
+  });
+
+  test("refuses to resume when the agent never advertised loadSession", async () => {
+    const h = harness();
+    await h.handshake();
+    expect(h.adapter.resume?.("old-1", h.ctx)).toBe(false);
+    expect(h.sent.some((message) => message.method === "session/load")).toBe(false);
+  });
+
+  test("reports a load the agent rejected instead of leaving the pane blank", async () => {
+    const h = harness();
+    await h.handshake({ agentCapabilities: { loadSession: true } });
+    h.adapter.resume?.("gone", h.ctx);
+    h.feed({ jsonrpc: "2.0", id: 3, error: { code: -32602, message: "no such session" } });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(h.state().items.at(-1)).toMatchObject({ kind: "notice", tone: "error", text: "no such session" });
+    expect(h.state().status).toBe("idle");
   });
 });

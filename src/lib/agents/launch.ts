@@ -19,6 +19,12 @@ export interface AgentLaunch {
   effort: string | null;
   /** `-c` / `--continue`, or `--resume` with no id: pick up where they left off. */
   resume: boolean;
+  /**
+   * A specific past session to resume: `--resume <id>`, or OpenCode's
+   * `--session <id>`. Also set by the in-app session picker, which is the
+   * usual way one gets here.
+   */
+  resumeId: string | null;
 }
 
 /**
@@ -215,6 +221,7 @@ export function parseAgentLaunch(command: string): AgentLaunch | null {
   let model: string | null = null;
   let effort: string | null = null;
   let resume = false;
+  let resumeId: string | null = null;
 
   for (let i = 0; i < args.length; i++) {
     const word = args[i];
@@ -252,7 +259,15 @@ export function parseAgentLaunch(command: string): AgentLaunch | null {
           model = config.model ?? model;
           effort = config.effort ?? effort;
         }
-        if (lower === "--resume" && !hasValue) resume = true;
+        if (lower === "--resume") {
+          if (hasValue) resumeId = value;
+          else resume = true;
+        }
+        // `-s` is OpenCode's "continue this session"; Grok spells the same two
+        // characters `--session-id` and means "start a new one with this id".
+        if (hasValue && agent === "opencode" && (lower === "-s" || lower === "--session")) {
+          resumeId = value;
+        }
         if (hasValue) i += 1;
         continue;
       }
@@ -270,7 +285,7 @@ export function parseAgentLaunch(command: string): AgentLaunch | null {
     return null;
   }
 
-  return { agent, args, prompt, model, effort, resume };
+  return { agent, args, prompt, model, effort, resume, resumeId };
 }
 
 /** True when `agent` is one the custom UI knows how to drive. */
