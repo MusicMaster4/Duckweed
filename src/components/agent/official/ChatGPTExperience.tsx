@@ -74,7 +74,7 @@ export function shouldDockCodexPrompt(
 }
 
 export function ChatGPTExperience(props: ExperienceProps) {
-  const { items, status, started, agent, label, program, cwd } = props;
+  const { items, termId, status, started, agent, label, program, cwd } = props;
   const [pendingThinkingVisible, setPendingThinkingVisible] = useState(false);
   const latestUserRef = useRef<HTMLElement>(null);
   const dockedRectRef = useRef<DOMRect | null>(null);
@@ -149,6 +149,7 @@ export function ChatGPTExperience(props: ExperienceProps) {
     return (
       <ProviderEmpty
         agent={agent}
+        termId={termId}
         label={label}
         program={program}
         cwd={cwd}

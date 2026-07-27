@@ -9,13 +9,14 @@ import {
 
 import { canResume } from "../../lib/agents/history";
 import * as agents from "../../lib/agents/session";
-import type { AgentSessionState } from "../../lib/agents/types";
+import type { AgentSessionState, PlanItem } from "../../lib/agents/types";
 import { confirmCloseRunning } from "../../lib/confirmClose";
 import { AgentComposer } from "./AgentComposer";
 import { AgentPermission } from "./AgentPermission";
 import { AgentProviderIcon } from "./AgentProviderIcon";
 import { AgentSessions } from "./AgentSessions";
 import { AgentTimeline } from "./AgentTimeline";
+import { PlanTracker, type OfficialVariant } from "./official/OfficialShared";
 
 interface Props {
   termId: string;
@@ -39,6 +40,19 @@ const STATUS_LABEL: Record<AgentSessionState["status"], string> = {
   exited: "ended",
   error: "failed",
 };
+
+function workflowVariant(agent: AgentSessionState["agent"]): OfficialVariant | "cursor" | "opencode" {
+  if (agent === "codex") return "chatgpt";
+  return agent;
+}
+
+/** The newest provider plan is the one the fixed workflow dock tracks. */
+export function latestWorkflow(items: AgentSessionState["items"]): PlanItem | null {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    if (items[index].kind === "plan") return items[index] as PlanItem;
+  }
+  return null;
+}
 
 /** A compact signal for streamed text, tool output, diffs, and plan updates. */
 export function agentTimelineRevision(items: AgentSessionState["items"]): number {
@@ -128,6 +142,10 @@ export function AgentSurface({ termId, active, onClose }: Props) {
   if (!session) return null;
 
   const { usage } = session;
+  const workflow = latestWorkflow(session.items);
+  const timelineItems = workflow
+    ? session.items.filter((item) => item.kind !== "plan")
+    : session.items;
   const tokens = usage.inputTokens + usage.outputTokens;
   const ended = session.status === "exited" || session.status === "error";
   const resumable = canResume(session.agent);
@@ -261,7 +279,8 @@ export function AgentSurface({ termId, active, onClose }: Props) {
       >
         <AgentTimeline
           session={session}
-          items={session.items}
+          items={timelineItems}
+          termId={termId}
           agent={session.agent}
           status={session.status}
           started={session.started}
@@ -305,6 +324,13 @@ export function AgentSurface({ termId, active, onClose }: Props) {
         )}
       </div>
 
+      {session.status === "starting" && session.exitArmed && (
+        <div className="agent-exit-hint is-surface" role="status" aria-live="polite">
+          <kbd>Ctrl+C</kbd>
+          <span>again to close</span>
+        </div>
+      )}
+
       {session.status !== "starting" && (
         <div className="agent-composer-shell">
           {!followingBottom && (
@@ -320,6 +346,11 @@ export function AgentSurface({ termId, active, onClose }: Props) {
               </svg>
               <span>Jump to bottom</span>
             </button>
+          )}
+          {workflow && (
+            <div className="agent-workflow-dock">
+              <PlanTracker item={workflow} variant={workflowVariant(session.agent)} />
+            </div>
           )}
           <AgentComposer
             session={session}

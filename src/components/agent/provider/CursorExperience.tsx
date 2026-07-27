@@ -348,9 +348,13 @@ export function CursorExperience({ session, items, className }: ProviderExperien
           <CursorOrbit phase={phase.kind} large />
           <div className="cx-open-text">
             <strong>{session.label}</strong>
-            {phase.kind === "starting" ? (
-              <AgentAsciiLoader agent="cursor" label="Starting session" />
-            ) : (
+            <AgentAsciiLoader
+              agent="cursor"
+              termId={session.termId}
+              label="Starting session"
+              progress={phase.kind === "starting"}
+            />
+            {phase.kind !== "starting" && (
               <span>Describe what you want changed. It runs commands and edits files here.</span>
             )}
             <code>{session.cwd}</code>

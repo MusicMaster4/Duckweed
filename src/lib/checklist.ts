@@ -1,5 +1,5 @@
 /**
- * Per-tab checklists — the notes you would otherwise keep in a scratch buffer,
+ * Per-tab checklists: the notes you would otherwise keep in a scratch buffer,
  * kept next to the shell they belong to.
  *
  * Each tab gets its own list, because a checklist is about the work in front of
@@ -8,9 +8,10 @@
  * update that swaps the WebView origin cannot quietly take them.
  *
  * Checked items are not deleted on the spot. They stay, struck through, for a
- * day — long enough to see what you finished this session, undo a mis-click, or
- * come back tomorrow and find the list already tidy. The sweep runs on load and
- * on a slow timer, so a window left open overnight clears itself.
+ * day. That is long enough to see what you finished this session, undo a
+ * mis-click, or come back tomorrow and find the list already tidy. The sweep
+ * runs on load and on a slow timer, so a window left open overnight clears
+ * itself.
  */
 
 import { saveDurably } from "./durableStorage";
@@ -46,7 +47,7 @@ const MAX_TEXT_LENGTH = 500;
  * Drop checked items that have outlived their day.
  *
  * Returns the same object when nothing changed so callers can skip a write and
- * a re-render — this runs on a timer against every list in the app.
+ * a re-render, since this runs on a timer against every list in the app.
  */
 export function sweep(lists: Record<string, ChecklistItem[]>, now: number): Record<string, ChecklistItem[]> {
   let changed = false;
@@ -63,7 +64,7 @@ export function sweep(lists: Record<string, ChecklistItem[]>, now: number): Reco
 
 /**
  * Open items first in the order they were added, then finished ones with the
- * newest at the top of that group — the reverse of how they were checked off,
+ * newest at the top of that group, the reverse of how they were checked off,
  * so the most recent mistake is the easiest one to undo.
  */
 export function ordered(items: readonly ChecklistItem[]): ChecklistItem[] {
@@ -161,7 +162,7 @@ export function items(scope: string): readonly ChecklistItem[] {
   return store.lists[scope] ?? EMPTY;
 }
 
-/** Open items in `scope` — what the rail badge counts. */
+/** Open items in `scope`, which is what the rail badge counts. */
 export function openCount(scope: string): number {
   return (store.lists[scope] ?? EMPTY).filter((item) => item.doneAt === null).length;
 }
@@ -177,7 +178,7 @@ export function add(scope: string, text: string): void {
   });
 }
 
-/** Check an open item, or put a checked one back — the same click either way. */
+/** Check an open item, or put a checked one back. The same click either way. */
 export function toggle(scope: string, id: string): void {
   const existing = store.lists[scope];
   if (!existing) return;
@@ -222,7 +223,7 @@ export function clearDone(scope: string): void {
 }
 
 /**
- * Forget lists whose tab is gone. Closing a tab takes its checklist with it —
+ * Forget lists whose tab is gone. Closing a tab takes its checklist with it,
  * otherwise the file grows a list per tab the user ever opened.
  */
 export function prune(liveScopes: readonly string[]): void {

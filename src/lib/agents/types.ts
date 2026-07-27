@@ -226,6 +226,8 @@ export interface AgentSessionState {
   commands: { name: string; description: string }[];
   /** True once any turn has run — the empty state steps aside. */
   started: boolean;
+  /** Claude/Grok are waiting for the confirming Ctrl+C that closes the harness. */
+  exitArmed?: boolean;
 }
 
 /** Effort levels the current model (or any known model) accepts. */

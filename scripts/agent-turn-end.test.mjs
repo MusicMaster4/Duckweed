@@ -116,13 +116,15 @@ describe("completion signals are rationed per prompt", () => {
   const session = read("src/lib/agents/session.ts");
 
   test("a log or hook completion is dropped when nothing was asked", () => {
-    expect(terminals).toContain("if (session.agentTurnCredits <= 0) return;");
-    expect(terminals).toContain("session.agentTurnCredits -= 1;");
+    expect(terminals).toContain("const completed = session.agentTurns.shift();");
+    expect(terminals).toContain("if (!completed) return;");
   });
 
-  test("launching an agent and pressing Enter into it both buy a completion", () => {
-    expect(terminals).toContain("session.agentTurnCredits = 1;");
-    // Only an already-bound agent gets a follow-up credit; first bind is launch.
+  test("only real prompts buy a completion", () => {
+    expect(terminals).toContain("if (launchPrompt !== null) creditAgentTurn(session, launchPrompt)");
+    expect(terminals).not.toContain("session.agentTurnCredits = 1;");
+    // Only an already-bound agent gets an interactive prompt credit; a launch
+    // is credited separately when it actually carries prompt text.
     expect(terminals).toContain("if (alreadyBound && isAgentPromptSubmission(data))");
     expect(terminals).toContain("creditAgentTurn(session");
   });
@@ -136,7 +138,7 @@ describe("completion signals are rationed per prompt", () => {
 
   test("quitting the CLI drops the credit its late events would spend", () => {
     const unbind = terminals.indexOf("function unbindAgent(");
-    const reset = terminals.indexOf("session.agentTurnCredits = 0;", unbind);
+    const reset = terminals.indexOf("session.agentTurns = [];", unbind);
     expect(unbind).toBeGreaterThan(-1);
     expect(reset).toBeGreaterThan(unbind);
   });
@@ -144,13 +146,86 @@ describe("completion signals are rationed per prompt", () => {
   test("the custom UI's own protocol signal is not rationed", () => {
     expect(terminals).toContain("markAgentComplete(session, true)");
     expect(terminals).toContain("agentSessions.subscribeTurnEnd");
+    expect(terminals).toContain("shouldAcceptAgentCompletion(trusted");
   });
 
   test("config slash ends are filtered before the sound is earned", () => {
     expect(session).toContain("isAnnounceableTurn");
     expect(session).toContain("userInitiatedTurn");
     // Raw CLI panes filter the same slash list when a log/hook completes.
-    expect(terminals).toContain("isMetaSlashCommand(session.lastAgentPrompt)");
-    expect(terminals).toContain("lastAgentPrompt");
+    expect(terminals).toContain("isMetaSlashCommand(completed.prompt)");
+    expect(terminals).toContain("agentTurns");
+  });
+});
+
+describe("custom agent UI restores the shell underneath it", () => {
+  const terminals = read("src/lib/terminals.ts");
+
+  test("intercepts a harness launch before shell history and used-state", () => {
+    const submit = terminals.slice(
+      terminals.indexOf("export function submitCommand("),
+      terminals.indexOf("/** Run `text` in the pane's shell", terminals.indexOf("export function submitCommand(")),
+    );
+    expect(submit.indexOf("startAgentUi(session, text, session.ran)")).toBeGreaterThan(-1);
+    expect(submit.indexOf("startAgentUi(session, text, session.ran)")).toBeLessThan(
+      submit.indexOf("markRan(session)"),
+    );
+    expect(submit.indexOf("startAgentUi(session, text, session.ran)")).toBeLessThan(
+      submit.indexOf("commandHistory.record"),
+    );
+  });
+
+  test("puts terminal metadata back before revealing and focusing the shell", () => {
+    const close = terminals.slice(
+      terminals.indexOf("export function closeAgentUi("),
+      terminals.indexOf("/** Handle the custom surface", terminals.indexOf("export function closeAgentUi(")),
+    );
+    expect(close).toContain("session.ran = restore.ran");
+    expect(close).toContain("session.processStartedAt = restore.processStartedAt");
+    expect(close.indexOf("session.ran = restore.ran")).toBeLessThan(
+      close.indexOf("notifySession(id)"),
+    );
+    expect(close.indexOf("notifySession(id)")).toBeLessThan(close.indexOf("focus(id)"));
+  });
+
+  test("remembers whether a raw pane was pristine before the launch was typed", () => {
+    expect(terminals).toContain("rawCommandStartedRan");
+    expect(terminals).toContain("const startedRan = session.rawCommandStartedRan ?? session.ran");
+    expect(terminals).toContain("startAgentUi(session, command, startedRan, command)");
+  });
+
+  test("erases the raw launch from PSReadLine instead of relying on Ctrl+U", () => {
+    const erase = terminals.slice(
+      terminals.indexOf("function eraseRawShellLine("),
+      terminals.indexOf("/**\n * Track what is being typed", terminals.indexOf("function eraseRawShellLine(")),
+    );
+    expect(erase).toContain('"\\x7f".repeat(width)');
+    expect(terminals).toContain("eraseRawShellLine(session, command)");
+    expect(terminals).toContain("eraseRawShellLine(session, restore.rawLaunchText)");
+    expect(terminals).not.toContain('send(session, "\\x15")');
+  });
+
+  test("clears the editor draft before a harness launch can unmount it", () => {
+    const submit = terminals.slice(
+      terminals.indexOf("export function submitCommand("),
+      terminals.indexOf("/** Run `text` in the pane's shell", terminals.indexOf("export function submitCommand(")),
+    );
+    expect(submit).toContain('session.draft = ""');
+    expect(submit.indexOf('session.draft = ""')).toBeLessThan(
+      submit.indexOf("startAgentUi(session, text, session.ran)"),
+    );
+  });
+});
+
+describe("custom agent workflow dock", () => {
+  const surface = read("src/components/agent/AgentSurface.tsx");
+
+  test("keeps the newest provider plan immediately above the composer", () => {
+    expect(surface).toContain("export function latestWorkflow(");
+    expect(surface).toContain('session.items.filter((item) => item.kind !== "plan")');
+    const dock = surface.indexOf('className="agent-workflow-dock"');
+    const composer = surface.indexOf("<AgentComposer", dock);
+    expect(dock).toBeGreaterThan(-1);
+    expect(composer).toBeGreaterThan(dock);
   });
 });

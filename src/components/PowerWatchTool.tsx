@@ -1,27 +1,65 @@
 import { useEffect, useState, useSyncExternalStore } from "react";
 
+import { Tooltip } from "./Tooltip";
 import {
   BUSY_REASON_LABELS,
   GRACE_CHOICES,
-  POWER_ACTION_LABELS,
+  arm,
+  disarm,
   formatCountdown,
   getState,
   secondsLeft,
-  subscribe,
-  arm,
-  disarm,
   setAction,
   setGrace,
+  subscribe,
+  type BusyReason,
   type PowerAction,
 } from "../lib/powerWatch";
 
-const ACTION_HINTS: Record<PowerAction, string> = {
-  suspend: "Sleep — everything stays open and comes back on wake.",
-  shutdown: "Shut down — the machine powers off completely.",
+const MoonIcon = () => (
+  <svg viewBox="0 0 16 16" aria-hidden="true">
+    <path d="M13 9.6A5.4 5.4 0 0 1 6.4 3a5.5 5.5 0 1 0 6.6 6.6z" />
+  </svg>
+);
+
+const PowerIcon = () => (
+  <svg viewBox="0 0 16 16" aria-hidden="true">
+    <path d="M8 2.5v5" />
+    <path d="M4.9 4.9a4.5 4.5 0 1 0 6.2 0" />
+  </svg>
+);
+
+const ACTIONS: {
+  id: PowerAction;
+  label: string;
+  blurb: string;
+  icon: () => JSX.Element;
+}[] = [
+  {
+    id: "suspend",
+    label: "Sleep",
+    blurb: "Every window and shell is still here when the machine wakes.",
+    icon: MoonIcon,
+  },
+  {
+    id: "shutdown",
+    label: "Shut down",
+    blurb: "Closes everything and powers off. Unsaved work is lost.",
+    icon: PowerIcon,
+  },
+];
+
+/** Why one pane still counts, in words, for the activity list. */
+const BUSY_REASON_HINTS: Record<BusyReason, string> = {
+  process: "A command is still running in this pane.",
+  "agent-starting": "The agent is still coming up.",
+  "agent-working": "The agent is working on a turn you asked for.",
+  "agent-waiting":
+    "The agent is blocked on you, most likely a permission prompt. It will not clear on its own.",
 };
 
 /**
- * Arm a sleep or shutdown for whenever the work finishes.
+ * Arm a sleep or a shutdown for whenever the work finishes.
  *
  * The panel is mostly a readout: what it is waiting on, and how long is left.
  * Both matter when you are deciding whether to walk away, and an armed watch
@@ -29,44 +67,60 @@ const ACTION_HINTS: Record<PowerAction, string> = {
  */
 export function PowerWatchTool() {
   const state = useSyncExternalStore(subscribe, getState, getState);
-  const ticking = state.phase === "countdown";
-  const now = useTick(ticking);
-  const armed = state.phase === "armed" || state.phase === "countdown";
+  const counting = state.phase === "countdown";
+  const now = useTick(counting);
+  const armed = state.phase === "armed" || counting;
+  const chosen = ACTIONS.find((entry) => entry.id === state.action) ?? ACTIONS[0];
+
+  const left = secondsLeft(state, now);
+  const remaining = state.graceMs > 0 ? Math.min(1, (left * 1000) / state.graceMs) : 0;
 
   return (
-    <>
-      <div className="tools-section-head">
+    <div className="power">
+      <header className="tools-section-head">
         <span className="tools-section-title">Power watch</span>
         <span className="tools-spacer" />
-        <span className={`power-state is-${state.phase}`}>{PHASE_LABELS[state.phase]}</span>
-      </div>
+        <span className={`power-pill is-${state.phase}`}>{PHASE_LABELS[state.phase]}</span>
+      </header>
 
       <div className="power-body">
-        <p className="power-lede">
-          When every process and agent here has been quiet for the grace period, put the machine
-          away.
-        </p>
+        {!armed && (
+          <p className="power-lede">
+            Watches every pane in every tab. Once they have all been quiet for the grace period,
+            the machine goes to sleep or shuts down.
+          </p>
+        )}
+
+        {state.phase === "failed" && (
+          <p className="power-error">
+            <strong>The OS refused.</strong> {state.error}
+          </p>
+        )}
 
         <fieldset className="power-group" disabled={armed}>
-          <legend>Then</legend>
-          <div className="power-choices">
-            {(["suspend", "shutdown"] as const).map((action) => (
-              <button
-                key={action}
-                type="button"
-                className={`power-choice ${state.action === action ? "is-active" : ""}`}
-                aria-pressed={state.action === action}
-                title={ACTION_HINTS[action]}
-                onClick={() => setAction(action)}
-              >
-                {POWER_ACTION_LABELS[action]}
-              </button>
-            ))}
+          <legend>Do this</legend>
+          <div className="power-cards">
+            {ACTIONS.map((entry) => {
+              const Icon = entry.icon;
+              return (
+                <button
+                  key={entry.id}
+                  type="button"
+                  className={`power-card ${state.action === entry.id ? "is-active" : ""}`}
+                  aria-pressed={state.action === entry.id}
+                  onClick={() => setAction(entry.id)}
+                >
+                  <Icon />
+                  <span>{entry.label}</span>
+                </button>
+              );
+            })}
           </div>
+          <p className="power-hint">{chosen.blurb}</p>
         </fieldset>
 
         <fieldset className="power-group">
-          <legend>After quiet for</legend>
+          <legend>After everything is quiet for</legend>
           <div className="power-choices">
             {GRACE_CHOICES.map((choice) => (
               <button
@@ -74,57 +128,92 @@ export function PowerWatchTool() {
                 type="button"
                 className={`power-choice ${state.graceMs === choice.ms ? "is-active" : ""}`}
                 aria-pressed={state.graceMs === choice.ms}
-                title={`Wait ${choice.label} of nothing running before acting`}
                 onClick={() => setGrace(choice.ms)}
               >
                 {choice.label}
               </button>
             ))}
           </div>
+          <p className="power-hint">
+            {state.graceMs <= 60_000
+              ? "Short. Good when you are only waiting on one long build."
+              : "Long enough that the pause between two agent turns will not set it off."}
+          </p>
         </fieldset>
 
-        <button
-          type="button"
-          className={`power-arm ${armed ? "is-armed" : ""}`}
-          onClick={() => (armed ? disarm() : arm())}
-        >
-          {armed ? "Cancel" : `Arm ${POWER_ACTION_LABELS[state.action].toLowerCase()}`}
-        </button>
-
-        {state.phase === "countdown" && (
-          <p className="power-countdown">
-            Nothing is running. {POWER_ACTION_LABELS[state.action]} in{" "}
-            <strong>{formatCountdown(secondsLeft(state, now))}</strong> unless something starts.
-          </p>
+        {!armed && (
+          <button type="button" className="power-arm" onClick={arm}>
+            Arm {chosen.label.toLowerCase()}
+          </button>
         )}
-
-        {state.phase === "failed" && <p className="power-error">{state.error}</p>}
 
         {armed && (
-          <div className="power-watching">
-            <span className="power-watching-title">
-              {state.busy.length === 0
-                ? "Nothing running"
-                : `Waiting on ${state.busy.length} ${state.busy.length === 1 ? "pane" : "panes"}`}
-            </span>
-            {state.busy.map((entry) => (
-              <div key={entry.termId} className="power-busy">
-                <span className={`power-dot is-${entry.reason}`} aria-hidden="true" />
-                <span className="power-busy-label">{entry.label}</span>
-                <span className="power-busy-reason">{BUSY_REASON_LABELS[entry.reason]}</span>
-              </div>
-            ))}
-          </div>
+          <section className="power-activity">
+            <div className="power-activity-head">
+              <span className="power-activity-title">
+                {state.busy.length === 0 ? "Nothing running" : "Still running"}
+              </span>
+              <span className="power-activity-rule" />
+              {state.busy.length > 0 && (
+                <span className="power-activity-count">{state.busy.length}</span>
+              )}
+            </div>
+
+            {state.busy.length === 0 ? (
+              <p className="power-hint">Every pane is idle.</p>
+            ) : (
+              state.busy.map((entry) => (
+                <Tooltip
+                  key={entry.termId}
+                  title={entry.label}
+                  detail={BUSY_REASON_HINTS[entry.reason]}
+                >
+                  <div className="power-busy">
+                    <span className={`power-dot is-${entry.reason}`} aria-hidden="true" />
+                    <span className="power-busy-label">{entry.label}</span>
+                    <span className="power-busy-reason">{BUSY_REASON_LABELS[entry.reason]}</span>
+                  </div>
+                </Tooltip>
+              ))
+            )}
+          </section>
         )}
+
+        {counting ? (
+          <div className="power-hero is-counting">
+            <span className="power-hero-time">{formatCountdown(left)}</span>
+            <span className="power-hero-caption">
+              until {chosen.label.toLowerCase()}. Nothing is running.
+            </span>
+            <div className="power-hero-track">
+              <div className="power-hero-fill" style={{ width: `${remaining * 100}%` }} />
+            </div>
+            <button type="button" className="power-arm is-armed" onClick={disarm}>
+              Cancel
+            </button>
+          </div>
+        ) : armed ? (
+          <div className="power-hero">
+            <span className="power-hero-title">Waiting for the work to finish</span>
+            <span className="power-hero-caption">
+              {state.busy.length === 0
+                ? "Checking what is running."
+                : `${state.busy.length} ${state.busy.length === 1 ? "pane is" : "panes are"} still busy. The countdown starts when they all go quiet.`}
+            </span>
+            <button type="button" className="power-arm is-armed" onClick={disarm}>
+              Cancel
+            </button>
+          </div>
+        ) : null}
 
         {!armed && (
           <p className="power-note">
-            Arming lasts for this session only — restarting Duckweed always leaves the machine
+            Arming lasts for this session only. Restarting Duckweed always leaves the machine
             alone.
           </p>
         )}
       </div>
-    </>
+    </div>
   );
 }
 

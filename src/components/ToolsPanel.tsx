@@ -3,13 +3,14 @@ import { type ReactNode, useCallback, useRef, useState, useSyncExternalStore } f
 import { ChecklistTool } from "./ChecklistTool";
 import { PowerWatchTool } from "./PowerWatchTool";
 import { ProjectExplorer } from "./ProjectExplorer";
+import { Tooltip } from "./Tooltip";
 import * as checklist from "../lib/checklist";
 import * as powerWatch from "../lib/powerWatch";
 import type { ProjectInfo } from "../lib/types";
 
 interface Props {
   project: ProjectInfo | null;
-  /** Visible tab — checklists are filed per tab, and named after it. */
+  /** Visible tab. Checklists are filed per tab, and named after it. */
   tabId: string | null;
   tabTitle: string;
   width: number;
@@ -31,11 +32,10 @@ type SectionId = "files" | "checklist" | "power";
  * row of clickable chips. Icons alone stop being legible the moment there is
  * more than one of them, and this list is meant to grow.
  */
-const SECTIONS: { id: SectionId; label: string; hint: string; icon: ReactNode }[] = [
+const SECTIONS: { id: SectionId; label: string; icon: ReactNode }[] = [
   {
     id: "files",
     label: "Files",
-    hint: "Project explorer — the folder this tab works in",
     icon: (
       <svg viewBox="0 0 16 16" aria-hidden="true">
         <path d="M9 2H4.5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h7a1 1 0 0 0 1-1V5.5z" />
@@ -46,7 +46,6 @@ const SECTIONS: { id: SectionId; label: string; hint: string; icon: ReactNode }[
   {
     id: "checklist",
     label: "Checklist",
-    hint: "A list of your own for this tab",
     icon: (
       <svg viewBox="0 0 16 16" aria-hidden="true">
         <path d="M2.5 4.5l1.5 1.5 2.5-3" />
@@ -58,7 +57,6 @@ const SECTIONS: { id: SectionId; label: string; hint: string; icon: ReactNode }[
   {
     id: "power",
     label: "Power",
-    hint: "Sleep or shut down once everything finishes",
     icon: (
       <svg viewBox="0 0 16 16" aria-hidden="true">
         <path d="M8 2v5" />
@@ -158,7 +156,6 @@ export function ToolsPanel({
               type="button"
               role="tab"
               className={`tools-tab ${section === entry.id ? "is-active" : ""}`}
-              title={entry.hint}
               aria-selected={section === entry.id}
               onClick={() => setSection(entry.id)}
             >
@@ -168,17 +165,18 @@ export function ToolsPanel({
             </button>
           ))}
         </div>
-        <button
-          type="button"
-          className="tools-hide"
-          title="Hide the tools panel (Ctrl+Shift+X)"
-          aria-label="Hide the tools panel"
-          onClick={onClose}
-        >
-          <svg viewBox="0 0 16 16" aria-hidden="true">
-            <path d="M4.5 4.5l7 7M11.5 4.5l-7 7" />
-          </svg>
-        </button>
+        <Tooltip title="Hide the dock" detail="The panel closes and the grid takes the room back." shortcut="Ctrl+Shift+X">
+          <button
+            type="button"
+            className="tools-hide"
+            aria-label="Hide the tools panel"
+            onClick={onClose}
+          >
+            <svg viewBox="0 0 16 16" aria-hidden="true">
+              <path d="M4.5 4.5l7 7M11.5 4.5l-7 7" />
+            </svg>
+          </button>
+        </Tooltip>
       </header>
 
       <div className="tools-body">

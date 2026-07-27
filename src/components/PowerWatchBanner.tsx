@@ -13,7 +13,7 @@ import {
  * The countdown, floated over the grid while it runs.
  *
  * The tools panel already shows this, but the panel is exactly what is closed
- * when somebody armed the watch and walked away — and a machine about to sleep
+ * when somebody armed the watch and walked away, and a machine about to sleep
  * has to offer a way out from wherever you are looking. Mount once at the root.
  */
 export function PowerWatchBanner() {

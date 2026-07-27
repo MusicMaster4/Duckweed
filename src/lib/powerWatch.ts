@@ -1,5 +1,5 @@
 /**
- * Power watch — "when everything here is done, put the machine away."
+ * Power watch: "when everything here is done, put the machine away."
  *
  * The user picks suspend or shut down and arms it. From then on the watch keeps
  * reading what is still working: shells with a live child process, and agent
@@ -17,7 +17,7 @@
  *   restoring a stale one means the machine suspends while somebody is using it.
  *
  * The state is global rather than component-owned because the watch has to keep
- * running with the tools panel closed — that is the whole point of walking away.
+ * running with the tools panel closed, which is the whole point of walking away.
  */
 
 export type PowerAction = "suspend" | "shutdown";
@@ -49,7 +49,7 @@ export interface PowerWatchState {
   phase: PowerWatchPhase;
   /** Uninterrupted quiet required before firing. */
   graceMs: number;
-  /** Epoch ms the countdown ends at — null outside `countdown`. */
+  /** Epoch ms the countdown ends at. Null outside `countdown`. */
   firesAt: number | null;
   /** What is keeping the watch waiting, as of the last poll. */
   busy: BusyEntry[];
@@ -96,8 +96,8 @@ interface Timing {
 /**
  * Where the watch goes next, given whether anything is still working.
  *
- * Kept pure and separate from the store so the interesting part — quiet has to
- * hold for the whole grace period — can be tested without a clock or a window.
+ * Kept pure and separate from the store so the interesting part, that quiet has
+ * to hold for the whole grace period, can be tested without a clock or a window.
  */
 export function nextTiming(
   current: { phase: PowerWatchPhase; firesAt: number | null; graceMs: number },
@@ -273,7 +273,7 @@ export function setAction(action: PowerAction): void {
 export function setGrace(graceMs: number): void {
   if (state.graceMs === graceMs) return;
   // Re-time a running countdown against the new period rather than letting the
-  // old deadline stand — the number on screen has to be the one that applies.
+  // old deadline stand, because the number on screen has to be the one applied.
   const firesAt = state.phase === "countdown" ? Date.now() + graceMs : state.firesAt;
   set({ graceMs, firesAt });
   savePrefs(state);

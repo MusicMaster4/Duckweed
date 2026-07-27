@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 
-import type { AgentId, AgentItem, AgentSessionState } from "../../lib/agents/types";
+import type { AgentId, AgentItem, AgentSessionState, PlanItem } from "../../lib/agents/types";
 import { emptyUsage, makeChange } from "../../lib/agents/types";
+import { AgentComposer } from "./AgentComposer";
 import { AgentProviderIcon } from "./AgentProviderIcon";
 import { AgentTimeline } from "./AgentTimeline";
+import { PlanTracker, type OfficialVariant } from "./official/OfficialShared";
 import "./AgentExperiencePreview.css";
 
 const PROVIDERS: Array<{
@@ -117,6 +119,7 @@ export function AgentExperiencePreview() {
   const playTurn = query.get("play") === "1";
   const completed = query.get("complete") === "1";
   const starting = query.get("starting") === "1";
+  const exitArmed = query.get("exit-armed") === "1";
   const [agent, setAgent] = useState<AgentId>(
     PROVIDERS.some((provider) => provider.id === requested) && requested ? requested : "codex",
   );
@@ -158,6 +161,18 @@ export function AgentExperiencePreview() {
       ? "idle"
       : "working";
   const visibleItems = starting ? [] : items;
+  let workflow: PlanItem | null = null;
+  for (let index = visibleItems.length - 1; index >= 0; index -= 1) {
+    if (visibleItems[index].kind === "plan") {
+      workflow = visibleItems[index] as PlanItem;
+      break;
+    }
+  }
+  const timelineItems = workflow
+    ? visibleItems.filter((item) => item.kind !== "plan")
+    : visibleItems;
+  const workflowVariant: OfficialVariant | "cursor" | "opencode" =
+    agent === "codex" ? "chatgpt" : agent;
   const session: AgentSessionState = {
     termId: "agent-experience-preview",
     agent,
@@ -182,6 +197,7 @@ export function AgentExperiencePreview() {
     error: null,
     commands: [],
     started: !starting,
+    exitArmed,
   };
 
   return (
@@ -222,7 +238,9 @@ export function AgentExperiencePreview() {
         <div className="agent-scroll">
           <AgentTimeline
             session={session}
-            items={visibleItems}
+            items={timelineItems}
+            /* Per provider, so switching the preview draws a new animation. */
+            termId={`${session.termId}:${provider.id}`}
             agent={provider.id}
             status={status}
             started={!starting}
@@ -233,16 +251,19 @@ export function AgentExperiencePreview() {
           />
         </div>
         {!starting && (
-          <footer className="agent-preview-composer" aria-label="Unchanged composer area">
-            <textarea readOnly placeholder={`Message ${provider.label}…`} />
-            <div>
-              <span>{provider.model}</span>
-              <span>High</span>
-              <button type="button" aria-label="Stop preview">
-                ■
-              </button>
-            </div>
-          </footer>
+          <div className="agent-composer-shell">
+            {workflow && (
+              <div className="agent-workflow-dock">
+                <PlanTracker item={workflow} variant={workflowVariant} />
+              </div>
+            )}
+            <AgentComposer
+              session={session}
+              active
+              onSubmit={() => {}}
+              onInterrupt={() => {}}
+            />
+          </div>
         )}
       </section>
     </main>

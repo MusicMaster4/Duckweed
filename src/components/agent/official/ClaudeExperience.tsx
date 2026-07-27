@@ -106,6 +106,7 @@ function ClaudeTrace({
 
 export function ClaudeExperience({
   items,
+  termId,
   status,
   started,
   agent,
@@ -137,6 +138,7 @@ export function ClaudeExperience({
     return (
       <ProviderEmpty
         agent={agent}
+        termId={termId}
         label={label}
         program={program}
         cwd={cwd}

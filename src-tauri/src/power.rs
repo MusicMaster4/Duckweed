@@ -70,7 +70,7 @@ fn perform(action: Action) -> Result<(), String> {
     }
 }
 
-/// Start a helper and stop caring about it — the shell that answers is going to
+/// Start a helper and stop caring about it. The shell that answers is going to
 /// take this process down with the rest of the session.
 fn spawn_detached(program: &str, args: &[&str]) -> Result<(), String> {
     let mut command = std::process::Command::new(program);
@@ -79,7 +79,7 @@ fn spawn_detached(program: &str, args: &[&str]) -> Result<(), String> {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        // CREATE_NO_WINDOW — no console flash on the way out.
+        // CREATE_NO_WINDOW, so there is no console flash on the way out.
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         command.creation_flags(CREATE_NO_WINDOW);
     }

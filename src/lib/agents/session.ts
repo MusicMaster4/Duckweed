@@ -492,6 +492,7 @@ export async function start(
       // never has to wait on the protocol to answer `/`.
       commands: fallbackCommands(launch.agent, launch.program),
       started: false,
+      exitArmed: false,
     },
     context: {
       cwd,
@@ -588,6 +589,10 @@ export function submit(termId: string, text: string): void {
   if (!session || session.disposed) return;
   const trimmed = text.trim();
   if (!trimmed) return;
+  if (session.exitArmedUntil > 0) {
+    session.exitArmedUntil = 0;
+    emit(session, { type: "exit-armed", armed: false });
+  }
   session.draft = "";
   if (session.state.status === "exited" || session.state.status === "error") return;
   if (/^\/usage$/i.test(trimmed)) {
@@ -783,16 +788,11 @@ export function requestExit(termId: string): "armed" | "close" | "none" {
   }
 
   session.exitArmedUntil = now + 1800;
-  emit(session, {
-    type: "notice",
-    tone: "info",
-    transient: true,
-    text: "Press Ctrl+C again to exit.",
-  });
+  emit(session, { type: "exit-armed", armed: true });
   window.setTimeout(() => {
     if (session.disposed || session.exitArmedUntil > Date.now()) return;
     session.exitArmedUntil = 0;
-    emit(session, { type: "dismiss-transient-notices" });
+    emit(session, { type: "exit-armed", armed: false });
   }, 1900);
   return "armed";
 }

@@ -1196,23 +1196,170 @@ svg.tab-glyph-fill path {
   background: var(--accent-line);
 }
 
+/* --------------------------------------------------------------- tooltip */
+
+/* The anchor must not disturb the layout it wraps: chips sit in a flex row,
+   activity rows are flex children of their own column. `display: contents`
+   keeps the wrapped element exactly where it would have been, and React still
+   dispatches enter/leave along the DOM path. The component measures the child
+   rather than this span, which has no box to measure. */
+.tip-anchor {
+  display: contents;
+}
+
+.tip {
+  position: fixed;
+  z-index: 90;
+  max-width: 250px;
+  padding: 7px 9px;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  background: var(--bg-elevated);
+  pointer-events: none;
+  transform: translateX(-50%);
+  animation: tip-in 90ms ease-out;
+}
+
+@keyframes tip-in {
+  from {
+    opacity: 0;
+  }
+}
+
+.tip-title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  color: var(--text);
+  font-size: 11.5px;
+  font-weight: 500;
+}
+
+.tip-title kbd {
+  flex: none;
+  margin-left: auto;
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.tip-detail {
+  margin: 3px 0 0;
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tip {
+    animation: none;
+  }
+}
+
 /* ------------------------------------------------------------- checklist */
+
+.check {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1 1 auto;
+}
+
+.check-head {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  flex: none;
+  padding: 2px 10px 9px;
+}
+
+.check-head-top {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 24px;
+}
+
+/* Which tab's list this is. Reads as a label rather than a control, because
+   it is not one: it follows the visible tab. */
+.check-scope {
+  overflow: hidden;
+  max-width: 60%;
+  padding: 1px 6px;
+  border-radius: 5px;
+  background: var(--hover);
+  color: var(--text-dim);
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.check-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.check-progress-track {
+  overflow: hidden;
+  flex: 1 1 auto;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--hover);
+}
+
+.check-progress-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 160ms ease-out;
+}
+
+.check-progress-count {
+  flex: none;
+  color: var(--text-faint);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
 
 .check-add {
   display: flex;
-  gap: 5px;
+  align-items: center;
+  gap: 6px;
   flex: none;
-  padding: 2px 8px 8px;
+  margin: 0 10px 8px;
+  padding: 0 8px;
+  height: 29px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg-pane);
+}
+
+.check-add:focus-within {
+  border-color: var(--accent-line);
+}
+
+.check-add-icon {
+  display: grid;
+  place-items: center;
+  flex: none;
+  color: var(--text-faint);
+}
+
+.check-add:focus-within .check-add-icon {
+  color: var(--accent);
+}
+
+.check-add-icon svg {
+  width: 12px;
+  height: 12px;
 }
 
 .check-add input {
   flex: 1 1 auto;
   min-width: 0;
-  height: 25px;
-  padding: 0 8px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--bg-pane);
+  border: none;
+  background: none;
   color: var(--text);
   font-family: inherit;
   font-size: 12px;
@@ -1223,20 +1370,17 @@ svg.tab-glyph-fill path {
 }
 
 .check-add input:focus {
-  border-color: var(--accent-line);
   outline: none;
 }
 
-.tools-btn:disabled {
+.check-add-key {
+  flex: none;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--hover);
   color: var(--text-faint);
-  cursor: default;
-  opacity: 0.5;
-}
-
-.tools-btn:disabled:hover {
-  background: none;
-  border-color: var(--border);
-  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
 }
 
 .check-list {
@@ -1244,24 +1388,53 @@ svg.tab-glyph-fill path {
   flex-direction: column;
   min-height: 0;
   flex: 1 1 auto;
-  padding: 0 4px 6px;
+  padding: 0 6px 10px;
   overflow-y: auto;
 }
 
+/* Empty state. Says what the tool is for, not just that it is empty. */
 .check-blank {
+  display: grid;
+  justify-items: center;
+  gap: 3px;
+  padding: 26px 16px;
+  text-align: center;
+}
+
+.check-blank svg {
+  width: 20px;
+  height: 20px;
+  margin-bottom: 5px;
+  color: var(--text-faint);
+  opacity: 0.5;
+}
+
+.check-blank-title {
   margin: 0;
-  padding: 6px 8px;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.check-blank-body {
+  margin: 0;
+  color: var(--text-faint);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.check-cleared {
+  margin: 2px 0 0;
+  padding: 8px 6px;
   color: var(--text-faint);
   font-size: 11.5px;
-  line-height: 1.5;
 }
 
 .check-row {
   display: flex;
   align-items: flex-start;
-  gap: 6px;
+  gap: 7px;
   flex: none;
-  padding: 3px 4px;
+  padding: 4px 5px;
   border-radius: 6px;
 }
 
@@ -1272,21 +1445,22 @@ svg.tab-glyph-fill path {
 .check-box {
   display: grid;
   place-items: center;
-  width: 14px;
-  height: 14px;
+  width: 15px;
+  height: 15px;
   flex: none;
-  margin-top: 2px;
+  margin-top: 1px;
   border: 1px solid var(--border-strong);
   border-radius: 4px;
-  color: var(--accent);
+  color: var(--bg);
 }
 
 .check-box:hover {
-  border-color: var(--accent-line);
+  border-color: var(--accent);
 }
 
 .check-row.is-done .check-box {
-  border-color: var(--accent-line);
+  border-color: var(--accent);
+  background: var(--accent);
 }
 
 .check-mark {
@@ -1297,9 +1471,9 @@ svg.tab-glyph-fill path {
 .check-text {
   flex: 1 1 auto;
   min-width: 0;
-  color: var(--text-dim);
+  color: var(--text);
   font-size: 12px;
-  line-height: 1.45;
+  line-height: 1.5;
   text-align: left;
   word-break: break-word;
 }
@@ -1319,20 +1493,35 @@ svg.tab-glyph-fill path {
   color: var(--text);
   font-family: inherit;
   font-size: 12px;
-  line-height: 1.45;
+  line-height: 1.5;
 }
 
 .check-edit:focus {
   outline: none;
 }
 
+/* How long a finished item has left. Stated on the row rather than hidden in a
+   tooltip, because the whole point is watching the list clear itself. Short
+   enough that it does not compete with the item it belongs to. */
+.check-expiry {
+  flex: none;
+  align-self: center;
+  padding: 0 4px;
+  border-radius: 4px;
+  background: var(--hover);
+  color: var(--text-faint);
+  font-size: 9.5px;
+  font-variant-numeric: tabular-nums;
+  line-height: 15px;
+  white-space: nowrap;
+}
+
 .check-remove {
   display: grid;
   place-items: center;
-  width: 16px;
-  height: 16px;
+  width: 17px;
+  height: 17px;
   flex: none;
-  margin-top: 1px;
   border-radius: 4px;
   color: var(--text-faint);
   opacity: 0;
@@ -1352,38 +1541,72 @@ svg.tab-glyph-fill path {
   color: var(--rose);
 }
 
-.check-foot {
+.check-divider {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   flex: none;
-  padding: 5px 12px;
-  border-top: 1px solid var(--border);
+  margin: 12px 5px 5px;
+}
+
+.check-divider-label {
+  flex: none;
   color: var(--text-faint);
-  font-size: 10.5px;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.check-divider-rule {
+  flex: 1 1 auto;
+  height: 1px;
+  background: var(--border);
+}
+
+.check-divider-btn {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: 5px;
+  color: var(--text-faint);
+  font-size: 10px;
+}
+
+.check-divider-btn:hover {
+  background: var(--hover);
+  color: var(--text);
 }
 
 /* ----------------------------------------------------------- power watch */
 
-.power-state {
+.power {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1 1 auto;
+}
+
+.power-pill {
   padding: 1px 6px;
   border-radius: 5px;
   background: var(--hover);
   color: var(--text-faint);
-  font-size: 10px;
-  letter-spacing: 0.04em;
+  font-size: 9.5px;
+  letter-spacing: 0.05em;
   text-transform: uppercase;
 }
 
-.power-state.is-armed {
+.power-pill.is-armed {
   background: var(--accent-dim);
   color: var(--accent);
 }
 
-.power-state.is-countdown,
-.power-state.is-firing {
+.power-pill.is-countdown,
+.power-pill.is-firing {
   background: rgba(240, 192, 82, 0.16);
   color: var(--amber);
 }
 
-.power-state.is-failed {
+.power-pill.is-failed {
   background: rgba(242, 104, 111, 0.16);
   color: var(--rose);
 }
@@ -1391,10 +1614,10 @@ svg.tab-glyph-fill path {
 .power-body {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 15px;
   min-height: 0;
   flex: 1 1 auto;
-  padding: 4px 12px 14px;
+  padding: 4px 12px 16px;
   overflow-y: auto;
 }
 
@@ -1403,13 +1626,62 @@ svg.tab-glyph-fill path {
   margin: 0;
   color: var(--text-faint);
   font-size: 11.5px;
+  line-height: 1.55;
+}
+
+/* The armed and counting states sit after the controls and activity readout. */
+.power-hero {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--accent-line);
+  border-radius: 9px;
+  background: var(--accent-dim);
+}
+
+.power-hero.is-counting {
+  border-color: rgba(240, 192, 82, 0.34);
+  background: rgba(240, 192, 82, 0.1);
+}
+
+.power-hero-title {
+  color: var(--text);
+  font-size: 12.5px;
+}
+
+.power-hero-time {
+  color: var(--amber);
+  font-size: 30px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.01em;
+  line-height: 1;
+}
+
+.power-hero-caption {
+  color: var(--text-dim);
+  font-size: 11.5px;
   line-height: 1.5;
+}
+
+.power-hero-track {
+  overflow: hidden;
+  height: 3px;
+  border-radius: 2px;
+  background: rgba(240, 192, 82, 0.18);
+}
+
+.power-hero-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: var(--amber);
+  transition: width 480ms linear;
 }
 
 .power-group {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 7px;
   margin: 0;
   padding: 0;
   border: none;
@@ -1418,14 +1690,55 @@ svg.tab-glyph-fill path {
 .power-group legend {
   padding: 0;
   color: var(--text-faint);
-  font-size: 10.5px;
+  font-size: 10px;
   letter-spacing: 0.06em;
   text-transform: uppercase;
 }
 
+.power-group:disabled {
+  opacity: 0.5;
+}
+
+.power-group:disabled .power-card,
 .power-group:disabled .power-choice {
-  opacity: 0.45;
   cursor: default;
+}
+
+/* Sleep and shut down: two cards, so the choice reads as a choice. */
+.power-cards {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.power-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text-dim);
+  font-size: 12px;
+  text-align: left;
+}
+
+.power-card svg {
+  width: 15px;
+  height: 15px;
+}
+
+.power-group:not(:disabled) .power-card:hover {
+  background: var(--hover);
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+.power-card.is-active {
+  background: var(--accent-dim);
+  border-color: var(--accent-line);
+  color: var(--accent);
 }
 
 .power-choices {
@@ -1435,11 +1748,12 @@ svg.tab-glyph-fill path {
 }
 
 .power-choice {
-  padding: 3px 9px;
+  padding: 3px 10px;
   border: 1px solid var(--border);
   border-radius: 6px;
   color: var(--text-dim);
   font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
 }
 
 .power-group:not(:disabled) .power-choice:hover {
@@ -1454,10 +1768,18 @@ svg.tab-glyph-fill path {
   color: var(--accent);
 }
 
+/* The explanation belongs under the control it explains, not behind a hover. */
+.power-hint {
+  margin: 0;
+  color: var(--text-faint);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
 .power-arm {
-  height: 28px;
+  height: 30px;
   border: 1px solid var(--accent-line);
-  border-radius: 7px;
+  border-radius: 8px;
   background: var(--accent-dim);
   color: var(--accent);
   font-size: 12px;
@@ -1468,58 +1790,83 @@ svg.tab-glyph-fill path {
 }
 
 .power-arm.is-armed {
-  border-color: rgba(242, 104, 111, 0.4);
-  background: rgba(242, 104, 111, 0.12);
+  height: 27px;
+  border-color: rgba(242, 104, 111, 0.38);
+  background: rgba(242, 104, 111, 0.1);
   color: var(--rose);
+  font-size: 11.5px;
 }
 
 .power-arm.is-armed:hover {
-  background: rgba(242, 104, 111, 0.2);
+  background: rgba(242, 104, 111, 0.18);
 }
 
-.power-countdown {
+.power-error {
   margin: 0;
-  padding: 8px 10px;
-  border: 1px solid rgba(240, 192, 82, 0.3);
-  border-radius: 7px;
-  background: rgba(240, 192, 82, 0.1);
+  padding: 9px 10px;
+  border: 1px solid rgba(242, 104, 111, 0.3);
+  border-radius: 8px;
+  background: rgba(242, 104, 111, 0.08);
   color: var(--text-dim);
   font-size: 11.5px;
   line-height: 1.5;
 }
 
-.power-countdown strong {
-  color: var(--amber);
-  font-variant-numeric: tabular-nums;
-}
-
-.power-error {
-  margin: 0;
+.power-error strong {
   color: var(--rose);
-  font-size: 11.5px;
-  line-height: 1.5;
+  font-weight: 500;
 }
 
-.power-watching {
+.power-activity {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  padding-top: 10px;
-  border-top: 1px solid var(--border);
+  gap: 3px;
 }
 
-.power-watching-title {
+.power-activity-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.power-activity-title {
+  flex: none;
   color: var(--text-faint);
-  font-size: 10.5px;
+  font-size: 10px;
   letter-spacing: 0.06em;
   text-transform: uppercase;
+}
+
+.power-activity-rule {
+  flex: 1 1 auto;
+  height: 1px;
+  background: var(--border);
+}
+
+.power-activity-count {
+  flex: none;
+  min-width: 15px;
+  padding: 0 4px;
+  border-radius: 7px;
+  background: var(--hover);
+  color: var(--text-dim);
+  font-size: 9.5px;
+  line-height: 15px;
+  text-align: center;
 }
 
 .power-busy {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 7px;
+  padding: 3px 5px;
+  border-radius: 6px;
   font-size: 11.5px;
+}
+
+.power-busy:hover {
+  background: var(--hover);
 }
 
 .power-dot {
@@ -1530,7 +1877,7 @@ svg.tab-glyph-fill path {
   background: var(--accent);
 }
 
-/* Blocked on the user, not on the machine — worth telling apart at a glance,
+/* Blocked on the user, not on the machine. Worth telling apart at a glance,
    because it is the one state that will never clear on its own. */
 .power-dot.is-agent-waiting {
   background: var(--amber);
@@ -1547,7 +1894,7 @@ svg.tab-glyph-fill path {
 .power-busy-reason {
   flex: none;
   color: var(--text-faint);
-  font-size: 10.5px;
+  font-size: 10px;
 }
 
 /* The countdown, over the grid, so it is cancellable with the dock closed. */
@@ -6184,6 +6531,71 @@ body.is-resizing * {
   flex: none;
 }
 
+.agent-workflow-dock {
+  padding: 7px 14px 8px;
+  border-top: 1px solid var(--border);
+  background:
+    linear-gradient(
+      to bottom,
+      color-mix(in srgb, var(--agent-accent) 4%, transparent),
+      transparent
+    ),
+    var(--bg-pane);
+}
+
+.agent-workflow-dock .official-plan {
+  width: min(100%, 840px);
+  margin: 0 auto;
+  border-color: rgba(255, 255, 255, 0.075);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--bg-elevated) 74%, transparent);
+  box-shadow: 0 7px 22px rgba(0, 0, 0, 0.16);
+}
+
+.agent-workflow-dock .official-plan-head {
+  padding-block: 7px 6px;
+}
+
+.agent-workflow-dock .official-plan-steps {
+  max-height: min(180px, 30vh);
+  overflow-y: auto;
+  padding-block: 7px 9px;
+}
+
+.agent-exit-hint {
+  position: absolute;
+  right: 10px;
+  bottom: calc(100% + 8px);
+  z-index: 5;
+  display: inline-flex;
+  height: 28px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 9px;
+  border: 1px solid rgba(255, 255, 255, 0.11);
+  border-radius: 8px;
+  color: var(--text-dim);
+  background: color-mix(in srgb, var(--bg-elevated) 95%, white 2%);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.32);
+  font-size: 10.5px;
+  pointer-events: none;
+}
+
+.agent-exit-hint kbd {
+  padding: 1px 5px;
+  border: 1px solid rgba(255, 255, 255, 0.13);
+  border-radius: 4px;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.045);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+}
+
+.agent-exit-hint.is-surface {
+  right: 10px;
+  bottom: 12px;
+}
+
 .agent-jump-bottom {
   position: absolute;
   top: -38px;
@@ -6329,6 +6741,10 @@ body.is-resizing * {
   .agent-composer-row {
     gap: 5px;
     padding-inline: 7px;
+  }
+
+  .agent-workflow-dock {
+    padding: 6px 9px 7px;
   }
 
   .agent-control-chip {

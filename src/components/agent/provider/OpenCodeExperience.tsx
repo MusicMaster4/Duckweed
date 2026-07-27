@@ -480,9 +480,13 @@ export function OpenCodeExperience({ session, items, className }: ProviderExperi
           <OpenCodeMark phase={phase.kind} large />
           <div className="oc-open-text">
             <strong>{session.label}</strong>
-            {phase.kind === "starting" ? (
-              <AgentAsciiLoader agent="opencode" label="Starting session" />
-            ) : (
+            <AgentAsciiLoader
+              agent="opencode"
+              termId={session.termId}
+              label="Starting session"
+              progress={phase.kind === "starting"}
+            />
+            {phase.kind !== "starting" && (
               <span>Say what to build. Any provider, any model, this folder.</span>
             )}
             <code>{session.cwd}</code>

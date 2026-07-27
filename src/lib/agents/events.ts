@@ -60,6 +60,7 @@ export type AgentEvent =
     }
   | { type: "plan"; steps: AgentPlanStep[] }
   | { type: "notice"; text: string; tone: "info" | "error"; transient?: boolean }
+  | { type: "exit-armed"; armed: boolean }
   /** Remove picker confirmations and double-Ctrl+C hints without touching errors. */
   | { type: "dismiss-transient-notices" }
   /**
@@ -346,6 +347,9 @@ export function applyEvent(state: AgentSessionState, event: AgentEvent): AgentSe
           },
         ],
       };
+
+    case "exit-armed":
+      return state.exitArmed === event.armed ? state : { ...state, exitArmed: event.armed };
 
     case "dismiss-transient-notices": {
       const items = state.items.filter((item) => item.kind !== "notice" || !item.transient);

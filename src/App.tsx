@@ -398,6 +398,7 @@ export default function App() {
         busy: meta.busy,
         exited: meta.exited,
         completionSeq: meta.completionSeq,
+        completionStartedAt: meta.completionStartedAt,
         agent: meta.agent,
         agentUi: meta.agentUi !== null,
         processStartedAt: meta.processStartedAt,

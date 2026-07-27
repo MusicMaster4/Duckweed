@@ -89,6 +89,15 @@ export function createAcpAdapter(): AgentAdapter {
   let sessionId: string | null = null;
   /** Turn ids so streamed chunks group into one bubble per turn. */
   let turnSeq = 0;
+  /**
+   * ACP only labels a chunk as message or thought; it does not provide a
+   * content-block id. Keep adjacent chunks together, but open a new block
+   * after the stream crosses a tool call or switches content kind. Without
+   * this, Grok's whole turn collapses into one giant reasoning/message item.
+   */
+  let activeContent: "assistant" | "thinking" | null = null;
+  let assistantSegment = 0;
+  let thinkingSegment = 0;
   /** Permission id → the JSON-RPC request id ACP is waiting on. */
   const permissionRequests = new Map<string, string | number>();
   /** Tool calls whose content we have already seen, to merge partial updates. */
@@ -127,6 +136,23 @@ export function createAcpAdapter(): AgentAdapter {
    */
   let loading = false;
   let replayedUser = "";
+
+  function resetContentSegments() {
+    activeContent = null;
+    assistantSegment = 0;
+    thinkingSegment = 0;
+  }
+
+  function contentId(kind: "assistant" | "thinking"): string {
+    if (activeContent !== kind) {
+      activeContent = kind;
+      if (kind === "assistant") assistantSegment += 1;
+      else thinkingSegment += 1;
+    }
+    const segment = kind === "assistant" ? assistantSegment : thinkingSegment;
+    const prefix = kind === "assistant" ? "a" : "r";
+    return `${prefix}${turnSeq}${segment > 1 ? `-${segment}` : ""}`;
+  }
 
   function request(
     ctx: AdapterContext,
@@ -444,6 +470,7 @@ export function createAcpAdapter(): AgentAdapter {
     const text = replayedUser;
     replayedUser = "";
     turnSeq += 1;
+    resetContentSegments();
     ctx.emit({ type: "user", text });
   }
 
@@ -467,7 +494,7 @@ export function createAcpAdapter(): AgentAdapter {
         const text = readContentText(update.content);
         if (text) {
           turnHadContent = true;
-          ctx.emit({ type: "assistant-delta", id: `a${turnSeq}`, text });
+          ctx.emit({ type: "assistant-delta", id: contentId("assistant"), text });
         }
         return;
       }
@@ -475,12 +502,13 @@ export function createAcpAdapter(): AgentAdapter {
         const text = readContentText(update.content);
         if (text) {
           turnHadContent = true;
-          ctx.emit({ type: "thinking-delta", id: `r${turnSeq}`, text });
+          ctx.emit({ type: "thinking-delta", id: contentId("thinking"), text });
         }
         return;
       }
       case "tool_call":
       case "tool_call_update": {
+        activeContent = null;
         const callId = asString(update.toolCallId);
         if (!callId) return;
         turnHadContent = true;
@@ -769,6 +797,7 @@ export function createAcpAdapter(): AgentAdapter {
     prompt: (text, ctx) => {
       if (!sessionId) return;
       turnSeq += 1;
+      resetContentSegments();
       slashPending = text.startsWith("/");
       turnHadContent = false;
       ctx.emit({ type: "user", text });

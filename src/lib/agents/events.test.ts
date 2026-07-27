@@ -84,3 +84,15 @@ describe("transient notices", () => {
     expect(state.items[0]).toMatchObject({ tone: "error", text: "A durable failure" });
   });
 });
+
+describe("double Ctrl+C exit", () => {
+  test("arms and disarms without adding chat timeline content", () => {
+    const armed = applyEvent(blank(), { type: "exit-armed", armed: true });
+    expect(armed.exitArmed).toBe(true);
+    expect(armed.items).toEqual([]);
+
+    const disarmed = applyEvent(armed, { type: "exit-armed", armed: false });
+    expect(disarmed.exitArmed).toBe(false);
+    expect(disarmed.items).toEqual([]);
+  });
+});

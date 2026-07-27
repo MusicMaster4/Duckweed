@@ -104,6 +104,7 @@ export function AgentComposer({ session, active, inputRef, onSubmit, onInterrupt
 
   const working = session.status === "working";
   const ended = session.status === "exited" || session.status === "error";
+  const exitArmed = session.exitArmed === true;
   const menu = buildMenu(value, session);
   const rows = menu?.rows ?? [];
 
@@ -303,6 +304,12 @@ export function AgentComposer({ session, active, inputRef, onSubmit, onInterrupt
           ))}
         </div>
       )}
+      {exitArmed && (
+        <div className="agent-exit-hint" role="status" aria-live="polite">
+          <kbd>Ctrl+C</kbd>
+          <span>again to close</span>
+        </div>
+      )}
       <div className="agent-composer-row">
         <textarea
           ref={ref}
@@ -311,7 +318,11 @@ export function AgentComposer({ session, active, inputRef, onSubmit, onInterrupt
           rows={1}
           spellCheck={false}
           placeholder={
-            working ? "Queue a follow-up…" : `Message ${session.label}…`
+            exitArmed
+              ? "Ctrl+C again to close"
+              : working
+                ? "Queue a follow-up…"
+                : `Message ${session.label}…`
           }
           aria-label={`Message ${session.label}`}
           onChange={(event) => change(event.target.value)}

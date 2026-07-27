@@ -236,7 +236,9 @@
    the styling only has to supply the edge fade and the sweep bar. The art reads
    on its own ink; a glow behind it would only smear the character grid. */
 .agent-ascii-loader {
-  --ascii-ink: color-mix(in srgb, var(--agent-accent) 78%, var(--text-dim));
+  /* The animation is provider-agnostic, so the provider's accent is the only
+     thing identifying it. Use the accent neat rather than mixing it down. */
+  --ascii-ink: var(--agent-accent);
   display: grid;
   place-items: center;
   gap: 8px;
@@ -292,16 +294,11 @@
   letter-spacing: 0.02em;
 }
 
-.agent-ascii-loader.is-claude {
-  --ascii-ink: #d97757;
-}
-
-.agent-ascii-loader.is-grok {
-  --ascii-ink: color-mix(in srgb, var(--text) 76%, transparent);
-}
-
-.agent-ascii-loader.is-opencode pre {
-  font-size: 9.5px;
+/* The idle empty state keeps the art but drops the progress affordances, so it
+   reads as decoration rather than as something the session is waiting on. */
+.agent-ascii-loader.is-ambient {
+  --ascii-ink: color-mix(in srgb, var(--agent-accent) 55%, transparent);
+  margin: 4px 0 0;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -1209,53 +1206,47 @@ button.chatgpt-thinking-row.is-selected {
   line-height: 24px;
 }
 
-.grok-trace-head {
+.grok-experience .official-transcript {
+  gap: 9px;
+}
+
+.grok-thought {
+  min-width: 0;
+  max-width: 100%;
+  align-self: flex-start;
+}
+
+.grok-thought-head {
   position: relative;
-  display: flex;
+  display: inline-flex;
+  max-width: 100%;
   min-width: 0;
   align-items: center;
-  gap: 4px;
+  gap: 5px;
+  padding: 2px;
   color: #9e9e9e;
-  font-size: 12px;
+  font-size: 11px;
   line-height: 24px;
   text-align: left;
-  cursor: default;
 }
 
-.grok-trace {
-  min-width: 0;
-  padding: 8px 10px;
-  border: 1px solid rgba(255, 255, 255, 0.065);
-  border-radius: 12px;
-  background:
-    linear-gradient(135deg, rgba(113, 137, 177, 0.055), transparent 52%),
-    rgba(255, 255, 255, 0.018);
-}
-
-.grok-trace-head {
-  width: 100%;
-}
-
-.grok-trace-head:not(:disabled) {
+.grok-thought-head:not(:disabled) {
   cursor: pointer;
 }
 
-.grok-trace.is-finished {
-  padding-block: 5px;
-  background: rgba(255, 255, 255, 0.012);
+.grok-thought-head:not(:disabled):hover {
+  color: var(--text-dim);
 }
 
-.grok-trace.is-finished .grok-trace-head {
-  color: color-mix(in srgb, var(--text-faint) 64%, transparent);
-  font-size: 11px;
+.grok-thought.is-settled .grok-loader-slot {
+  opacity: 0.52;
 }
 
-.grok-trace.is-finished .grok-loader-slot {
-  opacity: 0.58;
-}
-
-.grok-trace.is-finished .grok-trace-timeline {
-  opacity: 0.66;
+.grok-thought.is-pending {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px;
 }
 
 .grok-loader-slot {
@@ -1290,21 +1281,21 @@ button.chatgpt-thinking-row.is-selected {
   transition: transform 100ms ease;
 }
 
-.grok-trace-head:hover .grok-loader-slot,
-.grok-trace-head:focus-visible .grok-loader-slot {
+.grok-thought-head:hover .grok-loader-slot,
+.grok-thought-head:focus-visible .grok-loader-slot {
   opacity: 0;
 }
 
-.grok-trace-head:hover .grok-hover-chevron,
-.grok-trace-head:focus-visible .grok-hover-chevron {
+.grok-thought-head:hover .grok-hover-chevron,
+.grok-thought-head:focus-visible .grok-hover-chevron {
   opacity: 1;
 }
 
-.grok-trace.is-open .grok-hover-chevron svg {
+.grok-thought.is-open .grok-hover-chevron svg {
   transform: rotate(-180deg);
 }
 
-.grok-trace-copy {
+.grok-thought-copy {
   display: flex;
   min-width: 0;
   flex: 1;
@@ -1312,98 +1303,136 @@ button.chatgpt-thinking-row.is-selected {
   gap: 8px;
 }
 
-.grok-trace-kicker {
+.grok-thought-meta {
   flex: none;
-  color: color-mix(in srgb, var(--agent-accent) 65%, var(--text-dim));
-  font-size: 9px;
-  font-weight: 700;
-  letter-spacing: 0.09em;
-  text-transform: uppercase;
-}
-
-.grok-trace-title {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.grok-live-time {
-  white-space: pre;
+  color: color-mix(in srgb, var(--text-faint) 78%, transparent);
+  font-size: 10.5px;
   font-variant-numeric: tabular-nums;
 }
 
-.grok-trace-timeline {
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  margin: 4px 0 2px 12px;
-  padding-left: 16px;
+.grok-thought.is-streaming .grok-thought-meta {
+  color: var(--text-dim);
 }
 
-.grok-trace-timeline::before {
-  position: absolute;
-  top: 16px;
-  bottom: 16px;
-  left: 0;
-  width: 1px;
-  content: "";
-  background: rgba(255, 255, 255, 0.13);
-}
-
-.grok-trace-step,
-.grok-trace-tool {
-  position: relative;
-  display: flex;
-  min-height: 30px;
-  align-items: center;
+.grok-thought-summary {
   min-width: 0;
-  padding: 5px 0;
-}
-
-.grok-trace-node {
-  position: absolute;
-  left: -20px;
-  z-index: 1;
-  width: 8px;
-  height: 8px;
-  border: 1px solid rgba(255, 255, 255, 0.24);
-  border-radius: 50%;
-  background: var(--bg-pane);
-}
-
-.grok-trace-step p {
-  min-width: 0;
-  margin: 0;
   overflow: hidden;
-  color: var(--text-faint);
-  font-size: 11px;
-  line-height: 1.45;
+  color: color-mix(in srgb, var(--text-faint) 72%, transparent);
+  font-size: 10.75px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.grok-thought.is-streaming .grok-thought-summary {
+  color: var(--text-faint);
+}
+
+.grok-thought-body {
+  max-width: min(760px, calc(100cqw - 72px));
+  margin: 3px 2px 5px 29px;
+  padding: 4px 0 4px 11px;
+  border-left: 1px solid rgba(255, 255, 255, 0.1);
+  color: var(--text-faint);
+  font-size: 11px;
+  line-height: 1.55;
   user-select: text;
 }
 
-.grok-trace-tool .official-tool {
+.grok-thought-body[hidden] {
+  display: none;
+}
+
+.grok-thought-body .official-markdown {
+  opacity: 0.8;
+}
+
+.grok-thought-body .official-markdown pre {
+  max-height: none;
+}
+
+.grok-tool-wrap {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.grok-tool-history {
+  min-width: 0;
+  border-radius: 7px;
+}
+
+.grok-tool-history.is-open {
+  border-color: rgba(255, 255, 255, 0.055);
+  background: rgba(255, 255, 255, 0.012);
+}
+
+.grok-tool-history-head {
+  display: flex;
   width: 100%;
-  border-color: transparent;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 6px 5px 2px;
+  border-radius: 7px;
+  color: #969696;
+  text-align: left;
+  transition:
+    color 120ms ease,
+    background 120ms ease;
+}
+
+.grok-tool-history-head:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.grok-tool-history-copy {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.grok-tool-history-copy strong {
+  min-width: 0;
+  overflow: hidden;
+  font-family: var(--font-mono);
+  font-size: 10.75px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.grok-tool-history-copy > span {
+  flex: none;
+  color: var(--text-faint);
+  font-size: 9.5px;
+}
+
+.grok-tool-history-head > .official-chevron {
+  flex: none;
+}
+
+.grok-tool-history-list {
+  display: flex;
+  margin: 1px 5px 6px 29px;
+  padding: 4px 0 1px 9px;
+  border-left: 1px solid rgba(255, 255, 255, 0.08);
+  flex-direction: column;
+  gap: 2px;
+}
+
+.grok-tool-history-list .official-tool--grok.is-compact {
+  border: 0;
   background: transparent;
 }
 
-.grok-collapsed-steps {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  margin: 2px 0 3px 28px;
+.grok-tool-history-list .official-tool--grok.is-compact.is-open {
+  background: rgba(255, 255, 255, 0.018);
 }
 
-.grok-collapsed-steps .grok-trace-step {
-  min-height: 24px;
-  padding: 2px 0;
-}
-
-.grok-collapsed-steps .grok-trace-node {
-  display: none;
+.grok-tool-history-list .official-tool--grok.is-compact .official-tool-head {
+  padding-inline: 2px 5px;
 }
 
 .grok-answer-layer {
@@ -1444,6 +1473,10 @@ button.chatgpt-thinking-row.is-selected {
     max-width: 90%;
   }
 
+  .grok-thought-copy {
+    gap: 6px;
+  }
+
   .chatgpt-experience.has-details {
     display: block;
     width: 100%;
@@ -1465,6 +1498,16 @@ button.chatgpt-thinking-row.is-selected {
     right: 0;
     width: min(94%, 430px);
     height: min(680px, 100%);
+  }
+}
+
+@container agent-pane (max-width: 420px) {
+  .grok-thought-summary {
+    display: none;
+  }
+
+  .grok-thought-body {
+    margin-left: 24px;
   }
 }
 
@@ -1497,9 +1540,6 @@ button.chatgpt-thinking-row.is-selected {
     padding-inline: 7px;
   }
 
-  .grok-collapsed-steps {
-    margin-left: 24px;
-  }
 }
 
 @media (prefers-reduced-motion: reduce) {

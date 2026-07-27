@@ -1,12 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import type { ThinkingItem, ToolItem } from "../../../lib/agents/types";
+import type { AgentItem, ThinkingItem, ToolItem } from "../../../lib/agents/types";
 import {
   activityGroups,
+  AssistantMarkdown,
+  Chevron,
   MessageItem,
   PlanTracker,
   ProviderEmpty,
   ToolActivity,
+  ToolIcon,
   traceSummary,
   type ExperienceProps,
 } from "./OfficialShared";
@@ -130,47 +133,42 @@ function useTraceTimer(startedAt: number | null, running: boolean): number {
   return startedAt === null ? 0 : Math.max(0, Math.round((now - startedAt) / 1000));
 }
 
-function GrokThinkingStep({ item, connected }: { item: ThinkingItem; connected: boolean }) {
-  return (
-    <div className={`grok-trace-step${connected ? " is-connected" : ""}`}>
-      <span className="grok-trace-node" aria-hidden="true" />
-      <p>{traceSummary(item.text)}</p>
-    </div>
-  );
-}
-
-function GrokTrace({
-  activities,
-  working,
+function GrokThinkingEvent({
+  item,
+  active,
+  endedAt,
 }: {
-  activities: Array<ThinkingItem | ToolItem>;
-  working: boolean;
+  item: ThinkingItem;
+  active: boolean;
+  endedAt: number | null;
 }) {
-  const [open, setOpen] = useState(working);
-  const thoughts = activities.filter((item): item is ThinkingItem => item.kind === "thinking");
-  const latestThought = thoughts[thoughts.length - 1];
-  const seconds = useTraceTimer(activities[0]?.at ?? null, working);
-  const expandable = activities.length > 0;
-  const visibleCollapsed = working ? activities.slice(-2) : [];
-  const title = working
-    ? traceSummary(latestThought?.text ?? "Thinking")
-    : `Thought for ${elapsedLabel(seconds)}`;
+  const [open, setOpen] = useState(active);
+  const wasActive = useRef(active);
+  const liveSeconds = useTraceTimer(item.at, active);
+  const settledSeconds =
+    endedAt === null ? liveSeconds : Math.max(0, Math.round((endedAt - item.at) / 1000));
+  const expandable = item.text.trim().length > 0;
 
   useEffect(() => {
-    if (!working) setOpen(false);
-  }, [working]);
+    if (wasActive.current && !active) setOpen(false);
+    wasActive.current = active;
+  }, [active]);
 
   return (
-    <section className={`grok-trace${open ? " is-open" : ""}${working ? " is-working" : " is-finished"}`}>
+    <section
+      className={`grok-thought${open ? " is-open" : ""}${
+        active ? " is-streaming" : " is-settled"
+      }`}
+    >
       <button
         type="button"
-        className="grok-trace-head"
+        className="grok-thought-head"
         onClick={() => expandable && setOpen((value) => !value)}
         disabled={!expandable}
         aria-expanded={expandable ? open : undefined}
       >
         <span className="grok-loader-slot">
-          <GrokDotMatrix active={working} />
+          <GrokDotMatrix active={active} />
         </span>
         {expandable && (
           <span className="grok-hover-chevron" aria-hidden="true">
@@ -179,56 +177,130 @@ function GrokTrace({
             </svg>
           </span>
         )}
-        <span className="grok-trace-copy">
-          <span className="grok-trace-kicker">Reasoning</span>
-          <span className="grok-trace-title">
-            {title}
-            {working && <span className="grok-live-time"> · {elapsedLabel(seconds)}</span>}
+        <span className="grok-thought-copy">
+          <span className="grok-thought-meta">
+            {active
+              ? `Thinking · ${elapsedLabel(liveSeconds)}`
+              : `Thought for ${elapsedLabel(settledSeconds)}`}
           </span>
+          <span className="grok-thought-summary">{traceSummary(item.text)}</span>
         </span>
       </button>
+      <div className="grok-thought-body" hidden={!open}>
+        <AssistantMarkdown text={item.text} />
+      </div>
+    </section>
+  );
+}
+
+function GrokPendingThought() {
+  const startedAt = useRef(Date.now());
+  const seconds = useTraceTimer(startedAt.current, true);
+  return (
+    <div className="grok-thought is-streaming is-pending" role="status">
+      <span className="grok-loader-slot">
+        <GrokDotMatrix active />
+      </span>
+      <span className="grok-thought-meta">Thinking · {elapsedLabel(seconds)}</span>
+    </div>
+  );
+}
+
+function GrokToolHistory({ tools }: { tools: ToolItem[] }) {
+  const [open, setOpen] = useState(false);
+  const latest = tools[tools.length - 1];
+  if (!latest) return null;
+  const running = latest.status === "running" || latest.status === "pending";
+  const status =
+    latest.status === "error" ? "Failed" : running ? "Running" : "Completed";
+
+  return (
+    <section
+      className={`grok-tool-history${open ? " is-open" : ""}${
+        running ? " is-running" : ""
+      }`}
+    >
+      <button
+        type="button"
+        className="grok-tool-history-head"
+        onClick={() => setOpen((value) => !value)}
+        aria-expanded={open}
+      >
+        <span className="official-tool-mark">
+          <ToolIcon kind={latest.tool} />
+          {running && <span className="official-tool-spinner" aria-hidden="true" />}
+        </span>
+        <span className="grok-tool-history-copy">
+          <strong>{latest.title || latest.name}</strong>
+          <span>
+            {tools.length > 1 ? `${tools.length} tool calls · ${status}` : status}
+          </span>
+        </span>
+        {latest.status === "done" && <span className="official-tool-done">✓</span>}
+        {latest.status === "error" && <span className="official-tool-error">!</span>}
+        <Chevron open={open} />
+      </button>
       {open && (
-        <div className="grok-trace-timeline">
-          {activities.map((item, index) =>
-            item.kind === "thinking" ? (
-              <GrokThinkingStep
-                key={item.id}
-                item={item}
-                connected={index < activities.length - 1}
-              />
-            ) : (
-              <div
-                key={item.id}
-                className={`grok-trace-tool${index < activities.length - 1 ? " is-connected" : ""}`}
-              >
-                <span className="grok-trace-node" aria-hidden="true" />
-                <ToolActivity item={item} variant="grok" />
-              </div>
-            ),
-          )}
-        </div>
-      )}
-      {!open && visibleCollapsed.length > 0 && (
-        <div className="grok-collapsed-steps">
-          {visibleCollapsed.map((item, index) =>
-            item.kind === "thinking" ? (
-              <GrokThinkingStep
-                key={item.id}
-                item={item}
-                connected={index < visibleCollapsed.length - 1}
-              />
-            ) : (
-              <ToolActivity key={item.id} item={item} variant="grok" compact />
-            ),
-          )}
+        <div className="grok-tool-history-list" aria-label="Tool call history">
+          {tools.map((tool) => (
+            <ToolActivity key={tool.id} item={tool} variant="grok" compact />
+          ))}
         </div>
       )}
     </section>
   );
 }
 
+/**
+ * Grok streams short progress prose through the same ACP message channel as
+ * its final answer. In a turn that also performs work, only the first message
+ * after the last activity is the answer; earlier message chunks are status
+ * narration and would otherwise produce several fake replies.
+ */
+export function hiddenGrokProgressMessages(
+  items: AgentItem[],
+  working = false,
+): Set<string> {
+  const hidden = new Set<string>();
+
+  const inspectTurn = (start: number, end: number) => {
+    const turn = items.slice(start, end);
+    let lastActivity = -1;
+    for (let index = turn.length - 1; index >= 0; index -= 1) {
+      if (turn[index].kind === "thinking" || turn[index].kind === "tool") {
+        lastActivity = index;
+        break;
+      }
+    }
+    if (lastActivity < 0) return;
+    const tools = turn.filter((item): item is ToolItem => item.kind === "tool");
+    const canShowLiveAnswer =
+      !working ||
+      (tools.length > 0 &&
+        tools.every((tool) => tool.status === "done" || tool.status === "error"));
+    const answer = canShowLiveAnswer
+      ? turn.findIndex(
+          (item, index) => index > lastActivity && item.kind === "assistant",
+        )
+      : -1;
+    turn.forEach((item, index) => {
+      if (item.kind === "assistant" && index !== answer) hidden.add(item.id);
+    });
+  };
+
+  let turnStart = 0;
+  for (let index = 1; index < items.length; index += 1) {
+    if (items[index].kind !== "user") continue;
+    inspectTurn(turnStart, index);
+    turnStart = index;
+  }
+  inspectTurn(turnStart, items.length);
+  return hidden;
+}
+
 export function GrokExperience({
   items,
+  termId,
   status,
   started,
   agent,
@@ -237,33 +309,52 @@ export function GrokExperience({
   cwd,
 }: ExperienceProps) {
   const groups = useMemo(() => activityGroups(items), [items]);
-  const groupByActivity = useMemo(
-    () =>
-      new Map(
-        groups.flatMap((group) =>
-          group.activities.map((activity) => [activity.id, group] as const),
-        ),
-      ),
-    [groups],
-  );
   const answerIds = useMemo(
     () => new Set(groups.flatMap((group) => (group.answerId ? [group.answerId] : []))),
     [groups],
+  );
+  const hiddenProgressIds = useMemo(
+    () => hiddenGrokProgressMessages(items, status === "working"),
+    [items, status],
+  );
+  const toolGroups = useMemo(
+    () =>
+      groups
+        .map((group) => ({
+          key: group.firstId,
+          tools: group.activities.filter((item): item is ToolItem => item.kind === "tool"),
+        }))
+        .filter((group) => group.tools.length > 0),
+    [groups],
+  );
+  const toolGroupByLatestId = useMemo(
+    () =>
+      new Map(
+        toolGroups.map((group) => [
+          group.tools[group.tools.length - 1].id,
+          group,
+        ]),
+      ),
+    [toolGroups],
+  );
+  const groupedToolIds = useMemo(
+    () => new Set(toolGroups.flatMap((group) => group.tools.map((tool) => tool.id))),
+    [toolGroups],
   );
   let latestUserIndex = -1;
   for (let index = 0; index < items.length; index += 1) {
     if (items[index].kind === "user") latestUserIndex = index;
   }
-  let liveGroup: (typeof groups)[number] | undefined;
-  for (const group of groups) {
-    if (group.firstIndex > latestUserIndex) liveGroup = group;
-  }
-  const needsEmptyLiveTrace = status === "working" && !liveGroup;
+  const hasLiveActivity = items
+    .slice(latestUserIndex + 1)
+    .some((item) => item.kind === "thinking" || item.kind === "tool");
+  const needsEmptyLiveTrace = status === "working" && !hasLiveActivity;
 
   if (!started && status !== "error") {
     return (
       <ProviderEmpty
         agent={agent}
+        termId={termId}
         label={label}
         program={program}
         cwd={cwd}
@@ -275,21 +366,30 @@ export function GrokExperience({
   return (
     <div className="agent-experience grok-experience">
       <div className="official-transcript">
-        {items.map((item) => {
-          if (item.kind === "thinking" || item.kind === "tool") {
-            const group = groupByActivity.get(item.id);
-            if (!group || item.id !== group.firstId) return null;
+        {items.map((item, index) => {
+          if (item.kind === "thinking") {
             return (
-              <GrokTrace
-                key={`grok-trace-${group.firstId}`}
-                activities={group.activities}
-                working={status === "working" && group === liveGroup}
+              <GrokThinkingEvent
+                key={item.id}
+                item={item}
+                active={status === "working" && item.streaming}
+                endedAt={items[index + 1]?.at ?? null}
               />
+            );
+          }
+          if (item.kind === "tool") {
+            const group = toolGroupByLatestId.get(item.id);
+            if (!group && groupedToolIds.has(item.id)) return null;
+            return (
+              <div key={group ? `grok-tools-${group.key}` : item.id} className="grok-tool-wrap">
+                <GrokToolHistory tools={group?.tools ?? [item]} />
+              </div>
             );
           }
           if (item.kind === "plan") {
             return <PlanTracker key={item.id} item={item} variant="grok" />;
           }
+          if (item.kind === "assistant" && hiddenProgressIds.has(item.id)) return null;
           if (item.kind === "assistant" && answerIds.has(item.id)) {
             return (
               <div className="grok-answer-layer" key={item.id}>
@@ -302,9 +402,7 @@ export function GrokExperience({
           }
           return <MessageItem key={item.id} item={item} variant="grok" />;
         })}
-        {needsEmptyLiveTrace && (
-          <GrokTrace activities={[]} working />
-        )}
+        {needsEmptyLiveTrace && <GrokPendingThought />}
       </div>
     </div>
   );

@@ -541,7 +541,7 @@
 .cx-said {
   margin: 0;
   color: var(--text);
-  font-size: 12.5px;
+  font-size: 13px;
   line-height: 1.55;
   white-space: pre-wrap;
   word-break: break-word;
@@ -550,7 +550,7 @@
 
 .cx-prose {
   color: var(--text-dim);
-  font-size: 12.5px;
+  font-size: 13px;
   line-height: 1.65;
   white-space: pre-wrap;
   word-break: break-word;

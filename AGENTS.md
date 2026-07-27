@@ -8,3 +8,5 @@ Everything in the app must be written in english.
 
 Do not use glow on UI elements.
 
+Don't write with em dashes.
+

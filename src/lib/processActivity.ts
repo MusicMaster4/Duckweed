@@ -3,6 +3,8 @@ export interface ProcessState {
   exited: boolean;
   /** Increments when a persistent CLI agent finishes a turn or needs attention. */
   completionSeq: number;
+  /** Start time captured for the exact turn represented by completionSeq. */
+  completionStartedAt: number | null;
   /** Recognised coding agent currently responsible for the terminal activity. */
   agent: AgentKind | null;
   /** The custom agent UI owns this pane, so its shell is not what finishes. */
@@ -25,6 +27,22 @@ export const PROCESS_COMPLETION_MIN_MS = 30_000;
 
 /** Completion sound only after a job has been running for more than one minute. */
 export const COMPLETION_SOUND_MIN_MS = 60_000;
+
+/** Quiet window used only to merge duplicate heuristic completion channels. */
+export const AGENT_COMPLETION_DEDUPE_MS = 1_200;
+
+/**
+ * Structured protocol events are authoritative and must never be time-filtered.
+ * Raw CLI logs, hooks, and OSC notifications can all report the same turn, so
+ * only those heuristic signals share a short deduplication window.
+ */
+export function shouldAcceptAgentCompletion(
+  trusted: boolean,
+  lastCompletionAt: number,
+  now = Date.now(),
+): boolean {
+  return trusted || now - lastCompletionAt >= AGENT_COMPLETION_DEDUPE_MS;
+}
 
 /**
  * Real agent-turn completions (completionSeq) are always worth surfacing.
@@ -70,9 +88,10 @@ export function shouldPlayCompletionSound(
   now = Date.now(),
 ): boolean {
   if (!shouldSignalCompletion(previous, current, now)) return false;
-  // Prefer the pre-edge start so a turn that just finished keeps its clock
-  // even if the session module already prepared for the next one.
-  const startedAt = previous.processStartedAt ?? current.processStartedAt;
+  const startedAt =
+    current.completionSeq > previous.completionSeq
+      ? current.completionStartedAt
+      : previous.processStartedAt ?? current.processStartedAt;
   return startedAt !== null && now - startedAt > COMPLETION_SOUND_MIN_MS;
 }
 

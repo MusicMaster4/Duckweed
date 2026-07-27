@@ -46,7 +46,7 @@ describe("nextTiming", () => {
     });
   });
 
-  test("quiet has to hold for the whole period — an interruption restarts it", () => {
+  test("quiet has to hold for the whole period, so an interruption restarts it", () => {
     // A pane going quiet, then busy again a second later, then quiet: the
     // second countdown must be a fresh grace period, not the remains of the
     // first. This is the gap between two agent turns.

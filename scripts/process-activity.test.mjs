@@ -6,6 +6,7 @@ import {
   isAgentPromptSubmission,
   isGenericOsc777Notification,
   parseAgentOsc777,
+  shouldAcceptAgentCompletion,
   shouldPlayCompletionSound,
   shouldSignalCompletion,
 } from "../src/lib/processActivity.ts";
@@ -14,6 +15,7 @@ const state = (overrides = {}) => ({
   busy: false,
   exited: false,
   completionSeq: 0,
+  completionStartedAt: null,
   agent: null,
   agentUi: false,
   processStartedAt: null,
@@ -61,6 +63,17 @@ describe("terminal completion activity", () => {
         state({ busy: true, completionSeq: 5 }),
       ),
     ).toBe(true);
+  });
+});
+
+describe("agent completion deduplication", () => {
+  test("never time-filters exact custom UI protocol events", () => {
+    expect(shouldAcceptAgentCompletion(true, 10_000, 10_001)).toBe(true);
+  });
+
+  test("merges only heuristic signals inside the quiet window", () => {
+    expect(shouldAcceptAgentCompletion(false, 10_000, 11_199)).toBe(false);
+    expect(shouldAcceptAgentCompletion(false, 10_000, 11_200)).toBe(true);
   });
 });
 
@@ -191,12 +204,14 @@ describe("completion sound eligibility", () => {
           busy: true,
           agent: "codex",
           completionSeq: 1,
+          completionStartedAt: now - 59_999,
           processStartedAt: now - 59_999,
         }),
         state({
           busy: true,
           agent: "codex",
           completionSeq: 2,
+          completionStartedAt: now - 59_999,
           processStartedAt: now - 59_999,
         }),
         now,
@@ -218,17 +233,54 @@ describe("completion sound eligibility", () => {
           busy: true,
           agent: "claude",
           completionSeq: 1,
+          completionStartedAt: now - 60_001,
           processStartedAt: now - 60_001,
         }),
         state({
           busy: true,
           agent: "claude",
           completionSeq: 2,
+          completionStartedAt: now - 60_001,
           processStartedAt: now - 60_001,
         }),
         now,
       ),
     ).toBe(true);
+  });
+
+  test("uses the completed turn clock when another turn already owns the live clock", () => {
+    expect(
+      shouldPlayCompletionSound(
+        state({
+          agent: "codex",
+          completionSeq: 4,
+          processStartedAt: now - 2_000,
+        }),
+        state({
+          agent: "codex",
+          completionSeq: 5,
+          completionStartedAt: now - 90_000,
+          processStartedAt: now - 2_000,
+        }),
+        now,
+      ),
+    ).toBe(true);
+    expect(
+      shouldPlayCompletionSound(
+        state({
+          agent: "codex",
+          completionSeq: 5,
+          processStartedAt: now - 90_000,
+        }),
+        state({
+          agent: "codex",
+          completionSeq: 6,
+          completionStartedAt: now - 2_000,
+          processStartedAt: now - 90_000,
+        }),
+        now,
+      ),
+    ).toBe(false);
   });
 
   test("does not play when quitting a coding agent", () => {

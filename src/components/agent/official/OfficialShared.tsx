@@ -14,6 +14,8 @@ import { AgentProviderIcon } from "../AgentProviderIcon";
 
 export interface ExperienceProps {
   items: AgentItem[];
+  /** Identifies the terminal, so per-terminal presentation state can persist. */
+  termId: string;
   agent: AgentSessionState["agent"];
   status: AgentSessionState["status"];
   started: boolean;
@@ -448,11 +450,12 @@ export function ToolActivity({
 
 export function ProviderEmpty({
   agent,
+  termId,
   label,
   program,
   cwd,
   status,
-}: Pick<ExperienceProps, "agent" | "label" | "program" | "cwd" | "status">) {
+}: Pick<ExperienceProps, "agent" | "termId" | "label" | "program" | "cwd" | "status">) {
   const starting = status === "starting";
   return (
     <div className={`official-empty${starting ? " is-starting" : ""}`}>
@@ -460,9 +463,16 @@ export function ProviderEmpty({
         <AgentProviderIcon agent={agent} program={program} />
       </span>
       <strong>{label}</strong>
-      {starting ? (
-        <AgentAsciiLoader agent={agent} label="Starting session" />
-      ) : (
+      {/* Claude Code has no handshake to wait on, so a starting-only animation
+          would never be seen there. The art stays; only the progress
+          affordances are tied to the handshake. */}
+      <AgentAsciiLoader
+        agent={agent}
+        termId={termId}
+        label="Starting session"
+        progress={starting}
+      />
+      {!starting && (
         <span>Describe what you want changed and it will work in this folder.</span>
       )}
       <code>{cwd}</code>

@@ -38,6 +38,7 @@ import {
   isAgentPromptSubmission,
   isGenericOsc777Notification,
   parseAgentOsc777,
+  shouldAcceptAgentCompletion,
   type AgentKind,
 } from "./processActivity";
 import { buildCdCommand } from "./shellQuote";
@@ -63,6 +64,13 @@ export interface TermMeta {
   processStartedAt: number | null;
   /** Persistent CLI-agent turns completed while the process remains alive. */
   completionSeq: number;
+  /**
+   * Start of the exact job represented by the latest `completionSeq`.
+   *
+   * A follow-up can start before React observes the completion notification,
+   * so `processStartedAt` may already belong to the next turn.
+   */
+  completionStartedAt: number | null;
   /** Recognised coding agent currently responsible for the terminal activity. */
   agent: AgentKind | null;
   /**
@@ -140,32 +148,31 @@ interface Session extends TermMeta {
    * the user has not submitted yet.
    */
   draft: string;
-  /** Deduplicates a log event and OSC notification for the same completed turn. */
+  /** Deduplicates heuristic log/hook/OSC signals for one completed turn. */
   lastAgentCompletionAt: number;
   /**
-   * Turns the user is still owed an answer for in this pane.
+   * Turns the user is still owed an answer for in this pane, oldest first.
    *
-   * A completed turn is only worth announcing when the user actually asked for
-   * something: one credit per prompt submitted to a bound agent (plus one for
-   * the launch itself, which often carries the first prompt). Detection has
-   * several independent channels — session logs, hook bridge, OSC 777 — and a
-   * mis-bound transcript belonging to another copy of the same CLI is the one
-   * failure mode none of them can see. Spending a credit per notification
-   * makes every extra signal silent instead of a second sound and flash.
+   * The prompt and clock travel together so a queued follow-up cannot replace
+   * the slash classification or duration of the turn that actually finished.
    */
-  agentTurnCredits: number;
-  /**
-   * Text of the most recent prompt credited to this bound agent.
-   *
-   * Used to drop completion noise for settings slash commands (`/effort`,
-   * `/model`, …) when the only signal is a log/hook line — those still spend a
-   * credit (the turn really did end) but never earn a sound or flash.
-   */
-  lastAgentPrompt: string | null;
+  agentTurns: Array<{ prompt: string | null; startedAt: number }>;
   /** Command assembled while the conventional raw terminal owns shell input. */
   rawCommand: string;
+  /** Whether the pane already had history when the current raw command began. */
+  rawCommandStartedRan: boolean | null;
   /** Agent whose custom UI currently covers this pane. */
   agentUi: AgentId | null;
+  /** Shell metadata to put back when the custom agent surface closes. */
+  agentUiRestore: {
+    ran: boolean;
+    processStartedAt: number | null;
+    completionSeq: number;
+    completionStartedAt: number | null;
+    lastAgentCompletionAt: number;
+    /** Raw shell text echoed before Enter was intercepted. */
+    rawLaunchText: string | null;
+  } | null;
 }
 
 /** Focus handlers for the per-pane command editor (Warp-style input). */
@@ -392,6 +399,7 @@ export function getMeta(id: string): TermMeta | null {
     busy: s.busy,
     processStartedAt: s.processStartedAt,
     completionSeq: s.completionSeq,
+    completionStartedAt: s.completionStartedAt,
     agent: s.agent,
     agentUi: s.agentUi,
     ran: s.ran,
@@ -462,17 +470,16 @@ interface AgentCompletionPayload {
  * finish once. Two channels reporting the same turn — Gemini writes OSC 777
  * *and* runs the completion hook — must still be a single notification.
  */
-const MAX_AGENT_TURN_CREDITS = 8;
+const MAX_PENDING_AGENT_TURNS = 8;
 
 function creditAgentTurn(session: Session, prompt: string | null = null): void {
   if (!session.agent) return;
-  session.agentTurnCredits = Math.min(session.agentTurnCredits + 1, MAX_AGENT_TURN_CREDITS);
-  if (prompt !== null) session.lastAgentPrompt = prompt;
-  // Per-turn clock for the duration gates. Launch still seeds processStartedAt
-  // for the first prompt carried on the command line; every later Enter into a
-  // bound agent must not inherit that launch time or a 2-second /effort looks
-  // like it ran for the whole session.
-  session.processStartedAt = Date.now();
+  const startedAt = Date.now();
+  if (session.agentTurns.length >= MAX_PENDING_AGENT_TURNS) return;
+  session.agentTurns.push({ prompt, startedAt });
+  // A queued prompt has not started yet. Only the oldest outstanding turn owns
+  // the live clock; completion advances it when the agent hands control back.
+  if (session.agentTurns.length === 1) session.processStartedAt = startedAt;
 }
 
 /**
@@ -483,35 +490,49 @@ function creditAgentTurn(session: Session, prompt: string | null = null): void {
  */
 function markAgentComplete(session: Session, trusted = false): void {
   const now = Date.now();
-  if (now - session.lastAgentCompletionAt < 1200) return;
+  // Structured custom-UI protocols emit once per state transition. Debouncing
+  // those exact events swallowed legitimate fast follow-ups.
+  if (!shouldAcceptAgentCompletion(trusted, session.lastAgentCompletionAt, now)) return;
+  let completedStartedAt = session.processStartedAt;
   if (!trusted) {
     // Nothing was asked of this agent, so nothing of ours finished: a stale
     // hook line, a replayed log tail, or a transcript that belongs to another
     // instance of the same CLI running in this project.
-    if (session.agentTurnCredits <= 0) return;
-    session.agentTurnCredits -= 1;
+    const completed = session.agentTurns.shift();
+    if (!completed) return;
+    completedStartedAt = completed.startedAt;
     // Settings slash commands still end a turn in the session log, but they
     // are not work the user was waiting on. Spend the credit so a late real
     // completion cannot steal it, and stay silent.
-    if (isMetaSlashCommand(session.lastAgentPrompt)) {
+    if (isMetaSlashCommand(completed.prompt)) {
       session.lastAgentCompletionAt = now;
+      if (session.agentTurns.length > 0) {
+        session.agentTurns[0] = { ...session.agentTurns[0], startedAt: now };
+        session.processStartedAt = now;
+      }
       return;
     }
   }
   session.lastAgentCompletionAt = now;
+  session.completionStartedAt = completedStartedAt;
   session.completionSeq += 1;
   notifySession(session.id);
+  if (!trusted && session.agentTurns.length > 0) {
+    // Raw CLIs process queued prompts serially. The next prompt's execution
+    // clock begins when the previous one completes, not when it was typed.
+    session.agentTurns[0] = { ...session.agentTurns[0], startedAt: now };
+    session.processStartedAt = now;
+  }
 }
 
 function bindAgentKind(session: Session, agent: AgentKind, launchCommand = ""): void {
   if (session.agent === agent) return;
   session.agent = agent;
-  // `claude "fix the build"` carries its prompt on the command line, so the
-  // launch itself is worth one completion. Strip the program name so a bare
-  // `claude` launch with no prompt still credits one, and `/effort` on the
-  // line (unusual) is recorded for the meta filter.
-  session.agentTurnCredits = 1;
-  session.lastAgentPrompt = extractLaunchPrompt(launchCommand);
+  // A bare launch only opens the TUI. It must not create a phantom completion
+  // that a delayed hook or replayed log line can later spend.
+  session.agentTurns = [];
+  const launchPrompt = extractLaunchPrompt(launchCommand);
+  if (launchPrompt !== null) creditAgentTurn(session, launchPrompt);
   if (TAURI_RUNTIME) void agentWatch(session.id, agent, session.cwd);
 }
 
@@ -557,6 +578,18 @@ function bindAgentCommand(session: Session, command: string): void {
 }
 
 /**
+ * Erase an intercepted raw-mode launch from the shell's own line editor.
+ *
+ * Ctrl+U is not a portable "kill line" on Windows PSReadLine. DEL is the
+ * Backspace byte xterm itself sends, so replaying one per typed code point
+ * updates both PowerShell's edit buffer and the terminal cells.
+ */
+function eraseRawShellLine(session: Session, command: string): void {
+  const width = Array.from(command).length;
+  if (width > 0) send(session, "\x7f".repeat(width));
+}
+
+/**
  * Track what is being typed straight into the grid.
  *
  * Returns true when the Enter that ended the line opened the custom agent UI
@@ -568,16 +601,18 @@ function captureRawAgentCommand(session: Session, data: string): boolean {
   let claimed = false;
   for (const char of data) {
     if (char === "\r" || char === "\n") {
-      if (session.rawCommand.trim()) session.lastSubmitAt = Date.now();
       const command = session.rawCommand;
       session.rawCommand = "";
-      if (startAgentUi(session, command)) {
+      const startedRan = session.rawCommandStartedRan ?? session.ran;
+      session.rawCommandStartedRan = null;
+      if (startAgentUi(session, command, startedRan, command)) {
         // The shell has already echoed the half-typed command. Clear the line
         // it is holding so nothing is left behind when the pane comes back.
-        send(session, "\x15");
+        eraseRawShellLine(session, command);
         claimed = true;
         continue;
       }
+      if (command.trim()) session.lastSubmitAt = Date.now();
       bindAgentCommand(session, command);
     } else if (char === "\x7f" || char === "\b") {
       session.rawCommand = session.rawCommand.slice(0, -1);
@@ -598,11 +633,25 @@ function captureRawAgentCommand(session: Session, data: string): boolean {
  * failed to launch — the shell is always the fallback, so a command the user
  * typed never silently does nothing.
  */
-function startAgentUi(session: Session, command: string): boolean {
+function startAgentUi(
+  session: Session,
+  command: string,
+  restoreRan = session.ran,
+  rawLaunchText: string | null = null,
+): boolean {
   if (!agentUiEnabled || !TAURI_RUNTIME) return false;
   if (session.exited || session.agentUi) return false;
   const launch = parseAgentLaunch(command);
   if (!launch || !agentSessions.isAvailable(launch.agent)) return false;
+
+  session.agentUiRestore = {
+    ran: restoreRan,
+    processStartedAt: session.processStartedAt,
+    completionSeq: session.completionSeq,
+    completionStartedAt: session.completionStartedAt,
+    lastAgentCompletionAt: session.lastAgentCompletionAt,
+    rawLaunchText,
+  };
 
   // Register the session before the pane re-renders: `start` runs synchronously
   // as far as its first await, so the surface finds real state on its very
@@ -614,7 +663,6 @@ function startAgentUi(session: Session, command: string): boolean {
   // agent in this pane should not sound different because it has no shell
   // process behind it.
   session.processStartedAt = Date.now();
-  markRan(session);
   notifySession(session.id);
 
   void starting.then((failure) => {
@@ -624,6 +672,10 @@ function startAgentUi(session: Session, command: string): boolean {
     // first — a fallback that looks identical to "the feature is off" is how a
     // broken launch goes unnoticed.
     session.agentUi = null;
+    session.agentUiRestore = null;
+    markRan(session);
+    commandHistory.record(command, session.cwd || null);
+    recordLocalHistory(session, command);
     notifySession(session.id);
     if (session.exited) return;
     session.term.write(
@@ -640,7 +692,17 @@ export function closeAgentUi(id: string): void {
   if (!session) return;
   agentSessions.stop(id);
   if (!session.agentUi) return;
+  const restore = session.agentUiRestore;
+  if (restore?.rawLaunchText) eraseRawShellLine(session, restore.rawLaunchText);
   session.agentUi = null;
+  session.agentUiRestore = null;
+  if (restore) {
+    session.ran = restore.ran;
+    session.processStartedAt = restore.processStartedAt;
+    session.completionSeq = restore.completionSeq;
+    session.completionStartedAt = restore.completionStartedAt;
+    session.lastAgentCompletionAt = restore.lastAgentCompletionAt;
+  }
   notifySession(id);
   focus(id);
 }
@@ -659,8 +721,7 @@ function unbindAgent(session: Session): void {
   session.agent = null;
   session.rawCommand = "";
   // Late log/hook lines for the CLI the user just quit have nothing to say.
-  session.agentTurnCredits = 0;
-  session.lastAgentPrompt = null;
+  session.agentTurns = [];
   if (TAURI_RUNTIME) void agentUnwatch(session.id);
 }
 
@@ -978,16 +1039,18 @@ function create(id: string, opts: { cwd?: string | null; shell?: string | null }
     busy: false,
     processStartedAt: null,
     completionSeq: 0,
+    completionStartedAt: null,
     ran: false,
     lastSubmitAt: 0,
     history: [],
     draft: "",
     agent: null,
     lastAgentCompletionAt: 0,
-    agentTurnCredits: 0,
-    lastAgentPrompt: null,
+    agentTurns: [],
     rawCommand: "",
+    rawCommandStartedRan: null,
     agentUi: null,
+    agentUiRestore: null,
   };
   sessions.set(id, session);
   ensureBusyListener();
@@ -1030,7 +1093,24 @@ function create(id: string, opts: { cwd?: string | null; shell?: string | null }
   // position, device attributes) and xterm answers through `onData`. Treating
   // those replies as input marked every pane as used before it had run
   // anything, which is exactly what the empty state is there to hide.
-  term.onKey(() => markRan(session));
+  term.onKey((event) => {
+    // Raw mode echoes characters into xterm before Enter gives us the complete
+    // command. Remember whether the pane was pristine before the first
+    // printable key, otherwise typing `claude` itself would permanently hide
+    // the duck even though that line is intercepted and cleared.
+    if (
+      !session.editorMode &&
+      !session.busy &&
+      !session.agent &&
+      !session.agentUi &&
+      session.rawCommand.length === 0 &&
+      session.rawCommandStartedRan === null &&
+      event.domEvent.key.length === 1
+    ) {
+      session.rawCommandStartedRan = session.ran;
+    }
+    markRan(session);
+  });
   term.onScroll(() => {
     scheduleVisualCursor(session, true);
     session.blocks.scheduleLayout();
@@ -1556,8 +1636,16 @@ export function localHistory(id: string): readonly string[] {
 export function submitCommand(id: string, command: string): void {
   const session = sessions.get(id);
   if (!session || session.exited) return;
-  markRan(session);
   const text = command.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  // Submission owns the durable draft, not the React editor that called us.
+  // Opening a custom agent unmounts that editor immediately, so its queued
+  // state update is not guaranteed to run before the shell is revealed again.
+  session.draft = "";
+  // A harness launch is UI navigation, not shell history. Intercept it before
+  // marking the pane used or recording the command so closing can reveal the
+  // exact terminal that was underneath — including the welcome duck.
+  if (text.trim() && startAgentUi(session, text, session.ran)) return;
+  markRan(session);
   if (!text.trim()) {
     // Empty Enter — just send a newline so the shell re-draws the prompt.
     send(session, "\r");
@@ -1567,10 +1655,6 @@ export function submitCommand(id: string, command: string): void {
   // Shared history (ghost autosuggest across panes) + per-pane ↑ walk.
   commandHistory.record(text, session.cwd || null);
   recordLocalHistory(session, text);
-  // A recognised agent launch never reaches the shell: the custom UI runs the
-  // same agent headlessly and draws it instead. Everything else, including
-  // agents we cannot drive, carries on to the PTY untouched.
-  if (startAgentUi(session, text)) return;
   sendToShell(session, text);
 }
 
@@ -1589,8 +1673,8 @@ function sendToShell(session: Session, text: string): void {
     if (alreadyBound) creditAgentTurn(session, text);
     else {
       session.processStartedAt = Date.now();
-      // bindAgentKind already set lastAgentPrompt from the launch line; a bare
-      // agent name with no free text leaves it null, which is fine.
+      // A prompt carried on the launch line was credited by bindAgentKind.
+      // Bare launches stay uncredited until their first interactive Enter.
     }
   }
   markTyping(session);
@@ -1765,7 +1849,7 @@ export function runningAgentLabel(ids: string[]): string | null {
  */
 export function hasPendingAgentTurn(id: string): boolean {
   const session = sessions.get(id);
-  return !!session?.agent && session.agentTurnCredits > 0;
+  return !!session?.agent && session.agentTurns.length > 0;
 }
 
 /** Every live session id — used when quitting the app. */

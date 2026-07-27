@@ -139,6 +139,60 @@ describe("acp adapter", () => {
     expect(h.state().items[1]).toMatchObject({ text: "Hmm, let me look." });
   });
 
+  test("opens new thought and message segments around tool calls", async () => {
+    const h = harness();
+    await h.handshake();
+    h.adapter.prompt("inspect", h.ctx);
+
+    h.update({
+      sessionUpdate: "agent_thought_chunk",
+      content: { type: "text", text: "First thought" },
+    });
+    h.update({
+      sessionUpdate: "tool_call",
+      toolCallId: "call_1",
+      title: "Read package.json",
+      kind: "read",
+      status: "completed",
+    });
+    h.update({
+      sessionUpdate: "agent_thought_chunk",
+      content: { type: "text", text: "Second thought" },
+    });
+    h.update({
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "Interim narration" },
+    });
+    h.update({
+      sessionUpdate: "tool_call",
+      toolCallId: "call_2",
+      title: "Run tests",
+      kind: "execute",
+      status: "completed",
+    });
+    h.update({
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "Final answer" },
+    });
+
+    expect(
+      h.state().items
+        .filter((item) => item.kind === "thinking")
+        .map((item) => ({ id: item.id, text: item.text })),
+    ).toEqual([
+      { id: "r1", text: "First thought" },
+      { id: "r1-2", text: "Second thought" },
+    ]);
+    expect(
+      h.state().items
+        .filter((item) => item.kind === "assistant")
+        .map((item) => ({ id: item.id, text: item.text })),
+    ).toEqual([
+      { id: "a1", text: "Interim narration" },
+      { id: "a1-2", text: "Final answer" },
+    ]);
+  });
+
   test("builds a tool call from its ACP kind and merges later updates", async () => {
     const h = harness();
     await h.handshake();

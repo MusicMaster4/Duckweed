@@ -4,7 +4,11 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { AgentProviderIcon } from "../AgentProviderIcon";
 import { shouldDockCodexPrompt } from "./ChatGPTExperience";
 import { ClaudeExperience } from "./ClaudeExperience";
-import { GrokDotMatrix } from "./GrokExperience";
+import {
+  GrokDotMatrix,
+  GrokExperience,
+  hiddenGrokProgressMessages,
+} from "./GrokExperience";
 import { activityGroups, AssistantMarkdown, ProviderEmpty } from "./OfficialShared";
 
 describe("official agent presentation", () => {
@@ -35,6 +39,147 @@ describe("official agent presentation", () => {
     expect(html).toContain('cx="12" cy="12" r="1.6" opacity="0.2"');
     expect(html).not.toContain('opacity="1"');
     expect(html).not.toContain("<animate");
+  });
+
+  test("interleaves Grok thoughts while collapsing tools to the latest call", () => {
+    const fullThought =
+      "I should inspect the package metadata, then compare the entry points before answering. " +
+      "This final sentence must remain available when the completed thought is expanded.";
+    const html = renderToStaticMarkup(
+      <GrokExperience
+        agent="grok"
+        label="Grok Build"
+        mark="GR"
+        program="grok"
+        cwd="H:\\project"
+        started
+        status="idle"
+        items={[
+          { kind: "user", id: "u1", at: 1_000, text: "Explain this repo" },
+          { kind: "thinking", id: "t1", at: 2_000, text: fullThought, streaming: false },
+          {
+            kind: "assistant",
+            id: "progress-1",
+            at: 3_000,
+            text: "I will inspect the metadata now.",
+            streaming: false,
+          },
+          {
+            kind: "tool",
+            id: "tool-1",
+            at: 4_000,
+            callId: "call-1",
+            name: "Read",
+            tool: "read",
+            title: "Read package metadata",
+            status: "done",
+            command: null,
+            output: "",
+            changes: [],
+          },
+          {
+            kind: "thinking",
+            id: "t2",
+            at: 5_000,
+            text: "Now I should inspect the frontend entry point.",
+            streaming: false,
+          },
+          {
+            kind: "tool",
+            id: "tool-2",
+            at: 6_000,
+            callId: "call-2",
+            name: "Read",
+            tool: "read",
+            title: "Read frontend entry",
+            status: "done",
+            command: null,
+            output: "",
+            changes: [],
+          },
+          {
+            kind: "assistant",
+            id: "a1",
+            at: 7_000,
+            text: "### Report\nIt is **Duckweed**.",
+            streaming: false,
+          },
+        ]}
+      />,
+    );
+
+    expect(html).not.toContain("grok-trace");
+    expect(html.match(/grok-thought/g)?.length).toBeGreaterThan(1);
+    expect(html).toContain("grok-tool-history");
+    expect(html).toContain("2 tool calls");
+    expect(html).toContain("Read frontend entry");
+    expect(html).not.toContain("Read package metadata");
+    expect(html).not.toContain("I will inspect the metadata now.");
+    expect(html).toContain("grok-thought-body");
+    expect(html).toContain("This final sentence must remain available");
+    expect(html).toContain("<h3>Report</h3>");
+    expect(html).toContain("<strong>Duckweed</strong>");
+    expect(html.indexOf("Now I should inspect the frontend entry point.")).toBeLessThan(
+      html.indexOf("Read frontend entry"),
+    );
+  });
+
+  test("does not flash Grok planning prose before its first tool call", () => {
+    const hidden = hiddenGrokProgressMessages(
+      [
+        { kind: "user", id: "u1", at: 1, text: "Inspect" },
+        { kind: "thinking", id: "t1", at: 2, text: "Planning", streaming: true },
+        {
+          kind: "assistant",
+          id: "progress",
+          at: 3,
+          text: "I will inspect the repository now.",
+          streaming: true,
+        },
+      ],
+      true,
+    );
+    expect(hidden.has("progress")).toBe(true);
+  });
+
+  test("does not label prose as the Grok answer while its latest tool is running", () => {
+    const html = renderToStaticMarkup(
+      <GrokExperience
+        agent="grok"
+        label="Grok Build"
+        mark="GR"
+        program="grok"
+        cwd="H:\\project"
+        started
+        status="working"
+        items={[
+          { kind: "user", id: "u1", at: 1, text: "Inspect" },
+          { kind: "thinking", id: "t1", at: 2, text: "Planning", streaming: false },
+          {
+            kind: "tool",
+            id: "tool-1",
+            at: 3,
+            callId: "call-1",
+            name: "Read",
+            tool: "read",
+            title: "Read package metadata",
+            status: "running",
+            command: null,
+            output: "",
+            changes: [],
+          },
+          {
+            kind: "assistant",
+            id: "progress",
+            at: 4,
+            text: "This is still progress narration.",
+            streaming: true,
+          },
+        ]}
+      />,
+    );
+    expect(html).not.toContain("This is still progress narration.");
+    expect(html).not.toContain("grok-answer-layer");
   });
 
   test("uses provider artwork instead of the old letter badge", () => {
@@ -138,6 +283,7 @@ describe("official agent presentation", () => {
     const html = renderToStaticMarkup(
       <ProviderEmpty
         agent="codex"
+        termId="pane-empty-state"
         label="Codex"
         program="codex"
         cwd="H:\\project"
