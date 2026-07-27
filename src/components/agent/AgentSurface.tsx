@@ -211,27 +211,16 @@ export function AgentSurface({ termId, active, onClose }: Props) {
       </header>
 
       <div className="agent-scroll" ref={scrollRef}>
-        {!session.started && session.status !== "error" && (
-          <div className={`agent-empty${session.status === "starting" ? " is-starting" : ""}`}>
-            <span className="agent-empty-mark" aria-hidden="true">
-              {session.mark}
-            </span>
-            <strong>{session.label}</strong>
-            {session.status === "starting" ? (
-              <>
-                <span>Starting up…</span>
-                <span className="agent-starting-bar" aria-hidden="true">
-                  <span />
-                </span>
-              </>
-            ) : (
-              <span>Describe what you want changed and it will work in this folder.</span>
-            )}
-            <code>{session.cwd}</code>
-          </div>
-        )}
-
-        <AgentTimeline items={session.items} />
+        <AgentTimeline
+          session={session}
+          items={session.items}
+          agent={session.agent}
+          status={session.status}
+          started={session.started}
+          label={session.label}
+          mark={session.mark}
+          cwd={session.cwd}
+        />
 
         {session.pending.map((text, index) => (
           <div key={index} className="agent-turn is-pending">

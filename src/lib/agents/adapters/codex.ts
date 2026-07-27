@@ -43,6 +43,12 @@ const EXEC_STATUS: Record<string, ToolStatus> = {
   declined: "error",
 };
 
+const COLLAB_STATUS: Record<string, ToolStatus> = {
+  inProgress: "running",
+  completed: "done",
+  failed: "error",
+};
+
 interface Pending {
   resolve: (result: Record<string, unknown>) => void;
   reject: (error: Record<string, unknown>) => void;
@@ -261,6 +267,75 @@ export function createCodexAdapter(): AgentAdapter {
           tool: toolKind(tool),
           title: oneLine(name),
           status: status === "completed" ? "done" : status === "failed" ? "error" : "running",
+        });
+        return;
+      }
+      case "collabAgentToolCall": {
+        const collabTool = asString(item.tool) ?? "agent";
+        const status = asString(item.status) ?? "";
+        const prompt = asString(item.prompt);
+        const model = asString(item.model);
+        const effort = asString(item.reasoningEffort);
+        const receiverIds = asArray(item.receiverThreadIds)
+          .map((entry) => asString(entry) ?? "")
+          .filter(Boolean);
+        const states = asRecord(item.agentsStates);
+        const stateLines = states
+          ? Object.entries(states).map(([agentId, raw]) => {
+              const state = asRecord(raw);
+              const agentStatus = asString(state?.status) ?? "unknown";
+              const message = asString(state?.message);
+              return `${agentId} · ${agentStatus}${message ? ` · ${oneLine(message)}` : ""}`;
+            })
+          : [];
+        const operation =
+          collabTool === "spawnAgent"
+            ? "Spawned subagent"
+            : collabTool === "sendInput"
+              ? "Sent input to subagent"
+              : collabTool === "resumeAgent"
+                ? "Resumed subagent"
+                : collabTool === "wait"
+                  ? "Waiting for subagents"
+                  : collabTool === "closeAgent"
+                    ? "Closed subagent"
+                    : "Subagent activity";
+        const detail = [
+          model ? `Model: ${model}${effort ? ` · ${effort}` : ""}` : "",
+          receiverIds.length ? `Threads: ${receiverIds.join(", ")}` : "",
+          prompt ? `Prompt: ${prompt}` : "",
+          ...stateLines,
+        ]
+          .filter(Boolean)
+          .join("\n");
+        ctx.emit({
+          type: "tool",
+          callId: id,
+          name: `collab/${collabTool}`,
+          tool: "task",
+          title: prompt ? `${operation}: ${oneLine(prompt)}` : operation,
+          status: COLLAB_STATUS[status] ?? (settled ? "done" : "running"),
+          ...(detail ? { output: detail } : {}),
+        });
+        return;
+      }
+      case "subAgentActivity": {
+        const kind = asString(item.kind) ?? "interacted";
+        const agentPath = asString(item.agentPath);
+        const agentThreadId = asString(item.agentThreadId);
+        ctx.emit({
+          type: "tool",
+          callId: id,
+          name: "subagent",
+          tool: "task",
+          title: agentPath ? `Subagent ${agentPath}` : "Subagent activity",
+          status: kind === "interrupted" ? "error" : kind === "started" ? "running" : "done",
+          output: [
+            agentThreadId ? `Thread: ${agentThreadId}` : "",
+            kind ? `Activity: ${kind}` : "",
+          ]
+            .filter(Boolean)
+            .join("\n"),
         });
         return;
       }

@@ -48,6 +48,11 @@ export const AGENTS: Record<AgentId, AgentDefinition> = {
       "stream-json",
       "--verbose",
       "--include-partial-messages",
+      // Claude's child agents otherwise stay hidden behind the parent Task
+      // tool call. This preserves their text/thinking blocks on stream-json,
+      // tagged with parent_tool_use_id by the CLI, so the transcript can show
+      // real subagent activity instead of synthesising it.
+      "--forward-subagent-text",
       // Routes tool approvals back over the same stream as control requests
       // instead of failing them, which is what makes the UI's approve/deny
       // prompt possible at all.

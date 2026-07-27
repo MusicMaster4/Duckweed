@@ -307,6 +307,60 @@ describe("codex adapter", () => {
     });
   });
 
+  test("normalizes collaboration items into live subagent activity", async () => {
+    const h = harness();
+    await h.handshake();
+    h.notify("item/started", {
+      item: {
+        id: "sub1",
+        type: "collabAgentToolCall",
+        tool: "spawnAgent",
+        status: "inProgress",
+        senderThreadId: "thread_1",
+        receiverThreadIds: ["thread_child"],
+        prompt: "Inspect the parser tests",
+        model: "gpt-5.6-sol",
+        reasoningEffort: "high",
+        agentsStates: {
+          thread_child: { status: "running", message: "Reading tests" },
+        },
+      },
+    });
+
+    expect(h.state().items[0]).toMatchObject({
+      kind: "tool",
+      tool: "task",
+      status: "running",
+      title: "Spawned subagent: Inspect the parser tests",
+      output: expect.stringContaining("thread_child · running · Reading tests"),
+    });
+
+    h.notify("item/completed", {
+      item: {
+        id: "sub1",
+        type: "collabAgentToolCall",
+        tool: "spawnAgent",
+        status: "completed",
+        senderThreadId: "thread_1",
+        receiverThreadIds: ["thread_child"],
+        prompt: "Inspect the parser tests",
+        model: "gpt-5.6-sol",
+        reasoningEffort: "high",
+        agentsStates: {
+          thread_child: { status: "completed", message: "Found the failing case" },
+        },
+      },
+    });
+
+    expect(h.state().items).toHaveLength(1);
+    expect(h.state().items[0]).toMatchObject({
+      kind: "tool",
+      tool: "task",
+      status: "done",
+      output: expect.stringContaining("thread_child · completed · Found the failing case"),
+    });
+  });
+
   test("counts a unified patch into insertions and deletions", async () => {
     const h = harness();
     await h.handshake();

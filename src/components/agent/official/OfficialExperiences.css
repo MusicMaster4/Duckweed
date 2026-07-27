@@ -1,0 +1,1185 @@
+.agent-experience {
+  position: relative;
+  width: min(100%, 840px);
+  min-height: 100%;
+  margin: 0 auto;
+  color: var(--text);
+}
+
+.official-transcript {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+  padding: 8px 2px 24px;
+}
+
+.official-user {
+  align-self: flex-end;
+  max-width: min(78%, 680px);
+  padding: 10px 14px;
+  border: 1px solid rgba(255, 255, 255, 0.035);
+  border-radius: 18px;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.075);
+  user-select: text;
+}
+
+.official-user p {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.55;
+}
+
+.official-user--claude {
+  border-radius: 13px;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.official-user--grok {
+  border-radius: 20px 20px 5px 20px;
+  background: rgba(255, 255, 255, 0.065);
+}
+
+.official-answer {
+  position: relative;
+  align-self: stretch;
+  padding: 3px 2px;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.62;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.official-answer--claude {
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 13.5px;
+  line-height: 1.66;
+}
+
+.official-answer--grok {
+  font-size: 13.25px;
+}
+
+.official-stream-caret {
+  display: inline-block;
+  width: 2px;
+  height: 1em;
+  margin-left: 2px;
+  border-radius: 999px;
+  vertical-align: -0.12em;
+  background: currentColor;
+  animation: official-caret 900ms steps(2, jump-none) infinite;
+}
+
+@keyframes official-caret {
+  50% {
+    opacity: 0.15;
+  }
+}
+
+.official-notice {
+  align-self: flex-start;
+  max-width: 100%;
+  padding: 7px 10px;
+  border-left: 2px solid var(--agent-accent);
+  color: var(--text-dim);
+  background: color-mix(in srgb, var(--agent-accent) 7%, transparent);
+  font-size: 11.5px;
+  line-height: 1.45;
+  user-select: text;
+}
+
+.official-notice.is-error {
+  border-left-color: var(--rose);
+  background: rgba(242, 104, 111, 0.08);
+  color: #f5a0a5;
+}
+
+.official-empty {
+  display: flex;
+  min-height: 62vh;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 30px 20px;
+  text-align: center;
+  color: var(--text-faint);
+}
+
+.official-empty-mark {
+  display: grid;
+  width: 42px;
+  height: 42px;
+  place-items: center;
+  margin-bottom: 4px;
+  border-radius: 12px;
+  color: var(--agent-accent);
+  background: color-mix(in srgb, var(--agent-accent) 15%, transparent);
+  font-size: 14px;
+  font-weight: 750;
+}
+
+.official-empty strong {
+  color: var(--text);
+  font-size: 14px;
+}
+
+.official-empty > span:not(.official-empty-mark) {
+  max-width: 430px;
+  font-size: 12px;
+}
+
+.official-empty code {
+  margin-top: 3px;
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  opacity: 0.72;
+}
+
+/* Shared workflow/task tracker. It is fed by provider plan events and never
+   guesses tasks from prose. */
+.official-plan {
+  --plan-color: var(--agent-accent);
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: rgba(255, 255, 255, 0.018);
+}
+
+.official-plan--claude {
+  --plan-color: #d97757;
+}
+
+.official-plan--grok {
+  --plan-color: #b5b5b5;
+}
+
+.official-plan-head {
+  display: grid;
+  width: 100%;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 10px 8px;
+  text-align: left;
+}
+
+.official-plan-head:hover {
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.official-plan-kicker,
+.official-tool-kicker {
+  color: var(--plan-color);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.official-plan-head strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 11.5px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.official-plan-count {
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.official-chevron {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transition: transform 120ms ease;
+}
+
+.official-chevron.is-open {
+  transform: rotate(180deg);
+}
+
+.official-plan-progress {
+  height: 2px;
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.official-plan-progress span {
+  display: block;
+  height: 100%;
+  background: var(--plan-color);
+  transition: width 280ms cubic-bezier(0.25, 0.9, 0.3, 1);
+}
+
+.official-plan-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin: 0;
+  padding: 9px 11px 11px;
+  border-top: 1px solid rgba(255, 255, 255, 0.035);
+  list-style: none;
+}
+
+.official-plan-steps li {
+  display: grid;
+  grid-template-columns: 17px minmax(0, 1fr);
+  align-items: start;
+  gap: 7px;
+  color: var(--text-faint);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.official-plan-steps li.is-running {
+  color: var(--text);
+}
+
+.official-plan-steps li.is-done {
+  color: var(--text-dim);
+}
+
+.official-plan-step-mark {
+  display: grid;
+  width: 15px;
+  height: 15px;
+  place-items: center;
+  border: 1px solid var(--border-strong);
+  border-radius: 50%;
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: 8px;
+}
+
+.official-plan-steps li.is-done .official-plan-step-mark {
+  border-color: color-mix(in srgb, var(--plan-color) 55%, transparent);
+  color: var(--plan-color);
+  background: color-mix(in srgb, var(--plan-color) 10%, transparent);
+}
+
+.official-plan-steps li.is-running .official-plan-step-mark {
+  border-color: var(--plan-color);
+  box-shadow: inset 0 0 0 3px var(--bg-pane);
+  background: var(--plan-color);
+  animation: official-task-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes official-task-pulse {
+  50% {
+    opacity: 0.45;
+  }
+}
+
+/* Commands, edits and subagents share data but not provider chrome. */
+.official-tool {
+  --tool-color: var(--agent-accent);
+  overflow: hidden;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.018);
+}
+
+.official-tool--claude {
+  --tool-color: #d97757;
+}
+
+.official-tool--grok {
+  --tool-color: #c4c4c4;
+}
+
+.official-tool.is-error {
+  --tool-color: var(--rose);
+}
+
+.official-tool.is-subagent {
+  border-color: color-mix(in srgb, var(--tool-color) 25%, var(--border));
+  background: color-mix(in srgb, var(--tool-color) 4%, transparent);
+}
+
+.official-tool-head {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 9px;
+  text-align: left;
+}
+
+.official-tool-head:not(:disabled):hover {
+  background: rgba(255, 255, 255, 0.028);
+}
+
+.official-tool-head:disabled {
+  cursor: default;
+}
+
+.official-tool-mark {
+  position: relative;
+  display: grid;
+  width: 20px;
+  height: 20px;
+  flex: none;
+  place-items: center;
+  color: var(--tool-color);
+}
+
+.official-tool-icon {
+  width: 16px;
+  height: 16px;
+  overflow: visible;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.35;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.official-tool-spinner {
+  position: absolute;
+  inset: -1px;
+  border: 1px solid transparent;
+  border-top-color: currentColor;
+  border-radius: 50%;
+  animation: official-tool-spin 800ms linear infinite;
+}
+
+@keyframes official-tool-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.official-tool-copy {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.official-tool-copy strong {
+  overflow: hidden;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 10.75px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.official-tool-copy > span:not(.official-tool-kicker) {
+  color: var(--text-faint);
+  font-size: 9.5px;
+}
+
+.official-tool-stats {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+}
+
+.official-tool-stats .is-add {
+  color: #82c98a;
+}
+
+.official-tool-stats .is-del {
+  color: #e17c82;
+}
+
+.official-tool-done {
+  color: var(--tool-color);
+}
+
+.official-tool-error {
+  display: grid;
+  width: 15px;
+  height: 15px;
+  place-items: center;
+  border-radius: 50%;
+  color: #fff;
+  background: var(--rose);
+  font-weight: 700;
+}
+
+.official-tool-body {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 0 8px 8px;
+}
+
+.official-command,
+.official-output {
+  overflow: auto;
+  max-height: 240px;
+  margin: 0;
+  padding: 8px 9px;
+  border: 1px solid rgba(255, 255, 255, 0.055);
+  border-radius: 7px;
+  color: var(--text-dim);
+  background: rgba(0, 0, 0, 0.2);
+  font-family: var(--font-mono);
+  font-size: 10.25px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+}
+
+.official-command {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 7px;
+}
+
+.official-command > span {
+  color: var(--tool-color);
+}
+
+.official-command code {
+  font: inherit;
+}
+
+.official-tool.is-compact {
+  border-color: transparent;
+  background: transparent;
+}
+
+.official-tool.is-compact .official-tool-head {
+  min-height: 28px;
+  padding: 3px 2px;
+}
+
+.official-tool.is-compact .official-tool-mark {
+  width: 20px;
+  height: 20px;
+}
+
+.official-tool.is-compact .official-tool-copy {
+  display: block;
+}
+
+.official-tool.is-compact .official-tool-copy strong {
+  color: var(--text-faint);
+  font-family: inherit;
+  font-size: 12px;
+}
+
+/* ChatGPT: exact 1400ms dark-mode shimmer from the live CSS. */
+.chatgpt-experience {
+  --chatgpt-tertiary: #afafaf;
+  --chatgpt-contrast: rgba(0, 0, 0, 0.6);
+}
+
+.chatgpt-experience.has-details {
+  width: min(100%, 1180px);
+  display: grid;
+  grid-template-columns: minmax(300px, 1fr) minmax(300px, 430px);
+  gap: 18px;
+}
+
+.chatgpt-shimmer {
+  display: inline-block;
+  color: var(--chatgpt-tertiary);
+  background: var(--chatgpt-tertiary)
+    -webkit-gradient(
+      linear,
+      100% 0,
+      0 0,
+      from(var(--chatgpt-tertiary)),
+      color-stop(0.4, var(--chatgpt-contrast)),
+      color-stop(0.6, var(--chatgpt-contrast)),
+      to(var(--chatgpt-tertiary))
+    );
+  background-position: -100% 0;
+  background-repeat: no-repeat;
+  background-size: 50% 200%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: official-chatgpt-loading-shimmer 1400ms ease 0s infinite;
+}
+
+@keyframes official-chatgpt-loading-shimmer {
+  from {
+    background-position: -100% 0;
+  }
+  to {
+    background-position: 250% 0;
+  }
+}
+
+.chatgpt-thinking-row,
+.chatgpt-starting {
+  display: inline-flex;
+  min-width: 0;
+  align-self: flex-start;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-faint);
+  font-size: 12px;
+  line-height: 24px;
+  text-align: left;
+}
+
+button.chatgpt-thinking-row {
+  max-width: 100%;
+  border-radius: 7px;
+  padding: 1px 5px 1px 1px;
+}
+
+button.chatgpt-thinking-row:hover,
+button.chatgpt-thinking-row.is-selected {
+  color: var(--text-dim);
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.chatgpt-thinking-row > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chatgpt-activity-icon {
+  display: grid;
+  width: 20px;
+  height: 20px;
+  flex: none;
+  place-items: center;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 6px;
+  color: var(--text-dim);
+}
+
+.chatgpt-activity-icon.is-reasoning svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.05;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.chatgpt-tool-wrap {
+  max-width: 100%;
+}
+
+.chatgpt-tool-wrap.is-selected {
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.official-tool--chatgpt .official-tool-mark {
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 6px;
+}
+
+.official-tool--chatgpt.is-compact .official-tool-copy strong {
+  color: var(--text-faint);
+  font-size: 12px;
+}
+
+.chatgpt-details {
+  position: sticky;
+  top: 0;
+  display: flex;
+  overflow: hidden;
+  height: min(680px, calc(100vh - 150px));
+  min-height: 320px;
+  flex-direction: column;
+  border: 1px solid var(--border-strong);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--bg-elevated) 96%, black);
+  box-shadow: -18px 0 42px rgba(0, 0, 0, 0.2);
+}
+
+.chatgpt-details > header {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 13px;
+  border-bottom: 1px solid var(--border);
+}
+
+.chatgpt-details > header > div {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+}
+
+.chatgpt-details > header strong {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.chatgpt-details > header span {
+  color: var(--text-faint);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.chatgpt-details > header button {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border-radius: 6px;
+  color: var(--text-faint);
+}
+
+.chatgpt-details > header button:hover {
+  color: var(--text);
+  background: var(--hover);
+}
+
+.chatgpt-details > header svg {
+  width: 14px;
+  height: 14px;
+  stroke: currentColor;
+  stroke-width: 1.4;
+  stroke-linecap: round;
+}
+
+.chatgpt-details-body {
+  display: flex;
+  overflow-y: auto;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 3px;
+  padding: 10px;
+}
+
+.chatgpt-detail-phase {
+  padding: 9px;
+  border-radius: 9px;
+}
+
+.chatgpt-detail-phase.is-selected {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.chatgpt-detail-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.chatgpt-detail-title strong {
+  color: var(--text-dim);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.chatgpt-detail-phase > p {
+  margin: 7px 0 0 28px;
+  color: var(--text-faint);
+  font-size: 11px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  user-select: text;
+}
+
+.chatgpt-detail-phase.is-tool {
+  padding: 4px;
+}
+
+.chatgpt-details-scrim {
+  display: none;
+}
+
+/* Claude: the live component advances an 8-frame vertical Spark sheet at
+   90ms/frame and uses a 2.25s text shimmer that rests after 65%. */
+.claude-spark {
+  display: inline-block;
+  overflow: hidden;
+  width: 20px;
+  height: 20px;
+  flex: none;
+  color: #d97757;
+  clip-path: inset(1px 0);
+}
+
+.claude-spark svg {
+  display: block;
+  width: 20px;
+  height: 160px;
+  fill: currentColor;
+}
+
+.claude-spark.is-active svg {
+  animation: official-claude-spark 720ms steps(8, jump-none) infinite;
+}
+
+@keyframes official-claude-spark {
+  from {
+    transform: translateY(0);
+  }
+  to {
+    transform: translateY(-87.5%);
+  }
+}
+
+.claude-shimmer {
+  display: inline-block;
+  color: transparent;
+  background-image: linear-gradient(
+    to right,
+    rgb(151, 149, 141) 30%,
+    rgba(255, 255, 255, 0.7) 50%,
+    rgb(151, 149, 141) 80%
+  );
+  background-position: 100% 0;
+  background-repeat: no-repeat;
+  background-size: 400% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  animation: official-claude-shimmer 2.25s ease 0s infinite;
+}
+
+@keyframes official-claude-shimmer {
+  0% {
+    background-position: 100% 0;
+  }
+  65%,
+  100% {
+    background-position: 0 0;
+  }
+}
+
+.claude-starting {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: #97958d;
+  font-size: 12px;
+}
+
+.claude-trace {
+  --claude-rail: rgba(217, 119, 87, 0.3);
+  min-width: 0;
+}
+
+.claude-trace-head {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 2px;
+  color: #97958d;
+  font-size: 12px;
+  line-height: 20px;
+  text-align: left;
+  transition: color 150ms ease;
+}
+
+.claude-trace-head:hover {
+  color: var(--text-dim);
+}
+
+.claude-spark-slot {
+  position: relative;
+  display: flex;
+  overflow: hidden;
+  width: 20px;
+  height: 20px;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  margin-right: 2px;
+  transition:
+    width 150ms cubic-bezier(0.25, 0.9, 0.3, 1),
+    margin-right 150ms cubic-bezier(0.25, 0.9, 0.3, 1);
+}
+
+.claude-trace-head > span:nth-child(2) {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.claude-trace-head .official-chevron {
+  width: 12px;
+  height: 12px;
+  opacity: 0;
+  transform: rotate(-90deg);
+  transition:
+    opacity 200ms ease,
+    transform 150ms ease;
+}
+
+.claude-trace-head:hover .official-chevron,
+.claude-trace-head:focus-visible .official-chevron,
+.claude-trace.is-open .official-chevron {
+  opacity: 1;
+}
+
+.claude-trace.is-open .official-chevron {
+  transform: rotate(0deg);
+}
+
+.claude-trace-timeline {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 4px 0 2px 11px;
+  padding-left: 20px;
+}
+
+.claude-trace-timeline::before {
+  position: absolute;
+  top: 9px;
+  bottom: 12px;
+  left: 5px;
+  width: 1px;
+  content: "";
+  background: repeating-linear-gradient(
+    to bottom,
+    var(--claude-rail) 0 2px,
+    transparent 2px 5px
+  );
+}
+
+.claude-trace-step,
+.claude-trace-tool {
+  position: relative;
+  min-width: 0;
+}
+
+.claude-trace-node {
+  position: absolute;
+  top: 5px;
+  left: -20px;
+  display: grid;
+  width: 12px;
+  height: 12px;
+  place-items: center;
+  border-radius: 50%;
+  color: #97958d;
+  background: var(--bg-pane);
+}
+
+.claude-trace-node svg {
+  width: 12px;
+  height: 12px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.1;
+  stroke-linecap: round;
+}
+
+.claude-trace-node.is-tool {
+  top: 8px;
+  border: 1px solid var(--claude-rail);
+}
+
+.claude-trace-step p {
+  margin: 0 0 4px;
+  color: var(--text-faint);
+  font-size: 11px;
+  line-height: 1.48;
+  user-select: text;
+}
+
+.claude-trace-step.is-streaming p {
+  color: var(--text-dim);
+}
+
+.claude-trace-tool .official-tool {
+  border-color: transparent;
+  background: transparent;
+}
+
+.claude-latest-tool {
+  margin: 1px 0 0 28px;
+}
+
+.official-tool--claude.is-compact .official-tool-copy strong {
+  color: #97958d;
+}
+
+/* Grok: the source Lottie is 40 frames at 30fps. Each dot begins five frames
+   after the previous one, rises 20→100%, holds, then fades along the original
+   (.45,0,.1,1) opacity curve. */
+.grok-dot-matrix {
+  width: 24px;
+  height: 24px;
+  overflow: visible;
+  fill: currentColor;
+}
+
+.grok-dot-matrix circle {
+  opacity: 0.2;
+  animation: official-grok-dot 1333.333ms linear infinite;
+}
+
+@keyframes official-grok-dot {
+  0% {
+    opacity: 0.2;
+    animation-timing-function: cubic-bezier(0.45, 0, 0.1, 1);
+  }
+  31.25% {
+    opacity: 1;
+    animation-timing-function: cubic-bezier(0.45, 0, 0.1, 1);
+  }
+  50% {
+    opacity: 1;
+    animation-timing-function: cubic-bezier(0.45, 0, 0.1, 1);
+  }
+  100% {
+    opacity: 0.2;
+  }
+}
+
+.grok-starting {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #9e9e9e;
+  font-size: 12px;
+  line-height: 24px;
+}
+
+.grok-trace-head {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 4px;
+  color: #9e9e9e;
+  font-size: 12px;
+  line-height: 24px;
+  text-align: left;
+  cursor: default;
+}
+
+.grok-trace-head:not(:disabled) {
+  cursor: pointer;
+}
+
+.grok-loader-slot {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  flex: none;
+  place-items: center;
+  color: var(--text);
+  opacity: 1;
+  transition: opacity 200ms ease;
+}
+
+.grok-hover-chevron {
+  position: absolute;
+  inset: 0 auto auto 0;
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  opacity: 0;
+  transition: opacity 200ms ease;
+}
+
+.grok-hover-chevron svg {
+  width: 16px;
+  height: 16px;
+  stroke: currentColor;
+  stroke-width: 1.45;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transition: transform 100ms ease;
+}
+
+.grok-trace-head:hover .grok-loader-slot,
+.grok-trace-head:focus-visible .grok-loader-slot {
+  opacity: 0;
+}
+
+.grok-trace-head:hover .grok-hover-chevron,
+.grok-trace-head:focus-visible .grok-hover-chevron {
+  opacity: 1;
+}
+
+.grok-trace.is-open .grok-hover-chevron svg {
+  transform: rotate(-180deg);
+}
+
+.grok-trace-head > span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.grok-live-time {
+  white-space: pre;
+  font-variant-numeric: tabular-nums;
+}
+
+.grok-trace-timeline {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  margin: 4px 0 2px 12px;
+  padding-left: 16px;
+}
+
+.grok-trace-timeline::before {
+  position: absolute;
+  top: 16px;
+  bottom: 16px;
+  left: 0;
+  width: 1px;
+  content: "";
+  background: rgba(255, 255, 255, 0.13);
+}
+
+.grok-trace-step,
+.grok-trace-tool {
+  position: relative;
+  display: flex;
+  min-height: 30px;
+  align-items: center;
+  min-width: 0;
+  padding: 5px 0;
+}
+
+.grok-trace-node {
+  position: absolute;
+  left: -20px;
+  z-index: 1;
+  width: 8px;
+  height: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  border-radius: 50%;
+  background: var(--bg-pane);
+}
+
+.grok-trace-step p {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: var(--text-faint);
+  font-size: 11px;
+  line-height: 1.45;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  user-select: text;
+}
+
+.grok-trace-tool .official-tool {
+  width: 100%;
+  border-color: transparent;
+  background: transparent;
+}
+
+.grok-collapsed-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: 2px 0 3px 28px;
+}
+
+.grok-collapsed-steps .grok-trace-step {
+  min-height: 24px;
+  padding: 2px 0;
+}
+
+.grok-collapsed-steps .grok-trace-node {
+  display: none;
+}
+
+.official-tool--grok.is-compact .official-tool-copy strong {
+  color: #9e9e9e;
+}
+
+@media (max-width: 720px) {
+  .official-user {
+    max-width: 90%;
+  }
+
+  .chatgpt-experience.has-details {
+    display: block;
+    width: 100%;
+  }
+
+  .chatgpt-details-scrim {
+    position: absolute;
+    z-index: 4;
+    inset: 0;
+    display: block;
+    border-radius: 12px;
+    background: rgba(0, 0, 0, 0.42);
+  }
+
+  .chatgpt-details {
+    position: absolute;
+    z-index: 5;
+    top: 0;
+    right: 0;
+    width: min(94%, 430px);
+    height: min(680px, 100%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .official-stream-caret,
+  .official-plan-steps li.is-running .official-plan-step-mark,
+  .official-tool-spinner,
+  .chatgpt-shimmer,
+  .claude-spark.is-active svg,
+  .claude-shimmer,
+  .grok-dot-matrix circle {
+    animation: none;
+  }
+
+  .chatgpt-shimmer,
+  .claude-shimmer {
+    color: var(--text-faint);
+    background: none;
+    -webkit-text-fill-color: currentColor;
+  }
+
+  .claude-spark.is-active svg {
+    transform: translateY(0);
+  }
+
+  .grok-dot-matrix circle {
+    opacity: 0.55;
+  }
+
+  .official-chevron,
+  .official-plan-progress span,
+  .grok-loader-slot,
+  .grok-hover-chevron,
+  .grok-hover-chevron svg {
+    transition: none;
+  }
+}

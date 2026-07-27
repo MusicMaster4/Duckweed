@@ -1,0 +1,98 @@
+.agent-preview-page {
+  display: grid;
+  width: 100%;
+  height: 100%;
+  grid-template-rows: 40px minmax(0, 1fr);
+  background: var(--bg);
+}
+
+.agent-preview-tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-raised);
+}
+
+.agent-preview-tabs button {
+  padding: 5px 9px;
+  border-radius: 6px;
+  color: var(--text-faint);
+  font-size: 11px;
+}
+
+.agent-preview-tabs button:hover {
+  color: var(--text);
+  background: var(--hover);
+}
+
+.agent-preview-tabs button.is-active {
+  color: var(--text);
+  background: var(--accent-dim);
+}
+
+.agent-preview-surface {
+  display: flex;
+  overflow: hidden;
+  min-height: 0;
+  flex-direction: column;
+  background: var(--bg-pane);
+}
+
+.agent-preview-surface .agent-scroll {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+}
+
+.agent-preview-composer {
+  display: flex;
+  height: var(--composer-h);
+  flex: none;
+  flex-direction: column;
+  padding: 8px 12px 7px;
+  border-top: 3px solid rgba(255, 255, 255, 0.08);
+  background: var(--bg-raised);
+}
+
+.agent-preview-composer textarea {
+  width: 100%;
+  flex: 1;
+  resize: none;
+  border: 0;
+  outline: 0;
+  color: var(--text);
+  background: transparent;
+  font: 11.5px/1.4 var(--font-mono);
+}
+
+.agent-preview-composer textarea::placeholder {
+  color: var(--text-faint);
+}
+
+.agent-preview-composer > div {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-faint);
+  font-size: 9.5px;
+}
+
+.agent-preview-composer > div span {
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.agent-preview-composer > div button {
+  display: grid;
+  width: 20px;
+  height: 20px;
+  place-items: center;
+  margin-left: auto;
+  border-radius: 6px;
+  color: var(--bg);
+  background: var(--agent-accent);
+  font-size: 7px;
+}
