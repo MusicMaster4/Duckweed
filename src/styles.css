@@ -2279,6 +2279,15 @@ svg.tab-glyph-fill path {
 }
 
 /*
+ * xterm.js adds .column-select while Alt is held and switches the cursor to a
+ * crosshair for rectangular selection. Alt is also used for pane focus
+ * (Alt+arrows), so that flash is noise — keep the normal text cursor.
+ */
+.xterm.column-select.focus {
+  cursor: text;
+}
+
+/*
  * Warp-style block chrome, painted as DOM overlays above the xterm canvas
  * (same trick as the visual cursor). The command label hides the shell's
  * `PS path>` echo; the separator is a full-width hairline with padding.
