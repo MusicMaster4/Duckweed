@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod agent_activity;
+mod agent_proc;
 mod fs;
 mod git;
 mod launch;
@@ -20,6 +21,7 @@ use std::sync::Mutex;
 use tauri::{ipc::Channel, AppHandle, Emitter, Manager, State};
 
 use agent_activity::AgentActivityManager;
+use agent_proc::{AgentAvailability, AgentFrame, AgentProcManager, AgentSpawnOptions, AgentStarted};
 use fs::{DirEntry, FileContent};
 use git::{Branches, Diff, DiffStats, FileDiff};
 use launch::{LaunchIntent, PendingLaunch};
@@ -293,6 +295,46 @@ fn agent_unwatch(manager: State<'_, AgentActivityManager>, id: String) {
     manager.unwatch(&id);
 }
 
+/// Which headless agent CLIs this machine has, so the custom UI only takes
+/// over commands it can actually drive.
+#[tauri::command]
+async fn agent_proc_probe(names: Vec<String>) -> Result<Vec<AgentAvailability>, String> {
+    blocking(move || Ok(agent_proc::probe(names))).await
+}
+
+/// Launch a coding agent in its line-delimited JSON mode.
+#[tauri::command]
+async fn agent_proc_start(
+    manager: State<'_, AgentProcManager>,
+    on_frame: Channel<AgentFrame>,
+    id: String,
+    options: AgentSpawnOptions,
+) -> Result<AgentStarted, String> {
+    let manager = manager.inner().clone();
+    blocking(move || agent_proc::start(&manager, on_frame, id, options)).await
+}
+
+/// One protocol message to the agent's stdin.
+#[tauri::command]
+fn agent_proc_send(
+    manager: State<'_, AgentProcManager>,
+    id: String,
+    line: String,
+) -> Result<(), String> {
+    manager.send(&id, &line)
+}
+
+/// Signal end-of-input without killing the agent.
+#[tauri::command]
+fn agent_proc_close_stdin(manager: State<'_, AgentProcManager>, id: String) -> Result<(), String> {
+    manager.close_stdin(&id)
+}
+
+#[tauri::command]
+fn agent_proc_stop(manager: State<'_, AgentProcManager>, id: String) -> Result<(), String> {
+    manager.stop(&id)
+}
+
 fn home_path() -> PathBuf {
     PathBuf::from(home_dir())
 }
@@ -489,6 +531,7 @@ fn main() {
         )
         .manage(PtyManager::default())
         .manage(AgentActivityManager::default())
+        .manage(AgentProcManager::default())
         .manage(ProjectWatchManager::default())
         .manage(UsageState::default())
         .manage(DurableSettings::default())
@@ -530,6 +573,11 @@ fn main() {
             pty_any_busy,
             agent_watch,
             agent_unwatch,
+            agent_proc_probe,
+            agent_proc_start,
+            agent_proc_send,
+            agent_proc_close_stdin,
+            agent_proc_stop,
             frontend_ready,
             take_launch_intent,
             shell_integration_status,
@@ -546,6 +594,9 @@ fn main() {
             if let tauri::WindowEvent::Destroyed = event {
                 if let Some(manager) = window.app_handle().try_state::<PtyManager>() {
                     manager.kill_all();
+                }
+                if let Some(manager) = window.app_handle().try_state::<AgentProcManager>() {
+                    manager.stop_all();
                 }
             }
         })

@@ -19,11 +19,12 @@ import { nextBlockSelection, type BlockNavAction } from "./blockNav";
  */
 
 /**
- * Padding on each side of the block hairline (px). Warp's default (non-compact)
- * dividers sit in a short band with equal air above and below the 1px rule.
- * xterm rows have no inter-row gap, so the upper half covers the bottom of the
- * preceding output cell and the lower half reserves space before the command
- * label — keep each side small enough that the label's font still fits the cell.
+ * Height of the gap band above each block header (px). Warp's default
+ * (non-compact) dividers sit in a short band of air before the 1px rule.
+ * xterm rows have no inter-row gap, so the band overlaps the bottom of the
+ * preceding output cell — it must stay TRANSPARENT (only the hairline is
+ * painted, snug at the band's bottom edge). An opaque band used to slice the
+ * last output line of the previous chunk in half.
  */
 const BLOCK_GAP = 5;
 
@@ -113,7 +114,11 @@ export class BlockTracker {
    * end sits on the last line of that command's output.
    */
   open(command: string): void {
-    if (!this.editorMode || this.term.buffer.active.type !== "normal") return;
+    // No editorMode guard: submits only ever come from the composer, and a
+    // busy→idle race (the native busy poll lags a ^C) must not drop the block
+    // — that left the raw `PS path> cmd` echo uncovered for good. Command
+    // labels are safe either way; layout keeps them up in child mode too.
+    if (this.term.buffer.active.type !== "normal") return;
     this.prune();
     // A new command replaces any prior chunk selection.
     if (this.selectedId !== null) {
@@ -224,16 +229,30 @@ export class BlockTracker {
         continue;
       }
 
+      // Fold orphan idle prompts directly above the echo row into this block's
+      // header. An empty Enter (or the prompt re-drawn after ^C) leaves a
+      // `PS path>` row that belongs to no chunk: the previous block's range is
+      // trimmed of shell chrome and the prompt cover only paints after the
+      // last block, so it would sit raw between two chunks.
+      const buf = this.term.buffer.active;
+      let coverStart = range.start;
+      while (coverStart > 0) {
+        const line = buf.getLine(coverStart - 1);
+        const text = line ? line.translateToString(true) : "";
+        if (!looksLikePrompt(text)) break;
+        coverStart -= 1;
+      }
+
       const cmdRow = range.start - viewportY;
-      // Gap band is 2×BLOCK_GAP and sits entirely above the command text, so it
-      // can poke a few px past the viewport top while the label is still useful.
+      const coverRow = coverStart - viewportY;
+      // Gap band is 2×BLOCK_GAP and sits entirely above the covered rows, so
+      // it can poke a few px past the viewport top while the label is still
+      // useful.
       const cmdVisible = cmdRow >= -1 && cmdRow < rows;
       if (cmdVisible) {
-        const y = offsetY + cmdRow * cellHeight;
-        // Equal air above + below the hairline: expand the label upward by the
-        // full band (into the previous cell) so the command string keeps a full
-        // cell of line-height and is not clipped.
         const band = block.sepEl ? BLOCK_GAP * 2 : 0;
+        const coveredRows = cmdRow - coverRow;
+        const y = offsetY + coverRow * cellHeight;
         // Label only when the command row itself is in view (not just the gap).
         if (cmdRow >= 0) {
           block.cmdEl.hidden = false;
@@ -241,18 +260,19 @@ export class BlockTracker {
             "is-selected",
             this.editorMode && block.id === this.selectedId,
           );
-          block.cmdEl.style.transform = `translate3d(0, ${y - band}px, 0)`;
+          block.cmdEl.style.transform = `translate3d(0, ${y}px, 0)`;
           block.cmdEl.style.width = `${fullWidth}px`;
-          block.cmdEl.style.height = `${cellHeight + band}px`;
-          block.cmdEl.style.padding = `${band}px 6px 0`;
+          block.cmdEl.style.height = `${(coveredRows + 1) * cellHeight}px`;
+          block.cmdEl.style.padding = `${coveredRows * cellHeight}px 6px 0`;
           block.cmdEl.style.lineHeight = `${cellHeight}px`;
         } else {
           block.cmdEl.hidden = true;
         }
 
         if (block.sepEl) {
-          // Hairline centered in the band: BLOCK_GAP above (previous output) and
-          // BLOCK_GAP below (before cmd text). Label paint fills the band.
+          // The band is transparent (see BLOCK_GAP): the previous chunk's last
+          // line shows through uncut and only the hairline is painted, snug at
+          // the band's bottom edge.
           block.sepEl.hidden = false;
           block.sepEl.style.transform = `translate3d(0, ${y - band}px, 0)`;
           block.sepEl.style.width = `${fullWidth}px`;

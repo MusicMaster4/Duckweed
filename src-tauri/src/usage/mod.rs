@@ -319,16 +319,9 @@ pub fn scan(
         let files = sources::discover(agent.id, home);
         per_agent_files.insert(agent.id, files.len() as u32);
         for path in files {
-            let Ok(meta) = std::fs::metadata(&path) else {
+            let Some((size, mtime)) = sources::fingerprint(&path) else {
                 continue;
             };
-            let size = meta.len();
-            let mtime = meta
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_millis() as i64)
-                .unwrap_or(0);
             if agent.id == "codex"
                 && latest_codex
                     .as_ref()

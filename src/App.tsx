@@ -125,6 +125,7 @@ function boot() {
       highlight: saved.highlight,
       completionHighlights: saved.completionHighlights,
       completionSoundEnabled: saved.completionSoundEnabled,
+      customAgentUi: saved.customAgentUi,
       inputMode: saved.inputMode,
       confirmCloseRunning: saved.confirmCloseRunning,
       toolsOpen: saved.toolsOpen,
@@ -151,6 +152,7 @@ function boot() {
     highlight: true,
     completionHighlights: true,
     completionSoundEnabled: true,
+    customAgentUi: true,
     inputMode: "editor" as terminals.InputMode,
     confirmCloseRunning: true,
     toolsOpen: false,
@@ -186,6 +188,7 @@ export default function App() {
   const [completionSoundEnabled, setCompletionSoundEnabled] = useState(
     initial.completionSoundEnabled,
   );
+  const [customAgentUi, setCustomAgentUi] = useState(initial.customAgentUi);
   const [inputMode, setInputMode] = useState(initial.inputMode);
   const [confirmCloseRunningPref, setConfirmCloseRunningPref] = useState(() => {
     // Honour the saved preference before any close handler can run.
@@ -288,15 +291,23 @@ export default function App() {
     );
   }, []);
 
-  /** A terminal is being watched only when its pane and app window both have focus. */
-  const isFocusedTerm = useCallback((termId: string): boolean => {
-    if (!document.hasFocus() || settingsActiveRef.current) return false;
+  /** Active leaf of the active tab — used for the completion sound (works unfocused). */
+  const isSelectedTerm = useCallback((termId: string): boolean => {
     const tab = tabsRef.current.find((candidate) =>
       leaves(candidate.root).some((node) => node.term === termId),
     );
     if (!tab || tab.id !== activeTabIdRef.current) return false;
     return findLeaf(tab.root, tab.activeLeaf)?.term === termId;
   }, []);
+
+  /** Selected pane while the user is actually looking at the window (flash vs unread). */
+  const isFocusedTerm = useCallback(
+    (termId: string): boolean => {
+      if (!document.hasFocus() || settingsActiveRef.current) return false;
+      return isSelectedTerm(termId);
+    },
+    [isSelectedTerm],
+  );
 
   /** cwd a new pane should start in: follow the focused shell, then the tab's project. */
   const inheritCwd = useCallback((): string | null => {
@@ -376,10 +387,11 @@ export default function App() {
       if (!previous) return;
 
       if (!shouldSignalCompletion(previous, meta)) return;
-      // Sound only on the selected pane, and only after the job ran > 1 minute.
+      // Sound on the selected pane even when the window is in the background —
+      // that is when a long-job cue is most useful. Still quiet for other panes.
       if (
         completionSoundEnabledRef.current &&
-        isFocusedTerm(termId) &&
+        isSelectedTerm(termId) &&
         shouldPlayCompletionSound(previous, meta)
       ) {
         playCompletionSound();
@@ -405,7 +417,7 @@ export default function App() {
     };
     // Tab metadata changes must not tear down every terminal subscription.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [termIdsKey, acknowledgeTerm, flashFocusedCompletion, isFocusedTerm]);
+  }, [termIdsKey, acknowledgeTerm, flashFocusedCompletion, isFocusedTerm, isSelectedTerm]);
 
   // ---------------------------------------------------------------- tabs
 
@@ -1032,6 +1044,7 @@ export default function App() {
       // project metadata: null asks the backend for the same default shell.
       terminals.setFontSize(initial.fontSize);
       terminals.setHighlight(initial.highlight);
+      terminals.setAgentUi(initial.customAgentUi);
       terminals.setInputMode(initial.inputMode);
       preloadCompletionSound();
       if (!cancelled) setBooted(true);
@@ -1188,6 +1201,7 @@ export default function App() {
           highlight,
           completionHighlights,
           completionSoundEnabled,
+          customAgentUi,
           inputMode,
           confirmCloseRunning: confirmCloseRunningPref,
           toolsOpen,
@@ -1207,6 +1221,7 @@ export default function App() {
     highlight,
     completionHighlights,
     completionSoundEnabled,
+    customAgentUi,
     inputMode,
     confirmCloseRunningPref,
     toolsOpen,
@@ -1317,6 +1332,14 @@ export default function App() {
 
   const toggleCompletionSound = useCallback(() => {
     setCompletionSoundEnabled((prev) => !prev);
+  }, []);
+
+  const toggleCustomAgentUi = useCallback(() => {
+    setCustomAgentUi((prev) => {
+      const next = !prev;
+      terminals.setAgentUi(next);
+      return next;
+    });
   }, []);
 
   const toggleInputMode = useCallback(() => {
@@ -1737,6 +1760,13 @@ export default function App() {
         hint: "Ctrl+Shift+H",
         run: toggleHighlight,
       },
+      {
+        id: "view.agentui",
+        group: "View",
+        title: customAgentUi ? "Turn off Custom Agent UI" : "Turn on Custom Agent UI",
+        subtitle: "Draw Duckweed's own interface over Claude, Codex, Cursor, Grok, and OpenCode",
+        run: toggleCustomAgentUi,
+      },
     ];
 
     for (const info of shells) {
@@ -1810,6 +1840,7 @@ export default function App() {
     changes.stats,
     closePane,
     closeTab,
+    customAgentUi,
     highlight,
     inputMode,
     newTab,
@@ -1818,6 +1849,7 @@ export default function App() {
     shells,
     splitPane,
     tabs,
+    toggleCustomAgentUi,
     toggleHighlight,
     toggleInputMode,
     toggleZoom,
@@ -1981,6 +2013,7 @@ export default function App() {
                 highlight={highlight}
                 completionHighlights={completionHighlights}
                 completionSoundEnabled={completionSoundEnabled}
+                customAgentUi={customAgentUi}
                 confirmCloseRunning={confirmCloseRunningPref}
                 explorerIntegration={explorerIntegration}
                 shell={shell}
@@ -1991,6 +2024,7 @@ export default function App() {
                 onToggleHighlight={toggleHighlight}
                 onToggleCompletionHighlights={toggleCompletionHighlights}
                 onToggleCompletionSound={toggleCompletionSound}
+                onToggleCustomAgentUi={toggleCustomAgentUi}
                 onToggleConfirmCloseRunning={() =>
                   setConfirmCloseRunningPref((prev) => !prev)
                 }

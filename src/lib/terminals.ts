@@ -7,6 +7,10 @@ import { WebglAddon } from "@xterm/addon-webgl";
 import { Channel } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
+import { AGENTS } from "./agents/catalog";
+import { parseAgentLaunch } from "./agents/launch";
+import * as agentSessions from "./agents/session";
+import type { AgentId } from "./agents/types";
 import { BlockTracker } from "./blocks";
 import * as commandHistory from "./commandHistory";
 import { createCursorSettler, type CursorSettler } from "./cursor";
@@ -49,12 +53,22 @@ export interface TermMeta {
   rows: number;
   /** A child process currently owns this terminal. */
   busy: boolean;
-  /** Wall-clock captured when the current child process first became active. */
+  /**
+   * Wall-clock when the current (or just-finished) child became active.
+   * Kept after busy clears so completion listeners still see the start time
+   * even if title/cwd notifies land between idle and agent:complete.
+   */
   processStartedAt: number | null;
   /** Persistent CLI-agent turns completed while the process remains alive. */
   completionSeq: number;
   /** Recognised coding agent currently responsible for the terminal activity. */
   agent: AgentKind | null;
+  /**
+   * A headless agent has taken this pane over and the custom UI is drawn on
+   * top of the grid. The shell underneath is untouched and gets the pane back
+   * when the session ends.
+   */
+  agentUi: AgentId | null;
   /**
    * Something has been sent to the shell since the pane opened (or since the
    * last clear). Until then the grid holds only a prompt, which the pane hides
@@ -128,6 +142,8 @@ interface Session extends TermMeta {
   lastAgentCompletionAt: number;
   /** Command assembled while the conventional raw terminal owns shell input. */
   rawCommand: string;
+  /** Agent whose custom UI currently covers this pane. */
+  agentUi: AgentId | null;
 }
 
 /** Focus handlers for the per-pane command editor (Warp-style input). */
@@ -158,6 +174,15 @@ export type InputMode = "editor" | "raw";
 let inputMode: InputMode = "editor";
 let fontSize = 13.5;
 let highlightEnabled = true;
+/**
+ * Replace a recognised agent CLI with duckweed's own interface for it.
+ *
+ * On by default: every agent this covers ships a headless protocol that says
+ * far more than its TUI can draw into a terminal grid, and the interception is
+ * narrow enough (a bare launch, an agent that is installed) that the shell
+ * still gets everything else.
+ */
+let agentUiEnabled = true;
 const TAURI_RUNTIME = "__TAURI_INTERNALS__" in window;
 const FONT_FAMILY =
   '"CaskaydiaCove Nerd Font", "Cascadia Code", "JetBrains Mono", "Fira Code", Consolas, "Courier New", monospace';
@@ -345,6 +370,7 @@ export function getMeta(id: string): TermMeta | null {
     processStartedAt: s.processStartedAt,
     completionSeq: s.completionSeq,
     agent: s.agent,
+    agentUi: s.agentUi,
     ran: s.ran,
   };
 }
@@ -427,13 +453,29 @@ function bindAgentCommand(session: Session, command: string): void {
   if (agent) bindAgentKind(session, agent);
 }
 
-function captureRawAgentCommand(session: Session, data: string): void {
-  if (session.editorMode || session.busy || session.agent) return;
+/**
+ * Track what is being typed straight into the grid.
+ *
+ * Returns true when the Enter that ended the line opened the custom agent UI
+ * instead — the keystroke must then not reach the shell, or it would launch
+ * the CLI as well and leave two agents running in one pane.
+ */
+function captureRawAgentCommand(session: Session, data: string): boolean {
+  if (session.editorMode || session.busy || session.agent) return false;
+  let claimed = false;
   for (const char of data) {
     if (char === "\r" || char === "\n") {
       if (session.rawCommand.trim()) session.lastSubmitAt = Date.now();
-      bindAgentCommand(session, session.rawCommand);
+      const command = session.rawCommand;
       session.rawCommand = "";
+      if (startAgentUi(session, command)) {
+        // The shell has already echoed the half-typed command. Clear the line
+        // it is holding so nothing is left behind when the pane comes back.
+        send(session, "\x15");
+        claimed = true;
+        continue;
+      }
+      bindAgentCommand(session, command);
     } else if (char === "\x7f" || char === "\b") {
       session.rawCommand = session.rawCommand.slice(0, -1);
     } else if (char === "\x15") {
@@ -442,6 +484,57 @@ function captureRawAgentCommand(session: Session, data: string): void {
       session.rawCommand = (session.rawCommand + char).slice(-2048);
     }
   }
+  return claimed;
+}
+
+/**
+ * Hand the pane to the custom agent UI, if this command asked for an agent we
+ * can drive headlessly.
+ *
+ * Returns false for everything else, including an agent that is installed but
+ * failed to launch — the shell is always the fallback, so a command the user
+ * typed never silently does nothing.
+ */
+function startAgentUi(session: Session, command: string): boolean {
+  if (!agentUiEnabled || !TAURI_RUNTIME) return false;
+  if (session.exited || session.agentUi) return false;
+  const launch = parseAgentLaunch(command);
+  if (!launch || !agentSessions.isAvailable(launch.agent)) return false;
+
+  // Register the session before the pane re-renders: `start` runs synchronously
+  // as far as its first await, so the surface finds real state on its very
+  // first paint instead of flashing an empty frame.
+  const starting = agentSessions.start(session.id, launch, session.cwd);
+  session.agentUi = launch.agent;
+  markRan(session);
+  notifySession(session.id);
+
+  void starting.then((failure) => {
+    if (failure === null) return;
+    // Could not spawn after all: put the pane back and run what was typed, so
+    // the user still gets the CLI rather than a command that vanished. Say why
+    // first — a fallback that looks identical to "the feature is off" is how a
+    // broken launch goes unnoticed.
+    session.agentUi = null;
+    notifySession(session.id);
+    if (session.exited) return;
+    session.term.write(
+      `\r\n\x1b[38;5;244mCustom Agent UI could not start (${failure}); running ${AGENTS[launch.agent].binaries[0]} instead.\x1b[0m\r\n`,
+    );
+    sendToShell(session, command);
+  });
+  return true;
+}
+
+/** End an agent session and give the pane back to its shell. */
+export function closeAgentUi(id: string): void {
+  const session = sessions.get(id);
+  if (!session) return;
+  agentSessions.stop(id);
+  if (!session.agentUi) return;
+  session.agentUi = null;
+  notifySession(id);
+  focus(id);
 }
 
 function unbindAgent(session: Session): void {
@@ -457,7 +550,9 @@ function ensureAgentListener(): void {
   agentUnlisten = listen<AgentCompletionPayload>("agent:complete", (event) => {
     const session = sessions.get(event.payload.id);
     if (!session) return;
-    if (!session.agent) session.agent = event.payload.agent;
+    // Drop late log/hook events after unbind (user quit the CLI). Rebinding
+    // used to invent another completion and double the sound/highlight.
+    if (!session.agent || session.agent !== event.payload.agent) return;
     markAgentComplete(session);
   });
 }
@@ -484,10 +579,10 @@ function ensureBusyListener(): void {
       }
       session.blocks.busyChanged(state.busy);
       notifySession(state.id);
-      // Completion subscribers read these synchronously from the notification.
-      // Clear them afterwards so they can still classify the process that ended.
+      // Leave processStartedAt set after idle so a late agent:complete (or any
+      // notify between idle and the next run) still carries the finished job's
+      // start time. The next busy=true overwrites it for the new run.
       if (wasBusy && !state.busy) {
-        session.processStartedAt = null;
         unbindAgent(session);
       }
     }
@@ -735,17 +830,26 @@ function create(id: string, opts: { cwd?: string | null; shell?: string | null }
     agent: null,
     lastAgentCompletionAt: 0,
     rawCommand: "",
+    agentUi: null,
   };
   sessions.set(id, session);
   ensureBusyListener();
   ensureAgentListener();
+  // Cached after the first call: the answer decides whether typing `claude`
+  // opens the custom UI, and that has to be known before the first command is
+  // submitted rather than resolved while it is in flight.
+  void agentSessions.probeAvailability();
   // Selecting a chunk here drops chunk selection everywhere else so two panes
   // never show a selected block at the same time.
   session.blocks = new BlockTracker(term, host, () => clearOtherBlockSelections(id));
 
   term.onData((data) => {
-    captureRawAgentCommand(session, data);
     markTyping(session);
+    // The custom UI owns the keyboard through its own composer; anything the
+    // grid still emits underneath it (a stray focus, a paste) is not input the
+    // shell should act on.
+    if (session.agentUi) return;
+    if (captureRawAgentCommand(session, data)) return;
     send(session, data);
   });
 
@@ -966,15 +1070,14 @@ function create(id: string, opts: { cwd?: string | null; shell?: string | null }
   });
 
   // OSC 9;9;<path> — what Windows Terminal / PowerShell profiles emit.
+  // Do not treat other OSC 9 payloads as agent completion: shells and tools
+  // reuse OSC 9 for progress/badges, which false-fired the completion cue
+  // while long-running CLI agents were still working.
   term.parser.registerOscHandler(9, (payload) => {
     const match = /^9;(.+)$/.exec(payload);
     if (match) {
       session.cwd = match[1].replace(/^"|"$/g, "");
       notifySession(id);
-      return true;
-    }
-    if (session.agent && payload.trim()) {
-      markAgentComplete(session);
       return true;
     }
     return false;
@@ -1038,8 +1141,9 @@ async function start(session: Session, opts: { cwd?: string | null; shell?: stri
     session.term.write(
       `\r\n\x1b[38;5;244m[process exited${code === null ? "" : ` with code ${code}`}]\x1b[0m\r\n`,
     );
+    // Keep processStartedAt through the exit notify so completion sound/duration
+    // gates still see how long the last job ran.
     notifySession(id);
-    session.processStartedAt = null;
     unbindAgent(session);
   });
   session.unlisten.push(offExit);
@@ -1278,6 +1382,15 @@ export function submitCommand(id: string, command: string): void {
   // Shared history (ghost autosuggest across panes) + per-pane ↑ walk.
   commandHistory.record(text, session.cwd || null);
   recordLocalHistory(session, text);
+  // A recognised agent launch never reaches the shell: the custom UI runs the
+  // same agent headlessly and draws it instead. Everything else, including
+  // agents we cannot drive, carries on to the PTY untouched.
+  if (startAgentUi(session, text)) return;
+  sendToShell(session, text);
+}
+
+/** Run `text` in the pane's shell as a command block. */
+function sendToShell(session: Session, text: string): void {
   bindAgentCommand(session, text);
   // Mark the block before writing so the start line is the prompt row that
   // will hold the echoed command.
@@ -1380,6 +1493,7 @@ export function dispose(id: string): void {
   inputFocusers.delete(id);
   inputPasters.delete(id);
   if (session.agent && TAURI_RUNTIME) void agentUnwatch(id);
+  agentSessions.stop(id);
   for (const off of session.unlisten) off();
   session.dataChannel = null;
   if (TAURI_RUNTIME) void ptyKill(id);
@@ -1527,6 +1641,29 @@ export function setHighlight(enabled: boolean): void {
 
 export function getHighlight(): boolean {
   return highlightEnabled;
+}
+
+/**
+ * Turn the custom agent UI on or off.
+ *
+ * Switching it off ends every session that is already up: leaving them running
+ * behind a setting that says they are off is the kind of half-applied state
+ * that makes a toggle untrustworthy. The shell underneath is untouched either
+ * way, so each pane simply becomes a terminal again.
+ */
+export function setAgentUi(enabled: boolean): void {
+  if (agentUiEnabled === enabled) return;
+  agentUiEnabled = enabled;
+  if (!enabled) {
+    for (const id of agentSessions.activeTermIds()) closeAgentUi(id);
+  } else {
+    void agentSessions.probeAvailability();
+  }
+  notifySettings();
+}
+
+export function getAgentUi(): boolean {
+  return agentUiEnabled;
 }
 
 export function clear(id: string): void {

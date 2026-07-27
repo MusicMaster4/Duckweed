@@ -92,14 +92,29 @@ describe("completion sound and highlight eligibility", () => {
     ).toBe(true);
   });
 
-  test("signals recognised coding agents regardless of runtime", () => {
+  test("does not treat quitting a coding agent as a turn completion", () => {
+    // Ctrl+C /exit: process goes idle (or shell exits) without a turn record.
     expect(
       shouldSignalCompletion(
-        state({ busy: true, agent: "codex", processStartedAt: now - 1 }),
-        state({ agent: "codex", processStartedAt: now - 1 }),
+        state({ busy: true, agent: "codex", processStartedAt: now - 120_000 }),
+        state({ agent: "codex", processStartedAt: now - 120_000 }),
         now,
       ),
-    ).toBe(true);
+    ).toBe(false);
+    expect(
+      shouldSignalCompletion(
+        state({ busy: true, agent: "grok", processStartedAt: now - 120_000 }),
+        state({ processStartedAt: now - 120_000 }),
+        now,
+      ),
+    ).toBe(false);
+    expect(
+      shouldSignalCompletion(
+        state({ agent: "claude", processStartedAt: now - 120_000 }),
+        state({ exited: true, processStartedAt: now - 120_000 }),
+        now,
+      ),
+    ).toBe(false);
   });
 
   test("signals persistent agent turns regardless of process runtime", () => {
@@ -107,6 +122,23 @@ describe("completion sound and highlight eligibility", () => {
       shouldSignalCompletion(
         state({ busy: true, completionSeq: 4, processStartedAt: now - 1 }),
         state({ busy: true, completionSeq: 5, processStartedAt: now - 1 }),
+        now,
+      ),
+    ).toBe(true);
+    expect(
+      shouldSignalCompletion(
+        state({
+          busy: true,
+          agent: "grok",
+          completionSeq: 2,
+          processStartedAt: now - 1,
+        }),
+        state({
+          busy: true,
+          agent: "grok",
+          completionSeq: 3,
+          processStartedAt: now - 1,
+        }),
         now,
       ),
     ).toBe(true);
@@ -126,14 +158,24 @@ describe("completion sound eligibility", () => {
     ).toBe(false);
     expect(
       shouldPlayCompletionSound(
-        state({ busy: true, agent: "codex", processStartedAt: now - 59_999 }),
-        state({ agent: "codex", processStartedAt: now - 59_999 }),
+        state({
+          busy: true,
+          agent: "codex",
+          completionSeq: 1,
+          processStartedAt: now - 59_999,
+        }),
+        state({
+          busy: true,
+          agent: "codex",
+          completionSeq: 2,
+          processStartedAt: now - 59_999,
+        }),
         now,
       ),
     ).toBe(false);
   });
 
-  test("plays for any finished job that ran more than one minute", () => {
+  test("plays for finished jobs and agent turns that ran more than one minute", () => {
     expect(
       shouldPlayCompletionSound(
         state({ busy: true, processStartedAt: now - 60_001 }),
@@ -143,11 +185,31 @@ describe("completion sound eligibility", () => {
     ).toBe(true);
     expect(
       shouldPlayCompletionSound(
-        state({ busy: true, agent: "claude", processStartedAt: now - 60_001 }),
-        state({ agent: "claude", processStartedAt: now - 60_001 }),
+        state({
+          busy: true,
+          agent: "claude",
+          completionSeq: 1,
+          processStartedAt: now - 60_001,
+        }),
+        state({
+          busy: true,
+          agent: "claude",
+          completionSeq: 2,
+          processStartedAt: now - 60_001,
+        }),
         now,
       ),
     ).toBe(true);
+  });
+
+  test("does not play when quitting a coding agent", () => {
+    expect(
+      shouldPlayCompletionSound(
+        state({ busy: true, agent: "grok", processStartedAt: now - 120_000 }),
+        state({ processStartedAt: now - 120_000 }),
+        now,
+      ),
+    ).toBe(false);
   });
 
   test("does not play when the process did not finish", () => {
@@ -199,5 +261,8 @@ describe("CLI agent signals", () => {
       ),
     ).toBe(true);
     expect(isGenericOsc777Notification("progress;50")).toBe(false);
+    // Progress/status notifies must not look like a finished turn.
+    expect(isGenericOsc777Notification("notify;Working;Still generating…")).toBe(false);
+    expect(isGenericOsc777Notification("notify;Status;Agent busy")).toBe(false);
   });
 });

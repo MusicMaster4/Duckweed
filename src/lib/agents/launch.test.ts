@@ -1,0 +1,117 @@
+import { describe, expect, test } from "bun:test";
+
+import { parseAgentLaunch, tokenize } from "./launch";
+
+describe("tokenize", () => {
+  test("keeps a quoted prompt as one word", () => {
+    expect(tokenize(`claude "fix the login bug"`)).toEqual(["claude", "fix the login bug"]);
+  });
+
+  test("handles single quotes and escaped quotes", () => {
+    expect(tokenize(`grok 'say "hi"'`)).toEqual(["grok", 'say "hi"']);
+    expect(tokenize(`codex "a \\"b\\" c"`)).toEqual(["codex", 'a "b" c']);
+  });
+
+  test("keeps an empty quoted argument", () => {
+    expect(tokenize(`claude ""`)).toEqual(["claude", ""]);
+  });
+});
+
+describe("parseAgentLaunch", () => {
+  test("claims a bare launch of every supported agent", () => {
+    expect(parseAgentLaunch("claude")?.agent).toBe("claude");
+    expect(parseAgentLaunch("codex")?.agent).toBe("codex");
+    expect(parseAgentLaunch("cursor-agent")?.agent).toBe("cursor");
+    expect(parseAgentLaunch("grok")?.agent).toBe("grok");
+    expect(parseAgentLaunch("opencode")?.agent).toBe("opencode");
+  });
+
+  test("ignores agents the custom UI cannot drive", () => {
+    expect(parseAgentLaunch("gemini")).toBeNull();
+    expect(parseAgentLaunch("aider")).toBeNull();
+    expect(parseAgentLaunch("ls")).toBeNull();
+  });
+
+  test("takes the opening prompt from a positional argument", () => {
+    expect(parseAgentLaunch(`claude "fix the login bug"`)?.prompt).toBe("fix the login bug");
+    expect(parseAgentLaunch(`grok 'add tests'`)?.prompt).toBe("add tests");
+  });
+
+  test("reads the requested model in both flag forms", () => {
+    expect(parseAgentLaunch("claude --model opus")?.model).toBe("opus");
+    expect(parseAgentLaunch("claude --model=opus")?.model).toBe("opus");
+    expect(parseAgentLaunch("grok -m grok-4.5")?.model).toBe("grok-4.5");
+  });
+
+  test("reads the requested effort in its flag forms", () => {
+    expect(parseAgentLaunch("claude --effort high")?.effort).toBe("high");
+    expect(parseAgentLaunch("claude --effort=max")?.effort).toBe("max");
+    expect(parseAgentLaunch("grok --reasoning-effort low")?.effort).toBe("low");
+    expect(parseAgentLaunch("grok --effort medium")?.effort).toBe("medium");
+    // An effort flag with no value does not turn the next flag into one.
+    expect(parseAgentLaunch("claude --effort --model opus")?.effort).toBeNull();
+  });
+
+  test("reads model and effort out of codex config overrides", () => {
+    expect(parseAgentLaunch("codex -c model_reasoning_effort=high")?.effort).toBe("high");
+    expect(parseAgentLaunch('codex -c model="gpt-5.6-sol"')?.model).toBe("gpt-5.6-sol");
+    expect(parseAgentLaunch("codex --config model_reasoning_effort=xhigh")?.effort).toBe("xhigh");
+    // Between -m and a config override, the later word wins.
+    expect(parseAgentLaunch("codex -c model=gpt-5.4 -m gpt-5.5")?.model).toBe("gpt-5.5");
+  });
+
+  test("recognises continuing a previous session", () => {
+    expect(parseAgentLaunch("claude -c")?.resume).toBe(true);
+    expect(parseAgentLaunch("claude --continue")?.resume).toBe(true);
+    expect(parseAgentLaunch("opencode --continue")?.resume).toBe(true);
+    expect(parseAgentLaunch("claude --resume")?.resume).toBe(true);
+    // With an id, `--resume` consumes it rather than leaving it as a prompt.
+    expect(parseAgentLaunch("claude --resume abc123")?.prompt).toBeNull();
+  });
+
+  test("treats codex's -c as a config override, not continue", () => {
+    const launch = parseAgentLaunch("codex -c model_reasoning_effort=high");
+    expect(launch?.resume).toBe(false);
+    expect(launch?.prompt).toBeNull();
+  });
+
+  test("leaves non-interactive subcommands to the shell", () => {
+    expect(parseAgentLaunch("codex exec 'do a thing'")).toBeNull();
+    expect(parseAgentLaunch("codex login")).toBeNull();
+    expect(parseAgentLaunch("claude -p hello")).toBeNull();
+    expect(parseAgentLaunch("claude --help")).toBeNull();
+    expect(parseAgentLaunch("claude mcp list")).toBeNull();
+    expect(parseAgentLaunch("opencode run hello")).toBeNull();
+    expect(parseAgentLaunch("opencode serve")).toBeNull();
+    expect(parseAgentLaunch("grok agent stdio")).toBeNull();
+  });
+
+  test("leaves anything the shell has to compose alone", () => {
+    expect(parseAgentLaunch("claude | tee log.txt")).toBeNull();
+    expect(parseAgentLaunch("claude > out.txt")).toBeNull();
+    expect(parseAgentLaunch("git pull && claude")).toBeNull();
+    expect(parseAgentLaunch("claude &")).toBeNull();
+    expect(parseAgentLaunch("claude\nls")).toBeNull();
+  });
+
+  test("sees through runners and environment prefixes", () => {
+    expect(parseAgentLaunch("npx claude")?.agent).toBe("claude");
+    expect(parseAgentLaunch("bunx opencode")?.agent).toBe("opencode");
+    expect(parseAgentLaunch("pnpm dlx codex")?.agent).toBe("codex");
+    expect(parseAgentLaunch("ANTHROPIC_MODEL=opus claude")?.agent).toBe("claude");
+  });
+
+  test("sees through an explicit path and a Windows suffix", () => {
+    expect(parseAgentLaunch(`"C:\\Users\\me\\bin\\claude.cmd"`)?.agent).toBe("claude");
+    expect(parseAgentLaunch("/usr/local/bin/codex")?.agent).toBe("codex");
+  });
+
+  test("accepts profile-wrapper names", () => {
+    expect(parseAgentLaunch("claude-work")?.agent).toBe("claude");
+    expect(parseAgentLaunch("codex-personal")?.agent).toBe("codex");
+  });
+
+  test("refuses a second positional, which means a subcommand took an argument", () => {
+    expect(parseAgentLaunch("claude something else")).toBeNull();
+  });
+});

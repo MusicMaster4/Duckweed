@@ -103,6 +103,50 @@ export const agentWatch = (id: string, agent: string, cwd: string) =>
 
 export const agentUnwatch = (id: string) => invoke<void>("agent_unwatch", { id });
 
+/** One line of an agent's headless protocol, or the notice that it ended. */
+export type AgentFrame =
+  | { kind: "stdout"; line: string }
+  | { kind: "stderr"; line: string }
+  | { kind: "exit"; code: number | null };
+
+export interface AgentAvailability {
+  name: string;
+  /** Absolute path when the executable is on PATH, else null. */
+  path: string | null;
+}
+
+export interface AgentSpawnOptions {
+  program: string;
+  args: string[];
+  cwd?: string | null;
+  env?: Record<string, string> | null;
+}
+
+export interface AgentStarted {
+  program: string;
+  pid: number | null;
+}
+
+/** Which agent CLIs this machine has, without starting any of them. */
+export const agentProcProbe = (names: string[]) =>
+  invoke<AgentAvailability[]>("agent_proc_probe", { names });
+
+/** Launch a coding agent in its line-delimited JSON mode. */
+export const agentProcStart = (
+  id: string,
+  options: AgentSpawnOptions,
+  onFrame: Channel<AgentFrame>,
+) => invoke<AgentStarted>("agent_proc_start", { id, options, onFrame });
+
+export const agentProcSend = (id: string, line: string) =>
+  invoke<void>("agent_proc_send", { id, line });
+
+/** End-of-input without killing the process. */
+export const agentProcCloseStdin = (id: string) =>
+  invoke<void>("agent_proc_close_stdin", { id });
+
+export const agentProcStop = (id: string) => invoke<void>("agent_proc_stop", { id });
+
 /** True when the shell for `id` has a child process (a command still running). */
 export const ptyIsBusy = (id: string) => invoke<boolean>("pty_is_busy", { id });
 

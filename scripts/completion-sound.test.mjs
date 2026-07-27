@@ -14,13 +14,20 @@ class FakeAudio {
     this.src = src;
     this.currentTime = 19;
     this.preload = "";
+    this.readyState = 4; // HAVE_ENOUGH_DATA
+    this.muted = false;
     this.loads = 0;
     this.plays = 0;
+    this.pauses = 0;
     players.push(this);
   }
 
   load() {
     this.loads += 1;
+  }
+
+  pause() {
+    this.pauses += 1;
   }
 
   play() {
@@ -67,11 +74,14 @@ describe("completion sound", () => {
     const signal = app.indexOf("if (!shouldSignalCompletion(previous, meta)) return;");
     const soundGate = app.indexOf("shouldPlayCompletionSound(previous, meta)", signal);
     const sound = app.indexOf("playCompletionSound();", signal);
+    const selectedGate = app.indexOf("isSelectedTerm(termId)", signal);
     const focusGate = app.indexOf("isFocusedTerm(termId)", signal);
     expect(signal).toBeGreaterThan(-1);
     expect(soundGate).toBeGreaterThan(signal);
-    expect(focusGate).toBeGreaterThan(signal);
-    expect(focusGate).toBeLessThan(sound);
+    expect(selectedGate).toBeGreaterThan(signal);
+    expect(selectedGate).toBeLessThan(sound);
     expect(soundGate).toBeLessThan(sound);
+    // Flash/unread still use document focus; sound must not.
+    expect(focusGate).toBeGreaterThan(sound);
   });
 });

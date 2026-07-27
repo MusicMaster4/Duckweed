@@ -4,6 +4,7 @@ import { createPortal } from "react-dom";
 import * as bus from "../lib/bus";
 import * as terminals from "../lib/terminals";
 import type { DropZone, LeafNode, ProjectInfo } from "../lib/types";
+import { AgentSurface } from "./agent/AgentSurface";
 import { CommandInput } from "./CommandInput";
 import { PaneWelcome } from "./PaneWelcome";
 import { SearchBar } from "./SearchBar";
@@ -136,21 +137,23 @@ export const TerminalPane = memo(function TerminalPane({
   // The grid owns the keyboard when the app is set to raw input, while a child
   // process is running, or once the shell is gone.
   const busy = meta?.busy ?? false;
+  const agentUi = meta?.agentUi ?? null;
   const effectiveRaw = inputMode === "raw" || busy || !!meta?.exited;
 
   useEffect(() => {
     terminals.setEditorMode(node.term, !effectiveRaw);
   }, [node.term, effectiveRaw]);
 
-  // Hand keyboard to the grid while a child is running; reclaim the editor after.
+  // Hand keyboard to the grid while a child is running; reclaim the editor
+  // after. An agent surface has its own composer and focuses itself.
   useEffect(() => {
-    if (!active || meta?.exited) return;
+    if (!active || meta?.exited || agentUi) return;
     const id = window.setTimeout(
       () => (effectiveRaw ? terminals.focusTerminal(node.term) : terminals.focus(node.term)),
       0,
     );
     return () => window.clearTimeout(id);
-  }, [effectiveRaw, active, meta?.exited, node.term]);
+  }, [effectiveRaw, active, meta?.exited, agentUi, node.term]);
 
   const title = meta?.title || meta?.shellLabel || "shell";
   const cwdLabel = meta?.cwd ? basename(meta.cwd) : "";
@@ -161,7 +164,7 @@ export const TerminalPane = memo(function TerminalPane({
    * keeps the bar — it is the only thing left saying what happened. No project
    * yet means no composer either: pick a folder before any command runs.
    */
-  const showComposer = inputMode === "editor" && !busy && !!project;
+  const showComposer = inputMode === "editor" && !busy && !!project && !agentUi;
   /** Nothing has been run — hide the shell's lone prompt behind the empty state. */
   const blank = !!meta && !meta.ran && !effectiveRaw;
   /**
@@ -349,6 +352,14 @@ export const TerminalPane = memo(function TerminalPane({
           />
         )}
       </div>
+
+      {agentUi && (
+        <AgentSurface
+          termId={node.term}
+          active={active && !searching}
+          onClose={() => terminals.closeAgentUi(node.term)}
+        />
+      )}
 
       {showComposer && (
         <CommandInput

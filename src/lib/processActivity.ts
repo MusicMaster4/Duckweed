@@ -25,23 +25,25 @@ export const PROCESS_COMPLETION_MIN_MS = 30_000;
 export const COMPLETION_SOUND_MIN_MS = 60_000;
 
 /**
- * Coding-agent completions are always worth surfacing. Ordinary terminal
- * processes only earn the visual marker after running for more than
- * 30 seconds.
+ * Real agent-turn completions (completionSeq) are always worth surfacing.
+ * Ordinary terminal processes only earn the visual marker after running for
+ * more than 30 seconds.
+ *
+ * A coding-agent process going idle or exiting is the user quitting the CLI
+ * (Ctrl+C, /exit, …) — not a finished turn. Persistent agents report turns
+ * via completionSeq from session logs, hooks, or OSC notifications. Treating
+ * process exit as completion falsely played the sound and flash on quit, and
+ * stacked with a late agent:complete for agents like Grok.
  */
 export function shouldSignalCompletion(
   previous: ProcessState,
   current: ProcessState,
   now = Date.now(),
 ): boolean {
+  if (current.completionSeq > previous.completionSeq) return true;
   if (!didProcessFinish(previous, current)) return false;
-  if (
-    current.completionSeq > previous.completionSeq ||
-    previous.agent !== null ||
-    current.agent !== null
-  ) {
-    return true;
-  }
+  // Agent process left the tree (or the shell died while one was bound).
+  if (previous.agent !== null || current.agent !== null) return false;
 
   const startedAt = previous.processStartedAt ?? current.processStartedAt;
   return startedAt !== null && now - startedAt > PROCESS_COMPLETION_MIN_MS;
@@ -50,13 +52,14 @@ export function shouldSignalCompletion(
 /**
  * Sound is stricter than the visual marker: the job must have run for more
  * than one minute. Focus is checked separately so background panes stay quiet.
+ * Agent process exit alone never counts — same rule as shouldSignalCompletion.
  */
 export function shouldPlayCompletionSound(
   previous: ProcessState,
   current: ProcessState,
   now = Date.now(),
 ): boolean {
-  if (!didProcessFinish(previous, current)) return false;
+  if (!shouldSignalCompletion(previous, current, now)) return false;
   const startedAt = previous.processStartedAt ?? current.processStartedAt;
   return startedAt !== null && now - startedAt > COMPLETION_SOUND_MIN_MS;
 }
@@ -168,7 +171,13 @@ export function parseAgentOsc777(payload: string): StructuredAgentEvent | null {
   }
 }
 
-/** Gemini and several terminal tools use the standard `777;notify;title;body` form. */
+/**
+ * Gemini (and a few other CLIs) use the standard `777;notify;title;body` form
+ * for turn completion. Require completion-ish wording so progress/status
+ * notifies do not look like a finished agent turn.
+ */
 export function isGenericOsc777Notification(payload: string): boolean {
-  return /^notify;[^;]+(?:;.*)?$/i.test(payload.trim());
+  const text = payload.trim();
+  if (!/^notify;[^;]+(?:;.*)?$/i.test(text)) return false;
+  return /complete|finished|done|idle|responded|ready/i.test(text);
 }
