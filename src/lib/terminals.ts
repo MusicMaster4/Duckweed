@@ -24,6 +24,7 @@ import { createHighlighter, type Highlighter } from "./highlight";
 import {
   agentUnwatch,
   agentWatch,
+  openUrl,
   ptyAnyBusy,
   ptyIsBusy,
   ptyKill,
@@ -900,7 +901,17 @@ function create(id: string, opts: { cwd?: string | null; shell?: string | null }
   const search = new SearchAddon();
   term.loadAddon(fit);
   term.loadAddon(search);
-  term.loadAddon(new WebLinksAddon());
+  // Default WebLinksAddon uses window.open, which Tauri's webview blocks.
+  // Only open when the user deliberately Ctrl/Cmd-clicks — plain clicks keep
+  // focus/selection behaviour and never navigate away from the terminal.
+  term.loadAddon(
+    new WebLinksAddon((event, uri) => {
+      if (!(event.ctrlKey || event.metaKey)) return;
+      void openUrl(uri).catch((error) => {
+        console.warn("failed to open link", uri, error);
+      });
+    }),
+  );
   const unicode = new Unicode11Addon();
   term.loadAddon(unicode);
   term.unicode.activeVersion = "11";

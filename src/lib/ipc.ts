@@ -16,6 +16,9 @@ export const projectInfo = (path: string) => invoke<ProjectInfo>("project_info",
 export const watchProject = (path: string | null) => invoke<void>("watch_project", { path });
 export const frontendReady = () => invoke<void>("frontend_ready");
 
+/** Open an http(s) URL in the system default browser (Ctrl/Cmd-click on links). */
+export const openUrl = (url: string) => invoke<void>("open_url", { url });
+
 /** Folder request from Explorer / the CLI, if the app was cold-started with one. */
 export type LaunchAction = "new_tab" | "new_window";
 

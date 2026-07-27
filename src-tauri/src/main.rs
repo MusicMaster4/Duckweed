@@ -416,6 +416,80 @@ fn frontend_ready(app: AppHandle) -> Result<(), String> {
     window.set_focus().map_err(|error| error.to_string())
 }
 
+/// Open an http(s) URL in the user's default browser.
+///
+/// Used for Ctrl/Cmd-click on terminal links. Only http and https are allowed —
+/// anything else would let the terminal shell out to arbitrary schemes.
+#[tauri::command]
+fn open_url(url: String) -> Result<(), String> {
+    open_external_url(&url)
+}
+
+/// Validate and hand `url` to the OS default handler.
+fn open_external_url(url: &str) -> Result<(), String> {
+    let url = url.trim();
+    if !is_safe_http_url(url) {
+        return Err("only http(s) URLs can be opened".into());
+    }
+    open_in_browser(url)
+}
+
+/// True for plain `http://` / `https://` URLs with no control characters.
+fn is_safe_http_url(url: &str) -> bool {
+    if url.is_empty() || url.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return false;
+    }
+    let lower = url.to_ascii_lowercase();
+    lower.starts_with("https://") || lower.starts_with("http://")
+}
+
+#[cfg(windows)]
+fn open_in_browser(url: &str) -> Result<(), String> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+
+    fn wide(s: &str) -> Vec<u16> {
+        OsStr::new(s).encode_wide().chain(Some(0)).collect()
+    }
+
+    // ShellExecute returns a HINSTANCE cast to a pointer; values ≤ 32 are errors.
+    let operation = wide("open");
+    let file = wide(url);
+    let result = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            operation.as_ptr(),
+            file.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            1, // SW_SHOWNORMAL
+        )
+    };
+    if (result as isize) <= 32 {
+        return Err(format!("could not open URL (code {})", result as isize));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn open_in_browser(url: &str) -> Result<(), String> {
+    std::process::Command::new("open")
+        .arg(url)
+        .spawn()
+        .map_err(|error| format!("could not open URL: {error}"))?;
+    Ok(())
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn open_in_browser(url: &str) -> Result<(), String> {
+    std::process::Command::new("xdg-open")
+        .arg(url)
+        .spawn()
+        .map_err(|error| format!("could not open URL: {error}"))?;
+    Ok(())
+}
+
 /// Cold-start folder request from Explorer / the CLI, consumed once.
 #[tauri::command]
 fn take_launch_intent(pending: State<'_, PendingLaunch>) -> Option<LaunchIntent> {
@@ -592,6 +666,7 @@ fn main() {
             agent_proc_close_stdin,
             agent_proc_stop,
             frontend_ready,
+            open_url,
             take_launch_intent,
             shell_integration_status,
             shell_integration_set,
@@ -664,5 +739,17 @@ mod tests {
     fn merge_survives_a_corrupt_stored_copy() {
         let incoming = r#"[{"command":"ls","cwd":null,"at":1}]"#;
         assert_eq!(commands(&merge_history("not json", incoming)), ["ls"]);
+    }
+
+    #[test]
+    fn only_http_urls_are_openable() {
+        assert!(is_safe_http_url("https://example.com/path?q=1"));
+        assert!(is_safe_http_url("http://localhost:3000"));
+        assert!(is_safe_http_url("HTTPS://Example.COM"));
+        assert!(!is_safe_http_url("file:///etc/passwd"));
+        assert!(!is_safe_http_url("javascript:alert(1)"));
+        assert!(!is_safe_http_url("https://example.com/a b"));
+        assert!(!is_safe_http_url("https://example.com/\n"));
+        assert!(!is_safe_http_url(""));
     }
 }
