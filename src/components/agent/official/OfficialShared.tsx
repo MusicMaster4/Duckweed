@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode, type Ref } from "react";
 
 import type {
   AgentItem,
@@ -102,10 +102,23 @@ export function traceSummary(text: string, fallback = "Thinking"): string {
   return cleaned.length > 132 ? `${cleaned.slice(0, 129).trimEnd()}…` : cleaned;
 }
 
-export function MessageItem({ item, variant }: { item: AgentItem; variant: OfficialVariant }) {
+export function MessageItem({
+  item,
+  variant,
+  className,
+  elementRef,
+}: {
+  item: AgentItem;
+  variant: OfficialVariant;
+  className?: string;
+  elementRef?: Ref<HTMLElement>;
+}) {
   if (item.kind === "user") {
     return (
-      <article className={`official-user official-user--${variant}`}>
+      <article
+        ref={elementRef}
+        className={`official-user official-user--${variant}${className ? ` ${className}` : ""}`}
+      >
         <p>{item.text}</p>
       </article>
     );
@@ -113,9 +126,10 @@ export function MessageItem({ item, variant }: { item: AgentItem; variant: Offic
   if (item.kind === "assistant") {
     return (
       <article
+        ref={elementRef}
         className={`official-answer official-answer--${variant}${
           item.streaming ? " is-streaming" : ""
-        }`}
+        }${className ? ` ${className}` : ""}`}
       >
         {item.text}
         {item.streaming && <span className="official-stream-caret" aria-hidden="true" />}
@@ -123,7 +137,14 @@ export function MessageItem({ item, variant }: { item: AgentItem; variant: Offic
     );
   }
   if (item.kind === "notice") {
-    return <div className={`official-notice is-${item.tone}`}>{item.text}</div>;
+    return (
+      <div
+        ref={elementRef as Ref<HTMLDivElement>}
+        className={`official-notice is-${item.tone}${className ? ` ${className}` : ""}`}
+      >
+        {item.text}
+      </div>
+    );
   }
   return null;
 }

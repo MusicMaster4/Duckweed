@@ -1899,3 +1899,226 @@ button.oc-sub-head:hover {
     opacity: 0.6;
   }
 }
+
+/* OpenCode cohesion pass ----------------------------------------------------
+   Keep the provider's green brackets and burst-oriented modules, but let the
+   transcript share the same conversational rhythm, width, bubbles and card
+   density as the first-party-inspired surfaces. */
+
+.oc {
+  width: min(100%, 840px);
+  min-height: 100%;
+  margin: 0 auto;
+  gap: 12px;
+}
+
+.oc-bar {
+  position: relative;
+  top: auto;
+  gap: 7px;
+  padding: 5px 2px 9px;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+  background: transparent;
+  backdrop-filter: none;
+}
+
+.oc-bar[data-busy] {
+  border-bottom-color: color-mix(in srgb, var(--oc-ink) 24%, var(--border));
+}
+
+.oc-phase {
+  font-family: inherit;
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0;
+}
+
+.oc-phase-detail {
+  font-family: inherit;
+  font-size: 11px;
+}
+
+.oc-ident {
+  border-radius: 999px;
+}
+
+.oc-tallies,
+.oc-track {
+  padding-top: 6px;
+  border-top-color: rgba(255, 255, 255, 0.055);
+}
+
+.oc-lanes {
+  gap: 11px;
+  padding: 1px 2px 24px;
+}
+
+.oc-mod {
+  grid-template-columns: 32px minmax(0, 1fr);
+  gap: 8px;
+}
+
+.oc-mod-gutter {
+  padding-top: 5px;
+}
+
+.oc-mod-body {
+  padding-left: 10px;
+}
+
+.oc-mod[data-lane="you"] {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.oc-mod[data-lane="you"] .oc-mod-gutter,
+.oc-mod[data-lane="say"] .oc-mod-gutter,
+.oc-mod[data-lane="think"] .oc-mod-gutter,
+.oc-mod[data-lane="plan"] .oc-mod-gutter,
+.oc-mod[data-lane="note"] .oc-mod-gutter {
+  display: none;
+}
+
+.oc-mod[data-lane="you"] .oc-mod-body {
+  width: fit-content;
+  max-width: min(78%, 680px);
+  padding: 10px 14px;
+  border: 1px solid rgba(255, 255, 255, 0.035);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.075);
+}
+
+.oc-mod[data-lane="say"],
+.oc-mod[data-lane="think"],
+.oc-mod[data-lane="plan"],
+.oc-mod[data-lane="note"] {
+  display: block;
+}
+
+.oc-mod[data-lane="say"] .oc-mod-body,
+.oc-mod[data-lane="think"] .oc-mod-body,
+.oc-mod[data-lane="plan"] .oc-mod-body,
+.oc-mod[data-lane="note"] .oc-mod-body {
+  padding-left: 2px;
+  border-left: 0;
+}
+
+.oc-said {
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.oc-prose {
+  padding: 3px 0;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.62;
+}
+
+.oc-think-head {
+  align-items: center;
+  gap: 7px;
+  min-height: 28px;
+  padding: 2px 3px 2px 0;
+  border-radius: 7px;
+  font-size: 12px;
+}
+
+.oc-think-head .oc-mark {
+  width: 18px;
+  height: 18px;
+}
+
+.oc-think-head .oc-chevron {
+  order: 3;
+  margin-left: auto;
+}
+
+.oc-think-label {
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0;
+}
+
+.oc-think-peek {
+  color: var(--text-faint);
+  font-style: normal;
+}
+
+.oc-think-body {
+  margin: 2px 0 0 25px;
+  padding-left: 10px;
+  border-left: 1px solid color-mix(in srgb, var(--oc-ink) 25%, transparent);
+}
+
+.oc-think-text {
+  font-style: normal;
+  line-height: 1.55;
+}
+
+.oc-plan {
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.022);
+}
+
+.oc-plan-head {
+  padding: 7px 10px;
+}
+
+.oc-plan-steps {
+  padding: 6px 0;
+}
+
+.oc-plan-step {
+  padding: 3px 10px;
+}
+
+.oc-row,
+.oc-sub {
+  border-radius: 8px;
+}
+
+.oc-row {
+  background: rgba(255, 255, 255, 0.016);
+}
+
+.oc-row-head {
+  min-height: 30px;
+  padding: 4px 8px;
+  border-radius: 8px;
+}
+
+.oc-row-panel,
+.oc-sub-panel {
+  border-radius: 7px;
+}
+
+.oc-sub {
+  padding: 4px 6px 4px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.055);
+  border-left: 2px solid color-mix(in srgb, var(--oc-warn) 55%, transparent);
+  background: rgba(255, 255, 255, 0.018);
+}
+
+.oc-sub-head {
+  min-height: 28px;
+}
+
+@media (max-width: 720px) {
+  .oc-mod {
+    grid-template-columns: 27px minmax(0, 1fr);
+    gap: 6px;
+  }
+
+  .oc-mod[data-lane="you"] .oc-mod-body {
+    max-width: 90%;
+  }
+
+  .oc-ident-provider,
+  .oc-phase-detail {
+    display: none;
+  }
+}

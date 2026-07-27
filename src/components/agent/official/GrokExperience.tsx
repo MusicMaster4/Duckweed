@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type CSSProperties } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { ThinkingItem, ToolItem } from "../../../lib/agents/types";
 import {
@@ -23,29 +23,92 @@ const GROK_DOTS = [
   [12, 12, 8],
 ] as const;
 
-export function GrokDotMatrix() {
-  // The official Lottie instances are phase-locked to Date.now(), so every
-  // loader on the page advances on the same global 40-frame cycle.
-  const frameDuration = 1000 / 30;
-  const cycleDuration = frameDuration * 40;
-  const cycleTime = Date.now() % cycleDuration;
+const GROK_SOURCE_FRAMES = 80;
+const GROK_CYCLE_MS = (40 / 30) * 1000;
+
+function useReducedMotion(): boolean {
+  const [reduced, setReduced] = useState(
+    () =>
+      typeof window !== "undefined" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches,
+  );
+
+  useEffect(() => {
+    const query = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const update = () => setReduced(query.matches);
+    query.addEventListener("change", update);
+    return () => query.removeEventListener("change", update);
+  }, []);
+
+  return reduced;
+}
+
+/**
+ * The published Lottie is a 40-frame composition whose nested dot layer is
+ * time-stretched by .507. The nested sequence therefore traverses roughly 80
+ * source frames during one 1.333s loop. Keeping those global key times makes
+ * the animation complete one lap, arrive at the center, rest, and only then
+ * begin the next lap.
+ */
+export function GrokDotMatrix({ active = true }: { active?: boolean }) {
+  const reducedMotion = useReducedMotion();
+  const animate = active && !reducedMotion;
+  const animationPhase = useRef({ active: false, offsetMs: 0 });
+  if (animationPhase.current.active !== animate) {
+    animationPhase.current.active = animate;
+    if (animate) animationPhase.current.offsetMs = -(Date.now() % GROK_CYCLE_MS);
+  }
 
   return (
-    <svg className="grok-dot-matrix" viewBox="0 0 24 24" aria-hidden="true">
+    <svg
+      className={`grok-dot-matrix${animate ? " is-active" : " is-settled"}`}
+      viewBox="0 0 24 24"
+      aria-hidden="true"
+    >
       {GROK_DOTS.map(([cx, cy, phase]) => (
         <circle
           key={`${cx}-${cy}`}
           cx={cx}
           cy={cy}
           r="1.6"
-          style={
-            {
-              animationDelay: `${
-                -((cycleTime - phase * frameDuration * 5 + cycleDuration) % cycleDuration)
-              }ms`,
-            } as CSSProperties
-          }
-        />
+          opacity={animate ? 0.2 : phase === 8 ? 1 : 0.2}
+        >
+          {animate && (
+            <animate
+              attributeName="opacity"
+              begin={`${animationPhase.current.offsetMs}ms`}
+              dur={`${GROK_CYCLE_MS}ms`}
+              repeatCount="indefinite"
+              calcMode="spline"
+              values={
+                phase === 0
+                  ? "0.2;1;1;0.2;0.2"
+                  : phase === 8
+                    ? "0.2;0.2;1;1;0.2"
+                    : "0.2;0.2;1;1;0.2;0.2"
+              }
+              keyTimes={
+                phase === 0
+                  ? "0;0.15625;0.25;0.5;1"
+                  : phase === 8
+                    ? "0;0.5;0.65625;0.75;1"
+                    : [
+                        0,
+                        (phase * 5) / GROK_SOURCE_FRAMES,
+                        (phase * 5 + 12.5) / GROK_SOURCE_FRAMES,
+                        (phase * 5 + 20) / GROK_SOURCE_FRAMES,
+                        (phase * 5 + 40) / GROK_SOURCE_FRAMES,
+                        1,
+                      ].join(";")
+              }
+              keySplines={
+                phase === 0 || phase === 8
+                  ? "0.45 0 0.1 1;0.45 0 0.1 1;0.45 0 0.1 1;0 0 1 1"
+                  : "0 0 1 1;0.45 0 0.1 1;0.45 0 0.1 1;0.45 0 0.1 1;0 0 1 1"
+              }
+            />
+          )}
+        </circle>
       ))}
     </svg>
   );
@@ -102,7 +165,7 @@ function GrokTrace({
         aria-expanded={expandable ? open : undefined}
       >
         <span className="grok-loader-slot">
-          <GrokDotMatrix />
+          <GrokDotMatrix active={working} />
         </span>
         {expandable && (
           <span className="grok-hover-chevron" aria-hidden="true">

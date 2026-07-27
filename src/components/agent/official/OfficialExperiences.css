@@ -55,7 +55,6 @@
 }
 
 .official-answer--claude {
-  font-family: Georgia, "Times New Roman", serif;
   font-size: 13.5px;
   line-height: 1.66;
 }
@@ -493,6 +492,18 @@
   --chatgpt-contrast: rgba(0, 0, 0, 0.6);
 }
 
+.chatgpt-experience.is-prompt-docked {
+  height: 100%;
+  min-height: 100%;
+}
+
+.chatgpt-experience.is-prompt-docked .official-transcript {
+  height: 100%;
+  min-height: 100%;
+  justify-content: flex-end;
+  padding-bottom: 4px;
+}
+
 .chatgpt-experience.has-details {
   width: min(100%, 1180px);
   display: grid;
@@ -562,25 +573,35 @@ button.chatgpt-thinking-row.is-selected {
   white-space: nowrap;
 }
 
+.chatgpt-thinking-row.is-entering {
+  animation: chatgpt-thinking-enter 180ms cubic-bezier(0.2, 0.82, 0.2, 1) 110ms both;
+}
+
+@keyframes chatgpt-thinking-enter {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 .chatgpt-activity-icon {
   display: grid;
   width: 20px;
   height: 20px;
   flex: none;
   place-items: center;
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  border-radius: 6px;
   color: var(--text-dim);
 }
 
 .chatgpt-activity-icon.is-reasoning svg {
-  width: 15px;
-  height: 15px;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 1.05;
-  stroke-linecap: round;
-  stroke-linejoin: round;
+  width: 17px;
+  height: 17px;
+  fill: currentColor;
+  stroke: none;
 }
 
 .chatgpt-tool-wrap {
@@ -724,14 +745,15 @@ button.chatgpt-thinking-row.is-selected {
   clip-path: inset(1px 0);
 }
 
-.claude-spark svg {
+.claude-spark img {
   display: block;
   width: 20px;
   height: 160px;
-  fill: currentColor;
+  pointer-events: none;
+  user-select: none;
 }
 
-.claude-spark.is-active svg {
+.claude-spark.is-active img {
   animation: official-claude-spark 720ms steps(8, jump-none) infinite;
 }
 
@@ -926,9 +948,9 @@ button.chatgpt-thinking-row.is-selected {
   color: #97958d;
 }
 
-/* Grok: the source Lottie is 40 frames at 30fps. Each dot begins five frames
-   after the previous one, rises 20→100%, holds, then fades along the original
-   (.45,0,.1,1) opacity curve. */
+/* Grok: the outer Lottie is 40 frames at 30fps, while its .507 time-stretched
+   dot composition spans ~80 source frames. The SVG key times preserve that
+   full lap-to-center sequence and its original (.45,0,.1,1) opacity curve. */
 .grok-dot-matrix {
   width: 24px;
   height: 24px;
@@ -937,26 +959,7 @@ button.chatgpt-thinking-row.is-selected {
 }
 
 .grok-dot-matrix circle {
-  opacity: 0.2;
-  animation: official-grok-dot 1333.333ms linear infinite;
-}
-
-@keyframes official-grok-dot {
-  0% {
-    opacity: 0.2;
-    animation-timing-function: cubic-bezier(0.45, 0, 0.1, 1);
-  }
-  31.25% {
-    opacity: 1;
-    animation-timing-function: cubic-bezier(0.45, 0, 0.1, 1);
-  }
-  50% {
-    opacity: 1;
-    animation-timing-function: cubic-bezier(0.45, 0, 0.1, 1);
-  }
-  100% {
-    opacity: 0.2;
-  }
+  transition: opacity 160ms ease;
 }
 
 .grok-starting {
@@ -1153,10 +1156,10 @@ button.chatgpt-thinking-row.is-selected {
   .official-stream-caret,
   .official-plan-steps li.is-running .official-plan-step-mark,
   .official-tool-spinner,
+  .chatgpt-thinking-row.is-entering,
   .chatgpt-shimmer,
-  .claude-spark.is-active svg,
-  .claude-shimmer,
-  .grok-dot-matrix circle {
+  .claude-spark.is-active img,
+  .claude-shimmer {
     animation: none;
   }
 
@@ -1167,12 +1170,8 @@ button.chatgpt-thinking-row.is-selected {
     -webkit-text-fill-color: currentColor;
   }
 
-  .claude-spark.is-active svg {
+  .claude-spark.is-active img {
     transform: translateY(0);
-  }
-
-  .grok-dot-matrix circle {
-    opacity: 0.55;
   }
 
   .official-chevron,

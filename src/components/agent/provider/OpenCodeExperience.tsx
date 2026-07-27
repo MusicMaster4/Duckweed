@@ -236,6 +236,7 @@ function OpenCodeThinking({ text, streaming }: { text: string; streaming: boolea
         panelClassName="oc-think-body"
         head={
           <>
+            <OpenCodeMark phase={streaming ? "thinking" : "ready"} />
             <span className="oc-chevron" aria-hidden="true" data-open={open} />
             {open ? <span className="oc-think-label">reasoning</span> : null}
             {!open && <span className="oc-think-peek">{tailLine(text)}</span>}

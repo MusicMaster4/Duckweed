@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import type { AgentId, AgentItem, AgentSessionState } from "../../lib/agents/types";
 import { emptyUsage, makeChange } from "../../lib/agents/types";
@@ -103,11 +103,44 @@ function previewItems(): AgentItem[] {
 export function AgentExperiencePreview() {
   const query = new URLSearchParams(window.location.search);
   const requested = query.get("provider") as AgentId | null;
+  const playTurn = query.get("play") === "1";
+  const completed = query.get("complete") === "1";
   const [agent, setAgent] = useState<AgentId>(
     PROVIDERS.some((provider) => provider.id === requested) && requested ? requested : "codex",
   );
+  const [visibleCount, setVisibleCount] = useState(playTurn ? 1 : Number.POSITIVE_INFINITY);
   const provider = PROVIDERS.find((entry) => entry.id === agent) ?? PROVIDERS[0];
-  const items = useMemo(previewItems, []);
+  const allItems = useMemo(previewItems, []);
+  const items = useMemo(
+    () =>
+      allItems.slice(0, visibleCount).map((item) => {
+        if (!completed) return item;
+        if (item.kind === "thinking") return { ...item, streaming: false };
+        if (item.kind === "tool" && (item.status === "running" || item.status === "pending")) {
+          return { ...item, status: "done" as const };
+        }
+        return item;
+      }),
+    [allItems, completed, visibleCount],
+  );
+
+  useEffect(() => {
+    if (!playTurn) return;
+    const timers = [900, 1450, 2050, 2700, 3300, 3900].map((delay, index) =>
+      window.setTimeout(() => setVisibleCount(index + 2), delay),
+    );
+    return () => timers.forEach((timer) => window.clearTimeout(timer));
+  }, [playTurn]);
+
+  const replay = () => {
+    setVisibleCount(0);
+    window.requestAnimationFrame(() => setVisibleCount(1));
+    [900, 1450, 2050, 2700, 3300, 3900].forEach((delay, index) => {
+      window.setTimeout(() => setVisibleCount(index + 2), delay);
+    });
+  };
+
+  const status: AgentSessionState["status"] = completed ? "idle" : "working";
   const session: AgentSessionState = {
     termId: "agent-experience-preview",
     agent,
@@ -115,7 +148,7 @@ export function AgentExperiencePreview() {
     label: provider.label,
     mark: provider.mark,
     accent: provider.accent,
-    status: "working",
+    status,
     cwd: "H:\\Python\\Slop\\duckweed",
     model: provider.model,
     effort: "high",
@@ -147,6 +180,10 @@ export function AgentExperiencePreview() {
             {entry.label}
           </button>
         ))}
+        <span className="agent-preview-tabs-spacer" />
+        <button type="button" onClick={replay}>
+          Replay turn
+        </button>
       </nav>
       <section
         className="agent-preview-surface"
@@ -157,9 +194,9 @@ export function AgentExperiencePreview() {
           <span className="agent-badge">{provider.mark}</span>
           <span className="agent-name">{provider.label}</span>
           <span className="agent-model">{provider.model}</span>
-          <span className="agent-state is-working">
-            <span className="agent-pulse" />
-            working
+          <span className={`agent-state is-${status}`}>
+            {status === "working" && <span className="agent-pulse" />}
+            {status === "working" ? "working" : "ready"}
           </span>
           <span className="agent-head-spacer" />
           <span className="agent-usage">12.4k in · 2.1k out</span>
@@ -169,7 +206,7 @@ export function AgentExperiencePreview() {
             session={session}
             items={items}
             agent={provider.id}
-            status="working"
+            status={status}
             started
             label={provider.label}
             mark={provider.mark}

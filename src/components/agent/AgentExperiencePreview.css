@@ -32,6 +32,10 @@
   background: var(--accent-dim);
 }
 
+.agent-preview-tabs-spacer {
+  flex: 1;
+}
+
 .agent-preview-surface {
   display: flex;
   overflow: hidden;

@@ -567,6 +567,33 @@ describe("acp adapter", () => {
     await Promise.resolve();
     expect(h.state().items.find((item) => item.kind === "notice")).toBeUndefined();
   });
+
+  test("ignores a live user-message echo instead of duplicating the prompt", async () => {
+    const h = harness();
+    await h.handshake();
+
+    h.adapter.prompt("Fix the parser", h.ctx);
+    h.update({
+      sessionUpdate: "user_message_chunk",
+      content: { type: "text", text: "Fix the parser" },
+    });
+    h.update({
+      sessionUpdate: "agent_thought_chunk",
+      content: { type: "text", text: "Inspecting the parser" },
+    });
+    h.update({
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "Done." },
+    });
+
+    const items = h.state().items;
+    expect(items.filter((item) => item.kind === "user")).toEqual([
+      expect.objectContaining({ kind: "user", text: "Fix the parser" }),
+    ]);
+    expect(items.find((item) => item.kind === "thinking")?.id).toBe("r1");
+    expect(items.find((item) => item.kind === "assistant")?.id).toBe("a1");
+  });
+
   test("loads a stored session when the agent advertises loadSession", async () => {
     const h = harness();
     await h.handshake({ agentCapabilities: { loadSession: true } });

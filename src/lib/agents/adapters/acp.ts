@@ -453,10 +453,14 @@ export function createAcpAdapter(): AgentAdapter {
     const kind = asString(update.sessionUpdate);
 
     if (kind === "user_message_chunk") {
-      replayedUser += readContentText(update.content);
+      // Live ACP agents are allowed to echo the prompt back as user chunks.
+      // The app has already emitted that prompt locally, so accepting the echo
+      // would draw the same message twice (and advance `turnSeq` twice). Stored
+      // session replay is the one case where no local prompt exists.
+      if (loading) replayedUser += readContentText(update.content);
       return;
     }
-    flushReplayedUser(ctx);
+    if (loading) flushReplayedUser(ctx);
 
     switch (kind) {
       case "agent_message_chunk": {
