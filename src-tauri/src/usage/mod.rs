@@ -449,11 +449,22 @@ pub fn scan(
     let duty_cutoff = now - DUTY_DAYS * DAY_MS;
     let mut active_slots: HashMap<&'static str, HashSet<i64>> = HashMap::new();
     let mut first_active: HashMap<&'static str, i64> = HashMap::new();
+    // Agents that share another's transcripts and are told apart per record.
+    let mut derived_files: HashMap<&'static str, HashSet<&str>> = HashMap::new();
     for (key, entry) in index.files.iter() {
-        let Some(&agent_id) = agent_by_key.get(key.as_str()) else {
+        let Some(&file_agent) = agent_by_key.get(key.as_str()) else {
             continue;
         };
         for row in &entry.rows {
+            // A file's agent is not always the row's: a Claude Code transcript
+            // holds proxied turns too, and those belong to Claudex.
+            let agent_id = sources::route(file_agent, &row.model);
+            if agent_id != file_agent {
+                derived_files
+                    .entry(agent_id)
+                    .or_default()
+                    .insert(key.as_str());
+            }
             let (rates, priced) = pricing::lookup(&row.model, overrides);
             // An agent that priced the call itself knows better than a table
             // of list prices does.
@@ -528,7 +539,13 @@ pub fn scan(
         .map(|a| {
             let agent_totals = by_agent.get(a.id).copied().unwrap_or_default();
             let last = last_used.get(a.id).copied().unwrap_or_default();
-            let files = per_agent_files.get(a.id).copied().unwrap_or(0);
+            // An agent with no store of its own is "installed" when its
+            // records turn up inside someone else's transcripts.
+            let files = per_agent_files
+                .get(a.id)
+                .copied()
+                .unwrap_or(0)
+                .max(derived_files.get(a.id).map_or(0, |set| set.len() as u32));
             AgentSummary {
                 id: a.id.to_string(),
                 label: a.label.to_string(),
@@ -917,6 +934,76 @@ mod tests {
         .unwrap();
         assert_eq!(warm.scan.files_read, 0);
         assert_eq!(warm.totals.tokens.input, 300);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn proxied_turns_are_split_out_of_claude_code() {
+        let dir = std::env::temp_dir().join(format!("duckweed-claudex-{}", std::process::id()));
+        let home = dir.join("home");
+        let sessions = home.join(".claude/projects/test");
+        std::fs::create_dir_all(&sessions).unwrap();
+
+        let timestamp = chrono::Utc::now().to_rfc3339();
+        let line = |id: &str, model: &str, input: u64| {
+            format!(
+                "{{\"type\":\"assistant\",\"timestamp\":\"{timestamp}\",\"requestId\":\"{id}\",\
+                 \"message\":{{\"id\":\"{id}\",\"model\":\"{model}\",\
+                 \"usage\":{{\"input_tokens\":{input},\"output_tokens\":10}}}}}}\n"
+            )
+        };
+        // One session file, both agents: claudex leaves no separate transcript.
+        std::fs::write(
+            sessions.join("session.jsonl"),
+            format!(
+                "{}{}",
+                line("a", "claude-opus-5", 100),
+                line("b", "gpt-5.6-sol", 200)
+            ),
+        )
+        .unwrap();
+
+        let snapshot = scan(
+            &home,
+            &dir.join("index.json"),
+            &Overrides::new(),
+            &UsageState::default(),
+            &Query {
+                days: 7,
+                refresh: false,
+            },
+            &|_, _| {},
+        )
+        .unwrap();
+
+        let agent = |id: &str| {
+            snapshot
+                .agents
+                .iter()
+                .find(|agent| agent.id == id)
+                .expect("agent in the roster")
+        };
+        assert_eq!(agent("claude").totals.tokens.input, 100);
+        assert_eq!(agent("claudex").totals.tokens.input, 200);
+        assert!(agent("claudex").installed);
+        // Split, not duplicated.
+        assert_eq!(snapshot.totals.tokens.input, 300);
+        // The proxied model is priced, just not on the Anthropic plan.
+        let proxied = snapshot
+            .models
+            .iter()
+            .find(|model| model.model == "gpt-5.6-sol")
+            .unwrap();
+        assert_eq!(proxied.agent, "claudex");
+        assert!(proxied.priced);
+        // Anthropic's quota endpoint must not be asked about a proxied agent.
+        let claudex_quota = snapshot
+            .quotas
+            .iter()
+            .find(|quota| quota.agent == "claudex")
+            .unwrap();
+        assert_eq!(claudex_quota.source, "unavailable");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

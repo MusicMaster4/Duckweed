@@ -85,16 +85,35 @@ const CLAUDE_MODELS: AgentModelChoice[] = [
   { id: "opusplan", label: "Opus Plan", efforts: CLAUDE_EFFORTS },
 ];
 
+/**
+ * Models Claudex exposes through CLIProxyAPI. The real Claude Code binary is
+ * still the engine, but the Anthropic aliases above hit the proxy and fail —
+ * only these ids are wired in the user's claudex wrapper.
+ *
+ * Effort still uses Claude's levels because Claudex sets
+ * `CLAUDE_CODE_ALWAYS_ENABLE_EFFORT=1` and the CLI interprets `/effort`.
+ */
+const CLAUDEX_MODELS: AgentModelChoice[] = [
+  { id: "gpt-5.6-sol", label: "GPT-5.6 Sol", efforts: CLAUDE_EFFORTS },
+  { id: "grok-4.5", label: "Grok 4.5 (Grok Build)", efforts: CLAUDE_EFFORTS },
+  { id: "or/selected", label: "OpenRouter (selected)", efforts: CLAUDE_EFFORTS },
+];
+
 /** Friendly labels for Claude model ids that arrive from init / settings. */
 export function claudeModelLabel(id: string): string {
   const lower = id.toLowerCase();
   const exact = CLAUDE_MODELS.find((model) => model.id.toLowerCase() === lower);
   if (exact) return exact.label;
+  const claudex = CLAUDEX_MODELS.find((model) => model.id.toLowerCase() === lower);
+  if (claudex) return claudex.label;
   // Full ids from system/init: `claude-opus-5[1m]`, `claude-sonnet-5`, …
   if (lower.includes("fable")) return lower.includes("1m") ? "Fable 5 (1M context)" : "Fable 5";
   if (lower.includes("opus")) return lower.includes("1m") ? "Opus 5 (1M context)" : "Opus 5";
   if (lower.includes("sonnet")) return lower.includes("1m") ? "Sonnet 5 (1M context)" : "Sonnet 5";
   if (lower.includes("haiku")) return "Haiku 4.5";
+  if (lower === "gpt-5.6-sol" || lower === "gpt-5.6") return "GPT-5.6 Sol";
+  if (lower === "grok-4.5") return "Grok 4.5 (Grok Build)";
+  if (lower === "or/selected") return "OpenRouter (selected)";
   return id;
 }
 
@@ -121,13 +140,45 @@ const MODEL_FALLBACKS: Partial<Record<AgentId, AgentModelChoice[]>> = {
   // offering stale ids that the agent would reject.
 };
 
+/** True when the typed program is the Claudex Claude Code wrapper. */
+export function isClaudexProgram(program: string | null | undefined): boolean {
+  return program === "claudex";
+}
+
+/**
+ * Default model Claudex injects when the user did not pass `--model`.
+ * Mirrors `claudex.ps1`: Grok / OpenRouter flags, otherwise GPT-5.6 Sol.
+ */
+export function claudexDefaultModel(wrapperArgs: readonly string[] = []): string {
+  for (const arg of wrapperArgs) {
+    const lower = arg.toLowerCase();
+    if (lower === "--g" || lower === "--grok") return "grok-4.5";
+    if (lower === "--o" || lower === "--pick-openrouter") return "or/selected";
+  }
+  return "gpt-5.6-sol";
+}
+
 /** The commands an agent knows before (or without ever) advertising any. */
-export function fallbackCommands(agent: AgentId): { name: string; description: string }[] {
-  return FALLBACKS[agent].map((command) => ({ ...command }));
+export function fallbackCommands(
+  agent: AgentId,
+  program?: string,
+): { name: string; description: string }[] {
+  const commands = FALLBACKS[agent].map((command) => ({ ...command }));
+  if (!isClaudexProgram(program)) return commands;
+  // Same slash surface as Claude Code, reworded so /resume does not claim to
+  // open a plain Anthropic Claude session.
+  return commands.map((command) =>
+    command.name === "/resume"
+      ? { ...command, description: "Continue a past Claudex session in this folder" }
+      : command,
+  );
 }
 
 /** Models/efforts known before the agent reports its own list. */
-export function fallbackModels(agent: AgentId): AgentModelChoice[] {
+export function fallbackModels(agent: AgentId, program?: string): AgentModelChoice[] {
+  if (isClaudexProgram(program)) {
+    return CLAUDEX_MODELS.map((model) => ({ ...model, efforts: [...model.efforts] }));
+  }
   const list = MODEL_FALLBACKS[agent];
   return list ? list.map((model) => ({ ...model, efforts: [...model.efforts] })) : [];
 }

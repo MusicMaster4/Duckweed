@@ -8,6 +8,8 @@ import { createAcpAdapter } from "./acp";
 
 const launch: AgentLaunch = {
   agent: "grok",
+  program: "grok",
+  wrapperArgs: [],
   args: [],
   prompt: null,
   model: null,
@@ -33,7 +35,10 @@ function harness(overrides: Partial<AgentLaunch> = {}) {
     events.reduce<AgentSessionState>(applyEvent, {
       termId: "t1",
       agent: "grok",
+      program: "grok",
       label: "Grok Build",
+      mark: "GR",
+      accent: "#7ea6ff",
       status: "starting",
       cwd: "H:/project",
       model: null,

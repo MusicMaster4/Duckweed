@@ -26,6 +26,38 @@ describe("parseAgentLaunch", () => {
     expect(parseAgentLaunch("opencode")?.agent).toBe("opencode");
   });
 
+  test("claims claudex as Claude protocol while spawning the wrapper", () => {
+    const bare = parseAgentLaunch("claudex");
+    expect(bare?.agent).toBe("claude");
+    expect(bare?.program).toBe("claudex");
+    expect(bare?.wrapperArgs).toEqual([]);
+
+    // `--g` / `--o` select Claudex's proxied backend and must survive parsing
+    // so the spawn line can put them before the headless protocol args.
+    const grok = parseAgentLaunch("claudex --g --model grok-4.5");
+    expect(grok?.agent).toBe("claude");
+    expect(grok?.program).toBe("claudex");
+    expect(grok?.wrapperArgs).toEqual(["--g"]);
+    expect(grok?.model).toBe("grok-4.5");
+
+    const openrouter = parseAgentLaunch("claudex --o \"fix the login\"");
+    expect(openrouter?.program).toBe("claudex");
+    expect(openrouter?.wrapperArgs).toEqual(["--o"]);
+    expect(openrouter?.prompt).toBe("fix the login");
+
+    const longForms = parseAgentLaunch("claudex --grok --effort high");
+    expect(longForms?.wrapperArgs).toEqual(["--grok"]);
+    expect(longForms?.effort).toBe("high");
+  });
+
+  test("records the typed program, falling back for profile wrappers", () => {
+    expect(parseAgentLaunch("claude")?.program).toBe("claude");
+    expect(parseAgentLaunch("omc")?.program).toBe("omc");
+    // Profile wrappers are shell aliases; spawn the canonical binary.
+    expect(parseAgentLaunch("claude-work")?.program).toBe("claude");
+    expect(parseAgentLaunch("codex-personal")?.program).toBe("codex");
+  });
+
   test("ignores agents the custom UI cannot drive", () => {
     expect(parseAgentLaunch("gemini")).toBeNull();
     expect(parseAgentLaunch("aider")).toBeNull();

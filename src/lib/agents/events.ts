@@ -102,6 +102,46 @@ export interface TurnEndInput {
 }
 
 /**
+ * Extra facts about *what* ended, so a finished config tweak is not treated
+ * like a finished coding task.
+ *
+ * `isTurnEnd` only asks "did a turn end?"; `isAnnounceableTurn` asks "is the
+ * user owed a sound/highlight for it?".
+ */
+export interface TurnAnnounceInput extends TurnEndInput {
+  /** A tool call ran during the turn that just finished. */
+  usedTools: boolean;
+  /**
+   * Text of the user message that opened this turn, when there was one.
+   * Local slash handlers that never start a turn leave this null.
+   */
+  userText: string | null;
+  /**
+   * True when this working stretch began because the user submitted a prompt
+   * (including a slash that went to the agent). Resume/load handshakes and
+   * other synthetic working periods leave this false.
+   */
+  userInitiated: boolean;
+}
+
+/**
+ * Slash commands that only change settings, inspect state, or manage the
+ * session. Finishing one is not a task completion — the user already saw the
+ * notice in the transcript.
+ *
+ * Anything that might launch real work (`/review`, `/compact` on some agents,
+ * skills the CLI treats as prompts) is *not* listed: those still announce.
+ */
+const META_SLASH =
+  /^\/(effort|model|help|status|cost|usage|stats|context|config|settings|permissions|theme|color|vim|login|logout|exit|quit|clear|compact|doctor|init|memory|export|hooks|mcp|plugin|agents|skills|bashes|extra-usage|privacy-settings|output-style|rename|sandbox|terminal-setup|install-github-app|release-notes|upgrade|mobile|chrome|ide|fast|plan|ultracode|loop|bugs)\b/i;
+
+/** True when the submitted text is a local / status slash command, not a task. */
+export function isMetaSlashCommand(text: string | null | undefined): boolean {
+  if (!text) return false;
+  return META_SLASH.test(text.trim());
+}
+
+/**
  * True when a pane just became worth returning to.
  *
  * Precision is the whole point of this predicate — a sound and a highlight for
@@ -122,6 +162,27 @@ export function isTurnEnd(input: TurnEndInput): boolean {
   if (input.after !== "idle") return false;
   if (input.before !== "working" && input.before !== "waiting") return false;
   return !input.releasingQueued;
+}
+
+/**
+ * True when a finished turn is worth a completion sound or unread flash.
+ *
+ * Config and status slash commands (`/effort`, `/model`, …) still end a turn
+ * for the protocol, but they are not work the user was waiting on — they
+ * already read the confirmation. Permission prompts and real prompts always
+ * count. Synthetic ends (session load/resume, handshake) stay silent because
+ * they never set `userInitiated`.
+ */
+export function isAnnounceableTurn(input: TurnAnnounceInput): boolean {
+  if (!isTurnEnd(input)) return false;
+  // Blocked on the user: they need to come back regardless of how they got there.
+  if (input.after === "waiting" && input.permission) return true;
+  // Resume/load and other synthetic working stretches never earned a nudge.
+  if (!input.userInitiated) return false;
+  // A settings slash with no tool work is not a task. Tools on a slash-looking
+  // prompt (rare) still count as real work.
+  if (isMetaSlashCommand(input.userText) && !input.usedTools) return false;
+  return true;
 }
 
 /**

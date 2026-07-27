@@ -12,13 +12,18 @@ import type { AdapterContext, AgentAdapter } from "./adapter";
 import { createAcpAdapter } from "./adapters/acp";
 import { createClaudeAdapter } from "./adapters/claude";
 import { createCodexAdapter } from "./adapters/codex";
-import { AGENTS, AGENT_IDS } from "./catalog";
-import { applyEvent, isTurnEnd, type AgentEvent } from "./events";
+import { AGENTS, AGENT_IDS, agentPresentation } from "./catalog";
+import { applyEvent, isAnnounceableTurn, isTurnEnd, type AgentEvent } from "./events";
 import { latest as latestSession } from "./history";
 import type { AgentLaunch } from "./launch";
 import { loadClaudeSettingsDefaults } from "./claudeSettings";
-import { fallbackCommands, fallbackModels } from "./slashCatalog";
-import { emptyUsage, type AgentId, type AgentSessionState } from "./types";
+import {
+  claudexDefaultModel,
+  fallbackCommands,
+  fallbackModels,
+  isClaudexProgram,
+} from "./slashCatalog";
+import { emptyUsage, type AgentId, type AgentItem, type AgentSessionState } from "./types";
 
 /**
  * One agent session per terminal.
@@ -57,6 +62,12 @@ interface Session {
    * stopping the agent, not the agent finishing, so it must not be announced.
    */
   interrupted: boolean;
+  /**
+   * A user prompt opened the current working stretch. Cleared when the turn
+   * returns to idle so a later synthetic working→idle (resume, load) cannot
+   * reuse the flag and fire a completion for work nobody asked for.
+   */
+  userInitiatedTurn: boolean;
   disposed: boolean;
 }
 
@@ -72,21 +83,63 @@ const sessions = new Map<string, Session>();
 const paneListeners = new Map<string, Set<() => void>>();
 const globalListeners = new Set<() => void>();
 const turnEndListeners = new Set<(termId: string) => void>();
+const turnStartListeners = new Set<(termId: string) => void>();
 
 /**
  * "This pane finished a turn, or is now blocked on the user."
  *
  * The protocol says so directly here — no log tailing, no heuristics — which
  * makes it the most precise completion signal in the app. `terminals` turns it
- * into the same sound and unread marker a raw CLI pane gets.
+ * into the same sound and unread marker a raw CLI pane gets. Only announceable
+ * ends are forwarded — see {@link isAnnounceableTurn}.
  */
 export function subscribeTurnEnd(callback: (termId: string) => void): () => void {
   turnEndListeners.add(callback);
   return () => turnEndListeners.delete(callback);
 }
 
+/**
+ * "This pane just began working on a user-facing turn."
+ *
+ * Used to start the completion-duration clock per turn rather than once at
+ * session launch — otherwise a short `/effort` after a long session looks like
+ * a job that ran for the whole session.
+ */
+export function subscribeTurnStart(callback: (termId: string) => void): () => void {
+  turnStartListeners.add(callback);
+  return () => turnStartListeners.delete(callback);
+}
+
 function announceTurnEnd(session: Session): void {
   for (const listener of turnEndListeners) listener(session.termId);
+}
+
+function announceTurnStart(session: Session): void {
+  for (const listener of turnStartListeners) listener(session.termId);
+}
+
+/**
+ * Facts about the turn that just became idle, read from the transcript.
+ *
+ * Walks back from the newest item to the latest user message — that stretch is
+ * the turn. Notices alone are not tools; `/effort`-style handlers use them to
+ * confirm, and those stays silent via {@link isMetaSlashCommand}.
+ */
+function inspectTurn(items: AgentItem[]): {
+  usedTools: boolean;
+  userText: string | null;
+} {
+  let usedTools = false;
+  let userText: string | null = null;
+  for (let i = items.length - 1; i >= 0; i--) {
+    const item = items[i];
+    if (item.kind === "user") {
+      userText = item.text;
+      break;
+    }
+    if (item.kind === "tool") usedTools = true;
+  }
+  return { usedTools, userText };
 }
 
 /** Subscribe to "any session appeared, changed, or ended". */
@@ -220,8 +273,14 @@ function dispatch(session: Session, text: string): void {
   // Whatever the last turn's ending was, this one is the user's own request.
   session.interrupted = false;
   if (text.startsWith("/") && session.adapter.command?.(text, session.context) === "handled") {
+    // Local answer only (notice, model switch over RPC). No working stretch,
+    // so nothing to announce when it "finishes".
     return;
   }
+  // Everything that reaches `prompt` is a user-opened turn, including slash
+  // text the CLI will interpret (`/effort high` on Claude, advertised ACP
+  // commands). Announceability still filters pure meta slashes later.
+  session.userInitiatedTurn = true;
   session.adapter.prompt(text, session.context);
 }
 
@@ -242,18 +301,30 @@ function emit(session: Session, event: AgentEvent): void {
     return;
   }
 
+  // Fresh work starts the completion clock. `waiting` → `working` is the user
+  // answering a permission prompt mid-turn, not a new job.
+  if (
+    next.status === "working" &&
+    (before === "idle" || before === "starting")
+  ) {
+    announceTurnStart(session);
+  }
+
   // A prompt sent before the handshake landed, or while a turn was still
   // running, waits here. Exactly one is released per idle moment: every
   // protocol we speak runs one turn at a time, so pushing the whole backlog
   // would just make the agent reject the rest.
   const releasingQueued = next.status === "idle" && session.queued.length > 0;
-  const ended = isTurnEnd({
+  const turnEnd = {
     before,
     after: next.status,
     permission: next.permission !== null,
     releasingQueued,
     interrupted: session.interrupted,
-  });
+    userInitiated: session.userInitiatedTurn,
+    ...inspectTurn(next.items),
+  };
+  const ended = isTurnEnd(turnEnd);
   if (releasingQueued) {
     const text = session.queued.shift() as string;
     session.state = applyEvent(session.state, { type: "unqueue" });
@@ -262,9 +333,17 @@ function emit(session: Session, event: AgentEvent): void {
   notify(session);
 
   // The interrupt is spent on the idle it produced, so the next real turn end
-  // is announced normally.
-  if (next.status === "idle") session.interrupted = false;
-  if (ended) announceTurnEnd(session);
+  // is announced normally. The user-initiated flag is spent too — a later
+  // synthetic working→idle must not inherit it.
+  if (next.status === "idle") {
+    session.interrupted = false;
+    session.userInitiatedTurn = false;
+  }
+  // Config slash commands and synthetic idles still end the turn for the
+  // protocol — they just do not earn a sound or unread flash.
+  if (ended && isAnnounceableTurn(turnEnd)) {
+    announceTurnEnd(session);
+  }
 }
 
 function handleFrame(session: Session, frame: AgentFrame): void {
@@ -316,6 +395,12 @@ export async function start(
 
   const definition = AGENTS[launch.agent];
   const adapter = createAdapter(launch.agent);
+  const presentation = agentPresentation(launch.agent, launch.program);
+  // Claudex injects a default model when none was typed; surface that before
+  // the first turn so the header/picker match the process that actually runs.
+  const seedModel =
+    launch.model ??
+    (isClaudexProgram(launch.program) ? claudexDefaultModel(launch.wrapperArgs) : null);
 
   const session: Session = {
     termId,
@@ -327,18 +412,22 @@ export async function start(
     pendingResume: null,
     notifyHandle: null,
     interrupted: false,
+    userInitiatedTurn: false,
     disposed: false,
     state: {
       termId,
       agent: launch.agent,
-      label: definition.label,
+      program: launch.program,
+      label: presentation.label,
+      mark: presentation.mark,
+      accent: presentation.accent,
       status: "starting",
       cwd,
-      model: launch.model,
+      model: seedModel,
       effort: launch.effort,
-      // Live model lists from the adapter replace this; Claude starts with
-      // its known aliases so the picker works before the first turn.
-      models: fallbackModels(launch.agent),
+      // Live model lists from the adapter replace this; Claude/Claudex start
+      // with their known aliases so the picker works before the first turn.
+      models: fallbackModels(launch.agent, launch.program),
       sessionId: null,
       items: [],
       pending: [],
@@ -347,7 +436,7 @@ export async function start(
       error: null,
       // Live advertisements merge over this list as they arrive; the composer
       // never has to wait on the protocol to answer `/`.
-      commands: fallbackCommands(launch.agent),
+      commands: fallbackCommands(launch.agent, launch.program),
       started: false,
     },
     context: {
@@ -373,8 +462,13 @@ export async function start(
     await agentProcStart(
       termId,
       {
-        program: definition.binaries[0],
-        args: [...definition.headlessArgs, ...adapter.args(launch)],
+        // Prefer the typed executable so wrappers like `claudex` still set their
+        // proxy env before re-execing Claude Code. Canonical binaries remain the
+        // fallback when a profile alias was resolved to one.
+        program: launch.program,
+        // Wrapper flags (`claudex --g`) must precede headless protocol args so
+        // the wrapper can strip them before handing the rest to Claude.
+        args: [...launch.wrapperArgs, ...definition.headlessArgs, ...adapter.args(launch)],
         cwd,
       },
       channel,
@@ -390,7 +484,10 @@ export async function start(
   // Claude only reports model/effort on the first turn's system/init. Until
   // then, seed the header and pickers from the same settings file the real
   // TUI reads (`~/.claude/settings.json`), overridden by launch flags.
-  if (launch.agent === "claude") {
+  // Claudex deliberately skips that file: plain-Claude model aliases there
+  // (opus/sonnet/…) are wrong for the proxy, and the wrapper restores them
+  // on exit so a Claudex session must not adopt them as defaults either.
+  if (launch.agent === "claude" && !isClaudexProgram(launch.program)) {
     void loadClaudeSettingsDefaults().then((defaults) => {
       if (session.disposed) return;
       const model = launch.model ?? defaults.model;

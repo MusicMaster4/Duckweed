@@ -7,7 +7,10 @@ function blank(): AgentSessionState {
   return {
     termId: "t1",
     agent: "claude",
+    program: "claude",
     label: "Claude Code",
+    mark: "CC",
+    accent: "#d97757",
     status: "idle",
     cwd: "H:/project",
     model: null,

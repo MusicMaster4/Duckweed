@@ -8,6 +8,8 @@ import { createCodexAdapter } from "./codex";
 
 const launch: AgentLaunch = {
   agent: "codex",
+  program: "codex",
+  wrapperArgs: [],
   args: [],
   prompt: null,
   model: null,
@@ -32,7 +34,10 @@ function harness(overrides: Partial<AgentLaunch> = {}) {
     events.reduce<AgentSessionState>(applyEvent, {
       termId: "t1",
       agent: "codex",
+      program: "codex",
       label: "Codex",
+      mark: "CX",
+      accent: "#8f9aa6",
       status: "starting",
       cwd: "H:/project",
       model: null,

@@ -211,3 +211,36 @@ export const AGENT_IDS = Object.keys(AGENTS) as AgentId[];
 
 /** Every executable name the launch parser recognises. */
 export const AGENT_BINARIES: string[] = AGENT_IDS.flatMap((id) => AGENTS[id].binaries);
+
+/**
+ * How the custom UI brands a session in the header / empty state.
+ *
+ * Wrappers that speak a known protocol still get their own name and chrome so a
+ * pane running `claudex` is not labelled "Claude Code" with Anthropic models.
+ */
+export interface AgentPresentation {
+  label: string;
+  mark: string;
+  accent: string;
+}
+
+/**
+ * Presentation for a launch. `program` is the typed executable (e.g. `claudex`);
+ * when it is just the catalog binary the agent's own branding is used.
+ */
+export function agentPresentation(agent: AgentId, program: string): AgentPresentation {
+  if (program === "claudex") {
+    return {
+      label: "Claudex",
+      mark: "DX",
+      // Distinct from Claude Code's terracotta — Claudex is a local proxy layer.
+      accent: "#7c9cff",
+    };
+  }
+  const definition = AGENTS[agent];
+  return {
+    label: definition.label,
+    mark: definition.mark,
+    accent: definition.accent,
+  };
+}

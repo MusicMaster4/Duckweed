@@ -7,7 +7,6 @@ import {
   useSyncExternalStore,
 } from "react";
 
-import { AGENTS } from "../../lib/agents/catalog";
 import { canResume } from "../../lib/agents/history";
 import * as agents from "../../lib/agents/session";
 import type { AgentSessionState } from "../../lib/agents/types";
@@ -87,7 +86,6 @@ export function AgentSurface({ termId, active, onClose }: Props) {
 
   if (!session) return null;
 
-  const definition = AGENTS[session.agent];
   const { usage } = session;
   const tokens = usage.inputTokens + usage.outputTokens;
   const ended = session.status === "exited" || session.status === "error";
@@ -111,6 +109,8 @@ export function AgentSurface({ termId, active, onClose }: Props) {
    * Clicking anywhere quiet in the transcript hands the keyboard back to the
    * composer, the way a chat pane does. A drag that selected text is exempt —
    * that click was for the selection, and stealing focus would clear it.
+   * Mouseup (not mousedown) so a selection drag still has a chance to exist
+   * before we decide whether to steal the keyboard.
    */
   const focusComposer = (event: React.MouseEvent) => {
     if (ended || session.permission || resumeQuery !== null) return;
@@ -122,13 +122,14 @@ export function AgentSurface({ termId, active, onClose }: Props) {
   return (
     <div
       className={`agent-surface is-${session.status}`}
-      style={{ ["--agent-accent" as string]: definition.accent }}
+      style={{ ["--agent-accent" as string]: session.accent }}
       data-agent={session.agent}
+      data-program={session.program}
       onMouseUp={focusComposer}
     >
       <header className="agent-head">
         <span className="agent-badge" aria-hidden="true">
-          {definition.mark}
+          {session.mark}
         </span>
         <span className="agent-name">{session.label}</span>
         {/* Read-only identity in the head — interactive pickers live in the
@@ -169,7 +170,7 @@ export function AgentSurface({ termId, active, onClose }: Props) {
             type="button"
             className="agent-head-btn is-quiet"
             onClick={() => setResumeQuery("")}
-            title={`Resume a past ${definition.label} session (/resume)`}
+            title={`Resume a past ${session.label} session (/resume)`}
             aria-label="Resume a past session"
           >
             <svg viewBox="0 0 14 14" aria-hidden="true">
@@ -196,7 +197,7 @@ export function AgentSurface({ termId, active, onClose }: Props) {
         {!session.started && session.status !== "error" && (
           <div className={`agent-empty${session.status === "starting" ? " is-starting" : ""}`}>
             <span className="agent-empty-mark" aria-hidden="true">
-              {definition.mark}
+              {session.mark}
             </span>
             <strong>{session.label}</strong>
             {session.status === "starting" ? (
@@ -261,6 +262,8 @@ export function AgentSurface({ termId, active, onClose }: Props) {
         <AgentSessions
           agent={session.agent}
           cwd={session.cwd}
+          label={session.label}
+          mark={session.mark}
           initialQuery={resumeQuery}
           onClose={() => setResumeQuery(null)}
           onPick={(chosen) => {

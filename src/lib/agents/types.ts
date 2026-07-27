@@ -178,7 +178,17 @@ export interface AgentSessionState {
   /** Terminal this session replaced. */
   termId: string;
   agent: AgentId;
+  /**
+   * Executable that was spawned (`claude`, `claudex`, …). Branding and model
+   * catalogs key off this when a wrapper shares an agent protocol.
+   */
+  program: string;
+  /** Display name in the header — may differ from the catalog agent (Claudex). */
   label: string;
+  /** Two-letter badge mark for the empty state and header. */
+  mark: string;
+  /** Accent colour for the session chrome. */
+  accent: string;
   status: AgentStatus;
   cwd: string;
   /** Model the agent reports, once it says. */
@@ -245,6 +255,13 @@ export function effortsFor(state: Pick<AgentSessionState, "model" | "models">): 
 
 /** Compact a long provider/model id for the header / trigger chip. */
 export function shortModelLabel(model: string): string {
+  // Full-string checks first: Claudex's `or/selected` is a single id, not a
+  // provider/name pair, so the slash split below must not eat the prefix.
+  const full = model.toLowerCase();
+  if (full === "or/selected" || full === "or\\selected") return "OpenRouter";
+  if (full === "gpt-5.6-sol" || full === "gpt-5.6") return "GPT-5.6 Sol";
+  if (full === "grok-4.5") return "Grok 4.5";
+
   const slash = model.lastIndexOf("/");
   const base = slash >= 0 ? model.slice(slash + 1) : model;
   // Claude-style ids: `claude-opus-5[1m]` / `opus[1m]` → readable short form.
@@ -258,6 +275,8 @@ export function shortModelLabel(model: string): string {
   if (lower === "default") return "Default";
   if (lower === "best") return "Best";
   if (lower === "opusplan") return "Opus Plan";
+  if (lower === "gpt-5.6-sol" || lower === "gpt-5.6") return "GPT-5.6 Sol";
+  if (lower === "grok-4.5") return "Grok 4.5";
   // OpenCode Zen labels often arrive as the full id; keep the tail readable.
   return base.replace(/^claude-/, "").replace(/-/g, " ");
 }

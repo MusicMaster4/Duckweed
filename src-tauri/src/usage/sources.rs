@@ -63,6 +63,15 @@ pub static AGENTS: &[Agent] = &[
         caveat: None,
     },
     Agent {
+        id: "claudex",
+        label: "Claudex",
+        vendor: "Proxied",
+        format: Format::Append,
+        caveat: Some(
+            "Claude Code driving a non-Anthropic model through a local proxy. It shares Claude Code's transcripts, so these turns are split out by model rather than by file, and they bill to the proxied provider — not to your Anthropic plan.",
+        ),
+    },
+    Agent {
         id: "codex",
         label: "Codex CLI",
         vendor: "OpenAI",
@@ -137,6 +146,11 @@ pub fn discover(agent_id: &str, home: &Path) -> Vec<PathBuf> {
             collect(&home.join(".claude/projects"), "jsonl", &mut out);
             collect(&home.join(".config/claude/projects"), "jsonl", &mut out);
         }
+        // Claudex has no store of its own — it runs `claude` against a proxy,
+        // so its turns land in the Claude Code transcripts already discovered
+        // above. Listing those files here too would parse and bill them twice;
+        // `route` is what separates the two agents, per record.
+        "claudex" => {}
         "codex" => {
             collect(&home.join(".codex/sessions"), "jsonl", &mut out);
             collect(&home.join(".codex/archived_sessions"), "jsonl", &mut out);
@@ -206,6 +220,35 @@ pub fn discover(agent_id: &str, home: &Path) -> Vec<PathBuf> {
         _ => {}
     }
     out
+}
+
+/// Which agent a record belongs to, given the file's agent and the model.
+///
+/// Only Claude Code is ambiguous. Wrappers like `claudex` point it at a local
+/// proxy (`ANTHROPIC_BASE_URL`) that serves GPT, Grok or an OpenRouter model
+/// behind the Anthropic API, and the CLI writes those turns into its normal
+/// `~/.claude/projects` transcripts. The model id is the only trace left, and
+/// it is enough: a turn Claude Code did not run on an Anthropic model was not
+/// billed to the Anthropic plan, so folding it into Claude Code's totals — and
+/// into the quota card next to them — is simply wrong.
+pub fn route(agent_id: &'static str, model: &str) -> &'static str {
+    if agent_id == "claude" && !is_anthropic_model(model) {
+        return "claudex";
+    }
+    agent_id
+}
+
+/// Whether a model id names an Anthropic model, allowing for the provider
+/// prefixes proxies bolt on (`anthropic/claude-opus-5`).
+fn is_anthropic_model(model: &str) -> bool {
+    let id = super::pricing::normalize(model);
+    // Claude Code writes the full model id on assistant turns, but the aliases
+    // it accepts on the command line cost nothing to honour here, and a missing
+    // id is not evidence of a proxy.
+    const ALIASES: &[&str] = &[
+        "opus", "opusplan", "sonnet", "haiku", "fable", "mythos", "default", "unknown",
+    ];
+    id.starts_with("claude") || id.is_empty() || ALIASES.contains(&id.as_str())
 }
 
 fn collect(dir: &Path, ext: &str, out: &mut Vec<PathBuf>) {
@@ -970,6 +1013,31 @@ mod tests {
         assert_eq!(record.tokens.cache_write, 50);
         assert_eq!(record.reported_cost, Some(0.0085275));
         assert_ne!(record.dedup, 0);
+    }
+
+    #[test]
+    fn proxied_claude_turns_route_to_claudex() {
+        // claudex sets ANTHROPIC_BASE_URL at a local proxy; Claude Code still
+        // writes the turn to ~/.claude/projects, but it was not billed to the
+        // Anthropic plan.
+        assert_eq!(route("claude", "gpt-5.6-sol"), "claudex");
+        assert_eq!(route("claude", "grok-4.5-build"), "claudex");
+        assert_eq!(route("claude", "or/selected"), "claudex");
+        // Real Claude Code turns stay put, prefixed or not.
+        assert_eq!(route("claude", "claude-opus-5"), "claude");
+        assert_eq!(route("claude", "anthropic/claude-sonnet-4-5"), "claude");
+        assert_eq!(route("claude", "unknown"), "claude");
+        assert_eq!(route("claude", "opus"), "claude");
+        assert_eq!(route("claude", "sonnet"), "claude");
+        // No other agent is ambiguous.
+        assert_eq!(route("codex", "gpt-5.6"), "codex");
+    }
+
+    #[test]
+    fn claudex_has_no_files_of_its_own() {
+        // Discovering the Claude transcripts twice would bill them twice.
+        let home = std::env::temp_dir();
+        assert!(discover("claudex", &home).is_empty());
     }
 
     #[test]

@@ -57,6 +57,11 @@ import {
   shouldSignalCompletion,
   type ProcessState,
 } from "./lib/processActivity";
+import {
+  adjustSettingsIndexOnAppend,
+  adjustSettingsIndexOnClose,
+  applyStripReorder,
+} from "./lib/tabReorder";
 import * as terminals from "./lib/terminals";
 import { loadSettings as loadUsageSettings, prefetchUsage } from "./lib/usage";
 import type { LeafNode, ProjectInfo, ShellInfo, Tab } from "./lib/types";
@@ -203,6 +208,8 @@ export default function App() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [settingsTabOpen, setSettingsTabOpen] = useState(false);
   const [settingsActive, setSettingsActive] = useState(false);
+  /** Where Settings sits among strip items (0..tabs.length). */
+  const [settingsTabIndex, setSettingsTabIndex] = useState(0);
   const [changesOpen, setChangesOpen] = useState(false);
   const [toolsOpen, setToolsOpen] = useState(initial.toolsOpen);
   const [unreadTermIds, setUnreadTermIds] = useState<Set<string>>(() => new Set());
@@ -227,6 +234,10 @@ export default function App() {
   activeTabIdRef.current = activeTabId;
   const settingsActiveRef = useRef(settingsActive);
   settingsActiveRef.current = settingsActive;
+  const settingsTabOpenRef = useRef(settingsTabOpen);
+  settingsTabOpenRef.current = settingsTabOpen;
+  const settingsTabIndexRef = useRef(settingsTabIndex);
+  settingsTabIndexRef.current = settingsTabIndex;
   const shellRef = useRef(shell);
   shellRef.current = shell;
   const completionSoundEnabledRef = useRef(completionSoundEnabled);
@@ -428,11 +439,12 @@ export default function App() {
   // home). Choosing a project is an explicit action on this tab.
   const newTab = useCallback(
     (shellId?: string | null) => {
+      const previousCount = tabsRef.current.length;
       const term = createTerm({ cwd: null, shell: shellId ?? shellRef.current });
       const root = leaf(term);
       const tab: Tab = {
         id: uid("tab"),
-        title: `Terminal ${tabsRef.current.length + 1}`,
+        title: `Terminal ${previousCount + 1}`,
         root,
         activeLeaf: root.id,
         zoomedLeaf: null,
@@ -440,6 +452,10 @@ export default function App() {
       };
       setTabs([...tabsRef.current, tab]);
       setActiveTabId(tab.id);
+      setSettingsActive(false);
+      if (settingsTabOpenRef.current) {
+        setSettingsTabIndex((i) => adjustSettingsIndexOnAppend(i, previousCount));
+      }
     },
     [createTerm],
   );
@@ -489,6 +505,10 @@ export default function App() {
       const index = latest.findIndex((t) => t.id === tabId);
       const remaining = latest.filter((t) => t.id !== tabId);
 
+      if (settingsTabOpenRef.current && index >= 0) {
+        setSettingsTabIndex((i) => adjustSettingsIndexOnClose(i, index));
+      }
+
       if (remaining.length === 0) {
         // The window keeps one neutral tab open in the default directory.
         const term = createTerm({ cwd: null });
@@ -503,6 +523,8 @@ export default function App() {
         };
         setTabs([fresh]);
         setActiveTabId(fresh.id);
+        // Settings can only sit at 0 or 1 with a single tab left.
+        if (settingsTabOpenRef.current) setSettingsTabIndex((i) => Math.min(i, 1));
         return;
       }
 
@@ -515,18 +537,26 @@ export default function App() {
   );
 
   const reorderTabs = useCallback((from: number, to: number) => {
-    setTabs((prev) => {
-      if (from === to || from < 0 || to < 0 || from >= prev.length || to >= prev.length) return prev;
-      // Pinned tabs are immovable; unpinned tabs stay to their right.
-      if (prev[from]?.pinned) return prev;
-      const pinnedCount = prev.filter((t) => t.pinned).length;
-      const clampedTo = Math.max(to, pinnedCount);
-      if (from === clampedTo) return prev;
-      const next = [...prev];
-      const [moved] = next.splice(from, 1);
-      next.splice(clampedTo, 0, moved);
-      return next;
-    });
+    const prev = tabsRef.current;
+    const settingsOpen = settingsTabOpenRef.current;
+    const settingsIndex = settingsTabIndexRef.current;
+    const pinnedCount = prev.filter((t) => t.pinned).length;
+    const result = applyStripReorder(
+      prev.map((t) => t.id),
+      settingsOpen,
+      settingsIndex,
+      from,
+      to,
+      pinnedCount,
+    );
+    if (!result) return;
+
+    const byId = new Map(prev.map((t) => [t.id, t]));
+    const nextTabs = result.tabIds
+      .map((id) => byId.get(id))
+      .filter((t): t is Tab => t !== undefined);
+    setTabs(nextTabs);
+    if (settingsOpen) setSettingsTabIndex(result.settingsIndex);
   }, []);
 
   /** Pin moves the tab to the leftmost free pin slot (after other pins); unpin leaves it. */
@@ -622,6 +652,10 @@ export default function App() {
     void prefetchUsage(loadUsageSettings().days, 60_000).catch(() => {
       // The Usage panel owns the visible retry/error state.
     });
+    // Fresh open lands at the end of the strip; refocus keeps the last seat.
+    if (!settingsTabOpenRef.current) {
+      setSettingsTabIndex(tabsRef.current.length);
+    }
     setSettingsTabOpen(true);
     setSettingsActive(true);
   }, []);
@@ -827,12 +861,19 @@ export default function App() {
         return t;
       });
 
-      if (!restRoot) next = next.filter((t) => t.id !== source.id);
+      if (!restRoot) {
+        const removedIndex = next.findIndex((t) => t.id === source.id);
+        next = next.filter((t) => t.id !== source.id);
+        if (settingsTabOpenRef.current && removedIndex >= 0) {
+          setSettingsTabIndex((i) => adjustSettingsIndexOnClose(i, removedIndex));
+        }
+      }
 
       let focus = targetTabId;
       if (!targetTabId) {
         // The pane is still the same shell in the same folder — it just lives in
         // its own tab now, so the project comes with it.
+        const previousCount = next.length;
         const created: Tab = {
           id: uid("tab"),
           title: source.project?.name ?? `Terminal ${next.length + 1}`,
@@ -843,6 +884,9 @@ export default function App() {
         };
         next = [...next, created];
         focus = created.id;
+        if (settingsTabOpenRef.current) {
+          setSettingsTabIndex((i) => adjustSettingsIndexOnAppend(i, previousCount));
+        }
       }
 
       setTabs(next);
@@ -1988,6 +2032,7 @@ export default function App() {
           onIcon={iconTab}
           settingsOpen={settingsTabOpen}
           settingsActive={settingsActive}
+          settingsIndex={settingsTabIndex}
           onSelectSettings={openSettings}
           onCloseSettings={closeSettings}
         />

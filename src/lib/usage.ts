@@ -228,6 +228,7 @@ export const AGENT_COLORS: Record<string, string> = {
   kilocode: "var(--viz-7)",
   kimi: "var(--viz-8)",
   pi: "var(--viz-9)",
+  claudex: "var(--viz-10)",
   // Activity-only, so it never appears in a value chart and needs no hue.
   antigravity: "var(--viz-muted)",
 };

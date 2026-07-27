@@ -8,6 +8,8 @@ import { createClaudeAdapter } from "./claude";
 
 const launch: AgentLaunch = {
   agent: "claude",
+  program: "claude",
+  wrapperArgs: [],
   args: [],
   prompt: null,
   model: null,
@@ -31,7 +33,10 @@ function harness() {
     events.reduce<AgentSessionState>(applyEvent, {
       termId: "t1",
       agent: "claude",
+      program: "claude",
       label: "Claude Code",
+      mark: "CC",
+      accent: "#d97757",
       status: "starting",
       cwd: "H:/project",
       model: null,

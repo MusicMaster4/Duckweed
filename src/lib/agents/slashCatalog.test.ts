@@ -22,6 +22,22 @@ describe("slashCatalog", () => {
     expect(fallbackModels("codex")).toEqual([]);
   });
 
+  test("claudex seeds proxy models instead of Anthropic aliases", () => {
+    const models = fallbackModels("claude", "claudex");
+    const ids = models.map((model) => model.id);
+    expect(ids).toEqual(["gpt-5.6-sol", "grok-4.5", "or/selected"]);
+    expect(ids).not.toContain("opus");
+    expect(ids).not.toContain("sonnet");
+    // Same Claude effort surface — Claudex enables effort on the wrapped CLI.
+    expect(models[0].efforts).toEqual(
+      expect.arrayContaining(["low", "medium", "high", "xhigh", "max", "auto"]),
+    );
+    expect(
+      fallbackCommands("claude", "claudex").find((command) => command.name === "/resume")
+        ?.description,
+    ).toContain("Claudex");
+  });
+
   test("guided arg commands are exactly model and effort", () => {
     expect([...GUIDED_ARG_COMMANDS].sort()).toEqual(["/effort", "/model"]);
   });
@@ -62,6 +78,8 @@ describe("effortsFor / shortModelLabel", () => {
   test("shortens provider-prefixed and Claude model ids", () => {
     expect(shortModelLabel("opencode/claude-haiku-4-5")).toBe("Haiku 4.5");
     expect(shortModelLabel("claude-opus-5[1m]")).toBe("Opus 5 (1M)");
-    expect(shortModelLabel("grok-4.5")).toBe("grok 4.5");
+    expect(shortModelLabel("grok-4.5")).toBe("Grok 4.5");
+    expect(shortModelLabel("gpt-5.6-sol")).toBe("GPT-5.6 Sol");
+    expect(shortModelLabel("or/selected")).toBe("OpenRouter");
   });
 });

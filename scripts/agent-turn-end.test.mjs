@@ -3,7 +3,11 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { isTurnEnd } from "../src/lib/agents/events.ts";
+import {
+  isAnnounceableTurn,
+  isMetaSlashCommand,
+  isTurnEnd,
+} from "../src/lib/agents/events.ts";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const read = (file) => readFileSync(path.join(ROOT, file), "utf8");
@@ -14,6 +18,14 @@ const turn = (overrides = {}) => ({
   permission: false,
   releasingQueued: false,
   interrupted: false,
+  ...overrides,
+});
+
+const announce = (overrides = {}) => ({
+  ...turn(),
+  usedTools: false,
+  userText: "fix the build",
+  userInitiated: true,
   ...overrides,
 });
 
@@ -55,8 +67,53 @@ describe("custom agent UI turn completion", () => {
   });
 });
 
+describe("completion announcements are only for real tasks", () => {
+  test("a normal finished prompt is announceable", () => {
+    expect(isAnnounceableTurn(announce())).toBe(true);
+    expect(isAnnounceableTurn(announce({ usedTools: true }))).toBe(true);
+  });
+
+  test("a permission prompt is announceable even without tools", () => {
+    expect(
+      isAnnounceableTurn(
+        announce({ after: "waiting", permission: true, userText: null, usedTools: false }),
+      ),
+    ).toBe(true);
+  });
+
+  test("/effort and other meta slash commands are not tasks", () => {
+    expect(isMetaSlashCommand("/effort high")).toBe(true);
+    expect(isMetaSlashCommand("/model sonnet")).toBe(true);
+    expect(isMetaSlashCommand("/status")).toBe(true);
+    expect(isMetaSlashCommand("fix the build")).toBe(false);
+    expect(isMetaSlashCommand("/review the auth module")).toBe(false);
+
+    expect(isAnnounceableTurn(announce({ userText: "/effort high" }))).toBe(false);
+    expect(isAnnounceableTurn(announce({ userText: "/model opus" }))).toBe(false);
+    expect(isAnnounceableTurn(announce({ userText: "/compact" }))).toBe(false);
+    // A slash that actually ran tools is real work.
+    expect(
+      isAnnounceableTurn(announce({ userText: "/compact", usedTools: true })),
+    ).toBe(true);
+  });
+
+  test("synthetic working stretches (resume/load) stay silent", () => {
+    expect(
+      isAnnounceableTurn(
+        announce({ userInitiated: false, userText: null, usedTools: false }),
+      ),
+    ).toBe(false);
+  });
+
+  test("interrupted and queued ends are still not announceable", () => {
+    expect(isAnnounceableTurn(announce({ interrupted: true }))).toBe(false);
+    expect(isAnnounceableTurn(announce({ releasingQueued: true }))).toBe(false);
+  });
+});
+
 describe("completion signals are rationed per prompt", () => {
   const terminals = read("src/lib/terminals.ts");
+  const session = read("src/lib/agents/session.ts");
 
   test("a log or hook completion is dropped when nothing was asked", () => {
     expect(terminals).toContain("if (session.agentTurnCredits <= 0) return;");
@@ -65,9 +122,16 @@ describe("completion signals are rationed per prompt", () => {
 
   test("launching an agent and pressing Enter into it both buy a completion", () => {
     expect(terminals).toContain("session.agentTurnCredits = 1;");
-    expect(terminals).toContain(
-      "if (session.agent && isAgentPromptSubmission(data)) creditAgentTurn(session);",
-    );
+    // Only an already-bound agent gets a follow-up credit; first bind is launch.
+    expect(terminals).toContain("if (alreadyBound && isAgentPromptSubmission(data))");
+    expect(terminals).toContain("creditAgentTurn(session");
+  });
+
+  test("each prompt resets the duration clock so short follow-ups stay quiet", () => {
+    expect(terminals).toContain("session.processStartedAt = Date.now();");
+    expect(session).toContain("subscribeTurnStart");
+    expect(session).toContain("announceTurnStart");
+    expect(terminals).toContain("agentSessions.subscribeTurnStart");
   });
 
   test("quitting the CLI drops the credit its late events would spend", () => {
@@ -80,5 +144,13 @@ describe("completion signals are rationed per prompt", () => {
   test("the custom UI's own protocol signal is not rationed", () => {
     expect(terminals).toContain("markAgentComplete(session, true)");
     expect(terminals).toContain("agentSessions.subscribeTurnEnd");
+  });
+
+  test("config slash ends are filtered before the sound is earned", () => {
+    expect(session).toContain("isAnnounceableTurn");
+    expect(session).toContain("userInitiatedTurn");
+    // Raw CLI panes filter the same slash list when a log/hook completes.
+    expect(terminals).toContain("isMetaSlashCommand(session.lastAgentPrompt)");
+    expect(terminals).toContain("lastAgentPrompt");
   });
 });

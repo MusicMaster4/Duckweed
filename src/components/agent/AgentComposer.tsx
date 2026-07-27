@@ -7,6 +7,7 @@ import {
   type AgentSessionState,
 } from "../../lib/agents/types";
 import * as agents from "../../lib/agents/session";
+import * as terminals from "../../lib/terminals";
 import { AgentControls } from "./AgentControls";
 
 interface Props {
@@ -106,6 +107,18 @@ export function AgentComposer({ session, active, inputRef, onSubmit, onInterrupt
   const menu = buildMenu(value, session);
   const rows = menu?.rows ?? [];
 
+  const change = (text: string) => {
+    setValue(text);
+    agents.setDraft(session.termId, text);
+  };
+
+  const commit = (text: string) => {
+    if (!text.trim()) return;
+    onSubmit(text);
+    setValue("");
+    agents.setDraft(session.termId, "");
+  };
+
   // Grow with the text rather than scrolling a two-line box: a prompt is
   // usually a paragraph, and the composer is the only place to write it.
   useLayoutEffect(() => {
@@ -116,6 +129,38 @@ export function AgentComposer({ session, active, inputRef, onSubmit, onInterrupt
     node.style.height = `${Math.min(node.scrollHeight, lineHeight * MAX_ROWS)}px`;
   }, [value]);
 
+  // Same registry the shell composer uses: pane activation, paste shortcuts,
+  // and App's "keep OS focus on the active terminal" effect all call
+  // terminals.focus(termId). Without a focuser here they land on the hidden
+  // xterm grid, and typing vanishes while the message box looks selected.
+  useEffect(() => {
+    return terminals.registerInputFocus(session.termId, () => {
+      if (ended) return;
+      ref.current?.focus();
+    });
+  }, [session.termId, ended]);
+
+  useEffect(() => {
+    return terminals.registerInputPaste(session.termId, (text) => {
+      if (ended) return;
+      const node = ref.current;
+      const current = agents.getDraft(session.termId);
+      if (!node) {
+        change(current + text);
+        return;
+      }
+      const start = node.selectionStart ?? current.length;
+      const end = node.selectionEnd ?? current.length;
+      const next = current.slice(0, start) + text + current.slice(end);
+      change(next);
+      requestAnimationFrame(() => {
+        const pos = start + text.length;
+        node.focus();
+        node.setSelectionRange(pos, pos);
+      });
+    });
+  }, [session.termId, ended]);
+
   useEffect(() => {
     if (active && !ended) ref.current?.focus();
   }, [active, ended]);
@@ -123,18 +168,6 @@ export function AgentComposer({ session, active, inputRef, onSubmit, onInterrupt
   useEffect(() => {
     setHighlighted(0);
   }, [menu?.kind, value]);
-
-  const commit = (text: string) => {
-    if (!text.trim()) return;
-    onSubmit(text);
-    setValue("");
-    agents.setDraft(session.termId, "");
-  };
-
-  const change = (text: string) => {
-    setValue(text);
-    agents.setDraft(session.termId, text);
-  };
 
   const applyRow = (row: MenuRow) => {
     if (!menu) return;
@@ -208,8 +241,19 @@ export function AgentComposer({ session, active, inputRef, onSubmit, onInterrupt
 
   if (ended) return null;
 
+  /**
+   * Clicks on the composer's chrome (padding, footer gap) still mean "type
+   * here". Real controls (buttons, the textarea itself) keep their own
+   * behaviour; everything else hands the keyboard to the message box.
+   */
+  const focusInputFromChrome = (event: React.MouseEvent) => {
+    if (ended) return;
+    if ((event.target as HTMLElement).closest("button, a, input, textarea")) return;
+    ref.current?.focus();
+  };
+
   return (
-    <div className="agent-composer">
+    <div className="agent-composer" onMouseDown={focusInputFromChrome}>
       {menu && rows.length > 0 && (
         <div
           className="agent-commands"

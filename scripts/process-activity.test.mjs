@@ -256,6 +256,7 @@ describe("CLI agent signals", () => {
   test("recognises official commands and common profile wrappers", () => {
     expect(detectAgent("codex --search")).toBe("codex");
     expect(detectAgent("claude-work --resume")).toBe("claude");
+    expect(detectAgent("claudex --g")).toBe("claude");
     expect(detectAgent("grok-build")).toBe("grok");
     expect(detectAgent("npx @openai/codex")).toBe("codex");
     expect(detectAgent("opencode")).toBe("opencode");

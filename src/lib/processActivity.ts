@@ -59,6 +59,10 @@ export function shouldSignalCompletion(
  * Sound is stricter than the visual marker: the job must have run for more
  * than one minute. Focus is checked separately so background panes stay quiet.
  * Agent process exit alone never counts — same rule as shouldSignalCompletion.
+ *
+ * The start time is read from `previous` first: App measures duration at the
+ * completion edge, and a late notify that clears `processStartedAt` must not
+ * make a long turn look timeless (or the other way around).
  */
 export function shouldPlayCompletionSound(
   previous: ProcessState,
@@ -66,6 +70,8 @@ export function shouldPlayCompletionSound(
   now = Date.now(),
 ): boolean {
   if (!shouldSignalCompletion(previous, current, now)) return false;
+  // Prefer the pre-edge start so a turn that just finished keeps its clock
+  // even if the session module already prepared for the next one.
   const startedAt = previous.processStartedAt ?? current.processStartedAt;
   return startedAt !== null && now - startedAt > COMPLETION_SOUND_MIN_MS;
 }
@@ -106,6 +112,7 @@ const DIRECT_AGENTS: Record<string, AgentKind> = {
   omx: "codex",
   claude: "claude",
   "claude-code": "claude",
+  claudex: "claude",
   omc: "claude",
   grok: "grok",
   "grok-build": "grok",

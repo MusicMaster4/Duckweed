@@ -173,7 +173,15 @@ impl AgentActivityManager {
                         // A guess never replaces a guess — that would only
                         // trade one wrong transcript for another and reset the
                         // read offset each time.
-                        if watch.file.is_none() || strong {
+                        if watch.file.as_ref() == Some(&path) {
+                            // Same transcript we already follow: just promote a
+                            // weak match. Resetting the offset here would
+                            // re-ingest historical end-of-turn lines and play
+                            // the completion sound again minutes later.
+                            if strong {
+                                watch.strong = true;
+                            }
+                        } else if watch.file.is_none() || strong {
                             watch.offset = initial_offset(&path, watch.started);
                             watch.pending_complete = None;
                             watch.strong = strong;

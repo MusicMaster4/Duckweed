@@ -6,6 +6,19 @@ import type { AgentId } from "./types";
  */
 export interface AgentLaunch {
   agent: AgentId;
+  /**
+   * Executable actually launched. Usually the typed name (`claude`, `claudex`,
+   * `codex`); profile wrappers like `claude-work` fall back to the agent's
+   * canonical binary because those names are often shell aliases that PATH
+   * resolution cannot find.
+   */
+  program: string;
+  /**
+   * Wrapper-only flags that must precede the headless protocol args.
+   * Claudex uses `--g` / `--o` (and long forms) to pick a proxied backend
+   * before it re-execs Claude Code — those must not be dropped or reordered.
+   */
+  wrapperArgs: string[];
   /** Everything typed after the executable, unquoted. */
   args: string[];
   /** A bare positional argument — the opening prompt. */
@@ -30,10 +43,16 @@ export interface AgentLaunch {
 /**
  * Executables that launch each agent, including the profile-wrapper prefixes
  * duckweed already recognises elsewhere (`codex-work`, `claude-personal`).
+ *
+ * `claudex` is a local Claude Code wrapper that points the real CLI at a
+ * CLIProxyAPI backend (OpenAI/Grok/OpenRouter). It speaks the same protocol as
+ * `claude`, so the custom UI drives it as Claude — but the process must still
+ * be `claudex`, or the proxy env never gets set.
  */
 const EXECUTABLES: Record<string, AgentId> = {
   claude: "claude",
   "claude-code": "claude",
+  claudex: "claude",
   omc: "claude",
   codex: "codex",
   omx: "codex",
@@ -44,6 +63,17 @@ const EXECUTABLES: Record<string, AgentId> = {
   opencode: "opencode",
   "opencode-ai": "opencode",
 };
+
+/**
+ * Flags Claudex strips before handing the rest to Claude Code. They select a
+ * proxied model backend and must be forwarded on the spawned command line.
+ */
+const CLAUDEX_WRAPPER_FLAGS = new Set([
+  "--g",
+  "--grok",
+  "--o",
+  "--pick-openrouter",
+]);
 
 const PREFIXES: [RegExp, AgentId][] = [
   [/^(claude|cc|omc)-/, "claude"],
@@ -102,12 +132,20 @@ function executableName(word: string): string {
   return base.replace(/\.(exe|cmd|bat|ps1)$/i, "").toLowerCase();
 }
 
-function resolveAgent(word: string): AgentId | null {
+/**
+ * Resolve a typed executable to the agent it drives and the program to spawn.
+ *
+ * Exact catalog names (`claude`, `claudex`, `omc`, …) keep that name as the
+ * program so wrappers that set env / proxy before re-execing still run.
+ * Prefix profile wrappers (`claude-work`) fall back to the agent's canonical
+ * binary — those names are usually shell aliases, not PATH entries.
+ */
+function resolveAgent(word: string): { agent: AgentId; program: string } | null {
   const name = executableName(word);
   const direct = EXECUTABLES[name];
-  if (direct) return direct;
+  if (direct) return { agent: direct, program: name };
   for (const [pattern, id] of PREFIXES) {
-    if (pattern.test(name)) return id;
+    if (pattern.test(name)) return { agent: id, program: AGENTS[id].binaries[0] };
   }
   return null;
 }
@@ -210,8 +248,9 @@ export function parseAgentLaunch(command: string): AgentLaunch | null {
 
   const executable = words[at];
   if (!executable) return null;
-  const agent = resolveAgent(executable);
-  if (!agent) return null;
+  const resolved = resolveAgent(executable);
+  if (!resolved) return null;
+  const { agent, program } = resolved;
 
   const definition = AGENTS[agent];
   const args = words.slice(at + 1);
@@ -222,6 +261,7 @@ export function parseAgentLaunch(command: string): AgentLaunch | null {
   let effort: string | null = null;
   let resume = false;
   let resumeId: string | null = null;
+  const wrapperArgs: string[] = [];
 
   for (let i = 0; i < args.length; i++) {
     const word = args[i];
@@ -229,6 +269,12 @@ export function parseAgentLaunch(command: string): AgentLaunch | null {
     if (passthrough.has(lower)) return null;
 
     if (word.startsWith("-")) {
+      // Claudex's backend pickers are not Claude flags — capture them so the
+      // spawn line can put them before the headless protocol args.
+      if (program === "claudex" && CLAUDEX_WRAPPER_FLAGS.has(lower)) {
+        wrapperArgs.push(word);
+        continue;
+      }
       // `--model=opus` — one word carrying its own value.
       const equals = word.indexOf("=");
       if (equals > 0) {
@@ -285,7 +331,7 @@ export function parseAgentLaunch(command: string): AgentLaunch | null {
     return null;
   }
 
-  return { agent, args, prompt, model, effort, resume, resumeId };
+  return { agent, program, wrapperArgs, args, prompt, model, effort, resume, resumeId };
 }
 
 /** True when `agent` is one the custom UI knows how to drive. */

@@ -9,6 +9,12 @@ interface Props {
   agent: AgentId;
   /** Folder whose sessions are listed — one project, not the whole machine. */
   cwd: string;
+  /**
+   * Branding for the picker chrome. Defaults to the catalog agent; wrappers
+   * like Claudex pass their own label/mark so the dialog does not say Claude Code.
+   */
+  label?: string;
+  mark?: string;
   /** Text typed after `/resume`, used as the opening filter. */
   initialQuery?: string;
   onPick: (session: AgentSessionSummary) => void;
@@ -24,7 +30,15 @@ interface Props {
  * agent — the rows differ only in what each CLI bothered to record — so a pane
  * running Grok lists Grok sessions and nothing else.
  */
-export function AgentSessions({ agent, cwd, initialQuery = "", onPick, onClose }: Props) {
+export function AgentSessions({
+  agent,
+  cwd,
+  label,
+  mark,
+  initialQuery = "",
+  onPick,
+  onClose,
+}: Props) {
   const [sessions, setSessions] = useState<AgentSessionSummary[] | null>(() =>
     history.cached(agent, cwd),
   );
@@ -35,6 +49,8 @@ export function AgentSessions({ agent, cwd, initialQuery = "", onPick, onClose }
   const listRef = useRef<HTMLDivElement>(null);
 
   const definition = AGENTS[agent];
+  const displayLabel = label ?? definition.label;
+  const displayMark = mark ?? definition.mark;
 
   useEffect(() => {
     let live = true;
@@ -108,18 +124,18 @@ export function AgentSessions({ agent, cwd, initialQuery = "", onPick, onClose }
       <div
         className="agent-sessions"
         role="dialog"
-        aria-label={`Resume a ${definition.label} session`}
+        aria-label={`Resume a ${displayLabel} session`}
         onPointerDown={(event) => event.stopPropagation()}
         onKeyDown={onKeyDown}
       >
         <header className="agent-sessions-head">
           <span className="agent-sessions-mark" aria-hidden="true">
-            {definition.mark}
+            {displayMark}
           </span>
           <div className="agent-sessions-title">
             <strong>Resume a session</strong>
             <span title={cwd}>
-              {definition.label} · {folderName(cwd)}
+              {displayLabel} · {folderName(cwd)}
             </span>
           </div>
           <button

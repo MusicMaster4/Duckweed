@@ -3945,6 +3945,7 @@ body.is-resizing * {
   --viz-7: #9085e9;
   --viz-8: #e66767;
   --viz-9: #1599b0;
+  --viz-10: #a13d8f;
   /* Reserved for series that carry no value, so it never reads as identity. */
   --viz-muted: #5c665e;
 
@@ -5700,6 +5701,8 @@ body.is-resizing * {
   border: 0;
   background: transparent;
   color: var(--text);
+  /* Match the shell command editor and the terminal caret — house green. */
+  caret-color: var(--accent);
   font-family: var(--font-mono);
   font-size: var(--terminal-font-size);
   line-height: 1.5;

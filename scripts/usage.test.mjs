@@ -400,6 +400,7 @@ describe("usage series colours", () => {
       "#9085e9",
       "#e66767",
       "#1599b0",
+      "#a13d8f",
     ]) {
       expect(css).toContain(hex);
     }
