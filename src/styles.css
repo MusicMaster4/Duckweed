@@ -5859,6 +5859,16 @@ body.is-resizing * {
   color: var(--agent-accent);
 }
 
+.agent-head-btn:disabled {
+  cursor: default;
+  opacity: 0.34;
+}
+
+.agent-head-btn:disabled:hover {
+  color: inherit;
+  background: transparent;
+}
+
 .agent-head-btn svg {
   width: 12px;
   height: 12px;
@@ -6686,6 +6696,163 @@ body.is-resizing * {
   opacity: 0.65;
 }
 
+.agent-image-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 7px;
+}
+
+.agent-image-strip.is-composer {
+  padding: 7px 9px 2px;
+}
+
+.agent-image-strip.is-message {
+  margin-bottom: 8px;
+}
+
+.agent-image-tile {
+  position: relative;
+  flex: none;
+}
+
+.agent-image-preview {
+  display: block;
+  width: 76px;
+  height: 58px;
+  overflow: hidden;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.13);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.24);
+}
+
+.agent-image-strip.is-message .agent-image-preview {
+  width: 138px;
+  height: 96px;
+  border-radius: 10px;
+}
+
+.agent-image-preview:hover {
+  border-color: rgba(255, 255, 255, 0.26);
+}
+
+.agent-image-preview img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.agent-image-remove {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  display: grid;
+  width: 19px;
+  height: 19px;
+  place-items: center;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 50%;
+  color: #151715;
+  background: #f2f3f2;
+}
+
+.agent-image-remove:hover {
+  background: #ffffff;
+}
+
+.agent-image-remove svg,
+.agent-image-lightbox-close svg {
+  width: 11px;
+  height: 11px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+}
+
+.agent-attachment-error {
+  padding: 2px 11px 0;
+  color: #ef9a9f;
+  font-size: 10.5px;
+  line-height: 1.35;
+}
+
+.agent-file-drop-hint {
+  position: absolute;
+  z-index: 8;
+  inset: 5px;
+  display: grid;
+  place-items: center;
+  border: 1px dashed color-mix(in srgb, var(--agent-accent) 58%, white 12%);
+  border-radius: 8px;
+  color: var(--text);
+  background: color-mix(in srgb, var(--bg-elevated) 94%, var(--agent-accent) 6%);
+  font-size: 11px;
+  pointer-events: none;
+}
+
+.agent-image-lightbox {
+  position: fixed;
+  z-index: 1000;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 50px;
+  background: rgba(4, 5, 4, 0.9);
+}
+
+.agent-image-lightbox figure {
+  display: flex;
+  max-width: min(94vw, 1500px);
+  max-height: calc(100vh - 90px);
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+}
+
+.agent-image-lightbox figure img {
+  min-width: 0;
+  min-height: 0;
+  max-width: 100%;
+  max-height: calc(100vh - 120px);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 8px;
+  object-fit: contain;
+}
+
+.agent-image-lightbox figcaption {
+  overflow: hidden;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-image-lightbox-close {
+  position: fixed;
+  top: 18px;
+  right: 18px;
+  display: grid;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 50%;
+  color: var(--text);
+  background: rgba(28, 30, 28, 0.94);
+}
+
+.agent-image-lightbox-close:hover {
+  border-color: rgba(255, 255, 255, 0.36);
+  background: rgba(42, 45, 42, 0.98);
+}
+
 /* Only ever the stop button here: Enter sends, so a send button would be a
    permanent third of the row that repeats a key everyone already presses. */
 .agent-composer-stop {
@@ -6831,6 +6998,17 @@ body.is-resizing * {
   padding: 4px 8px;
   border-radius: 5px;
   text-align: left;
+}
+
+.agent-command-file {
+  flex: none;
+  width: 13px;
+  height: 13px;
+  align-self: center;
+  fill: none;
+  stroke: var(--text-faint);
+  stroke-width: 1.2;
+  stroke-linejoin: round;
 }
 
 .agent-commands button.is-active {

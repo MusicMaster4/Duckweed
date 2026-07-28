@@ -2,6 +2,7 @@ import {
   asArray,
   asRecord,
   asString,
+  imageBase64,
   oneLine,
   parseJson,
   type AdapterContext,
@@ -505,13 +506,26 @@ export function createClaudeAdapter(): AgentAdapter {
       }
     },
 
-    prompt: (text, ctx) => {
+    prompt: (prompt, ctx) => {
       seenTurnErrors.clear();
-      ctx.emit({ type: "user", text });
+      ctx.emit({ type: "user", text: prompt.text, images: prompt.images });
       ctx.emit({ type: "status", status: "working" });
       ctx.send({
         type: "user",
-        message: { role: "user", content: [{ type: "text", text }] },
+        message: {
+          role: "user",
+          content: [
+            ...prompt.images.map((image) => ({
+              type: "image",
+              source: {
+                type: "base64",
+                media_type: image.mimeType,
+                data: imageBase64(image.dataUrl),
+              },
+            })),
+            ...(prompt.text ? [{ type: "text", text: prompt.text }] : []),
+          ],
+        },
       });
     },
 

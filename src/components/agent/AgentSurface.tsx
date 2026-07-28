@@ -9,7 +9,7 @@ import {
 
 import { canResume } from "../../lib/agents/history";
 import * as agents from "../../lib/agents/session";
-import type { AgentSessionState } from "../../lib/agents/types";
+import type { AgentImageAttachment, AgentSessionState } from "../../lib/agents/types";
 import {
   isAtScrollBottom,
   shouldShowJumpToBottom,
@@ -206,6 +206,7 @@ export function AgentSurface({ termId, active, onClose }: Props) {
   const tokens = usage.inputTokens + usage.outputTokens;
   const ended = session.status === "exited" || session.status === "error";
   const resumable = canResume(session.agent);
+  const resumeBlocked = session.status === "working" || session.status === "waiting";
 
   /** End the session only after the user confirms — closing kills the agent. */
   const requestClose = () => {
@@ -227,16 +228,16 @@ export function AgentSurface({ termId, active, onClose }: Props) {
    * `/resume` is answered by the app, not the agent: no CLI advertises its
    * own history over the protocols we speak, so the text never leaves here.
    */
-  const submit = (text: string) => {
+  const submit = (text: string, images: AgentImageAttachment[]) => {
     const match = /^\/resume(?:\s+(.*))?$/i.exec(text.trim());
-    if (match) {
+    if (match && images.length === 0) {
       setResumeQuery(match[1]?.trim() ?? "");
       return;
     }
     pinnedRef.current = true;
     userPausedRef.current = false;
     setShowJumpToBottom(false);
-    agents.submit(termId, text);
+    agents.submit(termId, text, images);
   };
 
   const jumpToBottom = () => {
@@ -295,14 +296,20 @@ export function AgentSurface({ termId, active, onClose }: Props) {
             />
           </span>
         )}
-        {/* Hidden mid-turn: resuming would strand the work in flight, and an
-            action that is refused every time is worse than one that waits. */}
-        {resumable && !ended && session.status !== "working" && (
+        {/* Keep history discoverable on every resumable provider. Mid-turn it
+            stays visible but disabled because swapping sessions would strand
+            the work currently in flight. */}
+        {resumable && !ended && (
           <button
             type="button"
             className="agent-head-btn is-quiet"
             onClick={() => setResumeQuery("")}
-            title={`Resume a past ${session.label} session (/resume)`}
+            disabled={resumeBlocked}
+            title={
+              resumeBlocked
+                ? "Finish or stop the current turn before resuming another session"
+                : `Resume a past ${session.label} session (/resume)`
+            }
             aria-label="Resume a past session"
           >
             <svg viewBox="0 0 14 14" aria-hidden="true">

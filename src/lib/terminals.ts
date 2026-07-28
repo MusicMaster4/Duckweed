@@ -151,6 +151,11 @@ interface Session extends TermMeta {
   /** Deduplicates heuristic log/hook/OSC signals for one completed turn. */
   lastAgentCompletionAt: number;
   /**
+   * Keeps a one-shot CLI bound briefly after its process exits so the native
+   * log or hook monitor can deliver its quiet-window completion.
+   */
+  agentUnbindTimer: number | null;
+  /**
    * Turns the user is still owed an answer for in this pane, oldest first.
    *
    * The prompt and clock travel together so a queued follow-up cannot replace
@@ -471,6 +476,12 @@ interface AgentCompletionPayload {
  * *and* runs the completion hook — must still be a single notification.
  */
 const MAX_PENDING_AGENT_TURNS = 8;
+/**
+ * Native completion candidates wait 800 ms of quiet and session discovery can
+ * take one additional two-second pass. Keep an exited one-shot CLI bound past
+ * both windows so its final event is not discarded as already closed.
+ */
+const AGENT_UNBIND_GRACE_MS = 4_000;
 
 function creditAgentTurn(session: Session, prompt: string | null = null): void {
   if (!session.agent) return;
@@ -517,6 +528,9 @@ function markAgentComplete(session: Session, trusted = false): void {
   session.completionStartedAt = completedStartedAt;
   session.completionSeq += 1;
   notifySession(session.id);
+  if (!trusted && !session.busy && session.agentTurns.length === 0) {
+    unbindAgent(session);
+  }
   if (!trusted && session.agentTurns.length > 0) {
     // Raw CLIs process queued prompts serially. The next prompt's execution
     // clock begins when the previous one completes, not when it was typed.
@@ -717,12 +731,31 @@ export function requestCloseAgentUi(id: string): boolean {
 }
 
 function unbindAgent(session: Session): void {
+  if (session.agentUnbindTimer !== null) {
+    window.clearTimeout(session.agentUnbindTimer);
+    session.agentUnbindTimer = null;
+  }
   if (!session.agent) return;
   session.agent = null;
   session.rawCommand = "";
   // Late log/hook lines for the CLI the user just quit have nothing to say.
   session.agentTurns = [];
   if (TAURI_RUNTIME) void agentUnwatch(session.id);
+}
+
+function scheduleAgentUnbind(session: Session): void {
+  if (!session.agent) return;
+  if (session.agentUnbindTimer !== null) {
+    window.clearTimeout(session.agentUnbindTimer);
+  }
+  if (session.agentTurns.length === 0) {
+    unbindAgent(session);
+    return;
+  }
+  session.agentUnbindTimer = window.setTimeout(() => {
+    session.agentUnbindTimer = null;
+    unbindAgent(session);
+  }, AGENT_UNBIND_GRACE_MS);
 }
 
 /** One listener receives turn completion events from every watched agent log. */
@@ -774,6 +807,10 @@ function ensureBusyListener(): void {
       const wasBusy = session.busy;
       session.busy = state.busy;
       if (state.busy) {
+        if (session.agentUnbindTimer !== null) {
+          window.clearTimeout(session.agentUnbindTimer);
+          session.agentUnbindTimer = null;
+        }
         const now = Date.now();
         // The native busy monitor samples twice a second. Prefer the command
         // submission time when it is recent so the 30-second threshold is not
@@ -789,7 +826,7 @@ function ensureBusyListener(): void {
       // notify between idle and the next run) still carries the finished job's
       // start time. The next busy=true overwrites it for the new run.
       if (wasBusy && !state.busy) {
-        unbindAgent(session);
+        scheduleAgentUnbind(session);
       }
     }
   });
@@ -1046,6 +1083,7 @@ function create(id: string, opts: { cwd?: string | null; shell?: string | null }
     draft: "",
     agent: null,
     lastAgentCompletionAt: 0,
+    agentUnbindTimer: null,
     agentTurns: [],
     rawCommand: "",
     rawCommandStartedRan: null,
@@ -1094,6 +1132,11 @@ function create(id: string, opts: { cwd?: string | null; shell?: string | null }
   // those replies as input marked every pane as used before it had run
   // anything, which is exactly what the empty state is there to hide.
   term.onKey((event) => {
+    // The next real keystroke after a one-shot agent exits belongs to the
+    // shell. Release the old binding before onData classifies that input.
+    if (!session.busy && session.agentUnbindTimer !== null) {
+      unbindAgent(session);
+    }
     // Raw mode echoes characters into xterm before Enter gives us the complete
     // command. Remember whether the pane was pristine before the first
     // printable key, otherwise typing `claude` itself would permanently hide
@@ -1660,6 +1703,11 @@ export function submitCommand(id: string, command: string): void {
 
 /** Run `text` in the pane's shell as a command block. */
 function sendToShell(session: Session, text: string): void {
+  // An editor submission after a one-shot agent exits starts a new shell job,
+  // even if the old agent is still inside its short completion grace period.
+  if (!session.busy && session.agentUnbindTimer !== null) {
+    unbindAgent(session);
+  }
   // Launch credit lives in bindAgentKind; only a prompt into an already-bound
   // agent needs another one (and a fresh duration clock + prompt text).
   const alreadyBound = session.agent !== null;

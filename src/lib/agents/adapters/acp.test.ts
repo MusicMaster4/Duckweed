@@ -19,6 +19,14 @@ const launch: AgentLaunch = {
   resumeId: null,
 };
 
+const image = {
+  id: "image-1",
+  name: "screenshot.png",
+  mimeType: "image/png" as const,
+  dataUrl: "data:image/png;base64,aGVsbG8=",
+  size: 5,
+};
+
 function harness(overrides: Partial<AgentLaunch> = {}) {
   const events: AgentEvent[] = [];
   const sent: Record<string, unknown>[] = [];
@@ -130,20 +138,24 @@ describe("acp adapter", () => {
   test("splits message and thought chunks into their own items", async () => {
     const h = harness();
     await h.handshake();
-    h.adapter.prompt("hi", h.ctx);
+    h.adapter.prompt({ text: "hi", images: [] }, h.ctx);
     h.update({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "Hmm, " } });
     h.update({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "let me look." } });
     h.update({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Done." } });
 
     const kinds = h.state().items.map((item) => item.kind);
     expect(kinds).toEqual(["user", "thinking", "assistant"]);
-    expect(h.state().items[1]).toMatchObject({ text: "Hmm, let me look." });
+    expect(h.state().items[1]).toMatchObject({
+      text: "Hmm, let me look.",
+      streaming: false,
+    });
+    expect(h.state().items[2]).toMatchObject({ text: "Done.", streaming: true });
   });
 
   test("opens new thought and message segments around tool calls", async () => {
     const h = harness();
     await h.handshake();
-    h.adapter.prompt("inspect", h.ctx);
+    h.adapter.prompt({ text: "inspect", images: [] }, h.ctx);
 
     h.update({
       sessionUpdate: "agent_thought_chunk",
@@ -179,18 +191,18 @@ describe("acp adapter", () => {
     expect(
       h.state().items
         .filter((item) => item.kind === "thinking")
-        .map((item) => ({ id: item.id, text: item.text })),
+        .map((item) => ({ id: item.id, text: item.text, streaming: item.streaming })),
     ).toEqual([
-      { id: "r1", text: "First thought" },
-      { id: "r1-2", text: "Second thought" },
+      { id: "r1", text: "First thought", streaming: false },
+      { id: "r1-2", text: "Second thought", streaming: false },
     ]);
     expect(
       h.state().items
         .filter((item) => item.kind === "assistant")
-        .map((item) => ({ id: item.id, text: item.text })),
+        .map((item) => ({ id: item.id, text: item.text, streaming: item.streaming })),
     ).toEqual([
-      { id: "a1", text: "Interim narration" },
-      { id: "a1-2", text: "Final answer" },
+      { id: "a1", text: "Interim narration", streaming: false },
+      { id: "a1-2", text: "Final answer", streaming: true },
     ]);
   });
 
@@ -306,7 +318,7 @@ describe("acp adapter", () => {
   test("ends the turn when the prompt request resolves", async () => {
     const h = harness();
     await h.handshake();
-    h.adapter.prompt("hi", h.ctx);
+    h.adapter.prompt({ text: "hi", images: [] }, h.ctx);
     expect(h.sent.at(-1)).toMatchObject({
       method: "session/prompt",
       params: { sessionId: "s1", prompt: [{ type: "text", text: "hi" }] },
@@ -317,6 +329,22 @@ describe("acp adapter", () => {
     await Promise.resolve();
     await Promise.resolve();
     expect(h.state().status).toBe("idle");
+  });
+
+  test("sends attached images as ACP image content", async () => {
+    const h = harness();
+    await h.handshake();
+    h.adapter.prompt({ text: "Describe this", images: [image] }, h.ctx);
+    expect(h.sent.at(-1)).toMatchObject({
+      method: "session/prompt",
+      params: {
+        prompt: [
+          { type: "text", text: "Describe this" },
+          { type: "image", data: "aGVsbG8=", mimeType: "image/png" },
+        ],
+      },
+    });
+    expect(h.state().items[0]).toMatchObject({ kind: "user", images: [image] });
   });
 
   test("cancels the session on interrupt", async () => {
@@ -599,13 +627,13 @@ describe("acp adapter", () => {
       _meta: { availableCommands: [{ name: "context", description: "Show usage" }] },
     });
 
-    h.adapter.prompt("/context", h.ctx);
+    h.adapter.prompt({ text: "/context", images: [] }, h.ctx);
     h.feed({ jsonrpc: "2.0", id: 3, result: { stopReason: "end_turn" } });
     await Promise.resolve();
     await Promise.resolve();
     expect(h.state().items.find((item) => item.kind === "notice")).toMatchObject({
       tone: "info",
-      text: "Ran /context — this agent does not return its output to the custom UI.",
+      text: "Ran /context. This agent does not return its output to the custom UI.",
     });
   });
 
@@ -615,7 +643,7 @@ describe("acp adapter", () => {
       _meta: { availableCommands: [{ name: "context", description: "Show usage" }] },
     });
 
-    h.adapter.prompt("/context", h.ctx);
+    h.adapter.prompt({ text: "/context", images: [] }, h.ctx);
     h.update({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "72% used" } });
     h.feed({ jsonrpc: "2.0", id: 3, result: { stopReason: "end_turn" } });
     await Promise.resolve();
@@ -627,7 +655,7 @@ describe("acp adapter", () => {
     const h = harness();
     await h.handshake();
 
-    h.adapter.prompt("Fix the parser", h.ctx);
+    h.adapter.prompt({ text: "Fix the parser", images: [] }, h.ctx);
     h.update({
       sessionUpdate: "user_message_chunk",
       content: { type: "text", text: "Fix the parser" },
@@ -652,6 +680,7 @@ describe("acp adapter", () => {
   test("loads a stored session when the agent advertises loadSession", async () => {
     const h = harness();
     await h.handshake({ agentCapabilities: { loadSession: true } });
+    h.ctx.emit({ type: "user", text: "Current conversation" });
 
     const resumed = h.adapter.resume?.("old-1", h.ctx);
     const load = h.sent.find((message) => message.method === "session/load");
@@ -671,6 +700,9 @@ describe("acp adapter", () => {
     expect(items.filter((item) => item.kind === "user")).toEqual([
       expect.objectContaining({ kind: "user", text: "Fix the parser" }),
     ]);
+    expect(items.some((item) => item.kind === "user" && item.text === "Current conversation")).toBe(
+      false,
+    );
     expect(items.at(-1)).toMatchObject({ kind: "assistant", text: "Done." });
     expect(h.state().status).toBe("idle");
   });

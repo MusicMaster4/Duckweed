@@ -28,6 +28,27 @@ function blank(): AgentSessionState {
 }
 
 describe("resumed", () => {
+  test("replaces the current pane with a restored transcript", () => {
+    let state = applyEvent(blank(), { type: "user", text: "Current conversation" });
+    state = applyEvent(state, {
+      type: "transcript",
+      items: [
+        { kind: "user", id: "old-user", at: 1, text: "Past prompt" },
+        {
+          kind: "assistant",
+          id: "old-answer",
+          at: 2,
+          text: "Past answer",
+          streaming: false,
+        },
+      ],
+    });
+
+    expect(state.started).toBe(true);
+    expect(state.items.map((item) => item.id)).toEqual(["old-user", "old-answer"]);
+    expect(state.usage).toEqual(emptyUsage());
+  });
+
   test("marks the transcript and adopts the resumed session id", () => {
     const state = applyEvent(blank(), {
       type: "resumed",

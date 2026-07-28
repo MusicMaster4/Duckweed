@@ -1,6 +1,7 @@
 import { memo, useMemo, useState } from "react";
 
 import type { AgentItem, AgentPlanStep, ToolItem, ToolStatus } from "../../../lib/agents/types";
+import { AgentImageAttachments } from "../AgentImageAttachments";
 import {
   ActivityHistory,
   activeAssistantId,
@@ -404,7 +405,12 @@ function OpenCodeItem({
 
   switch (item.kind) {
     case "user":
-      return <p className="oc-said">{item.text}</p>;
+      return (
+        <>
+          <AgentImageAttachments images={item.images ?? []} />
+          {item.text && <p className="oc-said">{item.text}</p>}
+        </>
+      );
     case "assistant":
       return (
         <div
@@ -525,6 +531,10 @@ export function OpenCodeExperience({ session, items, className }: ProviderExperi
   for (const group of groups) {
     if (group.firstIndex > latestUserIndex) liveGroup = group;
   }
+  const visibleContinuedIds = useMemo(() => {
+    if (session.status !== "working" || !liveGroup?.answerId) return continuedIds;
+    return new Set([...continuedIds, liveGroup.answerId]);
+  }, [continuedIds, liveGroup?.answerId, session.status]);
   const needsEmptyLiveTrace = session.status === "working" && !liveGroup;
 
   // Outside the `.oc` column, like the official surfaces do it: the empty state
@@ -599,7 +609,8 @@ export function OpenCodeExperience({ session, items, className }: ProviderExperi
               if (
                 !group ||
                 module.key !== group.firstId ||
-                group.replacedByCommentId
+                group.replacedByCommentId ||
+                (session.status === "working" && group === liveGroup && group.answerId)
               ) {
                 return null;
               }
@@ -630,7 +641,7 @@ export function OpenCodeExperience({ session, items, className }: ProviderExperi
                 key={module.key}
                 module={module}
                 now={module.items.some(isLive) ? now : 0}
-                continuedIds={continuedIds}
+                continuedIds={visibleContinuedIds}
                 liveAssistantId={liveAssistantId}
               />
             );

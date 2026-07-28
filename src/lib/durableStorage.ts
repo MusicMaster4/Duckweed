@@ -14,6 +14,8 @@ export const DURABLE_KEYS = [
   // Per-tab checklists. These are the user's own notes rather than app state,
   // so an update that changes the WebView origin must not lose them.
   "duckweed:checklist:v1",
+  // Model and reasoning choices for each custom agent CLI.
+  "duckweed:agent-preferences:v1",
   COMMAND_HISTORY_KEY,
 ] as const;
 

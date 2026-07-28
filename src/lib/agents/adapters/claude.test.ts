@@ -19,6 +19,14 @@ const launch: AgentLaunch = {
   resumeId: null,
 };
 
+const image = {
+  id: "image-1",
+  name: "screenshot.png",
+  mimeType: "image/png" as const,
+  dataUrl: "data:image/png;base64,aGVsbG8=",
+  size: 5,
+};
+
 function harness() {
   const events: AgentEvent[] = [];
   const sent: unknown[] = [];
@@ -297,7 +305,7 @@ describe("claude adapter", () => {
       },
     };
 
-    h.adapter.prompt("analyze this folder", h.ctx);
+    h.adapter.prompt({ text: "analyze this folder", images: [] }, h.ctx);
     h.feed(assistantError);
     h.feed(assistantError);
     h.feed({ type: "result", subtype: "success", is_error: true, result: text });
@@ -306,7 +314,7 @@ describe("claude adapter", () => {
     expect(notices).toHaveLength(1);
     expect(notices[0]).toMatchObject({ tone: "error", text });
 
-    h.adapter.prompt("try again", h.ctx);
+    h.adapter.prompt({ text: "try again", images: [] }, h.ctx);
     h.feed(assistantError);
     notices = h.state().items.filter((item) => item.kind === "notice");
     expect(notices).toHaveLength(2);
@@ -314,12 +322,31 @@ describe("claude adapter", () => {
 
   test("sends a prompt as a stream-json user message", () => {
     const h = harness();
-    h.adapter.prompt("fix the bug", h.ctx);
+    h.adapter.prompt({ text: "fix the bug", images: [] }, h.ctx);
     expect(h.sent[0]).toMatchObject({
       type: "user",
       message: { role: "user", content: [{ type: "text", text: "fix the bug" }] },
     });
     expect(h.state().items[0]).toMatchObject({ kind: "user", text: "fix the bug" });
+  });
+
+  test("sends attached images as Anthropic base64 content", () => {
+    const h = harness();
+    h.adapter.prompt({ text: "Describe this", images: [image] }, h.ctx);
+    expect(h.sent[0]).toMatchObject({
+      type: "user",
+      message: {
+        role: "user",
+        content: [
+          {
+            type: "image",
+            source: { type: "base64", media_type: "image/png", data: "aGVsbG8=" },
+          },
+          { type: "text", text: "Describe this" },
+        ],
+      },
+    });
+    expect(h.state().items[0]).toMatchObject({ kind: "user", images: [image] });
   });
 
   test("interrupts over the control channel", () => {
@@ -406,7 +433,7 @@ describe("claude adapter", () => {
     expect(h.state().effort).toBe("high");
     // The session then sends it as a normal user message, which the CLI
     // intercepts and confirms with a synthetic message of its own.
-    h.adapter.prompt("/effort high", h.ctx);
+    h.adapter.prompt({ text: "/effort high", images: [] }, h.ctx);
     expect(h.sent[0]).toMatchObject({
       type: "user",
       message: { role: "user", content: [{ type: "text", text: "/effort high" }] },

@@ -19,6 +19,14 @@ const launch: AgentLaunch = {
   resumeId: null,
 };
 
+const image = {
+  id: "image-1",
+  name: "screenshot.png",
+  mimeType: "image/png" as const,
+  dataUrl: "data:image/png;base64,aGVsbG8=",
+  size: 5,
+};
+
 function harness(overrides: Partial<AgentLaunch> = {}) {
   const events: AgentEvent[] = [];
   const sent: Record<string, unknown>[] = [];
@@ -159,7 +167,7 @@ describe("codex adapter", () => {
   test("passes a requested effort into the first turn", async () => {
     const h = harness({ effort: "xhigh" });
     await h.handshake({ reasoningEffort: "xhigh" });
-    h.adapter.prompt("fix the bug", h.ctx);
+    h.adapter.prompt({ text: "fix the bug", images: [] }, h.ctx);
     expect(h.sent.at(-1)).toMatchObject({
       method: "turn/start",
       params: { effort: "xhigh" },
@@ -174,7 +182,7 @@ describe("codex adapter", () => {
     expect(h.adapter.command?.("/model gpt-5.5", h.ctx)).toBe("handled");
     expect(h.state().model).toBe("gpt-5.5");
 
-    h.adapter.prompt("hello", h.ctx);
+    h.adapter.prompt({ text: "hello", images: [] }, h.ctx);
     expect(h.sent.at(-1)).toMatchObject({
       method: "turn/start",
       params: { model: "gpt-5.5", effort: "high" },
@@ -209,7 +217,7 @@ describe("codex adapter", () => {
 
     h.adapter.command?.("/effort low", h.ctx);
     expect(h.state().effort).toBe("low");
-    h.adapter.prompt("hello", h.ctx);
+    h.adapter.prompt({ text: "hello", images: [] }, h.ctx);
     expect(h.sent.at(-1)).toMatchObject({
       method: "turn/start",
       params: { effort: "low" },
@@ -463,7 +471,7 @@ describe("codex adapter", () => {
   test("starts a turn with the typed prompt", async () => {
     const h = harness();
     await h.handshake();
-    h.adapter.prompt("fix the bug", h.ctx);
+    h.adapter.prompt({ text: "fix the bug", images: [] }, h.ctx);
     expect(h.sent.at(-1)).toMatchObject({
       method: "turn/start",
       params: {
@@ -477,6 +485,22 @@ describe("codex adapter", () => {
       },
     });
     expect(h.state().items[0]).toMatchObject({ kind: "user", text: "fix the bug" });
+  });
+
+  test("sends attached images as Codex image inputs", async () => {
+    const h = harness();
+    await h.handshake();
+    h.adapter.prompt({ text: "What is wrong here?", images: [image] }, h.ctx);
+    expect(h.sent.at(-1)).toMatchObject({
+      method: "turn/start",
+      params: {
+        input: [
+          { type: "text", text: "What is wrong here?" },
+          { type: "image", url: image.dataUrl },
+        ],
+      },
+    });
+    expect(h.state().items[0]).toMatchObject({ kind: "user", images: [image] });
   });
 
   test("interrupts only the turn that is actually running", async () => {
@@ -516,15 +540,62 @@ describe("codex adapter", () => {
     h.feed({
       jsonrpc: "2.0",
       id: (call as { id: number }).id,
-      result: { thread: { id: "thread_old", sessionId: "sess_old" }, model: "gpt-5.6" },
+      result: {
+        thread: {
+          id: "thread_old",
+          sessionId: "sess_old",
+          turns: [
+            {
+              id: "turn-old",
+              items: [
+                {
+                  type: "userMessage",
+                  id: "user-old",
+                  content: [{ type: "text", text: "Inspect the parser" }],
+                },
+                {
+                  type: "reasoning",
+                  id: "reasoning-old",
+                  summary: ["Checking compatibility"],
+                  content: [],
+                },
+                {
+                  type: "commandExecution",
+                  id: "command-old",
+                  command: "bun test",
+                  status: "completed",
+                  aggregatedOutput: "12 pass",
+                },
+                {
+                  type: "agentMessage",
+                  id: "answer-old",
+                  text: "The parser is compatible.",
+                },
+              ],
+            },
+          ],
+        },
+        model: "gpt-5.6",
+      },
     });
     await Promise.resolve();
     await Promise.resolve();
     expect(await resumed).toBe(true);
     expect(h.state()).toMatchObject({ sessionId: "sess_old", model: "gpt-5.6", status: "idle" });
+    expect(h.state().items).toEqual([
+      expect.objectContaining({ kind: "user", text: "Inspect the parser" }),
+      expect.objectContaining({ kind: "thinking", text: "Checking compatibility" }),
+      expect.objectContaining({
+        kind: "tool",
+        command: "bun test",
+        output: "12 pass",
+        status: "done",
+      }),
+      expect.objectContaining({ kind: "assistant", text: "The parser is compatible." }),
+    ]);
 
     // Later turns must run against the thread that was resumed.
-    h.adapter.prompt("carry on", h.ctx);
+    h.adapter.prompt({ text: "carry on", images: [] }, h.ctx);
     expect(h.sent.at(-1)).toMatchObject({
       method: "turn/start",
       params: expect.objectContaining({ threadId: "thread_old" }),

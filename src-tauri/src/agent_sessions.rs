@@ -34,6 +34,10 @@ const MAX_SCANNED: usize = 600;
 const HEAD_BYTES: u64 = 256 * 1024;
 /// Longest title kept; the picker truncates visually, this bounds the payload.
 const MAX_TITLE: usize = 160;
+/// A resumed transcript stays bounded so one long-running chat cannot freeze a pane.
+const MAX_TRANSCRIPT_ITEMS: usize = 1_000;
+const MAX_TRANSCRIPT_TEXT: usize = 400_000;
+const MAX_TRANSCRIPT_TOOL_OUTPUT: usize = 20_000;
 
 /// One resumable conversation.
 #[derive(Serialize, Clone, Debug, Default, PartialEq)]
@@ -53,6 +57,42 @@ pub struct AgentSessionSummary {
     pub model: String,
     /// Absolute path of the record, for diagnostics and tie-breaking.
     pub path: String,
+}
+
+/// Visible history normalized to the same item shapes used by the frontend.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum AgentTranscriptItem {
+    User {
+        id: String,
+        at: i64,
+        text: String,
+    },
+    Assistant {
+        id: String,
+        at: i64,
+        text: String,
+        streaming: bool,
+    },
+    Thinking {
+        id: String,
+        at: i64,
+        text: String,
+        streaming: bool,
+    },
+    Tool {
+        id: String,
+        at: i64,
+        #[serde(rename = "callId")]
+        call_id: String,
+        name: String,
+        tool: String,
+        title: String,
+        status: String,
+        command: Option<String>,
+        output: String,
+        changes: Vec<Value>,
+    },
 }
 
 pub fn home_dir() -> Option<PathBuf> {
@@ -183,6 +223,225 @@ fn message_text(value: &Value) -> String {
         .filter_map(|block| block.get("text").and_then(Value::as_str))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn bounded_text(text: &str, limit: usize) -> String {
+    let count = text.chars().count();
+    if count <= limit {
+        return text.to_string();
+    }
+    let keep = limit.saturating_sub(1);
+    let tail: String = text.chars().skip(count - keep).collect();
+    format!("…{tail}")
+}
+
+fn record_timestamp(record: &Value, fallback: i64) -> i64 {
+    record
+        .get("timestamp")
+        .and_then(Value::as_str)
+        .map(parse_timestamp)
+        .filter(|stamp| *stamp > 0)
+        .unwrap_or(fallback)
+}
+
+fn claude_tool_kind(name: &str) -> &'static str {
+    match name.to_ascii_lowercase().as_str() {
+        "read" => "read",
+        "edit" | "write" | "multiedit" | "notebookedit" => "edit",
+        "grep" | "glob" => "search",
+        "bash" => "execute",
+        "webfetch" | "websearch" => "fetch",
+        "task" | "sendmessage" => "task",
+        "todowrite" => "todo",
+        _ => "other",
+    }
+}
+
+fn claude_tool_title(name: &str, input: &Value) -> String {
+    let key = match name.to_ascii_lowercase().as_str() {
+        "bash" => "command",
+        "read" | "edit" | "write" | "multiedit" | "notebookedit" => "file_path",
+        "grep" | "glob" => "pattern",
+        "webfetch" => "url",
+        "task" => "description",
+        _ => "",
+    };
+    let detail = if key.is_empty() {
+        String::new()
+    } else {
+        input
+            .get(key)
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string()
+    };
+    clean_title(if detail.is_empty() { name } else { &detail })
+}
+
+fn claude_transcript(path: &Path) -> Result<Vec<AgentTranscriptItem>, String> {
+    let file =
+        File::open(path).map_err(|error| format!("could not open Claude transcript: {error}"))?;
+    let fallback_at = modified_millis(path);
+    let mut items = Vec::new();
+    let mut tools: HashMap<String, usize> = HashMap::new();
+
+    for (line_index, line) in BufReader::new(file)
+        .lines()
+        .map_while(Result::ok)
+        .enumerate()
+    {
+        if items.len() >= MAX_TRANSCRIPT_ITEMS {
+            break;
+        }
+        let Ok(record) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if record.get("isSidechain").and_then(Value::as_bool) == Some(true) {
+            continue;
+        }
+        let record_type = record.get("type").and_then(Value::as_str).unwrap_or("");
+        if record_type != "user" && record_type != "assistant" {
+            continue;
+        }
+        let message = record.get("message").unwrap_or(&Value::Null);
+        let content = message.get("content").unwrap_or(&Value::Null);
+        let base_id = record
+            .get("uuid")
+            .and_then(Value::as_str)
+            .or_else(|| message.get("id").and_then(Value::as_str))
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("history-{line_index}"));
+        let at = record_timestamp(&record, fallback_at + line_index as i64);
+
+        if record_type == "user" {
+            let mut has_tool_result = false;
+            if let Some(blocks) = content.as_array() {
+                for block in blocks {
+                    if block.get("type").and_then(Value::as_str) != Some("tool_result") {
+                        continue;
+                    }
+                    has_tool_result = true;
+                    let Some(call_id) = block.get("tool_use_id").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    let Some(index) = tools.get(call_id).copied() else {
+                        continue;
+                    };
+                    let output = bounded_text(
+                        &message_text(block.get("content").unwrap_or(&Value::Null)),
+                        MAX_TRANSCRIPT_TOOL_OUTPUT,
+                    );
+                    if let Some(AgentTranscriptItem::Tool {
+                        status,
+                        output: stored_output,
+                        ..
+                    }) = items.get_mut(index)
+                    {
+                        *status = if block.get("is_error").and_then(Value::as_bool) == Some(true) {
+                            "error".to_string()
+                        } else {
+                            "done".to_string()
+                        };
+                        *stored_output = output;
+                    }
+                }
+            }
+            if has_tool_result {
+                continue;
+            }
+            let text = message_text(content);
+            if text.trim().is_empty() || is_synthetic_prompt(&text) {
+                continue;
+            }
+            items.push(AgentTranscriptItem::User {
+                id: format!("user-{base_id}"),
+                at,
+                text: bounded_text(&text, MAX_TRANSCRIPT_TEXT),
+            });
+            continue;
+        }
+
+        let Some(blocks) = content.as_array() else {
+            let text = message_text(content);
+            if !text.trim().is_empty() {
+                items.push(AgentTranscriptItem::Assistant {
+                    id: format!("assistant-{base_id}"),
+                    at,
+                    text: bounded_text(&text, MAX_TRANSCRIPT_TEXT),
+                    streaming: false,
+                });
+            }
+            continue;
+        };
+        for (block_index, block) in blocks.iter().enumerate() {
+            if items.len() >= MAX_TRANSCRIPT_ITEMS {
+                break;
+            }
+            let block_type = block.get("type").and_then(Value::as_str).unwrap_or("");
+            match block_type {
+                "text" => {
+                    let text = block.get("text").and_then(Value::as_str).unwrap_or("");
+                    if !text.trim().is_empty() {
+                        items.push(AgentTranscriptItem::Assistant {
+                            id: format!("assistant-{base_id}-{block_index}"),
+                            at,
+                            text: bounded_text(text, MAX_TRANSCRIPT_TEXT),
+                            streaming: false,
+                        });
+                    }
+                }
+                "thinking" => {
+                    let text = block.get("thinking").and_then(Value::as_str).unwrap_or("");
+                    if !text.trim().is_empty() {
+                        items.push(AgentTranscriptItem::Thinking {
+                            id: format!("thinking-{base_id}-{block_index}"),
+                            at,
+                            text: bounded_text(text, MAX_TRANSCRIPT_TEXT),
+                            streaming: false,
+                        });
+                    }
+                }
+                "tool_use" => {
+                    let call_id = block
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                        .unwrap_or_else(|| format!("{base_id}-{block_index}"));
+                    let name = block
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("tool")
+                        .to_string();
+                    let input = block.get("input").unwrap_or(&Value::Null);
+                    let command = if name.eq_ignore_ascii_case("bash") {
+                        input
+                            .get("command")
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                    } else {
+                        None
+                    };
+                    let index = items.len();
+                    items.push(AgentTranscriptItem::Tool {
+                        id: format!("tool-{call_id}"),
+                        at,
+                        call_id: call_id.clone(),
+                        title: claude_tool_title(&name, input),
+                        tool: claude_tool_kind(&name).to_string(),
+                        name,
+                        status: "done".to_string(),
+                        command,
+                        output: String::new(),
+                        changes: Vec::new(),
+                    });
+                    tools.insert(call_id, index);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    Ok(items)
 }
 
 // ---------------------------------------------------------------- Claude Code
@@ -664,6 +923,25 @@ pub fn list(agent: &str, cwd: &str) -> Result<Vec<AgentSessionSummary>, String> 
     Ok(sessions)
 }
 
+/// Visible history for a selected conversation.
+///
+/// ACP agents replay their own history and Codex returns turns in
+/// `thread/resume`. Claude is the only provider that needs an on-disk fallback.
+pub fn transcript(
+    agent: &str,
+    cwd: &str,
+    session_id: &str,
+) -> Result<Vec<AgentTranscriptItem>, String> {
+    if agent != "claude" {
+        return Ok(Vec::new());
+    }
+    let selected = list(agent, cwd)?
+        .into_iter()
+        .find(|session| session.id == session_id)
+        .ok_or_else(|| "the selected session is no longer available".to_string())?;
+    claude_transcript(Path::new(&selected.path))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -771,6 +1049,55 @@ mod tests {
         );
         let found = claude_sessions(&home, cwd);
         assert_eq!(found[0].title, "Agent resume UI");
+    }
+
+    #[test]
+    fn claude_transcript_restores_visible_turns_and_tool_results() {
+        let home = temp_dir("claude-transcript");
+        let file = home.join("session.jsonl");
+        write(
+            &file,
+            concat!(
+                r#"{"type":"user","uuid":"u1","timestamp":"2026-07-27T11:04:04.392Z","message":{"role":"user","content":"Fix the parser"}}"#,
+                "\n",
+                r#"{"type":"assistant","uuid":"a1","timestamp":"2026-07-27T11:04:05.392Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"Inspect the entry point"},{"type":"tool_use","id":"tool-1","name":"Bash","input":{"command":"bun test"}}]}}"#,
+                "\n",
+                r#"{"type":"user","uuid":"r1","timestamp":"2026-07-27T11:04:06.392Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1","content":[{"type":"text","text":"12 pass"}]}]}}"#,
+                "\n",
+                r#"{"type":"assistant","uuid":"a2","timestamp":"2026-07-27T11:04:07.392Z","message":{"role":"assistant","content":[{"type":"text","text":"Done."}]}}"#,
+                "\n",
+            ),
+        );
+
+        let items = claude_transcript(&file).unwrap();
+        assert_eq!(items.len(), 4);
+        assert!(matches!(
+            &items[0],
+            AgentTranscriptItem::User { text, .. } if text == "Fix the parser"
+        ));
+        assert!(matches!(
+            &items[1],
+            AgentTranscriptItem::Thinking { text, streaming, .. }
+                if text == "Inspect the entry point" && !streaming
+        ));
+        assert!(matches!(
+            &items[2],
+            AgentTranscriptItem::Tool {
+                call_id,
+                status,
+                command,
+                output,
+                ..
+            } if call_id == "tool-1"
+                && status == "done"
+                && command.as_deref() == Some("bun test")
+                && output == "12 pass"
+        ));
+        assert!(matches!(
+            &items[3],
+            AgentTranscriptItem::Assistant { text, streaming, .. }
+                if text == "Done." && !streaming
+        ));
     }
 
     #[test]

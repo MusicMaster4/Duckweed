@@ -39,10 +39,19 @@ describe("checklist panel", () => {
 
   test("a finished item says on the row how long it has left", () => {
     checklist.resetForTests({
-      tab1: [{ id: "a", text: "done thing", createdAt: 0, doneAt: Date.now() - DAY / 24 }],
+      tab1: [
+        {
+          id: "a",
+          text: "done thing",
+          createdAt: 0,
+          // Keep away from the exact hour boundary so time spent rendering
+          // cannot change the floored label from 23h to 22h.
+          doneAt: Date.now() - DAY / 24 + 60_000,
+        },
+      ],
     });
     const html = renderToStaticMarkup(<ChecklistTool scope="tab1" scopeLabel="duckweed" />);
-    // Checked an hour ago, so 23 of its 24 hours are left.
+    // Checked just under an hour ago, so 23 whole hours are left.
     expect(html).toContain("check-expiry");
     expect(html).toContain(">23h<");
   });

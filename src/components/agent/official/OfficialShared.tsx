@@ -12,6 +12,7 @@ import type {
 import { openUrl } from "../../../lib/ipc";
 import { AgentAsciiLoader } from "../AgentAsciiLoader";
 import { AgentDiff } from "../AgentDiff";
+import { AgentImageAttachments } from "../AgentImageAttachments";
 import { AgentProviderIcon } from "../AgentProviderIcon";
 import { nextThinkingPulsePattern } from "./thinkingPulsePatterns";
 
@@ -416,7 +417,8 @@ export function MessageItem({
         ref={elementRef}
         className={`official-user official-user--${variant}${className ? ` ${className}` : ""}`}
       >
-        <p>{item.text}</p>
+        <AgentImageAttachments images={item.images ?? []} />
+        {item.text && <p>{item.text}</p>}
       </article>
     );
   }
@@ -758,6 +760,9 @@ export function ActivityHistory({
     (item): item is ThinkingItem => item.kind === "thinking",
   );
   const tools = activities.filter((item): item is ToolItem => item.kind === "tool");
+  const latestActivity = activities[activities.length - 1];
+  const thinkingActive =
+    working && (!latestActivity || latestActivity.kind === "thinking");
 
   if (!thoughts.length && !tools.length && !working) return null;
 
@@ -766,7 +771,7 @@ export function ActivityHistory({
       {(thoughts.length > 0 || working) && (
         <ThinkingHistory
           thoughts={thoughts}
-          working={working}
+          working={thinkingActive}
           showLatestFull={showLatestThinking}
         />
       )}

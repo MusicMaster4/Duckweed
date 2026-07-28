@@ -1,6 +1,8 @@
 import { mergeCommands } from "./slashCatalog";
 import type {
   AgentFileChange,
+  AgentImageAttachment,
+  AgentItem,
   AgentModelChoice,
   AgentPermission,
   AgentPlanStep,
@@ -38,7 +40,7 @@ export type AgentEvent =
     }
   | { type: "status"; status: AgentStatus; error?: string }
   /** The user's own message, echoed into the transcript. */
-  | { type: "user"; text: string }
+  | { type: "user"; text: string; images?: AgentImageAttachment[] }
   | { type: "assistant-delta"; id: string; text: string }
   | { type: "assistant-end"; id: string }
   | { type: "thinking-delta"; id: string; text: string }
@@ -63,6 +65,12 @@ export type AgentEvent =
   | { type: "exit-armed"; armed: boolean }
   /** Remove picker confirmations and double-Ctrl+C hints without touching errors. */
   | { type: "dismiss-transient-notices" }
+  /**
+   * The selected conversation is replacing the pane's current transcript.
+   * Protocols that replay their own history use the empty form first; agents
+   * whose CLI only resumes context can restore normalized on-disk items.
+   */
+  | { type: "transcript"; items?: AgentItem[] }
   /**
    * A past conversation was picked up. Marks the transcript so what follows
    * reads as a continuation rather than a first turn, whether or not the
@@ -168,6 +176,18 @@ export function isTurnEnd(input: TurnEndInput): boolean {
 }
 
 /**
+ * True only when an event actually moves the session into idle.
+ *
+ * Transcript events can update an already-idle session. In particular, every
+ * adapter echoes the user's prompt before it reports `working`. Treating that
+ * idle-to-idle item update as a return to idle discards ownership of the turn
+ * before it has even started, so its later completion looks synthetic.
+ */
+export function didStatusEnterIdle(before: AgentStatus, after: AgentStatus): boolean {
+  return before !== "idle" && after === "idle";
+}
+
+/**
  * True when a finished turn is worth a completion sound or unread flash.
  *
  * Config and status slash commands (`/effort`, `/model`, …) still end a turn
@@ -224,7 +244,13 @@ export function applyEvent(state: AgentSessionState, event: AgentEvent): AgentSe
         started: true,
         items: [
           ...state.items.filter((item) => item.kind !== "notice" || !item.transient),
-          { kind: "user", id: nextId(state), at: Date.now(), text: event.text },
+          {
+            kind: "user",
+            id: nextId(state),
+            at: Date.now(),
+            text: event.text,
+            images: event.images ? [...event.images] : [],
+          },
         ],
       };
 
@@ -355,6 +381,22 @@ export function applyEvent(state: AgentSessionState, event: AgentEvent): AgentSe
       const items = state.items.filter((item) => item.kind !== "notice" || !item.transient);
       return items.length === state.items.length ? state : { ...state, items };
     }
+
+    case "transcript":
+      return {
+        ...state,
+        started: true,
+        items: event.items ?? [],
+        pending: [],
+        permission: null,
+        error: null,
+        usage: {
+          inputTokens: 0,
+          outputTokens: 0,
+          costUsd: null,
+          contextUsed: null,
+        },
+      };
 
     case "resumed":
       return {

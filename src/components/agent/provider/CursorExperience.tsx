@@ -2,6 +2,7 @@ import { memo, useMemo, useState } from "react";
 
 import type { AgentItem, ToolItem, ToolStatus } from "../../../lib/agents/types";
 import { AgentAsciiLoader } from "../AgentAsciiLoader";
+import { AgentImageAttachments } from "../AgentImageAttachments";
 import {
   ActivityHistory,
   activeAssistantId,
@@ -303,7 +304,12 @@ const CursorNode = memo(function CursorNode({
     <li className={`cx-node is-${item.kind}`} data-mark={markFor(item)} data-live={live || undefined}>
       <span className="cx-mark" aria-hidden="true" />
       <div className="cx-body">
-        {item.kind === "user" && <p className="cx-said">{item.text}</p>}
+        {item.kind === "user" && (
+          <>
+            <AgentImageAttachments images={item.images ?? []} />
+            {item.text && <p className="cx-said">{item.text}</p>}
+          </>
+        )}
         {item.kind === "assistant" && (
           <div
             className={`cx-prose${showStreaming ? " is-streaming" : ""}${
@@ -427,11 +433,12 @@ export function CursorExperience({ session, items, className }: ProviderExperien
           {list.map((item) => {
             if (item.kind === "thinking" || item.kind === "tool") {
               const group = groupByActivity.get(item.id);
-              if (
-                !group ||
-                item.id !== group.firstId ||
-                group.replacedByCommentId
-              ) {
+            if (
+              !group ||
+              item.id !== group.firstId ||
+              group.replacedByCommentId ||
+              (session.status === "working" && group === liveGroup && group.answerId)
+            ) {
                 return null;
               }
               const hasThoughts = group.activities.some((activityItem) => activityItem.kind === "thinking");
@@ -460,7 +467,11 @@ export function CursorExperience({ session, items, className }: ProviderExperien
                 key={item.id}
                 item={item}
                 now={0}
-                continued={item.kind === "assistant" && continuedIds.has(item.id)}
+                continued={
+                  item.kind === "assistant" &&
+                  (continuedIds.has(item.id) ||
+                    (session.status === "working" && liveGroup?.answerId === item.id))
+                }
                 showStreaming={item.kind === "assistant" && item.id === liveAssistantId}
               />
             );

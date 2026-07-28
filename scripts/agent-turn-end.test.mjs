@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+  didStatusEnterIdle,
   isAnnounceableTurn,
   isMetaSlashCommand,
   isTurnEnd,
@@ -64,6 +65,17 @@ describe("custom agent UI turn completion", () => {
   test("mid-turn status changes are not completions", () => {
     expect(isTurnEnd(turn({ before: "idle", after: "working" }))).toBe(false);
     expect(isTurnEnd(turn({ before: "working", after: "working" }))).toBe(false);
+  });
+
+  test("echoing a prompt while idle keeps ownership of the turn", () => {
+    // Adapters emit the user item before their working status. That item
+    // changes the transcript, not the status, so it must not clear the flag
+    // that makes the eventual turn end announceable.
+    expect(didStatusEnterIdle("idle", "idle")).toBe(false);
+    expect(didStatusEnterIdle("idle", "working")).toBe(false);
+    expect(didStatusEnterIdle("working", "idle")).toBe(true);
+    expect(didStatusEnterIdle("waiting", "idle")).toBe(true);
+    expect(didStatusEnterIdle("starting", "idle")).toBe(true);
   });
 });
 
@@ -143,6 +155,15 @@ describe("completion signals are rationed per prompt", () => {
     expect(reset).toBeGreaterThan(unbind);
   });
 
+  test("one-shot CLIs stay bound until their delayed completion can arrive", () => {
+    expect(terminals).toContain("const AGENT_UNBIND_GRACE_MS = 4_000;");
+    expect(terminals).toContain("scheduleAgentUnbind(session);");
+    expect(terminals).toContain(
+      "if (!trusted && !session.busy && session.agentTurns.length === 0)",
+    );
+    expect(terminals).toContain("session.agentUnbindTimer = window.setTimeout");
+  });
+
   test("the custom UI's own protocol signal is not rationed", () => {
     expect(terminals).toContain("markAgentComplete(session, true)");
     expect(terminals).toContain("agentSessions.subscribeTurnEnd");
@@ -164,7 +185,7 @@ describe("completion signals are rationed per prompt", () => {
     );
     const clear = emit.indexOf("session.userInitiatedTurn = false;");
     const release = emit.indexOf("if (releasingQueued)");
-    const dispatch = emit.indexOf("dispatch(session, queued.text", release);
+    const dispatch = emit.indexOf("dispatch(session, queued.prompt", release);
     expect(clear).toBeGreaterThan(-1);
     expect(release).toBeGreaterThan(clear);
     expect(dispatch).toBeGreaterThan(release);

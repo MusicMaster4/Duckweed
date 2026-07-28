@@ -362,6 +362,62 @@ describe("official agent presentation", () => {
     });
   }
 
+  for (const agent of ["codex", "claude", "grok", "cursor", "opencode"] as const) {
+    test(`${agent} replaces the old activity area as soon as a live comment arrives`, () => {
+      const html = renderAgentActivity(agent, [
+        { kind: "user", id: "user", at: 1, text: "Inspect" },
+        {
+          kind: "thinking",
+          id: "thinking-before-comment",
+          at: 2,
+          text: "THIS_OLD_ACTIVITY_MUST_MOVE_OUT",
+          streaming: false,
+        },
+        {
+          kind: "assistant",
+          id: "live-comment",
+          at: 3,
+          text: "I found the boundary. I am continuing below this update.",
+          streaming: true,
+        },
+      ]);
+
+      expect(html).toContain("I found the boundary. I am continuing below this update.");
+      expect(html).toContain("is-interim-update");
+      expect(html).not.toContain("THIS_OLD_ACTIVITY_MUST_MOVE_OUT");
+      expect(html).not.toContain("agent-activity-cluster");
+    });
+  }
+
+  test("stops the thinking animation while the latest tool is active", () => {
+    const html = renderAgentActivity("grok", [
+      { kind: "user", id: "user", at: 1, text: "Inspect" },
+      {
+        kind: "thinking",
+        id: "stale-stream-flag",
+        at: 2,
+        text: "The adapter has not closed this trace yet.",
+        streaming: true,
+      },
+      {
+        kind: "tool",
+        id: "tool",
+        at: 3,
+        callId: "call",
+        name: "Read",
+        tool: "read",
+        title: "Read package metadata",
+        status: "running",
+        command: null,
+        output: "",
+        changes: [],
+      },
+    ]);
+
+    expect(html).toContain("agent-activity-pulse is-settled");
+    expect(html).not.toContain("agent-activity-pulse is-active");
+  });
+
   test("keeps Grok planning prose visible when work continues", () => {
     const html = renderAgentActivity("grok", [
         { kind: "user", id: "u1", at: 1, text: "Inspect" },

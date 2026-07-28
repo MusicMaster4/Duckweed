@@ -13,10 +13,20 @@ import { createAcpAdapter } from "./adapters/acp";
 import { createClaudeAdapter } from "./adapters/claude";
 import { createCodexAdapter } from "./adapters/codex";
 import { AGENTS, AGENT_IDS, agentPresentation } from "./catalog";
-import { applyEvent, isAnnounceableTurn, isTurnEnd, type AgentEvent } from "./events";
-import { latest as latestSession } from "./history";
+import {
+  applyEvent,
+  didStatusEnterIdle,
+  isAnnounceableTurn,
+  isTurnEnd,
+  type AgentEvent,
+} from "./events";
+import { latest as latestSession, transcript as sessionTranscript } from "./history";
 import type { AgentLaunch } from "./launch";
 import { loadClaudeSettingsDefaults } from "./claudeSettings";
+import {
+  rememberPreferences,
+  withRememberedPreferences,
+} from "./preferences";
 import {
   claudexDefaultModel,
   fallbackCommands,
@@ -24,7 +34,14 @@ import {
   formatSessionUsage,
   isClaudexProgram,
 } from "./slashCatalog";
-import { emptyUsage, type AgentId, type AgentItem, type AgentSessionState } from "./types";
+import {
+  emptyUsage,
+  type AgentId,
+  type AgentImageAttachment,
+  type AgentItem,
+  type AgentPrompt,
+  type AgentSessionState,
+} from "./types";
 
 /**
  * One agent session per terminal.
@@ -46,9 +63,10 @@ interface Session {
   /** Diagnostics kept only to explain a start that never got anywhere. */
   stderr: string[];
   /** Prompts submitted before the handshake finished or while a turn runs. */
-  queued: Array<{ text: string; echoed: boolean }>;
-  /** Unsent composer text, so a pane remount never loses a draft. */
+  queued: Array<{ prompt: AgentPrompt; echoed: boolean }>;
+  /** Unsent composer content, so a pane remount never loses a draft. */
   draft: string;
+  draftImages: AgentImageAttachment[];
   /**
    * A conversation to pick up as soon as the handshake finishes. Resuming
    * before the agent is ready would be answered with "no session", and the
@@ -190,6 +208,15 @@ export function setDraft(termId: string, text: string): void {
   if (session) session.draft = text;
 }
 
+export function getDraftImages(termId: string): AgentImageAttachment[] {
+  return sessions.get(termId)?.draftImages ?? [];
+}
+
+export function setDraftImages(termId: string, images: AgentImageAttachment[]): void {
+  const session = sessions.get(termId);
+  if (session) session.draftImages = [...images];
+}
+
 function announce(termId: string): void {
   const listeners = paneListeners.get(termId);
   if (listeners) for (const listener of [...listeners]) listener();
@@ -285,11 +312,11 @@ function contextWithoutUserEcho(session: Session): AdapterContext {
   };
 }
 
-function dispatch(session: Session, text: string, echoUser = true): void {
+function dispatch(session: Session, prompt: AgentPrompt, echoUser = true): void {
   // Whatever the last turn's ending was, this one is the user's own request.
   session.interrupted = false;
   const context = echoUser ? session.context : contextWithoutUserEcho(session);
-  if (/^\/usage$/i.test(text.trim())) {
+  if (prompt.images.length === 0 && /^\/usage$/i.test(prompt.text.trim())) {
     emit(session, {
       type: "notice",
       tone: "info",
@@ -297,7 +324,11 @@ function dispatch(session: Session, text: string, echoUser = true): void {
     });
     return;
   }
-  if (text.startsWith("/") && session.adapter.command?.(text, context) === "handled") {
+  if (
+    prompt.images.length === 0 &&
+    prompt.text.startsWith("/") &&
+    session.adapter.command?.(prompt.text, context) === "handled"
+  ) {
     // Local answer only (notice, model switch over RPC). No working stretch,
     // so nothing to announce when it "finishes".
     return;
@@ -307,7 +338,7 @@ function dispatch(session: Session, text: string, echoUser = true): void {
   // commands). Announceability still filters pure meta slashes later.
   session.userInitiatedTurn = true;
   session.interactionEpoch += 1;
-  session.adapter.prompt(text, context);
+  session.adapter.prompt(prompt, context);
 }
 
 function emit(session: Session, event: AgentEvent): void {
@@ -328,7 +359,7 @@ function emit(session: Session, event: AgentEvent): void {
         if (!queued.echoed) {
           session.state = applyEvent(session.state, { type: "unqueue" });
         }
-        dispatch(session, queued.text, !queued.echoed);
+        dispatch(session, queued.prompt, !queued.echoed);
       }
       notify(session);
       return;
@@ -338,6 +369,15 @@ function emit(session: Session, event: AgentEvent): void {
   const before = session.state.status;
   const next = applyEvent(session.state, event);
   if (next === session.state) return;
+  if (
+    event.type === "session" &&
+    (next.model !== session.state.model || next.effort !== session.state.effort)
+  ) {
+    rememberPreferences(session.launch, {
+      model: next.model,
+      effort: next.effort,
+    });
+  }
   session.state = next;
 
   // A resume waiting on the handshake goes first: a prompt released into the
@@ -379,17 +419,17 @@ function emit(session: Session, event: AgentEvent): void {
   // releasing a queued prompt. `dispatch` starts the next turn synchronously
   // and gives it fresh flags; clearing them afterwards would make that real
   // user turn look like a synthetic resume/load when it eventually finishes.
-  if (next.status === "idle") {
+  if (didStatusEnterIdle(before, next.status)) {
     session.interrupted = false;
     session.userInitiatedTurn = false;
   }
 
   if (releasingQueued) {
-    const queued = session.queued.shift() as { text: string; echoed: boolean };
+    const queued = session.queued.shift() as { prompt: AgentPrompt; echoed: boolean };
     if (!queued.echoed) {
       session.state = applyEvent(session.state, { type: "unqueue" });
     }
-    dispatch(session, queued.text, !queued.echoed);
+    dispatch(session, queued.prompt, !queued.echoed);
   }
   notify(session);
 
@@ -447,6 +487,14 @@ export async function start(
   if (sessions.has(termId)) return null;
   if (!TAURI_RUNTIME) return "the custom agent UI needs the desktop app";
 
+  // Explicit launch flags win field by field and become the next remembered
+  // choice. Everything omitted inherits the last choice for this exact CLI.
+  rememberPreferences(launch, {
+    ...(launch.model ? { model: launch.model } : {}),
+    ...(launch.effort ? { effort: launch.effort } : {}),
+  });
+  launch = withRememberedPreferences(launch);
+
   const definition = AGENTS[launch.agent];
   const adapter = createAdapter(launch.agent);
   const presentation = agentPresentation(launch.agent, launch.program);
@@ -463,6 +511,7 @@ export async function start(
     stderr: [],
     queued: [],
     draft: "",
+    draftImages: [],
     pendingResume: null,
     notifyHandle: null,
     interrupted: false,
@@ -588,18 +637,27 @@ export async function start(
   return null;
 }
 
-export function submit(termId: string, text: string): void {
+export function submit(
+  termId: string,
+  text: string,
+  images: AgentImageAttachment[] = [],
+): void {
   const session = sessions.get(termId);
   if (!session || session.disposed) return;
   const trimmed = text.trim();
-  if (!trimmed) return;
+  if (!trimmed && images.length === 0) return;
+  const prompt: AgentPrompt = { text: trimmed, images: [...images] };
+  const queueText =
+    trimmed ||
+    (images.length === 1 ? "1 image attached" : `${images.length} images attached`);
   if (session.exitArmedUntil > 0) {
     session.exitArmedUntil = 0;
     emit(session, { type: "exit-armed", armed: false });
   }
   session.draft = "";
+  session.draftImages = [];
   if (session.state.status === "exited" || session.state.status === "error") return;
-  if (/^\/usage$/i.test(trimmed)) {
+  if (images.length === 0 && /^\/usage$/i.test(trimmed)) {
     emit(session, {
       type: "notice",
       tone: "info",
@@ -608,26 +666,26 @@ export function submit(termId: string, text: string): void {
     return;
   }
   if (session.configuring) {
-    session.queued.push({ text: trimmed, echoed: false });
-    emit(session, { type: "queue", text: trimmed });
+    session.queued.push({ prompt, echoed: false });
+    emit(session, { type: "queue", text: queueText });
     return;
   }
   if (session.state.status === "starting") {
     // Show the opening prompt immediately. The handshake still owns when it
     // can actually be sent, but the adapter's later echo is suppressed so the
     // optimistic bubble becomes the real turn instead of being duplicated.
-    session.queued.push({ text: trimmed, echoed: true });
-    emit(session, { type: "user", text: trimmed });
+    session.queued.push({ prompt, echoed: true });
+    emit(session, { type: "user", text: trimmed, images });
     return;
   }
   if (session.state.status !== "idle") {
     // A turn is already running. Hold the follow-up and show it holding, so
     // the pane never looks like it swallowed a prompt.
-    session.queued.push({ text: trimmed, echoed: false });
-    emit(session, { type: "queue", text: trimmed });
+    session.queued.push({ prompt, echoed: false });
+    emit(session, { type: "queue", text: queueText });
     return;
   }
-  dispatch(session, trimmed);
+  dispatch(session, prompt);
 }
 
 /**
@@ -669,7 +727,7 @@ export function configure(
   const handled = session.adapter.command?.(command, context);
   if (handled === "prompt") {
     session.configuring = true;
-    session.adapter.prompt(command, context);
+    session.adapter.prompt({ text: command, images: [] }, context);
   } else if (handled !== "handled") {
     emit(session, {
       type: "notice",
@@ -745,6 +803,12 @@ export async function resume(
   // opening prompt, which already ran in the session being replaced.
   const { launch } = session;
   const cwd = session.state.cwd;
+  // Claude resumes model context but stream-json does not replay old messages.
+  // Read its durable transcript before the process is replaced so the selected
+  // conversation can be restored as soon as the new harness exists.
+  const transcript = await sessionTranscript(session.state.agent, cwd, sessionId).catch(
+    () => [],
+  );
   // Awaited, not fired and forgotten: the backend refuses a second process
   // under the same pane id, so the old one has to be gone first. Nothing is
   // announced in between either — a pane that blinked back to its shell and
@@ -767,7 +831,10 @@ export async function resume(
     return failure;
   }
   const restarted = sessions.get(termId);
-  if (restarted) emit(restarted, { type: "resumed", sessionId, title });
+  if (restarted) {
+    if (transcript.length) emit(restarted, { type: "transcript", items: transcript });
+    emit(restarted, { type: "resumed", sessionId, title });
+  }
   return null;
 }
 

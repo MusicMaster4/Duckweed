@@ -23,9 +23,11 @@ use std::sync::Mutex;
 use tauri::{ipc::Channel, AppHandle, Emitter, Manager, State};
 
 use agent_activity::AgentActivityManager;
-use agent_proc::{AgentAvailability, AgentFrame, AgentProcManager, AgentSpawnOptions, AgentStarted};
-use agent_sessions::AgentSessionSummary;
-use fs::{DirEntry, FileContent};
+use agent_proc::{
+    AgentAvailability, AgentFrame, AgentProcManager, AgentSpawnOptions, AgentStarted,
+};
+use agent_sessions::{AgentSessionSummary, AgentTranscriptItem};
+use fs::{DirEntry, FileContent, WorkspacePath};
 use git::{Branches, Diff, DiffStats, FileDiff};
 use launch::{LaunchIntent, PendingLaunch};
 use project::ProjectInfo;
@@ -39,10 +41,11 @@ struct DurableSettings(Mutex<()>);
 
 const COMMAND_HISTORY_KEY: &str = "duckweed:command-history:v1";
 
-const DURABLE_SETTING_KEYS: [&str; 4] = [
+const DURABLE_SETTING_KEYS: [&str; 5] = [
     "duckweed:state:v1",
     "duckweed:usage:v1",
     "duckweed:checklist:v1",
+    "duckweed:agent-preferences:v1",
     COMMAND_HISTORY_KEY,
 ];
 
@@ -309,6 +312,16 @@ async fn agent_sessions_list(
     blocking(move || agent_sessions::list(&agent, &cwd)).await
 }
 
+/// Visible turns for agents whose resume protocol does not replay history.
+#[tauri::command]
+async fn agent_session_transcript(
+    agent: String,
+    cwd: String,
+    session_id: String,
+) -> Result<Vec<AgentTranscriptItem>, String> {
+    blocking(move || agent_sessions::transcript(&agent, &cwd, &session_id)).await
+}
+
 /// Which headless agent CLIs this machine has, so the custom UI only takes
 /// over commands it can actually drive.
 #[tauri::command]
@@ -550,6 +563,11 @@ fn watch_project(
     manager.set(path)
 }
 
+#[tauri::command]
+fn workspace_paths(path: String) -> Result<Vec<WorkspacePath>, String> {
+    fs::workspace_paths(&path)
+}
+
 #[cfg(not(debug_assertions))]
 fn focus_main_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
@@ -657,6 +675,7 @@ fn main() {
             home_dir,
             project_info,
             list_dir,
+            workspace_paths,
             read_file,
             write_file,
             git_branches,
@@ -673,6 +692,7 @@ fn main() {
             agent_watch,
             agent_unwatch,
             agent_sessions_list,
+            agent_session_transcript,
             agent_proc_probe,
             agent_proc_start,
             agent_proc_send,

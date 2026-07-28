@@ -1,14 +1,29 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
+import {
+  activeFileMention,
+  clipboardImageFiles,
+  formatDroppedPaths,
+  imageFileToAttachment,
+  insertComposerText,
+  loadWorkspaceIndex,
+  MAX_PROMPT_IMAGES,
+  replaceMention,
+  searchWorkspaceIndex,
+  type FileMention,
+} from "../../lib/agentComposer";
 import { GUIDED_ARG_COMMANDS } from "../../lib/agents/slashCatalog";
 import {
   effortsFor,
   shortModelLabel,
+  type AgentImageAttachment,
   type AgentSessionState,
 } from "../../lib/agents/types";
 import * as agents from "../../lib/agents/session";
 import * as terminals from "../../lib/terminals";
 import { AgentControls } from "./AgentControls";
+import { AgentImageAttachments } from "./AgentImageAttachments";
 
 interface Props {
   session: AgentSessionState;
@@ -16,7 +31,7 @@ interface Props {
   active: boolean;
   /** Shared with the surface, so a click anywhere quiet can focus the input. */
   inputRef?: React.RefObject<HTMLTextAreaElement>;
-  onSubmit: (text: string) => void;
+  onSubmit: (text: string, images: AgentImageAttachment[]) => void;
   onInterrupt: () => void;
 }
 
@@ -31,11 +46,14 @@ type MenuRow = {
   description: string;
   /** True when this is the session's current model/effort. */
   current: boolean;
+  /** Project-relative path for file mention rows. */
+  path?: string;
 };
 
 type Menu =
   | { kind: "commands"; rows: MenuRow[] }
-  | { kind: "args"; command: "/model" | "/effort"; rows: MenuRow[] };
+  | { kind: "args"; command: "/model" | "/effort"; rows: MenuRow[] }
+  | { kind: "files"; mention: FileMention; rows: MenuRow[] };
 
 function buildMenu(value: string, session: AgentSessionState): Menu | null {
   if (!value.startsWith("/")) return null;
@@ -98,27 +116,122 @@ function buildMenu(value: string, session: AgentSessionState): Menu | null {
 
 export function AgentComposer({ session, active, inputRef, onSubmit, onInterrupt }: Props) {
   const own = useRef<HTMLTextAreaElement>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
   const ref = inputRef ?? own;
   const [value, setValue] = useState(() => agents.getDraft(session.termId));
+  const [images, setImages] = useState(() => agents.getDraftImages(session.termId));
+  const imagesRef = useRef(images);
   const [highlighted, setHighlighted] = useState(0);
+  const [cursor, setCursor] = useState(value.length);
+  const [fileRows, setFileRows] = useState<MenuRow[]>([]);
+  const [dismissedMention, setDismissedMention] = useState<string | null>(null);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  const [fileDragging, setFileDragging] = useState(false);
 
   const working = session.status === "working";
   const ended = session.status === "exited" || session.status === "error";
   const exitArmed = session.exitArmed === true;
-  const menu = buildMenu(value, session);
+  const mention = useMemo(() => activeFileMention(value, cursor), [value, cursor]);
+  const mentionKey = mention ? `${mention.start}:${mention.query}` : null;
+  const commandMenu = buildMenu(value, session);
+  const menu: Menu | null =
+    mention && mentionKey !== dismissedMention && fileRows.length
+      ? { kind: "files", mention, rows: fileRows }
+      : commandMenu;
   const rows = menu?.rows ?? [];
 
-  const change = (text: string) => {
+  const change = (text: string, nextCursor?: number) => {
     setValue(text);
+    setCursor(nextCursor ?? Math.min(cursor, text.length));
+    setDismissedMention(null);
     agents.setDraft(session.termId, text);
   };
 
-  const commit = (text: string) => {
-    if (!text.trim()) return;
-    onSubmit(text);
-    setValue("");
-    agents.setDraft(session.termId, "");
+  const placeCursor = (position: number) => {
+    requestAnimationFrame(() => {
+      const node = ref.current;
+      if (!node) return;
+      node.focus();
+      node.setSelectionRange(position, position);
+      setCursor(position);
+    });
   };
+
+  const replaceImages = (
+    update: AgentImageAttachment[] | ((current: AgentImageAttachment[]) => AgentImageAttachment[]),
+  ) => {
+    const next = typeof update === "function" ? update(imagesRef.current) : update;
+    imagesRef.current = next;
+    setImages(next);
+    agents.setDraftImages(session.termId, next);
+  };
+
+  const addImageFiles = async (files: File[]) => {
+    if (!files.length) {
+      setAttachmentError("No image was found in the clipboard.");
+      return;
+    }
+    const settled = await Promise.allSettled(files.map(imageFileToAttachment));
+    const added = settled.flatMap((result) => (result.status === "fulfilled" ? [result.value] : []));
+    const failure = settled.find((result) => result.status === "rejected");
+    const room = Math.max(0, MAX_PROMPT_IMAGES - imagesRef.current.length);
+    if (failure?.status === "rejected") {
+      setAttachmentError(
+        failure.reason instanceof Error ? failure.reason.message : "Could not attach this image.",
+      );
+    } else if (added.length > room) {
+      setAttachmentError(`You can attach up to ${MAX_PROMPT_IMAGES} images.`);
+    } else {
+      setAttachmentError(null);
+    }
+    replaceImages((current) => [...current, ...added.slice(0, room)]);
+    ref.current?.focus();
+  };
+
+  const insertText = (text: string) => {
+    const node = ref.current;
+    const current = agents.getDraft(session.termId);
+    const start = node?.selectionStart ?? current.length;
+    const end = node?.selectionEnd ?? current.length;
+    const next = insertComposerText(current, start, end, text);
+    change(next.value, next.cursor);
+    placeCursor(next.cursor);
+  };
+
+  const commit = (text: string) => {
+    if (!text.trim() && imagesRef.current.length === 0) return;
+    onSubmit(text, imagesRef.current);
+    setValue("");
+    setCursor(0);
+    imagesRef.current = [];
+    setImages([]);
+    setAttachmentError(null);
+    agents.setDraft(session.termId, "");
+    agents.setDraftImages(session.termId, []);
+  };
+
+  useEffect(() => {
+    if (!mention || mentionKey === dismissedMention) {
+      setFileRows([]);
+      return;
+    }
+    let cancelled = false;
+    void loadWorkspaceIndex(session.cwd).then((files) => {
+      if (cancelled) return;
+      setFileRows(
+        searchWorkspaceIndex(files, mention.query).map((file) => ({
+          value: file.relative,
+          label: file.name,
+          description: file.relative,
+          path: file.relative,
+          current: false,
+        })),
+      );
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [session.cwd, mention?.query, mention?.start, mentionKey, dismissedMention]);
 
   // Grow with the text rather than scrolling a two-line box: a prompt is
   // usually a paragraph, and the composer is the only place to write it.
@@ -153,14 +266,89 @@ export function AgentComposer({ session, active, inputRef, onSubmit, onInterrupt
       const start = node.selectionStart ?? current.length;
       const end = node.selectionEnd ?? current.length;
       const next = current.slice(0, start) + text + current.slice(end);
-      change(next);
-      requestAnimationFrame(() => {
-        const pos = start + text.length;
-        node.focus();
-        node.setSelectionRange(pos, pos);
-      });
+      const pos = start + text.length;
+      change(next, pos);
+      placeCursor(pos);
     });
   }, [session.termId, ended]);
+
+  // Alt+V is an explicit image-paste shortcut. Ctrl+V continues through the
+  // browser's native paste event, which also preserves ordinary text pastes.
+  useEffect(() => {
+    if (!active || ended) return;
+    const pasteImage = (event: KeyboardEvent) => {
+      if (
+        !event.altKey ||
+        event.ctrlKey ||
+        event.metaKey ||
+        event.shiftKey ||
+        event.code !== "KeyV"
+      ) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      void clipboardImageFiles()
+        .then(addImageFiles)
+        .catch((error: unknown) => {
+          setAttachmentError(
+            error instanceof Error
+              ? error.message
+              : "Could not read an image from the clipboard.",
+          );
+        });
+    };
+    window.addEventListener("keydown", pasteImage, true);
+    return () => window.removeEventListener("keydown", pasteImage, true);
+  }, [active, ended, session.termId]);
+
+  // Native OS file drops carry absolute paths through Tauri. A drop anywhere
+  // inside the active custom terminal inserts those paths at the caret.
+  useEffect(() => {
+    if (!active || ended || !("__TAURI_INTERNALS__" in window)) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+
+    const isInsideSurface = (position: { toLogical: (scale: number) => { x: number; y: number } }) => {
+      const surface = rootRef.current?.closest(".agent-surface");
+      if (!surface) return false;
+      const point = position.toLogical(window.devicePixelRatio);
+      const rect = surface.getBoundingClientRect();
+      return (
+        point.x >= rect.left &&
+        point.x <= rect.right &&
+        point.y >= rect.top &&
+        point.y <= rect.bottom
+      );
+    };
+
+    void getCurrentWebview()
+      .onDragDropEvent((event) => {
+        const payload = event.payload;
+        if (payload.type === "leave") {
+          setFileDragging(false);
+          return;
+        }
+        const inside = isInsideSurface(payload.position);
+        if (payload.type === "enter" || payload.type === "over") {
+          setFileDragging(inside);
+          return;
+        }
+        setFileDragging(false);
+        if (!inside || !payload.paths.length) return;
+        insertText(formatDroppedPaths(payload.paths));
+      })
+      .then((stop) => {
+        if (disposed) stop();
+        else unlisten = stop;
+      });
+
+    return () => {
+      disposed = true;
+      setFileDragging(false);
+      unlisten?.();
+    };
+  }, [active, ended, session.termId]);
 
   useEffect(() => {
     if (active && !ended) ref.current?.focus();
@@ -172,9 +360,18 @@ export function AgentComposer({ session, active, inputRef, onSubmit, onInterrupt
 
   const applyRow = (row: MenuRow) => {
     if (!menu) return;
+    if (menu.kind === "files") {
+      const next = replaceMention(value, menu.mention, row.path ?? row.value);
+      change(next.value, next.cursor);
+      setFileRows([]);
+      placeCursor(next.cursor);
+      return;
+    }
     if (menu.kind === "commands") {
       // Trailing space opens the guided argument menu for /model and /effort.
-      change(`${row.value} `);
+      const next = `${row.value} `;
+      change(next, next.length);
+      placeCursor(next.length);
       return;
     }
     commit(`${menu.command} ${row.value}`);
@@ -197,7 +394,10 @@ export function AgentComposer({ session, active, inputRef, onSubmit, onInterrupt
     }
     if (rows.length > 0 && event.key === "Escape") {
       event.preventDefault();
-      if (menu?.kind === "args") {
+      if (menu?.kind === "files") {
+        setDismissedMention(mentionKey);
+        setFileRows([]);
+      } else if (menu?.kind === "args") {
         // Back out to the bare command rather than wiping the draft.
         change(`${menu.command} `);
       } else {
@@ -209,7 +409,7 @@ export function AgentComposer({ session, active, inputRef, onSubmit, onInterrupt
     if (event.key === "Enter" && !event.shiftKey && !event.ctrlKey && !event.altKey) {
       event.preventDefault();
       if (menu && rows.length > 0) {
-        if (menu.kind === "args") {
+        if (menu.kind === "args" || menu.kind === "files") {
           applyRow(rows[highlighted]);
           return;
         }
@@ -253,8 +453,30 @@ export function AgentComposer({ session, active, inputRef, onSubmit, onInterrupt
     ref.current?.focus();
   };
 
+  const onPaste = (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const direct = Array.from(event.clipboardData.files).filter((file) =>
+      file.type.startsWith("image/"),
+    );
+    const files =
+      direct.length > 0
+        ? direct
+        : Array.from(event.clipboardData.items)
+            .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+            .flatMap((item) => {
+              const file = item.getAsFile();
+              return file ? [file] : [];
+            });
+    if (!files.length) return;
+    event.preventDefault();
+    void addImageFiles(files);
+  };
+
   return (
-    <div className="agent-composer" onMouseDown={focusInputFromChrome}>
+    <div
+      ref={rootRef}
+      className={`agent-composer${fileDragging ? " is-file-drag" : ""}`}
+      onMouseDown={focusInputFromChrome}
+    >
       {menu && rows.length > 0 && (
         <div
           className="agent-commands"
@@ -262,14 +484,20 @@ export function AgentComposer({ session, active, inputRef, onSubmit, onInterrupt
           aria-label={
             menu.kind === "commands"
               ? "Commands"
-              : menu.command === "/model"
-                ? "Models"
-                : "Effort"
+              : menu.kind === "files"
+                ? "Files"
+                : menu.command === "/model"
+                  ? "Models"
+                  : "Effort"
           }
         >
-          {menu.kind === "args" && (
+          {(menu.kind === "args" || menu.kind === "files") && (
             <div className="agent-commands-hint">
-              {menu.command === "/model" ? "Model" : "Reasoning effort"}
+              {menu.kind === "files"
+                ? "Mention a file"
+                : menu.command === "/model"
+                  ? "Model"
+                  : "Reasoning effort"}
               <span>↑↓ · Enter</span>
             </div>
           )}
@@ -291,6 +519,12 @@ export function AgentComposer({ session, active, inputRef, onSubmit, onInterrupt
                 ref.current?.focus();
               }}
             >
+              {menu.kind === "files" && (
+                <svg className="agent-command-file" viewBox="0 0 14 14" aria-hidden="true">
+                  <path d="M3 1.5h5l3 3v8H3z" />
+                  <path d="M8 1.5v3h3" />
+                </svg>
+              )}
               <span className="agent-command-name">{row.label}</span>
               {row.description && (
                 <span className="agent-command-desc">{row.description}</span>
@@ -310,6 +544,21 @@ export function AgentComposer({ session, active, inputRef, onSubmit, onInterrupt
           <span>again to close</span>
         </div>
       )}
+      {fileDragging && (
+        <div className="agent-file-drop-hint" role="status">
+          Drop to insert the full path
+        </div>
+      )}
+      <AgentImageAttachments
+        images={images}
+        variant="composer"
+        onRemove={(id) => replaceImages((current) => current.filter((image) => image.id !== id))}
+      />
+      {attachmentError && (
+        <div className="agent-attachment-error" role="status">
+          {attachmentError}
+        </div>
+      )}
       <div className="agent-composer-row">
         <textarea
           ref={ref}
@@ -325,8 +574,12 @@ export function AgentComposer({ session, active, inputRef, onSubmit, onInterrupt
                 : `Message ${session.label}…`
           }
           aria-label={`Message ${session.label}`}
-          onChange={(event) => change(event.target.value)}
+          onChange={(event) => change(event.target.value, event.target.selectionStart)}
+          onClick={(event) => setCursor(event.currentTarget.selectionStart)}
+          onKeyUp={(event) => setCursor(event.currentTarget.selectionStart)}
+          onSelect={(event) => setCursor(event.currentTarget.selectionStart)}
           onKeyDown={onKeyDown}
+          onPaste={onPaste}
         />
         {/* No send button: Enter submits, and a button that only ever repeats
             a key everybody already presses is a permanent third of the row. */}

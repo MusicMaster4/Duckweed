@@ -2,6 +2,7 @@ import {
   asArray,
   asRecord,
   asString,
+  imageBase64,
   oneLine,
   parseJson,
   type AdapterContext,
@@ -361,6 +362,33 @@ export function createCodexAdapter(): AgentAdapter {
     }
   }
 
+  /** Rebuild the visible transcript returned inside `thread/resume`. */
+  function replayThread(thread: Record<string, unknown>, ctx: AdapterContext) {
+    ctx.emit({ type: "transcript" });
+    streamed.clear();
+
+    for (const rawTurn of asArray(thread.turns)) {
+      const turn = asRecord(rawTurn);
+      if (!turn) continue;
+      for (const rawItem of asArray(turn.items)) {
+        const item = asRecord(rawItem);
+        if (!item) continue;
+        if (asString(item.type) === "userMessage") {
+          const text = asArray(item.content)
+            .map((entry) => asRecord(entry))
+            .filter((entry): entry is Record<string, unknown> => entry !== null)
+            .filter((entry) => asString(entry.type) === "text")
+            .map((entry) => asString(entry.text) ?? "")
+            .filter(Boolean)
+            .join("\n");
+          if (text) ctx.emit({ type: "user", text });
+          continue;
+        }
+        handleItem(item, true, ctx);
+      }
+    }
+  }
+
   function handleNotification(method: string, params: Record<string, unknown>, ctx: AdapterContext) {
     switch (method) {
       case "thread/started": {
@@ -653,13 +681,19 @@ export function createCodexAdapter(): AgentAdapter {
       handleNotification(method, params, ctx);
     },
 
-    prompt: (text, ctx) => {
+    prompt: (prompt, ctx) => {
       if (!threadId) return;
-      ctx.emit({ type: "user", text });
+      ctx.emit({ type: "user", text: prompt.text, images: prompt.images });
       ctx.emit({ type: "status", status: "working" });
       request(ctx, "turn/start", {
         threadId,
-        input: [{ type: "text", text }],
+        input: [
+          ...(prompt.text ? [{ type: "text", text: prompt.text }] : []),
+          ...prompt.images.map((image) => ({
+            type: "image",
+            url: `data:${image.mimeType};base64,${imageBase64(image.dataUrl)}`,
+          })),
+        ],
         approvalPolicy: "on-request",
         approvalsReviewer: "user",
         // `SandboxPolicy.type` is camelCase, unlike `thread/start`'s
@@ -684,10 +718,8 @@ export function createCodexAdapter(): AgentAdapter {
     command: handleCommand,
 
     /**
-     * `thread/resume` swaps the live thread for a stored one, so the running
-     * process keeps its handshake, model list, and sandbox decision. It does
-     * not replay the old items — Codex answers with the thread record only —
-     * which is why the UI shows a resumed marker rather than a transcript.
+     * `thread/resume` keeps the running process and returns the selected
+     * thread's complete turn list, which is replayed into the shared timeline.
      */
     resume: (sessionId, ctx) => {
       ctx.emit({ type: "status", status: "working" });
@@ -695,6 +727,7 @@ export function createCodexAdapter(): AgentAdapter {
         .then((result) => {
           const thread = asRecord(result.thread) ?? result;
           threadId = asString(thread.id) ?? sessionId;
+          replayThread(thread, ctx);
           // `thread/start` reports the model beside the thread, `thread/resume`
           // inside it; neither is guaranteed, so take whichever is there.
           const model = asString(result.model) ?? asString(thread.model);

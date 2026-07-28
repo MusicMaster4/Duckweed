@@ -5,7 +5,7 @@
 //! editor's sidebar does. File open goes through the same surface so the
 //! explorer can show a file in a popup without shelling out.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -24,6 +24,93 @@ pub struct DirEntry {
     pub is_dir: bool,
     /// git ignores this entry — shown dimmed and italic, but still listed.
     pub ignored: bool,
+}
+
+/// One file that can be mentioned from an agent composer.
+#[derive(Serialize, Clone, Debug)]
+pub struct WorkspacePath {
+    pub name: String,
+    /// Absolute path used for the row tooltip and drag/drop parity.
+    pub path: String,
+    /// Project-relative path inserted after `@`.
+    pub relative: String,
+}
+
+/// Enough for very large repositories while keeping one IPC payload bounded.
+const MAX_WORKSPACE_PATHS: usize = 50_000;
+
+/// Generated dependency trees are neither useful mention targets nor safe to walk.
+const SKIP_WORKSPACE_DIRS: [&str; 10] = [
+    ".git",
+    ".hg",
+    ".svn",
+    "node_modules",
+    "target",
+    "dist",
+    "build",
+    ".next",
+    ".turbo",
+    "__pycache__",
+];
+
+/// Build the file index used by `@` completion.
+///
+/// The frontend caches this per working directory and performs every keystroke
+/// search locally. A bounded breadth-first walk keeps shallow project files
+/// available even when a generated tree is unexpectedly large.
+pub fn workspace_paths(path: &str) -> Result<Vec<WorkspacePath>, String> {
+    let root = Path::new(path);
+    if !root.is_dir() {
+        return Err(format!("`{path}` is not a directory"));
+    }
+
+    let mut queue = VecDeque::from([root.to_path_buf()]);
+    let mut files = Vec::new();
+
+    while let Some(dir) = queue.pop_front() {
+        let Ok(read) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in read.flatten() {
+            let entry_path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_dir() {
+                if !SKIP_WORKSPACE_DIRS
+                    .iter()
+                    .any(|skipped| name.eq_ignore_ascii_case(skipped))
+                {
+                    queue.push_back(entry_path);
+                }
+                continue;
+            }
+            if !kind.is_file() {
+                continue;
+            }
+
+            let relative = entry_path
+                .strip_prefix(root)
+                .unwrap_or(&entry_path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            files.push(WorkspacePath {
+                name,
+                path: entry_path.to_string_lossy().to_string(),
+                relative,
+            });
+            if files.len() >= MAX_WORKSPACE_PATHS {
+                break;
+            }
+        }
+        if files.len() >= MAX_WORKSPACE_PATHS {
+            break;
+        }
+    }
+
+    files.sort_by(|a, b| a.relative.to_lowercase().cmp(&b.relative.to_lowercase()));
+    Ok(files)
 }
 
 /// Names of `dir` that git ignores. Anything unexpected (no git, no repo, a
@@ -179,4 +266,38 @@ pub fn write_file(path: &str, content: String) -> Result<(), String> {
         }
     }
     std::fs::write(file, content.as_bytes()).map_err(|e| format!("could not write `{path}`: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn workspace_index_returns_relative_files_and_skips_dependencies() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("duckweed-workspace-index-{unique}"));
+        let src = root.join("src");
+        let dependencies = root.join("node_modules").join("package");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dependencies).unwrap();
+        std::fs::write(src.join("app.ts"), "export {};").unwrap();
+        std::fs::write(root.join("README.md"), "# Test").unwrap();
+        std::fs::write(dependencies.join("index.js"), "").unwrap();
+
+        let indexed = workspace_paths(&root.to_string_lossy()).unwrap();
+        let relative: Vec<&str> = indexed
+            .iter()
+            .map(|entry| entry.relative.as_str())
+            .collect();
+        assert_eq!(relative, ["README.md", "src/app.ts"]);
+        assert!(indexed
+            .iter()
+            .all(|entry| Path::new(&entry.path).is_absolute()));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

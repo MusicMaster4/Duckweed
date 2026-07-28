@@ -1,4 +1,5 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
+import type { AgentItem } from "./agents/types";
 import type {
   Branches,
   Diff,
@@ -8,6 +9,7 @@ import type {
   FileDiff,
   ProjectInfo,
   ShellInfo,
+  WorkspacePath,
 } from "./types";
 
 export const listShells = () => invoke<ShellInfo[]>("list_shells");
@@ -57,6 +59,10 @@ export const shellIntegrationSet = (verb: ShellVerb, enabled: boolean) =>
 
 /** One level of a folder: folders first, then files, ignored entries flagged. */
 export const listDir = (path: string) => invoke<DirEntry[]>("list_dir", { path });
+
+/** Bounded project file index for agent `@` completion. */
+export const workspacePaths = (path: string) =>
+  invoke<WorkspacePath[]>("workspace_paths", { path });
 
 /** Read a file for the project explorer's popup editor. */
 export const readFile = (path: string) => invoke<FileContent>("read_file", { path });
@@ -158,6 +164,15 @@ export interface AgentSessionSummary {
 /** Past sessions `agent` recorded for `cwd`, newest first. Starts nothing. */
 export const agentSessionsList = (agent: string, cwd: string) =>
   invoke<AgentSessionSummary[]>("agent_sessions_list", { agent, cwd });
+
+/**
+ * Normalized visible transcript from a selected session's durable record.
+ *
+ * Most agents replay history through their protocol. This is the fallback for
+ * CLIs such as Claude Code that resume context without re-emitting old turns.
+ */
+export const agentSessionTranscript = (agent: string, cwd: string, sessionId: string) =>
+  invoke<AgentItem[]>("agent_session_transcript", { agent, cwd, sessionId });
 
 /** Which agent CLIs this machine has, without starting any of them. */
 export const agentProcProbe = (names: string[]) =>

@@ -2,6 +2,7 @@ import {
   asArray,
   asRecord,
   asString,
+  imageBase64,
   oneLine,
   parseJson,
   type AdapterContext,
@@ -143,8 +144,29 @@ export function createAcpAdapter(): AgentAdapter {
     thinkingSegment = 0;
   }
 
-  function contentId(kind: "assistant" | "thinking"): string {
+  function activeContentId(): string | null {
+    if (activeContent === "assistant") {
+      return `a${turnSeq}${assistantSegment > 1 ? `-${assistantSegment}` : ""}`;
+    }
+    if (activeContent === "thinking") {
+      return `r${turnSeq}${thinkingSegment > 1 ? `-${thinkingSegment}` : ""}`;
+    }
+    return null;
+  }
+
+  function closeActiveContent(ctx: AdapterContext) {
+    const id = activeContentId();
+    if (!id || !activeContent) return;
+    ctx.emit({
+      type: activeContent === "assistant" ? "assistant-end" : "thinking-end",
+      id,
+    });
+    activeContent = null;
+  }
+
+  function contentId(kind: "assistant" | "thinking", ctx: AdapterContext): string {
     if (activeContent !== kind) {
+      closeActiveContent(ctx);
       activeContent = kind;
       if (kind === "assistant") assistantSegment += 1;
       else thinkingSegment += 1;
@@ -494,7 +516,7 @@ export function createAcpAdapter(): AgentAdapter {
         const text = readContentText(update.content);
         if (text) {
           turnHadContent = true;
-          ctx.emit({ type: "assistant-delta", id: contentId("assistant"), text });
+          ctx.emit({ type: "assistant-delta", id: contentId("assistant", ctx), text });
         }
         return;
       }
@@ -502,13 +524,13 @@ export function createAcpAdapter(): AgentAdapter {
         const text = readContentText(update.content);
         if (text) {
           turnHadContent = true;
-          ctx.emit({ type: "thinking-delta", id: contentId("thinking"), text });
+          ctx.emit({ type: "thinking-delta", id: contentId("thinking", ctx), text });
         }
         return;
       }
       case "tool_call":
       case "tool_call_update": {
-        activeContent = null;
+        closeActiveContent(ctx);
         const callId = asString(update.toolCallId);
         if (!callId) return;
         turnHadContent = true;
@@ -794,17 +816,24 @@ export function createAcpAdapter(): AgentAdapter {
       if (method === "session/update") handleSessionUpdate(params, ctx);
     },
 
-    prompt: (text, ctx) => {
+    prompt: (prompt, ctx) => {
       if (!sessionId) return;
       turnSeq += 1;
       resetContentSegments();
-      slashPending = text.startsWith("/");
+      slashPending = prompt.text.startsWith("/");
       turnHadContent = false;
-      ctx.emit({ type: "user", text });
+      ctx.emit({ type: "user", text: prompt.text, images: prompt.images });
       ctx.emit({ type: "status", status: "working" });
       request(ctx, "session/prompt", {
         sessionId,
-        prompt: [{ type: "text", text }],
+        prompt: [
+          ...(prompt.text ? [{ type: "text", text: prompt.text }] : []),
+          ...prompt.images.map((image) => ({
+            type: "image",
+            data: imageBase64(image.dataUrl),
+            mimeType: image.mimeType,
+          })),
+        ],
       })
         .then((result) => {
           const stop = asString(result.stopReason);
@@ -814,7 +843,7 @@ export function createAcpAdapter(): AgentAdapter {
             ctx.emit({
               type: "notice",
               tone: "info",
-              text: `Ran ${oneLine(text.split(/\s/)[0], 40)} — this agent does not return its output to the custom UI.`,
+              text: `Ran ${oneLine(prompt.text.split(/\s/)[0], 40)}. This agent does not return its output to the custom UI.`,
             });
           }
           slashPending = false;
@@ -842,6 +871,7 @@ export function createAcpAdapter(): AgentAdapter {
      */
     resume: (id, ctx) => {
       if (!canLoadSession) return false;
+      ctx.emit({ type: "transcript" });
       loading = true;
       replayedUser = "";
       ctx.emit({ type: "status", status: "working" });

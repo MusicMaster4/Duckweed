@@ -72,7 +72,8 @@ export function ClaudeExperience({
             if (
               !group ||
               item.id !== group.firstId ||
-              group.replacedByCommentId
+              group.replacedByCommentId ||
+              (status === "working" && group === liveGroup && group.answerId)
             ) {
               return null;
             }
@@ -111,6 +112,10 @@ export function ClaudeExperience({
               className={
                 item.kind === "assistant" && continuedIds.has(item.id)
                   ? "is-interim-update"
+                  : item.kind === "assistant" &&
+                      status === "working" &&
+                      liveGroup?.answerId === item.id
+                    ? "is-interim-update"
                   : undefined
               }
               showStreaming={

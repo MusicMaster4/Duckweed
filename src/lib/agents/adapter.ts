@@ -1,5 +1,6 @@
 import type { AgentEvent } from "./events";
 import type { AgentLaunch } from "./launch";
+import type { AgentPrompt } from "./types";
 
 /** What an adapter is given to do its job. */
 export interface AdapterContext {
@@ -31,8 +32,8 @@ export interface AgentAdapter {
   start: (ctx: AdapterContext) => void;
   /** One line from the agent's stdout. */
   receive: (line: string, ctx: AdapterContext) => void;
-  /** The user submitted a prompt. */
-  prompt: (text: string, ctx: AdapterContext) => void;
+  /** The user submitted text and optional images. */
+  prompt: (prompt: AgentPrompt, ctx: AdapterContext) => void;
   /**
    * The user submitted text starting with `/`. Returning `"handled"` means
    * the adapter ran the command itself (an RPC, a local answer); `"prompt"`
@@ -59,6 +60,12 @@ export interface AgentAdapter {
    * say so, and the session closes their stdin first.
    */
   endsOnStdinClose?: boolean;
+}
+
+/** Strip the data-URL header for protocols that carry MIME and base64 separately. */
+export function imageBase64(dataUrl: string): string {
+  const comma = dataUrl.indexOf(",");
+  return comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl;
 }
 
 /** Parse a protocol line, ignoring anything that is not JSON we can read. */

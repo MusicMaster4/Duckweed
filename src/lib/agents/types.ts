@@ -71,6 +71,26 @@ export interface AgentPlanStep {
   status: "pending" | "running" | "done";
 }
 
+/** An image the user attached to a prompt. */
+export interface AgentImageAttachment {
+  /** Stable within the composer and transcript, used for removal and React keys. */
+  id: string;
+  /** Friendly clipboard or file name shown in the attachment UI. */
+  name: string;
+  /** MIME type accepted by the agent protocols. */
+  mimeType: "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+  /** Self-contained source used for previews and protocol conversion. */
+  dataUrl: string;
+  /** Original encoded file size in bytes. */
+  size: number;
+}
+
+/** One user turn, before an adapter translates it to its wire protocol. */
+export interface AgentPrompt {
+  text: string;
+  images: AgentImageAttachment[];
+}
+
 interface ItemBase {
   id: string;
   at: number;
@@ -80,6 +100,7 @@ interface ItemBase {
 export interface UserItem extends ItemBase {
   kind: "user";
   text: string;
+  images?: AgentImageAttachment[];
 }
 
 /** Prose the agent wrote. */
