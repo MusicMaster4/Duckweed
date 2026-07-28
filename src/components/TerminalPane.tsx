@@ -33,6 +33,7 @@ interface Props {
   project: ProjectInfo | null;
   recents: string[];
   onActivate: () => void;
+  onReview: () => void;
   onSplit: (zone: "right" | "bottom") => void;
   onClose: () => void;
   onToggleZoom: () => void;
@@ -61,6 +62,7 @@ export const TerminalPane = memo(function TerminalPane({
   project,
   recents,
   onActivate,
+  onReview,
   onSplit,
   onClose,
   onToggleZoom,
@@ -201,16 +203,15 @@ export const TerminalPane = memo(function TerminalPane({
       style={{ "--pane-radius": edgeRadius(edges) } as React.CSSProperties}
       data-pane-id={node.id}
       onPointerDownCapture={onActivate}
+      // A wheel gesture means the user is inspecting this pane. Keep this
+      // separate from activation so scrolling an inactive split does not move
+      // the keyboard focus to it.
+      onWheelCapture={unread ? onReview : undefined}
     >
       {completionFlash !== 0 && (
         <span
           key={completionFlash}
-          className={[
-            "pane-completion-flash",
-            completionFlash < 0 ? "is-restored" : "",
-          ]
-            .filter(Boolean)
-            .join(" ")}
+          className="pane-completion-flash"
           aria-hidden="true"
         />
       )}

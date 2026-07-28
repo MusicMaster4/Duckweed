@@ -217,3 +217,39 @@ export function nextLeaf(root: LayoutNode, currentId: string, step: 1 | -1): str
   const next = (idx + step + all.length) % all.length;
   return all[next].id;
 }
+
+/**
+ * Pick a surviving leaf after a close or move. Prefer `preferred` in order
+ * (most-recent first); fall back to depth-first order when none remain.
+ */
+export function preferredLeaf(root: LayoutNode, preferred: readonly string[]): string | null {
+  const all = leaves(root);
+  if (all.length === 0) return null;
+  for (const id of preferred) {
+    if (all.some((leaf) => leaf.id === id)) return id;
+  }
+  return all[0].id;
+}
+
+/**
+ * Record a pane focus change as most-recent-first, keeping only leaves that
+ * still exist in `root`. Seeds the previous active leaf when history was empty.
+ */
+export function touchPaneMru(
+  history: readonly string[],
+  nextActive: string,
+  root: LayoutNode,
+  previousActive?: string,
+): string[] {
+  const live = new Set(leaves(root).map((leaf) => leaf.id));
+  let base = history.filter((id) => live.has(id) || id === nextActive);
+  if (
+    previousActive &&
+    previousActive !== nextActive &&
+    live.has(previousActive) &&
+    !base.includes(previousActive)
+  ) {
+    base = [...base, previousActive];
+  }
+  return [nextActive, ...base.filter((id) => id !== nextActive)];
+}

@@ -15,6 +15,54 @@
 /** Agents the custom UI can drive headlessly. */
 export type AgentId = "claude" | "codex" | "cursor" | "grok" | "opencode";
 
+/**
+ * Coarse access levels shared by the custom UI.
+ *
+ * Each adapter translates these into its native protocol. `default` is
+ * intentionally an absence of overrides, so the headless session inherits
+ * the same configuration as the agent's normal terminal UI.
+ */
+export type AgentAccessMode = "default" | "read-only" | "workspace" | "full-access";
+
+export interface AgentAccessChoice {
+  id: AgentAccessMode;
+  label: string;
+  description: string;
+}
+
+const AGENT_ACCESS_CHOICES: AgentAccessChoice[] = [
+  {
+    id: "default",
+    label: "Agent default",
+    description: "Inherit the agent's own permission configuration",
+  },
+  {
+    id: "read-only",
+    label: "Read only",
+    description: "Inspect and plan without changing files",
+  },
+  {
+    id: "workspace",
+    label: "Workspace",
+    description: "Write in the project and ask when needed",
+  },
+  {
+    id: "full-access",
+    label: "Full access",
+    description: "Bypass routine sandbox and approval prompts",
+  },
+];
+
+/**
+ * Only expose a picker where the protocol can apply the choice faithfully.
+ * ACP agents own their permission policy and currently expose only individual
+ * approval requests, not a session-wide access level.
+ */
+export function accessChoicesFor(agent: AgentId): AgentAccessChoice[] {
+  if (agent !== "codex" && agent !== "claude") return [];
+  return AGENT_ACCESS_CHOICES.map((choice) => ({ ...choice }));
+}
+
 /** Where a session is in its request/response cycle. */
 export type AgentStatus =
   /** Process spawned, handshake not finished. */
@@ -91,6 +139,15 @@ export interface AgentImageAttachment {
 export interface AgentPrompt {
   text: string;
   images: AgentImageAttachment[];
+}
+
+/** How a follow-up submitted during an active turn should be delivered. */
+export type AgentFollowupMode = "queue" | "steer";
+
+/** A follow-up waiting for the current turn to finish. */
+export interface AgentPendingPrompt extends AgentPrompt {
+  /** Stable across removal and reordering, so transcript actions target the right prompt. */
+  id: string;
 }
 
 interface ItemBase {
@@ -215,11 +272,20 @@ export interface AgentSessionState {
   /** Accent colour for the session chrome. */
   accent: string;
   status: AgentStatus;
+  /** Wall-clock time when the current turn first entered `working`. */
+  workStartedAt: number | null;
+  /** Wall-clock duration of the most recently completed turn. */
+  lastWorkedForMs: number | null;
   cwd: string;
   /** Model the agent reports, once it says. */
   model: string | null;
   /** Reasoning effort in effect, when the agent exposes one. */
   effort: string | null;
+  /**
+   * Access override selected in Duckweed. Missing means `default` for older
+   * persisted/test state; live sessions always initialize this field.
+   */
+  accessMode?: AgentAccessMode;
   /**
    * Models the user can switch to in this session. Empty until the adapter
    * learns them (or a static fallback is seeded); the UI treats an empty list
@@ -236,7 +302,7 @@ export interface AgentSessionState {
    * being pushed at a protocol that would reject it — and it is shown while it
    * waits, because text that vanishes out of the composer looks like a bug.
    */
-  pending: string[];
+  pending: AgentPendingPrompt[];
   permission: AgentPermission | null;
   usage: AgentUsage;
   /** Set when `status` is `error`. */

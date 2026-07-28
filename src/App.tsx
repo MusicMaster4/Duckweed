@@ -33,6 +33,7 @@ import {
   setConfirmCloseRunningEnabled,
   subscribeConfirmClosePref,
 } from "./lib/confirmClose";
+import { acknowledgeCompletion } from "./lib/completionHighlights";
 import { playCompletionSound, preloadCompletionSound } from "./lib/completionSound";
 import * as commandHistory from "./lib/commandHistory";
 import { clearGreetings } from "./lib/greetings";
@@ -55,9 +56,11 @@ import {
   leaf,
   leaves,
   nextLeaf,
+  preferredLeaf,
   removeLeaf,
   setSizes,
   swapLeaves,
+  touchPaneMru,
   uid,
 } from "./lib/layout";
 import {
@@ -173,6 +176,7 @@ function boot() {
       completionHighlights: saved.completionHighlights,
       completionSoundEnabled: saved.completionSoundEnabled,
       customAgentUi: saved.customAgentUi,
+      agentFollowupMode: saved.agentFollowupMode,
       inputMode: saved.inputMode,
       confirmCloseRunning: saved.confirmCloseRunning,
       toolsOpen: saved.toolsOpen,
@@ -201,6 +205,7 @@ function boot() {
     completionHighlights: true,
     completionSoundEnabled: true,
     customAgentUi: true,
+    agentFollowupMode: "queue" as const,
     inputMode: "editor" as terminals.InputMode,
     confirmCloseRunning: true,
     toolsOpen: false,
@@ -238,6 +243,7 @@ export default function App() {
     initial.completionSoundEnabled,
   );
   const [customAgentUi, setCustomAgentUi] = useState(initial.customAgentUi);
+  const [agentFollowupMode, setAgentFollowupMode] = useState(initial.agentFollowupMode);
   const [inputMode, setInputMode] = useState(initial.inputMode);
   const [confirmCloseRunningPref, setConfirmCloseRunningPref] = useState(() => {
     // Honour the saved preference before any close handler can run.
@@ -351,30 +357,53 @@ export default function App() {
     }
   }, []);
 
-  const updateTab = useCallback((tabId: string, fn: (tab: Tab) => Tab) => {
-    setTabs((prev) => prev.map((t) => (t.id === tabId ? fn(t) : t)));
-  }, []);
+  /** Most-recent pane focus per tab, used when the active pane is closed. */
+  const paneMruRef = useRef(new Map<string, string[]>());
+
+  const rememberPaneFocus = useCallback(
+    (tabId: string, nextActive: string, root: Tab["root"], previousActive?: string) => {
+      const prev = paneMruRef.current.get(tabId) ?? [];
+      paneMruRef.current.set(tabId, touchPaneMru(prev, nextActive, root, previousActive));
+    },
+    [],
+  );
+
+  const updateTab = useCallback(
+    (tabId: string, fn: (tab: Tab) => Tab) => {
+      setTabs((prev) =>
+        prev.map((t) => {
+          if (t.id !== tabId) return t;
+          const next = fn(t);
+          if (next.activeLeaf !== t.activeLeaf) {
+            rememberPaneFocus(tabId, next.activeLeaf, next.root, t.activeLeaf);
+          } else if (next.root !== t.root) {
+            // Drop closed leaves from the history without changing focus order.
+            rememberPaneFocus(tabId, next.activeLeaf, next.root);
+          }
+          return next;
+        }),
+      );
+    },
+    [rememberPaneFocus],
+  );
 
   const acknowledgeTerm = useCallback((termId: string) => {
     setUnreadTermIds((prev) => {
-      if (!prev.has(termId)) return prev;
-      const next = new Set(prev);
-      next.delete(termId);
+      const next = acknowledgeCompletion(prev, termId);
+      if (next === prev) return prev;
       unreadTermIdsRef.current = next;
       return next;
     });
   }, []);
 
-  const flashFocusedCompletion = useCallback((termId: string, restored = false) => {
+  const flashFocusedCompletion = useCallback((termId: string) => {
     const previousTimer = completionFlashTimers.current.get(termId);
     if (previousTimer !== undefined) window.clearTimeout(previousTimer);
 
     const pulse = ++completionFlashSeq.current;
     setCompletionFlashes((previous) => {
       const next = new Map(previous);
-      // A negative pulse tells the pane that its already-visible unread frame
-      // should hold before fading, rather than fading in again.
-      next.set(termId, restored ? -pulse : pulse);
+      next.set(termId, pulse);
       return next;
     });
 
@@ -410,23 +439,9 @@ export default function App() {
     [isSelectedTerm],
   );
 
-  // A completion in the selected terminal becomes unread while the native
-  // window is minimized or unfocused. On return, it has already been seen at
-  // full opacity, so hold the frame for one second and then fade it away.
-  useEffect(() => {
-    const reviewSelectedCompletion = () => {
-      if (settingsActiveRef.current || !completionHighlightsRef.current) return;
-      const tab = currentTab();
-      const term = tab ? findLeaf(tab.root, tab.activeLeaf)?.term : null;
-      if (!term || !unreadTermIdsRef.current.has(term)) return;
-      acknowledgeTerm(term);
-      flashFocusedCompletion(term, true);
-    };
-
-    window.addEventListener("focus", reviewSelectedCompletion);
-    return () => window.removeEventListener("focus", reviewSelectedCompletion);
-  }, [acknowledgeTerm, currentTab, flashFocusedCompletion]);
-
+  // Window focus only dismisses the taskbar badge. It must not acknowledge the
+  // selected pane: the pointer-down that restored the window may target a
+  // different pane, and one interaction must never review two completions.
   useEffect(() => {
     window.addEventListener("focus", syncTaskbarCompletionBadge);
     window.addEventListener("blur", syncTaskbarCompletionBadge);
@@ -699,6 +714,8 @@ export default function App() {
         setSettingsTabIndex((i) => adjustSettingsIndexOnClose(i, index));
       }
 
+      paneMruRef.current.delete(tabId);
+
       if (remaining.length === 0) {
         // The window keeps one neutral tab open in the default directory.
         const term = createTerm({ cwd: null });
@@ -919,7 +936,8 @@ export default function App() {
       }
 
       releaseTerm(nodeNow.term);
-      const fallback = leaves(nextRoot)[0].id;
+      const mru = paneMruRef.current.get(tabNow.id) ?? [tabNow.activeLeaf];
+      const fallback = preferredLeaf(nextRoot, mru) ?? leaves(nextRoot)[0].id;
       updateTab(tabNow.id, (t) => ({
         ...t,
         root: nextRoot,
@@ -1032,18 +1050,23 @@ export default function App() {
 
       let next = prev.map((t) => {
         if (t.id === source.id && restRoot) {
-          const fallback = leaves(restRoot)[0].id;
+          const mru = paneMruRef.current.get(t.id) ?? [t.activeLeaf];
+          const fallback = preferredLeaf(restRoot, mru) ?? leaves(restRoot)[0].id;
+          const activeLeaf = findLeaf(restRoot, t.activeLeaf) ? t.activeLeaf : fallback;
+          rememberPaneFocus(t.id, activeLeaf, restRoot, t.activeLeaf);
           return {
             ...t,
             root: restRoot,
-            activeLeaf: findLeaf(restRoot, t.activeLeaf) ? t.activeLeaf : fallback,
+            activeLeaf,
             zoomedLeaf: null,
           };
         }
         if (targetTabId && t.id === targetTabId) {
+          const root = insertBeside(t.root, t.activeLeaf, moved, "right");
+          rememberPaneFocus(t.id, moved.id, root, t.activeLeaf);
           return {
             ...t,
-            root: insertBeside(t.root, t.activeLeaf, moved, "right"),
+            root,
             activeLeaf: moved.id,
             zoomedLeaf: null,
           };
@@ -1054,6 +1077,7 @@ export default function App() {
       if (!restRoot) {
         const removedIndex = next.findIndex((t) => t.id === source.id);
         next = next.filter((t) => t.id !== source.id);
+        paneMruRef.current.delete(source.id);
         if (settingsTabOpenRef.current && removedIndex >= 0) {
           setSettingsTabIndex((i) => adjustSettingsIndexOnClose(i, removedIndex));
         }
@@ -1074,6 +1098,7 @@ export default function App() {
         };
         next = [...next, created];
         focus = created.id;
+        rememberPaneFocus(created.id, moved.id, moved);
         if (settingsTabOpenRef.current) {
           setSettingsTabIndex((i) => adjustSettingsIndexOnAppend(i, previousCount));
         }
@@ -1082,7 +1107,7 @@ export default function App() {
       setTabs(next);
       if (focus) setActiveTabId(focus);
     },
-    [],
+    [rememberPaneFocus],
   );
 
   const handleDrop = useCallback(
@@ -1287,6 +1312,7 @@ export default function App() {
       terminals.setFontSize(initial.fontSize);
       terminals.setHighlight(initial.highlight);
       terminals.setAgentUi(initial.customAgentUi);
+      agentSessions.setFollowupMode(initial.agentFollowupMode);
       terminals.setInputMode(initial.inputMode);
       preloadCompletionSound();
       // Durable storage has been restored into the WebView copy by now, so the
@@ -1447,6 +1473,7 @@ export default function App() {
           completionHighlights,
           completionSoundEnabled,
           customAgentUi,
+          agentFollowupMode,
           inputMode,
           confirmCloseRunning: confirmCloseRunningPref,
           toolsOpen,
@@ -1467,6 +1494,7 @@ export default function App() {
     completionHighlights,
     completionSoundEnabled,
     customAgentUi,
+    agentFollowupMode,
     inputMode,
     confirmCloseRunningPref,
     toolsOpen,
@@ -2232,6 +2260,7 @@ export default function App() {
       onPickProject: pickActiveProject,
       zoomedLeaf: activeTab?.zoomedLeaf ?? null,
       onActivate: activatePane,
+      onReview: acknowledgeTerm,
       onSplit: splitAt,
       onClose: closePaneById,
       onToggleZoom: toggleZoom,
@@ -2241,6 +2270,7 @@ export default function App() {
     [
       activeTab?.activeLeaf,
       activeTab?.zoomedLeaf,
+      acknowledgeTerm,
       activatePane,
       browseActiveProject,
       closePaneById,
@@ -2347,6 +2377,7 @@ export default function App() {
                 completionHighlights={completionHighlights}
                 completionSoundEnabled={completionSoundEnabled}
                 customAgentUi={customAgentUi}
+                agentFollowupMode={agentFollowupMode}
                 confirmCloseRunning={confirmCloseRunningPref}
                 explorerIntegration={explorerIntegration}
                 shell={shell}
@@ -2358,6 +2389,10 @@ export default function App() {
                 onToggleCompletionHighlights={toggleCompletionHighlights}
                 onToggleCompletionSound={toggleCompletionSound}
                 onToggleCustomAgentUi={toggleCustomAgentUi}
+                onAgentFollowupMode={(mode) => {
+                  agentSessions.setFollowupMode(mode);
+                  setAgentFollowupMode(mode);
+                }}
                 onToggleConfirmCloseRunning={() =>
                   setConfirmCloseRunningPref((prev) => !prev)
                 }

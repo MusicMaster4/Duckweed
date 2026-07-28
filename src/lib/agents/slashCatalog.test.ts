@@ -6,6 +6,7 @@ import {
   fallbackModels,
   formatSessionUsage,
   GUIDED_ARG_COMMANDS,
+  isNewChatCommand,
 } from "./slashCatalog";
 import { effortsFor, shortModelLabel } from "./types";
 
@@ -20,6 +21,26 @@ describe("slashCatalog", () => {
     for (const agent of ["claude", "codex", "grok", "opencode", "cursor"] as const) {
       expect(fallbackCommands(agent).some((command) => command.name === "/usage")).toBe(true);
     }
+  });
+
+  test("offers app-owned /new to every custom agent", () => {
+    for (const agent of ["claude", "codex", "grok", "opencode", "cursor"] as const) {
+      const commands = fallbackCommands(agent);
+      expect(commands.some((command) => command.name === "/new")).toBe(true);
+      expect(
+        commands.filter((command) => command.name.startsWith("/n")).map((command) => command.name),
+      ).toContain("/new");
+    }
+    expect(fallbackCommands("claude", "claudex").some((command) => command.name === "/new")).toBe(
+      true,
+    );
+  });
+
+  test("accepts /n as a direct new-chat alias", () => {
+    expect(isNewChatCommand("/new")).toBe(true);
+    expect(isNewChatCommand("/NEW ")).toBe(true);
+    expect(isNewChatCommand("/n")).toBe(true);
+    expect(isNewChatCommand("/next")).toBe(false);
   });
 
   test("formats partial and empty usage without depending on a CLI", () => {

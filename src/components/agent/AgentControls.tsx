@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import {
+  accessChoicesFor,
   effortsFor,
   shortModelLabel,
   type AgentModelChoice,
@@ -10,7 +11,7 @@ import {
 interface Props {
   session: AgentSessionState;
   /** Apply a picker choice without exposing its internal slash syntax as chat. */
-  onSelect: (kind: "model" | "effort", value: string) => void;
+  onSelect: (kind: "model" | "effort" | "access", value: string) => void;
   /**
    * Where the menus open relative to the triggers.
    * Composer footer (T3-style) opens upward; header opens downward.
@@ -18,7 +19,7 @@ interface Props {
   placement?: "composer" | "header";
 }
 
-type MenuKind = "model" | "effort" | null;
+type MenuKind = "model" | "effort" | "access" | null;
 
 type MenuItem = {
   id: string;
@@ -46,8 +47,10 @@ export function AgentControls({ session, onSelect, placement = "composer" }: Pro
 
   const models = session.models;
   const efforts = effortsFor(session);
+  const accessChoices = useMemo(() => accessChoicesFor(session.agent), [session.agent]);
   const canPickModel = models.length > 0;
   const canPickEffort = efforts.length > 0;
+  const canPickAccess = accessChoices.length > 0;
   const ended = session.status === "exited" || session.status === "error";
   const showSearch = menu === "model" && models.length > SEARCH_THRESHOLD;
 
@@ -68,8 +71,25 @@ export function AgentControls({ session, onSelect, placement = "composer" }: Pro
         current: session.effort === effort,
       }));
     }
+    if (menu === "access") {
+      const current = session.accessMode ?? "default";
+      return accessChoices.map((choice) => ({
+        id: choice.id,
+        label: choice.label,
+        detail: choice.description,
+        current: current === choice.id,
+      }));
+    }
     return [];
-  }, [menu, models, efforts, session.model, session.effort]);
+  }, [
+    menu,
+    models,
+    efforts,
+    accessChoices,
+    session.model,
+    session.effort,
+    session.accessMode,
+  ]);
 
   const items = useMemo(() => {
     if (!query.trim() || menu !== "model") return allItems;
@@ -118,9 +138,17 @@ export function AgentControls({ session, onSelect, placement = "composer" }: Pro
     };
   }, [menu]);
 
-  if (!canPickModel && !canPickEffort && !session.model && !session.effort) return null;
+  if (
+    !canPickModel &&
+    !canPickEffort &&
+    !canPickAccess &&
+    !session.model &&
+    !session.effort
+  ) {
+    return null;
+  }
 
-  const pick = (kind: "model" | "effort", id: string) => {
+  const pick = (kind: "model" | "effort" | "access", id: string) => {
     setMenu(null);
     setQuery("");
     onSelect(kind, id);
@@ -151,8 +179,18 @@ export function AgentControls({ session, onSelect, placement = "composer" }: Pro
     : canPickEffort
       ? "Effort"
       : null;
+  const accessMode = session.accessMode ?? "default";
+  const accessLabel =
+    accessChoices.find((choice) => choice.id === accessMode)?.label ?? "Agent default";
 
-  const menuTitle = menu === "model" ? "Model" : menu === "effort" ? "Reasoning effort" : "";
+  const menuTitle =
+    menu === "model"
+      ? "Model"
+      : menu === "effort"
+        ? "Reasoning effort"
+        : menu === "access"
+          ? "Access"
+          : "";
 
   return (
     <div
@@ -178,6 +216,20 @@ export function AgentControls({ session, onSelect, placement = "composer" }: Pro
           open={menu === "effort"}
           interactive={canPickEffort && !ended}
           onToggle={() => setMenu((current) => (current === "effort" ? null : "effort"))}
+        />
+      )}
+      {canPickAccess && (
+        <ControlTrigger
+          kind="access"
+          label={accessLabel}
+          title={
+            accessMode === "default"
+              ? "Access: inherit the agent's own configuration"
+              : `Access: ${accessLabel}`
+          }
+          open={menu === "access"}
+          interactive={!ended}
+          onToggle={() => setMenu((current) => (current === "access" ? null : "access"))}
         />
       )}
       {menu && (
@@ -255,7 +307,7 @@ function ControlTrigger({
   interactive,
   onToggle,
 }: {
-  kind: "model" | "effort";
+  kind: "model" | "effort" | "access";
   label: string;
   title: string;
   open: boolean;

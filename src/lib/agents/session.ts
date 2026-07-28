@@ -36,7 +36,9 @@ import {
 } from "./slashCatalog";
 import {
   emptyUsage,
+  type AgentAccessMode,
   type AgentId,
+  type AgentFollowupMode,
   type AgentImageAttachment,
   type AgentItem,
   type AgentPrompt,
@@ -63,7 +65,7 @@ interface Session {
   /** Diagnostics kept only to explain a start that never got anywhere. */
   stderr: string[];
   /** Prompts submitted before the handshake finished or while a turn runs. */
-  queued: Array<{ prompt: AgentPrompt; echoed: boolean }>;
+  queued: Array<{ id: string; prompt: AgentPrompt; echoed: boolean }>;
   /** Unsent composer content, so a pane remount never loses a draft. */
   draft: string;
   draftImages: AgentImageAttachment[];
@@ -97,6 +99,21 @@ interface Session {
 }
 
 const sessions = new Map<string, Session>();
+let followupMode: AgentFollowupMode = "queue";
+let queuedPromptSequence = 0;
+
+function nextQueuedPromptId(): string {
+  queuedPromptSequence += 1;
+  return `queued-${Date.now().toString(36)}-${queuedPromptSequence.toString(36)}`;
+}
+
+export function setFollowupMode(mode: AgentFollowupMode): void {
+  followupMode = mode;
+}
+
+export function getFollowupMode(): AgentFollowupMode {
+  return followupMode;
+}
 /**
  * Subscribers per pane, kept outside the session they watch.
  *
@@ -357,7 +374,7 @@ function emit(session: Session, event: AgentEvent): void {
       const queued = session.queued.shift();
       if (queued) {
         if (!queued.echoed) {
-          session.state = applyEvent(session.state, { type: "unqueue" });
+          session.state = applyEvent(session.state, { type: "unqueue", id: queued.id });
         }
         dispatch(session, queued.prompt, !queued.echoed);
       }
@@ -425,9 +442,13 @@ function emit(session: Session, event: AgentEvent): void {
   }
 
   if (releasingQueued) {
-    const queued = session.queued.shift() as { prompt: AgentPrompt; echoed: boolean };
+    const queued = session.queued.shift() as {
+      id: string;
+      prompt: AgentPrompt;
+      echoed: boolean;
+    };
     if (!queued.echoed) {
-      session.state = applyEvent(session.state, { type: "unqueue" });
+      session.state = applyEvent(session.state, { type: "unqueue", id: queued.id });
     }
     dispatch(session, queued.prompt, !queued.echoed);
   }
@@ -528,9 +549,12 @@ export async function start(
       mark: presentation.mark,
       accent: presentation.accent,
       status: "starting",
+      workStartedAt: null,
+      lastWorkedForMs: null,
       cwd,
       model: seedModel,
       effort: launch.effort,
+      accessMode: "default",
       // Live model lists from the adapter replace this; Claude/Claudex start
       // with their known aliases so the picker works before the first turn.
       models: fallbackModels(launch.agent, launch.program),
@@ -648,19 +672,59 @@ export async function start(
   return null;
 }
 
+type FollowupDelivery = "default" | "alternate";
+
+function queuePrompt(session: Session, prompt: AgentPrompt, echoed = false): string {
+  const id = nextQueuedPromptId();
+  session.queued.push({ id, prompt, echoed });
+  if (!echoed) {
+    emit(session, {
+      type: "queue",
+      prompt: { id, text: prompt.text, images: [...prompt.images] },
+    });
+  }
+  return id;
+}
+
+function restoreAfterFailedSteer(session: Session, prompt: AgentPrompt): void {
+  if (session.disposed) return;
+  if (session.adapter.steer) {
+    emit(session, {
+      type: "notice",
+      tone: "error",
+      text: "The active turn could not be steered. The message was kept for the next turn.",
+    });
+  }
+  if (session.state.status === "idle") {
+    dispatch(session, prompt);
+  } else if (session.state.status !== "exited" && session.state.status !== "error") {
+    queuePrompt(session, prompt);
+  }
+}
+
+function steerPrompt(session: Session, prompt: AgentPrompt): void {
+  if (!session.adapter.steer) {
+    restoreAfterFailedSteer(session, prompt);
+    return;
+  }
+  void Promise.resolve(session.adapter.steer(prompt, session.context))
+    .then((accepted) => {
+      if (!accepted) restoreAfterFailedSteer(session, prompt);
+    })
+    .catch(() => restoreAfterFailedSteer(session, prompt));
+}
+
 export function submit(
   termId: string,
   text: string,
   images: AgentImageAttachment[] = [],
+  delivery: FollowupDelivery = "default",
 ): void {
   const session = sessions.get(termId);
   if (!session || session.disposed) return;
   const trimmed = text.trim();
   if (!trimmed && images.length === 0) return;
   const prompt: AgentPrompt = { text: trimmed, images: [...images] };
-  const queueText =
-    trimmed ||
-    (images.length === 1 ? "1 image attached" : `${images.length} images attached`);
   if (session.exitArmedUntil > 0) {
     session.exitArmedUntil = 0;
     emit(session, { type: "exit-armed", armed: false });
@@ -677,26 +741,79 @@ export function submit(
     return;
   }
   if (session.configuring) {
-    session.queued.push({ prompt, echoed: false });
-    emit(session, { type: "queue", text: queueText });
+    queuePrompt(session, prompt);
     return;
   }
   if (session.state.status === "starting") {
     // Show the opening prompt immediately. The handshake still owns when it
     // can actually be sent, but the adapter's later echo is suppressed so the
     // optimistic bubble becomes the real turn instead of being duplicated.
-    session.queued.push({ prompt, echoed: true });
+    queuePrompt(session, prompt, true);
     emit(session, { type: "user", text: trimmed, images });
     return;
   }
   if (session.state.status !== "idle") {
+    const requestedMode =
+      delivery === "alternate"
+        ? followupMode === "queue"
+          ? "steer"
+          : "queue"
+        : followupMode;
+    if (requestedMode === "steer") {
+      steerPrompt(session, prompt);
+      return;
+    }
     // A turn is already running. Hold the follow-up and show it holding, so
     // the pane never looks like it swallowed a prompt.
-    session.queued.push({ prompt, echoed: false });
-    emit(session, { type: "queue", text: queueText });
+    queuePrompt(session, prompt);
     return;
   }
   dispatch(session, prompt);
+}
+
+/** Whether the current provider exposes same-turn steering. */
+export function canSteer(termId: string): boolean {
+  const session = sessions.get(termId);
+  return Boolean(session && !session.disposed && session.adapter.steer);
+}
+
+/** Remove one waiting follow-up without affecting the turn in flight. */
+export function cancelQueued(termId: string, id: string): void {
+  const session = sessions.get(termId);
+  if (!session || session.disposed) return;
+  const index = session.queued.findIndex((queued) => queued.id === id && !queued.echoed);
+  if (index < 0) return;
+  session.queued.splice(index, 1);
+  emit(session, { type: "unqueue", id });
+}
+
+/** Pull the newest queued follow-up back into the composer for editing. */
+export function editLastQueued(termId: string): AgentPrompt | null {
+  const session = sessions.get(termId);
+  if (!session || session.disposed) return null;
+  for (let index = session.queued.length - 1; index >= 0; index -= 1) {
+    const queued = session.queued[index];
+    if (queued.echoed) continue;
+    session.queued.splice(index, 1);
+    emit(session, { type: "unqueue", id: queued.id });
+    return {
+      text: queued.prompt.text,
+      images: [...queued.prompt.images],
+    };
+  }
+  return null;
+}
+
+/** Send one queued follow-up into the active turn, keeping it queued on failure. */
+export function sendQueuedNow(termId: string, id: string): void {
+  const session = sessions.get(termId);
+  if (!session || session.disposed || !session.adapter.steer) return;
+  if (session.state.status !== "working" && session.state.status !== "waiting") return;
+  const index = session.queued.findIndex((queued) => queued.id === id && !queued.echoed);
+  if (index < 0) return;
+  const [queued] = session.queued.splice(index, 1);
+  emit(session, { type: "unqueue", id });
+  steerPrompt(session, queued.prompt);
 }
 
 /**
@@ -705,7 +822,7 @@ export function submit(
  */
 export function configure(
   termId: string,
-  kind: "model" | "effort",
+  kind: "model" | "effort" | "access",
   value: string,
 ): void {
   const session = sessions.get(termId);
@@ -719,7 +836,6 @@ export function configure(
     return;
   }
 
-  const command = `/${kind} ${value.trim()}`;
   const epoch = session.interactionEpoch;
   const baseContext = contextWithoutUserEcho(session);
   const context: AdapterContext = {
@@ -735,6 +851,32 @@ export function configure(
       baseContext.emit(event);
     },
   };
+
+  if (kind === "access") {
+    const mode = value.trim() as AgentAccessMode;
+    if (!["default", "read-only", "workspace", "full-access"].includes(mode)) return;
+    const configured = session.adapter.configureAccess?.(mode, context);
+    if (configured === undefined || configured === false) {
+      emit(session, {
+        type: "notice",
+        tone: "error",
+        text: `${session.state.label} does not expose a session-wide access level here.`,
+      });
+      return;
+    }
+    if (configured instanceof Promise) {
+      void configured.catch(() => {
+        emit(session, {
+          type: "notice",
+          tone: "error",
+          text: `${session.state.label} could not change its access level.`,
+        });
+      });
+    }
+    return;
+  }
+
+  const command = `/${kind} ${value.trim()}`;
   const handled = session.adapter.command?.(command, context);
   if (handled === "prompt") {
     session.configuring = true;
@@ -847,6 +989,56 @@ export async function resume(
     emit(restarted, { type: "resumed", sessionId, title });
   }
   return null;
+}
+
+/**
+ * Replace the current conversation with a blank one in the same pane.
+ *
+ * Relaunching is the one operation every supported protocol agrees on. It
+ * also guarantees that provider-side context is gone, instead of only
+ * clearing Duckweed's visible transcript while the agent still remembers it.
+ * The launch settings are retained, but resume flags and the original opening
+ * prompt are deliberately removed.
+ */
+export async function newChat(termId: string): Promise<string | null> {
+  const session = sessions.get(termId);
+  if (!session || session.disposed) return "this pane has no agent session";
+
+  if (
+    session.state.status === "starting" ||
+    session.state.status === "working" ||
+    session.state.status === "waiting" ||
+    session.configuring
+  ) {
+    emit(session, {
+      type: "notice",
+      tone: "error",
+      text:
+        session.state.status === "starting" || session.configuring
+          ? "Wait for the agent to become ready before starting a new chat."
+          : "Stop the current turn before starting a new chat.",
+    });
+    return null;
+  }
+
+  const { launch } = session;
+  const cwd = session.state.cwd;
+  session.disposed = true;
+  sessions.delete(termId);
+  if (TAURI_RUNTIME) {
+    if (session.adapter.endsOnStdinClose) {
+      await agentProcCloseStdin(termId).catch(() => {});
+    }
+    await agentProcStop(termId).catch(() => {});
+  }
+
+  const failure = await start(
+    termId,
+    { ...launch, prompt: null, resume: false, resumeId: null },
+    cwd,
+  );
+  if (failure) announce(termId);
+  return failure;
 }
 
 export function interrupt(termId: string): void {

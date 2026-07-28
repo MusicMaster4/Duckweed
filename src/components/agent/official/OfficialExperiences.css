@@ -493,6 +493,7 @@
   color: var(--text-faint);
   font-family: var(--font-mono);
   font-size: 8px;
+  line-height: 1;
 }
 
 .official-plan-steps li.is-done .official-plan-step-mark {
@@ -648,13 +649,26 @@
 
 .official-tool-error {
   display: grid;
-  width: 15px;
-  height: 15px;
+  width: 16px;
+  height: 16px;
   place-items: center;
-  border-radius: 50%;
-  color: #fff;
-  background: var(--rose);
-  font-weight: 700;
+  color: var(--rose);
+}
+
+.official-tool-error svg {
+  width: 16px;
+  height: 16px;
+  overflow: visible;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.35;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.official-tool-error circle {
+  fill: currentColor;
+  stroke: none;
 }
 
 .official-tool-body {
@@ -899,6 +913,36 @@ strong.agent-activity-history-summary {
   animation-timing-function: ease-in-out;
 }
 
+.agent-activity-pulse.is-active[data-motion="flicker"] > span {
+  animation-name: agent-activity-flicker;
+  animation-timing-function: linear;
+}
+
+.agent-activity-pulse.is-active[data-motion="swell"] > span {
+  animation-name: agent-activity-swell;
+  animation-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.agent-activity-pulse.is-active[data-motion="drift"] > span {
+  animation-name: agent-activity-drift;
+  animation-timing-function: ease-in-out;
+}
+
+.agent-activity-pulse.is-active[data-motion="sway"] > span {
+  animation-name: agent-activity-sway;
+  animation-timing-function: ease-in-out;
+}
+
+.agent-activity-pulse.is-active[data-motion="spark"] > span {
+  animation-name: agent-activity-spark;
+  animation-timing-function: ease-out;
+}
+
+.agent-activity-pulse.is-active[data-motion="settle"] > span {
+  animation-name: agent-activity-settle;
+  animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
 @keyframes agent-activity-chase {
   0%,
   58%,
@@ -973,6 +1017,127 @@ strong.agent-activity-history-summary {
   50% {
     opacity: 0.82;
     transform: scale(1.06);
+  }
+}
+
+/* Unsteady, several short blips before falling back to rest. */
+@keyframes agent-activity-flicker {
+  0%,
+  60%,
+  100% {
+    opacity: 0.2;
+    transform: scale(0.8);
+  }
+
+  8% {
+    opacity: 0.95;
+    transform: scale(1.04);
+  }
+
+  14% {
+    opacity: 0.3;
+    transform: scale(0.86);
+  }
+
+  21% {
+    opacity: 0.88;
+    transform: scale(1);
+  }
+
+  30% {
+    opacity: 0.24;
+    transform: scale(0.82);
+  }
+
+  44% {
+    opacity: 0.62;
+    transform: scale(0.94);
+  }
+}
+
+/* Slow rise that holds at the top before releasing. */
+@keyframes agent-activity-swell {
+  0%,
+  100% {
+    opacity: 0.18;
+    transform: scale(0.7);
+  }
+
+  40%,
+  62% {
+    opacity: 0.9;
+    transform: scale(1.1);
+  }
+}
+
+/* Travels up the cell instead of only brightening in place. */
+@keyframes agent-activity-drift {
+  0%,
+  100% {
+    opacity: 0.18;
+    transform: translateY(1px) scale(0.76);
+  }
+
+  34% {
+    opacity: 0.95;
+    transform: translateY(0) scale(1.06);
+  }
+
+  68% {
+    opacity: 0.3;
+    transform: translateY(-1px) scale(0.8);
+  }
+}
+
+/* Sideways counterpart to drift, so the two read as different axes. */
+@keyframes agent-activity-sway {
+  0%,
+  100% {
+    opacity: 0.2;
+    transform: translateX(-0.9px) scale(0.78);
+  }
+
+  50% {
+    opacity: 0.9;
+    transform: translateX(0.9px) scale(1.05);
+  }
+}
+
+/* Two quick beats close together, then a long rest. */
+@keyframes agent-activity-spark {
+  0%,
+  46%,
+  100% {
+    opacity: 0.18;
+    transform: scale(0.74);
+  }
+
+  10% {
+    opacity: 1;
+    transform: scale(1.1);
+  }
+
+  20% {
+    opacity: 0.3;
+    transform: scale(0.84);
+  }
+
+  30% {
+    opacity: 0.86;
+    transform: scale(1.02);
+  }
+}
+
+/* Sawtooth: snaps on at the loop boundary, then decays across the cycle. */
+@keyframes agent-activity-settle {
+  0% {
+    opacity: 1;
+    transform: scale(1.1);
+  }
+
+  100% {
+    opacity: 0.18;
+    transform: scale(0.76);
   }
 }
 

@@ -9,7 +9,13 @@ import {
   type AgentAdapter,
 } from "../adapter";
 import type { AgentLaunch } from "../launch";
-import { makeChange, toolKind, type AgentFileChange, type ToolStatus } from "../types";
+import {
+  makeChange,
+  toolKind,
+  type AgentAccessMode,
+  type AgentFileChange,
+  type ToolStatus,
+} from "../types";
 
 /**
  * Claude Code's `stream-json` mode.
@@ -116,6 +122,8 @@ export function createClaudeAdapter(): AgentAdapter {
   const pendingPermissions = new Map<string, { requestId: string; input: unknown }>();
   /** Our outbound `set_model` requests, keyed by the id we gave them. */
   const pendingModelChanges = new Map<string, string>();
+  /** Our outbound `set_permission_mode` requests, keyed by request id. */
+  const pendingAccessChanges = new Map<string, AgentAccessMode>();
   /**
    * Claude can report one API failure through several protocol frames: a
    * synthetic assistant message, a forwarded child-agent message, and the
@@ -281,6 +289,15 @@ export function createClaudeAdapter(): AgentAdapter {
     }
     const fallbackMessageId =
       asString(message.id) ?? `settled-${++settledMessageSeq}`;
+    // The settled message can omit thinking blocks that were present in the
+    // raw stream. Match text by its ordinal among text blocks, not by the
+    // absolute content index, so the authoritative copy updates the streamed
+    // item instead of creating a duplicate beside it.
+    const streamedTextBlocks = [...blocks.entries()]
+      .sort(([left], [right]) => left - right)
+      .map(([, block]) => block)
+      .filter((block) => block.kind === "text");
+    let textIndex = 0;
     for (const [index, raw] of asArray(message.content).entries()) {
       const block = asRecord(raw);
       if (!block) continue;
@@ -288,11 +305,9 @@ export function createClaudeAdapter(): AgentAdapter {
       if (blockType === "text") {
         const text = asString(block.text);
         if (!text) continue;
-        const streamed = blocks.get(index);
-        const id =
-          streamed?.kind === "text"
-            ? streamed.id
-            : `${fallbackMessageId}-b${index}`;
+        const streamed = streamedTextBlocks[textIndex];
+        textIndex += 1;
+        const id = streamed?.id ?? `${fallbackMessageId}-b${index}`;
         ctx.emit({ type: "assistant-snapshot", id, text });
         continue;
       }
@@ -375,24 +390,48 @@ export function createClaudeAdapter(): AgentAdapter {
     ctx.emit({ type: "turn-end" });
   }
 
-  /** The CLI answering one of our control requests (`set_model`, `interrupt`). */
+  /** The CLI answering one of our control requests. */
   function handleControlResponse(frame: Record<string, unknown>, ctx: AdapterContext) {
     const response = asRecord(frame.response);
     const requestId = asString(response?.request_id);
     if (!requestId) return;
     const model = pendingModelChanges.get(requestId);
-    if (model === undefined) return;
-    pendingModelChanges.delete(requestId);
-    if (asString(response?.subtype) === "success") {
-      ctx.emit({ type: "session", model });
-      ctx.emit({ type: "notice", tone: "info", text: `Model set to ${model}.` });
-    } else {
-      ctx.emit({
-        type: "notice",
-        tone: "error",
-        text: asString(response?.error) ?? `Claude refused model "${model}".`,
-      });
+    if (model !== undefined) {
+      pendingModelChanges.delete(requestId);
+      if (asString(response?.subtype) === "success") {
+        ctx.emit({ type: "session", model });
+        ctx.emit({ type: "notice", tone: "info", text: `Model set to ${model}.` });
+      } else {
+        ctx.emit({
+          type: "notice",
+          tone: "error",
+          text: asString(response?.error) ?? `Claude refused model "${model}".`,
+        });
+      }
+      return;
     }
+
+    const accessMode = pendingAccessChanges.get(requestId);
+    if (accessMode === undefined) return;
+    pendingAccessChanges.delete(requestId);
+    if (asString(response?.subtype) === "success") {
+      ctx.emit({ type: "session", accessMode });
+      const label =
+        accessMode === "default"
+          ? "Agent default"
+          : accessMode === "read-only"
+            ? "Read only"
+            : accessMode === "workspace"
+              ? "Workspace"
+              : "Full access";
+      ctx.emit({ type: "notice", tone: "info", text: `Access set to ${label}.` });
+      return;
+    }
+    ctx.emit({
+      type: "notice",
+      tone: "error",
+      text: asString(response?.error) ?? "Claude refused the requested access level.",
+    });
   }
 
   /**
@@ -545,6 +584,26 @@ export function createClaudeAdapter(): AgentAdapter {
     },
 
     command: handleCommand,
+
+    configureAccess: (mode, ctx) => {
+      const nativeMode =
+        mode === "read-only"
+          ? "plan"
+          : mode === "workspace"
+            ? "acceptEdits"
+            : mode === "full-access"
+              ? "bypassPermissions"
+              : "default";
+      controlSeq += 1;
+      const requestId = `dw-access-${controlSeq}`;
+      pendingAccessChanges.set(requestId, mode);
+      ctx.send({
+        type: "control_request",
+        request_id: requestId,
+        request: { subtype: "set_permission_mode", mode: nativeMode },
+      });
+      return true;
+    },
 
     interrupt: (ctx) => {
       controlSeq += 1;

@@ -2,6 +2,10 @@ import type { AgentId, AgentModelChoice, AgentUsage } from "./types";
 
 const LOCAL_COMMANDS = [
   {
+    name: "/new",
+    description: "Start a new chat with this agent",
+  },
+  {
     name: "/usage",
     description: "Show token, cost, and context usage reported for this session",
   },
@@ -182,6 +186,11 @@ export function fallbackCommands(
       ? { ...command, description: "Continue a past Claudex session in this folder" }
       : command,
   );
+}
+
+/** App-owned spellings that replace the current conversation with a blank one. */
+export function isNewChatCommand(value: string): boolean {
+  return /^\/(?:new|n)$/i.test(value.trim());
 }
 
 function formatUsageCount(count: number): string {

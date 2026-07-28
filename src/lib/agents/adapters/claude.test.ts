@@ -161,6 +161,78 @@ describe("claude adapter", () => {
     ]);
   });
 
+  test("does not duplicate text when the settled message omits streamed thinking", () => {
+    const h = harness();
+    h.feed({ type: "stream_event", event: { type: "message_start" } });
+    for (const frame of streamBlock(0, { type: "thinking" }, [
+      { type: "thinking_delta", thinking: "Checking the implementation." },
+    ])) {
+      h.feed(frame);
+    }
+    for (const frame of streamBlock(1, { type: "text" }, [
+      { type: "text_delta", text: "The partial answer." },
+    ])) {
+      h.feed(frame);
+    }
+
+    h.feed({
+      type: "assistant",
+      message: {
+        id: "message-with-hidden-thinking",
+        content: [{ type: "text", text: "The complete answer." }],
+      },
+    });
+
+    const answers = h.state().items.filter((item) => item.kind === "assistant");
+    expect(answers).toEqual([
+      expect.objectContaining({
+        id: "m1-b1",
+        text: "The complete answer.",
+        streaming: false,
+      }),
+    ]);
+  });
+
+  test("keeps interim comments single across tool rounds", () => {
+    const h = harness();
+    const comments = [
+      "I will inspect the end of the array.",
+      "I will validate the new entries.",
+      "Three entries overlap. I will replace them.",
+    ];
+
+    for (const [round, comment] of comments.entries()) {
+      h.feed({ type: "stream_event", event: { type: "message_start" } });
+      for (const frame of streamBlock(0, { type: "thinking" }, [
+        { type: "thinking_delta", thinking: `Planning round ${round + 1}.` },
+      ])) {
+        h.feed(frame);
+      }
+      for (const frame of streamBlock(1, { type: "text" }, [
+        { type: "text_delta", text: comment },
+      ])) {
+        h.feed(frame);
+      }
+      h.feed({
+        type: "assistant",
+        message: {
+          id: `message-${round + 1}`,
+          content: [{ type: "text", text: comment }],
+        },
+      });
+      for (const frame of streamBlock(
+        2,
+        { type: "tool_use", id: `tool-${round + 1}`, name: "Bash" },
+        [{ type: "input_json_delta", partial_json: '{"command":"echo ok"}' }],
+      )) {
+        h.feed(frame);
+      }
+    }
+
+    const answers = h.state().items.filter((item) => item.kind === "assistant");
+    expect(answers.map((item) => item.text)).toEqual(comments);
+  });
+
   test("shows settled assistant text even when no text delta was received", () => {
     const h = harness();
     h.feed({
@@ -472,6 +544,39 @@ describe("claude adapter", () => {
       tone: "info",
       text: "Model set to opus.",
     });
+  });
+
+  test("changes permission mode through Claude's control protocol", () => {
+    const h = harness();
+    expect(h.adapter.configureAccess?.("full-access", h.ctx)).toBe(true);
+    expect(h.sent[0]).toMatchObject({
+      type: "control_request",
+      request: { subtype: "set_permission_mode", mode: "bypassPermissions" },
+    });
+
+    const requestId = (h.sent[0] as { request_id: string }).request_id;
+    h.feed({
+      type: "control_response",
+      response: { subtype: "success", request_id: requestId },
+    });
+    expect(h.state().accessMode).toBe("full-access");
+    expect(h.state().items.find((item) => item.kind === "notice")).toMatchObject({
+      tone: "info",
+      text: "Access set to Full access.",
+    });
+  });
+
+  test("maps the other shared access levels onto Claude modes", () => {
+    const h = harness();
+    h.adapter.configureAccess?.("read-only", h.ctx);
+    h.adapter.configureAccess?.("workspace", h.ctx);
+    h.adapter.configureAccess?.("default", h.ctx);
+
+    expect(h.sent).toMatchObject([
+      { request: { subtype: "set_permission_mode", mode: "plan" } },
+      { request: { subtype: "set_permission_mode", mode: "acceptEdits" } },
+      { request: { subtype: "set_permission_mode", mode: "default" } },
+    ]);
   });
 
   test("surfaces a refused model change instead of updating the header", () => {

@@ -48,6 +48,10 @@ export const AGENTS: Record<AgentId, AgentDefinition> = {
       "stream-json",
       "--verbose",
       "--include-partial-messages",
+      // Makes bypassPermissions available to the in-session access picker
+      // without enabling it. The initial mode still comes from Claude's own
+      // settings unless the user explicitly selects Full access.
+      "--allow-dangerously-skip-permissions",
       // Claude's child agents otherwise stay hidden behind the parent Task
       // tool call. This preserves their text/thinking blocks on stream-json,
       // tagged with parent_tool_use_id by the CLI, so the transcript can show

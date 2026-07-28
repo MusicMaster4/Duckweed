@@ -3,6 +3,10 @@ import { describe, expect, test } from "bun:test";
 import { THINKING_PULSE_PATTERNS } from "./thinkingPulsePatterns";
 
 describe("thinking pulse patterns", () => {
+  test("the pool holds every path and wave in both directions", () => {
+    expect(THINKING_PULSE_PATTERNS).toHaveLength(126);
+  });
+
   test("no two patterns are the same animation", () => {
     // Ids key the pool; identical timing signatures would read as a repeat on
     // screen even with distinct ids.
@@ -26,6 +30,31 @@ describe("thinking pulse patterns", () => {
       motions.add(pattern.motion);
     }
 
-    expect(motions).toEqual(new Set(["chase", "blink", "ripple", "comet", "breathe"]));
+    expect(motions).toEqual(
+      new Set([
+        "chase",
+        "blink",
+        "ripple",
+        "comet",
+        "breathe",
+        "flicker",
+        "swell",
+        "drift",
+        "sway",
+        "spark",
+        "settle",
+      ]),
+    );
+  });
+
+  test("every motion has a keyframe to run", async () => {
+    // A motion with no matching CSS silently renders a still matrix, so keep
+    // the pool and the stylesheet locked together.
+    const css = await Bun.file(`${import.meta.dir}/OfficialExperiences.css`).text();
+
+    for (const motion of new Set(THINKING_PULSE_PATTERNS.map((p) => p.motion))) {
+      expect(css).toContain(`[data-motion="${motion}"]`);
+      expect(css).toContain(`@keyframes agent-activity-${motion}`);
+    }
   });
 });

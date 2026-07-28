@@ -31,7 +31,11 @@ interface Props {
   active: boolean;
   /** Shared with the surface, so a click anywhere quiet can focus the input. */
   inputRef?: React.RefObject<HTMLTextAreaElement>;
-  onSubmit: (text: string, images: AgentImageAttachment[]) => void;
+  onSubmit: (
+    text: string,
+    images: AgentImageAttachment[],
+    delivery?: "default" | "alternate",
+  ) => void;
   onInterrupt: () => void;
 }
 
@@ -198,9 +202,9 @@ export function AgentComposer({ session, active, inputRef, onSubmit, onInterrupt
     placeCursor(next.cursor);
   };
 
-  const commit = (text: string) => {
+  const commit = (text: string, delivery: "default" | "alternate" = "default") => {
     if (!text.trim() && imagesRef.current.length === 0) return;
-    onSubmit(text, imagesRef.current);
+    onSubmit(text, imagesRef.current, delivery);
     setValue("");
     setCursor(0);
     imagesRef.current = [];
@@ -406,6 +410,38 @@ export function AgentComposer({ session, active, inputRef, onSubmit, onInterrupt
       return;
     }
 
+    if (
+      event.key === "ArrowUp" &&
+      rows.length === 0 &&
+      !value &&
+      imagesRef.current.length === 0 &&
+      !event.altKey &&
+      !event.ctrlKey &&
+      !event.metaKey &&
+      !event.shiftKey
+    ) {
+      const queued = agents.editLastQueued(session.termId);
+      if (queued) {
+        event.preventDefault();
+        change(queued.text, queued.text.length);
+        replaceImages(queued.images);
+        placeCursor(queued.text.length);
+      }
+      return;
+    }
+
+    if (
+      event.key === "Enter" &&
+      event.altKey &&
+      event.shiftKey &&
+      !event.ctrlKey &&
+      !event.metaKey
+    ) {
+      event.preventDefault();
+      commit(value, "alternate");
+      return;
+    }
+
     if (event.key === "Enter" && !event.shiftKey && !event.ctrlKey && !event.altKey) {
       event.preventDefault();
       if (menu && rows.length > 0) {
@@ -570,7 +606,9 @@ export function AgentComposer({ session, active, inputRef, onSubmit, onInterrupt
             exitArmed
               ? "Ctrl+C again to close"
               : working
-                ? "Queue a follow-up…"
+                ? agents.getFollowupMode() === "steer"
+                  ? "Steer this turn…"
+                  : "Queue a follow-up…"
                 : `Message ${session.label}…`
           }
           aria-label={`Message ${session.label}`}
@@ -604,6 +642,12 @@ export function AgentComposer({ session, active, inputRef, onSubmit, onInterrupt
           placement="composer"
           onSelect={(kind, value) => agents.configure(session.termId, kind, value)}
         />
+        {working && (
+          <span className="agent-followup-hint">
+            <kbd>Alt+Shift+Enter</kbd>
+            {agents.getFollowupMode() === "queue" ? "steers now" : "queues instead"}
+          </span>
+        )}
       </div>
     </div>
   );

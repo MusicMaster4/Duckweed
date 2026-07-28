@@ -1,26 +1,40 @@
-const COMPLETION_SOUND_URL = new URL(
-  "../../assets/completion_sound.ogg",
-  import.meta.url,
-).href;
+const COMPLETION_SOUND_URLS = [
+  new URL("../../assets/completion_sound_A.ogg", import.meta.url).href,
+  new URL("../../assets/completion_sound_C.ogg", import.meta.url).href,
+  new URL("../../assets/completion_sound_C2.ogg", import.meta.url).href,
+  new URL("../../assets/completion_sound_D.ogg", import.meta.url).href,
+  new URL("../../assets/completion_sound_E.ogg", import.meta.url).href,
+  new URL("../../assets/completion_sound_G.ogg", import.meta.url).href,
+] as const;
 
-/** Numeric readyState floors — avoid depending on HTMLMediaElement in tests. */
+/** Numeric readyState floors. Avoid depending on HTMLMediaElement in tests. */
 const HAVE_METADATA = 1;
 const HAVE_CURRENT_DATA = 2;
 
-let audio: HTMLAudioElement | null = null;
+let audioPlayers: HTMLAudioElement[] | null = null;
+let activePlayer: HTMLAudioElement | null = null;
 /** True after a successful play (or silent unlock) under a user gesture. */
 let unlocked = false;
 let unlockBound = false;
 /** Bumps so a late `canplay` retry cannot restart a superseded cue. */
 let playGeneration = 0;
 
-function completionAudio(): HTMLAudioElement | null {
-  if (typeof Audio === "undefined") return null;
-  if (!audio) {
-    audio = new Audio(COMPLETION_SOUND_URL);
-    audio.preload = "auto";
+function completionAudios(): HTMLAudioElement[] {
+  if (typeof Audio === "undefined") return [];
+  if (!audioPlayers) {
+    audioPlayers = COMPLETION_SOUND_URLS.map((url) => {
+      const player = new Audio(url);
+      player.preload = "auto";
+      return player;
+    });
   }
-  return audio;
+  return audioPlayers;
+}
+
+function randomCompletionAudio(): HTMLAudioElement | null {
+  const players = completionAudios();
+  if (players.length === 0) return null;
+  return players[Math.floor(Math.random() * players.length)] ?? null;
 }
 
 function safeRewind(player: HTMLAudioElement): void {
@@ -43,25 +57,32 @@ function bindGestureUnlock(): void {
       window.removeEventListener("keydown", onGesture, true);
       return;
     }
-    const player = completionAudio();
-    if (!player) return;
+    const players = completionAudios();
+    if (players.length === 0) return;
 
-    // Silent play under a real gesture unlocks autoplay for later cues.
-    const wasMuted = player.muted;
-    player.muted = true;
-    void player
-      .play()
-      .then(() => {
+    // Silent plays under a real gesture unlock autoplay for every cue.
+    const attempts = players.map(async (player) => {
+      const wasMuted = player.muted;
+      player.muted = true;
+      try {
+        await player.play();
         player.pause();
         safeRewind(player);
+        return true;
+      } catch {
+        return false;
+      } finally {
         player.muted = wasMuted;
+      }
+    });
+
+    void Promise.all(attempts).then((results) => {
+      if (results.every(Boolean)) {
         unlocked = true;
         window.removeEventListener("pointerdown", onGesture, true);
         window.removeEventListener("keydown", onGesture, true);
-      })
-      .catch(() => {
-        player.muted = wasMuted;
-      });
+      }
+    });
   };
 
   // Capture phase so terminal keystrokes and pane clicks unlock audio too.
@@ -72,12 +93,16 @@ function bindGestureUnlock(): void {
 function attemptPlay(player: HTMLAudioElement, generation: number): void {
   if (generation !== playGeneration) return;
 
-  // Pause + rewind avoids racing a previous play() promise on the shared element.
-  try {
-    player.pause();
-  } catch {
-    // ignore
+  // Stop the previous cue so simultaneous completions still coalesce cleanly.
+  if (activePlayer) {
+    try {
+      activePlayer.pause();
+    } catch {
+      // ignore
+    }
+    safeRewind(activePlayer);
   }
+  activePlayer = player;
   safeRewind(player);
 
   void player
@@ -88,11 +113,11 @@ function attemptPlay(player: HTMLAudioElement, generation: number): void {
     .catch(() => {
       if (generation !== playGeneration) return;
 
-      // Decode not finished yet — wait once, then try again.
+      // Decode not finished yet. Wait once, then try again.
       if (player.readyState < HAVE_CURRENT_DATA) {
         const onReady = () => {
           player.removeEventListener("canplay", onReady);
-          if (generation !== playGeneration) return;
+          if (generation !== playGeneration || activePlayer !== player) return;
           safeRewind(player);
           void player
             .play()
@@ -114,25 +139,25 @@ function attemptPlay(player: HTMLAudioElement, generation: number): void {
     });
 }
 
-/** Decode the short effect ahead of the first process completion when possible. */
+/** Decode the short effects ahead of the first process completion when possible. */
 export function preloadCompletionSound(): void {
   bindGestureUnlock();
-  const player = completionAudio();
-  if (!player) return;
-  try {
-    player.load();
-  } catch {
-    // ignore
+  for (const player of completionAudios()) {
+    try {
+      player.load();
+    } catch {
+      // ignore
+    }
   }
 }
 
 /**
- * Signal a completion once. Rewinding the shared player coalesces simultaneous
- * completions into one clean cue instead of stacking several copies.
+ * Signal a completion once with a randomly selected cue. Rewinding the active
+ * player coalesces simultaneous completions instead of stacking several copies.
  */
 export function playCompletionSound(): void {
   bindGestureUnlock();
-  const player = completionAudio();
+  const player = randomCompletionAudio();
   if (!player) return;
   const generation = ++playGeneration;
   attemptPlay(player, generation);

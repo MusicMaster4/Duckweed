@@ -190,6 +190,8 @@ export function AgentExperiencePreview() {
     mark: provider.mark,
     accent: provider.accent,
     status,
+    workStartedAt: status === "working" ? Date.now() : null,
+    lastWorkedForMs: null,
     cwd: "H:\\Python\\Slop\\duckweed",
     model: provider.model,
     effort: "high",

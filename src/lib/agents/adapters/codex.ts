@@ -9,7 +9,13 @@ import {
   type AgentAdapter,
 } from "../adapter";
 import type { AgentLaunch } from "../launch";
-import { makePatchChange, toolKind, type AgentFileChange, type ToolStatus } from "../types";
+import {
+  makePatchChange,
+  toolKind,
+  type AgentAccessMode,
+  type AgentFileChange,
+  type ToolStatus,
+} from "../types";
 
 /**
  * Codex `app-server` — JSON-RPC 2.0 with Codex's own thread/turn/item model.
@@ -43,6 +49,56 @@ const EXEC_STATUS: Record<string, ToolStatus> = {
   failed: "error",
   declined: "error",
 };
+
+/**
+ * Codex uses different enum casing for thread/start and turn/start.
+ * An empty object is important: it lets app-server resolve the user's normal
+ * config/profile instead of Duckweed silently replacing it.
+ */
+function threadAccessParams(mode: AgentAccessMode): Record<string, unknown> {
+  switch (mode) {
+    case "read-only":
+      return {
+        approvalPolicy: "on-request",
+        approvalsReviewer: "user",
+        sandbox: "read-only",
+      };
+    case "workspace":
+      return {
+        approvalPolicy: "on-request",
+        approvalsReviewer: "user",
+        sandbox: "workspace-write",
+      };
+    case "full-access":
+      return { approvalPolicy: "never", sandbox: "danger-full-access" };
+    case "default":
+      return {};
+  }
+}
+
+function turnAccessParams(mode: AgentAccessMode): Record<string, unknown> {
+  switch (mode) {
+    case "read-only":
+      return {
+        approvalPolicy: "on-request",
+        approvalsReviewer: "user",
+        sandboxPolicy: { type: "readOnly" },
+      };
+    case "workspace":
+      return {
+        approvalPolicy: "on-request",
+        approvalsReviewer: "user",
+        sandboxPolicy: { type: "workspaceWrite" },
+      };
+    case "full-access":
+      return {
+        approvalPolicy: "never",
+        sandboxPolicy: { type: "dangerFullAccess" },
+      };
+    case "default":
+      return {};
+  }
+}
 
 const COLLAB_STATUS: Record<string, ToolStatus> = {
   inProgress: "running",
@@ -80,6 +136,7 @@ export function createCodexAdapter(): AgentAdapter {
    */
   let currentModel: string | null = null;
   let currentEffort: string | null = null;
+  let currentAccess: AgentAccessMode = "default";
   /** `model/list`, once it lands; empty until then, so validation is lenient. */
   let models: CodexModel[] = [];
   /**
@@ -119,12 +176,7 @@ export function createCodexAdapter(): AgentAdapter {
       currentEffort = ctx.launch.effort;
       const thread = await request(ctx, "thread/start", {
         cwd: ctx.cwd,
-        // Ask before anything leaves the workspace: the UI has a prompt for
-        // exactly this, and silently widening a user's sandbox because they
-        // opened a prettier front-end would be the wrong trade.
-        approvalPolicy: "on-request",
-        sandbox: "workspace-write",
-        approvalsReviewer: "user",
+        ...threadAccessParams(currentAccess),
         ...(currentModel ? { model: currentModel } : {}),
       });
       const started = asRecord(thread.thread) ?? thread;
@@ -694,12 +746,7 @@ export function createCodexAdapter(): AgentAdapter {
             url: imagePayloadDataUrl(image),
           })),
         ],
-        approvalPolicy: "on-request",
-        approvalsReviewer: "user",
-        // `SandboxPolicy.type` is camelCase, unlike `thread/start`'s
-        // kebab-case `sandbox`. Two enums, two conventions, one letter apart
-        // from silently rejecting every turn.
-        sandboxPolicy: { type: "workspaceWrite" },
+        ...turnAccessParams(currentAccess),
         ...(currentModel ? { model: currentModel } : {}),
         // Same sticky override semantics as `model`, and the same casing
         // discipline: `effort` is the exact field name in TurnStartParams.
@@ -715,7 +762,50 @@ export function createCodexAdapter(): AgentAdapter {
       });
     },
 
+    steer: async (prompt, ctx) => {
+      if (!threadId || !currentTurnId) return false;
+      try {
+        await request(ctx, "turn/steer", {
+          threadId,
+          expectedTurnId: currentTurnId,
+          input: [
+            ...(prompt.text ? [{ type: "text", text: prompt.text }] : []),
+            ...prompt.images.map((image) => ({
+              type: "image",
+              url: imagePayloadDataUrl(image),
+            })),
+          ],
+        });
+        ctx.emit({ type: "user", text: prompt.text, images: prompt.images });
+        return true;
+      } catch {
+        return false;
+      }
+    },
+
     command: handleCommand,
+
+    configureAccess: (mode, ctx) => {
+      currentAccess = mode;
+      ctx.emit({ type: "session", accessMode: mode });
+      const label =
+        mode === "default"
+          ? "Agent default"
+          : mode === "read-only"
+            ? "Read only"
+            : mode === "workspace"
+              ? "Workspace"
+              : "Full access";
+      ctx.emit({
+        type: "notice",
+        tone: "info",
+        text:
+          mode === "default"
+            ? "Access now inherits the Codex configuration. It applies to the next turn."
+            : `Access set to ${label}. It applies to the next turn.`,
+      });
+      return true;
+    },
 
     /**
      * `thread/resume` keeps the running process and returns the selected

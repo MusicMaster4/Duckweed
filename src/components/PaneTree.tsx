@@ -33,6 +33,7 @@ export interface PaneTreeShared {
   onPickProject: (path: string) => void;
   zoomedLeaf: string | null;
   onActivate: (leafId: string) => void;
+  onReview: (termId: string) => void;
   onSplit: (leafId: string, zone: "right" | "bottom") => void;
   onClose: (leafId: string) => void;
   onToggleZoom: (leafId: string) => void;
@@ -78,6 +79,7 @@ export const PaneTree = memo(function PaneTree({
         onBrowseProject={shared.onBrowseProject}
         onPickProject={shared.onPickProject}
         onActivate={() => shared.onActivate(node.id)}
+        onReview={() => shared.onReview(node.term)}
         onSplit={(zone) => shared.onSplit(node.id, zone)}
         onClose={() => shared.onClose(node.id)}
         onToggleZoom={() => shared.onToggleZoom(node.id)}

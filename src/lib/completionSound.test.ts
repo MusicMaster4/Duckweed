@@ -42,18 +42,36 @@ afterAll(() => {
 });
 
 describe("completion sound", () => {
-  test("preloads and reuses the bundled sound player", async () => {
-    const sound = await import("./completionSound");
-    sound.preloadCompletionSound();
-    sound.playCompletionSound();
-    sound.playCompletionSound();
+  test("preloads every cue and randomly chooses one for each completion", async () => {
+    const originalRandom = Math.random;
+    const randomValues = [0, 0.999, 0.5];
+    Math.random = () => randomValues.shift() ?? 0;
 
-    expect(players).toHaveLength(1);
-    expect(players[0].src).toContain("completion_sound.ogg");
-    expect(players[0].preload).toBe("auto");
-    expect(players[0].loads).toBe(1);
-    expect(players[0].plays).toBe(2);
-    // Replayed from the top rather than resuming where the last play ended.
-    expect(players[0].currentTime).toBe(0);
+    try {
+      const sound = await import("./completionSound");
+      sound.preloadCompletionSound();
+      sound.playCompletionSound();
+      sound.playCompletionSound();
+      sound.playCompletionSound();
+
+      expect(players).toHaveLength(6);
+      expect(players.map((player) => player.src)).toEqual([
+        expect.stringContaining("completion_sound_A.ogg"),
+        expect.stringContaining("completion_sound_C.ogg"),
+        expect.stringContaining("completion_sound_C2.ogg"),
+        expect.stringContaining("completion_sound_D.ogg"),
+        expect.stringContaining("completion_sound_E.ogg"),
+        expect.stringContaining("completion_sound_G.ogg"),
+      ]);
+      expect(players.every((player) => player.preload === "auto")).toBe(true);
+      expect(players.every((player) => player.loads === 1)).toBe(true);
+      expect(players.map((player) => player.plays)).toEqual([1, 0, 0, 1, 0, 1]);
+      // Every selected cue starts from the beginning.
+      expect(players[0].currentTime).toBe(0);
+      expect(players[3].currentTime).toBe(0);
+      expect(players[5].currentTime).toBe(0);
+    } finally {
+      Math.random = originalRandom;
+    }
   });
 });

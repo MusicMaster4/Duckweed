@@ -1,6 +1,6 @@
 import type { AgentEvent } from "./events";
 import type { AgentLaunch } from "./launch";
-import type { AgentImageAttachment, AgentPrompt } from "./types";
+import type { AgentAccessMode, AgentImageAttachment, AgentPrompt } from "./types";
 
 /** What an adapter is given to do its job. */
 export interface AdapterContext {
@@ -35,12 +35,26 @@ export interface AgentAdapter {
   /** The user submitted text and optional images. */
   prompt: (prompt: AgentPrompt, ctx: AdapterContext) => void;
   /**
+   * Add input to the turn already in flight. Resolves false when the provider
+   * rejects same-turn steering, so the session can safely put the prompt back
+   * in its queue.
+   */
+  steer?: (prompt: AgentPrompt, ctx: AdapterContext) => Promise<boolean> | boolean;
+  /**
    * The user submitted text starting with `/`. Returning `"handled"` means
    * the adapter ran the command itself (an RPC, a local answer); `"prompt"`
    * sends the text on as a normal message, which is how agents that interpret
    * slash text themselves (Claude, ACP) receive their commands.
    */
   command?: (text: string, ctx: AdapterContext) => "handled" | "prompt";
+  /**
+   * Apply a session-wide access level. `default` must remove Duckweed's
+   * overrides so the agent's own configuration remains authoritative.
+   */
+  configureAccess?: (
+    mode: AgentAccessMode,
+    ctx: AdapterContext,
+  ) => Promise<boolean> | boolean;
   /**
    * Continue a past conversation, in-protocol.
    *

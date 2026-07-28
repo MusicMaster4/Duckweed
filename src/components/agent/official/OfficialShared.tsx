@@ -14,6 +14,7 @@ import { AgentAsciiLoader } from "../AgentAsciiLoader";
 import { AgentDiff } from "../AgentDiff";
 import { AgentImageAttachments } from "../AgentImageAttachments";
 import { AgentProviderIcon } from "../AgentProviderIcon";
+import { nextPreparingMessage } from "./preparingMessages";
 import { nextThinkingPulsePattern } from "./thinkingPulsePatterns";
 
 export interface ExperienceProps {
@@ -95,6 +96,18 @@ export function Chevron({ open }: { open: boolean }) {
     >
       <path d="m5 6 3 3 3-3" />
     </svg>
+  );
+}
+
+function ToolErrorMark() {
+  return (
+    <span className="official-tool-error" aria-hidden="true">
+      <svg viewBox="0 0 16 16">
+        <path d="M8 2.25 13.75 8 8 13.75 2.25 8Z" />
+        <path d="M8 5.1v4.1" />
+        <circle cx="8" cy="11.2" r=".65" />
+      </svg>
+    </span>
   );
 }
 
@@ -558,7 +571,7 @@ export function ToolActivity({
           {insertions > 0 && <span className="is-add">+{insertions}</span>}
           {deletions > 0 && <span className="is-del">−{deletions}</span>}
           {item.status === "done" && <span className="official-tool-done">✓</span>}
-          {item.status === "error" && <span className="official-tool-error">!</span>}
+          {item.status === "error" && <ToolErrorMark />}
         </span>
         {expandable && <Chevron open={open} />}
       </button>
@@ -621,6 +634,9 @@ function ThinkingHistory({
   showLatestFull: boolean;
 }) {
   const [open, setOpen] = useState(false);
+  // Picked once per mount, same as the pulse pattern: a fresh preparing
+  // cluster gets a new line; remounts during the same wait do not flicker.
+  const [preparingMessage] = useState(nextPreparingMessage);
   const panelId = useId();
   const latest = showLatestFull ? thoughts[thoughts.length - 1] : undefined;
   const active = working;
@@ -649,7 +665,7 @@ function ThinkingHistory({
         <ActivityPulse active={active} />
         <span className="agent-activity-history-label">Thinking</span>
         {!latest && thoughts.length === 0 && (
-          <span className="agent-activity-history-summary">Preparing response</span>
+          <span className="agent-activity-history-summary">{preparingMessage}</span>
         )}
         {expandable && <Chevron open={open} />}
       </button>
@@ -715,7 +731,7 @@ function ToolHistory({ tools, variant }: { tools: ToolItem[]; variant: ActivityV
         <strong className="agent-activity-history-summary">{latest.title || latest.name}</strong>
         <span className="agent-activity-history-status">{activityStatus(latest)}</span>
         {latest.status === "done" && <span className="official-tool-done">✓</span>}
-        {latest.status === "error" && <span className="official-tool-error">!</span>}
+        {latest.status === "error" && <ToolErrorMark />}
         <Chevron open={open} />
       </button>
       {open && (

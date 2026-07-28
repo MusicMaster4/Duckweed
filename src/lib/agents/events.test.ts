@@ -20,6 +20,8 @@ function blank(): AgentSessionState {
     mark: "CC",
     accent: "#d97757",
     status: "idle",
+    workStartedAt: null,
+    lastWorkedForMs: null,
     cwd: "H:/project",
     model: null,
     effort: null,
@@ -81,6 +83,24 @@ describe("resumed", () => {
   });
 });
 
+describe("queued follow-ups", () => {
+  test("removes the requested prompt without disturbing the rest of the queue", () => {
+    let state = applyEvent(blank(), {
+      type: "queue",
+      prompt: { id: "queued-1", text: "first", images: [] },
+    });
+    state = applyEvent(state, {
+      type: "queue",
+      prompt: { id: "queued-2", text: "second", images: [] },
+    });
+    state = applyEvent(state, { type: "unqueue", id: "queued-2" });
+
+    expect(state.pending).toEqual([
+      { id: "queued-1", text: "first", images: [] },
+    ]);
+  });
+});
+
 describe("transient notices", () => {
   test("picker confirmations disappear when real work starts", () => {
     const configured = applyEvent(blank(), {
@@ -111,6 +131,40 @@ describe("transient notices", () => {
 
     expect(state.items).toHaveLength(1);
     expect(state.items[0]).toMatchObject({ tone: "error", text: "A durable failure" });
+  });
+});
+
+describe("work duration", () => {
+  test("records one turn from the working transition through completion", () => {
+    const originalNow = Date.now;
+    try {
+      Date.now = () => 1_000;
+      let state = applyEvent(blank(), { type: "status", status: "working" });
+      expect(state.workStartedAt).toBe(1_000);
+      expect(state.lastWorkedForMs).toBe(null);
+
+      Date.now = () => 84_000;
+      state = applyEvent(state, { type: "turn-end" });
+      expect(state.workStartedAt).toBe(null);
+      expect(state.lastWorkedForMs).toBe(83_000);
+    } finally {
+      Date.now = originalNow;
+    }
+  });
+
+  test("keeps the original start while a turn waits for the user", () => {
+    const originalNow = Date.now;
+    try {
+      Date.now = () => 2_000;
+      let state = applyEvent(blank(), { type: "status", status: "working" });
+      state = applyEvent(state, { type: "status", status: "waiting" });
+
+      Date.now = () => 7_000;
+      state = applyEvent(state, { type: "status", status: "working" });
+      expect(state.workStartedAt).toBe(2_000);
+    } finally {
+      Date.now = originalNow;
+    }
   });
 });
 

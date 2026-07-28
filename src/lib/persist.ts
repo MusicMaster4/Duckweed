@@ -2,6 +2,7 @@ import { uid } from "./layout";
 import { newTermId, type InputMode } from "./terminals";
 import type { LayoutNode, Tab } from "./types";
 import { saveDurably } from "./durableStorage";
+import type { AgentFollowupMode } from "./agents/types";
 
 const KEY = "duckweed:state:v1";
 const MAX_RECENTS = 12;
@@ -46,6 +47,8 @@ export interface Persisted {
    * of its terminal UI.
    */
   customAgentUi: boolean;
+  /** Default delivery for messages submitted while an agent turn is active. */
+  agentFollowupMode: AgentFollowupMode;
   /** Warp-style command editor, or a conventional raw terminal. */
   inputMode: InputMode;
   /**
@@ -120,6 +123,7 @@ export function load(): Persisted | null {
         typeof parsed.completionSoundEnabled === "boolean" ? parsed.completionSoundEnabled : true,
       // Default on, including for saves written before the setting existed.
       customAgentUi: typeof parsed.customAgentUi === "boolean" ? parsed.customAgentUi : true,
+      agentFollowupMode: parsed.agentFollowupMode === "steer" ? "steer" : "queue",
       inputMode: parsed.inputMode === "raw" ? "raw" : "editor",
       // Default on so a missing field from older saves still asks before killing work.
       confirmCloseRunning:
@@ -143,6 +147,7 @@ export function save(state: {
   completionHighlights: boolean;
   completionSoundEnabled: boolean;
   customAgentUi: boolean;
+  agentFollowupMode: AgentFollowupMode;
   inputMode: InputMode;
   confirmCloseRunning: boolean;
   toolsOpen: boolean;
@@ -161,6 +166,7 @@ export function save(state: {
       completionHighlights: state.completionHighlights,
       completionSoundEnabled: state.completionSoundEnabled,
       customAgentUi: state.customAgentUi,
+      agentFollowupMode: state.agentFollowupMode,
       inputMode: state.inputMode,
       confirmCloseRunning: state.confirmCloseRunning,
       toolsOpen: state.toolsOpen,

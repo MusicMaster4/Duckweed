@@ -1,9 +1,11 @@
 import { mergeCommands } from "./slashCatalog";
 import type {
+  AgentAccessMode,
   AgentFileChange,
   AgentImageAttachment,
   AgentItem,
   AgentModelChoice,
+  AgentPendingPrompt,
   AgentPermission,
   AgentPlanStep,
   AgentSessionState,
@@ -33,6 +35,8 @@ export type AgentEvent =
        * thought_level option). `undefined` leaves the current value alone.
        */
       effort?: string | null;
+      /** Permission level selected in the custom UI. */
+      accessMode?: AgentAccessMode;
       cwd?: string;
       commands?: { name: string; description: string }[];
       /** Replaces the switchable-model list when the adapter learns it. */
@@ -86,9 +90,9 @@ export type AgentEvent =
   | { type: "permission"; permission: AgentPermission | null }
   | { type: "usage"; usage: Partial<AgentUsage> }
   /** A follow-up the user sent while a turn was still running. */
-  | { type: "queue"; text: string }
-  /** The oldest queued follow-up has just been sent. */
-  | { type: "unqueue" }
+  | { type: "queue"; prompt: AgentPendingPrompt }
+  /** A queued follow-up has been sent, cancelled, or restored for editing. */
+  | { type: "unqueue"; id: string }
   /** The turn finished; the composer takes the keyboard back. */
   | { type: "turn-end" };
 
@@ -104,6 +108,35 @@ function clampEnd(text: string, limit: number): string {
 
 function nextId(state: AgentSessionState): string {
   return `i${state.items.length}-${Date.now().toString(36)}`;
+}
+
+function workTimingAfterStatus(
+  state: AgentSessionState,
+  status: AgentStatus,
+  now = Date.now(),
+): Pick<AgentSessionState, "workStartedAt" | "lastWorkedForMs"> {
+  if (
+    status === "working" &&
+    state.status !== "working" &&
+    !(state.status === "waiting" && state.workStartedAt !== null)
+  ) {
+    return {
+      workStartedAt: now,
+      lastWorkedForMs: state.lastWorkedForMs,
+    };
+  }
+
+  if (status === "idle" && state.workStartedAt !== null) {
+    return {
+      workStartedAt: null,
+      lastWorkedForMs: Math.max(0, now - state.workStartedAt),
+    };
+  }
+
+  return {
+    workStartedAt: state.workStartedAt,
+    lastWorkedForMs: state.lastWorkedForMs,
+  };
 }
 
 /** Everything a status change needs to say whether the user is owed a nudge. */
@@ -229,6 +262,7 @@ export function applyEvent(state: AgentSessionState, event: AgentEvent): AgentSe
         sessionId: event.sessionId ?? state.sessionId,
         model: event.model ?? state.model,
         effort: event.effort !== undefined ? event.effort : state.effort,
+        accessMode: event.accessMode ?? state.accessMode,
         cwd: event.cwd ?? state.cwd,
         commands: event.commands ? mergeCommands(state.commands, event.commands) : state.commands,
         // A non-empty list wins; adapters re-emit the full set whenever it
@@ -240,6 +274,7 @@ export function applyEvent(state: AgentSessionState, event: AgentEvent): AgentSe
       if (state.status === event.status && !event.error) return state;
       return {
         ...state,
+        ...workTimingAfterStatus(state, event.status),
         status: event.status,
         error: event.error ?? (event.status === "error" ? state.error : null),
       };
@@ -420,6 +455,7 @@ export function applyEvent(state: AgentSessionState, event: AgentEvent): AgentSe
         ...state,
         started: true,
         items: event.items ?? [],
+        lastWorkedForMs: null,
         pending: [],
         permission: null,
         error: null,
@@ -461,10 +497,12 @@ export function applyEvent(state: AgentSessionState, event: AgentEvent): AgentSe
       return { ...state, usage: { ...state.usage, ...event.usage } };
 
     case "queue":
-      return { ...state, started: true, pending: [...state.pending, event.text] };
+      return { ...state, started: true, pending: [...state.pending, event.prompt] };
 
     case "unqueue":
-      return state.pending.length === 0 ? state : { ...state, pending: state.pending.slice(1) };
+      return state.pending.some((prompt) => prompt.id === event.id)
+        ? { ...state, pending: state.pending.filter((prompt) => prompt.id !== event.id) }
+        : state;
 
     case "turn-end": {
       // Anything still marked as streaming when the turn ends never got its
@@ -476,6 +514,7 @@ export function applyEvent(state: AgentSessionState, event: AgentEvent): AgentSe
       );
       return {
         ...state,
+        ...workTimingAfterStatus(state, "idle"),
         items,
         permission: null,
         status: state.status === "exited" || state.status === "error" ? state.status : "idle",

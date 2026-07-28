@@ -6,6 +6,7 @@ import {
   latestWorkflow,
   workflowIsComplete,
 } from "../../lib/agentWorkflow";
+import { formatWorkDuration, workStatusLabel } from "../../lib/agentWorkDuration";
 
 const completedPlan: PlanItem = {
   kind: "plan",
@@ -49,5 +50,37 @@ describe("agent workflow dock", () => {
       ),
     ).toBe(false);
     expect(COMPLETED_WORKFLOW_TTL_MS).toBe(30_000);
+  });
+});
+
+describe("agent work status", () => {
+  test("formats compact durations for the header", () => {
+    expect(formatWorkDuration(9_999)).toBe("9s");
+    expect(formatWorkDuration(83_000)).toBe("1m 23s");
+    expect(formatWorkDuration(7_500_000)).toBe("2h 5m");
+  });
+
+  test("shows a live duration while working and keeps the final duration when idle", () => {
+    expect(
+      workStatusLabel(
+        { status: "working", workStartedAt: 1_000, lastWorkedForMs: null },
+        84_000,
+      ),
+    ).toBe("Working for 1m 23s");
+    expect(
+      workStatusLabel(
+        { status: "idle", workStartedAt: null, lastWorkedForMs: 83_000 },
+        100_000,
+      ),
+    ).toBe("Worked for 1m 23s");
+  });
+
+  test("keeps Ready before the first completed turn", () => {
+    expect(
+      workStatusLabel(
+        { status: "idle", workStartedAt: null, lastWorkedForMs: null },
+        0,
+      ),
+    ).toBe("Ready");
   });
 });

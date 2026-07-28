@@ -132,13 +132,12 @@ describe("codex adapter", () => {
 
     expect(h.sent[0]).toMatchObject({ method: "initialize" });
     expect(h.sent[1]).toMatchObject({ method: "initialized" });
-    // Kebab-case here, and only here. The app-server rejects `onRequest`
-    // ("expected one of untrusted, on-request, granular, never") and rejects
-    // `workspaceWrite` for this field — while `turn/start` below wants the
-    // opposite convention for its sandbox. Both spellings are load-bearing.
-    expect(h.sent[2]).toMatchObject({
+    // No override: app-server inherits the same config as the normal TUI.
+    expect(h.sent[2]).toEqual({
+      jsonrpc: "2.0",
+      id: 2,
       method: "thread/start",
-      params: { cwd: "H:/project", approvalPolicy: "on-request", sandbox: "workspace-write" },
+      params: { cwd: "H:/project" },
     });
     expect(h.state()).toMatchObject({ status: "idle", sessionId: "sess_1" });
   });
@@ -479,14 +478,96 @@ describe("codex adapter", () => {
       params: {
         threadId: "thread_1",
         input: [{ type: "text", text: "fix the bug" }],
-        approvalPolicy: "on-request",
-        // camelCase, unlike `thread/start`'s `sandbox` above: the app-server
-        // answers `workspace-write` here with "unknown variant … expected one
-        // of dangerFullAccess, readOnly, externalSandbox, workspaceWrite".
-        sandboxPolicy: { type: "workspaceWrite" },
       },
     });
     expect(h.state().items[0]).toMatchObject({ kind: "user", text: "fix the bug" });
+  });
+
+  test("maps the access picker onto Codex turn policies", async () => {
+    const cases = [
+      [
+        "read-only",
+        {
+          approvalPolicy: "on-request",
+          approvalsReviewer: "user",
+          sandboxPolicy: { type: "readOnly" },
+        },
+      ],
+      [
+        "workspace",
+        {
+          approvalPolicy: "on-request",
+          approvalsReviewer: "user",
+          sandboxPolicy: { type: "workspaceWrite" },
+        },
+      ],
+      [
+        "full-access",
+        {
+          approvalPolicy: "never",
+          sandboxPolicy: { type: "dangerFullAccess" },
+        },
+      ],
+    ] as const;
+
+    for (const [mode, expected] of cases) {
+      const h = harness();
+      await h.handshake();
+      expect(h.adapter.configureAccess?.(mode, h.ctx)).toBe(true);
+      h.adapter.prompt({ text: "continue", images: [] }, h.ctx);
+      expect(h.sent.at(-1)).toMatchObject({
+        method: "turn/start",
+        params: expected,
+      });
+      expect(h.state().accessMode).toBe(mode);
+    }
+  });
+
+  test("returns to inherited permissions without sending overrides", async () => {
+    const h = harness();
+    await h.handshake();
+    h.adapter.configureAccess?.("full-access", h.ctx);
+    h.adapter.configureAccess?.("default", h.ctx);
+    h.adapter.prompt({ text: "continue", images: [] }, h.ctx);
+
+    const params = h.sent.at(-1)?.params as Record<string, unknown>;
+    expect(params.approvalPolicy).toBeUndefined();
+    expect(params.sandboxPolicy).toBeUndefined();
+    expect(h.state().accessMode).toBe("default");
+  });
+
+  test("steers the turn already in flight", async () => {
+    const h = harness();
+    await h.handshake();
+    h.notify("turn/started", {
+      threadId: "thread_1",
+      turn: { id: "turn_9", status: "inProgress", items: [] },
+    });
+
+    const steering = h.adapter.steer?.(
+      { text: "focus on the failing tests", images: [image] },
+      h.ctx,
+    );
+    expect(h.sent.at(-1)).toMatchObject({
+      id: 4,
+      method: "turn/steer",
+      params: {
+        threadId: "thread_1",
+        expectedTurnId: "turn_9",
+        input: [
+          { type: "text", text: "focus on the failing tests" },
+          { type: "image", url: image.dataUrl },
+        ],
+      },
+    });
+
+    h.feed({ jsonrpc: "2.0", id: 4, result: { turnId: "turn_9" } });
+    await expect(steering).resolves.toBe(true);
+    expect(h.state().items.at(-1)).toMatchObject({
+      kind: "user",
+      text: "focus on the failing tests",
+      images: [image],
+    });
   });
 
   test("sends the original image instead of its thumbnail to Codex", async () => {

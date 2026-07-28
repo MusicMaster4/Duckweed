@@ -10,6 +10,7 @@ import {
 import { agentHasUnfinishedWork } from "../../lib/agents/activity";
 import { canResume } from "../../lib/agents/history";
 import * as agents from "../../lib/agents/session";
+import { isNewChatCommand } from "../../lib/agents/slashCatalog";
 import type { AgentImageAttachment, AgentSessionState } from "../../lib/agents/types";
 import {
   isAtScrollBottom,
@@ -20,8 +21,10 @@ import {
   latestWorkflow as findLatestWorkflow,
   workflowIsComplete,
 } from "../../lib/agentWorkflow";
+import { workStatusLabel } from "../../lib/agentWorkDuration";
 import { confirmCloseRunning } from "../../lib/confirmClose";
 import { AgentComposer } from "./AgentComposer";
+import { AgentImageAttachments } from "./AgentImageAttachments";
 import { AgentPermission } from "./AgentPermission";
 import { AgentProviderIcon } from "./AgentProviderIcon";
 import { AgentSessions } from "./AgentSessions";
@@ -41,15 +44,6 @@ function formatTokens(count: number): string {
   if (count >= 1000) return `${(count / 1000).toFixed(1)}k`;
   return String(count);
 }
-
-const STATUS_LABEL: Record<AgentSessionState["status"], string> = {
-  starting: "starting",
-  idle: "ready",
-  working: "working",
-  waiting: "needs you",
-  exited: "ended",
-  error: "failed",
-};
 
 function workflowVariant(agent: AgentSessionState["agent"]): OfficialVariant | "cursor" | "opencode" {
   if (agent === "codex") return "chatgpt";
@@ -123,6 +117,14 @@ export function AgentSurface({ termId, active, onClose }: Props) {
   const workflow = latestWorkflow(session?.items ?? []);
   const workflowComplete = workflowIsComplete(workflow, session?.status);
   const [expiredWorkflowId, setExpiredWorkflowId] = useState<string | null>(null);
+  const [clockNow, setClockNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (session?.status !== "working" || session.workStartedAt === null) return;
+    setClockNow(Date.now());
+    const timer = window.setInterval(() => setClockNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [session?.status, session?.workStartedAt]);
 
   useEffect(() => {
     if (!workflow || !workflowComplete) {
@@ -226,19 +228,38 @@ export function AgentSurface({ termId, active, onClose }: Props) {
   };
 
   /**
-   * `/resume` is answered by the app, not the agent: no CLI advertises its
-   * own history over the protocols we speak, so the text never leaves here.
+   * App-owned session commands never leave Duckweed. `/resume` opens stored
+   * history, while `/new` (and its short alias `/n`) relaunches the same agent
+   * with a blank provider-side conversation.
    */
-  const submit = (text: string, images: AgentImageAttachment[]) => {
-    const match = /^\/resume(?:\s+(.*))?$/i.exec(text.trim());
-    if (match && images.length === 0) {
-      setResumeQuery(match[1]?.trim() ?? "");
-      return;
+  const submit = (
+    text: string,
+    images: AgentImageAttachment[],
+    delivery: "default" | "alternate" = "default",
+  ) => {
+    if (images.length === 0) {
+      const trimmed = text.trim();
+      const resumeMatch = /^\/resume(?:\s+(.*))?$/i.exec(trimmed);
+      if (resumeMatch) {
+        setResumeQuery(resumeMatch[1]?.trim() ?? "");
+        return;
+      }
+      if (isNewChatCommand(trimmed)) {
+        pinnedRef.current = true;
+        userPausedRef.current = false;
+        setShowJumpToBottom(false);
+        void agents.newChat(termId).then((failure) => {
+          // A failed relaunch leaves no agent session to render. Return the
+          // pane to its shell instead of leaving the custom surface empty.
+          if (failure) onClose();
+        });
+        return;
+      }
     }
     pinnedRef.current = true;
     userPausedRef.current = false;
     setShowJumpToBottom(false);
-    agents.submit(termId, text, images);
+    agents.submit(termId, text, images, delivery);
   };
 
   const jumpToBottom = () => {
@@ -280,7 +301,7 @@ export function AgentSurface({ termId, active, onClose }: Props) {
         <span className="agent-name">{session.label}</span>
         <span className={`agent-state is-${session.status}`}>
           {session.status === "working" && <span className="agent-pulse" aria-hidden="true" />}
-          {STATUS_LABEL[session.status]}
+          {workStatusLabel(session, clockNow)}
         </span>
         <span className="agent-head-spacer" />
         {tokens > 0 && (
@@ -347,11 +368,47 @@ export function AgentSurface({ termId, active, onClose }: Props) {
           cwd={session.cwd}
         />
 
-        {session.pending.map((text, index) => (
-          <div key={index} className="agent-turn is-pending">
+        {session.pending.map((prompt) => (
+          <div key={prompt.id} className="agent-turn is-pending">
             <span className="agent-turn-mark" aria-hidden="true" />
-            <p className="agent-turn-text">{text}</p>
-            <span className="agent-turn-queued">queued</span>
+            <div className="agent-turn-pending-copy">
+              <p className="agent-turn-text">
+                {prompt.text ||
+                  (prompt.images.length === 1
+                    ? "1 image attached"
+                    : `${prompt.images.length} images attached`)}
+              </p>
+              {prompt.images.length > 0 && (
+                <AgentImageAttachments images={prompt.images} variant="message" />
+              )}
+            </div>
+            <div className="agent-turn-pending-actions">
+              <span className="agent-turn-queued">queued</span>
+              <button
+                type="button"
+                className="agent-turn-send-now"
+                disabled={!agents.canSteer(termId)}
+                onClick={() => agents.sendQueuedNow(termId, prompt.id)}
+                title={
+                  agents.canSteer(termId)
+                    ? "Send this message into the active turn"
+                    : `${session.label} does not support same-turn steering`
+                }
+              >
+                Send now
+              </button>
+              <button
+                type="button"
+                className="agent-turn-cancel"
+                onClick={() => agents.cancelQueued(termId, prompt.id)}
+                title="Remove queued message"
+                aria-label="Remove queued message"
+              >
+                <svg viewBox="0 0 12 12" aria-hidden="true">
+                  <path d="m3.25 3.25 5.5 5.5m0-5.5-5.5 5.5" />
+                </svg>
+              </button>
+            </div>
           </div>
         ))}
 
