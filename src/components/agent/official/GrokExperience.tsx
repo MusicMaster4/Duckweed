@@ -202,8 +202,8 @@ export function GrokExperience({
             status !== "working"
           ) {
             return (
-              <div className="grok-answer-layer" key={item.id}>
-                <div className="grok-answer-divider" aria-hidden="true">
+              <div className="official-answer-layer grok-answer-layer" key={item.id}>
+                <div className="official-answer-divider grok-answer-divider" aria-hidden="true">
                   <span>Answer</span>
                 </div>
                 <MessageItem

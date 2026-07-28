@@ -26,6 +26,10 @@ export function ChatGPTExperience(props: ExperienceProps) {
   const { items, termId, status, started, agent, label, program, cwd } = props;
   const [pendingThinkingVisible, setPendingThinkingVisible] = useState(false);
   const groups = useMemo(() => activityGroups(items), [items]);
+  const answerIds = useMemo(
+    () => new Set(groups.flatMap((group) => (group.answerId ? [group.answerId] : []))),
+    [groups],
+  );
   const continuedIds = useMemo(() => continuedAssistantIds(items), [items]);
   const liveAssistantId = useMemo(
     () => activeAssistantId(items, status === "working"),
@@ -155,6 +159,20 @@ export function ChatGPTExperience(props: ExperienceProps) {
           }
           if (item.kind === "plan") {
             return <PlanTracker key={item.id} item={item} variant="chatgpt" />;
+          }
+          if (
+            item.kind === "assistant" &&
+            answerIds.has(item.id) &&
+            status !== "working"
+          ) {
+            return (
+              <div className="official-answer-layer" key={item.id}>
+                <div className="official-answer-divider" aria-hidden="true">
+                  <span>Answer</span>
+                </div>
+                <MessageItem item={item} variant="chatgpt" />
+              </div>
+            );
           }
           const messageClassName =
             [

@@ -69,7 +69,7 @@ describe("completion sound", () => {
     expect(persist).toContain("completionSoundEnabled: state.completionSoundEnabled");
   });
 
-  test("sound requires the selected pane and a job longer than one minute", () => {
+  test("sound follows completion eligibility without requiring the selected pane", () => {
     const app = read("src/App.tsx");
     const signal = app.indexOf("if (!shouldSignalCompletion(previous, current)) return;");
     const soundGate = app.indexOf("shouldPlayCompletionSound(previous, current)", signal);
@@ -78,10 +78,9 @@ describe("completion sound", () => {
     const focusGate = app.indexOf("isFocusedTerm(termId)", signal);
     expect(signal).toBeGreaterThan(-1);
     expect(soundGate).toBeGreaterThan(signal);
-    expect(selectedGate).toBeGreaterThan(signal);
-    expect(selectedGate).toBeLessThan(sound);
+    expect(selectedGate === -1 || selectedGate > sound).toBe(true);
     expect(soundGate).toBeLessThan(sound);
-    // Flash/unread still use document focus; sound must not.
+    // Flash/unread still use document focus; sound does not.
     expect(focusGate).toBeGreaterThan(sound);
   });
 });

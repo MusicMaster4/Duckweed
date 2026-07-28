@@ -190,7 +190,7 @@ describe("completion sound and highlight eligibility", () => {
 describe("completion sound eligibility", () => {
   const now = 100_000;
 
-  test("does not play for jobs that ran one minute or less", () => {
+  test("does not play for ordinary terminal jobs that ran one minute or less", () => {
     expect(
       shouldPlayCompletionSound(
         state({ busy: true, processStartedAt: now - 60_000 }),
@@ -198,6 +198,9 @@ describe("completion sound eligibility", () => {
         now,
       ),
     ).toBe(false);
+  });
+
+  test("plays immediately for real agent turns in raw and custom UI panes", () => {
     expect(
       shouldPlayCompletionSound(
         state({
@@ -216,7 +219,24 @@ describe("completion sound eligibility", () => {
         }),
         now,
       ),
-    ).toBe(false);
+    ).toBe(true);
+    expect(
+      shouldPlayCompletionSound(
+        state({
+          agentUi: true,
+          completionSeq: 3,
+          completionStartedAt: now - 1,
+          processStartedAt: now - 1,
+        }),
+        state({
+          agentUi: true,
+          completionSeq: 4,
+          completionStartedAt: now - 1,
+          processStartedAt: now - 1,
+        }),
+        now,
+      ),
+    ).toBe(true);
   });
 
   test("plays for finished jobs and agent turns that ran more than one minute", () => {
@@ -248,7 +268,7 @@ describe("completion sound eligibility", () => {
     ).toBe(true);
   });
 
-  test("uses the completed turn clock when another turn already owns the live clock", () => {
+  test("does not duration-gate agent turns when another turn owns the live clock", () => {
     expect(
       shouldPlayCompletionSound(
         state({
@@ -280,7 +300,7 @@ describe("completion sound eligibility", () => {
         }),
         now,
       ),
-    ).toBe(false);
+    ).toBe(true);
   });
 
   test("does not play when quitting a coding agent", () => {

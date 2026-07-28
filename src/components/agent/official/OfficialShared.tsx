@@ -13,6 +13,7 @@ import { openUrl } from "../../../lib/ipc";
 import { AgentAsciiLoader } from "../AgentAsciiLoader";
 import { AgentDiff } from "../AgentDiff";
 import { AgentProviderIcon } from "../AgentProviderIcon";
+import { nextThinkingPulsePattern } from "./thinkingPulsePatterns";
 
 export interface ExperienceProps {
   items: AgentItem[];
@@ -583,13 +584,24 @@ export function ToolActivity({
 }
 
 function ActivityPulse({ active }: { active: boolean }) {
+  const [pattern] = useState(nextThinkingPulsePattern);
   return (
     <span
       className={`agent-activity-pulse${active ? " is-active" : " is-settled"}`}
+      data-motion={pattern.motion}
+      data-pattern={pattern.id}
       aria-hidden="true"
     >
       {Array.from({ length: 9 }, (_, index) => (
-        <span key={index} style={{ "--pulse-index": index } as React.CSSProperties} />
+        <span
+          key={index}
+          style={
+            {
+              "--pulse-duration": `${pattern.durationMs}ms`,
+              "--pulse-delay": `${pattern.steps[index]! * pattern.stepMs}ms`,
+            } as React.CSSProperties
+          }
+        />
       ))}
     </span>
   );

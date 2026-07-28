@@ -25,7 +25,7 @@ export function didProcessFinish(previous: ProcessState, current: ProcessState):
 /** Ordinary terminal jobs must run longer than this before completion is signalled. */
 export const PROCESS_COMPLETION_MIN_MS = 30_000;
 
-/** Completion sound only after a job has been running for more than one minute. */
+/** Ordinary terminal jobs only earn a sound after running for more than one minute. */
 export const COMPLETION_SOUND_MIN_MS = 60_000;
 
 /** Quiet window used only to merge duplicate heuristic completion channels. */
@@ -74,13 +74,11 @@ export function shouldSignalCompletion(
 }
 
 /**
- * Sound is stricter than the visual marker: the job must have run for more
- * than one minute. Focus is checked separately so background panes stay quiet.
- * Agent process exit alone never counts — same rule as shouldSignalCompletion.
- *
- * The start time is read from `previous` first: App measures duration at the
- * completion edge, and a late notify that clears `processStartedAt` must not
- * make a long turn look timeless (or the other way around).
+ * Real agent turns already passed the protocol and prompt filters that
+ * increment `completionSeq`, so they sound immediately when control returns to
+ * the user. Ordinary terminal jobs remain quieter and must run for more than
+ * one minute. Agent process exit alone never counts, which is the same rule
+ * used by shouldSignalCompletion.
  */
 export function shouldPlayCompletionSound(
   previous: ProcessState,
@@ -88,10 +86,8 @@ export function shouldPlayCompletionSound(
   now = Date.now(),
 ): boolean {
   if (!shouldSignalCompletion(previous, current, now)) return false;
-  const startedAt =
-    current.completionSeq > previous.completionSeq
-      ? current.completionStartedAt
-      : previous.processStartedAt ?? current.processStartedAt;
+  if (current.completionSeq > previous.completionSeq) return true;
+  const startedAt = previous.processStartedAt ?? current.processStartedAt;
   return startedAt !== null && now - startedAt > COMPLETION_SOUND_MIN_MS;
 }
 

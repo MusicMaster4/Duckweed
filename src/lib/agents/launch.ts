@@ -13,6 +13,8 @@ export interface AgentLaunch {
    * resolution cannot find.
    */
   program: string;
+  /** Environment assignments typed before the executable. */
+  env: Record<string, string>;
   /**
    * Wrapper-only flags that must precede the headless protocol args.
    * Claudex uses `--g` / `--o` (and long forms) to pick a proxied backend
@@ -143,7 +145,7 @@ function executableName(word: string): string {
 function resolveAgent(word: string): { agent: AgentId; program: string } | null {
   const name = executableName(word);
   const direct = EXECUTABLES[name];
-  if (direct) return { agent: direct, program: name };
+  if (direct) return { agent: direct, program: word };
   for (const [pattern, id] of PREFIXES) {
     if (pattern.test(name)) return { agent: id, program: AGENTS[id].binaries[0] };
   }
@@ -232,10 +234,26 @@ export function parseAgentLaunch(command: string): AgentLaunch | null {
 
   const words = tokenize(text);
   let at = 0;
-  // Environment assignments and `sudo`/`env` prefixes still launch the agent.
-  while (at < words.length && (words[at] === "sudo" || words[at] === "env" || /^\w+=/.test(words[at]))) {
+  const env: Record<string, string> = {};
+  const takeAssignment = (word: string): boolean => {
+    const match = /^([A-Za-z_]\w*)=(.*)$/.exec(word);
+    if (!match) return false;
+    env[match[1]] = match[2];
+    return true;
+  };
+
+  // Keep simple environment assignments when replacing the shell launch.
+  while (at < words.length && takeAssignment(words[at])) {
     at += 1;
   }
+  if (words[at] === "env") {
+    at += 1;
+    while (at < words.length && takeAssignment(words[at])) at += 1;
+    // Options such as `env -u NAME` need the real shell utility.
+    if (words[at]?.startsWith("-")) return null;
+  }
+  // Privilege and environment-preservation behavior belongs to sudo itself.
+  if (words[at] === "sudo") return null;
   if (["npx", "bunx"].includes(words[at])) at += 1;
   else if (
     ["npm", "pnpm", "yarn"].includes(words[at]) &&
@@ -331,7 +349,7 @@ export function parseAgentLaunch(command: string): AgentLaunch | null {
     return null;
   }
 
-  return { agent, program, wrapperArgs, args, prompt, model, effort, resume, resumeId };
+  return { agent, program, env, wrapperArgs, args, prompt, model, effort, resume, resumeId };
 }
 
 /** True when `agent` is one the custom UI knows how to drive. */

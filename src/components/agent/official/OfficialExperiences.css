@@ -864,19 +864,111 @@ strong.agent-activity-history-summary {
 }
 
 .agent-activity-pulse.is-active > span {
-  animation: agent-activity-point 1.2s ease-in-out infinite;
-  animation-delay: calc(var(--pulse-index) * 55ms);
+  animation-duration: var(--pulse-duration);
+  animation-delay: var(--pulse-delay);
+  animation-iteration-count: infinite;
+  animation-fill-mode: both;
 }
 
-@keyframes agent-activity-point {
+.agent-activity-pulse.is-active[data-motion="chase"] > span {
+  animation-name: agent-activity-chase;
+  animation-timing-function: ease-in-out;
+}
+
+.agent-activity-pulse.is-active[data-motion="blink"] > span {
+  animation-name: agent-activity-blink;
+  animation-timing-function: steps(2, jump-none);
+}
+
+.agent-activity-pulse.is-active[data-motion="ripple"] > span {
+  animation-name: agent-activity-ripple;
+  animation-timing-function: cubic-bezier(0.25, 0.8, 0.25, 1);
+}
+
+.agent-activity-pulse.is-active[data-motion="comet"] > span {
+  animation-name: agent-activity-comet;
+  animation-timing-function: ease-out;
+}
+
+.agent-activity-pulse.is-active[data-motion="breathe"] > span {
+  animation-name: agent-activity-breathe;
+  animation-timing-function: ease-in-out;
+}
+
+@keyframes agent-activity-chase {
   0%,
   58%,
   100% {
     opacity: 0.24;
+    transform: scale(0.78);
   }
 
   22% {
     opacity: 0.95;
+    transform: scale(1);
+  }
+}
+
+@keyframes agent-activity-blink {
+  0%,
+  24% {
+    opacity: 0.92;
+    transform: scale(1);
+  }
+
+  25%,
+  100% {
+    opacity: 0.2;
+    transform: scale(0.82);
+  }
+}
+
+@keyframes agent-activity-ripple {
+  0%,
+  100% {
+    opacity: 0.18;
+    transform: scale(0.62);
+  }
+
+  34% {
+    opacity: 0.9;
+    transform: scale(1.14);
+  }
+
+  55% {
+    opacity: 0.42;
+    transform: scale(0.9);
+  }
+}
+
+@keyframes agent-activity-comet {
+  0%,
+  100% {
+    opacity: 0.16;
+    transform: scale(0.72);
+  }
+
+  16% {
+    opacity: 1;
+    transform: scale(1.08);
+  }
+
+  38% {
+    opacity: 0.48;
+    transform: scale(0.92);
+  }
+}
+
+@keyframes agent-activity-breathe {
+  0%,
+  100% {
+    opacity: 0.22;
+    transform: scale(0.76);
+  }
+
+  50% {
+    opacity: 0.82;
+    transform: scale(1.06);
   }
 }
 
@@ -1742,14 +1834,14 @@ button.chatgpt-thinking-row.is-selected {
   padding-inline: 2px 5px;
 }
 
-.grok-answer-layer {
+.official-answer-layer {
   display: flex;
   min-width: 0;
   flex-direction: column;
   gap: 7px;
 }
 
-.grok-answer-divider {
+.official-answer-divider {
   display: flex;
   align-items: center;
   gap: 9px;
@@ -1760,14 +1852,14 @@ button.chatgpt-thinking-row.is-selected {
   text-transform: uppercase;
 }
 
-.grok-answer-divider::after {
+.official-answer-divider::after {
   height: 1px;
   flex: 1;
   content: "";
   background: linear-gradient(to right, rgba(255, 255, 255, 0.1), transparent);
 }
 
-.grok-answer-layer .official-answer {
+.official-answer-layer .official-answer {
   padding-top: 0;
 }
 

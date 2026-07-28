@@ -666,7 +666,7 @@ export function createAcpAdapter(): AgentAdapter {
         ctx.emit({
           type: "notice",
           tone: "error",
-          text: `"${arg}" matches more than one model — give the full provider/model id.`,
+          text: `"${arg}" matches more than one model. Give the full provider/model id.`,
         });
         return "handled";
       }
@@ -845,7 +845,7 @@ export function createAcpAdapter(): AgentAdapter {
       loading = true;
       replayedUser = "";
       ctx.emit({ type: "status", status: "working" });
-      request(ctx, "session/load", { sessionId: id, cwd: ctx.cwd, mcpServers: [] })
+      return request(ctx, "session/load", { sessionId: id, cwd: ctx.cwd, mcpServers: [] })
         .then((result) => {
           sessionId = id;
           flushReplayedUser(ctx);
@@ -855,6 +855,7 @@ export function createAcpAdapter(): AgentAdapter {
           };
           ctx.emit({ type: "session", sessionId: id, ...identity });
           ctx.emit({ type: "turn-end" });
+          return true;
         })
         .catch((error: unknown) => {
           const record = asRecord(error);
@@ -865,11 +866,11 @@ export function createAcpAdapter(): AgentAdapter {
             text: asString(record?.message) ?? "The agent could not load that session.",
           });
           ctx.emit({ type: "turn-end" });
+          return false;
         })
         .finally(() => {
           loading = false;
         });
-      return true;
     },
 
     interrupt: (ctx) => {

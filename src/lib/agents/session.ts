@@ -346,7 +346,7 @@ function emit(session: Session, event: AgentEvent): void {
     const wanted = session.pendingResume;
     session.pendingResume = null;
     notify(session);
-    applyResume(session, wanted.id, wanted.title);
+    void applyResume(session, wanted.id, wanted.title);
     return;
   }
 
@@ -528,6 +528,7 @@ export async function start(
         // the wrapper can strip them before handing the rest to Claude.
         args: [...launch.wrapperArgs, ...definition.headlessArgs, ...adapter.args(launch)],
         cwd,
+        env: Object.keys(launch.env).length ? launch.env : null,
       },
       channel,
     );
@@ -577,7 +578,7 @@ export async function start(
         if (session.state.status === "starting") {
           session.pendingResume = { id: found.id, title: found.title };
         } else {
-          applyResume(session, found.id, found.title);
+          void applyResume(session, found.id, found.title);
         }
       });
     }
@@ -682,18 +683,21 @@ export function configure(
  * Hand a stored conversation to a running agent, in whatever way it accepts
  * one. Emits the transcript marker only once the agent has taken it.
  */
-function applyResume(session: Session, sessionId: string, title: string): void {
-  if (session.adapter.resume?.(sessionId, session.context)) {
-    emit(session, { type: "resumed", sessionId, title });
+async function applyResume(session: Session, sessionId: string, title: string): Promise<void> {
+  const attempt = session.adapter.resume?.(sessionId, session.context);
+  if (attempt === false || attempt === undefined) {
+    // An ACP agent that never advertised `loadSession`, and no CLI flag to fall
+    // back on in its headless mode. Saying so beats a picker that does nothing.
+    emit(session, {
+      type: "notice",
+      tone: "error",
+      text: `${session.state.label} cannot resume a session from the custom UI.`,
+    });
     return;
   }
-  // An ACP agent that never advertised `loadSession`, and no CLI flag to fall
-  // back on in its headless mode. Saying so beats a picker that does nothing.
-  emit(session, {
-    type: "notice",
-    tone: "error",
-    text: `${session.state.label} cannot resume a session from the custom UI.`,
-  });
+  if (await attempt) {
+    emit(session, { type: "resumed", sessionId, title });
+  }
 }
 
 /**
@@ -733,7 +737,7 @@ export async function resume(
       session.pendingResume = { id: sessionId, title };
       return null;
     }
-    applyResume(session, sessionId, title);
+    await applyResume(session, sessionId, title);
     return null;
   }
 

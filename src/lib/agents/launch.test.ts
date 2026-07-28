@@ -142,11 +142,24 @@ describe("parseAgentLaunch", () => {
     expect(parseAgentLaunch("bunx opencode")?.agent).toBe("opencode");
     expect(parseAgentLaunch("pnpm dlx codex")?.agent).toBe("codex");
     expect(parseAgentLaunch("ANTHROPIC_MODEL=opus claude")?.agent).toBe("claude");
+    expect(parseAgentLaunch("ANTHROPIC_MODEL=opus claude")?.env).toEqual({
+      ANTHROPIC_MODEL: "opus",
+    });
+    expect(parseAgentLaunch("env FOO=one BAR=two codex")?.env).toEqual({
+      FOO: "one",
+      BAR: "two",
+    });
+    expect(parseAgentLaunch("sudo claude")).toBeNull();
+    expect(parseAgentLaunch("env -u ANTHROPIC_MODEL claude")).toBeNull();
   });
 
   test("sees through an explicit path and a Windows suffix", () => {
-    expect(parseAgentLaunch(`"C:\\Users\\me\\bin\\claude.cmd"`)?.agent).toBe("claude");
-    expect(parseAgentLaunch("/usr/local/bin/codex")?.agent).toBe("codex");
+    const windows = parseAgentLaunch(`"C:\\Users\\me\\bin\\claude.cmd"`);
+    expect(windows?.agent).toBe("claude");
+    expect(windows?.program).toBe("C:\\Users\\me\\bin\\claude.cmd");
+    const unix = parseAgentLaunch("/usr/local/bin/codex");
+    expect(unix?.agent).toBe("codex");
+    expect(unix?.program).toBe("/usr/local/bin/codex");
   });
 
   test("accepts profile-wrapper names", () => {

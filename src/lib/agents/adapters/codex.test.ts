@@ -9,6 +9,7 @@ import { createCodexAdapter } from "./codex";
 const launch: AgentLaunch = {
   agent: "codex",
   program: "codex",
+  env: {},
   wrapperArgs: [],
   args: [],
   prompt: null,
@@ -508,7 +509,7 @@ describe("codex adapter", () => {
     await h.handshake();
     const before = h.sent.length;
 
-    expect(h.adapter.resume?.("thread_old", h.ctx)).toBe(true);
+    const resumed = h.adapter.resume?.("thread_old", h.ctx);
     const call = h.sent.slice(before).find((message) => message.method === "thread/resume");
     expect(call?.params).toEqual({ threadId: "thread_old" });
 
@@ -519,6 +520,7 @@ describe("codex adapter", () => {
     });
     await Promise.resolve();
     await Promise.resolve();
+    expect(await resumed).toBe(true);
     expect(h.state()).toMatchObject({ sessionId: "sess_old", model: "gpt-5.6", status: "idle" });
 
     // Later turns must run against the thread that was resumed.
@@ -532,11 +534,12 @@ describe("codex adapter", () => {
   test("says so when a thread cannot be resumed", async () => {
     const h = harness();
     await h.handshake();
-    h.adapter.resume?.("gone", h.ctx);
+    const resumed = h.adapter.resume?.("gone", h.ctx);
     const call = h.sent.find((message) => message.method === "thread/resume") as { id: number };
     h.feed({ jsonrpc: "2.0", id: call.id, error: { message: "thread not found" } });
     await Promise.resolve();
     await Promise.resolve();
+    expect(await resumed).toBe(false);
     expect(h.state().items.at(-1)).toMatchObject({
       kind: "notice",
       tone: "error",

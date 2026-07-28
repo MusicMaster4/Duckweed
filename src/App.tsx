@@ -308,7 +308,7 @@ export default function App() {
     );
   }, []);
 
-  /** Active leaf of the active tab — used for the completion sound (works unfocused). */
+  /** Active leaf of the active tab. */
   const isSelectedTerm = useCallback((termId: string): boolean => {
     const tab = tabsRef.current.find((candidate) =>
       leaves(candidate.root).some((node) => node.term === termId),
@@ -407,11 +407,11 @@ export default function App() {
       if (!previous) return;
 
       if (!shouldSignalCompletion(previous, current)) return;
-      // Sound on the selected pane even when the window is in the background —
-      // that is when a long-job cue is most useful. Still quiet for other panes.
+      // Every eligible completion gets one cue. The shared audio player
+      // coalesces simultaneous finishes, so several agents returning together
+      // do not stack copies of the effect.
       if (
         completionSoundEnabledRef.current &&
-        isSelectedTerm(termId) &&
         shouldPlayCompletionSound(previous, current)
       ) {
         playCompletionSound();

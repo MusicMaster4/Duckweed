@@ -22,6 +22,10 @@ export function ClaudeExperience({
   cwd,
 }: ExperienceProps) {
   const groups = useMemo(() => activityGroups(items), [items]);
+  const answerIds = useMemo(
+    () => new Set(groups.flatMap((group) => (group.answerId ? [group.answerId] : []))),
+    [groups],
+  );
   const continuedIds = useMemo(() => continuedAssistantIds(items), [items]);
   const liveAssistantId = useMemo(
     () => activeAssistantId(items, status === "working"),
@@ -84,6 +88,20 @@ export function ClaudeExperience({
           }
           if (item.kind === "plan") {
             return <PlanTracker key={item.id} item={item} variant="claude" />;
+          }
+          if (
+            item.kind === "assistant" &&
+            answerIds.has(item.id) &&
+            status !== "working"
+          ) {
+            return (
+              <div className="official-answer-layer" key={item.id}>
+                <div className="official-answer-divider" aria-hidden="true">
+                  <span>Answer</span>
+                </div>
+                <MessageItem item={item} variant="claude" />
+              </div>
+            );
           }
           return (
             <MessageItem

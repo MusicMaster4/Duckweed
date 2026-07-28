@@ -44,11 +44,12 @@ export interface AgentAdapter {
    * Continue a past conversation, in-protocol.
    *
    * Codex (`thread/resume`) and ACP agents that advertise `loadSession`
-   * (`session/load`) can swap conversations without restarting; returning
-   * `false` — or leaving this out, as Claude does — tells the session store to
-   * relaunch the CLI with its resume flag instead.
+   * (`session/load`) can swap conversations without restarting. A fulfilled
+   * promise reports whether the protocol accepted the requested session.
+   * Returning `false`, or leaving this out as Claude does, means the running
+   * adapter cannot resume through its protocol.
    */
-  resume?: (sessionId: string, ctx: AdapterContext) => boolean;
+  resume?: (sessionId: string, ctx: AdapterContext) => Promise<boolean> | false;
   /** The user asked the current turn to stop. */
   interrupt: (ctx: AdapterContext) => void;
   /** The user answered a permission prompt. */

@@ -690,7 +690,8 @@ export function createCodexAdapter(): AgentAdapter {
      * which is why the UI shows a resumed marker rather than a transcript.
      */
     resume: (sessionId, ctx) => {
-      void request(ctx, "thread/resume", { threadId: sessionId })
+      ctx.emit({ type: "status", status: "working" });
+      return request(ctx, "thread/resume", { threadId: sessionId })
         .then((result) => {
           const thread = asRecord(result.thread) ?? result;
           threadId = asString(thread.id) ?? sessionId;
@@ -704,6 +705,7 @@ export function createCodexAdapter(): AgentAdapter {
             ...(model ? { model } : {}),
           });
           ctx.emit({ type: "status", status: "idle" });
+          return true;
         })
         .catch((error: unknown) => {
           const record = asRecord(error);
@@ -713,8 +715,8 @@ export function createCodexAdapter(): AgentAdapter {
             text: asString(record?.message) ?? "Codex could not resume that thread.",
           });
           ctx.emit({ type: "status", status: "idle" });
+          return false;
         });
-      return true;
     },
 
     interrupt: (ctx) => {

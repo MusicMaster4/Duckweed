@@ -434,6 +434,50 @@ describe("official agent presentation", () => {
     expect(html).not.toContain("grok-answer-layer");
   });
 
+  for (const agent of ["codex", "claude", "grok"] as const) {
+    test(`${agent} gives a completed answer the shared hairline`, () => {
+      const session = activitySession(agent, [
+        { kind: "user", id: "u1", at: 1, text: "Inspect" },
+        {
+          kind: "tool",
+          id: "tool-1",
+          at: 2,
+          callId: "call-1",
+          name: "Read",
+          tool: "read",
+          title: "Read package metadata",
+          status: "done",
+          command: null,
+          output: "",
+          changes: [],
+        },
+        { kind: "assistant", id: "answer-1", at: 3, text: "Done.", streaming: false },
+      ]);
+      session.status = "idle";
+      const props = {
+        items: session.items,
+        termId: session.termId,
+        agent,
+        status: session.status,
+        started: session.started,
+        label: session.label,
+        mark: session.mark,
+        program: session.program,
+        cwd: session.cwd,
+      };
+      const html =
+        agent === "codex"
+          ? renderToStaticMarkup(<ChatGPTExperience {...props} />)
+          : agent === "claude"
+            ? renderToStaticMarkup(<ClaudeExperience {...props} />)
+            : renderToStaticMarkup(<GrokExperience {...props} />);
+
+      expect(html).toContain("official-answer-layer");
+      expect(html).toContain("official-answer-divider");
+      expect(html).toContain(">Answer<");
+    });
+  }
+
   test("uses provider artwork instead of the old letter badge", () => {
     const html = renderToStaticMarkup(<AgentProviderIcon agent="codex" />);
     expect(html).toContain("<svg");

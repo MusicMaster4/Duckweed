@@ -9,6 +9,7 @@ import { createClaudeAdapter } from "./claude";
 const launch: AgentLaunch = {
   agent: "claude",
   program: "claude",
+  env: {},
   wrapperArgs: [],
   args: [],
   prompt: null,

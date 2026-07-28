@@ -9,6 +9,7 @@ import { createAcpAdapter } from "./acp";
 const launch: AgentLaunch = {
   agent: "grok",
   program: "grok",
+  env: {},
   wrapperArgs: [],
   args: [],
   prompt: null,
@@ -652,7 +653,7 @@ describe("acp adapter", () => {
     const h = harness();
     await h.handshake({ agentCapabilities: { loadSession: true } });
 
-    expect(h.adapter.resume?.("old-1", h.ctx)).toBe(true);
+    const resumed = h.adapter.resume?.("old-1", h.ctx);
     const load = h.sent.find((message) => message.method === "session/load");
     expect(load?.params).toMatchObject({ sessionId: "old-1", cwd: "H:/project" });
 
@@ -663,6 +664,7 @@ describe("acp adapter", () => {
     h.feed({ jsonrpc: "2.0", id: 3, result: {} });
     await Promise.resolve();
     await Promise.resolve();
+    expect(await resumed).toBe(true);
 
     const items = h.state().items;
     // Chunks of one past prompt collapse into a single transcript row.
@@ -683,10 +685,11 @@ describe("acp adapter", () => {
   test("reports a load the agent rejected instead of leaving the pane blank", async () => {
     const h = harness();
     await h.handshake({ agentCapabilities: { loadSession: true } });
-    h.adapter.resume?.("gone", h.ctx);
+    const resumed = h.adapter.resume?.("gone", h.ctx);
     h.feed({ jsonrpc: "2.0", id: 3, error: { code: -32602, message: "no such session" } });
     await Promise.resolve();
     await Promise.resolve();
+    expect(await resumed).toBe(false);
     expect(h.state().items.at(-1)).toMatchObject({ kind: "notice", tone: "error", text: "no such session" });
     expect(h.state().status).toBe("idle");
   });
