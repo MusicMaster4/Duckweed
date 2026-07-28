@@ -7335,7 +7335,7 @@ body.is-resizing * {
 
 .agent-composer-row {
   display: flex;
-  align-items: flex-end;
+  align-items: center;
   gap: 8px;
   padding: 5px 9px 2px;
 }

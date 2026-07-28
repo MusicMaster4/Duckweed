@@ -149,10 +149,15 @@ export const TerminalPane = memo(function TerminalPane({
   const busy = meta?.busy ?? false;
   const agentUi = meta?.agentUi ?? null;
   const effectiveRaw = inputMode === "raw" || busy || !!meta?.exited;
+  const terminalEditorMode = !effectiveRaw && !agentUi;
 
-  useEffect(() => {
-    terminals.setEditorMode(node.term, !effectiveRaw);
-  }, [node.term, effectiveRaw]);
+  // Agent surfaces cover the xterm grid, but command-block separators have a
+  // higher local z-index than that surface. Disable the terminal's editor
+  // chrome before paint so stale shell hairlines cannot leak through the
+  // agent transcript. Closing the agent restores it for an idle shell.
+  useLayoutEffect(() => {
+    terminals.setEditorMode(node.term, terminalEditorMode);
+  }, [node.term, terminalEditorMode]);
 
   // Hand keyboard to the grid while a child is running; reclaim the editor
   // after. An agent surface has its own composer and focuses itself.

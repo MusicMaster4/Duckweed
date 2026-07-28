@@ -69,8 +69,7 @@ session files those tools already keep.
 **[Download the latest stable release](https://github.com/MusicMaster4/Duckweed/releases/latest)**
 
 This is the normal install and the recommended choice. The link is permanent:
-GitHub always sends it to the newest stable Duckweed release. The first stable
-release is being prepared, so the page may be empty until it is published.
+GitHub always sends it to the newest stable Duckweed release.
 
 ### Beta
 
@@ -112,9 +111,16 @@ later updates can be installed from the version chip in the status bar or from
   highlight paths, URLs, flags, hashes, diffs, warnings, and errors.
 - **Shell discovery.** Duckweed finds PowerShell, `cmd`, Git Bash, WSL, Nushell,
   Bash, Zsh, and Fish when they are installed.
-- **Workspace tools.** Keep a persistent checklist for each tab, browse project
-  files, and arm a power watch that sleeps or shuts down the machine after all
-  panes finish.
+- **Workspace tools.** A dockable panel (`Ctrl+Shift+X`) with a project file
+  browser, saved pane layouts, a persistent per-tab checklist, session
+  statistics, a listening-port list with copy, forward, and close actions, and a
+  power watch that sleeps or shuts down the machine after all panes finish.
+- **Explorer integration.** Per-user context-menu entries open a folder in a new
+  Duckweed tab or window straight from Windows Explorer, without administrator
+  rights. Both entries can be toggled in the settings.
+- **Completion signals.** Finished agent turns and commands can play a
+  completion sound, highlight the pane, and outline the taskbar icon so you
+  notice from another window.
 - **Local persistence.** Pane arrangements come back after a restart without
   pretending the old processes are still alive.
 
@@ -189,6 +195,7 @@ not invent limits for agents that do not expose them.
 | `Ctrl+Shift+O` | Open a project |
 | `Ctrl+Shift+P` | Open the command palette |
 | `Ctrl+Shift+G` | Review uncommitted changes |
+| `Ctrl+Shift+X` | Toggle the workspace tools panel |
 | `Ctrl+Shift+F` | Search terminal output |
 | `Ctrl+Shift+K` | Clear the focused pane |
 | `Ctrl+Shift+H` | Toggle output highlighting |
@@ -224,16 +231,28 @@ not recreate its process or scrollback.
 
 ```text
 src/
-├── components/       workspace UI, settings, palette, search, diffs, updates
-├── hooks/            drag-and-drop behavior and update checks
-└── lib/              layouts, terminal registry, persistence, IPC, highlighting
+├── components/       workspace UI, agent interfaces, settings, palette, search,
+│                     diffs, tools panel, updates
+├── hooks/            drag-and-drop behavior, Git change polling, update checks
+└── lib/              layouts, terminal registry, agent adapters, persistence,
+                      IPC, highlighting
 
 src-tauri/src/
-├── main.rs           Tauri commands and IPC
-├── pty.rs            one PTY session per pane
-├── shells.rs         installed-shell discovery
-├── project.rs        project and Git branch detection
-└── usage/            local agent transcript and quota readers
+├── main.rs                Tauri commands and IPC
+├── pty.rs                 one PTY session per pane
+├── shells.rs              installed-shell discovery
+├── project.rs             project and Git branch detection
+├── git.rs                 diff and change collection
+├── launch.rs              coding agent launch detection
+├── agent_proc.rs          agent process supervision
+├── agent_sessions.rs      agent session storage
+├── agent_activity.rs      agent turn and activity tracking
+├── ports.rs               listening-port discovery and forwarding
+├── watch.rs / power.rs    power watch and sleep or shutdown actions
+├── process_tree.rs        pane process inspection
+├── fs.rs                  project file browsing
+├── shell_integration.rs   Windows Explorer context-menu entries
+└── usage/                 local agent transcript and quota readers
 ```
 
 The PTY stream is transported as base64 and decoded incrementally, which keeps
@@ -254,8 +273,9 @@ setup is documented in [docs/releases.md](docs/releases.md).
 ## Current scope
 
 Duckweed is an active project. Projects, tabs, panes, real shells, custom coding
-agent interfaces, search, Git diffs, local usage analytics, checklists, power
-watch, updates, and layout persistence are implemented.
+agent interfaces, search, Git diffs, local usage analytics, workspace tools
+(files, saved layouts, checklists, statistics, ports, power watch), completion
+signals, Explorer integration, updates, and layout persistence are implemented.
 
 Command blocks currently group commands submitted through Duckweed's composer.
 Grouping raw-mode input the same way still needs OSC 133 shell integration.
