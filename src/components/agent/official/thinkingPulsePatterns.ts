@@ -42,6 +42,62 @@ function invertSteps(steps: readonly number[]): number[] {
   return steps.map((step) => maximum - step);
 }
 
+/** Rotate a row-major 3 by 3 timing grid 90 degrees clockwise. */
+function rotateStepsClockwise(steps: readonly number[]): number[] {
+  const rotated = Array.from({ length: 9 }, () => 0);
+
+  for (let source = 0; source < steps.length; source += 1) {
+    const row = Math.floor(source / 3);
+    const column = source % 3;
+    const targetRow = column;
+    const targetColumn = 2 - row;
+    rotated[targetRow * 3 + targetColumn] = steps[source]!;
+  }
+
+  return rotated;
+}
+
+function patternSignature(pattern: ThinkingPulsePattern): string {
+  return JSON.stringify([
+    pattern.steps,
+    pattern.motion,
+    pattern.durationMs,
+    pattern.stepMs,
+  ]);
+}
+
+/**
+ * Add every clockwise quarter-turn wherever it creates a genuinely different
+ * animation. Symmetric rotations and rotations already represented in the
+ * pool are skipped.
+ */
+function withRotatedVariants(
+  patterns: readonly ThinkingPulsePattern[],
+): ThinkingPulsePattern[] {
+  const signatures = new Set(patterns.map(patternSignature));
+  const rotatedPatterns: ThinkingPulsePattern[] = [];
+
+  for (const pattern of patterns) {
+    let steps = pattern.steps;
+
+    for (const angle of [90, 180, 270] as const) {
+      steps = rotateStepsClockwise(steps);
+      const rotatedPattern: ThinkingPulsePattern = {
+        ...pattern,
+        id: `${pattern.id}-rotated-${angle}`,
+        steps,
+      };
+      const signature = patternSignature(rotatedPattern);
+
+      if (signatures.has(signature)) continue;
+      signatures.add(signature);
+      rotatedPatterns.push(rotatedPattern);
+    }
+  }
+
+  return [...patterns, ...rotatedPatterns];
+}
+
 const PATHS: ReadonlyArray<readonly [string, readonly number[]]> = [
   ["rows", [0, 1, 2, 3, 4, 5, 6, 7, 8]],
   ["row-snake", [0, 1, 2, 5, 4, 3, 6, 7, 8]],
@@ -186,7 +242,7 @@ const MOTIONS: readonly ThinkingPulseMotion[] = [
  * pattern's timing signature unique for any pool this side of that bound.
  * Accents carry their own motion and differ from everything else by steps.
  */
-export const THINKING_PULSE_PATTERNS: readonly ThinkingPulsePattern[] = [
+const ORIGINAL_PULSE_PATTERNS: readonly ThinkingPulsePattern[] = [
   ...BASE_PATTERNS.flatMap((base, index) => {
     const durationMs = 880 + (index % 7) * 105;
     const stepMs = 42 + (index % 6) * 13;
@@ -215,6 +271,14 @@ export const THINKING_PULSE_PATTERNS: readonly ThinkingPulsePattern[] = [
     stepMs: 48 + (index % 5) * 16,
   })),
 ];
+
+/**
+ * The authored pool plus every distinct 90, 180, and 270 degree variant.
+ * Rotating the timing grid keeps all cell motions and masks valid while
+ * giving directional paths and waves every possible orientation.
+ */
+export const THINKING_PULSE_PATTERNS: readonly ThinkingPulsePattern[] =
+  withRotatedVariants(ORIGINAL_PULSE_PATTERNS);
 
 const pickPattern = createCooldownPicker(
   THINKING_PULSE_PATTERNS,

@@ -413,6 +413,28 @@ button.chip:hover {
   opacity: 1;
 }
 
+.tab-completion-review {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow: inset 0 0 0 2px var(--rose);
+  pointer-events: none;
+  z-index: 2;
+  opacity: 0;
+  animation: tab-completion-review 1500ms linear both;
+}
+
+@keyframes tab-completion-review {
+  0%,
+  66.667% {
+    opacity: 1;
+  }
+
+  100% {
+    opacity: 0;
+  }
+}
+
 /* While a tab is being dragged the whole window is in that gesture: no text
    selection anywhere, and the cursor says so wherever it goes. */
 body.is-dragging-tab {

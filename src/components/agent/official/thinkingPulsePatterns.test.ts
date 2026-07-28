@@ -3,8 +3,73 @@ import { describe, expect, test } from "bun:test";
 import { THINKING_PULSE_PATTERNS } from "./thinkingPulsePatterns";
 
 describe("thinking pulse patterns", () => {
-  test("the pool holds every path and wave in both directions plus accents", () => {
-    expect(THINKING_PULSE_PATTERNS).toHaveLength(163);
+  test("the pool includes every distinct quarter-turn orientation", () => {
+    const rotatedSuffix = /-rotated-(90|180|270)$/;
+    const originals = THINKING_PULSE_PATTERNS.filter(
+      (pattern) => !rotatedSuffix.test(pattern.id),
+    );
+    const rotations = THINKING_PULSE_PATTERNS.filter((pattern) =>
+      rotatedSuffix.test(pattern.id),
+    );
+
+    expect(originals).toHaveLength(163);
+    expect(rotations).toHaveLength(399);
+    expect(THINKING_PULSE_PATTERNS).toHaveLength(562);
+    expect(
+      rotations.filter((pattern) => pattern.id.endsWith("-rotated-90")),
+    ).toHaveLength(145);
+    expect(
+      rotations.filter((pattern) => pattern.id.endsWith("-rotated-180")),
+    ).toHaveLength(127);
+    expect(
+      rotations.filter((pattern) => pattern.id.endsWith("-rotated-270")),
+    ).toHaveLength(127);
+
+    const rotateClockwise = (steps: readonly number[]) =>
+      steps.map((_, target) => {
+        const targetRow = Math.floor(target / 3);
+        const targetColumn = target % 3;
+        const sourceRow = 2 - targetColumn;
+        const sourceColumn = targetRow;
+        return steps[sourceRow * 3 + sourceColumn]!;
+      });
+    const signature = (pattern: (typeof THINKING_PULSE_PATTERNS)[number]) =>
+      JSON.stringify([
+        pattern.steps,
+        pattern.motion,
+        pattern.durationMs,
+        pattern.stepMs,
+      ]);
+    const expectedSignatures = new Set(originals.map(signature));
+
+    for (const original of originals) {
+      let steps = original.steps;
+      for (const angle of [90, 180, 270] as const) {
+        steps = rotateClockwise(steps);
+        expectedSignatures.add(signature({ ...original, steps }));
+      }
+    }
+
+    expect(new Set(THINKING_PULSE_PATTERNS.map(signature))).toEqual(
+      expectedSignatures,
+    );
+
+    const originalsById = new Map(
+      originals.map((pattern) => [pattern.id, pattern]),
+    );
+    for (const rotation of rotations) {
+      const match = rotation.id.match(rotatedSuffix)!;
+      const angle = Number(match[1]);
+      const sourceId = rotation.id.replace(rotatedSuffix, "");
+      const original = originalsById.get(sourceId)!;
+      let steps = original.steps;
+
+      for (let turn = 0; turn < angle / 90; turn += 1) {
+        steps = rotateClockwise(steps);
+      }
+
+      expect(rotation).toEqual({ ...original, id: rotation.id, steps });
+    }
   });
 
   test("no two patterns are the same animation", () => {

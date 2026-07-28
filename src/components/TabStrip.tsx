@@ -35,6 +35,8 @@ interface Props {
   activeTabId: string;
   paneCounts: Record<string, number>;
   unreadCounts: Record<string, number>;
+  /** One-shot review outline keyed by the tab that owns the completed pane. */
+  completionReviewFlashes: Record<string, number>;
   /** When false, hide completion outlines (tracking still runs in the app). */
   completionHighlights: boolean;
   drag: DragState | null;
@@ -125,6 +127,7 @@ export function TabStrip({
   activeTabId,
   paneCounts,
   unreadCounts,
+  completionReviewFlashes,
   completionHighlights,
   drag,
   projects,
@@ -390,6 +393,7 @@ export function TabStrip({
           const count = paneCounts[tab.id] ?? 0;
           const unread = unreadCounts[tab.id] ?? 0;
           const showUnread = completionHighlights && unread > 0;
+          const reviewFlashKey = completionHighlights ? completionReviewFlashes[tab.id] : undefined;
           const isActive = tab.id === activeTabId && !settingsActive;
           const accent = tabColorHex(tab.color);
           return (
@@ -448,6 +452,13 @@ export function TabStrip({
                 setContext({ tabId: tab.id, x: e.clientX, y: e.clientY });
               }}
             >
+              {reviewFlashKey !== undefined && (
+                <span
+                  key={reviewFlashKey}
+                  className="tab-completion-review"
+                  aria-hidden="true"
+                />
+              )}
               {editing === tab.id ? (
                 <input
                   className="tab-rename"

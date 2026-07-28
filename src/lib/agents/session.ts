@@ -71,6 +71,11 @@ interface Session {
   draft: string;
   draftImages: AgentImageAttachment[];
   /**
+   * Prompts submitted in this pane only (oldest first). Used by ↑/↓ history
+   * in the custom agent composer — same idea as the shell's per-pane history.
+   */
+  promptHistory: string[];
+  /**
    * A conversation to pick up as soon as the handshake finishes. Resuming
    * before the agent is ready would be answered with "no session", and the
    * user may have asked for it (`--continue`) before there was a protocol to
@@ -233,6 +238,29 @@ export function getDraftImages(termId: string): AgentImageAttachment[] {
 export function setDraftImages(termId: string, images: AgentImageAttachment[]): void {
   const session = sessions.get(termId);
   if (session) session.draftImages = [...images];
+}
+
+/** Max prompts kept for per-pane ↑/↓ history in the agent composer. */
+const MAX_PROMPT_HISTORY = 200;
+
+/**
+ * Record a submitted prompt for ↑/↓ navigation. Consecutive duplicates collapse
+ * to a single newest entry (shell-style). Empty/whitespace-only is ignored.
+ */
+function recordPromptHistory(session: Session, text: string): void {
+  const trimmed = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").trimEnd();
+  if (!trimmed.trim()) return;
+  const last = session.promptHistory[session.promptHistory.length - 1];
+  if (last === trimmed) return;
+  session.promptHistory = [...session.promptHistory, trimmed].slice(-MAX_PROMPT_HISTORY);
+}
+
+/**
+ * Prompts submitted in this agent pane, oldest first — for ↑/↓ history.
+ * Distinct from the follow-up queue and from the transcript items.
+ */
+export function localPromptHistory(termId: string): readonly string[] {
+  return sessions.get(termId)?.promptHistory ?? [];
 }
 
 function announce(termId: string): void {
@@ -537,6 +565,7 @@ export async function start(
     queued: [],
     draft: "",
     draftImages: [],
+    promptHistory: [],
     pendingResume: null,
     notifyHandle: null,
     interrupted: false,
@@ -736,6 +765,8 @@ export function submit(
   session.draft = "";
   session.draftImages = [];
   if (session.state.status === "exited" || session.state.status === "error") return;
+  // Record before usage/queue/steer paths so ↑ can recall it like a shell command.
+  recordPromptHistory(session, trimmed);
   if (images.length === 0 && /^\/usage$/i.test(trimmed)) {
     emit(session, {
       type: "notice",

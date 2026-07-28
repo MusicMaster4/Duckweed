@@ -127,6 +127,15 @@ export function AgentComposer({ session, active, inputRef, onSubmit, onInterrupt
   const imagesRef = useRef(images);
   /** Draft wiped by Ctrl+C — restored by the next Ctrl+Z while the box stays empty. */
   const undoClearRef = useRef<string | null>(null);
+  /**
+   * Index into this pane's submitted prompt history while ↑/↓ browsing.
+   * null means not in history walk (queue pulls use {@link historyDraftRef} alone).
+   */
+  const [historyIndex, setHistoryIndex] = useState<number | null>(null);
+  /** Composer text + images saved when the first ↑ leaves the live draft. */
+  const historyDraftRef = useRef<{ text: string; images: AgentImageAttachment[] } | null>(
+    null,
+  );
   const [highlighted, setHighlighted] = useState(0);
   const [cursor, setCursor] = useState(value.length);
   const [fileRows, setFileRows] = useState<MenuRow[]>([]);
@@ -146,11 +155,40 @@ export function AgentComposer({ session, active, inputRef, onSubmit, onInterrupt
       : commandMenu;
   const rows = menu?.rows ?? [];
 
+  const leaveHistoryBrowse = () => {
+    setHistoryIndex(null);
+    historyDraftRef.current = null;
+  };
+
   const change = (text: string, nextCursor?: number) => {
     setValue(text);
     setCursor(nextCursor ?? Math.min(cursor, text.length));
     setDismissedMention(null);
     agents.setDraft(session.termId, text);
+  };
+
+  const applyHistoryEntry = (text: string, nextImages: AgentImageAttachment[] = []) => {
+    change(text, text.length);
+    replaceImages(nextImages);
+    placeCursor(text.length);
+  };
+
+  const rememberHistoryDraft = () => {
+    if (historyDraftRef.current !== null || historyIndex !== null) return;
+    historyDraftRef.current = {
+      text: value,
+      images: [...imagesRef.current],
+    };
+  };
+
+  const restoreHistoryDraft = () => {
+    const draft = historyDraftRef.current;
+    leaveHistoryBrowse();
+    if (!draft) {
+      applyHistoryEntry("");
+      return;
+    }
+    applyHistoryEntry(draft.text, draft.images);
   };
 
   const placeCursor = (position: number) => {
@@ -190,6 +228,7 @@ export function AgentComposer({ session, active, inputRef, onSubmit, onInterrupt
     } else {
       setAttachmentError(null);
     }
+    leaveHistoryBrowse();
     replaceImages((current) => [...current, ...added.slice(0, room)]);
     ref.current?.focus();
   };
@@ -200,6 +239,7 @@ export function AgentComposer({ session, active, inputRef, onSubmit, onInterrupt
     const start = node?.selectionStart ?? current.length;
     const end = node?.selectionEnd ?? current.length;
     const next = insertComposerText(current, start, end, text);
+    leaveHistoryBrowse();
     change(next.value, next.cursor);
     placeCursor(next.cursor);
   };
@@ -208,6 +248,7 @@ export function AgentComposer({ session, active, inputRef, onSubmit, onInterrupt
     if (!text.trim() && imagesRef.current.length === 0) return;
     onSubmit(text, imagesRef.current, delivery);
     undoClearRef.current = null;
+    leaveHistoryBrowse();
     setValue("");
     setCursor(0);
     imagesRef.current = [];
@@ -266,6 +307,7 @@ export function AgentComposer({ session, active, inputRef, onSubmit, onInterrupt
       if (ended) return;
       const node = ref.current;
       const current = agents.getDraft(session.termId);
+      leaveHistoryBrowse();
       if (!node) {
         change(current + text);
         return;
@@ -361,6 +403,12 @@ export function AgentComposer({ session, active, inputRef, onSubmit, onInterrupt
     if (active && !ended) ref.current?.focus();
   }, [active, ended]);
 
+  // Pane swap reuses this component only via key=termId usually; still reseed
+  // browse state if termId changes without an unmount.
+  useEffect(() => {
+    leaveHistoryBrowse();
+  }, [session.termId]);
+
   useEffect(() => {
     setHighlighted(0);
   }, [menu?.kind, value]);
@@ -413,24 +461,80 @@ export function AgentComposer({ session, active, inputRef, onSubmit, onInterrupt
       return;
     }
 
+    // ↑/↓ prompt history (shell-style). Queued follow-ups come first; further
+    // ups walk this pane's submitted prompts. Multi-line buffers only start
+    // the walk from the first line (cursor at 0), so mid-message arrows move
+    // the caret like a normal textarea.
     if (
-      event.key === "ArrowUp" &&
       rows.length === 0 &&
-      !value &&
-      imagesRef.current.length === 0 &&
+      (event.key === "ArrowUp" || event.key === "ArrowDown") &&
       !event.altKey &&
       !event.ctrlKey &&
       !event.metaKey &&
       !event.shiftKey
     ) {
-      const queued = agents.editLastQueued(session.termId);
-      if (queued) {
+      const el = event.currentTarget;
+      const multiLine = value.includes("\n");
+      if (
+        multiLine &&
+        (el.selectionStart !== 0 || el.selectionEnd !== 0) &&
+        event.key === "ArrowUp"
+      ) {
+        // Let the caret move within the draft.
+      } else if (
+        multiLine &&
+        event.key === "ArrowDown" &&
+        historyIndex === null &&
+        historyDraftRef.current === null
+      ) {
+        // Not browsing — keep native line movement.
+      } else if (event.key === "ArrowUp") {
+        if (historyIndex === null) {
+          // Prefer the newest waiting follow-up before submitted history.
+          const queued = agents.editLastQueued(session.termId);
+          if (queued) {
+            event.preventDefault();
+            rememberHistoryDraft();
+            applyHistoryEntry(queued.text, queued.images);
+            return;
+          }
+        }
+        const hist = agents.localPromptHistory(session.termId);
+        if (hist.length === 0) {
+          if (historyDraftRef.current !== null && historyIndex === null) {
+            // Still "browsing" after a queue pull with no history — stay put.
+            event.preventDefault();
+          }
+          return;
+        }
         event.preventDefault();
-        change(queued.text, queued.text.length);
-        replaceImages(queued.images);
-        placeCursor(queued.text.length);
+        rememberHistoryDraft();
+        const next =
+          historyIndex === null ? hist.length - 1 : Math.max(0, historyIndex - 1);
+        setHistoryIndex(next);
+        applyHistoryEntry(hist[next] ?? "");
+        return;
+      } else {
+        // ArrowDown
+        if (historyIndex !== null) {
+          event.preventDefault();
+          const hist = agents.localPromptHistory(session.termId);
+          if (historyIndex >= hist.length - 1) {
+            restoreHistoryDraft();
+            return;
+          }
+          const next = historyIndex + 1;
+          setHistoryIndex(next);
+          applyHistoryEntry(hist[next] ?? "");
+          return;
+        }
+        if (historyDraftRef.current !== null) {
+          // Pulled a queued prompt (or left history) — next ↓ restores draft.
+          event.preventDefault();
+          restoreHistoryDraft();
+          return;
+        }
       }
-      return;
     }
 
     if (
@@ -482,6 +586,7 @@ export function AgentComposer({ session, active, inputRef, onSubmit, onInterrupt
       if (value.length > 0) {
         event.preventDefault();
         undoClearRef.current = value;
+        leaveHistoryBrowse();
         change("");
         placeCursor(0);
         return;
@@ -656,6 +761,8 @@ export function AgentComposer({ session, active, inputRef, onSubmit, onInterrupt
           onChange={(event) => {
             // Typing after a Ctrl+C clear discards that one-shot undo.
             if (undoClearRef.current !== null) undoClearRef.current = null;
+            // Manual edits leave history browse; the buffer is the new draft.
+            leaveHistoryBrowse();
             change(event.target.value, event.target.selectionStart);
           }}
           onClick={(event) => setCursor(event.currentTarget.selectionStart)}

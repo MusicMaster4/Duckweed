@@ -449,9 +449,7 @@ export default function App() {
     [isSelectedTerm],
   );
 
-  // Window focus only dismisses the taskbar badge. It must not acknowledge the
-  // selected pane: the pointer-down that restored the window may target a
-  // different pane, and one interaction must never review two completions.
+  // Window focus dismisses the taskbar badge immediately.
   useEffect(() => {
     window.addEventListener("focus", syncTaskbarCompletionBadge);
     window.addEventListener("blur", syncTaskbarCompletionBadge);
@@ -461,6 +459,45 @@ export default function App() {
       setCompletionTaskbarBadge(false);
     };
   }, [syncTaskbarCompletionBadge]);
+
+  const reviewSelectedCompletion = useCallback(() => {
+    if (settingsActiveRef.current) return;
+    const tab = currentTab();
+    const term = tab ? (findLeaf(tab.root, tab.activeLeaf)?.term ?? null) : null;
+    if (!shouldFlashCompletionReview(unreadTermIdsRef.current, term, true)) return;
+    if (completionHighlightsRef.current && term) flashCompletion(term, "review");
+    if (term) acknowledgeTerm(term);
+  }, [acknowledgeTerm, currentTab, flashCompletion]);
+
+  useEffect(() => {
+    let reviewTimer: number | null = null;
+
+    const cancelPendingReview = () => {
+      if (reviewTimer === null) return;
+      window.clearTimeout(reviewTimer);
+      reviewTimer = null;
+    };
+    const onFocus = () => {
+      cancelPendingReview();
+      // A taskbar or keyboard restore has no pointer event in the document.
+      // Defer one tick so a click directly into the window can cancel this and
+      // let the pane under the pointer be the only completion that is reviewed.
+      reviewTimer = window.setTimeout(() => {
+        reviewTimer = null;
+        reviewSelectedCompletion();
+      }, 0);
+    };
+
+    window.addEventListener("focus", onFocus);
+    window.addEventListener("blur", cancelPendingReview);
+    window.addEventListener("pointerdown", cancelPendingReview, true);
+    return () => {
+      cancelPendingReview();
+      window.removeEventListener("focus", onFocus);
+      window.removeEventListener("blur", cancelPendingReview);
+      window.removeEventListener("pointerdown", cancelPendingReview, true);
+    };
+  }, [reviewSelectedCompletion]);
 
   useEffect(() => {
     syncTaskbarCompletionBadge();
@@ -2212,6 +2249,19 @@ export default function App() {
       ),
     [tabs, unreadTermIds],
   );
+  const completionReviewFlashes = useMemo(
+    () =>
+      Object.fromEntries(
+        tabs.flatMap((tab) => {
+          const flash = leaves(tab.root)
+            .map((node) => completionFlashes.get(node.term))
+            .filter((candidate): candidate is CompletionFlash => candidate?.kind === "review")
+            .sort((a, b) => b.key - a.key)[0];
+          return flash ? [[tab.id, flash.key]] : [];
+        }),
+      ),
+    [completionFlashes, tabs],
+  );
 
   const browseActiveProject = useCallback(() => {
     const tab = currentTab();
@@ -2356,6 +2406,7 @@ export default function App() {
           activeTabId={activeTabId}
           paneCounts={paneCounts}
           unreadCounts={unreadCounts}
+          completionReviewFlashes={completionReviewFlashes}
           completionHighlights={completionHighlights}
           drag={drag}
           projects={tabProjects}
