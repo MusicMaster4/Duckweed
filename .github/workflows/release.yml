@@ -91,17 +91,19 @@ jobs:
         with:
           fetch-depth: 0 # every tag, to find the latest release of each channel
 
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: latest
 
       - name: Resolve the next version
         id: calc
+        env:
+          BUMP: ${{ inputs.bump }}
+          PUBLISH: ${{ inputs.publish }}
         run: |
           set -euo pipefail
           # Refuses to release from any branch other than main/testing.
-          bun scripts/release-version.mjs --branch "$GITHUB_REF_NAME" --bump "${{ inputs.bump }}"
-          PUBLISH="${{ inputs.publish }}"
+          bun scripts/release-version.mjs --branch "$GITHUB_REF_NAME" --bump "$BUMP"
           echo "publish=${PUBLISH:-true}" >> "$GITHUB_OUTPUT"
 
       - name: Tag the release and open it as a draft
@@ -138,13 +140,13 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: latest
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
         with:
           workspaces: src-tauri -> target
 
