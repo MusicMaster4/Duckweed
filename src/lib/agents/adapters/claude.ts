@@ -430,7 +430,7 @@ export function createClaudeAdapter(): AgentAdapter {
         ctx.emit({
           type: "notice",
           tone: "error",
-          text: `Unknown effort "${arg}" — pick low, medium, high, xhigh, max, auto, or ultracode.`,
+          text: `Unknown effort "${arg}". Pick low, medium, high, xhigh, max, auto, or ultracode.`,
         });
         return "handled";
       }

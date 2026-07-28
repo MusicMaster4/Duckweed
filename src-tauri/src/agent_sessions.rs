@@ -126,16 +126,24 @@ fn percent_encode(value: &str) -> String {
     out
 }
 
-/// Windows paths reach us in both separator flavours and either case; compare
-/// them the way the shell does rather than byte for byte.
 fn same_path(left: &str, right: &str) -> bool {
-    let normalize = |value: &str| {
-        value
-            .replace('/', "\\")
-            .trim_end_matches('\\')
-            .to_lowercase()
-    };
-    !left.is_empty() && normalize(left) == normalize(right)
+    if left.is_empty() {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        let normalize = |value: &str| {
+            value
+                .replace('/', "\\")
+                .trim_end_matches('\\')
+                .to_lowercase()
+        };
+        normalize(left) == normalize(right)
+    }
+    #[cfg(not(windows))]
+    {
+        Path::new(left) == Path::new(right)
+    }
 }
 
 fn millis(time: SystemTime) -> i64 {
@@ -978,6 +986,7 @@ mod tests {
         assert_eq!(percent_encode("a b"), "a%20b");
     }
 
+    #[cfg(windows)]
     #[test]
     fn paths_compare_across_separators_and_case() {
         assert!(same_path(
@@ -990,6 +999,15 @@ mod tests {
         ));
         assert!(!same_path("", ""));
         assert!(!same_path(r"H:\Python", r"H:\Python\Slop"));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn unix_paths_preserve_case_and_separator_meaning() {
+        assert!(same_path("/work/Foo", "/work/Foo/"));
+        assert!(!same_path("/work/Foo", "/work/foo"));
+        assert!(!same_path("/work/Foo", r"\work\Foo"));
+        assert!(!same_path("", ""));
     }
 
     #[test]

@@ -19,6 +19,7 @@ function launch(
     program,
     env: {},
     wrapperArgs: [],
+    forwardArgs: [],
     args: [],
     prompt: null,
     model,

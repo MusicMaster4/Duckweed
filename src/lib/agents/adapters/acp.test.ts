@@ -11,6 +11,7 @@ const launch: AgentLaunch = {
   program: "grok",
   env: {},
   wrapperArgs: [],
+  forwardArgs: [],
   args: [],
   prompt: null,
   model: null,
@@ -599,7 +600,7 @@ describe("acp adapter", () => {
     h.adapter.command?.("/effort maximum", h.ctx);
     expect(h.state().items.filter((item) => item.kind === "notice").at(-1)).toMatchObject({
       tone: "error",
-      text: 'Unknown effort "maximum" — pick high, medium, low.',
+      text: 'Unknown effort "maximum". Pick high, medium, low.',
     });
   });
 
@@ -618,7 +619,7 @@ describe("acp adapter", () => {
     expect(h.sent.at(-1)).toMatchObject({ method: "session/new" });
     expect(h.state().items.find((item) => item.kind === "notice")).toMatchObject({
       tone: "error",
-      text: "Unknown command /frobnicate — it is not in this agent's command list.",
+      text: "Unknown command /frobnicate. It is not in this agent's command list.",
     });
   });
 

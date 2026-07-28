@@ -573,7 +573,7 @@ export function createCodexAdapter(): AgentAdapter {
         ctx.emit({
           type: "notice",
           tone: "error",
-          text: `Unknown model "${arg}" — available: ${models.map((model) => model.id).join(", ")}.`,
+          text: `Unknown model "${arg}". Available: ${models.map((model) => model.id).join(", ")}.`,
         });
         return "handled";
       }
@@ -601,7 +601,7 @@ export function createCodexAdapter(): AgentAdapter {
         ctx.emit({
           type: "notice",
           tone: "error",
-          text: `${currentModel ?? "This model"} does not take "${arg}" effort — pick ${options.join(", ")}.`,
+          text: `${currentModel ?? "This model"} does not take "${arg}" effort. Pick ${options.join(", ")}.`,
         });
         return "handled";
       }
@@ -630,7 +630,7 @@ export function createCodexAdapter(): AgentAdapter {
     ctx.emit({
       type: "notice",
       tone: "error",
-      text: `Unknown command ${name} — Codex knows /model, /effort, /compact.`,
+      text: `Unknown command ${name}. Codex knows /model, /effort, /compact.`,
     });
     return "handled";
   }

@@ -21,6 +21,8 @@ export interface AgentLaunch {
    * before it re-execs Claude Code — those must not be dropped or reordered.
    */
   wrapperArgs: string[];
+  /** Supported CLI options preserved before the headless protocol arguments. */
+  forwardArgs: string[];
   /** Everything typed after the executable, unquoted. */
   args: string[];
   /** A bare positional argument — the opening prompt. */
@@ -65,6 +67,9 @@ const EXECUTABLES: Record<string, AgentId> = {
   opencode: "opencode",
   "opencode-ai": "opencode",
 };
+
+/** Direct executable names worth probing before a command is submitted. */
+export const AGENT_PROGRAMS = Object.freeze(Object.keys(EXECUTABLES));
 
 /**
  * Flags Claudex strips before handing the rest to Claude Code. They select a
@@ -280,6 +285,7 @@ export function parseAgentLaunch(command: string): AgentLaunch | null {
   let resume = false;
   let resumeId: string | null = null;
   const wrapperArgs: string[] = [];
+  const forwardArgs: string[] = [];
 
   for (let i = 0; i < args.length; i++) {
     const word = args[i];
@@ -298,13 +304,22 @@ export function parseAgentLaunch(command: string): AgentLaunch | null {
       if (equals > 0) {
         const flag = lower.slice(0, equals);
         if (passthrough.has(flag)) return null;
-        if (flag === "--model" || flag === "-m") model = word.slice(equals + 1);
-        if (isEffortFlag(flag)) effort = word.slice(equals + 1);
+        let consumed = false;
+        if (flag === "--model" || flag === "-m") {
+          model = word.slice(equals + 1);
+          consumed = true;
+        }
+        if (isEffortFlag(flag)) {
+          effort = word.slice(equals + 1);
+          consumed = true;
+        }
         if (agent === "codex" && (flag === "-c" || flag === "--config")) {
           const config = readCodexConfig(word.slice(equals + 1));
           model = config.model ?? model;
           effort = config.effort ?? effort;
+          consumed = config.model !== undefined || config.effort !== undefined;
         }
+        if (!consumed) forwardArgs.push(word);
         continue;
       }
       if (isContinue(agent, word)) {
@@ -316,25 +331,40 @@ export function parseAgentLaunch(command: string): AgentLaunch | null {
         // `--resume` is the one flag whose value is optional: with a session id
         // it consumes it, bare it just means "the last one".
         const hasValue = value !== undefined && !value.startsWith("-");
-        if (lower === "-m" || lower === "--model") model = hasValue ? value : null;
-        if (isEffortFlag(lower)) effort = hasValue ? value : null;
+        let consumed = false;
+        if (lower === "-m" || lower === "--model") {
+          model = hasValue ? value : null;
+          consumed = true;
+        }
+        if (isEffortFlag(lower)) {
+          effort = hasValue ? value : null;
+          consumed = true;
+        }
         if (hasValue && agent === "codex" && (lower === "-c" || lower === "--config")) {
           const config = readCodexConfig(value);
           model = config.model ?? model;
           effort = config.effort ?? effort;
+          consumed = config.model !== undefined || config.effort !== undefined;
         }
         if (lower === "--resume") {
           if (hasValue) resumeId = value;
           else resume = true;
+          consumed = true;
         }
         // `-s` is OpenCode's "continue this session"; Grok spells the same two
         // characters `--session-id` and means "start a new one with this id".
         if (hasValue && agent === "opencode" && (lower === "-s" || lower === "--session")) {
           resumeId = value;
+          consumed = true;
+        }
+        if (!consumed) {
+          forwardArgs.push(word);
+          if (hasValue) forwardArgs.push(value);
         }
         if (hasValue) i += 1;
         continue;
       }
+      forwardArgs.push(word);
       continue;
     }
 
@@ -349,7 +379,19 @@ export function parseAgentLaunch(command: string): AgentLaunch | null {
     return null;
   }
 
-  return { agent, program, env, wrapperArgs, args, prompt, model, effort, resume, resumeId };
+  return {
+    agent,
+    program,
+    env,
+    wrapperArgs,
+    forwardArgs,
+    args,
+    prompt,
+    model,
+    effort,
+    resume,
+    resumeId,
+  };
 }
 
 /** True when `agent` is one the custom UI knows how to drive. */

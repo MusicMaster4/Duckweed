@@ -463,7 +463,7 @@ export function createAcpAdapter(): AgentAdapter {
         ctx.emit({
           type: "notice",
           tone: "error",
-          text: `Unknown effort "${effort}" — pick ${efforts.join(", ")}.`,
+          text: `Unknown effort "${effort}". Pick ${efforts.join(", ")}.`,
         });
       } else {
         await setEffort(effort, ctx).catch((error: unknown) => {
@@ -740,7 +740,7 @@ export function createAcpAdapter(): AgentAdapter {
         ctx.emit({
           type: "notice",
           tone: "error",
-          text: `Unknown effort "${arg}" — pick ${efforts.join(", ")}.`,
+          text: `Unknown effort "${arg}". Pick ${efforts.join(", ")}.`,
         });
         return "handled";
       }
@@ -763,7 +763,7 @@ export function createAcpAdapter(): AgentAdapter {
     ctx.emit({
       type: "notice",
       tone: "error",
-      text: `Unknown command ${name} — it is not in this agent's command list.`,
+      text: `Unknown command ${name}. It is not in this agent's command list.`,
     });
     return "handled";
   }

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { canResume, timeAgo } from "./history";
+import { canResume, historyKey, timeAgo } from "./history";
 
 describe("canResume", () => {
   test("covers the agents whose sessions can be found and continued", () => {
@@ -11,6 +11,19 @@ describe("canResume", () => {
     // Cursor Agent publishes neither a listing nor a store we can read, so it
     // must not offer a picker that would always be empty.
     expect(canResume("cursor")).toBe(false);
+  });
+});
+
+describe("historyKey", () => {
+  test("folds Windows path separators and case", () => {
+    expect(historyKey("codex", "H:\\Work\\Duckweed\\")).toBe(
+      historyKey("codex", "h:/work/duckweed"),
+    );
+  });
+
+  test("preserves case on Unix paths", () => {
+    expect(historyKey("codex", "/work/Foo")).not.toBe(historyKey("codex", "/work/foo"));
+    expect(historyKey("codex", "/work/Foo/")).toBe(historyKey("codex", "/work/Foo"));
   });
 });
 

@@ -80,7 +80,6 @@ import {
   adjustSettingsIndexOnClose,
   applyStripReorder,
 } from "./lib/tabReorder";
-import * as sessionUsage from "./lib/sessionUsage";
 import * as terminals from "./lib/terminals";
 import { loadSettings as loadUsageSettings, prefetchUsage } from "./lib/usage";
 import type { LeafNode, ProjectInfo, ShellInfo, Tab } from "./lib/types";
@@ -425,11 +424,6 @@ export default function App() {
     window.addEventListener("focus", reviewSelectedCompletion);
     return () => window.removeEventListener("focus", reviewSelectedCompletion);
   }, [acknowledgeTerm, currentTab, flashFocusedCompletion]);
-
-  // "What this session cost" is a delta against the moment the window opened,
-  // so the baseline has to be taken now rather than when Statistics is first
-  // opened. The tracker defers its own first scan off the startup path.
-  useEffect(() => sessionUsage.start(), []);
 
   useEffect(() => {
     window.addEventListener("focus", syncTaskbarCompletionBadge);

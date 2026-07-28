@@ -92,6 +92,34 @@ describe("parseAgentLaunch", () => {
     expect(parseAgentLaunch("codex -c model=gpt-5.4 -m gpt-5.5")?.model).toBe("gpt-5.5");
   });
 
+  test("preserves configuration and permission flags for the headless launch", () => {
+    expect(
+      parseAgentLaunch(
+        "claude --add-dir ../shared --settings team.json --allowed-tools Read,Edit",
+      )?.forwardArgs,
+    ).toEqual([
+      "--add-dir",
+      "../shared",
+      "--settings",
+      "team.json",
+      "--allowed-tools",
+      "Read,Edit",
+    ]);
+    expect(parseAgentLaunch("codex --profile work --sandbox workspace-write")?.forwardArgs).toEqual(
+      ["--profile", "work", "--sandbox", "workspace-write"],
+    );
+  });
+
+  test("does not duplicate options reconstructed by the protocol adapter", () => {
+    expect(
+      parseAgentLaunch("claude --model opus --effort high --continue")?.forwardArgs,
+    ).toEqual([]);
+    expect(
+      parseAgentLaunch("codex -c model_reasoning_effort=xhigh -c features.foo=true")
+        ?.forwardArgs,
+    ).toEqual(["-c", "features.foo=true"]);
+  });
+
   test("recognises continuing a previous session", () => {
     expect(parseAgentLaunch("claude -c")?.resume).toBe(true);
     expect(parseAgentLaunch("claude --continue")?.resume).toBe(true);

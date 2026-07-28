@@ -24,6 +24,9 @@ async function start() {
   // Do this before importing App: command history and settings are read during
   // module initialization, so recovery must finish first after an update.
   await restoreDurableStorage();
+  // Capture session usage before App can restore a layout and start agents.
+  const sessionUsage = await import("./lib/sessionUsage");
+  sessionUsage.start();
   const { default: App } = await import("./App");
   const container = document.getElementById("root");
   if (!container) throw new Error("missing #root");

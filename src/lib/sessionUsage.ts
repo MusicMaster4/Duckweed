@@ -12,8 +12,6 @@ import { prefetchUsage, type Snapshot, type Totals } from "./usage";
 /** Days of history to read. Only buckets at or after the session day count. */
 const RANGE_DAYS = 7;
 const POLL_MS = 30_000;
-/** Let the window finish opening before the first transcript scan. */
-const FIRST_SCAN_DELAY_MS = 4_000;
 
 const EMPTY: Totals = {
   input: 0,
@@ -60,7 +58,6 @@ let state: SessionUsage = {
 let baseline: Map<string, Totals> | null = null;
 let baselineTotals: Totals = EMPTY;
 let timer: number | null = null;
-let firstScan: number | null = null;
 
 const listeners = new Set<() => void>();
 
@@ -160,32 +157,27 @@ export function observe(snapshot: Snapshot): void {
   });
 }
 
-function scan(): void {
+function scan(maxAgeMs = POLL_MS - 5_000): void {
   // A short max-age keeps the poll fresh while still coalescing with whatever
   // the Usage panel is asking the shared scanner for.
-  prefetchUsage(RANGE_DAYS, POLL_MS - 5_000).then(observe, () => {
+  prefetchUsage(RANGE_DAYS, maxAgeMs).then(observe, () => {
     publish({ ...state, error: !state.ready });
   });
 }
 
 /**
- * Begin measuring. Idempotent, and safe to call at startup: the first scan is
- * deferred so opening the window never waits on reading transcripts.
+ * Begin measuring. Idempotent and non-blocking: capture the baseline now, then
+ * leave later transcript scans to the polling interval.
  */
 export function start(): void {
-  if (timer !== null || firstScan !== null) return;
-  firstScan = window.setTimeout(() => {
-    firstScan = null;
-    scan();
-  }, FIRST_SCAN_DELAY_MS);
+  if (timer !== null) return;
+  scan(0);
   timer = window.setInterval(scan, POLL_MS);
 }
 
 export function stop(): void {
   if (timer !== null) window.clearInterval(timer);
-  if (firstScan !== null) window.clearTimeout(firstScan);
   timer = null;
-  firstScan = null;
 }
 
 /** Cost per hour at the pace of this session, or null before it means anything. */

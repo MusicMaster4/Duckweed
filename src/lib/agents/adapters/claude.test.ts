@@ -11,6 +11,7 @@ const launch: AgentLaunch = {
   program: "claude",
   env: {},
   wrapperArgs: [],
+  forwardArgs: [],
   args: [],
   prompt: null,
   model: null,
@@ -508,7 +509,7 @@ describe("claude adapter", () => {
     expect(h.sent).toHaveLength(0);
     expect(h.state().items.find((item) => item.kind === "notice")).toMatchObject({
       tone: "error",
-      text: 'Unknown effort "ludicrous" — pick low, medium, high, xhigh, max, auto, or ultracode.',
+      text: 'Unknown effort "ludicrous". Pick low, medium, high, xhigh, max, auto, or ultracode.',
     });
   });
 

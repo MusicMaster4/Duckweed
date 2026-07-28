@@ -12,7 +12,7 @@ import type { AdapterContext, AgentAdapter } from "./adapter";
 import { createAcpAdapter } from "./adapters/acp";
 import { createClaudeAdapter } from "./adapters/claude";
 import { createCodexAdapter } from "./adapters/codex";
-import { AGENTS, AGENT_IDS, agentPresentation } from "./catalog";
+import { AGENTS, agentPresentation } from "./catalog";
 import {
   applyEvent,
   didStatusEnterIdle,
@@ -21,7 +21,7 @@ import {
   type AgentEvent,
 } from "./events";
 import { latest as latestSession, transcript as sessionTranscript } from "./history";
-import type { AgentLaunch } from "./launch";
+import { AGENT_PROGRAMS, type AgentLaunch } from "./launch";
 import { loadClaudeSettingsDefaults } from "./claudeSettings";
 import {
   rememberPreferences,
@@ -258,29 +258,25 @@ function createAdapter(agent: AgentId): AgentAdapter {
  * custom UI, so it has to be available synchronously by the time a command is
  * submitted, and a PATH lookup does not change while the app is open.
  */
-let availabilityProbe: Promise<Set<AgentId>> | null = null;
-let availableAgents: Set<AgentId> = new Set();
+let availabilityProbe: Promise<Set<string>> | null = null;
+let availablePrograms: Set<string> = new Set();
 let availabilityKnown = false;
 
-export function probeAvailability(): Promise<Set<AgentId>> {
+export function probeAvailability(): Promise<Set<string>> {
   if (availabilityProbe) return availabilityProbe;
   if (!TAURI_RUNTIME) {
     availabilityProbe = Promise.resolve(new Set());
     return availabilityProbe;
   }
-  const names = AGENT_IDS.flatMap((id) => AGENTS[id].binaries);
-  availabilityProbe = agentProcProbe(names)
+  availabilityProbe = agentProcProbe([...AGENT_PROGRAMS])
     .then((found) => {
-      const installed = new Set(
+      availablePrograms = new Set(
         found.filter((entry) => entry.path !== null).map((entry) => entry.name),
       );
-      availableAgents = new Set(
-        AGENT_IDS.filter((id) => AGENTS[id].binaries.some((binary) => installed.has(binary))),
-      );
       availabilityKnown = true;
-      return availableAgents;
+      return availablePrograms;
     })
-    .catch(() => new Set<AgentId>());
+    .catch(() => new Set<string>());
   return availabilityProbe;
 }
 
@@ -293,8 +289,12 @@ export function probeAvailability(): Promise<Set<AgentId>> {
  * which typing `claude` two seconds after the app opens quietly behaves
  * differently from typing it later.
  */
-export function isAvailable(agent: AgentId): boolean {
-  return availabilityKnown ? availableAgents.has(agent) : true;
+export function isAvailable(launch: AgentLaunch): boolean {
+  if (!availabilityKnown) return true;
+  // Explicit paths cannot be known during the startup probe. Let the backend
+  // resolve the exact path and fall back to the shell if it no longer exists.
+  if (/[\\/]/.test(launch.program) || /\.(?:exe|cmd|bat|ps1)$/i.test(launch.program)) return true;
+  return availablePrograms.has(launch.program.toLowerCase());
 }
 
 /**
@@ -575,16 +575,27 @@ export async function start(
         program: launch.program,
         // Wrapper flags (`claudex --g`) must precede headless protocol args so
         // the wrapper can strip them before handing the rest to Claude.
-        args: [...launch.wrapperArgs, ...definition.headlessArgs, ...adapter.args(launch)],
+        args: [
+          ...launch.wrapperArgs,
+          ...launch.forwardArgs,
+          ...definition.headlessArgs,
+          ...adapter.args(launch),
+        ],
         cwd,
         env: Object.keys(launch.env).length ? launch.env : null,
       },
       channel,
     );
   } catch (error) {
+    if (sessions.get(termId) !== session) return null;
     sessions.delete(termId);
     announce(termId);
     return error instanceof Error ? error.message : String(error);
+  }
+
+  if (session.disposed || sessions.get(termId) !== session) {
+    await agentProcStop(termId).catch(() => {});
+    return null;
   }
 
   adapter.start(session.context);

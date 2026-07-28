@@ -11,6 +11,7 @@ const launch: AgentLaunch = {
   program: "codex",
   env: {},
   wrapperArgs: [],
+  forwardArgs: [],
   args: [],
   prompt: null,
   model: null,
@@ -200,7 +201,7 @@ describe("codex adapter", () => {
     expect(state.model).toBe("gpt-5.6-sol");
     expect(state.items.find((item) => item.kind === "notice")).toMatchObject({
       tone: "error",
-      text: 'Unknown model "gpt-4.1" — available: gpt-5.6-sol, gpt-5.5.',
+      text: 'Unknown model "gpt-4.1". Available: gpt-5.6-sol, gpt-5.5.',
     });
   });
 
@@ -212,7 +213,7 @@ describe("codex adapter", () => {
     h.adapter.command?.("/effort xhigh", h.ctx);
     expect(h.state().items.find((item) => item.kind === "notice")).toMatchObject({
       tone: "error",
-      text: 'gpt-5.6-sol does not take "xhigh" effort — pick low, medium, high.',
+      text: 'gpt-5.6-sol does not take "xhigh" effort. Pick low, medium, high.',
     });
     expect(h.state().effort).toBe("high");
 
@@ -261,7 +262,7 @@ describe("codex adapter", () => {
     expect(h.sent.at(-1)).toMatchObject({ method: "model/list" });
     expect(h.state().items.find((item) => item.kind === "notice")).toMatchObject({
       tone: "error",
-      text: "Unknown command /frobnicate — Codex knows /model, /effort, /compact.",
+      text: "Unknown command /frobnicate. Codex knows /model, /effort, /compact.",
     });
   });
 

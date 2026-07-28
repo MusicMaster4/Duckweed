@@ -656,7 +656,7 @@ function startAgentUi(
   if (!agentUiEnabled || !TAURI_RUNTIME) return false;
   if (session.exited || session.agentUi) return false;
   const launch = parseAgentLaunch(command);
-  if (!launch || !agentSessions.isAvailable(launch.agent)) return false;
+  if (!launch || !agentSessions.isAvailable(launch)) return false;
 
   session.agentUiRestore = {
     ran: restoreRan,
