@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
@@ -7,29 +7,44 @@ import { ChangesPanel } from "./components/ChangesPanel";
 import { CommandPalette, type PaletteAction } from "./components/CommandPalette";
 import { FileEditor } from "./components/FileEditor";
 import { PaneTree, type PaneTreeShared } from "./components/PaneTree";
+import { PowerWatchBanner } from "./components/PowerWatchBanner";
 import { StatusBar } from "./components/StatusBar";
 import { TabStrip } from "./components/TabStrip";
 import { TitleBar } from "./components/TitleBar";
 import { SettingsMenu } from "./components/SettingsMenu";
-import { ToolsPanel, TOOLS_MAX_WIDTH, TOOLS_MIN_WIDTH } from "./components/ToolsPanel";
+import {
+  ToolsPanel,
+  TOOLS_MAX_WIDTH,
+  TOOLS_MIN_WIDTH,
+  type SectionId as ToolsSectionId,
+} from "./components/ToolsPanel";
 import { ConfirmCloseDialog } from "./components/ConfirmCloseDialog";
 import { UpdateDialog } from "./components/UpdateDialog";
 import { useDragPane, type DragState } from "./hooks/useDragPane";
 import { useGitChanges } from "./hooks/useGitChanges";
 import { useUpdater } from "./hooks/useUpdater";
 import * as bus from "./lib/bus";
+import * as checklist from "./lib/checklist";
+import * as powerWatch from "./lib/powerWatch";
+import * as agentSessions from "./lib/agents/session";
 import {
   confirmCloseRunning,
   isConfirmCloseRunningEnabled,
   setConfirmCloseRunningEnabled,
   subscribeConfirmClosePref,
 } from "./lib/confirmClose";
+import {
+  acknowledgeCompletion,
+  shouldFlashCompletionReview,
+  type CompletionFlash,
+} from "./lib/completionHighlights";
 import { playCompletionSound, preloadCompletionSound } from "./lib/completionSound";
 import * as commandHistory from "./lib/commandHistory";
 import { clearGreetings } from "./lib/greetings";
 import {
   frontendReady,
   listShells,
+  powerAction,
   projectInfo,
   shellIntegrationSet,
   shellIntegrationStatus,
@@ -45,11 +60,21 @@ import {
   leaf,
   leaves,
   nextLeaf,
+  preferredLeaf,
   removeLeaf,
   setSizes,
   swapLeaves,
+  touchPaneMru,
   uid,
 } from "./lib/layout";
+import {
+  captureLayout,
+  getDefaultLayout,
+  instantiateLayout,
+  type LayoutDraft,
+  type LayoutTemplate,
+} from "./lib/layouts";
+import { tabColorHex } from "./lib/tabColors";
 import { toggleFullscreen } from "./lib/window";
 import { DEFAULT_TOOLS_WIDTH, load, pushRecent, rehydrate, save } from "./lib/persist";
 import {
@@ -57,6 +82,12 @@ import {
   shouldSignalCompletion,
   type ProcessState,
 } from "./lib/processActivity";
+import { setCompletionTaskbarBadge } from "./lib/taskbarCompletion";
+import {
+  adjustSettingsIndexOnAppend,
+  adjustSettingsIndexOnClose,
+  applyStripReorder,
+} from "./lib/tabReorder";
 import * as terminals from "./lib/terminals";
 import { loadSettings as loadUsageSettings, prefetchUsage } from "./lib/usage";
 import type { LeafNode, ProjectInfo, ShellInfo, Tab } from "./lib/types";
@@ -64,13 +95,16 @@ import type { LeafNode, ProjectInfo, ShellInfo, Tab } from "./lib/types";
 interface SpawnOpts {
   cwd: string | null;
   shell: string | null;
+  command: string | null;
 }
 
 const DEFAULT_FONT_SIZE = 13.5;
 const TAURI_RUNTIME = "__TAURI_INTERNALS__" in window;
 
 async function confirmUpdateWithRunningProcesses(): Promise<boolean> {
-  const hasRunningProcesses = await terminals.anyHasRunningProcess(terminals.allSessionIds());
+  const hasRunningProcesses = await terminals.anyHasCloseBlockingWork(
+    terminals.allSessionIds(),
+  );
   if (!hasRunningProcesses) return true;
   return confirmCloseRunning({
     title: "Install update?",
@@ -99,11 +133,13 @@ function isAutoTitle(tab: Tab): boolean {
 
 function boot() {
   const saved = load();
+  const startupSpawns = new Map<string, SpawnOpts>();
   if (saved && saved.tabs.length > 0) {
     const tabs: Tab[] = saved.tabs.map((entry, i) => {
       const root = rehydrate(entry.root);
       return {
-        id: uid("tab"),
+        // Keep the saved id: per-tab checklists are filed under it.
+        id: entry.id ?? uid("tab"),
         title: entry.title || `Terminal ${i + 1}`,
         root,
         activeLeaf: leaves(root)[0].id,
@@ -115,6 +151,25 @@ function boot() {
       };
     });
     const index = Math.min(Math.max(0, saved.activeTabIndex), tabs.length - 1);
+    const startupLayout = getDefaultLayout();
+    const startupTab = tabs[index];
+    if (startupLayout && startupTab.project) {
+      const root = instantiateLayout(startupLayout.root, (command) => {
+        const term = terminals.newTermId();
+        startupSpawns.set(term, {
+          cwd: startupTab.project?.path ?? null,
+          shell: saved.shell,
+          command: command.trim() || null,
+        });
+        return leaf(term);
+      });
+      tabs[index] = {
+        ...startupTab,
+        root,
+        activeLeaf: leaves(root)[0].id,
+        zoomedLeaf: null,
+      };
+    }
     return {
       tabs,
       activeTabId: tabs[index].id,
@@ -125,10 +180,14 @@ function boot() {
       highlight: saved.highlight,
       completionHighlights: saved.completionHighlights,
       completionSoundEnabled: saved.completionSoundEnabled,
+      tintWorkspaceWithTabColor: saved.tintWorkspaceWithTabColor,
+      customAgentUi: saved.customAgentUi,
+      agentFollowupMode: saved.agentFollowupMode,
       inputMode: saved.inputMode,
       confirmCloseRunning: saved.confirmCloseRunning,
       toolsOpen: saved.toolsOpen,
       toolsWidth: saved.toolsWidth,
+      startupSpawns,
     };
   }
   const term = terminals.newTermId();
@@ -151,17 +210,21 @@ function boot() {
     highlight: true,
     completionHighlights: true,
     completionSoundEnabled: true,
+    tintWorkspaceWithTabColor: false,
+    customAgentUi: true,
+    agentFollowupMode: "queue" as const,
     inputMode: "editor" as terminals.InputMode,
     confirmCloseRunning: true,
     toolsOpen: false,
     toolsWidth: DEFAULT_TOOLS_WIDTH,
+    startupSpawns,
   };
 }
 
 /** Stable empty set so hiding completion marks does not churn PaneTree memos. */
 const NO_UNREAD_TERMS: ReadonlySet<string> = new Set();
 /** Stable empty map used while focused completion flashes are hidden. */
-const NO_COMPLETION_FLASHES: ReadonlyMap<string, number> = new Map();
+const NO_COMPLETION_FLASHES: ReadonlyMap<string, CompletionFlash> = new Map();
 
 /**
  * True for a field the user is typing into. xterm's hidden helper textarea is
@@ -186,6 +249,11 @@ export default function App() {
   const [completionSoundEnabled, setCompletionSoundEnabled] = useState(
     initial.completionSoundEnabled,
   );
+  const [tintWorkspaceWithTabColor, setTintWorkspaceWithTabColor] = useState(
+    initial.tintWorkspaceWithTabColor,
+  );
+  const [customAgentUi, setCustomAgentUi] = useState(initial.customAgentUi);
+  const [agentFollowupMode, setAgentFollowupMode] = useState(initial.agentFollowupMode);
   const [inputMode, setInputMode] = useState(initial.inputMode);
   const [confirmCloseRunningPref, setConfirmCloseRunningPref] = useState(() => {
     // Honour the saved preference before any close handler can run.
@@ -200,12 +268,21 @@ export default function App() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [settingsTabOpen, setSettingsTabOpen] = useState(false);
   const [settingsActive, setSettingsActive] = useState(false);
+  /** Where Settings sits among strip items (0..tabs.length). */
+  const [settingsTabIndex, setSettingsTabIndex] = useState(0);
   const [changesOpen, setChangesOpen] = useState(false);
   const [toolsOpen, setToolsOpen] = useState(initial.toolsOpen);
+  /** Kept here because the dock unmounts while Settings is up: the tool the
+      user left open has to be the one waiting when they switch back. */
+  const [toolsSection, setToolsSection] = useState<ToolsSectionId>("files");
   const [unreadTermIds, setUnreadTermIds] = useState<Set<string>>(() => new Set());
-  const [completionFlashes, setCompletionFlashes] = useState<Map<string, number>>(
+  const [completionFlashes, setCompletionFlashes] = useState<Map<string, CompletionFlash>>(
     () => new Map(),
   );
+  const unreadTermIdsRef = useRef(unreadTermIds);
+  unreadTermIdsRef.current = unreadTermIds;
+  const completionFlashesRef = useRef(completionFlashes);
+  completionFlashesRef.current = completionFlashes;
   const [toolsWidth, setToolsWidth] = useState(
     Math.min(TOOLS_MAX_WIDTH, Math.max(TOOLS_MIN_WIDTH, initial.toolsWidth)),
   );
@@ -224,6 +301,10 @@ export default function App() {
   activeTabIdRef.current = activeTabId;
   const settingsActiveRef = useRef(settingsActive);
   settingsActiveRef.current = settingsActive;
+  const settingsTabOpenRef = useRef(settingsTabOpen);
+  settingsTabOpenRef.current = settingsTabOpen;
+  const settingsTabIndexRef = useRef(settingsTabIndex);
+  settingsTabIndexRef.current = settingsTabIndex;
   const shellRef = useRef(shell);
   shellRef.current = shell;
   const completionSoundEnabledRef = useRef(completionSoundEnabled);
@@ -239,10 +320,33 @@ export default function App() {
   const lastProject = useRef<string | null>(initial.lastProject);
 
   /** Spawn parameters for terminals that have not been created yet. */
-  const spawnOpts = useRef(new Map<string, SpawnOpts>());
+  const spawnOpts = useRef(new Map<string, SpawnOpts>(initial.startupSpawns));
 
   const activeTab = tabs.find((t) => t.id === activeTabId) ?? tabs[0];
   const project = activeTab?.project ?? null;
+  const toolStats = useMemo(
+    () => ({
+      tabs: tabs.length,
+      panes: tabs.reduce((count, tab) => count + leaves(tab.root).length, 0),
+      projects: new Set(
+        tabs.map((tab) => tab.project?.path).filter((path): path is string => Boolean(path)),
+      ).size,
+    }),
+    [tabs],
+  );
+  const portOwnerNames = useMemo(() => {
+    const names = new Map<string, string>();
+    for (const tab of tabs) {
+      const paneCount = leaves(tab.root).length;
+      leaves(tab.root).forEach((node, index) => {
+        names.set(
+          node.term,
+          paneCount > 1 ? `${tab.title}, pane ${index + 1}` : tab.title,
+        );
+      });
+    }
+    return names;
+  }, [tabs]);
   const changes = useGitChanges(project);
 
   const currentTab = useCallback(
@@ -250,27 +354,66 @@ export default function App() {
     [],
   );
 
-  const updateTab = useCallback((tabId: string, fn: (tab: Tab) => Tab) => {
-    setTabs((prev) => prev.map((t) => (t.id === tabId ? fn(t) : t)));
+  const syncTaskbarCompletionBadge = useCallback(() => {
+    if (document.hasFocus() || !completionHighlightsRef.current) {
+      setCompletionTaskbarBadge(false);
+      return;
+    }
+    if (unreadTermIdsRef.current.size > 0 || completionFlashesRef.current.size > 0) {
+      // Do not clear this just because a transient pane flash expires. Once the
+      // user leaves with a completion visible, the taskbar marker stays until
+      // the window is focused again.
+      setCompletionTaskbarBadge(true);
+    }
   }, []);
+
+  /** Most-recent pane focus per tab, used when the active pane is closed. */
+  const paneMruRef = useRef(new Map<string, string[]>());
+
+  const rememberPaneFocus = useCallback(
+    (tabId: string, nextActive: string, root: Tab["root"], previousActive?: string) => {
+      const prev = paneMruRef.current.get(tabId) ?? [];
+      paneMruRef.current.set(tabId, touchPaneMru(prev, nextActive, root, previousActive));
+    },
+    [],
+  );
+
+  const updateTab = useCallback(
+    (tabId: string, fn: (tab: Tab) => Tab) => {
+      setTabs((prev) =>
+        prev.map((t) => {
+          if (t.id !== tabId) return t;
+          const next = fn(t);
+          if (next.activeLeaf !== t.activeLeaf) {
+            rememberPaneFocus(tabId, next.activeLeaf, next.root, t.activeLeaf);
+          } else if (next.root !== t.root) {
+            // Drop closed leaves from the history without changing focus order.
+            rememberPaneFocus(tabId, next.activeLeaf, next.root);
+          }
+          return next;
+        }),
+      );
+    },
+    [rememberPaneFocus],
+  );
 
   const acknowledgeTerm = useCallback((termId: string) => {
     setUnreadTermIds((prev) => {
-      if (!prev.has(termId)) return prev;
-      const next = new Set(prev);
-      next.delete(termId);
+      const next = acknowledgeCompletion(prev, termId);
+      if (next === prev) return prev;
+      unreadTermIdsRef.current = next;
       return next;
     });
   }, []);
 
-  const flashFocusedCompletion = useCallback((termId: string) => {
+  const flashCompletion = useCallback((termId: string, kind: CompletionFlash["kind"]) => {
     const previousTimer = completionFlashTimers.current.get(termId);
     if (previousTimer !== undefined) window.clearTimeout(previousTimer);
 
-    const pulse = ++completionFlashSeq.current;
+    const flash = { key: ++completionFlashSeq.current, kind };
     setCompletionFlashes((previous) => {
       const next = new Map(previous);
-      next.set(termId, pulse);
+      next.set(termId, flash);
       return next;
     });
 
@@ -288,15 +431,82 @@ export default function App() {
     );
   }, []);
 
-  /** A terminal is being watched only when its pane and app window both have focus. */
-  const isFocusedTerm = useCallback((termId: string): boolean => {
-    if (!document.hasFocus() || settingsActiveRef.current) return false;
+  /** Active leaf of the active tab. */
+  const isSelectedTerm = useCallback((termId: string): boolean => {
     const tab = tabsRef.current.find((candidate) =>
       leaves(candidate.root).some((node) => node.term === termId),
     );
     if (!tab || tab.id !== activeTabIdRef.current) return false;
     return findLeaf(tab.root, tab.activeLeaf)?.term === termId;
   }, []);
+
+  /** Selected pane while the user is actually looking at the window (flash vs unread). */
+  const isFocusedTerm = useCallback(
+    (termId: string): boolean => {
+      if (!document.hasFocus() || settingsActiveRef.current) return false;
+      return isSelectedTerm(termId);
+    },
+    [isSelectedTerm],
+  );
+
+  // Window focus dismisses the taskbar badge immediately.
+  useEffect(() => {
+    window.addEventListener("focus", syncTaskbarCompletionBadge);
+    window.addEventListener("blur", syncTaskbarCompletionBadge);
+    return () => {
+      window.removeEventListener("focus", syncTaskbarCompletionBadge);
+      window.removeEventListener("blur", syncTaskbarCompletionBadge);
+      setCompletionTaskbarBadge(false);
+    };
+  }, [syncTaskbarCompletionBadge]);
+
+  const reviewSelectedCompletion = useCallback(() => {
+    if (settingsActiveRef.current) return;
+    const tab = currentTab();
+    const term = tab ? (findLeaf(tab.root, tab.activeLeaf)?.term ?? null) : null;
+    if (!shouldFlashCompletionReview(unreadTermIdsRef.current, term, true)) return;
+    if (completionHighlightsRef.current && term) flashCompletion(term, "review");
+    if (term) acknowledgeTerm(term);
+  }, [acknowledgeTerm, currentTab, flashCompletion]);
+
+  useEffect(() => {
+    let reviewTimer: number | null = null;
+
+    const cancelPendingReview = () => {
+      if (reviewTimer === null) return;
+      window.clearTimeout(reviewTimer);
+      reviewTimer = null;
+    };
+    const onFocus = () => {
+      cancelPendingReview();
+      // A taskbar or keyboard restore has no pointer event in the document.
+      // Defer one tick so a click directly into the window can cancel this and
+      // let the pane under the pointer be the only completion that is reviewed.
+      reviewTimer = window.setTimeout(() => {
+        reviewTimer = null;
+        reviewSelectedCompletion();
+      }, 0);
+    };
+
+    window.addEventListener("focus", onFocus);
+    window.addEventListener("blur", cancelPendingReview);
+    window.addEventListener("pointerdown", cancelPendingReview, true);
+    return () => {
+      cancelPendingReview();
+      window.removeEventListener("focus", onFocus);
+      window.removeEventListener("blur", cancelPendingReview);
+      window.removeEventListener("pointerdown", cancelPendingReview, true);
+    };
+  }, [reviewSelectedCompletion]);
+
+  useEffect(() => {
+    syncTaskbarCompletionBadge();
+  }, [
+    completionFlashes,
+    completionHighlights,
+    syncTaskbarCompletionBadge,
+    unreadTermIds,
+  ]);
 
   /** cwd a new pane should start in: follow the focused shell, then the tab's project. */
   const inheritCwd = useCallback((): string | null => {
@@ -314,6 +524,7 @@ export default function App() {
       spawnOpts.current.set(term, {
         cwd: opts?.cwd !== undefined ? opts.cwd : inheritCwd(),
         shell: opts?.shell !== undefined ? opts.shell : shellRef.current,
+        command: opts?.command !== undefined ? opts.command?.trim() || null : null,
       });
       return term;
     },
@@ -326,7 +537,7 @@ export default function App() {
     // A pane restored from disk records nothing, so its folder is the one
     // belonging to the tab it was restored into — not whichever tab is active.
     const owner = tabsRef.current.find((t) => leaves(t.root).some((n) => n.term === term));
-    return { cwd: owner?.project?.path ?? null, shell: shellRef.current };
+    return { cwd: owner?.project?.path ?? null, shell: shellRef.current, command: null };
   }, []);
 
   const releaseTerm = useCallback((term: string) => {
@@ -366,32 +577,37 @@ export default function App() {
       }
 
       const previous = processState.current.get(termId);
-      processState.current.set(termId, {
+      const current = {
         busy: meta.busy,
         exited: meta.exited,
         completionSeq: meta.completionSeq,
+        completionStartedAt: meta.completionStartedAt,
         agent: meta.agent,
+        agentUi: meta.agentUi !== null,
         processStartedAt: meta.processStartedAt,
-      });
+      };
+      processState.current.set(termId, current);
       if (!previous) return;
 
-      if (!shouldSignalCompletion(previous, meta)) return;
-      // Sound only on the selected pane, and only after the job ran > 1 minute.
+      if (!shouldSignalCompletion(previous, current)) return;
+      // Every eligible completion gets one cue. The shared audio player
+      // coalesces simultaneous finishes, so several agents returning together
+      // do not stack copies of the effect.
       if (
         completionSoundEnabledRef.current &&
-        isFocusedTerm(termId) &&
-        shouldPlayCompletionSound(previous, meta)
+        shouldPlayCompletionSound(previous, current)
       ) {
         playCompletionSound();
       }
       if (isFocusedTerm(termId)) {
-        if (completionHighlightsRef.current) flashFocusedCompletion(termId);
+        if (completionHighlightsRef.current) flashCompletion(termId, "focused");
         return;
       }
       setUnreadTermIds((prev) => {
         if (prev.has(termId)) return prev;
         const next = new Set(prev);
         next.add(termId);
+        unreadTermIdsRef.current = next;
         return next;
       });
     };
@@ -405,7 +621,68 @@ export default function App() {
     };
     // Tab metadata changes must not tear down every terminal subscription.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [termIdsKey, acknowledgeTerm, flashFocusedCompletion, isFocusedTerm]);
+  }, [termIdsKey, acknowledgeTerm, flashCompletion, isFocusedTerm, isSelectedTerm]);
+
+  // ---------------------------------------------------------- power watch
+
+  /**
+   * Everything still doing work, across every tab — the power watch's whole
+   * view of the app.
+   *
+   * Three kinds of pane, and the difference matters:
+   *
+   * - A pane the custom agent UI owns reports its own status, so `working`,
+   *   `starting` and `waiting` are read straight off the session. `waiting`
+   *   counts as busy: an agent blocked on a permission prompt has not finished,
+   *   and suspending the machine under it would strand the turn.
+   * - A pane running an agent CLI in the terminal stays "busy" for as long as
+   *   the CLI is open, so outstanding turns are what count instead.
+   * - Anything else is an ordinary command: `busy` means a child process.
+   */
+  const probeActivity = useCallback((): powerWatch.BusyEntry[] => {
+    const entries: powerWatch.BusyEntry[] = [];
+    for (const tab of tabsRef.current) {
+      const panes = leaves(tab.root);
+      panes.forEach((node, index) => {
+        const meta = terminals.getMeta(node.term);
+        if (!meta || meta.exited) return;
+        const where = panes.length > 1 ? `${tab.title} · pane ${index + 1}` : tab.title;
+
+        const agent = agentSessions.get(node.term);
+        if (agent) {
+          const reason =
+            agent.status === "working"
+              ? "agent-working"
+              : agent.status === "starting"
+                ? "agent-starting"
+                : agent.status === "waiting"
+                  ? "agent-waiting"
+                  : null;
+          if (reason) entries.push({ termId: node.term, label: `${where} · ${agent.label}`, reason });
+          return;
+        }
+
+        if (meta.agent) {
+          if (terminals.hasPendingAgentTurn(node.term)) {
+            entries.push({
+              termId: node.term,
+              label: `${where} · ${meta.agent}`,
+              reason: "agent-working",
+            });
+          }
+          return;
+        }
+
+        if (meta.busy) entries.push({ termId: node.term, label: where, reason: "process" });
+      });
+    }
+    return entries;
+  }, []);
+
+  useEffect(
+    () => powerWatch.connect({ probe: probeActivity, fire: powerAction }),
+    [probeActivity],
+  );
 
   // ---------------------------------------------------------------- tabs
 
@@ -414,11 +691,12 @@ export default function App() {
   // home). Choosing a project is an explicit action on this tab.
   const newTab = useCallback(
     (shellId?: string | null) => {
+      const previousCount = tabsRef.current.length;
       const term = createTerm({ cwd: null, shell: shellId ?? shellRef.current });
       const root = leaf(term);
       const tab: Tab = {
         id: uid("tab"),
-        title: `Terminal ${tabsRef.current.length + 1}`,
+        title: `Terminal ${previousCount + 1}`,
         root,
         activeLeaf: root.id,
         zoomedLeaf: null,
@@ -426,6 +704,10 @@ export default function App() {
       };
       setTabs([...tabsRef.current, tab]);
       setActiveTabId(tab.id);
+      setSettingsActive(false);
+      if (settingsTabOpenRef.current) {
+        setSettingsTabIndex((i) => adjustSettingsIndexOnAppend(i, previousCount));
+      }
     },
     [createTerm],
   );
@@ -449,11 +731,13 @@ export default function App() {
       const termsToCheck = leaves(tab.root)
         .map((n) => n.term)
         .filter((t) => !skipTerms.includes(t));
-      if (await terminals.anyHasRunningProcess(termsToCheck)) {
+      if (await terminals.anyHasCloseBlockingWork(termsToCheck)) {
+        const agent = terminals.runningAgentLabel(termsToCheck);
         const ok = await confirmCloseRunning({
           title: "Close tab?",
-          message:
-            termsToCheck.length === 1
+          message: agent
+            ? `${agent} is still open in this tab. Closing ends the session.`
+            : termsToCheck.length === 1
               ? "You have a process running in this tab."
               : "You have processes running in this tab.",
           confirmLabel: "Yes, close",
@@ -473,6 +757,12 @@ export default function App() {
       const index = latest.findIndex((t) => t.id === tabId);
       const remaining = latest.filter((t) => t.id !== tabId);
 
+      if (settingsTabOpenRef.current && index >= 0) {
+        setSettingsTabIndex((i) => adjustSettingsIndexOnClose(i, index));
+      }
+
+      paneMruRef.current.delete(tabId);
+
       if (remaining.length === 0) {
         // The window keeps one neutral tab open in the default directory.
         const term = createTerm({ cwd: null });
@@ -487,6 +777,8 @@ export default function App() {
         };
         setTabs([fresh]);
         setActiveTabId(fresh.id);
+        // Settings can only sit at 0 or 1 with a single tab left.
+        if (settingsTabOpenRef.current) setSettingsTabIndex((i) => Math.min(i, 1));
         return;
       }
 
@@ -499,18 +791,26 @@ export default function App() {
   );
 
   const reorderTabs = useCallback((from: number, to: number) => {
-    setTabs((prev) => {
-      if (from === to || from < 0 || to < 0 || from >= prev.length || to >= prev.length) return prev;
-      // Pinned tabs are immovable; unpinned tabs stay to their right.
-      if (prev[from]?.pinned) return prev;
-      const pinnedCount = prev.filter((t) => t.pinned).length;
-      const clampedTo = Math.max(to, pinnedCount);
-      if (from === clampedTo) return prev;
-      const next = [...prev];
-      const [moved] = next.splice(from, 1);
-      next.splice(clampedTo, 0, moved);
-      return next;
-    });
+    const prev = tabsRef.current;
+    const settingsOpen = settingsTabOpenRef.current;
+    const settingsIndex = settingsTabIndexRef.current;
+    const pinnedCount = prev.filter((t) => t.pinned).length;
+    const result = applyStripReorder(
+      prev.map((t) => t.id),
+      settingsOpen,
+      settingsIndex,
+      from,
+      to,
+      pinnedCount,
+    );
+    if (!result) return;
+
+    const byId = new Map(prev.map((t) => [t.id, t]));
+    const nextTabs = result.tabIds
+      .map((id) => byId.get(id))
+      .filter((t): t is Tab => t !== undefined);
+    setTabs(nextTabs);
+    if (settingsOpen) setSettingsTabIndex(result.settingsIndex);
   }, []);
 
   /** Pin moves the tab to the leftmost free pin slot (after other pins); unpin leaves it. */
@@ -561,7 +861,7 @@ export default function App() {
       // One prompt for the whole batch — "this tab" wording is wrong here because
       // the tabs being closed are the other ones, not the focused tab.
       const termsToCheck = others.flatMap((t) => leaves(t.root).map((n) => n.term));
-      if (await terminals.anyHasRunningProcess(termsToCheck)) {
+      if (await terminals.anyHasCloseBlockingWork(termsToCheck)) {
         const n = others.length;
         const ok = await confirmCloseRunning({
           title: n === 1 ? "Close other tab?" : "Close other tabs?",
@@ -590,13 +890,21 @@ export default function App() {
   );
 
   const selectTab = useCallback((id: string) => {
+    const viewChanged = settingsActiveRef.current || id !== activeTabIdRef.current;
     if (id !== activeTabIdRef.current) terminals.clearAllBlockSelections();
     const tab = tabsRef.current.find((candidate) => candidate.id === id);
-    const term = tab ? findLeaf(tab.root, tab.activeLeaf)?.term : null;
+    const term = tab ? (findLeaf(tab.root, tab.activeLeaf)?.term ?? null) : null;
+    if (
+      term !== null &&
+      completionHighlightsRef.current &&
+      shouldFlashCompletionReview(unreadTermIdsRef.current, term, viewChanged)
+    ) {
+      flashCompletion(term, "review");
+    }
     if (term) acknowledgeTerm(term);
     setSettingsActive(false);
     setActiveTabId(id);
-  }, [acknowledgeTerm]);
+  }, [acknowledgeTerm, flashCompletion]);
 
   const openSettings = useCallback(() => {
     terminals.clearAllBlockSelections();
@@ -606,6 +914,10 @@ export default function App() {
     void prefetchUsage(loadUsageSettings().days, 60_000).catch(() => {
       // The Usage panel owns the visible retry/error state.
     });
+    // Fresh open lands at the end of the strip; refocus keeps the last seat.
+    if (!settingsTabOpenRef.current) {
+      setSettingsTabIndex(tabsRef.current.length);
+    }
     setSettingsTabOpen(true);
     setSettingsActive(true);
   }, []);
@@ -651,10 +963,13 @@ export default function App() {
       const node = findLeaf(tab.root, leafId);
       if (!node) return;
 
-      if (await terminals.hasRunningProcess(node.term)) {
+      if (await terminals.hasCloseBlockingWork(node.term)) {
+        const agent = terminals.runningAgentLabel([node.term]);
         const ok = await confirmCloseRunning({
           title: "Close pane?",
-          message: "You have a process running in this pane.",
+          message: agent
+            ? `${agent} is still open in this pane. Closing ends the session.`
+            : "You have a process running in this pane.",
           confirmLabel: "Yes, close",
           allowDontShowAgain: true,
         });
@@ -669,14 +984,23 @@ export default function App() {
       const nextRoot = removeLeaf(tabNow.root, leafId);
 
       if (!nextRoot) {
+        // Closing the last pane resets its shell instead of closing the tab.
+        // Create the replacement first so it inherits the current directory
+        // while the outgoing session is still available.
+        const replacementTerm = createTerm();
         releaseTerm(nodeNow.term);
-        // Term already checked above; skip a second busy prompt in closeTab.
-        void closeTab(tabNow.id, [nodeNow.term]);
+        updateTab(tabNow.id, (t) => ({
+          ...t,
+          root: { ...nodeNow, term: replacementTerm },
+          activeLeaf: nodeNow.id,
+          zoomedLeaf: null,
+        }));
         return;
       }
 
       releaseTerm(nodeNow.term);
-      const fallback = leaves(nextRoot)[0].id;
+      const mru = paneMruRef.current.get(tabNow.id) ?? [tabNow.activeLeaf];
+      const fallback = preferredLeaf(nextRoot, mru) ?? leaves(nextRoot)[0].id;
       updateTab(tabNow.id, (t) => ({
         ...t,
         root: nextRoot,
@@ -684,7 +1008,7 @@ export default function App() {
         zoomedLeaf: t.zoomedLeaf === leafId ? null : t.zoomedLeaf,
       }));
     },
-    [closeTab, currentTab, releaseTerm, updateTab],
+    [createTerm, currentTab, releaseTerm, updateTab],
   );
 
   const activatePane = useCallback(
@@ -789,18 +1113,23 @@ export default function App() {
 
       let next = prev.map((t) => {
         if (t.id === source.id && restRoot) {
-          const fallback = leaves(restRoot)[0].id;
+          const mru = paneMruRef.current.get(t.id) ?? [t.activeLeaf];
+          const fallback = preferredLeaf(restRoot, mru) ?? leaves(restRoot)[0].id;
+          const activeLeaf = findLeaf(restRoot, t.activeLeaf) ? t.activeLeaf : fallback;
+          rememberPaneFocus(t.id, activeLeaf, restRoot, t.activeLeaf);
           return {
             ...t,
             root: restRoot,
-            activeLeaf: findLeaf(restRoot, t.activeLeaf) ? t.activeLeaf : fallback,
+            activeLeaf,
             zoomedLeaf: null,
           };
         }
         if (targetTabId && t.id === targetTabId) {
+          const root = insertBeside(t.root, t.activeLeaf, moved, "right");
+          rememberPaneFocus(t.id, moved.id, root, t.activeLeaf);
           return {
             ...t,
-            root: insertBeside(t.root, t.activeLeaf, moved, "right"),
+            root,
             activeLeaf: moved.id,
             zoomedLeaf: null,
           };
@@ -808,12 +1137,20 @@ export default function App() {
         return t;
       });
 
-      if (!restRoot) next = next.filter((t) => t.id !== source.id);
+      if (!restRoot) {
+        const removedIndex = next.findIndex((t) => t.id === source.id);
+        next = next.filter((t) => t.id !== source.id);
+        paneMruRef.current.delete(source.id);
+        if (settingsTabOpenRef.current && removedIndex >= 0) {
+          setSettingsTabIndex((i) => adjustSettingsIndexOnClose(i, removedIndex));
+        }
+      }
 
       let focus = targetTabId;
       if (!targetTabId) {
         // The pane is still the same shell in the same folder — it just lives in
         // its own tab now, so the project comes with it.
+        const previousCount = next.length;
         const created: Tab = {
           id: uid("tab"),
           title: source.project?.name ?? `Terminal ${next.length + 1}`,
@@ -824,12 +1161,16 @@ export default function App() {
         };
         next = [...next, created];
         focus = created.id;
+        rememberPaneFocus(created.id, moved.id, moved);
+        if (settingsTabOpenRef.current) {
+          setSettingsTabIndex((i) => adjustSettingsIndexOnAppend(i, previousCount));
+        }
       }
 
       setTabs(next);
       if (focus) setActiveTabId(focus);
     },
-    [],
+    [rememberPaneFocus],
   );
 
   const handleDrop = useCallback(
@@ -904,6 +1245,7 @@ export default function App() {
       spawnOpts.current.set(term, {
         cwd: path,
         shell: recorded?.shell ?? shellRef.current,
+        command: recorded?.command ?? null,
       });
       return;
     }
@@ -1032,8 +1374,13 @@ export default function App() {
       // project metadata: null asks the backend for the same default shell.
       terminals.setFontSize(initial.fontSize);
       terminals.setHighlight(initial.highlight);
+      terminals.setAgentUi(initial.customAgentUi);
+      agentSessions.setFollowupMode(initial.agentFollowupMode);
       terminals.setInputMode(initial.inputMode);
       preloadCompletionSound();
+      // Durable storage has been restored into the WebView copy by now, so the
+      // saved lists are the ones that survived the last update.
+      checklist.init();
       if (!cancelled) setBooted(true);
 
       try {
@@ -1188,6 +1535,9 @@ export default function App() {
           highlight,
           completionHighlights,
           completionSoundEnabled,
+          tintWorkspaceWithTabColor,
+          customAgentUi,
+          agentFollowupMode,
           inputMode,
           confirmCloseRunning: confirmCloseRunningPref,
           toolsOpen,
@@ -1207,6 +1557,9 @@ export default function App() {
     highlight,
     completionHighlights,
     completionSoundEnabled,
+    tintWorkspaceWithTabColor,
+    customAgentUi,
+    agentFollowupMode,
     inputMode,
     confirmCloseRunningPref,
     toolsOpen,
@@ -1214,6 +1567,14 @@ export default function App() {
     tabs,
     activeTabId,
   ]);
+
+  // A closed tab takes its checklist with it. Deferred to a settled tab list so
+  // an intermediate state during a reorder or a close cannot drop a live list.
+  useEffect(() => {
+    if (!booted) return;
+    const id = window.setTimeout(() => checklist.prune(tabs.map((tab) => tab.id)), 800);
+    return () => window.clearTimeout(id);
+  }, [booted, tabs]);
 
   // The grid just lost (or got back) horizontal room; the per-pane observers see
   // it, but re-measuring on the next frame keeps the reflow to a single pass.
@@ -1246,10 +1607,14 @@ export default function App() {
     let unlisten: (() => void) | undefined;
     void getCurrentWindow()
       .onCloseRequested(async (event) => {
-        if (!(await terminals.anyHasRunningProcess(terminals.allSessionIds()))) return;
+        const ids = terminals.allSessionIds();
+        if (!(await terminals.anyHasCloseBlockingWork(ids))) return;
+        const agent = terminals.runningAgentLabel(ids);
         const ok = await confirmCloseRunning({
           title: "Quit Duckweed?",
-          message: "You have processes running in open terminals.",
+          message: agent
+            ? `${agent} is still open in a terminal. Quitting ends the session.`
+            : "You have processes running in open terminals.",
           confirmLabel: "Yes, quit",
           allowDontShowAgain: true,
         });
@@ -1317,6 +1682,14 @@ export default function App() {
 
   const toggleCompletionSound = useCallback(() => {
     setCompletionSoundEnabled((prev) => !prev);
+  }, []);
+
+  const toggleCustomAgentUi = useCallback(() => {
+    setCustomAgentUi((prev) => {
+      const next = !prev;
+      terminals.setAgentUi(next);
+      return next;
+    });
   }, []);
 
   const toggleInputMode = useCallback(() => {
@@ -1458,7 +1831,31 @@ export default function App() {
       // Plain Ctrl+C with a grid selection: copy, never interrupt. Without this,
       // focus-on-xterm after a drag turns Ctrl+C into \x03 and PowerShell paints
       // a stack of `PS …> ^C` lines under the blocks.
-      if (ctrl && !e.shiftKey && !e.altKey && key === "c" && !isTextField(e.target)) {
+      if (ctrl && !e.shiftKey && !e.altKey && key === "c") {
+        // A custom surface is still a terminal harness. Empty composer Ctrl+C
+        // exits it (Claude/Grok arm a quick second press first). With draft
+        // text, the field clears instead — same gesture as the shell editor.
+        const field = isTextField(e.target)
+          ? (e.target as HTMLInputElement | HTMLTextAreaElement)
+          : null;
+        const fieldHasSelection =
+          field !== null &&
+          field.selectionStart !== null &&
+          field.selectionEnd !== null &&
+          field.selectionStart !== field.selectionEnd;
+        const fieldHasText = field !== null && field.value.length > 0;
+        const pageHasSelection = Boolean(window.getSelection()?.toString());
+        if (
+          activeTerm &&
+          !fieldHasSelection &&
+          !pageHasSelection &&
+          !fieldHasText &&
+          terminals.requestCloseAgentUi(activeTerm)
+        ) {
+          return take();
+        }
+
+        if (field) return;
         if (activeTerm) {
           const text = terminals.selection(activeTerm);
           if (text) {
@@ -1737,6 +2134,13 @@ export default function App() {
         hint: "Ctrl+Shift+H",
         run: toggleHighlight,
       },
+      {
+        id: "view.agentui",
+        group: "View",
+        title: customAgentUi ? "Turn off Custom Agent UI" : "Turn on Custom Agent UI",
+        subtitle: "Draw Duckweed's own interface over Claude, Codex, Cursor, Grok, and OpenCode",
+        run: toggleCustomAgentUi,
+      },
     ];
 
     for (const info of shells) {
@@ -1810,6 +2214,7 @@ export default function App() {
     changes.stats,
     closePane,
     closeTab,
+    customAgentUi,
     highlight,
     inputMode,
     newTab,
@@ -1818,6 +2223,7 @@ export default function App() {
     shells,
     splitPane,
     tabs,
+    toggleCustomAgentUi,
     toggleHighlight,
     toggleInputMode,
     toggleZoom,
@@ -1843,6 +2249,19 @@ export default function App() {
       ),
     [tabs, unreadTermIds],
   );
+  const completionReviewFlashes = useMemo(
+    () =>
+      Object.fromEntries(
+        tabs.flatMap((tab) => {
+          const flash = leaves(tab.root)
+            .map((node) => completionFlashes.get(node.term))
+            .filter((candidate): candidate is CompletionFlash => candidate?.kind === "review")
+            .sort((a, b) => b.key - a.key)[0];
+          return flash ? [[tab.id, flash.key]] : [];
+        }),
+      ),
+    [completionFlashes, tabs],
+  );
 
   const browseActiveProject = useCallback(() => {
     const tab = currentTab();
@@ -1854,6 +2273,52 @@ export default function App() {
       if (tab) void applyProject(path, { tabId: tab.id });
     },
     [applyProject, currentTab],
+  );
+  const getCurrentLayoutDraft = useCallback((): LayoutDraft | null => {
+    const tab = currentTab();
+    if (!tab) return null;
+    return {
+      name: `${tab.title} layout`,
+      root: captureLayout(tab.root, (term) => {
+        const meta = terminals.getMeta(term);
+        if (meta?.agent) return meta.agent;
+        const history = terminals.localHistory(term);
+        return history.length > 0 ? history[history.length - 1] : "";
+      }),
+    };
+  }, [currentTab]);
+  const openLayoutTemplate = useCallback(
+    async (layout: LayoutTemplate) => {
+      const source = currentTab();
+      if (!source?.project) return;
+      const termsToReplace = leaves(source.root).map((node) => node.term);
+      const hasRunningProcesses = await terminals.anyHasCloseBlockingWork(termsToReplace);
+      const ok = await confirmCloseRunning({
+        title: "Replace current layout?",
+        message: hasRunningProcesses
+          ? `This will replace every pane in "${source.title}" and end any running processes. The tab name and folder will stay the same.`
+          : `This will replace every pane in "${source.title}". The tab name and folder will stay the same.`,
+        confirmLabel: "Yes, replace",
+      });
+      if (!ok) return;
+
+      const latest = currentTab();
+      if (!latest?.project || latest.id !== source.id) return;
+      const root = instantiateLayout(layout.root, (command) =>
+        leaf(createTerm({ cwd: latest.project?.path ?? null, command })),
+      );
+      const first = leaves(root)[0];
+      for (const node of leaves(latest.root)) {
+        releaseTerm(node.term);
+      }
+      updateTab(latest.id, (tab) => ({
+        ...tab,
+        root,
+        activeLeaf: first.id,
+        zoomedLeaf: null,
+      }));
+    },
+    [createTerm, currentTab, releaseTerm, updateTab],
   );
   const splitAt = useCallback(
     (leafId: string, zone: "right" | "bottom") => splitPane(leafId, zone),
@@ -1876,6 +2341,7 @@ export default function App() {
       onPickProject: pickActiveProject,
       zoomedLeaf: activeTab?.zoomedLeaf ?? null,
       onActivate: activatePane,
+      onReview: acknowledgeTerm,
       onSplit: splitAt,
       onClose: closePaneById,
       onToggleZoom: toggleZoom,
@@ -1885,6 +2351,7 @@ export default function App() {
     [
       activeTab?.activeLeaf,
       activeTab?.zoomedLeaf,
+      acknowledgeTerm,
       activatePane,
       browseActiveProject,
       closePaneById,
@@ -1916,9 +2383,18 @@ export default function App() {
   const zoomedNode =
     activeTab?.zoomedLeaf ? findLeaf(activeTab.root, activeTab.zoomedLeaf) : null;
   const activeTerm = activeTab ? (findLeaf(activeTab.root, activeTab.activeLeaf)?.term ?? null) : null;
+  const activeWindowColor =
+    tintWorkspaceWithTabColor && !settingsActive ? tabColorHex(activeTab?.color) : null;
 
   return (
-    <div className="app">
+    <div
+      className={`app${activeWindowColor ? " has-tab-color" : ""}`}
+      style={
+        activeWindowColor
+          ? ({ "--active-tab-color": activeWindowColor } as CSSProperties)
+          : undefined
+      }
+    >
       <TitleBar
         settingsActive={settingsActive}
         onOpenSettings={openSettings}
@@ -1930,6 +2406,7 @@ export default function App() {
           activeTabId={activeTabId}
           paneCounts={paneCounts}
           unreadCounts={unreadCounts}
+          completionReviewFlashes={completionReviewFlashes}
           completionHighlights={completionHighlights}
           drag={drag}
           projects={tabProjects}
@@ -1945,6 +2422,7 @@ export default function App() {
           onIcon={iconTab}
           settingsOpen={settingsTabOpen}
           settingsActive={settingsActive}
+          settingsIndex={settingsTabIndex}
           onSelectSettings={openSettings}
           onCloseSettings={closeSettings}
         />
@@ -1956,6 +2434,8 @@ export default function App() {
         {toolsOpen && !settingsActive && (
           <ToolsPanel
             project={project}
+            tabId={activeTab?.id ?? null}
+            tabTitle={activeTab?.title ?? ""}
             width={toolsWidth}
             onWidth={setToolsWidth}
             onClose={() => setToolsOpen(false)}
@@ -1963,6 +2443,12 @@ export default function App() {
             onOpenFolder={cdActivePane}
             onBrowseProject={browseActiveProject}
             onOpenFile={(path) => void openExplorerFile(path)}
+            getCurrentLayoutDraft={getCurrentLayoutDraft}
+            onOpenLayout={openLayoutTemplate}
+            stats={toolStats}
+            ownerNames={portOwnerNames}
+            section={toolsSection}
+            onSection={setToolsSection}
           />
         )}
 
@@ -1981,6 +2467,9 @@ export default function App() {
                 highlight={highlight}
                 completionHighlights={completionHighlights}
                 completionSoundEnabled={completionSoundEnabled}
+                tintWorkspaceWithTabColor={tintWorkspaceWithTabColor}
+                customAgentUi={customAgentUi}
+                agentFollowupMode={agentFollowupMode}
                 confirmCloseRunning={confirmCloseRunningPref}
                 explorerIntegration={explorerIntegration}
                 shell={shell}
@@ -1991,6 +2480,14 @@ export default function App() {
                 onToggleHighlight={toggleHighlight}
                 onToggleCompletionHighlights={toggleCompletionHighlights}
                 onToggleCompletionSound={toggleCompletionSound}
+                onToggleTintWorkspaceWithTabColor={() =>
+                  setTintWorkspaceWithTabColor((enabled) => !enabled)
+                }
+                onToggleCustomAgentUi={toggleCustomAgentUi}
+                onAgentFollowupMode={(mode) => {
+                  agentSessions.setFollowupMode(mode);
+                  setAgentFollowupMode(mode);
+                }}
                 onToggleConfirmCloseRunning={() =>
                   setConfirmCloseRunningPref((prev) => !prev)
                 }
@@ -2086,6 +2583,9 @@ export default function App() {
       )}
 
       {updater.dialogOpen && <UpdateDialog updater={updater} />}
+      {/* Floats over the grid so an armed watch can be called off from
+          anywhere, not only from the panel that armed it. */}
+      <PowerWatchBanner />
       <ConfirmCloseDialog />
     </div>
   );

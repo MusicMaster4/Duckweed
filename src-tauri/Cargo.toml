@@ -27,11 +27,16 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 # dedicated blocking worker.
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "json"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
+# OpenCode moved usage off per-message JSON files into a local SQLite DB.
+# 0.40 pulls libsqlite3-sys that needs unstable cfg_select; 0.32 is solid.
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
+    "Win32_Storage_FileSystem",
     "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Power",
     "Win32_UI_Shell",
 ] }
 winreg = "0.55"

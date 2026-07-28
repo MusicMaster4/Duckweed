@@ -11,6 +11,11 @@ context, diffs, tabs, and panes in one place. There is no Duckweed account to
 create, no cloud workspace to set up, and nothing to sync before your first
 command.
 
+Launch several coding agents side by side in the same window. Duckweed gives
+each one a dedicated interface for conversations, tool calls, plans,
+permissions, and file changes, without taking away the terminal when you need
+it.
+
 <p>
   <a href="https://github.com/MusicMaster4/Duckweed/releases/latest">
     <img src="https://img.shields.io/badge/Download-stable-78dc50?style=for-the-badge&logo=windows&logoColor=111511" alt="Download the latest stable release" />
@@ -48,7 +53,9 @@ somewhere behind all of them.
 Duckweed is the terminal workspace I wanted for that kind of work. It has the
 freedom of a tiling layout, but it still behaves like a regular terminal. Open
 your project, arrange the panes once, and let each agent or command have its own
-space.
+space. Multiple panes can show Duckweed's custom agent interface at the same
+time, so separate agents can work in parallel without being spread across
+separate application windows.
 
 Duckweed does not host your repository or wrap your coding tools in another
 service. It runs the shells and CLIs already installed on your computer. Layouts
@@ -62,8 +69,7 @@ session files those tools already keep.
 **[Download the latest stable release](https://github.com/MusicMaster4/Duckweed/releases/latest)**
 
 This is the normal install and the recommended choice. The link is permanent:
-GitHub always sends it to the newest stable Duckweed release. The first stable
-release is being prepared, so the page may be empty until it is published.
+GitHub always sends it to the newest stable Duckweed release.
 
 ### Beta
 
@@ -85,6 +91,18 @@ later updates can be installed from the version chip in the status bar or from
 > yet code-signed. Duckweed's built-in updater still verifies every update with
 > the project's update signature.
 
+## Platform support and prerequisites
+
+Official prebuilt releases are currently available for Windows only. Linux and
+macOS users can build Duckweed from source, but those platforms do not yet have
+official installers or the same release testing as Windows.
+
+Duckweed runs shells and coding-agent CLIs that are already installed on your
+computer. Before launching an agent in Duckweed, install its CLI, sign in or
+configure its provider credentials, and confirm that its command works in a
+regular terminal. Duckweed does not provide agent accounts, subscriptions, or
+API credentials.
+
 ## What it does
 
 - **Real terminal sessions.** Every pane owns a PTY-backed shell: ConPTY on
@@ -97,12 +115,62 @@ later updates can be installed from the version chip in the status bar or from
   the status bar or press `Ctrl+Shift+G`.
 - **A useful command palette.** Projects, shells, tabs, panes, settings, and
   updates are available through `Ctrl+Shift+P`.
+- **First-class coding agent interfaces.** Launch Claude Code, Codex, Cursor
+  Agent, Grok, or OpenCode in a pane and Duckweed can replace the terminal UI
+  with a native conversation, tool, plan, permission, and diff timeline. Run
+  several of these interfaces side by side in the same window.
 - **Search and readable output.** Search terminal scrollback and optionally
   highlight paths, URLs, flags, hashes, diffs, warnings, and errors.
 - **Shell discovery.** Duckweed finds PowerShell, `cmd`, Git Bash, WSL, Nushell,
   Bash, Zsh, and Fish when they are installed.
+- **Workspace tools.** A dockable panel (`Ctrl+Shift+X`) with a project file
+  browser, saved pane layouts, a persistent per-tab checklist, session
+  statistics, a listening-port list with copy, forward, and close actions, and a
+  power watch that sleeps or shuts down the machine after all panes finish.
+- **Explorer integration.** Per-user context-menu entries open a folder in a new
+  Duckweed tab or window straight from Windows Explorer, without administrator
+  rights. Both entries can be toggled in the settings.
+- **Completion signals.** Finished agent turns and commands can play a
+  completion sound, highlight the pane, and outline the taskbar icon so you
+  notice from another window.
 - **Local persistence.** Pane arrangements come back after a restart without
   pretending the old processes are still alive.
+
+## Coding agents
+
+When the custom agent UI is enabled, launching `claude`, `codex`, `agent`,
+`grok`, or `opencode` opens a focused interface inside the current pane. The
+installed CLI still runs locally and keeps its own authentication and provider
+configuration.
+
+Each pane owns its agent session. Split the workspace and launch another agent
+to keep multiple custom interfaces visible and working at once, all within the
+same Duckweed window. You can mix agent interfaces and regular shells in any
+layout.
+
+The interface presents streamed responses, reasoning, tool calls, file changes,
+plans, permission requests, token usage, and session history in a consistent
+timeline while preserving each provider's identity. When Claude Code stops to
+ask you something, the question arrives as a card you can answer by clicking a
+choice, by pressing its number, or by writing an answer of your own. The composer supports slash
+commands, workspace file mentions, queued follow-ups, and image attachments
+where the provider accepts them. Model and reasoning controls appear when the
+agent protocol exposes those choices.
+
+Supported custom interfaces currently include:
+
+- Claude Code and compatible Claudex launches
+- Codex CLI
+- Cursor Agent
+- Grok CLI
+- OpenCode
+
+The longer list in [Agent usage](#agent-usage) includes tools whose local
+transcripts Duckweed can measure even when they do not have a custom agent
+interface. Usage scanning support does not imply custom-interface support.
+
+Turn off **Custom Agent UI** from the command palette whenever you prefer to use
+an agent's original terminal interface.
 
 ## Agent usage
 
@@ -129,6 +197,18 @@ can query the official usage endpoint with Claude Code's existing OAuth session;
 Codex and Grok use the latest quota snapshots saved by their CLIs. Duckweed does
 not invent limits for agents that do not expose them.
 
+## Local data and network sharing
+
+Projects, layouts, settings, agent sessions, and usage indexes stay on your
+computer. Duckweed does not upload repository contents or agent transcripts.
+Provider CLIs may still contact their own services, and Claude quota cards can
+query Claude's official usage endpoint with the local Claude Code session.
+
+The Ports tool's **Share on network** action makes the selected local service
+reachable from other devices on the same network. Do not share unauthenticated
+development servers on public or untrusted networks. Stop sharing from the Ports
+tool when access is no longer needed.
+
 ## Keyboard shortcuts
 
 | Shortcut | Action |
@@ -145,6 +225,7 @@ not invent limits for agents that do not expose them.
 | `Ctrl+Shift+O` | Open a project |
 | `Ctrl+Shift+P` | Open the command palette |
 | `Ctrl+Shift+G` | Review uncommitted changes |
+| `Ctrl+Shift+X` | Toggle the workspace tools panel |
 | `Ctrl+Shift+F` | Search terminal output |
 | `Ctrl+Shift+K` | Clear the focused pane |
 | `Ctrl+Shift+H` | Toggle output highlighting |
@@ -157,7 +238,7 @@ Right-click copies a selection. With no selection, it pastes from the clipboard.
 
 You will need [Bun](https://bun.sh/), [Rust](https://www.rust-lang.org/tools/install),
 and the [Tauri 2 prerequisites](https://v2.tauri.app/start/prerequisites/) for
-your operating system.
+your operating system. Duckweed's Rust crates require Rust 1.77 or newer.
 
 ```bash
 git clone https://github.com/MusicMaster4/Duckweed.git
@@ -165,6 +246,9 @@ cd Duckweed
 bun install
 bun run app
 ```
+
+`bun run app` starts Tauri without watching the Rust backend. During backend
+development, use `bun run app:watch` to rebuild when Rust files change.
 
 Build the native installer or application bundle with:
 
@@ -180,16 +264,28 @@ not recreate its process or scrollback.
 
 ```text
 src/
-├── components/       workspace UI, settings, palette, search, diffs, updates
-├── hooks/            drag-and-drop behavior and update checks
-└── lib/              layouts, terminal registry, persistence, IPC, highlighting
+├── components/       workspace UI, agent interfaces, settings, palette, search,
+│                     diffs, tools panel, updates
+├── hooks/            drag-and-drop behavior, Git change polling, update checks
+└── lib/              layouts, terminal registry, agent adapters, persistence,
+                      IPC, highlighting
 
 src-tauri/src/
-├── main.rs           Tauri commands and IPC
-├── pty.rs            one PTY session per pane
-├── shells.rs         installed-shell discovery
-├── project.rs        project and Git branch detection
-└── usage/            local agent transcript and quota readers
+├── main.rs                Tauri commands and IPC
+├── pty.rs                 one PTY session per pane
+├── shells.rs              installed-shell discovery
+├── project.rs             project and Git branch detection
+├── git.rs                 diff and change collection
+├── launch.rs              coding agent launch detection
+├── agent_proc.rs          agent process supervision
+├── agent_sessions.rs      agent session storage
+├── agent_activity.rs      agent turn and activity tracking
+├── ports.rs               listening-port discovery and forwarding
+├── watch.rs / power.rs    power watch and sleep or shutdown actions
+├── process_tree.rs        pane process inspection
+├── fs.rs                  project file browsing
+├── shell_integration.rs   Windows Explorer context-menu entries
+└── usage/                 local agent transcript and quota readers
 ```
 
 The PTY stream is transported as base64 and decoded incrementally, which keeps
@@ -203,14 +299,20 @@ bun test
 cd src-tauri && cargo check
 ```
 
+GitHub CI currently runs the TypeScript check and Bun test suite. Run
+`cargo check` locally before submitting Rust changes; it is not currently part
+of the automated CI workflow.
+
 Release builds come from two branches: `main` publishes stable releases and
 `testing` publishes beta releases. The full versioning, signing, and updater
 setup is documented in [docs/releases.md](docs/releases.md).
 
 ## Current scope
 
-Duckweed is an active project. Projects, tabs, panes, real shells, search, Git
-diffs, local usage analytics, updates, and layout persistence are implemented.
+Duckweed is an active project. Projects, tabs, panes, real shells, custom coding
+agent interfaces, search, Git diffs, local usage analytics, workspace tools
+(files, saved layouts, checklists, statistics, ports, power watch), completion
+signals, Explorer integration, updates, and layout persistence are implemented.
 
 Command blocks currently group commands submitted through Duckweed's composer.
 Grouping raw-mode input the same way still needs OSC 133 shell integration.

@@ -1,0 +1,389 @@
+import { describe, expect, test } from "bun:test";
+
+import {
+  detectAgent,
+  didProcessFinish,
+  isAgentPromptSubmission,
+  isGenericOsc777Notification,
+  parseAgentOsc777,
+  shouldAcceptAgentCompletion,
+  shouldPlayCompletionSound,
+  shouldSignalCompletion,
+  type ProcessState,
+} from "./processActivity";
+
+const state = (overrides: Partial<ProcessState> = {}): ProcessState => ({
+  busy: false,
+  exited: false,
+  completionSeq: 0,
+  completionStartedAt: null,
+  agent: null,
+  agentUi: false,
+  processStartedAt: null,
+  ...overrides,
+});
+
+describe("terminal completion activity", () => {
+  test("a child process changing from running to idle finishes", () => {
+    expect(
+      didProcessFinish(
+        state({ busy: true }),
+        state(),
+      ),
+    ).toBe(true);
+  });
+
+  test("an exited shell finishes even when it had no busy child", () => {
+    expect(
+      didProcessFinish(
+        state(),
+        state({ exited: true }),
+      ),
+    ).toBe(true);
+  });
+
+  test("starting and unchanged idle states do not finish", () => {
+    expect(
+      didProcessFinish(
+        state(),
+        state({ busy: true }),
+      ),
+    ).toBe(false);
+    expect(
+      didProcessFinish(
+        state(),
+        state(),
+      ),
+    ).toBe(false);
+  });
+
+  test("a persistent agent completing a turn finishes without exiting", () => {
+    expect(
+      didProcessFinish(
+        state({ busy: true, completionSeq: 4 }),
+        state({ busy: true, completionSeq: 5 }),
+      ),
+    ).toBe(true);
+  });
+});
+
+describe("agent completion deduplication", () => {
+  test("never time-filters exact custom UI protocol events", () => {
+    expect(shouldAcceptAgentCompletion(true, 10_000, 10_001)).toBe(true);
+  });
+
+  test("merges only heuristic signals inside the quiet window", () => {
+    expect(shouldAcceptAgentCompletion(false, 10_000, 11_199)).toBe(false);
+    expect(shouldAcceptAgentCompletion(false, 10_000, 11_200)).toBe(true);
+  });
+});
+
+describe("completion sound and highlight eligibility", () => {
+  const now = 100_000;
+
+  test("ignores ordinary terminal processes that ran for 30 seconds or less", () => {
+    expect(
+      shouldSignalCompletion(
+        state({ busy: true, processStartedAt: now - 29_999 }),
+        state({ processStartedAt: now - 29_999 }),
+        now,
+      ),
+    ).toBe(false);
+    expect(
+      shouldSignalCompletion(
+        state({ busy: true, processStartedAt: now - 30_000 }),
+        state({ processStartedAt: now - 30_000 }),
+        now,
+      ),
+    ).toBe(false);
+  });
+
+  test("signals ordinary terminal processes that ran for more than 30 seconds", () => {
+    expect(
+      shouldSignalCompletion(
+        state({ busy: true, processStartedAt: now - 30_001 }),
+        state({ processStartedAt: now - 30_001 }),
+        now,
+      ),
+    ).toBe(true);
+  });
+
+  test("does not treat quitting a coding agent as a turn completion", () => {
+    // Ctrl+C /exit: process goes idle (or shell exits) without a turn record.
+    expect(
+      shouldSignalCompletion(
+        state({ busy: true, agent: "codex", processStartedAt: now - 120_000 }),
+        state({ agent: "codex", processStartedAt: now - 120_000 }),
+        now,
+      ),
+    ).toBe(false);
+    expect(
+      shouldSignalCompletion(
+        state({ busy: true, agent: "grok", processStartedAt: now - 120_000 }),
+        state({ processStartedAt: now - 120_000 }),
+        now,
+      ),
+    ).toBe(false);
+    expect(
+      shouldSignalCompletion(
+        state({ agent: "claude", processStartedAt: now - 120_000 }),
+        state({ exited: true, processStartedAt: now - 120_000 }),
+        now,
+      ),
+    ).toBe(false);
+  });
+
+  test("the shell behind a custom agent UI pane is never the completion", () => {
+    // The agent runs beside the PTY, so the shell dying (or the pane's last
+    // command finishing before the UI took over) says nothing about the turn.
+    expect(
+      shouldSignalCompletion(
+        state({ busy: true, agentUi: true, processStartedAt: now - 120_000 }),
+        state({ agentUi: true, processStartedAt: now - 120_000 }),
+        now,
+      ),
+    ).toBe(false);
+    expect(
+      shouldSignalCompletion(
+        state({ agentUi: true, processStartedAt: now - 120_000 }),
+        state({ exited: true, agentUi: true, processStartedAt: now - 120_000 }),
+        now,
+      ),
+    ).toBe(false);
+    // Its own protocol-reported turn still counts.
+    expect(
+      shouldSignalCompletion(
+        state({ agentUi: true, completionSeq: 1, processStartedAt: now - 120_000 }),
+        state({ agentUi: true, completionSeq: 2, processStartedAt: now - 120_000 }),
+        now,
+      ),
+    ).toBe(true);
+  });
+
+  test("signals persistent agent turns regardless of process runtime", () => {
+    expect(
+      shouldSignalCompletion(
+        state({ busy: true, completionSeq: 4, processStartedAt: now - 1 }),
+        state({ busy: true, completionSeq: 5, processStartedAt: now - 1 }),
+        now,
+      ),
+    ).toBe(true);
+    expect(
+      shouldSignalCompletion(
+        state({
+          busy: true,
+          agent: "grok",
+          completionSeq: 2,
+          processStartedAt: now - 1,
+        }),
+        state({
+          busy: true,
+          agent: "grok",
+          completionSeq: 3,
+          processStartedAt: now - 1,
+        }),
+        now,
+      ),
+    ).toBe(true);
+  });
+});
+
+describe("completion sound eligibility", () => {
+  const now = 100_000;
+
+  test("does not play for ordinary terminal jobs that ran one minute or less", () => {
+    expect(
+      shouldPlayCompletionSound(
+        state({ busy: true, processStartedAt: now - 60_000 }),
+        state({ processStartedAt: now - 60_000 }),
+        now,
+      ),
+    ).toBe(false);
+  });
+
+  test("plays immediately for real agent turns in raw and custom UI panes", () => {
+    expect(
+      shouldPlayCompletionSound(
+        state({
+          busy: true,
+          agent: "codex",
+          completionSeq: 1,
+          completionStartedAt: now - 59_999,
+          processStartedAt: now - 59_999,
+        }),
+        state({
+          busy: true,
+          agent: "codex",
+          completionSeq: 2,
+          completionStartedAt: now - 59_999,
+          processStartedAt: now - 59_999,
+        }),
+        now,
+      ),
+    ).toBe(true);
+    expect(
+      shouldPlayCompletionSound(
+        state({
+          agentUi: true,
+          completionSeq: 3,
+          completionStartedAt: now - 1,
+          processStartedAt: now - 1,
+        }),
+        state({
+          agentUi: true,
+          completionSeq: 4,
+          completionStartedAt: now - 1,
+          processStartedAt: now - 1,
+        }),
+        now,
+      ),
+    ).toBe(true);
+  });
+
+  test("plays for finished jobs and agent turns that ran more than one minute", () => {
+    expect(
+      shouldPlayCompletionSound(
+        state({ busy: true, processStartedAt: now - 60_001 }),
+        state({ processStartedAt: now - 60_001 }),
+        now,
+      ),
+    ).toBe(true);
+    expect(
+      shouldPlayCompletionSound(
+        state({
+          busy: true,
+          agent: "claude",
+          completionSeq: 1,
+          completionStartedAt: now - 60_001,
+          processStartedAt: now - 60_001,
+        }),
+        state({
+          busy: true,
+          agent: "claude",
+          completionSeq: 2,
+          completionStartedAt: now - 60_001,
+          processStartedAt: now - 60_001,
+        }),
+        now,
+      ),
+    ).toBe(true);
+  });
+
+  test("does not duration-gate agent turns when another turn owns the live clock", () => {
+    expect(
+      shouldPlayCompletionSound(
+        state({
+          agent: "codex",
+          completionSeq: 4,
+          processStartedAt: now - 2_000,
+        }),
+        state({
+          agent: "codex",
+          completionSeq: 5,
+          completionStartedAt: now - 90_000,
+          processStartedAt: now - 2_000,
+        }),
+        now,
+      ),
+    ).toBe(true);
+    expect(
+      shouldPlayCompletionSound(
+        state({
+          agent: "codex",
+          completionSeq: 5,
+          processStartedAt: now - 90_000,
+        }),
+        state({
+          agent: "codex",
+          completionSeq: 6,
+          completionStartedAt: now - 2_000,
+          processStartedAt: now - 90_000,
+        }),
+        now,
+      ),
+    ).toBe(true);
+  });
+
+  test("does not play when quitting a coding agent", () => {
+    expect(
+      shouldPlayCompletionSound(
+        state({ busy: true, agent: "grok", processStartedAt: now - 120_000 }),
+        state({ processStartedAt: now - 120_000 }),
+        now,
+      ),
+    ).toBe(false);
+  });
+
+  test("does not play when the process did not finish", () => {
+    expect(
+      shouldPlayCompletionSound(
+        state({ processStartedAt: now - 120_000 }),
+        state({ busy: true, processStartedAt: now - 120_000 }),
+        now,
+      ),
+    ).toBe(false);
+  });
+});
+
+describe("CLI agent signals", () => {
+  test("recognises official commands and common profile wrappers", () => {
+    expect(detectAgent("codex --search")).toBe("codex");
+    expect(detectAgent("claude-work --resume")).toBe("claude");
+    expect(detectAgent("claudex --g")).toBe("claude");
+    expect(detectAgent("grok-build")).toBe("grok");
+    expect(detectAgent("npx @openai/codex")).toBe("codex");
+    expect(detectAgent("opencode")).toBe("opencode");
+    expect(detectAgent("npx @google/gemini-cli")).toBe("gemini");
+    expect(detectAgent("agy --continue")).toBe("antigravity");
+    expect(detectAgent("qwen-code")).toBe("qwen");
+    expect(detectAgent("copilot")).toBe("copilot");
+    expect(detectAgent("aider --model sonnet")).toBe("aider");
+    expect(detectAgent("aider-chat")).toBe("aider");
+    expect(detectAgent("npm test")).toBeNull();
+    expect(detectAgent("echo codex")).toBeNull();
+  });
+
+  test("parses Warp-compatible OSC 777 completion events", () => {
+    const event = parseAgentOsc777(
+      'notify;warp://cli-agent;{"v":1,"agent":"claude","event":"stop"}',
+    );
+    expect(event).toEqual({ agent: "claude", needsAttention: true });
+  });
+
+  test("does not treat prompt submission as completion", () => {
+    const event = parseAgentOsc777(
+      'notify;warp://cli-agent;{"v":1,"agent":"codex","event":"prompt_submit"}',
+    );
+    expect(event).toEqual({ agent: "codex", needsAttention: false });
+  });
+
+  test("counts Enter into a bound agent as a prompt, and terminal chatter as nothing", () => {
+    expect(isAgentPromptSubmission("\r")).toBe(true);
+    expect(isAgentPromptSubmission("fix the build\r")).toBe(true);
+    // Answering a permission prompt is also work handed back to the agent.
+    expect(isAgentPromptSubmission("2\r")).toBe(true);
+    // Bracketed paste of a multi-line prompt.
+    expect(isAgentPromptSubmission("\x1b[200~one\ntwo\x1b[201~\r")).toBe(true);
+
+    expect(isAgentPromptSubmission("hello")).toBe(false);
+    expect(isAgentPromptSubmission("\x03")).toBe(false);
+    // Arrow keys and mouse reports full-screen agents ask for.
+    expect(isAgentPromptSubmission("\x1b[A")).toBe(false);
+    expect(isAgentPromptSubmission("\x1b[<0;12;24M")).toBe(false);
+    // xterm answering ConPTY's startup queries is not the user typing.
+    expect(isAgentPromptSubmission("\x1b[24;80R")).toBe(false);
+    expect(isAgentPromptSubmission("\x1b]11;rgb:1e1e/1e1e/1e1e\x07")).toBe(false);
+  });
+
+  test("recognises generic OSC 777 terminal notifications", () => {
+    expect(
+      isGenericOsc777Notification(
+        "notify;Gemini CLI session complete;Gemini CLI finished responding.",
+      ),
+    ).toBe(true);
+    expect(isGenericOsc777Notification("progress;50")).toBe(false);
+    // Progress/status notifies must not look like a finished turn.
+    expect(isGenericOsc777Notification("notify;Working;Still generating…")).toBe(false);
+    expect(isGenericOsc777Notification("notify;Status;Agent busy")).toBe(false);
+  });
+});

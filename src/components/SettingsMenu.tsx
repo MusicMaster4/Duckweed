@@ -4,6 +4,7 @@ import { UsagePanel } from "./UsagePanel";
 import type { ShellIntegrationStatus } from "../lib/ipc";
 import type { InputMode } from "../lib/terminals";
 import type { ShellInfo } from "../lib/types";
+import type { AgentFollowupMode } from "../lib/agents/types";
 
 interface Props {
   /** False while the settings tab exists but another tab is selected. */
@@ -13,6 +14,10 @@ interface Props {
   highlight: boolean;
   completionHighlights: boolean;
   completionSoundEnabled: boolean;
+  tintWorkspaceWithTabColor: boolean;
+  /** Draw Duckweed's own interface over a recognised coding-agent CLI. */
+  customAgentUi: boolean;
+  agentFollowupMode: AgentFollowupMode;
   confirmCloseRunning: boolean;
   /** Windows Explorer folder verbs; null when unavailable. */
   explorerIntegration: ShellIntegrationStatus | null;
@@ -24,6 +29,9 @@ interface Props {
   onToggleHighlight: () => void;
   onToggleCompletionHighlights: () => void;
   onToggleCompletionSound: () => void;
+  onToggleTintWorkspaceWithTabColor: () => void;
+  onToggleCustomAgentUi: () => void;
+  onAgentFollowupMode: (mode: AgentFollowupMode) => void;
   onToggleConfirmCloseRunning: () => void;
   onToggleExplorerTab: () => void;
   onToggleExplorerWindow: () => void;
@@ -41,7 +49,7 @@ function Toggle({ enabled }: { enabled: boolean }) {
   );
 }
 
-type SettingsSection = "General" | "Appearance" | "Terminal" | "Usage" | "About";
+type SettingsSection = "General" | "Appearance" | "Agents" | "Terminal" | "Usage" | "About";
 
 // Survive SettingsMenu unmount when the settings tab is closed and reopened.
 // (While the tab stays open, App keeps this tree mounted so the browser holds
@@ -50,6 +58,7 @@ let lastSettingsSection: SettingsSection = "General";
 const lastSettingsScroll: Record<SettingsSection, number> = {
   General: 0,
   Appearance: 0,
+  Agents: 0,
   Terminal: 0,
   Usage: 0,
   About: 0,
@@ -62,6 +71,9 @@ export function SettingsMenu({
   highlight,
   completionHighlights,
   completionSoundEnabled,
+  tintWorkspaceWithTabColor,
+  customAgentUi,
+  agentFollowupMode,
   confirmCloseRunning,
   explorerIntegration,
   shell,
@@ -72,6 +84,9 @@ export function SettingsMenu({
   onToggleHighlight,
   onToggleCompletionHighlights,
   onToggleCompletionSound,
+  onToggleTintWorkspaceWithTabColor,
+  onToggleCustomAgentUi,
+  onAgentFollowupMode,
   onToggleConfirmCloseRunning,
   onToggleExplorerTab,
   onToggleExplorerWindow,
@@ -124,6 +139,7 @@ export function SettingsMenu({
     (section === "General" || section === "Appearance" || searching) &&
     (matches("appearance font size terminal text command editor") ||
       matches("syntax highlighting colour commands plain terminal output") ||
+      matches("tint workspace background active tab colour frame status bar") ||
       matches("completion highlights finished process unread tab outline rose") ||
       matches("completion sound audio cue process agent finished"));
   const showTerminal =
@@ -140,6 +156,14 @@ export function SettingsMenu({
         "explorer open duckweed in new window folder right click context menu shell integration",
       ) ||
       matches("reset suggestions ghost autocomplete history learning clear forget"));
+  const showAgents =
+    (section === "General" || section === "Agents" || searching) &&
+    (matches(
+      "custom agent ui claude code codex cursor grok opencode coding agent interface overlay cli",
+    ) ||
+      matches(
+        "active turn messages follow-up queue steer send now alt shift enter agent delivery",
+      ));
   const showAbout =
     (section === "General" || section === "About" || searching) &&
     matches("about updates version stable beta command palette");
@@ -228,7 +252,7 @@ export function SettingsMenu({
           />
         </label>
         <nav aria-label="Settings sections">
-          {(["General", "Appearance", "Terminal", "Usage", "About"] as const).map((item) => (
+          {(["General", "Appearance", "Agents", "Terminal", "Usage", "About"] as const).map((item) => (
             <button
               key={item}
               type="button"
@@ -308,6 +332,19 @@ export function SettingsMenu({
                   <Toggle enabled={highlight} />
                 </button>
               )}
+              {matches("tint workspace background active tab colour frame status bar") && (
+                <button
+                  type="button"
+                  className="settings-row settings-action"
+                  onClick={onToggleTintWorkspaceWithTabColor}
+                >
+                  <span className="settings-copy">
+                    <strong>Tint workspace background</strong>
+                    <span>Use the active tab colour in the workspace frame and status bar</span>
+                  </span>
+                  <Toggle enabled={tintWorkspaceWithTabColor} />
+                </button>
+              )}
               {matches("completion highlights finished process unread tab outline rose") && (
                 <button
                   type="button"
@@ -329,10 +366,55 @@ export function SettingsMenu({
                 >
                   <span className="settings-copy">
                     <strong>Completion sound</strong>
-                    <span>Play on the selected pane when a job has run for more than one minute</span>
+                    <span>Play for finished agent turns and terminal jobs longer than one minute</span>
                   </span>
                   <Toggle enabled={completionSoundEnabled} />
                 </button>
+              )}
+            </section>
+          )}
+
+          {showAgents && (
+            <section className="settings-section">
+              <h2>Agents</h2>
+              {matches(
+                "custom agent ui claude code codex cursor grok opencode coding agent interface overlay cli",
+              ) && (
+                <button
+                  type="button"
+                  className="settings-row settings-action"
+                  onClick={onToggleCustomAgentUi}
+                >
+                  <span className="settings-copy">
+                    <strong>Custom Agent UI</strong>
+                    <span>
+                      Show thinking, tool calls, and live diffs instead of the terminal UI for
+                      Claude Code, Codex, Cursor, Grok, and OpenCode
+                    </span>
+                  </span>
+                  <Toggle enabled={customAgentUi} />
+                </button>
+              )}
+              {matches(
+                "active turn messages follow-up queue steer send now alt shift enter agent delivery",
+              ) && (
+                <label className="settings-field">
+                  <span>
+                    <strong>Active-turn messages</strong>
+                    <small>
+                      Unsupported agents keep queueing. Alt+Shift+Enter uses the other method
+                    </small>
+                  </span>
+                  <select
+                    value={agentFollowupMode}
+                    onChange={(event) =>
+                      onAgentFollowupMode(event.target.value === "steer" ? "steer" : "queue")
+                    }
+                  >
+                    <option value="queue">Queue follow-up</option>
+                    <option value="steer">Steer immediately</option>
+                  </select>
+                </label>
               )}
             </section>
           )}
@@ -455,7 +537,7 @@ export function SettingsMenu({
             </section>
           )}
 
-          {!showAppearance && !showTerminal && !showAbout && !showUsage && !usageHit && (
+          {!showAppearance && !showAgents && !showTerminal && !showAbout && !showUsage && !usageHit && (
             <div className="settings-empty">
               <strong>No settings found</strong>
               <span>Try a different search.</span>

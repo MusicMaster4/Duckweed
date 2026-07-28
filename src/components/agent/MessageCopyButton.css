@@ -1,0 +1,55 @@
+.agent-message-actions {
+  display: flex;
+  flex: none;
+  justify-content: flex-end;
+  align-self: flex-end;
+  min-height: 22px;
+  margin-top: 4px;
+}
+
+.agent-message-copy {
+  display: grid;
+  flex: none;
+  width: 24px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  place-items: center;
+  color: var(--text-faint);
+  background: transparent;
+  cursor: pointer;
+  transition:
+    color 120ms ease,
+    background 120ms ease;
+}
+
+.agent-message-copy:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.065);
+}
+
+.agent-message-copy:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.agent-message-copy.is-copied {
+  color: var(--success, #7bbf8a);
+}
+
+.agent-message-copy svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.25;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-message-copy {
+    transition: none;
+  }
+}

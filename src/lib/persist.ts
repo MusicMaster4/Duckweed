@@ -2,12 +2,19 @@ import { uid } from "./layout";
 import { newTermId, type InputMode } from "./terminals";
 import type { LayoutNode, Tab } from "./types";
 import { saveDurably } from "./durableStorage";
+import type { AgentFollowupMode } from "./agents/types";
 
 const KEY = "duckweed:state:v1";
 const MAX_RECENTS = 12;
 export const DEFAULT_TOOLS_WIDTH = 260;
 
 export interface PersistedTab {
+  /**
+   * The tab's id, kept across restarts so per-tab data — checklists today —
+   * finds its tab again. Absent in saves written before this existed; boot
+   * mints a fresh one then, which loses nothing that was ever stored.
+   */
+  id?: string;
   title: string;
   root: LayoutNode;
   /** Folder this tab works in — projects belong to tabs, not to the window. */
@@ -35,6 +42,15 @@ export interface Persisted {
   completionHighlights: boolean;
   /** Play the bundled cue whenever a process or persistent agent finishes. */
   completionSoundEnabled: boolean;
+  /** Tint the workspace frame and status bar with the active tab's colour. */
+  tintWorkspaceWithTabColor: boolean;
+  /**
+   * Draw duckweed's own interface over a recognised coding-agent CLI instead
+   * of its terminal UI.
+   */
+  customAgentUi: boolean;
+  /** Default delivery for messages submitted while an agent turn is active. */
+  agentFollowupMode: AgentFollowupMode;
   /** Warp-style command editor, or a conventional raw terminal. */
   inputMode: InputMode;
   /**
@@ -90,6 +106,7 @@ export function load(): Persisted | null {
       // window-wide project, so that is where they all belong now.
       .map((t) => ({
         ...t,
+        id: typeof t.id === "string" && t.id ? t.id : undefined,
         project: typeof t.project === "string" ? t.project : project,
         pinned: t.pinned === true,
         color: typeof t.color === "string" ? t.color : null,
@@ -106,6 +123,14 @@ export function load(): Persisted | null {
         typeof parsed.completionHighlights === "boolean" ? parsed.completionHighlights : true,
       completionSoundEnabled:
         typeof parsed.completionSoundEnabled === "boolean" ? parsed.completionSoundEnabled : true,
+      // Opt in so existing windows keep their current neutral background.
+      tintWorkspaceWithTabColor:
+        typeof parsed.tintWorkspaceWithTabColor === "boolean"
+          ? parsed.tintWorkspaceWithTabColor
+          : false,
+      // Default on, including for saves written before the setting existed.
+      customAgentUi: typeof parsed.customAgentUi === "boolean" ? parsed.customAgentUi : true,
+      agentFollowupMode: parsed.agentFollowupMode === "steer" ? "steer" : "queue",
       inputMode: parsed.inputMode === "raw" ? "raw" : "editor",
       // Default on so a missing field from older saves still asks before killing work.
       confirmCloseRunning:
@@ -128,6 +153,9 @@ export function save(state: {
   highlight: boolean;
   completionHighlights: boolean;
   completionSoundEnabled: boolean;
+  tintWorkspaceWithTabColor: boolean;
+  customAgentUi: boolean;
+  agentFollowupMode: AgentFollowupMode;
   inputMode: InputMode;
   confirmCloseRunning: boolean;
   toolsOpen: boolean;
@@ -145,11 +173,15 @@ export function save(state: {
       highlight: state.highlight,
       completionHighlights: state.completionHighlights,
       completionSoundEnabled: state.completionSoundEnabled,
+      tintWorkspaceWithTabColor: state.tintWorkspaceWithTabColor,
+      customAgentUi: state.customAgentUi,
+      agentFollowupMode: state.agentFollowupMode,
       inputMode: state.inputMode,
       confirmCloseRunning: state.confirmCloseRunning,
       toolsOpen: state.toolsOpen,
       toolsWidth: state.toolsWidth,
       tabs: state.tabs.map((t) => ({
+        id: t.id,
         title: t.title,
         root: t.root,
         project: t.project?.path ?? null,

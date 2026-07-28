@@ -379,6 +379,12 @@ export function CommandInput({ termId, active, exited, highlight }: Props) {
       ]
         .filter(Boolean)
         .join(" ")}
+      onPointerDown={() => {
+        // Clicking into the composer means "I am done with that block" — drop
+        // the selection chrome instead of leaving a chunk highlighted behind
+        // the cursor until the next keystroke.
+        terminals.dismissBlockSelection(termId);
+      }}
     >
       <div className="command-input-editor">
         {showMirror && (

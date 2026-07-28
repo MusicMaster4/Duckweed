@@ -1,0 +1,83 @@
+import { describe, expect, test } from "bun:test";
+
+import {
+  DONE_RETENTION_MS,
+  hoursUntilSweep,
+  ordered,
+  sweep,
+  type ChecklistItem,
+} from "./checklist";
+
+const item = (id: string, doneAt: number | null = null, createdAt = 0): ChecklistItem => ({
+  id,
+  text: id,
+  createdAt,
+  doneAt,
+});
+
+describe("sweep", () => {
+  const now = 10 * DONE_RETENTION_MS;
+
+  test("keeps open items no matter how old they are", () => {
+    const lists = { tab1: [item("a", null, 0)] };
+    expect(sweep(lists, now)).toBe(lists);
+  });
+
+  test("keeps checked items until the day is up", () => {
+    const lists = { tab1: [item("a", now - DONE_RETENTION_MS + 1_000)] };
+    expect(sweep(lists, now)).toBe(lists);
+  });
+
+  test("drops checked items once the day has passed", () => {
+    const lists = {
+      tab1: [item("stale", now - DONE_RETENTION_MS), item("fresh", now - 1_000), item("open")],
+    };
+    expect(sweep(lists, now).tab1.map((i) => i.id)).toEqual(["fresh", "open"]);
+  });
+
+  test("removes a list that swept itself empty rather than leaving a husk", () => {
+    const swept = sweep({ tab1: [item("stale", now - DONE_RETENTION_MS)] }, now);
+    expect(Object.keys(swept)).toEqual([]);
+  });
+
+  test("returns the same object when nothing changed, so callers can skip a write", () => {
+    const lists = { tab1: [item("a")], tab2: [item("b", now)] };
+    expect(sweep(lists, now)).toBe(lists);
+  });
+
+  test("sweeps each tab independently", () => {
+    const swept = sweep(
+      { tab1: [item("a"), item("gone", now - DONE_RETENTION_MS)], tab2: [item("b")] },
+      now,
+    );
+    expect(swept.tab1.map((i) => i.id)).toEqual(["a"]);
+    expect(swept.tab2.map((i) => i.id)).toEqual(["b"]);
+  });
+});
+
+describe("ordered", () => {
+  test("open items keep insertion order, ahead of everything finished", () => {
+    const rows = ordered([item("done", 500), item("first"), item("second")]);
+    expect(rows.map((i) => i.id)).toEqual(["first", "second", "done"]);
+  });
+
+  test("finished items show the most recently checked first", () => {
+    const rows = ordered([item("old", 100), item("new", 900), item("mid", 500)]);
+    expect(rows.map((i) => i.id)).toEqual(["new", "mid", "old"]);
+  });
+});
+
+describe("hoursUntilSweep", () => {
+  test("counts whole hours left on a checked item", () => {
+    expect(hoursUntilSweep(item("a", 0), 2 * 60 * 60 * 1000)).toBe(22);
+  });
+
+  test("is zero inside the last hour and never negative", () => {
+    expect(hoursUntilSweep(item("a", 0), DONE_RETENTION_MS - 1)).toBe(0);
+    expect(hoursUntilSweep(item("a", 0), DONE_RETENTION_MS * 3)).toBe(0);
+  });
+
+  test("is zero for an open item, which is not on the clock at all", () => {
+    expect(hoursUntilSweep(item("a", null), 5_000)).toBe(0);
+  });
+});

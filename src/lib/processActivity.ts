@@ -3,8 +3,12 @@ export interface ProcessState {
   exited: boolean;
   /** Increments when a persistent CLI agent finishes a turn or needs attention. */
   completionSeq: number;
+  /** Start time captured for the exact turn represented by completionSeq. */
+  completionStartedAt: number | null;
   /** Recognised coding agent currently responsible for the terminal activity. */
   agent: AgentKind | null;
+  /** The custom agent UI owns this pane, so its shell is not what finishes. */
+  agentUi: boolean;
   /** Wall-clock captured when a child process first became active. */
   processStartedAt: number | null;
 }
@@ -21,44 +25,90 @@ export function didProcessFinish(previous: ProcessState, current: ProcessState):
 /** Ordinary terminal jobs must run longer than this before completion is signalled. */
 export const PROCESS_COMPLETION_MIN_MS = 30_000;
 
-/** Completion sound only after a job has been running for more than one minute. */
+/** Ordinary terminal jobs only earn a sound after running for more than one minute. */
 export const COMPLETION_SOUND_MIN_MS = 60_000;
 
+/** Quiet window used only to merge duplicate heuristic completion channels. */
+export const AGENT_COMPLETION_DEDUPE_MS = 1_200;
+
 /**
- * Coding-agent completions are always worth surfacing. Ordinary terminal
- * processes only earn the visual marker after running for more than
- * 30 seconds.
+ * Structured protocol events are authoritative and must never be time-filtered.
+ * Raw CLI logs, hooks, and OSC notifications can all report the same turn, so
+ * only those heuristic signals share a short deduplication window.
+ */
+export function shouldAcceptAgentCompletion(
+  trusted: boolean,
+  lastCompletionAt: number,
+  now = Date.now(),
+): boolean {
+  return trusted || now - lastCompletionAt >= AGENT_COMPLETION_DEDUPE_MS;
+}
+
+/**
+ * Real agent-turn completions (completionSeq) are always worth surfacing.
+ * Ordinary terminal processes only earn the visual marker after running for
+ * more than 30 seconds.
+ *
+ * A coding-agent process going idle or exiting is the user quitting the CLI
+ * (Ctrl+C, /exit, …) — not a finished turn. Persistent agents report turns
+ * via completionSeq from session logs, hooks, or OSC notifications. Treating
+ * process exit as completion falsely played the sound and flash on quit, and
+ * stacked with a late agent:complete for agents like Grok.
+ *
+ * The same holds under the custom agent UI, where the shell sitting behind the
+ * pane is not what the user is waiting on at all.
  */
 export function shouldSignalCompletion(
   previous: ProcessState,
   current: ProcessState,
   now = Date.now(),
 ): boolean {
+  if (current.completionSeq > previous.completionSeq) return true;
   if (!didProcessFinish(previous, current)) return false;
-  if (
-    current.completionSeq > previous.completionSeq ||
-    previous.agent !== null ||
-    current.agent !== null
-  ) {
-    return true;
-  }
+  // Agent process left the tree (or the shell died while one was bound).
+  if (previous.agent !== null || current.agent !== null) return false;
+  if (previous.agentUi || current.agentUi) return false;
 
   const startedAt = previous.processStartedAt ?? current.processStartedAt;
   return startedAt !== null && now - startedAt > PROCESS_COMPLETION_MIN_MS;
 }
 
 /**
- * Sound is stricter than the visual marker: the job must have run for more
- * than one minute. Focus is checked separately so background panes stay quiet.
+ * Real agent turns already passed the protocol and prompt filters that
+ * increment `completionSeq`, so they sound immediately when control returns to
+ * the user. Ordinary terminal jobs remain quieter and must run for more than
+ * one minute. Agent process exit alone never counts, which is the same rule
+ * used by shouldSignalCompletion.
  */
 export function shouldPlayCompletionSound(
   previous: ProcessState,
   current: ProcessState,
   now = Date.now(),
 ): boolean {
-  if (!didProcessFinish(previous, current)) return false;
+  if (!shouldSignalCompletion(previous, current, now)) return false;
+  if (current.completionSeq > previous.completionSeq) return true;
   const startedAt = previous.processStartedAt ?? current.processStartedAt;
   return startedAt !== null && now - startedAt > COMPLETION_SOUND_MIN_MS;
+}
+
+/**
+ * True when raw terminal input is the user handing work to a bound agent.
+ *
+ * Enter submits a prompt in every CLI agent we recognise, and it is also how a
+ * permission prompt is answered. Escape sequences are stripped first: xterm
+ * answers ConPTY's device queries through the same channel, and full-screen
+ * agents turn on mouse reporting, neither of which is the user asking for
+ * anything. Over-counting only allows a notification the agent still has to
+ * earn; under-counting would swallow a real one, so anything Enter-shaped
+ * counts.
+ */
+export function isAgentPromptSubmission(data: string): boolean {
+  const typed = data
+    // CSI (mouse reports, cursor position replies, bracketed paste markers).
+    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "")
+    // OSC and other string sequences, up to their terminator.
+    .replace(/\x1b][\s\S]*?(?:\x07|\x1b\\)/g, "");
+  return /[\r\n]/.test(typed);
 }
 
 export type AgentKind =
@@ -77,6 +127,7 @@ const DIRECT_AGENTS: Record<string, AgentKind> = {
   omx: "codex",
   claude: "claude",
   "claude-code": "claude",
+  claudex: "claude",
   omc: "claude",
   grok: "grok",
   "grok-build": "grok",
@@ -168,7 +219,13 @@ export function parseAgentOsc777(payload: string): StructuredAgentEvent | null {
   }
 }
 
-/** Gemini and several terminal tools use the standard `777;notify;title;body` form. */
+/**
+ * Gemini (and a few other CLIs) use the standard `777;notify;title;body` form
+ * for turn completion. Require completion-ish wording so progress/status
+ * notifies do not look like a finished agent turn.
+ */
 export function isGenericOsc777Notification(payload: string): boolean {
-  return /^notify;[^;]+(?:;.*)?$/i.test(payload.trim());
+  const text = payload.trim();
+  if (!/^notify;[^;]+(?:;.*)?$/i.test(text)) return false;
+  return /complete|finished|done|idle|responded|ready/i.test(text);
 }

@@ -2,9 +2,10 @@
 //!
 //! A transcript total is not a quota. We only draw a meter when the provider
 //! reports the current percentage and reset time, either through its official
-//! OAuth usage endpoint or a snapshot persisted by the CLI. Agents without
-//! either source still get a card, but it says why no trustworthy limit is
-//! available instead of asking the user to invent a ceiling.
+//! OAuth usage endpoint or a snapshot persisted by the CLI. Agents with no
+//! account limit source at all (multi-provider CLIs, local proxies, activity-only
+//! tools) are omitted. Agents that can report but currently can't (missing
+//! OAuth session, no recent snapshot) still get a card that says why.
 //!
 //! Each successful snapshot is also appended to a small local history so we
 //! can estimate how long the remaining allowance lasts at the recent burn
@@ -32,7 +33,7 @@
 //! never runs out at all.
 
 use std::collections::{HashMap, HashSet};
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -43,7 +44,17 @@ use serde_json::Value;
 
 const CLAUDE_USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 const CLAUDE_BETA: &str = "oauth-2025-04-20";
+/// Claude Code's public OAuth client. Used only to refresh an already-stored
+/// `refreshToken` from `~/.claude/.credentials.json` so quota meters work after
+/// a Duckweed reinstall without opening Claude Code first.
+const CLAUDE_OAUTH_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+const CLAUDE_TOKEN_URLS: &[&str] = &[
+    "https://console.anthropic.com/v1/oauth/token",
+    "https://platform.claude.com/v1/oauth/token",
+];
 const CLAUDE_CACHE_TTL: Duration = Duration::from_secs(60);
+/// Refresh a little early so a scan mid-expiry still has a usable access token.
+const CLAUDE_ACCESS_SKEW_MS: i64 = 60_000;
 
 /// Burn rate lookback for a window of unknown length, and the floor for every
 /// other window.
@@ -158,8 +169,10 @@ pub struct Quota {
     pub limits: Vec<QuotaLimit>,
 }
 
-/// Build one card for every agent with at least one request in the selected
-/// dashboard range. Empty/installed-only agents are deliberately omitted.
+/// Build one card for every agent that both saw activity in the selected range
+/// and has a real provider limit source. Agents with no account quota to read
+/// (multi-provider CLIs, local proxies, activity-only tools) are omitted rather
+/// than shown as permanent "unavailable" cards.
 ///
 /// `duty` carries each agent's active share of the wall clock, measured from
 /// the transcripts rather than from this history — the transcripts record
@@ -175,7 +188,7 @@ pub fn build(
     let mut history = load_history(history_path);
     let mut quotas: Vec<Quota> = crate::usage::sources::AGENTS
         .iter()
-        .filter(|agent| used_agents.contains(agent.id))
+        .filter(|agent| used_agents.contains(agent.id) && supports_quota_reporting(agent.id))
         .map(|agent| {
             reported_for_with_codex_session(agent.id, home, latest_codex_session).unwrap_or_else(
                 || Quota {
@@ -201,22 +214,23 @@ pub fn build(
     quotas
 }
 
+/// Agents whose CLI (or OAuth session) can expose an account-wide limit. Everyone
+/// else either multi-homes providers, proxies someone else's quota, or only logs
+/// local activity — none of those produce a trustworthy remaining bar.
+fn supports_quota_reporting(agent_id: &str) -> bool {
+    matches!(agent_id, "claude" | "codex" | "grok")
+}
+
 fn unavailable_message(agent_id: &str) -> &'static str {
     match agent_id {
         "claude" => {
-            "Claude usage could not be fetched from the local OAuth session. Open Claude Code to refresh its sign-in, then refresh Usage."
+            "Claude usage could not be fetched from the local OAuth session. Sign in once with Claude Code (`claude` /login), then reopen Duckweed or refresh Usage."
         }
         "codex" => {
             "No usable Codex rate-limit snapshot found in recent sessions. Run Codex after signing in so it can write usage limits, then refresh Usage."
         }
-        "gemini" => {
-            "Gemini reports session statistics in /stats; it does not persist a reliable account-wide remaining quota."
-        }
-        "opencode" => {
-            "OpenCode can use many providers, so it has no single account quota to report."
-        }
-        "antigravity" => {
-            "Antigravity records local activity, but not token counts or an account limit snapshot."
+        "grok" => {
+            "No Grok credit snapshot found in recent logs. Run Grok after signing in so it can write usage limits, then refresh Usage."
         }
         _ => "This agent does not persist provider-reported account limits locally.",
     }
@@ -555,34 +569,31 @@ fn reported_for_with_codex_session(
     }
 }
 
-#[derive(Deserialize)]
-struct ClaudeCredentials {
-    #[serde(rename = "claudeAiOauth")]
-    oauth: Option<ClaudeOauth>,
-}
-
-#[derive(Deserialize)]
-struct ClaudeOauth {
-    #[serde(rename = "accessToken")]
-    access_token: String,
-    #[serde(rename = "expiresAt")]
-    expires_at: i64,
-    #[serde(rename = "subscriptionType")]
-    subscription_type: Option<String>,
-}
-
 struct ClaudeCacheEntry {
     checked_at: Instant,
     value: Option<Quota>,
     last_success: Option<Quota>,
 }
 
+struct ClaudeAccess {
+    access_token: String,
+    subscription_type: Option<String>,
+}
+
 static CLAUDE_CACHE: OnceLock<Mutex<HashMap<PathBuf, ClaudeCacheEntry>>> = OnceLock::new();
 static TLS_PROVIDER: OnceLock<()> = OnceLock::new();
+/// Serialise credential refresh: Claude rotates refresh tokens, so two scans
+/// racing with the same token would leave only one of them valid.
+static CLAUDE_CREDENTIALS_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 /// Fetch Claude's own `/usage` data with the OAuth session created by Claude
 /// Code. Tokens never leave this function except as a Bearer header sent to
 /// `api.anthropic.com`, and are never logged or copied into Duckweed's index.
+///
+/// When the stored access token has expired, the local refresh token is used
+/// once to mint a new one and write it back to Claude Code's credentials file.
+/// That is what makes quota meters work after a Duckweed reinstall without
+/// opening Claude Code first — the user already signed in there.
 fn claude_quota(home: &Path) -> Option<Quota> {
     let key = home.to_path_buf();
     let cache = CLAUDE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
@@ -612,30 +623,15 @@ fn claude_quota(home: &Path) -> Option<Quota> {
 }
 
 fn fetch_claude_quota(home: &Path) -> Option<Quota> {
-    let path = home.join(".claude/.credentials.json");
-    let credentials: ClaudeCredentials = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
-    let oauth = credentials.oauth?;
-    if oauth.access_token.trim().is_empty()
-        || epoch_ms(oauth.expires_at) <= Utc::now().timestamp_millis() + 30_000
-    {
+    let access = claude_access(home)?;
+    if access.access_token.trim().is_empty() {
         return None;
     }
 
-    TLS_PROVIDER.get_or_init(|| {
-        // The updater uses reqwest with provider-neutral rustls. Install Ring
-        // once for the blocking client as well; an already installed provider
-        // is a valid outcome.
-        let _ = rustls::crypto::ring::default_provider().install_default();
-    });
-    let client = reqwest::blocking::Client::builder()
-        .connect_timeout(Duration::from_secs(3))
-        .timeout(Duration::from_secs(6))
-        .user_agent("duckweed/0.1 usage-dashboard")
-        .build()
-        .ok()?;
+    let client = claude_http_client()?;
     let response = client
         .get(CLAUDE_USAGE_URL)
-        .bearer_auth(oauth.access_token)
+        .bearer_auth(&access.access_token)
         .header("anthropic-beta", CLAUDE_BETA)
         .header("accept", "application/json")
         .send()
@@ -646,7 +642,189 @@ fn fetch_claude_quota(home: &Path) -> Option<Quota> {
     // Stamped here, not at read time: this answer is cached for minutes, and
     // every later reader must know it describes this moment, not theirs.
     let fetched_at = Utc::now().timestamp_millis();
-    claude_quota_from_payload(&payload, oauth.subscription_type, fetched_at)
+    claude_quota_from_payload(&payload, access.subscription_type, fetched_at)
+}
+
+fn claude_http_client() -> Option<reqwest::blocking::Client> {
+    TLS_PROVIDER.get_or_init(|| {
+        // The updater uses reqwest with provider-neutral rustls. Install Ring
+        // once for the blocking client as well; an already installed provider
+        // is a valid outcome.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+    reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_secs(3))
+        .timeout(Duration::from_secs(8))
+        .user_agent("duckweed/0.1 usage-dashboard")
+        .build()
+        .ok()
+}
+
+/// A usable Claude Code access token, refreshing the stored OAuth session first
+/// when the current one is about to expire.
+fn claude_access(home: &Path) -> Option<ClaudeAccess> {
+    let path = home.join(".claude/.credentials.json");
+    let lock = CLAUDE_CREDENTIALS_LOCK.get_or_init(|| Mutex::new(()));
+    let _guard = lock.lock().ok()?;
+
+    let bytes = std::fs::read(&path).ok()?;
+    let mut root: Value = serde_json::from_slice(&bytes).ok()?;
+    let oauth = root.get_mut("claudeAiOauth")?.as_object_mut()?;
+
+    let subscription_type = oauth
+        .get("subscriptionType")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let access_token = oauth
+        .get("accessToken")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let expires_at = oauth
+        .get("expiresAt")
+        .and_then(|value| value.as_i64().or_else(|| value.as_f64().map(|n| n as i64)))
+        .unwrap_or(0);
+    let now = Utc::now().timestamp_millis();
+    if !access_token.trim().is_empty() && epoch_ms(expires_at) > now + CLAUDE_ACCESS_SKEW_MS {
+        return Some(ClaudeAccess {
+            access_token,
+            subscription_type,
+        });
+    }
+
+    let refresh_token = oauth
+        .get("refreshToken")
+        .and_then(Value::as_str)
+        .filter(|token| !token.trim().is_empty())?
+        .to_string();
+    let refreshed = refresh_claude_oauth(&refresh_token)?;
+    let new_access = refreshed
+        .get("access_token")
+        .and_then(Value::as_str)
+        .filter(|token| !token.trim().is_empty())?
+        .to_string();
+    let new_refresh = refreshed
+        .get("refresh_token")
+        .and_then(Value::as_str)
+        .filter(|token| !token.trim().is_empty())
+        .map(str::to_string)
+        .unwrap_or(refresh_token);
+    let expires_in = refreshed
+        .get("expires_in")
+        .and_then(|value| value.as_i64().or_else(|| value.as_f64().map(|n| n as i64)))
+        .unwrap_or(3_600)
+        .max(60);
+    let new_expires_at = now.saturating_add(expires_in.saturating_mul(1_000));
+
+    oauth.insert("accessToken".into(), Value::String(new_access.clone()));
+    oauth.insert("refreshToken".into(), Value::String(new_refresh));
+    oauth.insert("expiresAt".into(), Value::from(new_expires_at));
+    // Write the whole file, not just the OAuth block — Claude Code keeps other
+    // top-level keys here and must keep finding them after a Duckweed refresh.
+    let bytes = serde_json::to_vec_pretty(&root).ok()?;
+    write_atomically(&path, &bytes).ok()?;
+
+    Some(ClaudeAccess {
+        access_token: new_access,
+        subscription_type,
+    })
+}
+
+fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("credentials path has no parent"))?;
+    std::fs::create_dir_all(parent)?;
+
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("credentials");
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let temporary = parent.join(format!(
+        ".{file_name}.duckweed-{}-{nonce}.tmp",
+        std::process::id()
+    ));
+
+    let result = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        replace_file(&temporary, path)?;
+        #[cfg(unix)]
+        std::fs::File::open(parent)?.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
+}
+
+#[cfg(not(windows))]
+fn replace_file(temporary: &Path, target: &Path) -> std::io::Result<()> {
+    std::fs::rename(temporary, target)
+}
+
+#[cfg(windows)]
+fn replace_file(temporary: &Path, target: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::ReplaceFileW;
+
+    let target_wide: Vec<u16> = target.as_os_str().encode_wide().chain(Some(0)).collect();
+    let temporary_wide: Vec<u16> = temporary.as_os_str().encode_wide().chain(Some(0)).collect();
+    let replaced = unsafe {
+        ReplaceFileW(
+            target_wide.as_ptr(),
+            temporary_wide.as_ptr(),
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            std::ptr::null(),
+        )
+    };
+    if replaced == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+/// Exchange Claude Code's refresh token for a fresh access token.
+fn refresh_claude_oauth(refresh_token: &str) -> Option<Value> {
+    let client = claude_http_client()?;
+    let body = serde_json::json!({
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token,
+        "client_id": CLAUDE_OAUTH_CLIENT_ID,
+    });
+    for url in CLAUDE_TOKEN_URLS {
+        let Ok(response) = client
+            .post(*url)
+            .header("content-type", "application/json")
+            .header("accept", "application/json")
+            .json(&body)
+            .send()
+        else {
+            continue;
+        };
+        if !response.status().is_success() {
+            continue;
+        }
+        if let Ok(payload) = response.json::<Value>() {
+            if payload.get("access_token").and_then(Value::as_str).is_some() {
+                return Some(payload);
+            }
+        }
+    }
+    None
 }
 
 fn epoch_ms(value: i64) -> i64 {
@@ -987,16 +1165,22 @@ mod tests {
     }
 
     #[test]
-    fn only_agents_used_in_the_range_receive_cards() {
-        let used = HashSet::from(["claude", "opencode"]);
+    fn only_agents_that_can_report_limits_receive_cards() {
+        let used = HashSet::from(["claude", "opencode", "claudex", "antigravity", "grok"]);
         let empty = std::env::temp_dir().join("duckweed-no-such-home");
         let history = std::env::temp_dir().join(format!(
             "duckweed-quota-history-empty-{}",
             std::process::id()
         ));
         let quotas = build(&used, &empty, &history, None, &HashMap::new());
+        // OpenCode / Claudex / Antigravity have no account limit to read.
         assert_eq!(quotas.len(), 2);
         assert!(quotas.iter().all(|quota| quota.source == "unavailable"));
+        assert!(quotas.iter().any(|quota| quota.agent == "claude"));
+        assert!(quotas.iter().any(|quota| quota.agent == "grok"));
+        assert!(!quotas.iter().any(|quota| quota.agent == "opencode"));
+        assert!(!quotas.iter().any(|quota| quota.agent == "claudex"));
+        assert!(!quotas.iter().any(|quota| quota.agent == "antigravity"));
         assert!(!quotas.iter().any(|quota| quota.agent == "codex"));
         let _ = std::fs::remove_file(&history);
     }
@@ -1534,6 +1718,72 @@ mod tests {
     fn credential_expiry_accepts_seconds_or_milliseconds() {
         assert_eq!(epoch_ms(1_785_000_000), 1_785_000_000_000);
         assert_eq!(epoch_ms(1_785_000_000_000), 1_785_000_000_000);
+    }
+
+    #[test]
+    fn credential_updates_replace_the_file_atomically() {
+        let root = std::env::temp_dir().join(format!(
+            "duckweed-atomic-credentials-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let path = root.join(".claude/.credentials.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"old credentials").unwrap();
+
+        write_atomically(&path, b"new credentials").unwrap();
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"new credentials");
+        let leftovers: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".duckweed-"))
+            .collect();
+        assert!(leftovers.is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn expired_claude_credentials_are_refreshed_before_usage_fetch() {
+        // Pure shape check: the refresh path rewrites only the OAuth fields and
+        // keeps sibling top-level keys Claude Code may also store here.
+        let mut root: Value = serde_json::from_str(
+            r#"{
+                "other": true,
+                "claudeAiOauth": {
+                    "accessToken": "old-access",
+                    "refreshToken": "old-refresh",
+                    "expiresAt": 1,
+                    "subscriptionType": "pro",
+                    "scopes": ["user:inference"]
+                }
+            }"#,
+        )
+        .unwrap();
+        let oauth = root
+            .get_mut("claudeAiOauth")
+            .unwrap()
+            .as_object_mut()
+            .unwrap();
+        oauth.insert("accessToken".into(), Value::String("new-access".into()));
+        oauth.insert("refreshToken".into(), Value::String("new-refresh".into()));
+        oauth.insert("expiresAt".into(), Value::from(1_800_000_000_000i64));
+        assert_eq!(root.get("other"), Some(&Value::Bool(true)));
+        assert_eq!(
+            root.pointer("/claudeAiOauth/accessToken")
+                .and_then(Value::as_str),
+            Some("new-access")
+        );
+        assert_eq!(
+            root.pointer("/claudeAiOauth/refreshToken")
+                .and_then(Value::as_str),
+            Some("new-refresh")
+        );
+        assert_eq!(
+            root.pointer("/claudeAiOauth/subscriptionType")
+                .and_then(Value::as_str),
+            Some("pro")
+        );
     }
 
     #[test]

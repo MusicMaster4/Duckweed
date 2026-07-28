@@ -1,6 +1,7 @@
 import { Fragment, memo, useRef, useState } from "react";
 
-import { resizeSplit } from "../lib/layout";
+import { ALL_EDGES, edgesForChild, resizeSplit } from "../lib/layout";
+import type { CompletionFlash } from "../lib/completionHighlights";
 import type { DropZone, LayoutNode, LeafNode, ProjectInfo, SplitNode } from "../lib/types";
 import type { DragState } from "../hooks/useDragPane";
 import { TerminalPane } from "./TerminalPane";
@@ -16,12 +17,16 @@ export interface PaneTreeShared {
   activeLeaf: string;
   drag: DragState | null;
   /** Resolves the shell/cwd a not-yet-created terminal should start with. */
-  spawnFor: (term: string) => { cwd: string | null; shell: string | null };
+  spawnFor: (term: string) => {
+    cwd: string | null;
+    shell: string | null;
+    command: string | null;
+  };
   highlight: boolean;
   /** Terminals whose most recent completion has not been reviewed yet. */
   unreadTerms: ReadonlySet<string>;
   /** One-shot animation pulse for a completion in the currently focused pane. */
-  completionFlashes: ReadonlyMap<string, number>;
+  completionFlashes: ReadonlyMap<string, CompletionFlash>;
   /** Folder of the tab being rendered; the empty pane offers to pick one. */
   project: ProjectInfo | null;
   recents: string[];
@@ -29,6 +34,7 @@ export interface PaneTreeShared {
   onPickProject: (path: string) => void;
   zoomedLeaf: string | null;
   onActivate: (leafId: string) => void;
+  onReview: (termId: string) => void;
   onSplit: (leafId: string, zone: "right" | "bottom") => void;
   onClose: (leafId: string) => void;
   onToggleZoom: (leafId: string) => void;
@@ -43,7 +49,15 @@ function dropZoneFor(drag: DragState | null, leafId: string): DropZone | null {
   return drag.target.zone;
 }
 
-export const PaneTree = memo(function PaneTree({ node, shared }: { node: LayoutNode; shared: PaneTreeShared }) {
+export const PaneTree = memo(function PaneTree({
+  node,
+  shared,
+  edges = ALL_EDGES,
+}: {
+  node: LayoutNode;
+  shared: PaneTreeShared;
+  edges?: number;
+}) {
   if (node.kind === "leaf") {
     return (
       <TerminalPane
@@ -58,13 +72,15 @@ export const PaneTree = memo(function PaneTree({ node, shared }: { node: LayoutN
         isSource={shared.drag?.leafId === node.id}
         spawn={shared.spawnFor(node.term)}
         highlight={shared.highlight}
+        edges={edges}
         unread={shared.unreadTerms.has(node.term)}
-        completionFlash={shared.completionFlashes.get(node.term) ?? 0}
+        completionFlash={shared.completionFlashes.get(node.term) ?? null}
         project={shared.project}
         recents={shared.recents}
         onBrowseProject={shared.onBrowseProject}
         onPickProject={shared.onPickProject}
         onActivate={() => shared.onActivate(node.id)}
+        onReview={() => shared.onReview(node.term)}
         onSplit={(zone) => shared.onSplit(node.id, zone)}
         onClose={() => shared.onClose(node.id)}
         onToggleZoom={() => shared.onToggleZoom(node.id)}
@@ -72,10 +88,18 @@ export const PaneTree = memo(function PaneTree({ node, shared }: { node: LayoutN
       />
     );
   }
-  return <SplitView node={node} shared={shared} />;
+  return <SplitView node={node} shared={shared} edges={edges} />;
 });
 
-const SplitView = memo(function SplitView({ node, shared }: { node: SplitNode; shared: PaneTreeShared }) {
+const SplitView = memo(function SplitView({
+  node,
+  shared,
+  edges,
+}: {
+  node: SplitNode;
+  shared: PaneTreeShared;
+  edges: number;
+}) {
   const containerRef = useRef<HTMLDivElement>(null);
   const count = node.children.length;
 
@@ -101,7 +125,7 @@ const SplitView = memo(function SplitView({ node, shared }: { node: SplitNode; s
               />
             )}
             <div className="split-cell" style={{ flexBasis: basis }}>
-              <PaneTree node={child} shared={shared} />
+              <PaneTree node={child} shared={shared} edges={edgesForChild(edges, node.dir, index, count)} />
             </div>
           </Fragment>
         );

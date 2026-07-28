@@ -1,11 +1,23 @@
-import { useEffect, useRef, useState, type CSSProperties, type MouseEvent } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+  type MouseEvent,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 
 import type { Tab } from "../lib/types";
 import { tabColorHex } from "../lib/tabColors";
 import { tabIconDef } from "../lib/tabIcons";
-import { clampLeft, dropIndex, restingLeft, slotShift } from "../lib/tabReorder";
+import {
+  SETTINGS_TAB_ID,
+  clampLeft,
+  dropIndex,
+  restingLeft,
+  slotShift,
+} from "../lib/tabReorder";
 import type { DragState } from "../hooks/useDragPane";
-import { CompletionDot } from "./CompletionDot";
 import { ProjectMenu } from "./ProjectMenu";
 import { TabContextMenu } from "./TabContextMenu";
 
@@ -23,7 +35,9 @@ interface Props {
   activeTabId: string;
   paneCounts: Record<string, number>;
   unreadCounts: Record<string, number>;
-  /** When false, hide completion dots (tracking still runs in the app). */
+  /** One-shot review outline keyed by the tab that owns the completed pane. */
+  completionReviewFlashes: Record<string, number>;
+  /** When false, hide completion outlines (tracking still runs in the app). */
   completionHighlights: boolean;
   drag: DragState | null;
   projects: ProjectActions;
@@ -40,6 +54,8 @@ interface Props {
   onIcon: (tabId: string, iconId: string | null) => void;
   settingsOpen: boolean;
   settingsActive: boolean;
+  /** Index of Settings among strip items (0..tabs.length). */
+  settingsIndex: number;
   onSelectSettings: () => void;
   onCloseSettings: () => void;
 }
@@ -111,6 +127,7 @@ export function TabStrip({
   activeTabId,
   paneCounts,
   unreadCounts,
+  completionReviewFlashes,
   completionHighlights,
   drag,
   projects,
@@ -126,6 +143,7 @@ export function TabStrip({
   onIcon,
   settingsOpen,
   settingsActive,
+  settingsIndex,
   onSelectSettings,
   onCloseSettings,
 }: Props) {
@@ -144,12 +162,15 @@ export function TabStrip({
      * decision is made against this frozen layout: the tabs are being moved
      * around by transforms, so live rects would feed the gesture its own
      * output and the drag would fight itself.
+     *
+     * Strip items use `data-strip-id` (tabs + Settings). Pane drops still use
+     * `data-tab-id`, which only real terminal tabs carry.
      */
     const snapshot = (tabId: string) => {
       const strip = stripRef.current;
       if (!strip) return null;
-      const els = [...strip.querySelectorAll<HTMLElement>("[data-tab-id]")];
-      const from = els.findIndex((el) => el.dataset.tabId === tabId);
+      const els = [...strip.querySelectorAll<HTMLElement>("[data-strip-id]")];
+      const from = els.findIndex((el) => el.dataset.stripId === tabId);
       if (from < 0) return null;
       // Pinned tabs are fixed — never start a drag for them.
       if (els[from].dataset.pinned === "true") return null;
@@ -277,21 +298,108 @@ export function TabStrip({
     setPicker({ tabId, x: rect.left, y: rect.bottom + 6 });
   };
 
+  /** Begin a strip reorder after the pointer moves past the slop threshold. */
+  const beginReorder = (e: ReactPointerEvent<HTMLElement>, stripId: string) => {
+    if (e.button !== 0) return;
+    settling.current?.();
+    const rect = e.currentTarget.getBoundingClientRect();
+    reorder.current = {
+      tabId: stripId,
+      startX: e.clientX,
+      grabOffset: e.clientX - rect.left,
+      from: 0,
+      to: 0,
+      slots: [],
+      pinnedCount: 0,
+      dragging: false,
+    };
+  };
+
   const pickerTab = picker ? tabs.find((t) => t.id === picker.tabId) : null;
   const contextTab = context ? tabs.find((t) => t.id === context.tabId) : null;
+
+  // Interleave Settings at `settingsIndex` so it reorders with the rest.
+  type StripItem =
+    | { kind: "tab"; tab: Tab }
+    | { kind: "settings" };
+  const stripItems: StripItem[] = [];
+  if (settingsOpen) {
+    const insertAt = Math.min(Math.max(0, settingsIndex), tabs.length);
+    tabs.forEach((tab, i) => {
+      if (i === insertAt) stripItems.push({ kind: "settings" });
+      stripItems.push({ kind: "tab", tab });
+    });
+    if (insertAt >= tabs.length) stripItems.push({ kind: "settings" });
+  } else {
+    for (const tab of tabs) stripItems.push({ kind: "tab", tab });
+  }
 
   return (
     <div className="tabstrip">
       <div className="tabs" ref={stripRef} role="tablist" aria-label="Open tabs">
-        {tabs.map((tab) => {
+        {stripItems.map((item) => {
+          if (item.kind === "settings") {
+            return (
+              <div
+                key={SETTINGS_TAB_ID}
+                data-strip-id={SETTINGS_TAB_ID}
+                role="tab"
+                aria-selected={settingsActive}
+                tabIndex={settingsActive ? 0 : -1}
+                className={[
+                  "tab",
+                  "settings-tab",
+                  settingsActive ? "is-active" : "",
+                  dragTabId === SETTINGS_TAB_ID ? "is-reordering" : "",
+                ]
+                  .filter(Boolean)
+                  .join(" ")}
+                onPointerDown={(event) => {
+                  if (event.button !== 0) return;
+                  onSelectSettings();
+                  beginReorder(event, SETTINGS_TAB_ID);
+                }}
+                onKeyDown={(event) => {
+                  if (event.key !== "Enter" && event.key !== " ") return;
+                  event.preventDefault();
+                  onSelectSettings();
+                }}
+              >
+                <span className="settings-tab-icon" aria-hidden="true">
+                  <svg viewBox="0 0 16 16">
+                    <circle cx="8" cy="8" r="2" />
+                    <path d="M6.44 3.94 6.61 1.45h2.78l.17 2.49a4.35 4.35 0 0 1 1.18.68l2.24-1.1 1.39 2.41-2.07 1.39a4.35 4.35 0 0 1 0 1.36l2.07 1.39-1.39 2.41-2.24-1.1a4.35 4.35 0 0 1-1.18.68l-.17 2.49H6.61l-.17-2.49a4.35 4.35 0 0 1-1.18-.68l-2.24 1.1-1.39-2.41 2.07-1.39a4.35 4.35 0 0 1 0-1.36L1.63 5.93l1.39-2.41 2.24 1.1a4.35 4.35 0 0 1 1.18-.68z" />
+                  </svg>
+                </span>
+                <span className="tab-title">Settings</span>
+                <button
+                  type="button"
+                  className="tab-close"
+                  title="Close settings"
+                  aria-label="Close settings"
+                  onPointerDown={(event) => event.stopPropagation()}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onCloseSettings();
+                  }}
+                >
+                  ✕
+                </button>
+              </div>
+            );
+          }
+
+          const tab = item.tab;
           const count = paneCounts[tab.id] ?? 0;
           const unread = unreadCounts[tab.id] ?? 0;
           const showUnread = completionHighlights && unread > 0;
+          const reviewFlashKey = completionHighlights ? completionReviewFlashes[tab.id] : undefined;
           const isActive = tab.id === activeTabId && !settingsActive;
           const accent = tabColorHex(tab.color);
           return (
             <div
               key={tab.id}
+              data-strip-id={tab.id}
               data-tab-id={tab.id}
               data-pinned={tab.pinned ? "true" : undefined}
               role="tab"
@@ -317,25 +425,14 @@ export function TabStrip({
               style={accent ? ({ "--tab-color": accent } as CSSProperties) : undefined}
               onPointerDown={(e) => {
                 if (e.button !== 0) return;
-                // Land any drop still animating before measuring anything.
-                settling.current?.();
                 onSelect(tab.id);
                 // Pinned tabs stay put — select only, no reorder gesture.
                 if (tab.pinned) {
+                  settling.current?.();
                   reorder.current = null;
                   return;
                 }
-                const rect = e.currentTarget.getBoundingClientRect();
-                reorder.current = {
-                  tabId: tab.id,
-                  startX: e.clientX,
-                  grabOffset: e.clientX - rect.left,
-                  from: 0,
-                  to: 0,
-                  slots: [],
-                  pinnedCount: 0,
-                  dragging: false,
-                };
+                beginReorder(e, tab.id);
               }}
               onDoubleClick={() => setEditing(tab.id)}
               onKeyDown={(e) => {
@@ -355,6 +452,13 @@ export function TabStrip({
                 setContext({ tabId: tab.id, x: e.clientX, y: e.clientY });
               }}
             >
+              {reviewFlashKey !== undefined && (
+                <span
+                  key={reviewFlashKey}
+                  className="tab-completion-review"
+                  aria-hidden="true"
+                />
+              )}
               {editing === tab.id ? (
                 <input
                   className="tab-rename"
@@ -393,12 +497,6 @@ export function TabStrip({
                   </button>
                   <span className="tab-title">{tab.title}</span>
                   {count > 1 && <span className="tab-count">{count}</span>}
-                  <CompletionDot
-                    active={showUnread}
-                    className="tab-completion-dot"
-                    title={`${unread} finished terminal${unread === 1 ? "" : "s"} not reviewed`}
-                    aria-hidden="true"
-                  />
                   <button
                     type="button"
                     className="tab-close"
@@ -416,44 +514,6 @@ export function TabStrip({
             </div>
           );
         })}
-
-        {settingsOpen && (
-          <div
-            role="tab"
-            aria-selected={settingsActive}
-            tabIndex={settingsActive ? 0 : -1}
-            className={`tab settings-tab ${settingsActive ? "is-active" : ""}`}
-            onPointerDown={(event) => {
-              if (event.button === 0) onSelectSettings();
-            }}
-            onKeyDown={(event) => {
-              if (event.key !== "Enter" && event.key !== " ") return;
-              event.preventDefault();
-              onSelectSettings();
-            }}
-          >
-            <span className="settings-tab-icon" aria-hidden="true">
-              <svg viewBox="0 0 16 16">
-                <circle cx="8" cy="8" r="2" />
-                <path d="M6.44 3.94 6.61 1.45h2.78l.17 2.49a4.35 4.35 0 0 1 1.18.68l2.24-1.1 1.39 2.41-2.07 1.39a4.35 4.35 0 0 1 0 1.36l2.07 1.39-1.39 2.41-2.24-1.1a4.35 4.35 0 0 1-1.18.68l-.17 2.49H6.61l-.17-2.49a4.35 4.35 0 0 1-1.18-.68l-2.24 1.1-1.39-2.41 2.07-1.39a4.35 4.35 0 0 1 0-1.36L1.63 5.93l1.39-2.41 2.24 1.1a4.35 4.35 0 0 1 1.18-.68z" />
-              </svg>
-            </span>
-            <span className="tab-title">Settings</span>
-            <button
-              type="button"
-              className="tab-close"
-              title="Close settings"
-              aria-label="Close settings"
-              onPointerDown={(event) => event.stopPropagation()}
-              onClick={(event) => {
-                event.stopPropagation();
-                onCloseSettings();
-              }}
-            >
-              ✕
-            </button>
-          </div>
-        )}
 
         <div className={`tab-new-wrap ${allowNewTab ? "" : "is-locked"}`}>
           <button
