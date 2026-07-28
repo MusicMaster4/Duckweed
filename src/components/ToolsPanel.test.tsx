@@ -129,7 +129,7 @@ describe("power watch panel", () => {
       busy: [{ termId: "t1", label: "duckweed · claude", reason: "agent-waiting" }],
     });
     const html = renderToStaticMarkup(<PowerWatchTool />);
-    expect(html).toContain("Waiting for the work to finish");
+    expect(html).toContain("Still running");
     expect(html).toContain("duckweed · claude");
     expect(html).toContain("needs you");
     expect(html).toContain("Cancel");
@@ -145,18 +145,20 @@ describe("power watch panel", () => {
     });
     const html = renderToStaticMarkup(<PowerWatchTool />);
     expect(html).toMatch(/1:3[45]/);
-    expect(html).toContain("until shut down");
+    expect(html).toContain("Shutting down in");
     expect(html).toContain("Cancel");
   });
 
-  test("the active countdown card appears below the activity readout", () => {
+  test("the active countdown card sits above the plan", () => {
     powerWatch.resetForTests({
       phase: "countdown",
       firesAt: Date.now() + 95_000,
       action: "shutdown",
     });
     const html = renderToStaticMarkup(<PowerWatchTool />);
-    expect(html.indexOf("Nothing running")).toBeLessThan(html.indexOf("power-hero is-counting"));
+    expect(html.indexOf("power-card is-counting")).toBeLessThan(
+      html.indexOf("When the work is done"),
+    );
   });
 
   test("a refused action is reported rather than swallowed", () => {

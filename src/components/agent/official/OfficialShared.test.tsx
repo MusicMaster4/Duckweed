@@ -14,6 +14,7 @@ import {
   AssistantMarkdown,
   continuedAssistantIds,
   ProviderEmpty,
+  shortAssistantUpdatesAsThinking,
 } from "./OfficialShared";
 
 function activitySession(agent: AgentId, items: AgentItem[]): AgentSessionState {
@@ -345,13 +346,20 @@ describe("official agent presentation", () => {
       ];
       const html = renderAgentActivity(agent, items);
 
-      expect(html).toContain("I found the entry point. I am checking the callers now.");
-      expect(html).toContain("is-interim-update");
       expect(html).not.toContain("Reviewing the entry point");
       expect(html.match(/agent-activity-cluster/g)).toHaveLength(1);
-      expect(html.indexOf("I found the entry point. I am checking the callers now.")).toBeLessThan(
-        html.indexOf("Checking every caller in full"),
-      );
+      if (agent === "codex" || agent === "claude") {
+        expect(html).not.toContain("I found the entry point. I am checking the callers now.");
+        expect(html).not.toContain("is-interim-update");
+        expect(html).toContain("Checking every caller in full");
+        expect(html).toContain("agent-thinking-latest");
+      } else {
+        expect(html).toContain("I found the entry point. I am checking the callers now.");
+        expect(html).toContain("is-interim-update");
+        expect(html.indexOf("I found the entry point. I am checking the callers now.")).toBeLessThan(
+          html.indexOf("Checking every caller in full"),
+        );
+      }
       if (agent === "cursor") {
         expect(html).toContain("cx-prose is-interim-update");
       } else if (agent === "opencode") {
@@ -383,9 +391,15 @@ describe("official agent presentation", () => {
       ]);
 
       expect(html).toContain("I found the boundary. I am continuing below this update.");
-      expect(html).toContain("is-interim-update");
       expect(html).not.toContain("THIS_OLD_ACTIVITY_MUST_MOVE_OUT");
-      expect(html).not.toContain("agent-activity-cluster");
+      if (agent === "codex" || agent === "claude") {
+        expect(html).not.toContain("is-interim-update");
+        expect(html).toContain("agent-activity-cluster");
+        expect(html).toContain("agent-thinking-latest");
+      } else {
+        expect(html).toContain("is-interim-update");
+        expect(html).not.toContain("agent-activity-cluster");
+      }
     });
   }
 
@@ -667,6 +681,60 @@ describe("official agent presentation", () => {
     expect(groups[1].activities.map((item) => item.id)).toEqual(["tool-2"]);
     expect(continuedAssistantIds(items).has("comment")).toBe(true);
     expect(activeAssistantId(items, true)).toBe(null);
+  });
+
+  test("turns short running assistant updates into thinking and keeps longer responses", () => {
+    const items: AgentItem[] = [
+      { kind: "user", id: "user", at: 1, text: "Inspect" },
+      { kind: "assistant", id: "short", at: 2, text: "a".repeat(250), streaming: false },
+      { kind: "assistant", id: "long", at: 3, text: "b".repeat(251), streaming: true },
+    ];
+
+    const presented = shortAssistantUpdatesAsThinking(items, true, 250);
+
+    expect(presented[1]).toMatchObject({ id: "short", kind: "thinking" });
+    expect(presented[2]).toMatchObject({ id: "long", kind: "assistant" });
+  });
+
+  test("keeps a completed turn's final response even when it is short", () => {
+    const items: AgentItem[] = [
+      { kind: "user", id: "user", at: 1, text: "Inspect" },
+      { kind: "assistant", id: "update", at: 2, text: "Checking.", streaming: false },
+      { kind: "assistant", id: "final", at: 3, text: "Done.", streaming: false },
+    ];
+
+    const presented = shortAssistantUpdatesAsThinking(items, false, 250);
+
+    expect(presented[1]).toMatchObject({ id: "update", kind: "thinking" });
+    expect(presented[2]).toMatchObject({ id: "final", kind: "assistant" });
+  });
+
+  test("uses provider-specific limits for Codex and Claude Code", () => {
+    const codexHtml = renderAgentActivity("codex", [
+      { kind: "user", id: "codex-user", at: 1, text: "Inspect" },
+      {
+        kind: "assistant",
+        id: "codex-update",
+        at: 2,
+        text: "c".repeat(225),
+        streaming: true,
+      },
+    ]);
+    const claudeHtml = renderAgentActivity("claude", [
+      { kind: "user", id: "claude-user", at: 1, text: "Inspect" },
+      {
+        kind: "assistant",
+        id: "claude-update",
+        at: 2,
+        text: "c".repeat(225),
+        streaming: true,
+      },
+    ]);
+
+    expect(codexHtml).toContain("agent-thinking-latest");
+    expect(codexHtml).not.toContain("official-answer official-answer--chatgpt");
+    expect(claudeHtml).toContain("official-answer official-answer--claude");
+    expect(claudeHtml).not.toContain("agent-thinking-latest");
   });
 
   test("uses a single provider mark plus an ASCII startup animation", () => {

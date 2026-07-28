@@ -755,6 +755,17 @@
   --activity-accent: var(--agent-accent);
 }
 
+/* Claudex reuses the Claude layout, but not Anthropic orange. Expanded tool
+   rows and plan trackers set --tool-color / --plan-color from the variant, so
+   they need the same program override as the activity accent above. */
+.agent-surface[data-program="claudex"] .official-tool--claude {
+  --tool-color: var(--agent-accent);
+}
+
+.agent-surface[data-program="claudex"] .official-plan--claude {
+  --plan-color: var(--agent-accent);
+}
+
 .agent-activity-cluster[data-variant="grok"] {
   --activity-accent: #b8b8b8;
 }

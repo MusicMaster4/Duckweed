@@ -834,6 +834,53 @@ export function activityItems(items: AgentItem[]): Array<ToolItem | Extract<Agen
   );
 }
 
+/**
+ * Present short assistant updates as thinking traces while preserving the last
+ * assistant item of every completed turn as its final response.
+ *
+ * Providers do not consistently distinguish commentary from the final answer
+ * on the wire. While the newest turn is running, its short assistant items can
+ * therefore be treated as activity. Once the turn settles, its last response
+ * remains a response regardless of length.
+ */
+export function shortAssistantUpdatesAsThinking(
+  items: AgentItem[],
+  working: boolean,
+  maxCharacters: number,
+): AgentItem[] {
+  const finalResponseIds = new Set<string>();
+  let turnStart = 0;
+
+  const preserveLastResponse = (start: number, end: number) => {
+    for (let index = end - 1; index >= start; index -= 1) {
+      const item = items[index];
+      if (item.kind === "assistant" && item.text.trim()) {
+        finalResponseIds.add(item.id);
+        return;
+      }
+    }
+  };
+
+  for (let index = 1; index < items.length; index += 1) {
+    if (items[index].kind !== "user") continue;
+    preserveLastResponse(turnStart, index);
+    turnStart = index;
+  }
+  if (!working) preserveLastResponse(turnStart, items.length);
+
+  return items.map((item) => {
+    if (
+      item.kind !== "assistant" ||
+      finalResponseIds.has(item.id) ||
+      !item.text.trim() ||
+      Array.from(item.text).length > maxCharacters
+    ) {
+      return item;
+    }
+    return { ...item, kind: "thinking" };
+  });
+}
+
 export interface ActivityGroup {
   firstId: string;
   firstIndex: number;

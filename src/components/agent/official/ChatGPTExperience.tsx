@@ -8,20 +8,28 @@ import {
   MessageItem,
   PlanTracker,
   ProviderEmpty,
+  shortAssistantUpdatesAsThinking,
   type ExperienceProps,
 } from "./OfficialShared";
 
 export function ChatGPTExperience(props: ExperienceProps) {
   const { items, termId, status, started, agent, label, program, cwd } = props;
-  const groups = useMemo(() => activityGroups(items), [items]);
+  const transcriptItems = useMemo(
+    () => shortAssistantUpdatesAsThinking(items, status === "working", 250),
+    [items, status],
+  );
+  const groups = useMemo(() => activityGroups(transcriptItems), [transcriptItems]);
   const answerIds = useMemo(
     () => new Set(groups.flatMap((group) => (group.answerId ? [group.answerId] : []))),
     [groups],
   );
-  const continuedIds = useMemo(() => continuedAssistantIds(items), [items]);
+  const continuedIds = useMemo(
+    () => continuedAssistantIds(transcriptItems),
+    [transcriptItems],
+  );
   const liveAssistantId = useMemo(
-    () => activeAssistantId(items, status === "working"),
-    [items, status],
+    () => activeAssistantId(transcriptItems, status === "working"),
+    [transcriptItems, status],
   );
   const groupByActivity = useMemo(
     () =>
@@ -33,8 +41,8 @@ export function ChatGPTExperience(props: ExperienceProps) {
     [groups],
   );
   let latestUserIndex = -1;
-  for (let index = items.length - 1; index >= 0; index -= 1) {
-    if (items[index]?.kind === "user") {
+  for (let index = transcriptItems.length - 1; index >= 0; index -= 1) {
+    if (transcriptItems[index]?.kind === "user") {
       latestUserIndex = index;
       break;
     }
@@ -43,7 +51,7 @@ export function ChatGPTExperience(props: ExperienceProps) {
   for (const group of groups) {
     if (group.firstIndex > latestUserIndex) liveGroup = group;
   }
-  const hasActivityAfterPrompt = items.slice(latestUserIndex + 1).some((item) => {
+  const hasActivityAfterPrompt = transcriptItems.slice(latestUserIndex + 1).some((item) => {
     if (item.kind === "user") return false;
     if (item.kind === "assistant") return Boolean(item.text.trim());
     return item.kind === "thinking" || item.kind === "tool" || item.kind === "plan";
@@ -67,7 +75,7 @@ export function ChatGPTExperience(props: ExperienceProps) {
   return (
     <div className="agent-experience chatgpt-experience">
       <div className="official-transcript">
-        {items.map((item) => {
+        {transcriptItems.map((item) => {
           if (item.kind === "thinking" || item.kind === "tool") {
             const group = groupByActivity.get(item.id);
             if (

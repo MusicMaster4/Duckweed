@@ -8,6 +8,7 @@ import {
   MessageItem,
   PlanTracker,
   ProviderEmpty,
+  shortAssistantUpdatesAsThinking,
   type ExperienceProps,
 } from "./OfficialShared";
 
@@ -21,15 +22,22 @@ export function ClaudeExperience({
   program,
   cwd,
 }: ExperienceProps) {
-  const groups = useMemo(() => activityGroups(items), [items]);
+  const transcriptItems = useMemo(
+    () => shortAssistantUpdatesAsThinking(items, status === "working", 200),
+    [items, status],
+  );
+  const groups = useMemo(() => activityGroups(transcriptItems), [transcriptItems]);
   const answerIds = useMemo(
     () => new Set(groups.flatMap((group) => (group.answerId ? [group.answerId] : []))),
     [groups],
   );
-  const continuedIds = useMemo(() => continuedAssistantIds(items), [items]);
+  const continuedIds = useMemo(
+    () => continuedAssistantIds(transcriptItems),
+    [transcriptItems],
+  );
   const liveAssistantId = useMemo(
-    () => activeAssistantId(items, status === "working"),
-    [items, status],
+    () => activeAssistantId(transcriptItems, status === "working"),
+    [transcriptItems, status],
   );
   const groupByActivity = useMemo(
     () =>
@@ -41,8 +49,8 @@ export function ClaudeExperience({
     [groups],
   );
   let latestUserIndex = -1;
-  for (let index = 0; index < items.length; index += 1) {
-    if (items[index].kind === "user") latestUserIndex = index;
+  for (let index = 0; index < transcriptItems.length; index += 1) {
+    if (transcriptItems[index].kind === "user") latestUserIndex = index;
   }
   let liveGroup: (typeof groups)[number] | undefined;
   for (const group of groups) {
@@ -66,7 +74,7 @@ export function ClaudeExperience({
   return (
     <div className="agent-experience claude-experience">
       <div className="official-transcript">
-        {items.map((item) => {
+        {transcriptItems.map((item) => {
           if (item.kind === "thinking" || item.kind === "tool") {
             const group = groupByActivity.get(item.id);
             if (
