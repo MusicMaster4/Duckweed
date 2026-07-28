@@ -673,6 +673,9 @@ function startAgentUi(
   // first paint instead of flashing an empty frame.
   const starting = agentSessions.start(session.id, launch, session.cwd);
   session.agentUi = launch.agent;
+  // The surface covers the grid; any caret left from the shell (or from the
+  // next editor-mode flip) must not paint through empty OpenCode/Claude chrome.
+  hideVisualCursor(session);
   // The agent runs beside the PTY, so the busy monitor never sees it. Record
   // the start anyway: completion sound and duration gates read this, and an
   // agent in this pane should not sound different because it has no shell
@@ -890,9 +893,13 @@ function hideVisualCursor(session: Session): void {
 function paintVisualCursor(session: Session): void {
   const { term, visualCursor } = session;
   const buffer = term.buffer.active;
-  // In editor mode the caret lives in the command bar, not the grid.
+  // In editor mode the caret lives in the command bar, not the grid. The
+  // custom agent surface also covers the grid completely — its z-index is only
+  // one step below block chrome, so a painted caret would blink through empty
+  // chat regions (often at a leftover PTY cell after `/new` or a redraw).
   if (
     session.editorMode ||
+    session.agentUi ||
     !session.cursorVisible ||
     !session.cursorFocused ||
     !session.container ||
@@ -933,7 +940,7 @@ function paintVisualCursor(session: Session): void {
  * status/footer position.
  */
 function scheduleVisualCursor(session: Session, forceSettle = false): void {
-  if (!session.cursorFocused || !session.container) {
+  if (!session.cursorFocused || !session.container || session.agentUi) {
     hideVisualCursor(session);
     return;
   }
@@ -1642,9 +1649,15 @@ export function setEditorMode(id: string, enabled: boolean): void {
   // Command labels stay up so the shell's `PS path> cmd` echo remains covered.
   session.blocks.setEditorMode(enabled);
   if (!enabled) {
-    // Editor mode hides the visual caret in favor of the input bar.
-    session.cursorFocused = true;
-    scheduleVisualCursor(session, true);
+    // Leaving editor mode normally hands the caret back to the grid (raw TUI /
+    // child process). While a custom agent surface owns the pane, that caret
+    // would sit at a leftover PTY cell and blink through the chat empty state.
+    if (session.agentUi) {
+      hideVisualCursor(session);
+    } else {
+      session.cursorFocused = true;
+      scheduleVisualCursor(session, true);
+    }
   } else {
     hideVisualCursor(session);
   }

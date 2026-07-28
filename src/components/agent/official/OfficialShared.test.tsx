@@ -94,6 +94,44 @@ describe("official agent presentation", () => {
     }
   });
 
+  test("keeps the OpenCode copy control outside the user bubble", () => {
+    const prompt: AgentItem = {
+      kind: "user",
+      id: "prompt",
+      at: 1,
+      text: "Copy this exact message",
+    };
+    const html = renderAgentActivity("opencode", [prompt]);
+
+    expect(html).toContain('class="oc-user-turn"');
+    expect(html).toContain('class="oc-user-bubble"');
+    // Bubble closes before the actions row; the icon must not paint inside it.
+    expect(html).toMatch(
+      /oc-user-bubble[\s\S]*?Copy this exact message[\s\S]*?<\/div>\s*<div class="agent-message-actions"/,
+    );
+    const bubble = html.match(
+      /class="oc-user-bubble"[^>]*>([\s\S]*?)<\/div>\s*<div class="agent-message-actions"/,
+    );
+    expect(bubble?.[1] ?? "").not.toContain('aria-label="Copy message"');
+  });
+
+  test("keeps official copy controls outside the user bubble", () => {
+    const prompt: AgentItem = {
+      kind: "user",
+      id: "prompt",
+      at: 1,
+      text: "Copy this exact message",
+    };
+
+    for (const agent of ["codex", "claude", "grok"] as const) {
+      const html = renderAgentActivity(agent, [prompt]);
+      expect(html).toContain('class="official-user-turn');
+      expect(html).toMatch(
+        /official-user official-user--[\w]+[\s\S]*?Copy this exact message[\s\S]*?<\/article>\s*<div class="agent-message-actions"/,
+      );
+    }
+  });
+
   test("renders agent markdown as structure instead of literal markers", () => {
     const html = renderToStaticMarkup(
       <AssistantMarkdown

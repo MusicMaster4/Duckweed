@@ -2039,13 +2039,33 @@ button.oc-sub-head:hover {
   display: none;
 }
 
+/* Body is only a right-aligned shell; the bubble is on `.oc-user-bubble` so
+   the copy action can sit outside the filled rect. */
 .oc-mod[data-lane="you"] .oc-mod-body {
   width: fit-content;
   max-width: min(78%, 680px);
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.oc-user-turn {
+  display: flex;
+  width: fit-content;
+  max-width: 100%;
+  flex-direction: column;
+  align-items: flex-end;
+}
+
+.oc-user-bubble {
+  max-width: 100%;
   padding: 10px 14px;
   border: 1px solid rgba(255, 255, 255, 0.035);
   border-radius: 18px;
+  color: var(--text);
   background: rgba(255, 255, 255, 0.075);
+  font-size: 13px;
+  user-select: text;
 }
 
 .oc-mod[data-lane="say"],

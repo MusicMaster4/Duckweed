@@ -1,3 +1,12 @@
+export interface CompletionFlash {
+  key: number;
+  /**
+   * A completion seen live fades in first. A completion carried in from a
+   * background tab is already lit, then waits before fading away.
+   */
+  kind: "focused" | "review";
+}
+
 /**
  * Mark one terminal completion as reviewed without disturbing completion
  * markers owned by other panes.
@@ -10,4 +19,16 @@ export function acknowledgeCompletion(
   const next = new Set(unreadTermIds);
   next.delete(termId);
   return next;
+}
+
+/**
+ * Switching to a tab reviews its selected terminal, but an unread completion
+ * there must remain visible long enough for the newly rendered pane to show it.
+ */
+export function shouldFlashCompletionReview(
+  unreadTermIds: ReadonlySet<string>,
+  termId: string | null,
+  viewChanged: boolean,
+): boolean {
+  return viewChanged && termId !== null && unreadTermIds.has(termId);
 }

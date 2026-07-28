@@ -23,6 +23,11 @@
   align-items: flex-end;
 }
 
+/* Actions are a flex sibling of the bubble, never a child of it. */
+.official-user-turn > .agent-message-actions {
+  align-self: flex-end;
+}
+
 .official-user {
   max-width: 100%;
   padding: 10px 14px;

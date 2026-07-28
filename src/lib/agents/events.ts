@@ -270,14 +270,33 @@ export function applyEvent(state: AgentSessionState, event: AgentEvent): AgentSe
         models: event.models && event.models.length ? event.models : state.models,
       };
 
-    case "status":
+    case "status": {
       if (state.status === event.status && !event.error) return state;
+      // Adapters that go idle without a turn-end frame (Codex resume, Claude
+      // start) would otherwise leave a streaming caret blinking on the last
+      // unfinished assistant/thinking block.
+      const settled =
+        event.status === "idle" || event.status === "exited" || event.status === "error";
+      const items =
+        settled &&
+        state.items.some(
+          (item) =>
+            (item.kind === "assistant" || item.kind === "thinking") && item.streaming,
+        )
+          ? state.items.map((item) =>
+              (item.kind === "assistant" || item.kind === "thinking") && item.streaming
+                ? { ...item, streaming: false }
+                : item,
+            )
+          : state.items;
       return {
         ...state,
         ...workTimingAfterStatus(state, event.status),
         status: event.status,
+        items,
         error: event.error ?? (event.status === "error" ? state.error : null),
       };
+    }
 
     case "user":
       return {

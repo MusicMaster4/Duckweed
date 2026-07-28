@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
@@ -33,7 +33,11 @@ import {
   setConfirmCloseRunningEnabled,
   subscribeConfirmClosePref,
 } from "./lib/confirmClose";
-import { acknowledgeCompletion } from "./lib/completionHighlights";
+import {
+  acknowledgeCompletion,
+  shouldFlashCompletionReview,
+  type CompletionFlash,
+} from "./lib/completionHighlights";
 import { playCompletionSound, preloadCompletionSound } from "./lib/completionSound";
 import * as commandHistory from "./lib/commandHistory";
 import { clearGreetings } from "./lib/greetings";
@@ -70,6 +74,7 @@ import {
   type LayoutDraft,
   type LayoutTemplate,
 } from "./lib/layouts";
+import { tabColorHex } from "./lib/tabColors";
 import { toggleFullscreen } from "./lib/window";
 import { DEFAULT_TOOLS_WIDTH, load, pushRecent, rehydrate, save } from "./lib/persist";
 import {
@@ -175,6 +180,7 @@ function boot() {
       highlight: saved.highlight,
       completionHighlights: saved.completionHighlights,
       completionSoundEnabled: saved.completionSoundEnabled,
+      tintWorkspaceWithTabColor: saved.tintWorkspaceWithTabColor,
       customAgentUi: saved.customAgentUi,
       agentFollowupMode: saved.agentFollowupMode,
       inputMode: saved.inputMode,
@@ -204,6 +210,7 @@ function boot() {
     highlight: true,
     completionHighlights: true,
     completionSoundEnabled: true,
+    tintWorkspaceWithTabColor: false,
     customAgentUi: true,
     agentFollowupMode: "queue" as const,
     inputMode: "editor" as terminals.InputMode,
@@ -217,7 +224,7 @@ function boot() {
 /** Stable empty set so hiding completion marks does not churn PaneTree memos. */
 const NO_UNREAD_TERMS: ReadonlySet<string> = new Set();
 /** Stable empty map used while focused completion flashes are hidden. */
-const NO_COMPLETION_FLASHES: ReadonlyMap<string, number> = new Map();
+const NO_COMPLETION_FLASHES: ReadonlyMap<string, CompletionFlash> = new Map();
 
 /**
  * True for a field the user is typing into. xterm's hidden helper textarea is
@@ -241,6 +248,9 @@ export default function App() {
   const [completionHighlights, setCompletionHighlights] = useState(initial.completionHighlights);
   const [completionSoundEnabled, setCompletionSoundEnabled] = useState(
     initial.completionSoundEnabled,
+  );
+  const [tintWorkspaceWithTabColor, setTintWorkspaceWithTabColor] = useState(
+    initial.tintWorkspaceWithTabColor,
   );
   const [customAgentUi, setCustomAgentUi] = useState(initial.customAgentUi);
   const [agentFollowupMode, setAgentFollowupMode] = useState(initial.agentFollowupMode);
@@ -266,7 +276,7 @@ export default function App() {
       user left open has to be the one waiting when they switch back. */
   const [toolsSection, setToolsSection] = useState<ToolsSectionId>("files");
   const [unreadTermIds, setUnreadTermIds] = useState<Set<string>>(() => new Set());
-  const [completionFlashes, setCompletionFlashes] = useState<Map<string, number>>(
+  const [completionFlashes, setCompletionFlashes] = useState<Map<string, CompletionFlash>>(
     () => new Map(),
   );
   const unreadTermIdsRef = useRef(unreadTermIds);
@@ -396,14 +406,14 @@ export default function App() {
     });
   }, []);
 
-  const flashFocusedCompletion = useCallback((termId: string) => {
+  const flashCompletion = useCallback((termId: string, kind: CompletionFlash["kind"]) => {
     const previousTimer = completionFlashTimers.current.get(termId);
     if (previousTimer !== undefined) window.clearTimeout(previousTimer);
 
-    const pulse = ++completionFlashSeq.current;
+    const flash = { key: ++completionFlashSeq.current, kind };
     setCompletionFlashes((previous) => {
       const next = new Map(previous);
-      next.set(termId, pulse);
+      next.set(termId, flash);
       return next;
     });
 
@@ -553,7 +563,7 @@ export default function App() {
         playCompletionSound();
       }
       if (isFocusedTerm(termId)) {
-        if (completionHighlightsRef.current) flashFocusedCompletion(termId);
+        if (completionHighlightsRef.current) flashCompletion(termId, "focused");
         return;
       }
       setUnreadTermIds((prev) => {
@@ -574,7 +584,7 @@ export default function App() {
     };
     // Tab metadata changes must not tear down every terminal subscription.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [termIdsKey, acknowledgeTerm, flashFocusedCompletion, isFocusedTerm, isSelectedTerm]);
+  }, [termIdsKey, acknowledgeTerm, flashCompletion, isFocusedTerm, isSelectedTerm]);
 
   // ---------------------------------------------------------- power watch
 
@@ -843,13 +853,21 @@ export default function App() {
   );
 
   const selectTab = useCallback((id: string) => {
+    const viewChanged = settingsActiveRef.current || id !== activeTabIdRef.current;
     if (id !== activeTabIdRef.current) terminals.clearAllBlockSelections();
     const tab = tabsRef.current.find((candidate) => candidate.id === id);
-    const term = tab ? findLeaf(tab.root, tab.activeLeaf)?.term : null;
+    const term = tab ? (findLeaf(tab.root, tab.activeLeaf)?.term ?? null) : null;
+    if (
+      term !== null &&
+      completionHighlightsRef.current &&
+      shouldFlashCompletionReview(unreadTermIdsRef.current, term, viewChanged)
+    ) {
+      flashCompletion(term, "review");
+    }
     if (term) acknowledgeTerm(term);
     setSettingsActive(false);
     setActiveTabId(id);
-  }, [acknowledgeTerm]);
+  }, [acknowledgeTerm, flashCompletion]);
 
   const openSettings = useCallback(() => {
     terminals.clearAllBlockSelections();
@@ -1472,6 +1490,7 @@ export default function App() {
           highlight,
           completionHighlights,
           completionSoundEnabled,
+          tintWorkspaceWithTabColor,
           customAgentUi,
           agentFollowupMode,
           inputMode,
@@ -1493,6 +1512,7 @@ export default function App() {
     highlight,
     completionHighlights,
     completionSoundEnabled,
+    tintWorkspaceWithTabColor,
     customAgentUi,
     agentFollowupMode,
     inputMode,
@@ -2305,9 +2325,18 @@ export default function App() {
   const zoomedNode =
     activeTab?.zoomedLeaf ? findLeaf(activeTab.root, activeTab.zoomedLeaf) : null;
   const activeTerm = activeTab ? (findLeaf(activeTab.root, activeTab.activeLeaf)?.term ?? null) : null;
+  const activeWindowColor =
+    tintWorkspaceWithTabColor && !settingsActive ? tabColorHex(activeTab?.color) : null;
 
   return (
-    <div className="app">
+    <div
+      className={`app${activeWindowColor ? " has-tab-color" : ""}`}
+      style={
+        activeWindowColor
+          ? ({ "--active-tab-color": activeWindowColor } as CSSProperties)
+          : undefined
+      }
+    >
       <TitleBar
         settingsActive={settingsActive}
         onOpenSettings={openSettings}
@@ -2379,6 +2408,7 @@ export default function App() {
                 highlight={highlight}
                 completionHighlights={completionHighlights}
                 completionSoundEnabled={completionSoundEnabled}
+                tintWorkspaceWithTabColor={tintWorkspaceWithTabColor}
                 customAgentUi={customAgentUi}
                 agentFollowupMode={agentFollowupMode}
                 confirmCloseRunning={confirmCloseRunningPref}
@@ -2391,6 +2421,9 @@ export default function App() {
                 onToggleHighlight={toggleHighlight}
                 onToggleCompletionHighlights={toggleCompletionHighlights}
                 onToggleCompletionSound={toggleCompletionSound}
+                onToggleTintWorkspaceWithTabColor={() =>
+                  setTintWorkspaceWithTabColor((enabled) => !enabled)
+                }
                 onToggleCustomAgentUi={toggleCustomAgentUi}
                 onAgentFollowupMode={(mode) => {
                   agentSessions.setFollowupMode(mode);

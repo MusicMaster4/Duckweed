@@ -1,12 +1,15 @@
 .agent-message-actions {
   display: flex;
+  flex: none;
   justify-content: flex-end;
+  align-self: flex-end;
   min-height: 22px;
-  margin-top: 2px;
+  margin-top: 4px;
 }
 
 .agent-message-copy {
   display: grid;
+  flex: none;
   width: 24px;
   height: 22px;
   padding: 0;

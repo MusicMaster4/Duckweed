@@ -13,15 +13,9 @@ import {
 } from "../official/OfficialShared";
 import { ChangeSet, Disclosure, ScreenReaderText, useTicker } from "./ProviderExperienceParts";
 import {
-  activitySummary,
   basename,
   formatElapsed,
-  phaseOf,
-  planSummary,
   tailLine,
-  turnStart,
-  type PhaseKind,
-  type PlanSummary,
   type ProviderExperienceProps,
 } from "./providerExperience";
 import "./ProviderExperience.css";
@@ -41,17 +35,6 @@ import "./ProviderExperience.css";
  * Cursor surface — that one is a single editorial rail; this one is a stack of
  * bracketed modules.
  */
-
-const PHASE_WORD: Record<PhaseKind, string> = {
-  starting: "booting",
-  ready: "idle",
-  thinking: "thinking",
-  writing: "streaming",
-  tool: "running",
-  waiting: "blocked",
-  ended: "closed",
-  failed: "error",
-};
 
 /** The lane an event belongs to — the gutter tag, and what merges with what. */
 type Lane =
@@ -140,25 +123,6 @@ function toModules(items: AgentItem[]): Module[] {
   return modules;
 }
 
-/** OpenCode's official nested-square mark, animated only through its fill. */
-function OpenCodeMark({ phase, large }: { phase: PhaseKind; large?: boolean }) {
-  return (
-    <svg
-      className={`oc-mark${large ? " is-large" : ""}`}
-      data-phase={phase}
-      viewBox="0 0 20 20"
-      aria-hidden="true"
-    >
-      <path
-        className="oc-frame"
-        fillRule="evenodd"
-        d="M17.5 17.5h-15v-15h15v15Zm-3.75-11.25h-7.5v7.5h7.5v-7.5Z"
-      />
-      <rect className="oc-core" x="7.5" y="8.75" width="5" height="5" />
-    </svg>
-  );
-}
-
 function OpenCodeStatus({ status, elapsed }: { status: ToolStatus; elapsed: string | null }) {
   const label =
     status === "running"
@@ -210,23 +174,6 @@ function OpenCodeMeter({ steps, done }: { steps: AgentPlanStep[]; done: number }
         ]
       </span>
     </span>
-  );
-}
-
-function OpenCodeTracker({ plan }: { plan: PlanSummary }) {
-  const current = plan.active ?? plan.next;
-  return (
-    <div className="oc-track">
-      <OpenCodeMeter steps={plan.steps} done={plan.done} />
-      <span className="oc-track-count">
-        {plan.done}/{plan.total} tasks
-      </span>
-      {current && (
-        <span className={`oc-track-active${plan.active ? " is-live" : ""}`}>
-          {plan.active ? current.text : `up next · ${current.text}`}
-        </span>
-      )}
-    </div>
   );
 }
 
@@ -406,12 +353,17 @@ function OpenCodeItem({
 
   switch (item.kind) {
     case "user":
+      // Bubble wraps only the prompt; the copy control sits outside it, same
+      // pattern as the official user turns. Keeping both in `.oc-mod-body`
+      // previously painted the icon inside the bubble.
       return (
-        <>
-          <AgentImageAttachments images={item.images ?? []} />
-          {item.text && <p className="oc-said">{item.text}</p>}
+        <div className="oc-user-turn">
+          <div className="oc-user-bubble">
+            <AgentImageAttachments images={item.images ?? []} />
+            {item.text && <p className="oc-said">{item.text}</p>}
+          </div>
           {item.text && <MessageCopyButton text={item.text} />}
-        </>
+        </div>
       );
     case "assistant":
       return (
@@ -488,19 +440,6 @@ const OpenCodeModule = memo(function OpenCodeModule({
   );
 });
 
-/** Tool families as lane tags, so the header speaks the same words as the body. */
-const TALLY_LANE: Record<string, Lane> = {
-  execute: "exec",
-  edit: "edit",
-  read: "read",
-  search: "find",
-  fetch: "net",
-  task: "agent",
-  todo: "plan",
-  think: "think",
-  other: "tool",
-};
-
 export function OpenCodeExperience({ session, items, className }: ProviderExperienceProps) {
   const list = items ?? session.items;
   const modules = useMemo(() => toModules(list), [list]);
@@ -519,12 +458,9 @@ export function OpenCodeExperience({ session, items, className }: ProviderExperi
       ),
     [groups],
   );
-  const plan = useMemo(() => planSummary(list), [list]);
-  const activity = useMemo(() => activitySummary(list), [list]);
-  const phase = phaseOf(session, list);
-  const now = useTicker(phase.busy);
-  const started = turnStart(list);
-  const turnFor = phase.busy && started !== null ? formatElapsed(now - started) : null;
+  // Tick only while a tool call is live so finished rows do not re-render once a second.
+  const hasLiveTools = useMemo(() => list.some(isLive), [list]);
+  const now = useTicker(hasLiveTools);
   let latestUserIndex = -1;
   for (let index = 0; index < list.length; index += 1) {
     if (list[index].kind === "user") latestUserIndex = index;
@@ -555,52 +491,8 @@ export function OpenCodeExperience({ session, items, className }: ProviderExperi
   }
 
   return (
-    <section className={`oc${className ? ` ${className}` : ""}`} data-phase={phase.kind}>
-      {session.started && (
-        <header className="oc-bar" data-busy={phase.busy || undefined}>
-          <div className="oc-bar-row">
-            <OpenCodeMark phase={phase.kind} />
-            <span className="oc-phase" aria-live="polite">
-              {PHASE_WORD[phase.kind]}
-            </span>
-            {phase.detail && (
-              <span className="oc-phase-detail" title={phase.detail}>
-                {phase.detail}
-              </span>
-            )}
-            <span className="oc-bar-gap" />
-            {turnFor && <span className="oc-bar-time">{turnFor}</span>}
-          </div>
-          {(activity.tallies.length > 0 || activity.files.length > 0) && (
-            <div className="oc-tallies">
-              {activity.tallies.map((tally) => (
-                <span
-                  key={tally.kind}
-                  className={`oc-tally${tally.running ? " is-live" : ""}${tally.failed ? " is-bad" : ""}`}
-                  data-lane={TALLY_LANE[tally.kind] ?? "tool"}
-                >
-                  <span className="oc-tally-tag">{TALLY_LANE[tally.kind] ?? "tool"}</span>
-                  <span className="oc-tally-count">{tally.count}</span>
-                </span>
-              ))}
-              {activity.files.length > 0 && (
-                <span
-                  className="oc-tally is-files"
-                  title={activity.files.map(basename).join(", ")}
-                >
-                  <span className="oc-tally-tag">files</span>
-                  <span className="oc-tally-count">{activity.files.length}</span>
-                  <span className="oc-add">+{activity.insertions}</span>
-                  <span className="oc-del">−{activity.deletions}</span>
-                </span>
-              )}
-            </div>
-          )}
-          {plan && <OpenCodeTracker plan={plan} />}
-        </header>
-      )}
-
-      {modules.length > 0 && (
+    <section className={`oc${className ? ` ${className}` : ""}`}>
+      {(modules.length > 0 || needsEmptyLiveTrace) && (
         <div className="oc-lanes">
           {/* Only a module with a live call gets the ticking clock: handing
               `now` to a finished module would re-render it once a second. */}

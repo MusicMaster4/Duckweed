@@ -42,6 +42,8 @@ export interface Persisted {
   completionHighlights: boolean;
   /** Play the bundled cue whenever a process or persistent agent finishes. */
   completionSoundEnabled: boolean;
+  /** Tint the workspace frame and status bar with the active tab's colour. */
+  tintWorkspaceWithTabColor: boolean;
   /**
    * Draw duckweed's own interface over a recognised coding-agent CLI instead
    * of its terminal UI.
@@ -121,6 +123,11 @@ export function load(): Persisted | null {
         typeof parsed.completionHighlights === "boolean" ? parsed.completionHighlights : true,
       completionSoundEnabled:
         typeof parsed.completionSoundEnabled === "boolean" ? parsed.completionSoundEnabled : true,
+      // Opt in so existing windows keep their current neutral background.
+      tintWorkspaceWithTabColor:
+        typeof parsed.tintWorkspaceWithTabColor === "boolean"
+          ? parsed.tintWorkspaceWithTabColor
+          : false,
       // Default on, including for saves written before the setting existed.
       customAgentUi: typeof parsed.customAgentUi === "boolean" ? parsed.customAgentUi : true,
       agentFollowupMode: parsed.agentFollowupMode === "steer" ? "steer" : "queue",
@@ -146,6 +153,7 @@ export function save(state: {
   highlight: boolean;
   completionHighlights: boolean;
   completionSoundEnabled: boolean;
+  tintWorkspaceWithTabColor: boolean;
   customAgentUi: boolean;
   agentFollowupMode: AgentFollowupMode;
   inputMode: InputMode;
@@ -165,6 +173,7 @@ export function save(state: {
       highlight: state.highlight,
       completionHighlights: state.completionHighlights,
       completionSoundEnabled: state.completionSoundEnabled,
+      tintWorkspaceWithTabColor: state.tintWorkspaceWithTabColor,
       customAgentUi: state.customAgentUi,
       agentFollowupMode: state.agentFollowupMode,
       inputMode: state.inputMode,

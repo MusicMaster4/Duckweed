@@ -14,6 +14,7 @@ interface Props {
   highlight: boolean;
   completionHighlights: boolean;
   completionSoundEnabled: boolean;
+  tintWorkspaceWithTabColor: boolean;
   /** Draw Duckweed's own interface over a recognised coding-agent CLI. */
   customAgentUi: boolean;
   agentFollowupMode: AgentFollowupMode;
@@ -28,6 +29,7 @@ interface Props {
   onToggleHighlight: () => void;
   onToggleCompletionHighlights: () => void;
   onToggleCompletionSound: () => void;
+  onToggleTintWorkspaceWithTabColor: () => void;
   onToggleCustomAgentUi: () => void;
   onAgentFollowupMode: (mode: AgentFollowupMode) => void;
   onToggleConfirmCloseRunning: () => void;
@@ -69,6 +71,7 @@ export function SettingsMenu({
   highlight,
   completionHighlights,
   completionSoundEnabled,
+  tintWorkspaceWithTabColor,
   customAgentUi,
   agentFollowupMode,
   confirmCloseRunning,
@@ -81,6 +84,7 @@ export function SettingsMenu({
   onToggleHighlight,
   onToggleCompletionHighlights,
   onToggleCompletionSound,
+  onToggleTintWorkspaceWithTabColor,
   onToggleCustomAgentUi,
   onAgentFollowupMode,
   onToggleConfirmCloseRunning,
@@ -135,6 +139,7 @@ export function SettingsMenu({
     (section === "General" || section === "Appearance" || searching) &&
     (matches("appearance font size terminal text command editor") ||
       matches("syntax highlighting colour commands plain terminal output") ||
+      matches("tint workspace background active tab colour frame status bar") ||
       matches("completion highlights finished process unread tab outline rose") ||
       matches("completion sound audio cue process agent finished"));
   const showTerminal =
@@ -325,6 +330,19 @@ export function SettingsMenu({
                     <span>Colour commands and plain terminal output</span>
                   </span>
                   <Toggle enabled={highlight} />
+                </button>
+              )}
+              {matches("tint workspace background active tab colour frame status bar") && (
+                <button
+                  type="button"
+                  className="settings-row settings-action"
+                  onClick={onToggleTintWorkspaceWithTabColor}
+                >
+                  <span className="settings-copy">
+                    <strong>Tint workspace background</strong>
+                    <span>Use the active tab colour in the workspace frame and status bar</span>
+                  </span>
+                  <Toggle enabled={tintWorkspaceWithTabColor} />
                 </button>
               )}
               {matches("completion highlights finished process unread tab outline rose") && (

@@ -205,6 +205,38 @@ describe("assistant snapshots", () => {
   });
 });
 
+describe("streaming caret cleanup", () => {
+  test("status idle clears a streaming assistant that never got a closing frame", () => {
+    let state = applyEvent(blank(), { type: "status", status: "working" });
+    state = applyEvent(state, {
+      type: "assistant-delta",
+      id: "answer-1",
+      text: "Halfway",
+    });
+    expect(state.items[0]).toMatchObject({ streaming: true });
+
+    state = applyEvent(state, { type: "status", status: "idle" });
+    expect(state.status).toBe("idle");
+    expect(state.items[0]).toMatchObject({
+      kind: "assistant",
+      text: "Halfway",
+      streaming: false,
+    });
+  });
+
+  test("turn-end still clears streaming the same way", () => {
+    let state = applyEvent(blank(), { type: "status", status: "working" });
+    state = applyEvent(state, {
+      type: "thinking-delta",
+      id: "think-1",
+      text: "Planning",
+    });
+    state = applyEvent(state, { type: "turn-end" });
+    expect(state.items[0]).toMatchObject({ streaming: false });
+    expect(state.status).toBe("idle");
+  });
+});
+
 describe("double Ctrl+C exit", () => {
   test("arms and disarms without adding chat timeline content", () => {
     const armed = applyEvent(blank(), { type: "exit-armed", armed: true });

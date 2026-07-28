@@ -18,7 +18,6 @@ import {
   slotShift,
 } from "../lib/tabReorder";
 import type { DragState } from "../hooks/useDragPane";
-import { CompletionDot } from "./CompletionDot";
 import { ProjectMenu } from "./ProjectMenu";
 import { TabContextMenu } from "./TabContextMenu";
 
@@ -36,7 +35,7 @@ interface Props {
   activeTabId: string;
   paneCounts: Record<string, number>;
   unreadCounts: Record<string, number>;
-  /** When false, hide completion dots (tracking still runs in the app). */
+  /** When false, hide completion outlines (tracking still runs in the app). */
   completionHighlights: boolean;
   drag: DragState | null;
   projects: ProjectActions;
@@ -487,12 +486,6 @@ export function TabStrip({
                   </button>
                   <span className="tab-title">{tab.title}</span>
                   {count > 1 && <span className="tab-count">{count}</span>}
-                  <CompletionDot
-                    active={showUnread}
-                    className="tab-completion-dot"
-                    title={`${unread} finished terminal${unread === 1 ? "" : "s"} not reviewed`}
-                    aria-hidden="true"
-                  />
                   <button
                     type="button"
                     className="tab-close"

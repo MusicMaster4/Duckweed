@@ -2,6 +2,7 @@ import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 import * as bus from "../lib/bus";
+import type { CompletionFlash } from "../lib/completionHighlights";
 import { edgeRadius } from "../lib/layout";
 import * as terminals from "../lib/terminals";
 import type { DropZone, LeafNode, ProjectInfo } from "../lib/types";
@@ -26,7 +27,7 @@ interface Props {
   highlight: boolean;
   /** Bitmask of the sides sitting on the rounded outer frame — see PaneTree. */
   edges: number;
-  completionFlash: number;
+  completionFlash: CompletionFlash | null;
   /** Background completion not reviewed yet — drives the pane outline, not a header dot. */
   unread: boolean;
   /** Folder of the tab this pane belongs to — the empty state offers to set it. */
@@ -151,10 +152,11 @@ export const TerminalPane = memo(function TerminalPane({
   const effectiveRaw = inputMode === "raw" || busy || !!meta?.exited;
   const terminalEditorMode = !effectiveRaw && !agentUi;
 
-  // Agent surfaces cover the xterm grid, but command-block separators have a
-  // higher local z-index than that surface. Disable the terminal's editor
-  // chrome before paint so stale shell hairlines cannot leak through the
-  // agent transcript. Closing the agent restores it for an idle shell.
+  // Agent surfaces cover the xterm grid, but command-block separators used to
+  // paint above that surface. Disable the terminal's editor chrome before
+  // paint so stale shell hairlines cannot leak through the agent transcript
+  // (setEditorMode also hides the visual caret while agentUi is set). Closing
+  // the agent restores editor mode for an idle shell.
   useLayoutEffect(() => {
     terminals.setEditorMode(node.term, terminalEditorMode);
   }, [node.term, terminalEditorMode]);
@@ -213,10 +215,10 @@ export const TerminalPane = memo(function TerminalPane({
       // the keyboard focus to it.
       onWheelCapture={unread ? onReview : undefined}
     >
-      {completionFlash !== 0 && (
+      {completionFlash !== null && (
         <span
-          key={completionFlash}
-          className="pane-completion-flash"
+          key={completionFlash.key}
+          className={`pane-completion-flash is-${completionFlash.kind}`}
           aria-hidden="true"
         />
       )}
