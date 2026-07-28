@@ -967,6 +967,22 @@ strong.agent-activity-history-summary {
   animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
 }
 
+.agent-activity-pulse.is-active[data-motion="echo"] > span {
+  animation-name: agent-activity-echo;
+  animation-timing-function: ease-in-out;
+}
+
+.agent-activity-pulse.is-active[data-motion="triplet"] > span {
+  animation-name: agent-activity-triplet;
+  animation-timing-function: ease-out;
+}
+
+/* Cells a pattern leaves dark on purpose; kept dimmer than the resting glow. */
+.agent-activity-pulse.is-active > span.is-idle {
+  animation: none;
+  opacity: 0.14;
+}
+
 @keyframes agent-activity-chase {
   0%,
   58%,
@@ -1149,6 +1165,66 @@ strong.agent-activity-history-summary {
   30% {
     opacity: 0.86;
     transform: scale(1.02);
+  }
+}
+
+/* Two full pulses per cycle, so every lit cell fires twice per pass. */
+@keyframes agent-activity-echo {
+  0%,
+  44%,
+  100% {
+    opacity: 0.2;
+    transform: scale(0.76);
+  }
+
+  14% {
+    opacity: 0.95;
+    transform: scale(1.08);
+  }
+
+  62% {
+    opacity: 0.78;
+    transform: scale(1);
+  }
+
+  80% {
+    opacity: 0.24;
+    transform: scale(0.8);
+  }
+}
+
+/* Three quick beats in a row before a long rest. */
+@keyframes agent-activity-triplet {
+  0%,
+  54%,
+  100% {
+    opacity: 0.18;
+    transform: scale(0.74);
+  }
+
+  8% {
+    opacity: 1;
+    transform: scale(1.1);
+  }
+
+  17% {
+    opacity: 0.28;
+    transform: scale(0.82);
+  }
+
+  26% {
+    opacity: 0.9;
+    transform: scale(1.04);
+  }
+
+  35% {
+    opacity: 0.26;
+    transform: scale(0.8);
+  }
+
+  44% {
+    opacity: 0.78;
+    transform: scale(0.98);
   }
 }
 

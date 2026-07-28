@@ -3,8 +3,8 @@ import { describe, expect, test } from "bun:test";
 import { THINKING_PULSE_PATTERNS } from "./thinkingPulsePatterns";
 
 describe("thinking pulse patterns", () => {
-  test("the pool holds every path and wave in both directions", () => {
-    expect(THINKING_PULSE_PATTERNS).toHaveLength(126);
+  test("the pool holds every path and wave in both directions plus accents", () => {
+    expect(THINKING_PULSE_PATTERNS).toHaveLength(163);
   });
 
   test("no two patterns are the same animation", () => {
@@ -24,7 +24,8 @@ describe("thinking pulse patterns", () => {
 
     for (const pattern of THINKING_PULSE_PATTERNS) {
       expect(pattern.steps).toHaveLength(9);
-      expect(pattern.steps.every((step) => Number.isInteger(step) && step >= 0)).toBe(true);
+      expect(pattern.steps.every((step) => Number.isInteger(step) && step >= -1)).toBe(true);
+      expect(pattern.steps.some((step) => step >= 0)).toBe(true);
       expect(pattern.durationMs).toBeGreaterThan(0);
       expect(pattern.stepMs).toBeGreaterThan(0);
       motions.add(pattern.motion);
@@ -43,8 +44,19 @@ describe("thinking pulse patterns", () => {
         "sway",
         "spark",
         "settle",
+        "echo",
+        "triplet",
       ]),
     );
+  });
+
+  test("dark cells always form a mask symmetric under a 180 degree rotation", () => {
+    // Partial grids must read as intentional, not as a rendering bug.
+    for (const pattern of THINKING_PULSE_PATTERNS) {
+      for (let cell = 0; cell < 9; cell += 1) {
+        expect(pattern.steps[cell]! >= 0).toBe(pattern.steps[8 - cell]! >= 0);
+      }
+    }
   });
 
   test("every motion has a keyframe to run", async () => {

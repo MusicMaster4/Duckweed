@@ -604,17 +604,21 @@ function ActivityPulse({ active }: { active: boolean }) {
       data-pattern={pattern.id}
       aria-hidden="true"
     >
-      {Array.from({ length: 9 }, (_, index) => (
-        <span
-          key={index}
-          style={
-            {
-              "--pulse-duration": `${pattern.durationMs}ms`,
-              "--pulse-delay": `${pattern.steps[index]! * pattern.stepMs}ms`,
-            } as React.CSSProperties
-          }
-        />
-      ))}
+      {Array.from({ length: 9 }, (_, index) => {
+        const step = pattern.steps[index]!;
+        if (step < 0) return <span key={index} className="is-idle" />;
+        return (
+          <span
+            key={index}
+            style={
+              {
+                "--pulse-duration": `${pattern.durationMs}ms`,
+                "--pulse-delay": `${step * pattern.stepMs}ms`,
+              } as React.CSSProperties
+            }
+          />
+        );
+      })}
     </span>
   );
 }

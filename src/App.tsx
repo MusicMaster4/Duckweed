@@ -947,9 +947,17 @@ export default function App() {
       const nextRoot = removeLeaf(tabNow.root, leafId);
 
       if (!nextRoot) {
+        // Closing the last pane resets its shell instead of closing the tab.
+        // Create the replacement first so it inherits the current directory
+        // while the outgoing session is still available.
+        const replacementTerm = createTerm();
         releaseTerm(nodeNow.term);
-        // Term already checked above; skip a second busy prompt in closeTab.
-        void closeTab(tabNow.id, [nodeNow.term]);
+        updateTab(tabNow.id, (t) => ({
+          ...t,
+          root: { ...nodeNow, term: replacementTerm },
+          activeLeaf: nodeNow.id,
+          zoomedLeaf: null,
+        }));
         return;
       }
 
@@ -963,7 +971,7 @@ export default function App() {
         zoomedLeaf: t.zoomedLeaf === leafId ? null : t.zoomedLeaf,
       }));
     },
-    [closeTab, currentTab, releaseTerm, updateTab],
+    [createTerm, currentTab, releaseTerm, updateTab],
   );
 
   const activatePane = useCallback(

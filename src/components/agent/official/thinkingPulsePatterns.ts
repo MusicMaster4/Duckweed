@@ -11,11 +11,13 @@ export type ThinkingPulseMotion =
   | "drift"
   | "sway"
   | "spark"
-  | "settle";
+  | "settle"
+  | "echo"
+  | "triplet";
 
 export interface ThinkingPulsePattern {
   id: string;
-  /** Animation step for each cell in the 3 by 3 matrix. */
+  /** Animation step for each cell in the 3 by 3 matrix. -1 keeps a cell dark. */
   steps: readonly number[];
   motion: ThinkingPulseMotion;
   durationMs: number;
@@ -109,6 +111,54 @@ const WAVES: ReadonlyArray<readonly [string, readonly number[]]> = [
   ["spiral-band", [0, 0, 1, 3, 3, 1, 2, 2, 2]],
 ];
 
+/**
+ * Patterns with an explicit motion. -1 keeps a cell dark for the whole cycle;
+ * every mask of lit cells is symmetric under a 180 degree rotation so partial
+ * grids read as designed instead of broken. The echo and triplet motions make
+ * each lit cell fire more than once per cycle.
+ */
+const ACCENTS: ReadonlyArray<
+  readonly [string, readonly number[], ThinkingPulseMotion]
+> = [
+  ["corners-alternate", [0, -1, 1, -1, -1, -1, 1, -1, 0], "echo"],
+  ["corners-orbit-solo", [0, -1, 1, -1, -1, -1, 3, -1, 2], "chase"],
+  ["x-bloom", [1, -1, 1, -1, 0, -1, 1, -1, 1], "ripple"],
+  ["x-chase", [0, -1, 1, -1, 2, -1, 3, -1, 4], "comet"],
+  ["plus-bloom", [-1, 1, -1, 1, 0, 1, -1, 1, -1], "breathe"],
+  ["plus-orbit", [-1, 0, -1, 3, 2, 1, -1, 4, -1], "triplet"],
+  ["edge-orbit", [-1, 0, -1, 3, -1, 1, -1, 2, -1], "chase"],
+  ["edge-pairs", [-1, 0, -1, 1, -1, 1, -1, 0, -1], "echo"],
+  ["ring-orbit", [0, 1, 2, 7, -1, 3, 6, 5, 4], "comet"],
+  ["ring-counter", [0, 7, 6, 1, -1, 5, 2, 3, 4], "spark"],
+  ["ring-converge", [0, 1, 2, 3, -1, 3, 2, 1, 0], "ripple"],
+  ["diagonal-solo", [0, -1, -1, -1, 1, -1, -1, -1, 2], "echo"],
+  ["anti-diagonal-solo", [-1, -1, 0, -1, 1, -1, 2, -1, -1], "triplet"],
+  ["rows-apart", [0, 0, 0, -1, -1, -1, 1, 1, 1], "blink"],
+  ["rows-clap", [0, 1, 0, -1, -1, -1, 0, 1, 0], "echo"],
+  ["columns-apart", [0, -1, 1, 0, -1, 1, 0, -1, 1], "swell"],
+  ["columns-clap", [0, -1, 0, 1, -1, 1, 0, -1, 0], "triplet"],
+  ["middle-row-pulse", [-1, -1, -1, 0, 1, 0, -1, -1, -1], "breathe"],
+  ["middle-column-pulse", [-1, 0, -1, -1, 1, -1, -1, 0, -1], "echo"],
+  ["center-beat", [-1, -1, -1, -1, 0, -1, -1, -1, -1], "triplet"],
+  ["corner-pair-main", [0, -1, -1, -1, -1, -1, -1, -1, 1], "echo"],
+  ["corner-pair-anti", [-1, -1, 0, -1, -1, -1, 1, -1, -1], "flicker"],
+  ["vertical-gates", [-1, 0, -1, -1, -1, -1, -1, 1, -1], "sway"],
+  ["horizontal-gates", [-1, -1, -1, 0, -1, 1, -1, -1, -1], "drift"],
+  ["diamond-spin", [-1, 0, -1, 1, -1, 3, -1, 2, -1], "chase"],
+  ["checker-echo", [0, 1, 0, 1, 0, 1, 0, 1, 0], "echo"],
+  ["frame-echo", [0, 0, 0, 0, 1, 0, 0, 0, 0], "echo"],
+  ["x-alternate", [0, -1, 0, -1, 1, -1, 0, -1, 0], "blink"],
+  ["ring-skip", [0, 4, 1, 7, -1, 5, 3, 6, 2], "spark"],
+  ["h-bridge", [0, -1, 0, 1, 2, 1, 0, -1, 0], "swell"],
+  ["i-beam", [0, 0, 0, -1, 1, -1, 2, 2, 2], "settle"],
+  ["x-collapse", [0, -1, 1, -1, 4, -1, 2, -1, 3], "comet"],
+  ["plus-collapse", [-1, 0, -1, 3, 4, 1, -1, 2, -1], "ripple"],
+  ["ring-beat", [0, 0, 0, 0, -1, 0, 0, 0, 0], "triplet"],
+  ["x-beat", [0, -1, 0, -1, 0, -1, 0, -1, 0], "echo"],
+  ["plus-beat", [-1, 0, -1, 0, 0, 0, -1, 0, -1], "triplet"],
+  ["corner-beat", [0, -1, 0, -1, -1, -1, 0, -1, 0], "triplet"],
+];
+
 const BASE_PATTERNS: readonly BasePattern[] = [
   ...PATHS.map(([id, sequence]) => ({ id, steps: stepsFromSequence(sequence) })),
   ...WAVES.map(([id, steps]) => ({ id, steps })),
@@ -129,14 +179,15 @@ const MOTIONS: readonly ThinkingPulseMotion[] = [
 ];
 
 /**
- * Every base path and wave in both directions.
+ * Every base path and wave in both directions, plus the accent set.
  *
- * Motion, duration, and cadence step through cycles of 11, 7, and 6, so the
- * three only realign after 462 entries. That keeps each pattern's timing
- * signature unique for any pool this side of that bound.
+ * For the base pool, motion, duration, and cadence step through cycles of 11,
+ * 7, and 6, so the three only realign after 462 entries. That keeps each
+ * pattern's timing signature unique for any pool this side of that bound.
+ * Accents carry their own motion and differ from everything else by steps.
  */
-export const THINKING_PULSE_PATTERNS: readonly ThinkingPulsePattern[] =
-  BASE_PATTERNS.flatMap((base, index) => {
+export const THINKING_PULSE_PATTERNS: readonly ThinkingPulsePattern[] = [
+  ...BASE_PATTERNS.flatMap((base, index) => {
     const durationMs = 880 + (index % 7) * 105;
     const stepMs = 42 + (index % 6) * 13;
     return [
@@ -155,7 +206,15 @@ export const THINKING_PULSE_PATTERNS: readonly ThinkingPulsePattern[] =
         stepMs: stepMs + 7,
       },
     ];
-  });
+  }),
+  ...ACCENTS.map(([id, steps, motion], index) => ({
+    id,
+    steps,
+    motion,
+    durationMs: 920 + (index % 8) * 90,
+    stepMs: 48 + (index % 5) * 16,
+  })),
+];
 
 const pickPattern = createCooldownPicker(
   THINKING_PULSE_PATTERNS,
