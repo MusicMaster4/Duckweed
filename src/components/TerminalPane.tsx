@@ -22,7 +22,7 @@ interface Props {
   dropZone: DropZone | null;
   /** This pane is the one being dragged. */
   isSource: boolean;
-  spawn: { cwd: string | null; shell: string | null };
+  spawn: { cwd: string | null; shell: string | null; command: string | null };
   highlight: boolean;
   /** Bitmask of the sides sitting on the rounded outer frame — see PaneTree. */
   edges: number;
@@ -107,7 +107,11 @@ export const TerminalPane = memo(function TerminalPane({
   useLayoutEffect(() => {
     const body = bodyRef.current;
     if (!body) return;
-    terminals.attach(node.term, body, { cwd: spawn.cwd, shell: spawn.shell });
+    terminals.attach(node.term, body, {
+      cwd: spawn.cwd,
+      shell: spawn.shell,
+      command: spawn.command,
+    });
     setMeta(terminals.getMeta(node.term));
     return () => terminals.detach(node.term);
     // `spawn` only matters for the very first attach, which creates the shell.

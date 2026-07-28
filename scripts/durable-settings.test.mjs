@@ -19,6 +19,7 @@ describe("settings survive app updates", () => {
     expect(durable).toContain('"duckweed:state:v1"');
     expect(durable).toContain('"duckweed:usage:v1"');
     expect(durable).toContain('"duckweed:agent-preferences:v1"');
+    expect(durable).toContain('"duckweed:layouts:v1"');
     expect(durable).toContain('"duckweed:command-history:v1"');
     expect(read("src/lib/persist.ts")).toContain("saveDurably(KEY, raw)");
     expect(read("src/lib/usage.ts")).toContain("saveDurably(KEY, raw)");
@@ -33,5 +34,6 @@ describe("settings survive app updates", () => {
     expect(backend).toContain('join("durable-settings.json")');
     expect(backend).toContain("DURABLE_SETTING_KEYS");
     expect(backend).toContain('"duckweed:agent-preferences:v1"');
+    expect(backend).toContain('"duckweed:layouts:v1"');
   });
 });

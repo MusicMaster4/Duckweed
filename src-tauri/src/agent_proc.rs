@@ -140,6 +140,24 @@ impl AgentProcManager {
             let _ = self.stop(&id);
         }
     }
+
+    /// Headless agent roots keyed by terminal id. An agent may open a preview
+    /// server without involving the shell that remains underneath its UI.
+    pub fn root_processes(&self) -> Vec<(String, u32)> {
+        self.inner
+            .processes
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|(id, process)| {
+                process
+                    .lock()
+                    .unwrap()
+                    .pid
+                    .map(|pid| (id.clone(), pid))
+            })
+            .collect()
+    }
 }
 
 /// Kill the agent and everything it started.

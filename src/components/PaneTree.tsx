@@ -16,7 +16,11 @@ export interface PaneTreeShared {
   activeLeaf: string;
   drag: DragState | null;
   /** Resolves the shell/cwd a not-yet-created terminal should start with. */
-  spawnFor: (term: string) => { cwd: string | null; shell: string | null };
+  spawnFor: (term: string) => {
+    cwd: string | null;
+    shell: string | null;
+    command: string | null;
+  };
   highlight: boolean;
   /** Terminals whose most recent completion has not been reviewed yet. */
   unreadTerms: ReadonlySet<string>;

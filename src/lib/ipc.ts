@@ -30,6 +30,43 @@ export const openUrl = (url: string) => invoke<void>("open_url", { url });
 export const powerAction = (action: "suspend" | "shutdown") =>
   invoke<void>("power_action", { action });
 
+export interface PortForward {
+  id: string;
+  target_pid: number;
+  target_port: number;
+  public_port: number;
+  url: string;
+}
+
+export interface AppPort {
+  pid: number;
+  port: number;
+  address: string;
+  process: string;
+  owner_id: string;
+  owner_kind: "terminal" | "agent";
+  forward: PortForward | null;
+}
+
+export interface PortSnapshot {
+  ports: AppPort[];
+  scanned_at: number;
+}
+
+/** Listening TCP ports owned by terminal and agent process trees. */
+export const portsList = () => invoke<PortSnapshot>("ports_list");
+
+/** Stop the process currently owning this Duckweed-created listener. */
+export const portClose = (pid: number, port: number) =>
+  invoke<void>("port_close", { pid, port });
+
+/** Expose a local listener through a LAN-bound Duckweed TCP proxy. */
+export const portForward = (pid: number, port: number) =>
+  invoke<PortForward>("port_forward", { pid, port });
+
+export const portForwardStop = (id: string) =>
+  invoke<void>("port_forward_stop", { id });
+
 /** Folder request from Explorer / the CLI, if the app was cold-started with one. */
 export type LaunchAction = "new_tab" | "new_window";
 

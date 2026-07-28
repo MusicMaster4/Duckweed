@@ -5,7 +5,7 @@ import type { AgentId, AgentItem, AgentSessionState } from "../../../lib/agents/
 import { AgentProviderIcon } from "../AgentProviderIcon";
 import { CursorExperience } from "../provider/CursorExperience";
 import { OpenCodeExperience } from "../provider/OpenCodeExperience";
-import { ChatGPTExperience, shouldDockCodexPrompt } from "./ChatGPTExperience";
+import { ChatGPTExperience } from "./ChatGPTExperience";
 import { ClaudeExperience } from "./ClaudeExperience";
 import { GrokDotMatrix, GrokExperience } from "./GrokExperience";
 import {
@@ -714,10 +714,13 @@ describe("official agent presentation", () => {
     expect(html).not.toContain("oc-open");
   });
 
-  test("docks an optimistic first Codex prompt while the handshake finishes", () => {
-    expect(shouldDockCodexPrompt("starting", true, false, false)).toBe(true);
-    expect(shouldDockCodexPrompt("working", true, false, false)).toBe(true);
-    expect(shouldDockCodexPrompt("working", true, false, true)).toBe(false);
-    expect(shouldDockCodexPrompt("working", true, true, false)).toBe(false);
+  test("keeps a new Codex prompt in its final transcript position", () => {
+    const html = renderAgentActivity("codex", [
+      { kind: "user", id: "prompt", at: 1, text: "Inspect the project" },
+    ]);
+
+    expect(html).toContain("Inspect the project");
+    expect(html).not.toContain("is-prompt-docked");
+    expect(html).toContain("agent-activity-cluster");
   });
 });

@@ -982,7 +982,14 @@ function draw(session: Session, chunk: FrameWrite): void {
   });
 }
 
-function create(id: string, opts: { cwd?: string | null; shell?: string | null }): Session {
+interface TerminalStartOptions {
+  cwd?: string | null;
+  shell?: string | null;
+  /** Run once after the shell is ready. Used by saved layout templates. */
+  command?: string | null;
+}
+
+function create(id: string, opts: TerminalStartOptions): Session {
   const metrics = metricsFor(fontSize);
   metricsDpr = window.devicePixelRatio || 1;
   const term = new Terminal({
@@ -1406,7 +1413,7 @@ function create(id: string, opts: { cwd?: string | null; shell?: string | null }
   return session;
 }
 
-async function start(session: Session, opts: { cwd?: string | null; shell?: string | null }) {
+async function start(session: Session, opts: TerminalStartOptions) {
   const { id } = session;
   // A session starts exactly once. This only matters if `create` ever runs twice
   // for the same id — the backend would answer the second spawn with
@@ -1479,6 +1486,8 @@ async function start(session: Session, opts: { cwd?: string | null; shell?: stri
     for (const chunk of session.pending) void ptyWrite(id, chunk);
     session.pending = [];
     notifySession(id);
+    const startupCommand = opts.command?.trim();
+    if (startupCommand) submitCommand(id, startupCommand);
   } catch (error) {
     session.exited = true;
     session.term.write(`\r\n\x1b[31mfailed to start shell: ${String(error)}\x1b[0m\r\n`);
@@ -1493,7 +1502,7 @@ async function start(session: Session, opts: { cwd?: string | null; shell?: stri
 export function attach(
   id: string,
   container: HTMLElement,
-  opts: { cwd?: string | null; shell?: string | null } = {},
+  opts: TerminalStartOptions = {},
 ): void {
   const session = sessions.get(id) ?? create(id, opts);
 

@@ -159,6 +159,24 @@ impl PtyManager {
         }
     }
 
+    /// Shell roots keyed by terminal id. Ports walks their descendants to
+    /// attribute a listening server to the pane that launched it.
+    pub fn root_processes(&self) -> Vec<(String, u32)> {
+        self.inner
+            .sessions
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|(id, session)| {
+                session
+                    .lock()
+                    .unwrap()
+                    .pid
+                    .map(|pid| (id.clone(), pid))
+            })
+            .collect()
+    }
+
     /// True when the shell for `id` still has a child process (a command running).
     pub fn is_busy(&self, id: &str) -> bool {
         self.busy_snapshot(Some(&[id.to_string()]))

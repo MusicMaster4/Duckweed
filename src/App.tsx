@@ -12,7 +12,12 @@ import { StatusBar } from "./components/StatusBar";
 import { TabStrip } from "./components/TabStrip";
 import { TitleBar } from "./components/TitleBar";
 import { SettingsMenu } from "./components/SettingsMenu";
-import { ToolsPanel, TOOLS_MAX_WIDTH, TOOLS_MIN_WIDTH } from "./components/ToolsPanel";
+import {
+  ToolsPanel,
+  TOOLS_MAX_WIDTH,
+  TOOLS_MIN_WIDTH,
+  type SectionId as ToolsSectionId,
+} from "./components/ToolsPanel";
 import { ConfirmCloseDialog } from "./components/ConfirmCloseDialog";
 import { UpdateDialog } from "./components/UpdateDialog";
 import { useDragPane, type DragState } from "./hooks/useDragPane";
@@ -55,6 +60,13 @@ import {
   swapLeaves,
   uid,
 } from "./lib/layout";
+import {
+  captureLayout,
+  getDefaultLayout,
+  instantiateLayout,
+  type LayoutDraft,
+  type LayoutTemplate,
+} from "./lib/layouts";
 import { toggleFullscreen } from "./lib/window";
 import { DEFAULT_TOOLS_WIDTH, load, pushRecent, rehydrate, save } from "./lib/persist";
 import {
@@ -68,6 +80,7 @@ import {
   adjustSettingsIndexOnClose,
   applyStripReorder,
 } from "./lib/tabReorder";
+import * as sessionUsage from "./lib/sessionUsage";
 import * as terminals from "./lib/terminals";
 import { loadSettings as loadUsageSettings, prefetchUsage } from "./lib/usage";
 import type { LeafNode, ProjectInfo, ShellInfo, Tab } from "./lib/types";
@@ -75,6 +88,7 @@ import type { LeafNode, ProjectInfo, ShellInfo, Tab } from "./lib/types";
 interface SpawnOpts {
   cwd: string | null;
   shell: string | null;
+  command: string | null;
 }
 
 const DEFAULT_FONT_SIZE = 13.5;
@@ -110,6 +124,7 @@ function isAutoTitle(tab: Tab): boolean {
 
 function boot() {
   const saved = load();
+  const startupSpawns = new Map<string, SpawnOpts>();
   if (saved && saved.tabs.length > 0) {
     const tabs: Tab[] = saved.tabs.map((entry, i) => {
       const root = rehydrate(entry.root);
@@ -127,6 +142,25 @@ function boot() {
       };
     });
     const index = Math.min(Math.max(0, saved.activeTabIndex), tabs.length - 1);
+    const startupLayout = getDefaultLayout();
+    const startupTab = tabs[index];
+    if (startupLayout && startupTab.project) {
+      const root = instantiateLayout(startupLayout.root, (command) => {
+        const term = terminals.newTermId();
+        startupSpawns.set(term, {
+          cwd: startupTab.project?.path ?? null,
+          shell: saved.shell,
+          command: command.trim() || null,
+        });
+        return leaf(term);
+      });
+      tabs[index] = {
+        ...startupTab,
+        root,
+        activeLeaf: leaves(root)[0].id,
+        zoomedLeaf: null,
+      };
+    }
     return {
       tabs,
       activeTabId: tabs[index].id,
@@ -142,6 +176,7 @@ function boot() {
       confirmCloseRunning: saved.confirmCloseRunning,
       toolsOpen: saved.toolsOpen,
       toolsWidth: saved.toolsWidth,
+      startupSpawns,
     };
   }
   const term = terminals.newTermId();
@@ -169,6 +204,7 @@ function boot() {
     confirmCloseRunning: true,
     toolsOpen: false,
     toolsWidth: DEFAULT_TOOLS_WIDTH,
+    startupSpawns,
   };
 }
 
@@ -219,6 +255,9 @@ export default function App() {
   const [settingsTabIndex, setSettingsTabIndex] = useState(0);
   const [changesOpen, setChangesOpen] = useState(false);
   const [toolsOpen, setToolsOpen] = useState(initial.toolsOpen);
+  /** Kept here because the dock unmounts while Settings is up: the tool the
+      user left open has to be the one waiting when they switch back. */
+  const [toolsSection, setToolsSection] = useState<ToolsSectionId>("files");
   const [unreadTermIds, setUnreadTermIds] = useState<Set<string>>(() => new Set());
   const [completionFlashes, setCompletionFlashes] = useState<Map<string, number>>(
     () => new Map(),
@@ -264,10 +303,33 @@ export default function App() {
   const lastProject = useRef<string | null>(initial.lastProject);
 
   /** Spawn parameters for terminals that have not been created yet. */
-  const spawnOpts = useRef(new Map<string, SpawnOpts>());
+  const spawnOpts = useRef(new Map<string, SpawnOpts>(initial.startupSpawns));
 
   const activeTab = tabs.find((t) => t.id === activeTabId) ?? tabs[0];
   const project = activeTab?.project ?? null;
+  const toolStats = useMemo(
+    () => ({
+      tabs: tabs.length,
+      panes: tabs.reduce((count, tab) => count + leaves(tab.root).length, 0),
+      projects: new Set(
+        tabs.map((tab) => tab.project?.path).filter((path): path is string => Boolean(path)),
+      ).size,
+    }),
+    [tabs],
+  );
+  const portOwnerNames = useMemo(() => {
+    const names = new Map<string, string>();
+    for (const tab of tabs) {
+      const paneCount = leaves(tab.root).length;
+      leaves(tab.root).forEach((node, index) => {
+        names.set(
+          node.term,
+          paneCount > 1 ? `${tab.title}, pane ${index + 1}` : tab.title,
+        );
+      });
+    }
+    return names;
+  }, [tabs]);
   const changes = useGitChanges(project);
 
   const currentTab = useCallback(
@@ -364,6 +426,11 @@ export default function App() {
     return () => window.removeEventListener("focus", reviewSelectedCompletion);
   }, [acknowledgeTerm, currentTab, flashFocusedCompletion]);
 
+  // "What this session cost" is a delta against the moment the window opened,
+  // so the baseline has to be taken now rather than when Statistics is first
+  // opened. The tracker defers its own first scan off the startup path.
+  useEffect(() => sessionUsage.start(), []);
+
   useEffect(() => {
     window.addEventListener("focus", syncTaskbarCompletionBadge);
     window.addEventListener("blur", syncTaskbarCompletionBadge);
@@ -399,6 +466,7 @@ export default function App() {
       spawnOpts.current.set(term, {
         cwd: opts?.cwd !== undefined ? opts.cwd : inheritCwd(),
         shell: opts?.shell !== undefined ? opts.shell : shellRef.current,
+        command: opts?.command !== undefined ? opts.command?.trim() || null : null,
       });
       return term;
     },
@@ -411,7 +479,7 @@ export default function App() {
     // A pane restored from disk records nothing, so its folder is the one
     // belonging to the tab it was restored into — not whichever tab is active.
     const owner = tabsRef.current.find((t) => leaves(t.root).some((n) => n.term === term));
-    return { cwd: owner?.project?.path ?? null, shell: shellRef.current };
+    return { cwd: owner?.project?.path ?? null, shell: shellRef.current, command: null };
   }, []);
 
   const releaseTerm = useCallback((term: string) => {
@@ -1093,6 +1161,7 @@ export default function App() {
       spawnOpts.current.set(term, {
         cwd: path,
         shell: recorded?.shell ?? shellRef.current,
+        command: recorded?.command ?? null,
       });
       return;
     }
@@ -2100,6 +2169,52 @@ export default function App() {
     },
     [applyProject, currentTab],
   );
+  const getCurrentLayoutDraft = useCallback((): LayoutDraft | null => {
+    const tab = currentTab();
+    if (!tab) return null;
+    return {
+      name: `${tab.title} layout`,
+      root: captureLayout(tab.root, (term) => {
+        const meta = terminals.getMeta(term);
+        if (meta?.agent) return meta.agent;
+        const history = terminals.localHistory(term);
+        return history.length > 0 ? history[history.length - 1] : "";
+      }),
+    };
+  }, [currentTab]);
+  const openLayoutTemplate = useCallback(
+    async (layout: LayoutTemplate) => {
+      const source = currentTab();
+      if (!source?.project) return;
+      const termsToReplace = leaves(source.root).map((node) => node.term);
+      const hasRunningProcesses = await terminals.anyHasRunningProcess(termsToReplace);
+      const ok = await confirmCloseRunning({
+        title: "Replace current layout?",
+        message: hasRunningProcesses
+          ? `This will replace every pane in "${source.title}" and end any running processes. The tab name and folder will stay the same.`
+          : `This will replace every pane in "${source.title}". The tab name and folder will stay the same.`,
+        confirmLabel: "Yes, replace",
+      });
+      if (!ok) return;
+
+      const latest = currentTab();
+      if (!latest?.project || latest.id !== source.id) return;
+      const root = instantiateLayout(layout.root, (command) =>
+        leaf(createTerm({ cwd: latest.project?.path ?? null, command })),
+      );
+      const first = leaves(root)[0];
+      for (const node of leaves(latest.root)) {
+        releaseTerm(node.term);
+      }
+      updateTab(latest.id, (tab) => ({
+        ...tab,
+        root,
+        activeLeaf: first.id,
+        zoomedLeaf: null,
+      }));
+    },
+    [createTerm, currentTab, releaseTerm, updateTab],
+  );
   const splitAt = useCallback(
     (leafId: string, zone: "right" | "bottom") => splitPane(leafId, zone),
     [splitPane],
@@ -2211,6 +2326,12 @@ export default function App() {
             onOpenFolder={cdActivePane}
             onBrowseProject={browseActiveProject}
             onOpenFile={(path) => void openExplorerFile(path)}
+            getCurrentLayoutDraft={getCurrentLayoutDraft}
+            onOpenLayout={openLayoutTemplate}
+            stats={toolStats}
+            ownerNames={portOwnerNames}
+            section={toolsSection}
+            onSection={setToolsSection}
           />
         )}
 

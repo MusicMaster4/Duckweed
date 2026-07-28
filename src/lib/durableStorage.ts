@@ -16,6 +16,8 @@ export const DURABLE_KEYS = [
   "duckweed:checklist:v1",
   // Model and reasoning choices for each custom agent CLI.
   "duckweed:agent-preferences:v1",
+  // Named pane arrangements and their optional startup commands.
+  "duckweed:layouts:v1",
   COMMAND_HISTORY_KEY,
 ] as const;
 

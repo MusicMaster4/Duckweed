@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useState, type ReactNode, type Ref } from "react";
+import { useEffect, useId, useMemo, useState, type ReactNode } from "react";
 
 import type {
   AgentItem,
@@ -402,21 +402,17 @@ export function MessageItem({
   item,
   variant,
   className,
-  elementRef,
   showStreaming,
 }: {
   item: AgentItem;
   variant: OfficialVariant;
   className?: string;
-  elementRef?: Ref<HTMLElement>;
   showStreaming?: boolean;
 }) {
   if (item.kind === "user") {
     return (
       <article
-        ref={elementRef}
         className={`official-user official-user--${variant}${className ? ` ${className}` : ""}`}
-        data-agent-user-message={item.id}
       >
         <AgentImageAttachments images={item.images ?? []} />
         {item.text && <p>{item.text}</p>}
@@ -427,7 +423,6 @@ export function MessageItem({
     const streaming = showStreaming ?? item.streaming;
     return (
       <article
-        ref={elementRef}
         className={`official-answer official-answer--${variant}${
           streaming ? " is-streaming" : ""
         }${className ? ` ${className}` : ""}`}
@@ -440,7 +435,6 @@ export function MessageItem({
   if (item.kind === "notice") {
     return (
       <div
-        ref={elementRef as Ref<HTMLDivElement>}
         className={`official-notice is-${item.tone}${className ? ` ${className}` : ""}`}
       >
         {item.text}

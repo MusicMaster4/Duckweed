@@ -8,6 +8,7 @@ mod fs;
 mod git;
 mod launch;
 mod power;
+mod ports;
 mod process_tree;
 mod project;
 mod pty;
@@ -30,6 +31,7 @@ use agent_sessions::{AgentSessionSummary, AgentTranscriptItem};
 use fs::{DirEntry, FileContent, WorkspacePath};
 use git::{Branches, Diff, DiffStats, FileDiff};
 use launch::{LaunchIntent, PendingLaunch};
+use ports::{ForwardInfo, PortManager, PortSnapshot};
 use project::ProjectInfo;
 use pty::{PtyManager, SpawnResult};
 use shells::ShellInfo;
@@ -41,11 +43,12 @@ struct DurableSettings(Mutex<()>);
 
 const COMMAND_HISTORY_KEY: &str = "duckweed:command-history:v1";
 
-const DURABLE_SETTING_KEYS: [&str; 5] = [
+const DURABLE_SETTING_KEYS: [&str; 6] = [
     "duckweed:state:v1",
     "duckweed:usage:v1",
     "duckweed:checklist:v1",
     "duckweed:agent-preferences:v1",
+    "duckweed:layouts:v1",
     COMMAND_HISTORY_KEY,
 ];
 
@@ -290,6 +293,54 @@ fn pty_is_busy(manager: State<'_, PtyManager>, id: String) -> bool {
 #[tauri::command]
 fn pty_any_busy(manager: State<'_, PtyManager>, ids: Vec<String>) -> bool {
     manager.any_busy(&ids)
+}
+
+/// TCP listeners opened by processes launched from a Duckweed pane or agent.
+#[tauri::command]
+async fn ports_list(
+    ptys: State<'_, PtyManager>,
+    agents: State<'_, AgentProcManager>,
+    ports: State<'_, PortManager>,
+) -> Result<PortSnapshot, String> {
+    let ptys = ptys.inner().clone();
+    let agents = agents.inner().clone();
+    let ports = ports.inner().clone();
+    blocking(move || Ok(ports::snapshot(&ptys, &agents, &ports))).await
+}
+
+/// Stop the process that owns a listener, after rechecking its Duckweed ancestry.
+#[tauri::command]
+async fn port_close(
+    ptys: State<'_, PtyManager>,
+    agents: State<'_, AgentProcManager>,
+    ports: State<'_, PortManager>,
+    pid: u32,
+    port: u16,
+) -> Result<(), String> {
+    let ptys = ptys.inner().clone();
+    let agents = agents.inner().clone();
+    let ports = ports.inner().clone();
+    blocking(move || ports::close(pid, port, &ptys, &agents, &ports)).await
+}
+
+/// Proxy one owned local listener through a Duckweed port bound to the LAN.
+#[tauri::command]
+async fn port_forward(
+    ptys: State<'_, PtyManager>,
+    agents: State<'_, AgentProcManager>,
+    ports: State<'_, PortManager>,
+    pid: u32,
+    port: u16,
+) -> Result<ForwardInfo, String> {
+    let ptys = ptys.inner().clone();
+    let agents = agents.inner().clone();
+    let ports = ports.inner().clone();
+    blocking(move || ports::forward(pid, port, &ptys, &agents, &ports)).await
+}
+
+#[tauri::command]
+fn port_forward_stop(ports: State<'_, PortManager>, id: String) -> Result<(), String> {
+    ports.stop(&id)
 }
 
 #[tauri::command]
@@ -649,6 +700,7 @@ fn main() {
         .manage(PtyManager::default())
         .manage(AgentActivityManager::default())
         .manage(AgentProcManager::default())
+        .manage(PortManager::default())
         .manage(ProjectWatchManager::default())
         .manage(UsageState::default())
         .manage(DurableSettings::default())
@@ -689,6 +741,10 @@ fn main() {
             pty_kill,
             pty_is_busy,
             pty_any_busy,
+            ports_list,
+            port_close,
+            port_forward,
+            port_forward_stop,
             agent_watch,
             agent_unwatch,
             agent_sessions_list,
@@ -718,6 +774,9 @@ fn main() {
                     manager.kill_all();
                 }
                 if let Some(manager) = window.app_handle().try_state::<AgentProcManager>() {
+                    manager.stop_all();
+                }
+                if let Some(manager) = window.app_handle().try_state::<PortManager>() {
                     manager.stop_all();
                 }
             }

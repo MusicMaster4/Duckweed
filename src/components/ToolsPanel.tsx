@@ -1,10 +1,14 @@
 import { type ReactNode, useCallback, useRef, useState, useSyncExternalStore } from "react";
 
 import { ChecklistTool } from "./ChecklistTool";
+import { LayoutsTool } from "./LayoutsTool";
+import { PortsTool } from "./PortsTool";
 import { PowerWatchTool } from "./PowerWatchTool";
 import { ProjectExplorer } from "./ProjectExplorer";
+import { StatisticsTool } from "./StatisticsTool";
 import { Tooltip } from "./Tooltip";
 import * as checklist from "../lib/checklist";
+import type { LayoutDraft, LayoutTemplate } from "../lib/layouts";
 import * as powerWatch from "../lib/powerWatch";
 import type { ProjectInfo } from "../lib/types";
 
@@ -20,12 +24,24 @@ interface Props {
   onOpenFolder: (path: string) => void;
   onBrowseProject: () => void;
   onOpenFile: (path: string) => void;
+  getCurrentLayoutDraft: () => LayoutDraft | null;
+  onOpenLayout: (layout: LayoutTemplate) => void;
+  stats: {
+    tabs: number;
+    panes: number;
+    projects: number;
+  };
+  ownerNames: ReadonlyMap<string, string>;
+  /** Owned by App: the dock unmounts while Settings is up, and the tool the
+      user was reading has to still be there when they come back. */
+  section: SectionId;
+  onSection: (section: SectionId) => void;
 }
 
 export const TOOLS_MIN_WIDTH = 190;
 export const TOOLS_MAX_WIDTH = 560;
 
-type SectionId = "files" | "checklist" | "power";
+export type SectionId = "files" | "layouts" | "checklist" | "statistics" | "ports" | "power";
 
 /**
  * The picker at the top of the panel: every tool the dock holds, named, in one
@@ -44,6 +60,17 @@ const SECTIONS: { id: SectionId; label: string; icon: ReactNode }[] = [
     ),
   },
   {
+    id: "layouts",
+    label: "Layouts",
+    icon: (
+      <svg viewBox="0 0 16 16" aria-hidden="true">
+        <rect x="2" y="2.5" width="5" height="4.5" rx=".8" />
+        <rect x="9" y="2.5" width="5" height="4.5" rx=".8" />
+        <rect x="2" y="9" width="12" height="4.5" rx=".8" />
+      </svg>
+    ),
+  },
+  {
     id: "checklist",
     label: "Checklist",
     icon: (
@@ -51,6 +78,27 @@ const SECTIONS: { id: SectionId; label: string; icon: ReactNode }[] = [
         <path d="M2.5 4.5l1.5 1.5 2.5-3" />
         <path d="M2.5 11l1.5 1.5 2.5-3" />
         <path d="M8.5 4.5h5M8.5 11h5" />
+      </svg>
+    ),
+  },
+  {
+    id: "statistics",
+    label: "Statistics",
+    icon: (
+      <svg viewBox="0 0 16 16" aria-hidden="true">
+        <path d="M2.5 13.5h11" />
+        <rect x="3" y="8" width="2.5" height="4" rx=".5" />
+        <rect x="6.75" y="5.5" width="2.5" height="6.5" rx=".5" />
+        <rect x="10.5" y="2.5" width="2.5" height="9.5" rx=".5" />
+      </svg>
+    ),
+  },
+  {
+    id: "ports",
+    label: "Ports",
+    icon: (
+      <svg viewBox="0 0 16 16" aria-hidden="true">
+        <path d="M5 3v3M11 3v3M3.5 6h9v2.5a4.5 4.5 0 0 1-9 0zM8 13v1.5" />
       </svg>
     ),
   },
@@ -81,8 +129,13 @@ export function ToolsPanel({
   onOpenFolder,
   onBrowseProject,
   onOpenFile,
+  getCurrentLayoutDraft,
+  onOpenLayout,
+  stats,
+  ownerNames,
+  section,
+  onSection,
 }: Props) {
-  const [section, setSection] = useState<SectionId>("files");
   const [dragging, setDragging] = useState(false);
   const start = useRef({ x: 0, width });
   const asideRef = useRef<HTMLElement>(null);
@@ -157,7 +210,7 @@ export function ToolsPanel({
               role="tab"
               className={`tools-tab ${section === entry.id ? "is-active" : ""}`}
               aria-selected={section === entry.id}
-              onClick={() => setSection(entry.id)}
+              onClick={() => onSection(entry.id)}
             >
               {entry.icon}
               <span className="tools-tab-label">{entry.label}</span>
@@ -190,7 +243,16 @@ export function ToolsPanel({
           />
         )}
         {section === "checklist" && <ChecklistTool scope={tabId} scopeLabel={tabTitle} />}
+        {section === "statistics" && <StatisticsTool {...stats} />}
+        {section === "ports" && <PortsTool ownerNames={ownerNames} />}
         {section === "power" && <PowerWatchTool />}
+        {section === "layouts" && (
+          <LayoutsTool
+            projectName={project?.name ?? null}
+            getCurrentDraft={getCurrentLayoutDraft}
+            onOpen={onOpenLayout}
+          />
+        )}
       </div>
 
       <div
