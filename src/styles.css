@@ -432,9 +432,9 @@ body.is-dragging-tab .tab.is-reordering,
 }
 
 .tab.is-active {
-  background: #202520;
-  border-color: rgba(255, 255, 255, 0.12);
-  color: var(--text);
+  background: color-mix(in srgb, var(--accent) 22%, var(--bg-raised));
+  border-color: transparent;
+  color: #fff;
 }
 
 .tab:focus-visible {
@@ -445,7 +445,7 @@ body.is-dragging-tab .tab.is-reordering,
 /* A chosen colour belongs to the whole tab. Keep its edge neutral and avoid
    extra underlines or accent marks competing with the filled surface. */
 .tab.is-colored {
-  background: color-mix(in srgb, var(--tab-color) 27%, var(--bg-raised));
+  background: color-mix(in srgb, var(--tab-color) 24%, var(--bg-raised));
   border-color: transparent;
   color: #dce4de;
 }
@@ -457,9 +457,9 @@ body.is-dragging-tab .tab.is-reordering,
 }
 
 .tab.is-colored.is-active {
-  background: color-mix(in srgb, var(--tab-color) 38%, var(--bg-raised));
+  background: color-mix(in srgb, var(--tab-color) 58%, var(--bg-raised));
   border-color: transparent;
-  color: #f4f7f5;
+  color: #fff;
 }
 
 .tab.is-colored .tab-folder {
@@ -7203,6 +7203,313 @@ body.is-resizing * {
   background: rgba(242, 104, 111, 0.14);
 }
 
+/* ── Question prompt ──
+   The agent asking the user to decide something. It borrows the provider
+   accent instead of the amber warning colour: nothing here is risky, it is
+   just a conversation the user has to finish. */
+
+.agent-question {
+  margin-top: 12px;
+  padding: 12px 13px 11px;
+  border: 1px solid var(--border-strong);
+  border-left: 2px solid var(--agent-accent);
+  border-radius: 8px;
+  background: var(--bg-raised);
+  outline: none;
+}
+
+.agent-question-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+  font-size: 12.5px;
+}
+
+.agent-question-mark {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--agent-accent) 18%, transparent);
+  color: var(--agent-accent);
+}
+
+.agent-question-mark svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* The dot under the question mark is solid; its stem is not. */
+.agent-question-mark circle {
+  fill: currentColor;
+  stroke: none;
+}
+
+.agent-question-progress {
+  margin-left: auto;
+  color: var(--text-faint);
+  font-size: 11px;
+}
+
+.agent-question-block + .agent-question-block {
+  margin-top: 13px;
+  padding-top: 13px;
+  border-top: 1px solid var(--border);
+}
+
+/* In a stack of questions, the chip is how you see which ones are done. */
+.agent-question-block.is-answered .agent-question-chip {
+  border-color: color-mix(in srgb, var(--agent-accent) 45%, transparent);
+  color: var(--agent-accent);
+}
+
+.agent-question-ask {
+  margin-top: 10px;
+}
+
+.agent-question-chip {
+  display: inline-block;
+  margin-bottom: 5px;
+  padding: 1px 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-faint);
+  font-size: 10px;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.agent-question-text {
+  margin: 0;
+  color: var(--text);
+  font-size: 12.5px;
+  line-height: 1.45;
+  user-select: text;
+}
+
+.agent-question-options {
+  display: grid;
+  gap: 6px;
+  margin-top: 9px;
+}
+
+.agent-question-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.agent-question-option:hover:not(:disabled),
+.agent-question-option.is-cursor:not(:disabled) {
+  border-color: var(--border-strong);
+  background: var(--hover);
+}
+
+.agent-question-option.is-picked {
+  border-color: color-mix(in srgb, var(--agent-accent) 55%, transparent);
+  background: color-mix(in srgb, var(--agent-accent) 12%, transparent);
+}
+
+.agent-question-option:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+/* The digit that picks this option, doubling as its bullet. */
+.agent-question-key {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 17px;
+  height: 17px;
+  margin-top: 1px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1;
+}
+
+.agent-question-option.is-picked .agent-question-key {
+  border-color: color-mix(in srgb, var(--agent-accent) 50%, transparent);
+  color: var(--agent-accent);
+}
+
+.agent-question-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.agent-question-label {
+  font-size: 12px;
+}
+
+.agent-question-desc {
+  color: var(--text-dim);
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+
+.agent-question-tick {
+  flex: none;
+  margin-top: 2px;
+  opacity: 0;
+  color: var(--agent-accent);
+}
+
+.agent-question-tick svg {
+  display: block;
+  width: 12px;
+  height: 12px;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.agent-question-option.is-picked .agent-question-tick {
+  opacity: 1;
+}
+
+.agent-question-preview-toggle {
+  margin: 4px 0 0 26px;
+  padding: 2px 6px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  color: var(--text-faint);
+  font-size: 11px;
+}
+
+.agent-question-preview-toggle:hover {
+  border-color: var(--border);
+  color: var(--text-dim);
+}
+
+.agent-question-preview {
+  margin: 5px 0 0 26px;
+  padding: 8px 10px;
+  max-height: 210px;
+  overflow: auto;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.32);
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+}
+
+.agent-question-custom {
+  display: block;
+  margin-top: 8px;
+}
+
+.agent-question-custom-label {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--text-faint);
+  font-size: 11px;
+}
+
+.agent-question-custom textarea {
+  display: block;
+  width: 100%;
+  min-height: 30px;
+  max-height: 132px;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg-pane);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.45;
+  resize: none;
+}
+
+.agent-question-custom textarea::placeholder {
+  color: var(--text-faint);
+}
+
+.agent-question-custom textarea:focus {
+  border-color: color-mix(in srgb, var(--agent-accent) 55%, transparent);
+  outline: none;
+}
+
+.agent-question-actions {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 12px;
+}
+
+.agent-question-hint {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-right: auto;
+  color: var(--text-faint);
+  font-size: 11px;
+}
+
+.agent-question-hint kbd {
+  padding: 1px 5px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.agent-question-hint-sep {
+  opacity: 0.5;
+}
+
+.agent-question-skip,
+.agent-question-send {
+  padding: 5px 13px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 11.5px;
+}
+
+.agent-question-skip:hover:not(:disabled) {
+  background: var(--hover);
+}
+
+.agent-question-send {
+  border-color: color-mix(in srgb, var(--agent-accent) 55%, transparent);
+  background: color-mix(in srgb, var(--agent-accent) 16%, transparent);
+  color: var(--agent-accent);
+}
+
+.agent-question-send:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--agent-accent) 26%, transparent);
+}
+
+.agent-question-send:disabled,
+.agent-question-skip:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
 /* ── Composer ── */
 
 .agent-composer-shell {
@@ -7391,6 +7698,10 @@ body.is-resizing * {
   width: 76px;
   height: 58px;
   transform-origin: center;
+}
+
+/* Only first appearance of an attachment id animates (see AgentImageAttachments). */
+.agent-image-tile.is-entering {
   animation: agent-image-attachment-in 180ms cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
@@ -7563,7 +7874,7 @@ body.is-resizing * {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .agent-image-tile,
+  .agent-image-tile.is-entering,
   .agent-image-tile.is-removing {
     animation: none;
   }

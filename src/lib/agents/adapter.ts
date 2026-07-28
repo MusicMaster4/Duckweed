@@ -1,6 +1,11 @@
 import type { AgentEvent } from "./events";
 import type { AgentLaunch } from "./launch";
-import type { AgentAccessMode, AgentImageAttachment, AgentPrompt } from "./types";
+import type {
+  AgentAccessMode,
+  AgentImageAttachment,
+  AgentPrompt,
+  AgentQuestionAnswer,
+} from "./types";
 
 /** What an adapter is given to do its job. */
 export interface AdapterContext {
@@ -69,6 +74,16 @@ export interface AgentAdapter {
   interrupt: (ctx: AdapterContext) => void;
   /** The user answered a permission prompt. */
   respond: (permissionId: string, optionId: string, ctx: AdapterContext) => void;
+  /**
+   * The user answered a question the agent asked. Only adapters that implement
+   * this may emit a `question` permission: without it the card would collect an
+   * answer with nowhere to send it.
+   */
+  answer?: (
+    permissionId: string,
+    answers: AgentQuestionAnswer[],
+    ctx: AdapterContext,
+  ) => void;
   /**
    * The session is closing. Adapters that end on stdin EOF rather than a kill
    * say so, and the session closes their stdin first.

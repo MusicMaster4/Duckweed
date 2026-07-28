@@ -23,7 +23,7 @@ export function ClaudeExperience({
   cwd,
 }: ExperienceProps) {
   const transcriptItems = useMemo(
-    () => shortAssistantUpdatesAsThinking(items, status === "working", 200),
+    () => shortAssistantUpdatesAsThinking(items, status === "working", 110),
     [items, status],
   );
   const groups = useMemo(() => activityGroups(transcriptItems), [transcriptItems]);

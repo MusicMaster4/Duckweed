@@ -42,6 +42,7 @@ import {
   type AgentImageAttachment,
   type AgentItem,
   type AgentPrompt,
+  type AgentQuestionAnswer,
   type AgentSessionState,
 } from "./types";
 
@@ -1081,6 +1082,17 @@ export function respond(termId: string, permissionId: string, optionId: string):
   const session = sessions.get(termId);
   if (!session || session.disposed) return;
   session.adapter.respond(permissionId, optionId, session.context);
+}
+
+/** Send the user's reply to a question the agent asked. */
+export function answer(
+  termId: string,
+  permissionId: string,
+  answers: AgentQuestionAnswer[],
+): void {
+  const session = sessions.get(termId);
+  if (!session || session.disposed) return;
+  session.adapter.answer?.(permissionId, answers, session.context);
 }
 
 /** End the session and hand the pane back to its terminal. */

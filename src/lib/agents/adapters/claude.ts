@@ -15,6 +15,7 @@ import {
   type AgentAccessMode,
   type AgentFileChange,
   type AgentPrompt,
+  type AgentQuestionItem,
   type ToolStatus,
 } from "../types";
 
@@ -26,7 +27,8 @@ import {
  * `stream_event` carries the partial deltas that make the UI feel live, and
  * the `assistant` / `user` messages carry the settled version of the same
  * content — tool inputs arrive complete there, which is where titles and diffs
- * come from. Permission prompts ride the control protocol on the same stream.
+ * come from. Permission prompts ride the control protocol on the same stream,
+ * and so do the questions Claude asks the user (see {@link QUESTION_TOOL}).
  *
  * Slash commands are plain user messages: the CLI intercepts leading-`/`
  * text itself, answers with a synthetic assistant message (`model` is the
@@ -43,8 +45,30 @@ interface ToolCall {
   partialInput: string;
 }
 
+/**
+ * `AskUserQuestion` is Claude asking the user to decide something, not a tool
+ * that needs approving.
+ *
+ * The CLI routes it through the same `can_use_tool` channel as every other
+ * call, and expects the client's permission UI to collect the choices and hand
+ * them back on the allowed input. Answering it with a bare "Allow" is what
+ * makes the prompt look like it does nothing: the tool runs with no answers in
+ * it and Claude learns nothing.
+ */
+const QUESTION_TOOL = "askuserquestion";
+
 /** Turn a tool's input into the one line that names the call. */
 function describeTool(name: string, input: Record<string, unknown>): string {
+  // A question reads as the question, not as the name of the tool carrying it.
+  if (name.toLowerCase() === QUESTION_TOOL) {
+    const questions = asArray(input.questions)
+      .map((raw) => asRecord(raw))
+      .map((question) => asString(question?.question))
+      .filter((text): text is string => text !== null && text.trim() !== "");
+    if (questions.length === 1) return oneLine(questions[0]);
+    if (questions.length > 1) return `${questions.length} questions for you`;
+    return "A question for you";
+  }
   const first = (...keys: string[]): string | null => {
     for (const key of keys) {
       const value = input[key];
@@ -80,6 +104,30 @@ function changesFor(name: string, input: Record<string, unknown>): AgentFileChan
       .map((edit) => makeChange(path, asString(edit.old_string), asString(edit.new_string)));
   }
   return [];
+}
+
+/** Read the questions out of an `AskUserQuestion` input. */
+function questionsFrom(input: Record<string, unknown>): AgentQuestionItem[] {
+  return asArray(input.questions)
+    .map((raw) => asRecord(raw))
+    .filter((question): question is Record<string, unknown> => question !== null)
+    .map((question, index) => ({
+      id: `q${index}`,
+      header: asString(question.header) ?? "",
+      question: asString(question.question) ?? "",
+      multiSelect: question.multiSelect === true,
+      options: asArray(question.options)
+        .map((raw) => asRecord(raw))
+        .filter((option): option is Record<string, unknown> => option !== null)
+        .map((option, optionIndex) => ({
+          id: `o${optionIndex}`,
+          label: asString(option.label) ?? `Option ${optionIndex + 1}`,
+          description: asString(option.description) ?? "",
+          preview: asString(option.preview),
+        }))
+        .filter((option) => option.label),
+    }))
+    .filter((question) => question.question && question.options.length > 0);
 }
 
 /** `TodoWrite` is Claude's plan; lift it out of the tool list into the plan row. */
@@ -120,7 +168,15 @@ export function createClaudeAdapter(): AgentAdapter {
   let settledMessageSeq = 0;
   let controlSeq = 0;
   /** Control request ids Claude is waiting on, keyed by our permission id. */
-  const pendingPermissions = new Map<string, { requestId: string; input: unknown }>();
+  const pendingPermissions = new Map<
+    string,
+    {
+      requestId: string;
+      input: Record<string, unknown>;
+      /** Set for `AskUserQuestion`, so answers can be mapped back to it. */
+      questions: AgentQuestionItem[] | null;
+    }
+  >();
   /** Our outbound `set_model` requests, keyed by the id we gave them. */
   const pendingModelChanges = new Map<string, string>();
   /** Our outbound `set_permission_mode` requests, keyed by request id. */
@@ -366,11 +422,37 @@ export function createClaudeAdapter(): AgentAdapter {
     const name = asString(request.tool_name) ?? "tool";
     const input = asRecord(request.input) ?? {};
     const permissionId = `perm-${requestId}`;
-    pendingPermissions.set(permissionId, { requestId, input });
+
+    const questions = name.toLowerCase() === QUESTION_TOOL ? questionsFrom(input) : [];
+    if (questions.length > 0) {
+      pendingPermissions.set(permissionId, { requestId, input, questions });
+      ctx.emit({
+        type: "permission",
+        permission: {
+          id: permissionId,
+          kind: "question",
+          title:
+            questions.length === 1
+              ? questions[0].question
+              : `${questions.length} questions for you`,
+          detail: null,
+          command: null,
+          changes: [],
+          // The card draws its own answer controls; the only fixed action is
+          // walking away from the question without answering it.
+          options: [{ id: "deny", label: "Skip", kind: "reject" }],
+          questions,
+        },
+      });
+      return;
+    }
+
+    pendingPermissions.set(permissionId, { requestId, input, questions: null });
     ctx.emit({
       type: "permission",
       permission: {
         id: permissionId,
+        kind: "approval",
         title: `${name} wants to run`,
         detail: describeTool(name, input),
         command: asString(input.command),
@@ -655,7 +737,64 @@ export function createClaudeAdapter(): AgentAdapter {
           request_id: pending.requestId,
           response: allowed
             ? { behavior: "allow", updatedInput: pending.input }
-            : { behavior: "deny", message: "Denied in Duckweed" },
+            : {
+                behavior: "deny",
+                // A skipped question is not a refused tool. Saying which one
+                // happened is the difference between Claude asking again in a
+                // better way and Claude assuming it is not allowed to ask.
+                message: pending.questions
+                  ? "The user skipped the question without answering. Continue with your own best judgement, or ask again if you truly cannot proceed."
+                  : "Denied in Duckweed",
+              },
+        },
+      });
+      ctx.emit({ type: "permission", permission: null });
+      ctx.emit({ type: "status", status: "working" });
+    },
+
+    /**
+     * Hand the user's choices back as the tool's own input.
+     *
+     * Claude Code's `AskUserQuestion` takes its result from an `answers` map
+     * the client fills in: question text to answer text, several choices
+     * comma-separated, with anything the user typed alongside a choice carried
+     * as an annotation note. Allowing the call with those filled in is what
+     * actually answers the question. Verified against claude 2.1.220, which
+     * replies "The user answered: …" and reads it back correctly.
+     */
+    answer: (permissionId, answers, ctx) => {
+      const pending = pendingPermissions.get(permissionId);
+      if (!pending?.questions) return;
+      pendingPermissions.delete(permissionId);
+
+      const asked = new Map(pending.questions.map((question) => [question.id, question]));
+      const collected: Record<string, string> = {};
+      const annotations: Record<string, { notes: string }> = {};
+      for (const reply of answers) {
+        const question = asked.get(reply.questionId);
+        if (!question) continue;
+        const custom = reply.custom?.trim() ?? "";
+        // Text on its own is the answer; text beside a choice is a note about
+        // that choice, which is exactly the distinction the tool draws.
+        const text = reply.labels.length ? reply.labels.join(", ") : custom;
+        if (!text) continue;
+        collected[question.question] = text;
+        if (custom && reply.labels.length) annotations[question.question] = { notes: custom };
+      }
+
+      ctx.send({
+        type: "control_response",
+        response: {
+          subtype: "success",
+          request_id: pending.requestId,
+          response: {
+            behavior: "allow",
+            updatedInput: {
+              ...pending.input,
+              answers: collected,
+              ...(Object.keys(annotations).length ? { annotations } : {}),
+            },
+          },
         },
       });
       ctx.emit({ type: "permission", permission: null });

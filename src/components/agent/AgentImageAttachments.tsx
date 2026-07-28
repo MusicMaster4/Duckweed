@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 import type { AgentImageAttachment } from "../../lib/agents/types";
@@ -19,8 +19,40 @@ export function AgentImageAttachments({
 }: Props) {
   const [openId, setOpenId] = useState<string | null>(null);
   const [removingIds, setRemovingIds] = useState<Set<string>>(() => new Set());
+  const [enteringIds, setEnteringIds] = useState<Set<string>>(() => new Set());
   const removalTimers = useRef<Map<string, number>>(new Map());
+  /**
+   * Attachment ids already painted in this mount. Seeded on the first layout so
+   * remounts (inactive tabs unmount their panes) do not replay paste-in for
+   * draft images that were already attached.
+   */
+  const knownIdsRef = useRef<Set<string> | null>(null);
   const open = images.find((image) => image.id === openId) ?? null;
+
+  useLayoutEffect(() => {
+    // Messages are history; only the composer paste strip should enter-animate.
+    if (variant !== "composer") return;
+
+    if (knownIdsRef.current === null) {
+      knownIdsRef.current = new Set(images.map((image) => image.id));
+      return;
+    }
+
+    const known = knownIdsRef.current;
+    const fresh: string[] = [];
+    for (const image of images) {
+      if (known.has(image.id)) continue;
+      known.add(image.id);
+      fresh.push(image.id);
+    }
+    if (!fresh.length) return;
+
+    setEnteringIds((current) => {
+      const next = new Set(current);
+      for (const id of fresh) next.add(id);
+      return next;
+    });
+  }, [images, variant]);
 
   useEffect(() => {
     return () => {
@@ -37,6 +69,15 @@ export function AgentImageAttachments({
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
   }, [open]);
+
+  const finishEnter = (id: string) => {
+    setEnteringIds((current) => {
+      if (!current.has(id)) return current;
+      const next = new Set(current);
+      next.delete(id);
+      return next;
+    });
+  };
 
   const finishRemove = (id: string) => {
     const timer = removalTimers.current.get(id);
@@ -74,17 +115,19 @@ export function AgentImageAttachments({
       >
         {images.map((image) => {
           const removing = removingIds.has(image.id);
+          const entering = enteringIds.has(image.id);
           return (
             <div
-              className={`agent-image-tile${removing ? " is-removing" : ""}`}
+              className={`agent-image-tile${entering ? " is-entering" : ""}${removing ? " is-removing" : ""}`}
               key={image.id}
               onAnimationEnd={(event) => {
-                if (
-                  removing &&
-                  event.target === event.currentTarget &&
-                  event.animationName === "agent-image-attachment-out"
-                ) {
+                if (event.target !== event.currentTarget) return;
+                if (removing && event.animationName === "agent-image-attachment-out") {
                   finishRemove(image.id);
+                  return;
+                }
+                if (entering && event.animationName === "agent-image-attachment-in") {
+                  finishEnter(image.id);
                 }
               }}
             >

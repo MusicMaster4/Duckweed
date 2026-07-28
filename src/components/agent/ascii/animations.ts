@@ -554,33 +554,6 @@ function paintSpring(t: number): string {
   });
 }
 
-/* -- Heartbeat: an ECG trace scrolling across the screen ------------------- */
-
-function ecgPulse(x: number): number {
-  /* P wave, QRS complex, T wave: five gaussians along one beat. */
-  return (
-    0.16 * Math.exp(-Math.pow((x - 0.18) / 0.04, 2)) -
-    0.13 * Math.exp(-Math.pow((x - 0.34) / 0.015, 2)) +
-    0.85 * Math.exp(-Math.pow((x - 0.38) / 0.016, 2)) -
-    0.2 * Math.exp(-Math.pow((x - 0.42) / 0.015, 2)) +
-    0.24 * Math.exp(-Math.pow((x - 0.62) / 0.05, 2))
-  );
-}
-
-function paintEcg(t: number): string {
-  return paintPlotted((plot) => {
-    for (let step = 0; step <= 250; step += 1) {
-      const f = step / 250;
-      const value = ecgPulse((((f + t * 0.42) % 1) + 1) % 1);
-      plot(
-        f * ASPECT * 2 - ASPECT,
-        0.18 - value * 1.2,
-        0.25 + 0.75 * clamp01(Math.abs(value) * 2.4),
-      );
-    }
-  });
-}
-
 /* ========================================================================
    Motion: particles, physics, and things that travel.
    ===================================================================== */
@@ -1495,7 +1468,6 @@ export const ASCII_ANIMATIONS: readonly PainterFactory[] = [
   stateless(paintScreensaver),
   stateless(paintSpirograph),
   stateless(paintWindmill),
-  stateless(paintEcg),
   stateless(paintHourglass),
   /* A simulation like Rule 30 above: each surface needs its own instance. */
   createLangtonPainter,

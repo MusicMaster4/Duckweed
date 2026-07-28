@@ -27,6 +27,7 @@ import { AgentComposer } from "./AgentComposer";
 import { AgentImageAttachments } from "./AgentImageAttachments";
 import { AgentPermission } from "./AgentPermission";
 import { AgentProviderIcon } from "./AgentProviderIcon";
+import { AgentQuestion } from "./AgentQuestion";
 import { AgentSessions } from "./AgentSessions";
 import { AgentTimeline } from "./AgentTimeline";
 import { PlanTracker, type OfficialVariant } from "./official/OfficialShared";
@@ -428,14 +429,27 @@ export function AgentSurface({ termId, active, onClose }: Props) {
           </div>
         )}
 
-        {session.permission && (
-          <AgentPermission
-            permission={session.permission}
-            onRespond={(optionId) =>
-              agents.respond(termId, session.permission?.id ?? "", optionId)
-            }
-          />
-        )}
+        {session.permission &&
+          (session.permission.kind === "question" ? (
+            <AgentQuestion
+              /* A new question is a new card, not the old one with new text:
+                 the key drops any half-made selection with the question it
+                 belonged to. */
+              key={session.permission.id}
+              permission={session.permission}
+              onAnswer={(answers) =>
+                agents.answer(termId, session.permission?.id ?? "", answers)
+              }
+              onSkip={() => agents.respond(termId, session.permission?.id ?? "", "deny")}
+            />
+          ) : (
+            <AgentPermission
+              permission={session.permission}
+              onRespond={(optionId) =>
+                agents.respond(termId, session.permission?.id ?? "", optionId)
+              }
+            />
+          ))}
       </div>
 
       {session.status === "starting" && session.exitArmed && (

@@ -725,13 +725,15 @@ describe("official agent presentation", () => {
   });
 
   test("uses provider-specific limits for Codex and Claude Code", () => {
+    // Codex keeps short updates as thinking up to 250 chars; Claude promotes
+    // anything above 110 chars to a normal assistant message.
     const codexHtml = renderAgentActivity("codex", [
       { kind: "user", id: "codex-user", at: 1, text: "Inspect" },
       {
         kind: "assistant",
         id: "codex-update",
         at: 2,
-        text: "c".repeat(225),
+        text: "c".repeat(150),
         streaming: true,
       },
     ]);
@@ -741,7 +743,7 @@ describe("official agent presentation", () => {
         kind: "assistant",
         id: "claude-update",
         at: 2,
-        text: "c".repeat(225),
+        text: "c".repeat(150),
         streaming: true,
       },
     ]);

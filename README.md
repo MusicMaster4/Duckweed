@@ -138,7 +138,9 @@ layout.
 
 The interface presents streamed responses, reasoning, tool calls, file changes,
 plans, permission requests, token usage, and session history in a consistent
-timeline while preserving each provider's identity. The composer supports slash
+timeline while preserving each provider's identity. When Claude Code stops to
+ask you something, the question arrives as a card you can answer by clicking a
+choice, by pressing its number, or by writing an answer of your own. The composer supports slash
 commands, workspace file mentions, queued follow-ups, and image attachments
 where the provider accepts them. Model and reasoning controls appear when the
 agent protocol exposes those choices.

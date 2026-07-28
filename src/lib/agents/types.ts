@@ -223,14 +223,63 @@ export interface PermissionOption {
   kind: "allow" | "allow-always" | "reject" | "reject-always";
 }
 
+/** One choice offered for an agent question. */
+export interface AgentQuestionOption {
+  /** Stable within its question; used for selection state and React keys. */
+  id: string;
+  /** Short display text, the thing the user actually picks. */
+  label: string;
+  /** What choosing it means, shown under the label. */
+  description: string;
+  /** Longer sample content (a mockup, a snippet) the option wants to show. */
+  preview: string | null;
+}
+
+/** One question an agent asked, with the choices it offered. */
+export interface AgentQuestionItem {
+  id: string;
+  /** Very short chip label, e.g. "Auth method". */
+  header: string;
+  question: string;
+  /** The user may pick several options rather than exactly one. */
+  multiSelect: boolean;
+  options: AgentQuestionOption[];
+}
+
+/**
+ * The user's reply to one question.
+ *
+ * `labels` and `custom` are independent on purpose: picking options and adding
+ * a note is a normal answer, and typing with nothing selected is the "none of
+ * these" answer. Adapters decide how their protocol carries each part.
+ */
+export interface AgentQuestionAnswer {
+  questionId: string;
+  /** Labels of the chosen options, in the order they were picked. */
+  labels: string[];
+  /** Free text the user wrote, when they wrote any. */
+  custom: string | null;
+}
+
+/**
+ * Whether the card is asking to run something or asking the user to decide.
+ *
+ * Missing means `approval`: the original prompt, and what every adapter that
+ * has not learned about questions still emits.
+ */
+export type AgentPermissionKind = "approval" | "question";
+
 /** A decision only the user can make; the turn is parked until it is answered. */
 export interface AgentPermission {
   id: string;
+  kind?: AgentPermissionKind;
   title: string;
   detail: string | null;
   command: string | null;
   changes: AgentFileChange[];
   options: PermissionOption[];
+  /** Set when {@link kind} is `question`; the card renders its own controls. */
+  questions?: AgentQuestionItem[];
 }
 
 export interface AgentUsage {

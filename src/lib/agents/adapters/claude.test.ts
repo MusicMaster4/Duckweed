@@ -395,6 +395,195 @@ describe("claude adapter", () => {
     expect(h.state().permission).toBeNull();
   });
 
+  test("turns AskUserQuestion into an answerable question rather than an approval", () => {
+    const h = harness();
+    h.feed({
+      type: "control_request",
+      request_id: "req_q",
+      request: {
+        subtype: "can_use_tool",
+        tool_name: "AskUserQuestion",
+        input: {
+          questions: [
+            {
+              question: "Which date library should we use?",
+              header: "Library",
+              multiSelect: false,
+              options: [
+                { label: "date-fns", description: "Small and tree-shakeable" },
+                { label: "Luxon", description: "Rich timezone support", preview: "DateTime.now()" },
+              ],
+            },
+          ],
+        },
+      },
+    });
+
+    const waiting = h.state();
+    expect(waiting.status).toBe("waiting");
+    expect(waiting.permission).toMatchObject({
+      kind: "question",
+      title: "Which date library should we use?",
+    });
+    expect(waiting.permission?.questions?.[0]).toMatchObject({
+      header: "Library",
+      multiSelect: false,
+    });
+    expect(waiting.permission?.questions?.[0].options).toEqual([
+      { id: "o0", label: "date-fns", description: "Small and tree-shakeable", preview: null },
+      {
+        id: "o1",
+        label: "Luxon",
+        description: "Rich timezone support",
+        preview: "DateTime.now()",
+      },
+    ]);
+
+    h.adapter.answer?.(
+      waiting.permission!.id,
+      [{ questionId: "q0", labels: ["date-fns"], custom: null }],
+      h.ctx,
+    );
+    expect(h.sent.at(-1)).toMatchObject({
+      type: "control_response",
+      response: {
+        request_id: "req_q",
+        response: {
+          behavior: "allow",
+          updatedInput: { answers: { "Which date library should we use?": "date-fns" } },
+        },
+      },
+    });
+    expect(h.state().permission).toBeNull();
+  });
+
+  test("joins multi-select answers and carries typed text alongside a choice", () => {
+    const h = harness();
+    h.feed({
+      type: "control_request",
+      request_id: "req_multi",
+      request: {
+        subtype: "can_use_tool",
+        tool_name: "AskUserQuestion",
+        input: {
+          questions: [
+            {
+              question: "Which features should ship?",
+              header: "Scope",
+              multiSelect: true,
+              options: [
+                { label: "Search", description: "" },
+                { label: "Export", description: "" },
+              ],
+            },
+            {
+              question: "Which database?",
+              header: "Storage",
+              multiSelect: false,
+              options: [
+                { label: "Postgres", description: "" },
+                { label: "SQLite", description: "" },
+              ],
+            },
+          ],
+        },
+      },
+    });
+
+    const waiting = h.state();
+    expect(waiting.permission?.title).toBe("2 questions for you");
+
+    h.adapter.answer?.(
+      waiting.permission!.id,
+      [
+        { questionId: "q0", labels: ["Search", "Export"], custom: "Search matters most" },
+        // Nothing picked: the typed text is the answer itself.
+        { questionId: "q1", labels: [], custom: "Neither, use the existing store" },
+      ],
+      h.ctx,
+    );
+
+    expect(h.sent.at(-1)).toMatchObject({
+      response: {
+        response: {
+          updatedInput: {
+            answers: {
+              "Which features should ship?": "Search, Export",
+              "Which database?": "Neither, use the existing store",
+            },
+            annotations: {
+              "Which features should ship?": { notes: "Search matters most" },
+            },
+          },
+        },
+      },
+    });
+  });
+
+  test("tells Claude a skipped question was skipped, not that the tool was refused", () => {
+    const h = harness();
+    h.feed({
+      type: "control_request",
+      request_id: "req_skip",
+      request: {
+        subtype: "can_use_tool",
+        tool_name: "AskUserQuestion",
+        input: {
+          questions: [
+            {
+              question: "Ship it?",
+              header: "Ship",
+              multiSelect: false,
+              options: [
+                { label: "Yes", description: "" },
+                { label: "No", description: "" },
+              ],
+            },
+          ],
+        },
+      },
+    });
+
+    h.adapter.respond(h.state().permission!.id, "deny", h.ctx);
+    const sent = h.sent.at(-1) as {
+      response: { response: { behavior: string; message: string } };
+    };
+    expect(sent.response.response.behavior).toBe("deny");
+    expect(sent.response.response.message).toContain("skipped the question");
+  });
+
+  test("falls back to an approval when AskUserQuestion carries no usable questions", () => {
+    const h = harness();
+    h.feed({
+      type: "control_request",
+      request_id: "req_empty",
+      request: {
+        subtype: "can_use_tool",
+        tool_name: "AskUserQuestion",
+        input: { questions: [] },
+      },
+    });
+    expect(h.state().permission).toMatchObject({ kind: "approval" });
+  });
+
+  test("names the AskUserQuestion tool call after the question it asks", () => {
+    const h = harness();
+    h.feed({
+      type: "assistant",
+      message: {
+        content: [
+          {
+            type: "tool_use",
+            id: "call_q",
+            name: "AskUserQuestion",
+            input: { questions: [{ question: "Which approach?", options: [] }] },
+          },
+        ],
+      },
+    });
+    expect(h.state().items[0]).toMatchObject({ title: "Which approach?" });
+  });
+
   test("answers a control request it does not implement instead of stalling", () => {
     const h = harness();
     h.feed({ type: "control_request", request_id: "req_x", request: { subtype: "mcp_message" } });
