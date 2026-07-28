@@ -904,46 +904,6 @@ function paintRain(t: number): string {
   return rows.join("\n");
 }
 
-/* -- Life: Conway on a torus, reseeded before it can stagnate ------------- */
-
-const LIFE_SECONDS_PER_STEP = 0.17;
-const LIFE_EPOCH = 70;
-
-function createLifePainter(): Painter {
-  const lifeAt = makeStepper<Uint8Array>(
-    (epoch) => {
-      const grid = new Uint8Array(W * H);
-      for (let cell = 0; cell < grid.length; cell += 1) {
-        grid[cell] = hash(cell * 3.7 + epoch * 617) > 0.62 ? 1 : 0;
-      }
-      return grid;
-    },
-    (grid) => {
-      const next = new Uint8Array(W * H);
-      for (let y = 0; y < H; y += 1) {
-        for (let x = 0; x < W; x += 1) {
-          let neighbours = 0;
-          for (let dy = -1; dy <= 1; dy += 1) {
-            for (let dx = -1; dx <= 1; dx += 1) {
-              if (dx === 0 && dy === 0) continue;
-              neighbours += grid[((y + dy + H) % H) * W + ((x + dx + W) % W)];
-            }
-          }
-          const alive = grid[y * W + x] === 1;
-          next[y * W + x] = neighbours === 3 || (alive && neighbours === 2) ? 1 : 0;
-        }
-      }
-      return next;
-    },
-    LIFE_EPOCH,
-  );
-
-  return (t) => {
-    const grid = lifeAt(Math.floor(t / LIFE_SECONDS_PER_STEP));
-    return paintGrid((x, y) => (grid[y * W + x] === 1 ? 0.92 : 0));
-  };
-}
-
 /* -- Rule 30: an elementary automaton scrolling upward -------------------- */
 
 const RULE30_SECONDS_PER_STEP = 0.085;
@@ -1044,10 +1004,11 @@ export const ASCII_ANIMATIONS: readonly PainterFactory[] = [
   stateless(paintPendulum),
   stateless(paintOctahedron),
   stateless(paintGlobe),
-  /* Conway and Rule 30 advance a generation at a time, so two surfaces sharing
-     one instance would drag its clock backwards and forwards and reseed on
-     every frame. They get a fresh simulation each. */
-  createLifePainter,
+  /* Rule 30 advances a generation at a time, so two surfaces sharing one
+     instance would drag its clock backwards and forwards and reseed on every
+     frame. It gets a fresh simulation. Conway is intentionally not in the
+     startup pool because its random seed reads like broken glyphs in a still
+     frame, even though the simulation itself is valid. */
   createRule30Painter,
   field(voronoiField),
   field(radarField),

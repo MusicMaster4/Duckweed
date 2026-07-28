@@ -114,8 +114,20 @@ export function createClaudeAdapter(): AgentAdapter {
   const pendingPermissions = new Map<string, { requestId: string; input: unknown }>();
   /** Our outbound `set_model` requests, keyed by the id we gave them. */
   const pendingModelChanges = new Map<string, string>();
+  /**
+   * Claude can report one API failure through several protocol frames: a
+   * synthetic assistant message, a forwarded child-agent message, and the
+   * final result. Keep one visible error for the submitted turn.
+   */
+  const seenTurnErrors = new Set<string>();
 
   const blockId = (index: number) => `m${messageSeq}-b${index}`;
+
+  function emitTurnError(text: string, ctx: AdapterContext) {
+    if (seenTurnErrors.has(text)) return;
+    seenTurnErrors.add(text);
+    ctx.emit({ type: "notice", tone: "error", text });
+  }
 
   /** Apply a settled tool input: title, command, diffs, and plans. */
   function settleTool(callId: string, name: string, input: Record<string, unknown>, ctx: AdapterContext) {
@@ -229,7 +241,11 @@ export function createClaudeAdapter(): AgentAdapter {
   }
 
   /** The settled assistant message: authoritative tool inputs and text. */
-  function handleAssistant(message: Record<string, unknown>, ctx: AdapterContext) {
+  function handleAssistant(
+    message: Record<string, unknown>,
+    frame: Record<string, unknown>,
+    ctx: AdapterContext,
+  ) {
     // Slash command answers arrive as a synthetic assistant message — "Set
     // effort level to high (this session only)", "Unknown command: /foo".
     // That feedback is the whole point of the command, so it must render.
@@ -251,8 +267,13 @@ export function createClaudeAdapter(): AgentAdapter {
           ctx.emit({ type: "notice", tone: "info", text: `Effort set to ${effort}.` });
           return;
         }
+        const failed =
+          asString(frame.error) !== null ||
+          frame.is_api_error_message === true ||
+          frame.isApiErrorMessage === true;
         const refused = /needs dynamic workflows|Invalid argument|Valid options are/i.test(text);
-        ctx.emit({ type: "notice", tone: refused ? "error" : "info", text });
+        if (failed) emitTurnError(text, ctx);
+        else ctx.emit({ type: "notice", tone: refused ? "error" : "info", text });
       }
       return;
     }
@@ -333,11 +354,7 @@ export function createClaudeAdapter(): AgentAdapter {
     const cost = frame.total_cost_usd;
     if (typeof cost === "number") ctx.emit({ type: "usage", usage: { costUsd: cost } });
     if (frame.is_error === true) {
-      ctx.emit({
-        type: "notice",
-        tone: "error",
-        text: asString(frame.result) ?? "The turn failed.",
-      });
+      emitTurnError(asString(frame.result) ?? "The turn failed.", ctx);
     }
     ctx.emit({ type: "turn-end" });
   }
@@ -466,7 +483,7 @@ export function createClaudeAdapter(): AgentAdapter {
         }
         case "assistant": {
           const message = asRecord(frame.message);
-          if (message) handleAssistant(message, ctx);
+          if (message) handleAssistant(message, frame, ctx);
           return;
         }
         case "user": {
@@ -489,6 +506,7 @@ export function createClaudeAdapter(): AgentAdapter {
     },
 
     prompt: (text, ctx) => {
+      seenTurnErrors.clear();
       ctx.emit({ type: "user", text });
       ctx.emit({ type: "status", status: "working" });
       ctx.send({

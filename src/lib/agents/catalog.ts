@@ -238,8 +238,8 @@ export function agentPresentation(agent: AgentId, program: string): AgentPresent
     return {
       label: "Claudex",
       mark: "DX",
-      // Distinct from Claude Code's terracotta — Claudex is a local proxy layer.
-      accent: "#7c9cff",
+      // Warm custom color shared by the Claudex icon and all activity states.
+      accent: "#dcc09d",
     };
   }
   const definition = AGENTS[agent];

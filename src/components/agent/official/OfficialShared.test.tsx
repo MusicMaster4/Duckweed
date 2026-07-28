@@ -1,15 +1,81 @@
 import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 
+import type { AgentId, AgentItem, AgentSessionState } from "../../../lib/agents/types";
 import { AgentProviderIcon } from "../AgentProviderIcon";
-import { shouldDockCodexPrompt } from "./ChatGPTExperience";
+import { CursorExperience } from "../provider/CursorExperience";
+import { OpenCodeExperience } from "../provider/OpenCodeExperience";
+import { ChatGPTExperience, shouldDockCodexPrompt } from "./ChatGPTExperience";
 import { ClaudeExperience } from "./ClaudeExperience";
+import { GrokDotMatrix, GrokExperience } from "./GrokExperience";
 import {
-  GrokDotMatrix,
-  GrokExperience,
-  hiddenGrokProgressMessages,
-} from "./GrokExperience";
-import { activityGroups, AssistantMarkdown, ProviderEmpty } from "./OfficialShared";
+  activeAssistantId,
+  activityGroups,
+  AssistantMarkdown,
+  continuedAssistantIds,
+  ProviderEmpty,
+} from "./OfficialShared";
+
+function activitySession(agent: AgentId, items: AgentItem[]): AgentSessionState {
+  return {
+    termId: `${agent}-latest-activity`,
+    agent,
+    program: agent,
+    label:
+      agent === "codex"
+        ? "Codex"
+        : agent === "claude"
+          ? "Claude Code"
+          : agent === "grok"
+            ? "Grok Build"
+            : agent === "cursor"
+              ? "Cursor Agent"
+              : "OpenCode",
+    mark: agent.slice(0, 2).toUpperCase(),
+    accent: "#7ea6ff",
+    status: "working",
+    cwd: "H:\\project",
+    model: null,
+    effort: null,
+    models: [],
+    sessionId: null,
+    items,
+    pending: [],
+    permission: null,
+    usage: { inputTokens: 0, outputTokens: 0, costUsd: null, contextUsed: null },
+    error: null,
+    commands: [],
+    started: true,
+  };
+}
+
+function renderAgentActivity(agent: AgentId, items: AgentItem[]): string {
+  const session = activitySession(agent, items);
+  const props = {
+    items,
+    termId: session.termId,
+    agent,
+    status: session.status,
+    started: session.started,
+    label: session.label,
+    mark: session.mark,
+    program: session.program,
+    cwd: session.cwd,
+  };
+
+  switch (agent) {
+    case "codex":
+      return renderToStaticMarkup(<ChatGPTExperience {...props} />);
+    case "claude":
+      return renderToStaticMarkup(<ClaudeExperience {...props} />);
+    case "grok":
+      return renderToStaticMarkup(<GrokExperience {...props} />);
+    case "cursor":
+      return renderToStaticMarkup(<CursorExperience session={session} items={items} />);
+    case "opencode":
+      return renderToStaticMarkup(<OpenCodeExperience session={session} items={items} />);
+  }
+}
 
 describe("official agent presentation", () => {
   test("renders agent markdown as structure instead of literal markers", () => {
@@ -27,10 +93,63 @@ describe("official agent presentation", () => {
     expect(html).not.toContain("**important**");
   });
 
+  test("renders Markdown tables with inline formatting and alignment", () => {
+    const html = renderToStaticMarkup(
+      <AssistantMarkdown
+        text={[
+          "Priority matrix",
+          "",
+          "| # | Improvement | Impact | Risk if ignored |",
+          "|---:|:------------|:------:|-----------------|",
+          "| 1 | **Virtualize** streams | High | Jank on long sessions |",
+          "| 2 | `Shared UI` | Medium | Forever-N skins |",
+        ].join("\n")}
+      />,
+    );
+
+    expect(html).toContain('class="official-markdown-table-wrap"');
+    expect(html).toContain("<table>");
+    expect(html).toContain('<th style="text-align:right">#</th>');
+    expect(html).toContain('<th style="text-align:center">Impact</th>');
+    expect(html).toContain("<strong>Virtualize</strong> streams");
+    expect(html).toContain("<code>Shared UI</code>");
+    expect(html).not.toContain("|---:|");
+  });
+
+  test("supports tables without outer pipes and pipes inside inline code", () => {
+    const html = renderToStaticMarkup(
+      <AssistantMarkdown
+        text={"Command | Result\n--- | ---\n`foo | bar` | Passed\nA \\| B | Kept together"}
+      />,
+    );
+
+    expect(html).toContain('<th style="text-align:left">Command</th>');
+    expect(html).toContain("<code>foo | bar</code>");
+    expect(html).toContain('<td style="text-align:left">Passed</td>');
+    expect(html).toContain('<td style="text-align:left">A | B</td>');
+  });
+
   test("escapes HTML supplied by an agent", () => {
     const html = renderToStaticMarkup(<AssistantMarkdown text={'<script>alert("x")</script>'} />);
     expect(html).toContain("&lt;script&gt;");
     expect(html).not.toContain("<script>");
+  });
+
+  test("renders Markdown and bare http links as external links", () => {
+    const html = renderToStaticMarkup(
+      <AssistantMarkdown
+        text={
+          "Open [the docs](https://example.com/docs) or visit https://example.com/billing."
+        }
+      />,
+    );
+
+    expect(html).toContain(
+      '<a href="https://example.com/docs" target="_blank" rel="noreferrer">the docs</a>',
+    );
+    expect(html).toContain(
+      '<a href="https://example.com/billing" target="_blank" rel="noreferrer">https://example.com/billing</a>.',
+    );
   });
 
   test("settles the Grok matrix with every point dimmed", () => {
@@ -41,7 +160,7 @@ describe("official agent presentation", () => {
     expect(html).not.toContain("<animate");
   });
 
-  test("interleaves Grok thoughts while collapsing tools to the latest call", () => {
+  test("keeps Grok progress comments between their activity phases", () => {
     const fullThought =
       "I should inspect the package metadata, then compare the entry points before answering. " +
       "This final sentence must remain available when the completed thought is expanded.";
@@ -108,27 +227,145 @@ describe("official agent presentation", () => {
       />,
     );
 
-    expect(html).not.toContain("grok-trace");
-    expect(html.match(/grok-thought/g)?.length).toBeGreaterThan(1);
-    expect(html).toContain("grok-tool-history");
+    expect(html.match(/agent-activity-cluster/g)?.length).toBe(1);
+    expect(html.match(/agent-activity-pulse/g)?.length).toBe(1);
+    expect(html.match(/>Thinking</g)?.length).toBe(1);
     expect(html).toContain("2 tool calls");
+    expect(html).toContain("Now I should inspect the frontend entry point.");
     expect(html).toContain("Read frontend entry");
     expect(html).not.toContain("Read package metadata");
-    expect(html).not.toContain("I will inspect the metadata now.");
-    expect(html).toContain("grok-thought-body");
-    expect(html).toContain("This final sentence must remain available");
+    expect(html).toContain("I will inspect the metadata now.");
+    expect(html).toContain("is-interim-update");
+    expect(html).not.toContain("This final sentence must remain available");
     expect(html).toContain("<h3>Report</h3>");
     expect(html).toContain("<strong>Duckweed</strong>");
-    expect(html.indexOf("Now I should inspect the frontend entry point.")).toBeLessThan(
-      html.indexOf("Read frontend entry"),
+    expect(html.indexOf("I will inspect the metadata now.")).toBeLessThan(
+      html.indexOf("Now I should inspect the frontend entry point."),
     );
   });
 
-  test("does not flash Grok planning prose before its first tool call", () => {
-    const hidden = hiddenGrokProgressMessages(
-      [
+  for (const agent of ["codex", "claude", "grok", "cursor", "opencode"] as const) {
+    test(`${agent} always shows the full latest thinking trace and latest tool call`, () => {
+      const items: AgentItem[] = [
+        { kind: "user", id: "u1", at: 1, text: "Inspect the project" },
+        {
+          kind: "thinking",
+          id: "thinking-old",
+          at: 2,
+          text: "OLD_THINKING_TRACE",
+          streaming: false,
+        },
+        {
+          kind: "tool",
+          id: "tool-old",
+          at: 3,
+          callId: "call-old",
+          name: "Read",
+          tool: "read",
+          title: "OLD_TOOL_CALL",
+          status: "done",
+          command: null,
+          output: "",
+          changes: [],
+        },
+        {
+          kind: "thinking",
+          id: "thinking-latest",
+          at: 4,
+          text: "LATEST THINKING FIRST LINE\n\nLATEST THINKING FINAL LINE",
+          streaming: true,
+        },
+        {
+          kind: "tool",
+          id: "tool-latest",
+          at: 5,
+          callId: "call-latest",
+          name: "Search",
+          tool: "search",
+          title: "LATEST_TOOL_CALL",
+          status: "running",
+          command: null,
+          output: "",
+          changes: [],
+        },
+      ];
+      const html = renderAgentActivity(agent, items);
+
+      expect(html.match(/agent-activity-history is-thinking/g)).toHaveLength(1);
+      expect(html.match(/agent-activity-history is-tools/g)).toHaveLength(1);
+      expect(html).toContain("LATEST THINKING FIRST LINE");
+      expect(html).toContain("LATEST THINKING FINAL LINE");
+      expect(html).toContain("LATEST_TOOL_CALL");
+      expect(html).not.toContain("OLD_THINKING_TRACE");
+      expect(html).not.toContain("OLD_TOOL_CALL");
+      expect(html).not.toContain("2 traces");
+      expect(html).toContain("2 tool calls");
+      expect(html).toContain("official-chevron");
+    });
+  }
+
+  for (const agent of ["codex", "claude", "grok", "cursor", "opencode"] as const) {
+    test(`${agent} preserves an interim comment and moves fresh activity below it`, () => {
+      const items: AgentItem[] = [
+        { kind: "user", id: "user", at: 1, text: "Inspect" },
+        {
+          kind: "thinking",
+          id: "thinking-before",
+          at: 2,
+          text: "Reviewing the entry point",
+          streaming: false,
+        },
+        {
+          kind: "assistant",
+          id: "interim",
+          at: 3,
+          text: "I found the entry point. I am checking the callers now.",
+          streaming: true,
+        },
+        {
+          kind: "thinking",
+          id: "thinking-after",
+          at: 4,
+          text: "Checking every caller in full",
+          streaming: false,
+        },
+        {
+          kind: "tool",
+          id: "tool-after",
+          at: 5,
+          callId: "call-after",
+          name: "Search",
+          tool: "search",
+          title: "Find entry point callers",
+          status: "running",
+          command: null,
+          output: "",
+          changes: [],
+        },
+      ];
+      const html = renderAgentActivity(agent, items);
+
+      expect(html).toContain("I found the entry point. I am checking the callers now.");
+      expect(html).toContain("is-interim-update");
+      expect(html).not.toContain("Reviewing the entry point");
+      expect(html.match(/agent-activity-cluster/g)).toHaveLength(1);
+      expect(html.indexOf("I found the entry point. I am checking the callers now.")).toBeLessThan(
+        html.indexOf("Checking every caller in full"),
+      );
+      if (agent === "cursor") {
+        expect(html).toContain("cx-prose is-interim-update");
+      } else if (agent === "opencode") {
+        expect(html).toContain("oc-prose is-interim-update");
+      } else {
+        expect(html).not.toContain("official-stream-caret");
+      }
+    });
+  }
+
+  test("keeps Grok planning prose visible when work continues", () => {
+    const html = renderAgentActivity("grok", [
         { kind: "user", id: "u1", at: 1, text: "Inspect" },
-        { kind: "thinking", id: "t1", at: 2, text: "Planning", streaming: true },
+        { kind: "thinking", id: "t1", at: 2, text: "Planning", streaming: false },
         {
           kind: "assistant",
           id: "progress",
@@ -136,10 +373,25 @@ describe("official agent presentation", () => {
           text: "I will inspect the repository now.",
           streaming: true,
         },
-      ],
-      true,
+        {
+          kind: "tool",
+          id: "tool-after-comment",
+          at: 4,
+          callId: "call-after-comment",
+          name: "Read",
+          tool: "read",
+          title: "Read repository",
+          status: "running",
+          command: null,
+          output: "",
+          changes: [],
+        },
+      ]);
+    expect(html).toContain("I will inspect the repository now.");
+    expect(html).toContain("is-interim-update");
+    expect(html.indexOf("I will inspect the repository now.")).toBeLessThan(
+      html.indexOf("Read repository"),
     );
-    expect(hidden.has("progress")).toBe(true);
   });
 
   test("does not label prose as the Grok answer while its latest tool is running", () => {
@@ -178,7 +430,7 @@ describe("official agent presentation", () => {
         ]}
       />,
     );
-    expect(html).not.toContain("This is still progress narration.");
+    expect(html).toContain("This is still progress narration.");
     expect(html).not.toContain("grok-answer-layer");
   });
 
@@ -188,7 +440,7 @@ describe("official agent presentation", () => {
     expect(html).not.toContain(">CX<");
   });
 
-  test("keeps every Claude command but removes Thinking after completion", () => {
+  test("collapses completed Claude activity to its latest trace and tool call", () => {
     const html = renderToStaticMarkup(
       <ClaudeExperience
         agent="claude"
@@ -230,11 +482,12 @@ describe("official agent presentation", () => {
         ]}
       />,
     );
-    expect(html).toContain("claude-completed-tools");
-    expect(html).toContain("Read package metadata");
+    expect(html).toContain("agent-activity-cluster");
+    expect(html).toContain("2 tool calls");
+    expect(html).toContain(">Thinking<");
+    expect(html).not.toContain("Read package metadata");
     expect(html).toContain("Run tests");
-    expect(html).not.toContain("claude-trace-head");
-    expect(html).not.toContain(">Thinking<");
+    expect(html).not.toContain("Get-Content package.json");
   });
 
   test("keeps activity grouped within its own user turn", () => {
@@ -279,6 +532,41 @@ describe("official agent presentation", () => {
     expect(groups[1].answerId).toBe("answer-2");
   });
 
+  test("starts fresh activity below an interim assistant comment", () => {
+    const items: AgentItem[] = [
+      { kind: "user", id: "user", at: 1, text: "Inspect" },
+      { kind: "thinking", id: "thinking-1", at: 2, text: "First phase", streaming: false },
+      {
+        kind: "assistant",
+        id: "comment",
+        at: 3,
+        text: "I found the entry point. I am checking its callers now.",
+        streaming: true,
+      },
+      {
+        kind: "tool",
+        id: "tool-2",
+        at: 4,
+        callId: "call-2",
+        name: "Search",
+        tool: "search",
+        title: "Find callers",
+        status: "running",
+        command: null,
+        output: "",
+        changes: [],
+      },
+    ];
+
+    const groups = activityGroups(items);
+    expect(groups).toHaveLength(2);
+    expect(groups[0].activities.map((item) => item.id)).toEqual(["thinking-1"]);
+    expect(groups[0].replacedByCommentId).toBe("comment");
+    expect(groups[1].activities.map((item) => item.id)).toEqual(["tool-2"]);
+    expect(continuedAssistantIds(items).has("comment")).toBe(true);
+    expect(activeAssistantId(items, true)).toBe(null);
+  });
+
   test("uses a single provider mark plus an ASCII startup animation", () => {
     const html = renderToStaticMarkup(
       <ProviderEmpty
@@ -293,6 +581,35 @@ describe("official agent presentation", () => {
     expect(html.match(/agent-provider-icon/g)).toHaveLength(1);
     expect(html).toContain("agent-ascii-loader");
     expect(html).toContain("Starting session");
+  });
+
+  test("uses the shared centered startup state for OpenCode", () => {
+    const session: AgentSessionState = {
+      termId: "opencode-empty-state",
+      agent: "opencode",
+      program: "opencode",
+      label: "OpenCode",
+      mark: "OC",
+      accent: "#7be05a",
+      status: "starting",
+      cwd: "H:\\project",
+      model: null,
+      effort: null,
+      models: [],
+      sessionId: null,
+      items: [],
+      pending: [],
+      permission: null,
+      usage: { inputTokens: 0, outputTokens: 0, costUsd: null, contextUsed: null },
+      error: null,
+      commands: [],
+      started: false,
+    };
+    const html = renderToStaticMarkup(<OpenCodeExperience session={session} items={[]} />);
+
+    expect(html).toContain("official-empty");
+    expect(html).toContain("OpenCode");
+    expect(html).not.toContain("oc-open");
   });
 
   test("docks an optimistic first Codex prompt while the handshake finishes", () => {

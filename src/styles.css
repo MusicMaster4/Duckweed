@@ -5545,10 +5545,6 @@ body.is-resizing * {
   stroke: none;
 }
 
-.agent-provider-icon.is-claudex {
-  filter: saturate(0.35) hue-rotate(165deg) brightness(1.25);
-}
-
 .agent-provider-icon.is-cursor svg {
   fill: none;
   stroke: currentColor;

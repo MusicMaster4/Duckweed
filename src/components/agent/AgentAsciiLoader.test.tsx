@@ -25,7 +25,7 @@ describe("agent startup animation", () => {
   });
 
   test("offers a pool to choose from rather than one animation per provider", () => {
-    expect(ASCII_ANIMATIONS.length).toBeGreaterThanOrEqual(40);
+    expect(ASCII_ANIMATIONS.length).toBeGreaterThanOrEqual(36);
   });
 
   /**

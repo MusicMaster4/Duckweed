@@ -282,6 +282,35 @@ describe("claude adapter", () => {
     expect(notice).toMatchObject({ tone: "error", text: "boom" });
   });
 
+  test("shows a repeated API failure once per submitted turn", () => {
+    const h = harness();
+    const text = "You've hit your session limit · resets 11:20pm (America/Fortaleza)";
+    const assistantError = {
+      type: "assistant",
+      error: "rate_limit",
+      is_api_error_message: true,
+      message: {
+        model: "<synthetic>",
+        role: "assistant",
+        content: [{ type: "text", text }],
+      },
+    };
+
+    h.adapter.prompt("analyze this folder", h.ctx);
+    h.feed(assistantError);
+    h.feed(assistantError);
+    h.feed({ type: "result", subtype: "success", is_error: true, result: text });
+
+    let notices = h.state().items.filter((item) => item.kind === "notice");
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toMatchObject({ tone: "error", text });
+
+    h.adapter.prompt("try again", h.ctx);
+    h.feed(assistantError);
+    notices = h.state().items.filter((item) => item.kind === "notice");
+    expect(notices).toHaveLength(2);
+  });
+
   test("sends a prompt as a stream-json user message", () => {
     const h = harness();
     h.adapter.prompt("fix the bug", h.ctx);

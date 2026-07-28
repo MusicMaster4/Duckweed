@@ -2,7 +2,13 @@ import { memo, useMemo, useState } from "react";
 
 import type { AgentItem, ToolItem, ToolStatus } from "../../../lib/agents/types";
 import { AgentAsciiLoader } from "../AgentAsciiLoader";
-import { AssistantMarkdown } from "../official/OfficialShared";
+import {
+  ActivityHistory,
+  activeAssistantId,
+  activityGroups,
+  AssistantMarkdown,
+  continuedAssistantIds,
+} from "../official/OfficialShared";
 import { ChangeSet, Disclosure, ScreenReaderText, useTicker } from "./ProviderExperienceParts";
 import {
   activitySummary,
@@ -10,7 +16,6 @@ import {
   formatElapsed,
   phaseOf,
   planSummary,
-  tailLine,
   turnStart,
   type PhaseKind,
   type PlanSummary,
@@ -138,29 +143,6 @@ function CursorTracker({ plan }: { plan: PlanSummary }) {
           {plan.active ? current.text : `next · ${current.text}`}
         </span>
       )}
-    </div>
-  );
-}
-
-function CursorThinking({ text, streaming }: { text: string; streaming: boolean }) {
-  const [open, setOpen] = useState(false);
-  return (
-    <div className={`cx-think${streaming ? " is-streaming" : ""}`}>
-      <Disclosure
-        open={open}
-        onToggle={() => setOpen(!open)}
-        className="cx-think-head"
-        panelClassName="cx-think-body"
-        head={
-          <>
-            <span className="cx-think-label">Reasoning</span>
-            {!open && <span className="cx-think-peek">{tailLine(text)}</span>}
-            <span className="cx-chevron" aria-hidden="true" data-open={open} />
-          </>
-        }
-      >
-        <div className="cx-think-text">{text}</div>
-      </Disclosure>
     </div>
   );
 }
@@ -303,7 +285,17 @@ function CursorPlan({ steps }: { steps: PlanSummary["steps"] }) {
  * frame, and only the live block at the bottom has changed. `now` is handed to
  * running rows only, so a ticking clock does not invalidate finished ones.
  */
-const CursorNode = memo(function CursorNode({ item, now }: { item: AgentItem; now: number }) {
+const CursorNode = memo(function CursorNode({
+  item,
+  now,
+  continued = false,
+  showStreaming = false,
+}: {
+  item: AgentItem;
+  now: number;
+  continued?: boolean;
+  showStreaming?: boolean;
+}) {
   const live = item.kind === "tool" && (item.status === "running" || item.status === "pending");
   const elapsed = live && now > 0 ? formatElapsed(now - item.at) : null;
 
@@ -313,11 +305,14 @@ const CursorNode = memo(function CursorNode({ item, now }: { item: AgentItem; no
       <div className="cx-body">
         {item.kind === "user" && <p className="cx-said">{item.text}</p>}
         {item.kind === "assistant" && (
-          <div className={`cx-prose${item.streaming ? " is-streaming" : ""}`}>
+          <div
+            className={`cx-prose${showStreaming ? " is-streaming" : ""}${
+              continued ? " is-interim-update" : ""
+            }`}
+          >
             <AssistantMarkdown text={item.text} />
           </div>
         )}
-        {item.kind === "thinking" && <CursorThinking text={item.text} streaming={item.streaming} />}
         {item.kind === "plan" && <CursorPlan steps={item.steps} />}
         {item.kind === "notice" && <div className={`cx-notice is-${item.tone}`}>{item.text}</div>}
         {item.kind === "tool" &&
@@ -335,11 +330,35 @@ export function CursorExperience({ session, items, className }: ProviderExperien
   const list = items ?? session.items;
   const plan = useMemo(() => planSummary(list), [list]);
   const activity = useMemo(() => activitySummary(list), [list]);
+  const groups = useMemo(() => activityGroups(list), [list]);
+  const continuedIds = useMemo(() => continuedAssistantIds(list), [list]);
+  const liveAssistantId = useMemo(
+    () => activeAssistantId(list, session.status === "working"),
+    [list, session.status],
+  );
+  const groupByActivity = useMemo(
+    () =>
+      new Map(
+        groups.flatMap((group) =>
+          group.activities.map((item) => [item.id, group] as const),
+        ),
+      ),
+    [groups],
+  );
   const phase = phaseOf(session, list);
   const now = useTicker(phase.busy);
   const started = turnStart(list);
   const turnFor = phase.busy && started !== null ? formatElapsed(now - started) : null;
   const files = activity.files.length;
+  let latestUserIndex = -1;
+  for (let index = 0; index < list.length; index += 1) {
+    if (list[index].kind === "user") latestUserIndex = index;
+  }
+  let liveGroup: (typeof groups)[number] | undefined;
+  for (const group of groups) {
+    if (group.firstIndex > latestUserIndex) liveGroup = group;
+  }
+  const needsEmptyLiveTrace = session.status === "working" && !liveGroup;
 
   return (
     <section className={`cx${className ? ` ${className}` : ""}`} data-phase={phase.kind}>
@@ -405,17 +424,55 @@ export function CursorExperience({ session, items, className }: ProviderExperien
 
       {list.length > 0 && (
         <ol className="cx-rail">
-          {list.map((item) => (
-            <CursorNode
-              key={item.id}
-              item={item}
-              now={
-                item.kind === "tool" && (item.status === "running" || item.status === "pending")
-                  ? now
-                  : 0
+          {list.map((item) => {
+            if (item.kind === "thinking" || item.kind === "tool") {
+              const group = groupByActivity.get(item.id);
+              if (
+                !group ||
+                item.id !== group.firstId ||
+                group.replacedByCommentId
+              ) {
+                return null;
               }
-            />
-          ))}
+              const hasThoughts = group.activities.some((activityItem) => activityItem.kind === "thinking");
+              const working = session.status === "working" && group === liveGroup;
+              return (
+                <li
+                  key={`cursor-activity-${group.firstId}`}
+                  className="cx-node is-activity"
+                  data-mark={hasThoughts ? "think" : "tool"}
+                  data-live={working || undefined}
+                >
+                  <span className="cx-mark" aria-hidden="true" />
+                  <div className="cx-body">
+                    <ActivityHistory
+                      activities={group.activities}
+                      variant="cursor"
+                      working={working}
+                      showLatestThinking={group === groups[groups.length - 1]}
+                    />
+                  </div>
+                </li>
+              );
+            }
+            return (
+              <CursorNode
+                key={item.id}
+                item={item}
+                now={0}
+                continued={item.kind === "assistant" && continuedIds.has(item.id)}
+                showStreaming={item.kind === "assistant" && item.id === liveAssistantId}
+              />
+            );
+          })}
+          {needsEmptyLiveTrace && (
+            <li className="cx-node is-activity" data-mark="think" data-live>
+              <span className="cx-mark" aria-hidden="true" />
+              <div className="cx-body">
+                <ActivityHistory activities={[]} variant="cursor" working />
+              </div>
+            </li>
+          )}
         </ol>
       )}
     </section>

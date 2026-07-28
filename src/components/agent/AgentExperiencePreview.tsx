@@ -77,10 +77,19 @@ function previewItems(): AgentItem[] {
       changes: [],
     },
     {
+      kind: "assistant",
+      id: "preview-progress",
+      at: now - 20_000,
+      text:
+        "I found the compatibility boundary. I am checking every streamed update before I finish.",
+      streaming: true,
+    },
+    {
       kind: "thinking",
       id: "preview-thinking-2",
       at: now - 16_000,
-      text: "Reconciling the parser changes with streamed tool updates",
+      text:
+        "Reconciling the parser changes with streamed tool updates.\n\nThe next step is to verify that older payload shapes still normalize without losing tool status, file changes, or assistant progress comments.",
       streaming: true,
     },
     {
@@ -141,7 +150,7 @@ export function AgentExperiencePreview() {
 
   useEffect(() => {
     if (!playTurn) return;
-    const timers = [900, 1450, 2050, 2700, 3300, 3900, 4550].map((delay, index) =>
+    const timers = [900, 1450, 2050, 2700, 3300, 3900, 4550, 5150].map((delay, index) =>
       window.setTimeout(() => setVisibleCount(index + 2), delay),
     );
     return () => timers.forEach((timer) => window.clearTimeout(timer));
@@ -150,7 +159,7 @@ export function AgentExperiencePreview() {
   const replay = () => {
     setVisibleCount(0);
     window.requestAnimationFrame(() => setVisibleCount(1));
-    [900, 1450, 2050, 2700, 3300, 3900, 4550].forEach((delay, index) => {
+    [900, 1450, 2050, 2700, 3300, 3900, 4550, 5150].forEach((delay, index) => {
       window.setTimeout(() => setVisibleCount(index + 2), delay);
     });
   };

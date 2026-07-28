@@ -520,6 +520,10 @@
   animation: cx-ping 1.6s ease-out infinite;
 }
 
+.cx-node.is-activity[data-live] .cx-mark::after {
+  display: none;
+}
+
 @keyframes cx-ping {
   0% {
     opacity: 0.7;
@@ -555,6 +559,12 @@
   white-space: pre-wrap;
   word-break: break-word;
   user-select: text;
+}
+
+.cx-prose.is-interim-update {
+  margin-bottom: 2px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.075);
 }
 
 .cx-prose.is-streaming::after {
@@ -1481,6 +1491,12 @@ button.cx-sub-head:hover {
   user-select: text;
 }
 
+.oc-prose.is-interim-update {
+  margin-bottom: 2px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.075);
+}
+
 .oc-prose .official-markdown,
 .cx-prose .official-markdown,
 .oc-think-text .official-markdown {
@@ -2035,16 +2051,23 @@ button.oc-sub-head:hover {
 .oc-mod[data-lane="say"],
 .oc-mod[data-lane="think"],
 .oc-mod[data-lane="plan"],
-.oc-mod[data-lane="note"] {
+.oc-mod[data-lane="note"],
+.oc-mod[data-lane="activity"] {
   display: block;
 }
 
 .oc-mod[data-lane="say"] .oc-mod-body,
 .oc-mod[data-lane="think"] .oc-mod-body,
 .oc-mod[data-lane="plan"] .oc-mod-body,
-.oc-mod[data-lane="note"] .oc-mod-body {
+.oc-mod[data-lane="note"] .oc-mod-body,
+.oc-mod[data-lane="activity"] .oc-mod-body {
   padding-left: 2px;
   border-left: 0;
+}
+
+.oc-mod[data-lane="activity"] .oc-mod-gutter,
+.oc-mod[data-lane="activity"][data-live] .oc-mod-body::before {
+  display: none;
 }
 
 .oc-said {

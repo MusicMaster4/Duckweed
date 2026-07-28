@@ -1,8 +1,14 @@
 import { memo, useMemo, useState } from "react";
 
 import type { AgentItem, AgentPlanStep, ToolItem, ToolStatus } from "../../../lib/agents/types";
-import { AgentAsciiLoader } from "../AgentAsciiLoader";
-import { AssistantMarkdown } from "../official/OfficialShared";
+import {
+  ActivityHistory,
+  activeAssistantId,
+  activityGroups,
+  AssistantMarkdown,
+  continuedAssistantIds,
+  ProviderEmpty,
+} from "../official/OfficialShared";
 import { ChangeSet, Disclosure, ScreenReaderText, useTicker } from "./ProviderExperienceParts";
 import {
   activitySummary,
@@ -383,7 +389,17 @@ function OpenCodeTool({ item, elapsed }: { item: ToolItem; elapsed: string | nul
   );
 }
 
-function OpenCodeItem({ item, now }: { item: AgentItem; now: number }) {
+function OpenCodeItem({
+  item,
+  now,
+  continued = false,
+  showStreaming = false,
+}: {
+  item: AgentItem;
+  now: number;
+  continued?: boolean;
+  showStreaming?: boolean;
+}) {
   const elapsed = isLive(item) && now > 0 ? formatElapsed(now - item.at) : null;
 
   switch (item.kind) {
@@ -391,7 +407,11 @@ function OpenCodeItem({ item, now }: { item: AgentItem; now: number }) {
       return <p className="oc-said">{item.text}</p>;
     case "assistant":
       return (
-        <div className={`oc-prose${item.streaming ? " is-streaming" : ""}`}>
+        <div
+          className={`oc-prose${showStreaming ? " is-streaming" : ""}${
+            continued ? " is-interim-update" : ""
+          }`}
+        >
           <AssistantMarkdown text={item.text} />
         </div>
       );
@@ -420,9 +440,13 @@ function OpenCodeItem({ item, now }: { item: AgentItem; now: number }) {
 const OpenCodeModule = memo(function OpenCodeModule({
   module,
   now,
+  continuedIds,
+  liveAssistantId,
 }: {
   module: Module;
   now: number;
+  continuedIds: Set<string>;
+  liveAssistantId: string | null;
 }) {
   const live = module.items.some(isLive);
   const failed = module.items.some((item) => item.kind === "tool" && item.status === "error");
@@ -443,7 +467,13 @@ const OpenCodeModule = memo(function OpenCodeModule({
       </div>
       <div className="oc-mod-body">
         {module.items.map((item) => (
-          <OpenCodeItem key={item.id} item={item} now={isLive(item) ? now : 0} />
+          <OpenCodeItem
+            key={item.id}
+            item={item}
+            now={isLive(item) ? now : 0}
+            continued={item.kind === "assistant" && continuedIds.has(item.id)}
+            showStreaming={item.kind === "assistant" && item.id === liveAssistantId}
+          />
         ))}
       </div>
     </section>
@@ -466,34 +496,54 @@ const TALLY_LANE: Record<string, Lane> = {
 export function OpenCodeExperience({ session, items, className }: ProviderExperienceProps) {
   const list = items ?? session.items;
   const modules = useMemo(() => toModules(list), [list]);
+  const groups = useMemo(() => activityGroups(list), [list]);
+  const continuedIds = useMemo(() => continuedAssistantIds(list), [list]);
+  const liveAssistantId = useMemo(
+    () => activeAssistantId(list, session.status === "working"),
+    [list, session.status],
+  );
+  const groupByActivity = useMemo(
+    () =>
+      new Map(
+        groups.flatMap((group) =>
+          group.activities.map((item) => [item.id, group] as const),
+        ),
+      ),
+    [groups],
+  );
   const plan = useMemo(() => planSummary(list), [list]);
   const activity = useMemo(() => activitySummary(list), [list]);
   const phase = phaseOf(session, list);
   const now = useTicker(phase.busy);
   const started = turnStart(list);
   const turnFor = phase.busy && started !== null ? formatElapsed(now - started) : null;
+  let latestUserIndex = -1;
+  for (let index = 0; index < list.length; index += 1) {
+    if (list[index].kind === "user") latestUserIndex = index;
+  }
+  let liveGroup: (typeof groups)[number] | undefined;
+  for (const group of groups) {
+    if (group.firstIndex > latestUserIndex) liveGroup = group;
+  }
+  const needsEmptyLiveTrace = session.status === "working" && !liveGroup;
+
+  // Outside the `.oc` column, like the official surfaces do it: the empty state
+  // centres itself against the full pane, not against the transcript's width.
+  if (!session.started && session.status !== "error") {
+    return (
+      <ProviderEmpty
+        agent={session.agent}
+        termId={session.termId}
+        label={session.label}
+        program={session.program}
+        cwd={session.cwd}
+        status={session.status}
+      />
+    );
+  }
 
   return (
     <section className={`oc${className ? ` ${className}` : ""}`} data-phase={phase.kind}>
-      {!session.started && session.status !== "error" && (
-        <div className="oc-open">
-          <OpenCodeMark phase={phase.kind} large />
-          <div className="oc-open-text">
-            <strong>{session.label}</strong>
-            <AgentAsciiLoader
-              agent="opencode"
-              termId={session.termId}
-              label="Starting session"
-              progress={phase.kind === "starting"}
-            />
-            {phase.kind !== "starting" && (
-              <span>Say what to build. Any provider, any model, this folder.</span>
-            )}
-            <code>{session.cwd}</code>
-          </div>
-        </div>
-      )}
-
       {session.started && (
         <header className="oc-bar" data-busy={phase.busy || undefined}>
           <div className="oc-bar-row">
@@ -542,13 +592,59 @@ export function OpenCodeExperience({ session, items, className }: ProviderExperi
         <div className="oc-lanes">
           {/* Only a module with a live call gets the ticking clock: handing
               `now` to a finished module would re-render it once a second. */}
-          {modules.map((module) => (
-            <OpenCodeModule
-              key={module.key}
-              module={module}
-              now={module.items.some(isLive) ? now : 0}
-            />
-          ))}
+          {modules.map((module) => {
+            const first = module.items[0];
+            if (first.kind === "thinking" || first.kind === "tool") {
+              const group = groupByActivity.get(first.id);
+              if (
+                !group ||
+                module.key !== group.firstId ||
+                group.replacedByCommentId
+              ) {
+                return null;
+              }
+              const working = session.status === "working" && group === liveGroup;
+              return (
+                <section
+                  key={`opencode-activity-${group.firstId}`}
+                  className="oc-mod is-activity"
+                  data-lane="activity"
+                  data-live={working || undefined}
+                >
+                  <div className="oc-mod-gutter">
+                    <span className="oc-mod-tag">activity</span>
+                  </div>
+                  <div className="oc-mod-body">
+                    <ActivityHistory
+                      activities={group.activities}
+                      variant="opencode"
+                      working={working}
+                      showLatestThinking={group === groups[groups.length - 1]}
+                    />
+                  </div>
+                </section>
+              );
+            }
+            return (
+              <OpenCodeModule
+                key={module.key}
+                module={module}
+                now={module.items.some(isLive) ? now : 0}
+                continuedIds={continuedIds}
+                liveAssistantId={liveAssistantId}
+              />
+            );
+          })}
+          {needsEmptyLiveTrace && (
+            <section className="oc-mod is-activity" data-lane="activity" data-live>
+              <div className="oc-mod-gutter">
+                <span className="oc-mod-tag">activity</span>
+              </div>
+              <div className="oc-mod-body">
+                <ActivityHistory activities={[]} variant="opencode" working />
+              </div>
+            </section>
+          )}
         </div>
       )}
     </section>

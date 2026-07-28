@@ -374,6 +374,16 @@ function emit(session: Session, event: AgentEvent): void {
     ...inspectTurn(next.items),
   };
   const ended = isTurnEnd(turnEnd);
+
+  // Spend the flags that belonged to the turn which just became idle before
+  // releasing a queued prompt. `dispatch` starts the next turn synchronously
+  // and gives it fresh flags; clearing them afterwards would make that real
+  // user turn look like a synthetic resume/load when it eventually finishes.
+  if (next.status === "idle") {
+    session.interrupted = false;
+    session.userInitiatedTurn = false;
+  }
+
   if (releasingQueued) {
     const queued = session.queued.shift() as { text: string; echoed: boolean };
     if (!queued.echoed) {
@@ -383,13 +393,6 @@ function emit(session: Session, event: AgentEvent): void {
   }
   notify(session);
 
-  // The interrupt is spent on the idle it produced, so the next real turn end
-  // is announced normally. The user-initiated flag is spent too — a later
-  // synthetic working→idle must not inherit it.
-  if (next.status === "idle") {
-    session.interrupted = false;
-    session.userInitiatedTurn = false;
-  }
   // Config slash commands and synthetic idles still end the turn for the
   // protocol — they just do not earn a sound or unread flash.
   if (ended && isAnnounceableTurn(turnEnd)) {

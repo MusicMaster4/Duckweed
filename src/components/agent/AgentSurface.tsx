@@ -9,7 +9,16 @@ import {
 
 import { canResume } from "../../lib/agents/history";
 import * as agents from "../../lib/agents/session";
-import type { AgentSessionState, PlanItem } from "../../lib/agents/types";
+import type { AgentSessionState } from "../../lib/agents/types";
+import {
+  isAtScrollBottom,
+  shouldShowJumpToBottom,
+} from "../../lib/agentScroll";
+import {
+  COMPLETED_WORKFLOW_TTL_MS,
+  latestWorkflow as findLatestWorkflow,
+  workflowIsComplete,
+} from "../../lib/agentWorkflow";
 import { confirmCloseRunning } from "../../lib/confirmClose";
 import { AgentComposer } from "./AgentComposer";
 import { AgentPermission } from "./AgentPermission";
@@ -46,12 +55,8 @@ function workflowVariant(agent: AgentSessionState["agent"]): OfficialVariant | "
   return agent;
 }
 
-/** The newest provider plan is the one the fixed workflow dock tracks. */
-export function latestWorkflow(items: AgentSessionState["items"]): PlanItem | null {
-  for (let index = items.length - 1; index >= 0; index -= 1) {
-    if (items[index].kind === "plan") return items[index] as PlanItem;
-  }
-  return null;
+export function latestWorkflow(items: AgentSessionState["items"]) {
+  return findLatestWorkflow(items);
 }
 
 /** A compact signal for streamed text, tool output, diffs, and plan updates. */
@@ -110,13 +115,33 @@ export function AgentSurface({ termId, active, onClose }: Props) {
   // Following the stream is the default, but scrolling up to read something is
   // a deliberate act — new output must not yank the view back down.
   const pinnedRef = useRef(true);
-  const [followingBottom, setFollowingBottom] = useState(true);
+  const userPausedRef = useRef(false);
+  const lastScrollTopRef = useRef(0);
+  const [showJumpToBottom, setShowJumpToBottom] = useState(false);
   const timelineRevision = agentTimelineRevision(session?.items ?? []);
+  const workflow = latestWorkflow(session?.items ?? []);
+  const workflowComplete = workflowIsComplete(workflow, session?.status);
+  const [expiredWorkflowId, setExpiredWorkflowId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!workflow || !workflowComplete) {
+      setExpiredWorkflowId(null);
+      return;
+    }
+    setExpiredWorkflowId(null);
+    const timer = window.setTimeout(
+      () => setExpiredWorkflowId(workflow.id),
+      COMPLETED_WORKFLOW_TTL_MS,
+    );
+    return () => window.clearTimeout(timer);
+  }, [workflow?.id, workflowComplete]);
 
   useLayoutEffect(() => {
     const node = scrollRef.current;
     if (!node || !pinnedRef.current) return;
     node.scrollTop = node.scrollHeight;
+    lastScrollTopRef.current = node.scrollTop;
+    setShowJumpToBottom(false);
   }, [
     timelineRevision,
     session?.status,
@@ -128,21 +153,53 @@ export function AgentSurface({ termId, active, onClose }: Props) {
   useEffect(() => {
     const node = scrollRef.current;
     if (!node) return;
-    const onScroll = () => {
-      const distance = node.scrollHeight - node.scrollTop - node.clientHeight;
-      const following = distance < 40;
-      pinnedRef.current = following;
-      setFollowingBottom((current) => (current === following ? current : following));
+    const syncScrollState = () => {
+      const movedUp = node.scrollTop < lastScrollTopRef.current - 1;
+      if (movedUp) {
+        userPausedRef.current = true;
+        pinnedRef.current = false;
+      }
+      if (isAtScrollBottom(node)) {
+        userPausedRef.current = false;
+        pinnedRef.current = true;
+      }
+      setShowJumpToBottom(
+        shouldShowJumpToBottom(node, userPausedRef.current),
+      );
+      lastScrollTopRef.current = node.scrollTop;
     };
-    node.addEventListener("scroll", onScroll, { passive: true });
-    onScroll();
-    return () => node.removeEventListener("scroll", onScroll);
+    const followResize = () => {
+      if (pinnedRef.current) node.scrollTop = node.scrollHeight;
+      syncScrollState();
+    };
+    const resizeObserver = new ResizeObserver(followResize);
+    const observeChildren = () => {
+      for (const child of Array.from(node.children)) {
+        resizeObserver.observe(child);
+      }
+    };
+    const mutationObserver = new MutationObserver(() => {
+      observeChildren();
+      followResize();
+    });
+
+    node.addEventListener("scroll", syncScrollState, { passive: true });
+    resizeObserver.observe(node);
+    observeChildren();
+    mutationObserver.observe(node, { childList: true });
+    syncScrollState();
+    return () => {
+      node.removeEventListener("scroll", syncScrollState);
+      resizeObserver.disconnect();
+      mutationObserver.disconnect();
+    };
   }, []);
 
   if (!session) return null;
 
   const { usage } = session;
-  const workflow = latestWorkflow(session.items);
+  const visibleWorkflow =
+    workflow && workflow.id !== expiredWorkflowId ? workflow : null;
   const timelineItems = workflow
     ? session.items.filter((item) => item.kind !== "plan")
     : session.items;
@@ -177,7 +234,8 @@ export function AgentSurface({ termId, active, onClose }: Props) {
       return;
     }
     pinnedRef.current = true;
-    setFollowingBottom(true);
+    userPausedRef.current = false;
+    setShowJumpToBottom(false);
     agents.submit(termId, text);
   };
 
@@ -185,11 +243,10 @@ export function AgentSurface({ termId, active, onClose }: Props) {
     const node = scrollRef.current;
     if (!node) return;
     pinnedRef.current = true;
-    setFollowingBottom(true);
-    node.scrollTo({
-      top: node.scrollHeight,
-      behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
-    });
+    userPausedRef.current = false;
+    setShowJumpToBottom(false);
+    node.scrollTop = node.scrollHeight;
+    lastScrollTopRef.current = node.scrollTop;
   };
 
   /**
@@ -268,15 +325,7 @@ export function AgentSurface({ termId, active, onClose }: Props) {
         </button>
       </header>
 
-      <div
-        className="agent-scroll"
-        ref={scrollRef}
-        onWheelCapture={(event) => {
-          if (event.deltaY >= 0) return;
-          pinnedRef.current = false;
-          setFollowingBottom(false);
-        }}
-      >
+      <div className="agent-scroll" ref={scrollRef}>
         <AgentTimeline
           session={session}
           items={timelineItems}
@@ -333,7 +382,7 @@ export function AgentSurface({ termId, active, onClose }: Props) {
 
       {session.status !== "starting" && (
         <div className="agent-composer-shell">
-          {!followingBottom && (
+          {showJumpToBottom && (
             <button
               type="button"
               className="agent-jump-bottom"
@@ -347,9 +396,9 @@ export function AgentSurface({ termId, active, onClose }: Props) {
               <span>Jump to bottom</span>
             </button>
           )}
-          {workflow && (
+          {visibleWorkflow && (
             <div className="agent-workflow-dock">
-              <PlanTracker item={workflow} variant={workflowVariant(session.agent)} />
+              <PlanTracker item={visibleWorkflow} variant={workflowVariant(session.agent)} />
             </div>
           )}
           <AgentComposer
@@ -372,7 +421,8 @@ export function AgentSurface({ termId, active, onClose }: Props) {
           onPick={(chosen) => {
             setResumeQuery(null);
             pinnedRef.current = true;
-            setFollowingBottom(true);
+            userPausedRef.current = false;
+            setShowJumpToBottom(false);
             void agents.resume(termId, chosen.id, chosen.title).then((failure) => {
               // Only the relaunching agents can fail this way, and a failed
               // relaunch leaves no session to render the reason in. Handing

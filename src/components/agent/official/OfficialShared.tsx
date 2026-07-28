@@ -1,13 +1,15 @@
-import { useEffect, useMemo, useState, type ReactNode, type Ref } from "react";
+import { useEffect, useId, useMemo, useState, type ReactNode, type Ref } from "react";
 
 import type {
   AgentItem,
   AgentPlanStep,
   AgentSessionState,
   PlanItem,
+  ThinkingItem,
   ToolItem,
   ToolKind,
 } from "../../../lib/agents/types";
+import { openUrl } from "../../../lib/ipc";
 import { AgentAsciiLoader } from "../AgentAsciiLoader";
 import { AgentDiff } from "../AgentDiff";
 import { AgentProviderIcon } from "../AgentProviderIcon";
@@ -26,6 +28,7 @@ export interface ExperienceProps {
 }
 
 export type OfficialVariant = "chatgpt" | "claude" | "grok";
+export type ActivityVariant = OfficialVariant | "cursor" | "opencode";
 
 const TOOL_LABEL: Record<ToolKind, string> = {
   read: "Reading",
@@ -107,10 +110,34 @@ export function traceSummary(text: string, fallback = "Thinking"): string {
   return cleaned.length > 132 ? `${cleaned.slice(0, 129).trimEnd()}…` : cleaned;
 }
 
+function ExternalLink({
+  href,
+  children,
+}: {
+  href: string;
+  children: ReactNode;
+}) {
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noreferrer"
+      onClick={(event) => {
+        event.preventDefault();
+        void openUrl(href).catch((error) => {
+          console.warn("failed to open agent link", href, error);
+        });
+      }}
+    >
+      {children}
+    </a>
+  );
+}
+
 function inlineMarkdown(text: string, keyPrefix: string): ReactNode[] {
   const nodes: ReactNode[] = [];
   const token =
-    /(`[^`\n]+`|\*\*[^*\n]+\*\*|__[^_\n]+__|\[[^\]\n]+\]\(https?:\/\/[^)\s]+\)|\*[^*\n]+\*|_[^_\n]+_)/g;
+    /(`[^`\n]+`|\*\*[^*\n]+\*\*|__[^_\n]+__|\[[^\]\n]+\]\(https?:\/\/[^)\s]+\)|https?:\/\/[^\s<]+|\*[^*\n]+\*|_[^_\n]+_)/g;
   let cursor = 0;
   let match: RegExpExecArray | null;
 
@@ -126,13 +153,22 @@ function inlineMarkdown(text: string, keyPrefix: string): ReactNode[] {
       const link = /^\[([^\]]+)\]\((https?:\/\/[^)]+)\)$/.exec(value);
       nodes.push(
         link ? (
-          <a key={key} href={link[2]} target="_blank" rel="noreferrer">
+          <ExternalLink key={key} href={link[2]}>
             {link[1]}
-          </a>
+          </ExternalLink>
         ) : (
           value
         ),
       );
+    } else if (/^https?:\/\//.test(value)) {
+      const trailing = /[),.;:!?]+$/.exec(value)?.[0] ?? "";
+      const href = trailing ? value.slice(0, -trailing.length) : value;
+      nodes.push(
+        <ExternalLink key={key} href={href}>
+          {href}
+        </ExternalLink>,
+      );
+      if (trailing) nodes.push(trailing);
     } else {
       nodes.push(<em key={key}>{value.slice(1, -1)}</em>);
     }
@@ -153,6 +189,52 @@ function paragraphLines(lines: string[], key: string): ReactNode {
       ))}
     </p>
   );
+}
+
+type TableAlignment = "left" | "center" | "right" | undefined;
+
+function tableCells(line: string): string[] {
+  let source = line.trim();
+  if (source.startsWith("|")) source = source.slice(1);
+  if (source.endsWith("|") && !source.endsWith("\\|")) source = source.slice(0, -1);
+
+  const cells: string[] = [];
+  let cell = "";
+  let inCode = false;
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index];
+    if (character === "\\" && source[index + 1] === "|") {
+      cell += "|";
+      index += 1;
+    } else if (character === "`") {
+      inCode = !inCode;
+      cell += character;
+    } else if (character === "|" && !inCode) {
+      cells.push(cell.trim());
+      cell = "";
+    } else {
+      cell += character;
+    }
+  }
+  cells.push(cell.trim());
+  return cells;
+}
+
+function tableDelimiter(line: string): TableAlignment[] | null {
+  const cells = tableCells(line);
+  if (cells.length === 0 || cells.some((cell) => !/^:?-{3,}:?$/.test(cell))) return null;
+  return cells.map((cell) => {
+    if (cell.startsWith(":") && cell.endsWith(":")) return "center";
+    if (cell.endsWith(":")) return "right";
+    return "left";
+  });
+}
+
+function isTableStart(lines: string[], index: number): boolean {
+  if (index + 1 >= lines.length || !lines[index].includes("|")) return false;
+  const header = tableCells(lines[index]);
+  const alignment = tableDelimiter(lines[index + 1]);
+  return Boolean(alignment && header.length === alignment.length);
 }
 
 /**
@@ -198,6 +280,52 @@ export function AssistantMarkdown({ text }: { text: string }) {
         </Tag>,
       );
       index += 1;
+      continue;
+    }
+
+    if (isTableStart(lines, index)) {
+      const header = tableCells(line);
+      const alignment = tableDelimiter(lines[index + 1])!;
+      const rows: string[][] = [];
+      index += 2;
+      while (index < lines.length && lines[index].trim() && lines[index].includes("|")) {
+        const row = tableCells(lines[index]);
+        if (row.length !== header.length) break;
+        rows.push(row);
+        index += 1;
+      }
+      blocks.push(
+        <div
+          className="official-markdown-table-wrap"
+          key={`table-${index}`}
+          role="region"
+          aria-label="Scrollable table"
+          tabIndex={0}
+        >
+          <table>
+            <thead>
+              <tr>
+                {header.map((cell, cellIndex) => (
+                  <th key={cellIndex} style={{ textAlign: alignment[cellIndex] }}>
+                    {inlineMarkdown(cell, `table-${index}-head-${cellIndex}`)}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row, rowIndex) => (
+                <tr key={rowIndex}>
+                  {row.map((cell, cellIndex) => (
+                    <td key={cellIndex} style={{ textAlign: alignment[cellIndex] }}>
+                      {inlineMarkdown(cell, `table-${index}-${rowIndex}-${cellIndex}`)}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>,
+      );
       continue;
     }
 
@@ -254,6 +382,7 @@ export function AssistantMarkdown({ text }: { text: string }) {
       lines[index].trim() &&
       !/^```/.test(lines[index]) &&
       !/^(#{1,6})\s+/.test(lines[index]) &&
+      !isTableStart(lines, index) &&
       !/^\s*[-*+]\s+/.test(lines[index]) &&
       !/^\s*\d+[.)]\s+/.test(lines[index]) &&
       !/^\s*>\s?/.test(lines[index])
@@ -272,11 +401,13 @@ export function MessageItem({
   variant,
   className,
   elementRef,
+  showStreaming,
 }: {
   item: AgentItem;
   variant: OfficialVariant;
   className?: string;
   elementRef?: Ref<HTMLElement>;
+  showStreaming?: boolean;
 }) {
   if (item.kind === "user") {
     return (
@@ -289,15 +420,16 @@ export function MessageItem({
     );
   }
   if (item.kind === "assistant") {
+    const streaming = showStreaming ?? item.streaming;
     return (
       <article
         ref={elementRef}
         className={`official-answer official-answer--${variant}${
-          item.streaming ? " is-streaming" : ""
+          streaming ? " is-streaming" : ""
         }${className ? ` ${className}` : ""}`}
       >
         <AssistantMarkdown text={item.text} />
-        {item.streaming && <span className="official-stream-caret" aria-hidden="true" />}
+        {streaming && <span className="official-stream-caret" aria-hidden="true" />}
       </article>
     );
   }
@@ -383,11 +515,13 @@ export function ToolActivity({
   const hasOutput = item.output.trim().length > 0;
   const hasChanges = item.changes.length > 0;
   const expandable = hasOutput || hasChanges || Boolean(item.command);
-  const [open, setOpen] = useState(hasChanges || item.status === "error" || item.tool === "task");
+  const [open, setOpen] = useState(
+    !compact && (hasChanges || item.status === "error" || item.tool === "task"),
+  );
 
   useEffect(() => {
-    if (hasChanges) setOpen(true);
-  }, [hasChanges]);
+    if (hasChanges && !compact) setOpen(true);
+  }, [compact, hasChanges]);
 
   const insertions = useMemo(
     () => item.changes.reduce((sum, change) => sum + change.insertions, 0),
@@ -448,6 +582,187 @@ export function ToolActivity({
   );
 }
 
+function ActivityPulse({ active }: { active: boolean }) {
+  return (
+    <span
+      className={`agent-activity-pulse${active ? " is-active" : " is-settled"}`}
+      aria-hidden="true"
+    >
+      {Array.from({ length: 9 }, (_, index) => (
+        <span key={index} style={{ "--pulse-index": index } as React.CSSProperties} />
+      ))}
+    </span>
+  );
+}
+
+function activityStatus(item: ToolItem): string {
+  if (item.status === "error") return "Failed";
+  if (item.status === "done") return "Completed";
+  if (item.status === "pending") return "Queued";
+  return "Running";
+}
+
+function ThinkingHistory({
+  thoughts,
+  working,
+  showLatestFull,
+}: {
+  thoughts: ThinkingItem[];
+  working: boolean;
+  showLatestFull: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const panelId = useId();
+  const latest = showLatestFull ? thoughts[thoughts.length - 1] : undefined;
+  const active = working && (!latest || latest.streaming);
+  const earlierThoughts = showLatestFull ? thoughts.slice(0, -1) : thoughts;
+  const expandable = earlierThoughts.length > 0;
+
+  return (
+    <section
+      className={`agent-activity-history is-thinking${open ? " is-open" : ""}${
+        active ? " is-active" : ""
+      }`}
+    >
+      <button
+        type="button"
+        className="agent-activity-history-head"
+        onClick={() => expandable && setOpen((value) => !value)}
+        disabled={!expandable}
+        aria-expanded={expandable ? open : undefined}
+        aria-controls={expandable ? panelId : undefined}
+        aria-label={
+          latest
+            ? `Thinking: ${traceSummary(latest.text)}`
+            : "Thinking"
+        }
+      >
+        <ActivityPulse active={active} />
+        <span className="agent-activity-history-label">Thinking</span>
+        {!latest && thoughts.length === 0 && (
+          <span className="agent-activity-history-summary">Preparing response</span>
+        )}
+        {expandable && <Chevron open={open} />}
+      </button>
+      {latest && (
+        <div
+          className={`agent-thinking-latest${latest.streaming ? " is-streaming" : ""}`}
+          aria-label="Latest thinking trace"
+        >
+          <AssistantMarkdown text={latest.text} />
+        </div>
+      )}
+      {open && (
+        <ol
+          id={panelId}
+          className="agent-thinking-history-list"
+          aria-label="Thinking trace history"
+        >
+          {earlierThoughts.map((item, index) => (
+            <li
+              key={item.id}
+              className={`agent-thinking-history-item${item.streaming ? " is-streaming" : ""}`}
+            >
+              <span className="agent-thinking-history-index" aria-hidden="true">
+                {String(index + 1).padStart(2, "0")}
+              </span>
+              <AssistantMarkdown text={item.text} />
+            </li>
+          ))}
+        </ol>
+      )}
+    </section>
+  );
+}
+
+function ToolHistory({ tools, variant }: { tools: ToolItem[]; variant: ActivityVariant }) {
+  const [open, setOpen] = useState(false);
+  const panelId = useId();
+  const latest = tools[tools.length - 1];
+  if (!latest) return null;
+  const running = latest.status === "running" || latest.status === "pending";
+
+  return (
+    <section
+      className={`agent-activity-history is-tools${open ? " is-open" : ""}${
+        running ? " is-active" : ""
+      }`}
+    >
+      <button
+        type="button"
+        className="agent-activity-history-head"
+        onClick={() => setOpen((value) => !value)}
+        aria-expanded={open}
+        aria-controls={panelId}
+        aria-label={`${tools.length === 1 ? "Tool call" : `${tools.length} tool calls`}: ${latest.title || latest.name}, ${activityStatus(latest)}`}
+      >
+        <span className="official-tool-mark">
+          <ToolIcon kind={latest.tool} />
+          {running && <span className="official-tool-spinner" aria-hidden="true" />}
+        </span>
+        <span className="agent-activity-history-label">
+          {tools.length === 1 ? "Tool call" : `${tools.length} tool calls`}
+        </span>
+        <strong className="agent-activity-history-summary">{latest.title || latest.name}</strong>
+        <span className="agent-activity-history-status">{activityStatus(latest)}</span>
+        {latest.status === "done" && <span className="official-tool-done">✓</span>}
+        {latest.status === "error" && <span className="official-tool-error">!</span>}
+        <Chevron open={open} />
+      </button>
+      {open && (
+        <div
+          id={panelId}
+          className="agent-tool-history-list"
+          role="list"
+          aria-label="Tool call history"
+        >
+          {tools.map((tool) => (
+            <div key={tool.id} role="listitem">
+              <ToolActivity item={tool} variant={variant} compact />
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+/**
+ * One compact activity area per user turn. The newest thought and tool call
+ * remain visible while their complete histories stay one click away.
+ */
+export function ActivityHistory({
+  activities,
+  variant,
+  working = false,
+  showLatestThinking = true,
+}: {
+  activities: Array<ThinkingItem | ToolItem>;
+  variant: ActivityVariant;
+  working?: boolean;
+  showLatestThinking?: boolean;
+}) {
+  const thoughts = activities.filter(
+    (item): item is ThinkingItem => item.kind === "thinking",
+  );
+  const tools = activities.filter((item): item is ToolItem => item.kind === "tool");
+
+  if (!thoughts.length && !tools.length && !working) return null;
+
+  return (
+    <div className="agent-activity-cluster" data-variant={variant}>
+      {(thoughts.length > 0 || working) && (
+        <ThinkingHistory
+          thoughts={thoughts}
+          working={working}
+          showLatestFull={showLatestThinking}
+        />
+      )}
+      {tools.length > 0 && <ToolHistory tools={tools} variant={variant} />}
+    </div>
+  );
+}
+
 export function ProviderEmpty({
   agent,
   termId,
@@ -498,42 +813,59 @@ export interface ActivityGroup {
   firstId: string;
   firstIndex: number;
   activities: Array<ToolItem | Extract<AgentItem, { kind: "thinking" }>>;
-  /** First assistant message after the final activity in this user turn. */
+  /** Final assistant answer, only when no later activity follows it. */
   answerId: string | null;
+  /** Interim comment that replaces this completed activity phase. */
+  replacedByCommentId: string | null;
 }
 
 /**
- * Keep reasoning/tool activity scoped to the user turn that produced it.
- * Without this, later commands migrate into the first trace in the session.
+ * Keep reasoning/tool activity scoped to the user turn and the assistant
+ * comment that preceded it. A comment followed by more work starts a fresh
+ * activity group below that comment instead of pulling future work upward.
  */
 export function activityGroups(items: AgentItem[]): ActivityGroup[] {
   const groups: ActivityGroup[] = [];
   let turnStart = 0;
 
   const collectTurn = (start: number, end: number) => {
-    const indexed = items
-      .slice(start, end)
-      .map((item, offset) => ({ item, index: start + offset }));
-    const activity = indexed.filter(
-      (
-        entry,
-      ): entry is {
-        item: ToolItem | Extract<AgentItem, { kind: "thinking" }>;
-        index: number;
-      } => entry.item.kind === "tool" || entry.item.kind === "thinking",
-    );
-    if (!activity.length) return;
-    const finalActivityIndex = activity[activity.length - 1].index;
-    const answer =
-      indexed.find(
-        ({ item, index }) => index > finalActivityIndex && item.kind === "assistant",
-      )?.item ?? null;
-    groups.push({
-      firstId: activity[0].item.id,
-      firstIndex: activity[0].index,
-      activities: activity.map(({ item }) => item),
-      answerId: answer?.kind === "assistant" ? answer.id : null,
-    });
+    let activity: Array<{
+      item: ToolItem | Extract<AgentItem, { kind: "thinking" }>;
+      index: number;
+    }> = [];
+
+    const flush = (
+      answerId: string | null,
+      replacedByCommentId: string | null = null,
+    ) => {
+      if (!activity.length) return;
+      groups.push({
+        firstId: activity[0].item.id,
+        firstIndex: activity[0].index,
+        activities: activity.map(({ item }) => item),
+        answerId,
+        replacedByCommentId,
+      });
+      activity = [];
+    };
+
+    for (let index = start; index < end; index += 1) {
+      const item = items[index];
+      if (item.kind === "thinking" || item.kind === "tool") {
+        activity.push({ item, index });
+        continue;
+      }
+      if (item.kind !== "assistant" || !activity.length) continue;
+      const hasLaterActivity = items
+        .slice(index + 1, end)
+        .some((later) => later.kind === "thinking" || later.kind === "tool");
+      if (hasLaterActivity) {
+        flush(null, item.id);
+      } else {
+        flush(item.id);
+      }
+    }
+    flush(null);
   };
 
   for (let index = 1; index < items.length; index += 1) {
@@ -543,4 +875,40 @@ export function activityGroups(items: AgentItem[]): ActivityGroup[] {
   }
   collectTurn(turnStart, items.length);
   return groups;
+}
+
+/** Assistant comments that are followed by more work in the same user turn. */
+export function continuedAssistantIds(items: AgentItem[]): Set<string> {
+  const ids = new Set<string>();
+  let turnEnd = items.length;
+
+  const inspectTurn = (start: number, end: number) => {
+    let hasLaterActivity = false;
+    for (let index = end - 1; index >= start; index -= 1) {
+      const item = items[index];
+      if (item.kind === "thinking" || item.kind === "tool") {
+        hasLaterActivity = true;
+      } else if (item.kind === "assistant" && hasLaterActivity) {
+        ids.add(item.id);
+      }
+    }
+  };
+
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    if (items[index].kind !== "user") continue;
+    inspectTurn(index, turnEnd);
+    turnEnd = index;
+  }
+  if (turnEnd > 0) inspectTurn(0, turnEnd);
+  return ids;
+}
+
+/** Only the newest, still-current assistant block receives a streaming caret. */
+export function activeAssistantId(
+  items: AgentItem[],
+  working: boolean,
+): string | null {
+  if (!working) return null;
+  const latest = items[items.length - 1];
+  return latest?.kind === "assistant" && latest.streaming ? latest.id : null;
 }

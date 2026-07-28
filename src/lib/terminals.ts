@@ -2017,6 +2017,15 @@ export function clearBlockSelection(id: string): void {
   sessions.get(id)?.blocks.clearSelection();
 }
 
+/**
+ * Drop the chunk highlight but keep any free-range xterm selection — used when
+ * focus moves to the composer, where dropping a dragged selection too would be
+ * surprising.
+ */
+export function dismissBlockSelection(id: string): void {
+  sessions.get(id)?.blocks.dismissNavSelection();
+}
+
 /** Drop chunk selection in every terminal (pane/tab focus moved away). */
 export function clearAllBlockSelections(): void {
   for (const session of sessions.values()) {

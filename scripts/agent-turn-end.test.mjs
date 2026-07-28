@@ -156,6 +156,19 @@ describe("completion signals are rationed per prompt", () => {
     expect(terminals).toContain("isMetaSlashCommand(completed.prompt)");
     expect(terminals).toContain("agentTurns");
   });
+
+  test("a queued custom UI follow-up keeps ownership of its later completion", () => {
+    const emit = session.slice(
+      session.indexOf("function emit("),
+      session.indexOf("function handleFrame(", session.indexOf("function emit(")),
+    );
+    const clear = emit.indexOf("session.userInitiatedTurn = false;");
+    const release = emit.indexOf("if (releasingQueued)");
+    const dispatch = emit.indexOf("dispatch(session, queued.text", release);
+    expect(clear).toBeGreaterThan(-1);
+    expect(release).toBeGreaterThan(clear);
+    expect(dispatch).toBeGreaterThan(release);
+  });
 });
 
 describe("custom agent UI restores the shell underneath it", () => {
