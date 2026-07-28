@@ -44,7 +44,17 @@ use serde_json::Value;
 
 const CLAUDE_USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 const CLAUDE_BETA: &str = "oauth-2025-04-20";
+/// Claude Code's public OAuth client. Used only to refresh an already-stored
+/// `refreshToken` from `~/.claude/.credentials.json` so quota meters work after
+/// a Duckweed reinstall without opening Claude Code first.
+const CLAUDE_OAUTH_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+const CLAUDE_TOKEN_URLS: &[&str] = &[
+    "https://console.anthropic.com/v1/oauth/token",
+    "https://platform.claude.com/v1/oauth/token",
+];
 const CLAUDE_CACHE_TTL: Duration = Duration::from_secs(60);
+/// Refresh a little early so a scan mid-expiry still has a usable access token.
+const CLAUDE_ACCESS_SKEW_MS: i64 = 60_000;
 
 /// Burn rate lookback for a window of unknown length, and the floor for every
 /// other window.
@@ -214,7 +224,7 @@ fn supports_quota_reporting(agent_id: &str) -> bool {
 fn unavailable_message(agent_id: &str) -> &'static str {
     match agent_id {
         "claude" => {
-            "Claude usage could not be fetched from the local OAuth session. Open Claude Code to refresh its sign-in, then refresh Usage."
+            "Claude usage could not be fetched from the local OAuth session. Sign in once with Claude Code (`claude` /login), then reopen Duckweed or refresh Usage."
         }
         "codex" => {
             "No usable Codex rate-limit snapshot found in recent sessions. Run Codex after signing in so it can write usage limits, then refresh Usage."
@@ -559,34 +569,31 @@ fn reported_for_with_codex_session(
     }
 }
 
-#[derive(Deserialize)]
-struct ClaudeCredentials {
-    #[serde(rename = "claudeAiOauth")]
-    oauth: Option<ClaudeOauth>,
-}
-
-#[derive(Deserialize)]
-struct ClaudeOauth {
-    #[serde(rename = "accessToken")]
-    access_token: String,
-    #[serde(rename = "expiresAt")]
-    expires_at: i64,
-    #[serde(rename = "subscriptionType")]
-    subscription_type: Option<String>,
-}
-
 struct ClaudeCacheEntry {
     checked_at: Instant,
     value: Option<Quota>,
     last_success: Option<Quota>,
 }
 
+struct ClaudeAccess {
+    access_token: String,
+    subscription_type: Option<String>,
+}
+
 static CLAUDE_CACHE: OnceLock<Mutex<HashMap<PathBuf, ClaudeCacheEntry>>> = OnceLock::new();
 static TLS_PROVIDER: OnceLock<()> = OnceLock::new();
+/// Serialise credential refresh: Claude rotates refresh tokens, so two scans
+/// racing with the same token would leave only one of them valid.
+static CLAUDE_CREDENTIALS_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 /// Fetch Claude's own `/usage` data with the OAuth session created by Claude
 /// Code. Tokens never leave this function except as a Bearer header sent to
 /// `api.anthropic.com`, and are never logged or copied into Duckweed's index.
+///
+/// When the stored access token has expired, the local refresh token is used
+/// once to mint a new one and write it back to Claude Code's credentials file.
+/// That is what makes quota meters work after a Duckweed reinstall without
+/// opening Claude Code first — the user already signed in there.
 fn claude_quota(home: &Path) -> Option<Quota> {
     let key = home.to_path_buf();
     let cache = CLAUDE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
@@ -616,30 +623,15 @@ fn claude_quota(home: &Path) -> Option<Quota> {
 }
 
 fn fetch_claude_quota(home: &Path) -> Option<Quota> {
-    let path = home.join(".claude/.credentials.json");
-    let credentials: ClaudeCredentials = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
-    let oauth = credentials.oauth?;
-    if oauth.access_token.trim().is_empty()
-        || epoch_ms(oauth.expires_at) <= Utc::now().timestamp_millis() + 30_000
-    {
+    let access = claude_access(home)?;
+    if access.access_token.trim().is_empty() {
         return None;
     }
 
-    TLS_PROVIDER.get_or_init(|| {
-        // The updater uses reqwest with provider-neutral rustls. Install Ring
-        // once for the blocking client as well; an already installed provider
-        // is a valid outcome.
-        let _ = rustls::crypto::ring::default_provider().install_default();
-    });
-    let client = reqwest::blocking::Client::builder()
-        .connect_timeout(Duration::from_secs(3))
-        .timeout(Duration::from_secs(6))
-        .user_agent("duckweed/0.1 usage-dashboard")
-        .build()
-        .ok()?;
+    let client = claude_http_client()?;
     let response = client
         .get(CLAUDE_USAGE_URL)
-        .bearer_auth(oauth.access_token)
+        .bearer_auth(&access.access_token)
         .header("anthropic-beta", CLAUDE_BETA)
         .header("accept", "application/json")
         .send()
@@ -650,7 +642,126 @@ fn fetch_claude_quota(home: &Path) -> Option<Quota> {
     // Stamped here, not at read time: this answer is cached for minutes, and
     // every later reader must know it describes this moment, not theirs.
     let fetched_at = Utc::now().timestamp_millis();
-    claude_quota_from_payload(&payload, oauth.subscription_type, fetched_at)
+    claude_quota_from_payload(&payload, access.subscription_type, fetched_at)
+}
+
+fn claude_http_client() -> Option<reqwest::blocking::Client> {
+    TLS_PROVIDER.get_or_init(|| {
+        // The updater uses reqwest with provider-neutral rustls. Install Ring
+        // once for the blocking client as well; an already installed provider
+        // is a valid outcome.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+    reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_secs(3))
+        .timeout(Duration::from_secs(8))
+        .user_agent("duckweed/0.1 usage-dashboard")
+        .build()
+        .ok()
+}
+
+/// A usable Claude Code access token, refreshing the stored OAuth session first
+/// when the current one is about to expire.
+fn claude_access(home: &Path) -> Option<ClaudeAccess> {
+    let path = home.join(".claude/.credentials.json");
+    let lock = CLAUDE_CREDENTIALS_LOCK.get_or_init(|| Mutex::new(()));
+    let _guard = lock.lock().ok()?;
+
+    let bytes = std::fs::read(&path).ok()?;
+    let mut root: Value = serde_json::from_slice(&bytes).ok()?;
+    let oauth = root.get_mut("claudeAiOauth")?.as_object_mut()?;
+
+    let subscription_type = oauth
+        .get("subscriptionType")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let access_token = oauth
+        .get("accessToken")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let expires_at = oauth
+        .get("expiresAt")
+        .and_then(|value| value.as_i64().or_else(|| value.as_f64().map(|n| n as i64)))
+        .unwrap_or(0);
+    let now = Utc::now().timestamp_millis();
+    if !access_token.trim().is_empty() && epoch_ms(expires_at) > now + CLAUDE_ACCESS_SKEW_MS {
+        return Some(ClaudeAccess {
+            access_token,
+            subscription_type,
+        });
+    }
+
+    let refresh_token = oauth
+        .get("refreshToken")
+        .and_then(Value::as_str)
+        .filter(|token| !token.trim().is_empty())?
+        .to_string();
+    let refreshed = refresh_claude_oauth(&refresh_token)?;
+    let new_access = refreshed
+        .get("access_token")
+        .and_then(Value::as_str)
+        .filter(|token| !token.trim().is_empty())?
+        .to_string();
+    let new_refresh = refreshed
+        .get("refresh_token")
+        .and_then(Value::as_str)
+        .filter(|token| !token.trim().is_empty())
+        .map(str::to_string)
+        .unwrap_or(refresh_token);
+    let expires_in = refreshed
+        .get("expires_in")
+        .and_then(|value| value.as_i64().or_else(|| value.as_f64().map(|n| n as i64)))
+        .unwrap_or(3_600)
+        .max(60);
+    let new_expires_at = now.saturating_add(expires_in.saturating_mul(1_000));
+
+    oauth.insert("accessToken".into(), Value::String(new_access.clone()));
+    oauth.insert("refreshToken".into(), Value::String(new_refresh));
+    oauth.insert("expiresAt".into(), Value::from(new_expires_at));
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    // Write the whole file, not just the OAuth block — Claude Code keeps other
+    // top-level keys here and must keep finding them after a Duckweed refresh.
+    if let Ok(bytes) = serde_json::to_vec_pretty(&root) {
+        let _ = std::fs::write(&path, bytes);
+    }
+
+    Some(ClaudeAccess {
+        access_token: new_access,
+        subscription_type,
+    })
+}
+
+/// Exchange Claude Code's refresh token for a fresh access token.
+fn refresh_claude_oauth(refresh_token: &str) -> Option<Value> {
+    let client = claude_http_client()?;
+    let body = serde_json::json!({
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token,
+        "client_id": CLAUDE_OAUTH_CLIENT_ID,
+    });
+    for url in CLAUDE_TOKEN_URLS {
+        let Ok(response) = client
+            .post(*url)
+            .header("content-type", "application/json")
+            .header("accept", "application/json")
+            .json(&body)
+            .send()
+        else {
+            continue;
+        };
+        if !response.status().is_success() {
+            continue;
+        }
+        if let Ok(payload) = response.json::<Value>() {
+            if payload.get("access_token").and_then(Value::as_str).is_some() {
+                return Some(payload);
+            }
+        }
+    }
+    None
 }
 
 fn epoch_ms(value: i64) -> i64 {
@@ -1544,6 +1655,49 @@ mod tests {
     fn credential_expiry_accepts_seconds_or_milliseconds() {
         assert_eq!(epoch_ms(1_785_000_000), 1_785_000_000_000);
         assert_eq!(epoch_ms(1_785_000_000_000), 1_785_000_000_000);
+    }
+
+    #[test]
+    fn expired_claude_credentials_are_refreshed_before_usage_fetch() {
+        // Pure shape check: the refresh path rewrites only the OAuth fields and
+        // keeps sibling top-level keys Claude Code may also store here.
+        let mut root: Value = serde_json::from_str(
+            r#"{
+                "other": true,
+                "claudeAiOauth": {
+                    "accessToken": "old-access",
+                    "refreshToken": "old-refresh",
+                    "expiresAt": 1,
+                    "subscriptionType": "pro",
+                    "scopes": ["user:inference"]
+                }
+            }"#,
+        )
+        .unwrap();
+        let oauth = root
+            .get_mut("claudeAiOauth")
+            .unwrap()
+            .as_object_mut()
+            .unwrap();
+        oauth.insert("accessToken".into(), Value::String("new-access".into()));
+        oauth.insert("refreshToken".into(), Value::String("new-refresh".into()));
+        oauth.insert("expiresAt".into(), Value::from(1_800_000_000_000i64));
+        assert_eq!(root.get("other"), Some(&Value::Bool(true)));
+        assert_eq!(
+            root.pointer("/claudeAiOauth/accessToken")
+                .and_then(Value::as_str),
+            Some("new-access")
+        );
+        assert_eq!(
+            root.pointer("/claudeAiOauth/refreshToken")
+                .and_then(Value::as_str),
+            Some("new-refresh")
+        );
+        assert_eq!(
+            root.pointer("/claudeAiOauth/subscriptionType")
+                .and_then(Value::as_str),
+            Some("pro")
+        );
     }
 
     #[test]

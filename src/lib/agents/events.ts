@@ -429,6 +429,10 @@ export function applyEvent(state: AgentSessionState, event: AgentEvent): AgentSe
     case "notice":
       return {
         ...state,
+        // Notices are real transcript content. Without `started`, every experience
+        // keeps rendering the empty welcome and the line is invisible — which is
+        // exactly how app-owned `/usage` was swallowing its own reply.
+        started: true,
         items: [
           ...state.items,
           {

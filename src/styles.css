@@ -7349,29 +7349,6 @@ body.is-resizing * {
   padding: 0 6px 3px;
 }
 
-.agent-followup-hint {
-  display: inline-flex;
-  min-width: 0;
-  align-items: center;
-  gap: 5px;
-  margin-left: auto;
-  overflow: hidden;
-  color: var(--text-faint);
-  font-size: 9.5px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.agent-followup-hint kbd {
-  padding: 1px 4px;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  color: var(--text-dim);
-  background: rgba(255, 255, 255, 0.025);
-  font-family: var(--font-mono);
-  font-size: 9px;
-}
-
 .agent-composer-input {
   flex: 1;
   min-width: 0;

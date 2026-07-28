@@ -115,6 +115,22 @@ describe("transient notices", () => {
     expect(prompted.items[0]).toMatchObject({ kind: "user", text: "Explain this repo" });
   });
 
+  test("a notice leaves the empty welcome so app-owned commands are visible", () => {
+    const state = applyEvent(blank(), {
+      type: "notice",
+      tone: "info",
+      text: "Usage this session · 1.2k input · 300 output · 1.5k total",
+    });
+    expect(state.started).toBe(true);
+    expect(state.items).toEqual([
+      expect.objectContaining({
+        kind: "notice",
+        tone: "info",
+        text: "Usage this session · 1.2k input · 300 output · 1.5k total",
+      }),
+    ]);
+  });
+
   test("dismisses exit hints without removing durable errors", () => {
     let state = applyEvent(blank(), {
       type: "notice",

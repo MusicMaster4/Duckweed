@@ -642,12 +642,6 @@ export function AgentComposer({ session, active, inputRef, onSubmit, onInterrupt
           placement="composer"
           onSelect={(kind, value) => agents.configure(session.termId, kind, value)}
         />
-        {working && (
-          <span className="agent-followup-hint">
-            <kbd>Alt+Shift+Enter</kbd>
-            {agents.getFollowupMode() === "queue" ? "steers now" : "queues instead"}
-          </span>
-        )}
       </div>
     </div>
   );
