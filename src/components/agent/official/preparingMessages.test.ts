@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
 
-import { PREPARING_MESSAGES, nextPreparingMessage } from "./preparingMessages";
+import {
+  PREPARING_MESSAGES,
+  nextPreparingMessage,
+  preparingMessageFor,
+} from "./preparingMessages";
 
 describe("preparingMessages", () => {
   test("the pool has fifty short lines", () => {
@@ -21,5 +25,16 @@ describe("preparingMessages", () => {
     }
     // Half-pool cooldown should force real variety across many picks.
     expect(seen.size).toBeGreaterThan(20);
+  });
+
+  test("keeps one preparing line per cluster across remount-style lookups", () => {
+    const first = preparingMessageFor("term-a:live:prompt-1");
+    const again = preparingMessageFor("term-a:live:prompt-1");
+    const other = preparingMessageFor("term-a:live:prompt-2");
+
+    expect(again).toBe(first);
+    expect(PREPARING_MESSAGES).toContain(first);
+    // Distinct clusters draw independently; with cooldown they usually differ.
+    expect(typeof other).toBe("string");
   });
 });

@@ -15,8 +15,8 @@ import { AgentDiff } from "../AgentDiff";
 import { AgentImageAttachments } from "../AgentImageAttachments";
 import { MessageCopyButton } from "../MessageCopyButton";
 import { AgentProviderIcon } from "../AgentProviderIcon";
-import { nextPreparingMessage } from "./preparingMessages";
-import { nextThinkingPulsePattern } from "./thinkingPulsePatterns";
+import { preparingMessageFor } from "./preparingMessages";
+import { thinkingPulsePatternFor } from "./thinkingPulsePatterns";
 
 export interface ExperienceProps {
   items: AgentItem[];
@@ -595,8 +595,16 @@ export function ToolActivity({
   );
 }
 
-function ActivityPulse({ active }: { active: boolean }) {
-  const [pattern] = useState(nextThinkingPulsePattern);
+function ActivityPulse({
+  active,
+  clusterId,
+}: {
+  active: boolean;
+  /** Stable id for this thinking wait; keeps the matrix across remounts. */
+  clusterId: string;
+}) {
+  // Registry-backed: remounts (tab switch, pane split) must not roll a new pattern.
+  const pattern = thinkingPulsePatternFor(clusterId);
   return (
     <span
       className={`agent-activity-pulse${active ? " is-active" : " is-settled"}`}
@@ -634,15 +642,18 @@ function ThinkingHistory({
   thoughts,
   working,
   showLatestFull,
+  clusterId,
 }: {
   thoughts: ThinkingItem[];
   working: boolean;
   showLatestFull: boolean;
+  /** Stable id for this thinking wait; keeps pulse + preparing line across remounts. */
+  clusterId: string;
 }) {
   const [open, setOpen] = useState(false);
-  // Picked once per mount, same as the pulse pattern: a fresh preparing
-  // cluster gets a new line; remounts during the same wait do not flicker.
-  const [preparingMessage] = useState(nextPreparingMessage);
+  // Registry-backed like the pulse: a fresh preparing cluster gets a new line;
+  // remounts during the same wait keep the same stand-in text.
+  const preparingMessage = preparingMessageFor(clusterId);
   const panelId = useId();
   const latest = showLatestFull ? thoughts[thoughts.length - 1] : undefined;
   const active = working;
@@ -668,7 +679,7 @@ function ThinkingHistory({
             : "Thinking"
         }
       >
-        <ActivityPulse active={active} />
+        <ActivityPulse active={active} clusterId={clusterId} />
         <span className="agent-activity-history-label">Thinking</span>
         {!latest && thoughts.length === 0 && (
           <span className="agent-activity-history-summary">{preparingMessage}</span>
@@ -807,11 +818,18 @@ export function ActivityHistory({
   variant,
   working = false,
   showLatestThinking = true,
+  clusterId,
 }: {
   activities: Array<ThinkingItem | ToolItem>;
   variant: ActivityVariant;
   working?: boolean;
   showLatestThinking?: boolean;
+  /**
+   * Stable id for this activity phase (terminal + group/phase). Survives tab
+   * remounts, but a new user prompt, interim agent message, or session starts a
+   * fresh phase and draws a new matrix pattern.
+   */
+  clusterId: string;
 }) {
   const thoughts = activities.filter(
     (item): item is ThinkingItem => item.kind === "thinking",
@@ -827,6 +845,7 @@ export function ActivityHistory({
           thoughts={thoughts}
           working={working}
           showLatestFull={showLatestThinking}
+          clusterId={clusterId}
         />
       )}
       {tools.length > 0 && (

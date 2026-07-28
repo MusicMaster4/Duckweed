@@ -367,6 +367,8 @@ export function CursorExperience({ session, items, className }: ProviderExperien
     if (group.firstIndex > latestUserIndex) liveGroup = group;
   }
   const needsEmptyLiveTrace = session.status === "working" && !liveGroup;
+  const liveUserId =
+    latestUserIndex >= 0 ? list[latestUserIndex]?.id : "session-start";
 
   return (
     <section className={`cx${className ? ` ${className}` : ""}`} data-phase={phase.kind}>
@@ -459,6 +461,7 @@ export function CursorExperience({ session, items, className }: ProviderExperien
                       variant="cursor"
                       working={working}
                       showLatestThinking={group === groups[groups.length - 1]}
+                      clusterId={`${session.termId}:${group.firstId}`}
                     />
                   </div>
                 </li>
@@ -482,7 +485,12 @@ export function CursorExperience({ session, items, className }: ProviderExperien
             <li className="cx-node is-activity" data-mark="think" data-live>
               <span className="cx-mark" aria-hidden="true" />
               <div className="cx-body">
-                <ActivityHistory activities={[]} variant="cursor" working />
+                <ActivityHistory
+                  activities={[]}
+                  variant="cursor"
+                  working
+                  clusterId={`${session.termId}:live:${liveUserId}`}
+                />
               </div>
             </li>
           )}

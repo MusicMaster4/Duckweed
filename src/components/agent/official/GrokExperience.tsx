@@ -156,6 +156,8 @@ export function GrokExperience({
     if (group.firstIndex > latestUserIndex) liveGroup = group;
   }
   const needsEmptyLiveTrace = status === "working" && !hasLiveActivity;
+  const liveUserId =
+    latestUserIndex >= 0 ? items[latestUserIndex]?.id : "session-start";
 
   if (!started && status !== "error") {
     return (
@@ -191,6 +193,7 @@ export function GrokExperience({
                 variant="grok"
                 working={status === "working" && group === liveGroup}
                 showLatestThinking={group === groups[groups.length - 1]}
+                clusterId={`${termId}:${group.firstId}`}
               />
             );
           }
@@ -235,7 +238,14 @@ export function GrokExperience({
             />
           );
         })}
-        {needsEmptyLiveTrace && <ActivityHistory activities={[]} variant="grok" working />}
+        {needsEmptyLiveTrace && (
+          <ActivityHistory
+            activities={[]}
+            variant="grok"
+            working
+            clusterId={`${termId}:live:${liveUserId}`}
+          />
+        )}
       </div>
     </div>
   );

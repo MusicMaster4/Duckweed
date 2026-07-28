@@ -474,6 +474,8 @@ export function OpenCodeExperience({ session, items, className }: ProviderExperi
     return new Set([...continuedIds, liveGroup.answerId]);
   }, [continuedIds, liveGroup?.answerId, session.status]);
   const needsEmptyLiveTrace = session.status === "working" && !liveGroup;
+  const liveUserId =
+    latestUserIndex >= 0 ? list[latestUserIndex]?.id : "session-start";
 
   // Outside the `.oc` column, like the official surfaces do it: the empty state
   // centres itself against the full pane, not against the transcript's width.
@@ -525,6 +527,7 @@ export function OpenCodeExperience({ session, items, className }: ProviderExperi
                       variant="opencode"
                       working={working}
                       showLatestThinking={group === groups[groups.length - 1]}
+                      clusterId={`${session.termId}:${group.firstId}`}
                     />
                   </div>
                 </section>
@@ -546,7 +549,12 @@ export function OpenCodeExperience({ session, items, className }: ProviderExperi
                 <span className="oc-mod-tag">activity</span>
               </div>
               <div className="oc-mod-body">
-                <ActivityHistory activities={[]} variant="opencode" working />
+                <ActivityHistory
+                  activities={[]}
+                  variant="opencode"
+                  working
+                  clusterId={`${session.termId}:live:${liveUserId}`}
+                />
               </div>
             </section>
           )}

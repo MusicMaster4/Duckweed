@@ -289,3 +289,27 @@ const pickPattern = createCooldownPicker(
 export function nextThinkingPulsePattern(): ThinkingPulsePattern {
   return pickPattern();
 }
+
+/** Enough for any plausible number of live thinking clusters. */
+const REGISTRY_LIMIT = 128;
+
+/**
+ * Thinking clusters remount when a pane is re-parented (tab switch, split).
+ * Component state cannot survive that; keying the draw off a stable cluster id
+ * keeps the same matrix running instead of rolling a new pattern mid-wait.
+ */
+const patternAssignments = new Map<string, ThinkingPulsePattern>();
+
+/** Same pattern for the same cluster across remounts; a new id draws again. */
+export function thinkingPulsePatternFor(clusterId: string): ThinkingPulsePattern {
+  const existing = patternAssignments.get(clusterId);
+  if (existing) return existing;
+
+  const pattern = nextThinkingPulsePattern();
+  if (patternAssignments.size >= REGISTRY_LIMIT) {
+    const oldest = patternAssignments.keys().next().value;
+    if (oldest !== undefined) patternAssignments.delete(oldest);
+  }
+  patternAssignments.set(clusterId, pattern);
+  return pattern;
+}

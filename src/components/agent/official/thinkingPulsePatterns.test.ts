@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 
-import { THINKING_PULSE_PATTERNS } from "./thinkingPulsePatterns";
+import {
+  THINKING_PULSE_PATTERNS,
+  thinkingPulsePatternFor,
+} from "./thinkingPulsePatterns";
 
 describe("thinking pulse patterns", () => {
   test("the pool includes every distinct quarter-turn orientation", () => {
@@ -133,5 +136,18 @@ describe("thinking pulse patterns", () => {
       expect(css).toContain(`[data-motion="${motion}"]`);
       expect(css).toContain(`@keyframes agent-activity-${motion}`);
     }
+  });
+
+  /**
+   * Tab switches and pane splits remount the thinking row. The pattern must be
+   * keyed by cluster id, not component identity, or the matrix jumps mid-wait.
+   */
+  test("keeps one pattern per cluster across remount-style lookups", () => {
+    const first = thinkingPulsePatternFor("term-a:group-1");
+    const again = thinkingPulsePatternFor("term-a:group-1");
+    const other = thinkingPulsePatternFor("term-a:group-2");
+
+    expect(again).toBe(first);
+    expect(other.id).not.toBe(first.id);
   });
 });
