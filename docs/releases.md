@@ -160,11 +160,11 @@ bun test          # version arithmetic, channel isolation, workflow rules
 bun run typecheck
 ```
 
-`scripts/version.test.mjs` covers the odometer and channel rules,
+`src/lib/version.test.ts` covers the odometer and channel rules,
 `scripts/release-scripts.test.mjs` the stamping and manifest building,
-`scripts/update-check.test.mjs` the app's refusal to cross channels (with the
-Tauri plugins mocked), and `scripts/workflows.test.mjs` reads the workflow YAML
-to assert that only `main` and `testing` release, that betas are never marked
+`src/lib/update.test.ts` the app's refusal to cross channels (with the Tauri
+plugins mocked), and `scripts/workflows.test.mjs` reads the workflow YAML to
+assert that only `main` and `testing` release, that betas are never marked
 latest, and that the endpoint the app reads is the one the workflow writes.
 
 To try a real build without publishing anything: Actions → Release → Run

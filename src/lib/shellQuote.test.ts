@@ -4,7 +4,7 @@ import {
   buildCdCommand,
   quoteShellPath,
   shellFamily,
-} from "../src/lib/shellQuote.ts";
+} from "./shellQuote";
 
 describe("shellFamily", () => {
   test("recognises PowerShell labels and ids", () => {

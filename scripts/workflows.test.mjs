@@ -243,6 +243,13 @@ describe("the shipped app configuration", () => {
     expect(capabilities.permissions).toContain("core:window:allow-destroy");
   });
 
+  test("the window can paint the taskbar completion badge", () => {
+    // Without the grant the overlay call fails at runtime, silently: the badge
+    // simply never appears.
+    const capabilities = JSON.parse(read("src-tauri/capabilities/default.json"));
+    expect(capabilities.permissions).toContain("core:window:allow-set-overlay-icon");
+  });
+
   test("the release workflow is the only workflow that touches versions", () => {
     expect(releaseText).toContain("apply-version.mjs");
     expect(read(".github/workflows/ci.yml")).not.toContain("apply-version");

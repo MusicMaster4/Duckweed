@@ -9,9 +9,10 @@ import {
   shouldAcceptAgentCompletion,
   shouldPlayCompletionSound,
   shouldSignalCompletion,
-} from "../src/lib/processActivity.ts";
+  type ProcessState,
+} from "./processActivity";
 
-const state = (overrides = {}) => ({
+const state = (overrides: Partial<ProcessState> = {}): ProcessState => ({
   busy: false,
   exited: false,
   completionSeq: 0,

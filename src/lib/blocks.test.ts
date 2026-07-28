@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { foldOrphanPrompts, looksLikePrompt } from "../src/lib/blocks.ts";
+import { foldOrphanPrompts, looksLikePrompt } from "./blocks";
 
 describe("looksLikePrompt", () => {
   test("matches classic PowerShell idle prompts", () => {
@@ -44,8 +44,8 @@ describe("looksLikePrompt", () => {
 
 describe("foldOrphanPrompts", () => {
   /** Build a getLine from a sparse map of absolute buffer lines. */
-  function lines(map) {
-    return (y) => map[y] ?? "";
+  function lines(map: Record<number, string>) {
+    return (y: number) => map[y] ?? "";
   }
 
   test("does not move when the row above is real output", () => {

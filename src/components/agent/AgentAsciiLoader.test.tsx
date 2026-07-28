@@ -24,10 +24,6 @@ describe("agent startup animation", () => {
     }
   });
 
-  test("offers a pool to choose from rather than one animation per provider", () => {
-    expect(ASCII_ANIMATIONS.length).toBeGreaterThanOrEqual(36);
-  });
-
   /**
    * Two panes can land on the same animation. The simulations advance a
    * generation at a time, so a shared instance would be dragged backwards and

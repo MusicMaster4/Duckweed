@@ -94,7 +94,9 @@ const DEFAULT_FONT_SIZE = 13.5;
 const TAURI_RUNTIME = "__TAURI_INTERNALS__" in window;
 
 async function confirmUpdateWithRunningProcesses(): Promise<boolean> {
-  const hasRunningProcesses = await terminals.anyHasRunningProcess(terminals.allSessionIds());
+  const hasRunningProcesses = await terminals.anyHasCloseBlockingWork(
+    terminals.allSessionIds(),
+  );
   if (!hasRunningProcesses) return true;
   return confirmCloseRunning({
     title: "Install update?",
@@ -667,7 +669,7 @@ export default function App() {
       const termsToCheck = leaves(tab.root)
         .map((n) => n.term)
         .filter((t) => !skipTerms.includes(t));
-      if (await terminals.anyHasRunningProcess(termsToCheck)) {
+      if (await terminals.anyHasCloseBlockingWork(termsToCheck)) {
         const agent = terminals.runningAgentLabel(termsToCheck);
         const ok = await confirmCloseRunning({
           title: "Close tab?",
@@ -795,7 +797,7 @@ export default function App() {
       // One prompt for the whole batch — "this tab" wording is wrong here because
       // the tabs being closed are the other ones, not the focused tab.
       const termsToCheck = others.flatMap((t) => leaves(t.root).map((n) => n.term));
-      if (await terminals.anyHasRunningProcess(termsToCheck)) {
+      if (await terminals.anyHasCloseBlockingWork(termsToCheck)) {
         const n = others.length;
         const ok = await confirmCloseRunning({
           title: n === 1 ? "Close other tab?" : "Close other tabs?",
@@ -889,7 +891,7 @@ export default function App() {
       const node = findLeaf(tab.root, leafId);
       if (!node) return;
 
-      if (await terminals.hasRunningProcess(node.term)) {
+      if (await terminals.hasCloseBlockingWork(node.term)) {
         const agent = terminals.runningAgentLabel([node.term]);
         const ok = await confirmCloseRunning({
           title: "Close pane?",
@@ -1513,7 +1515,7 @@ export default function App() {
     void getCurrentWindow()
       .onCloseRequested(async (event) => {
         const ids = terminals.allSessionIds();
-        if (!(await terminals.anyHasRunningProcess(ids))) return;
+        if (!(await terminals.anyHasCloseBlockingWork(ids))) return;
         const agent = terminals.runningAgentLabel(ids);
         const ok = await confirmCloseRunning({
           title: "Quit Duckweed?",
@@ -2181,7 +2183,7 @@ export default function App() {
       const source = currentTab();
       if (!source?.project) return;
       const termsToReplace = leaves(source.root).map((node) => node.term);
-      const hasRunningProcesses = await terminals.anyHasRunningProcess(termsToReplace);
+      const hasRunningProcesses = await terminals.anyHasCloseBlockingWork(termsToReplace);
       const ok = await confirmCloseRunning({
         title: "Replace current layout?",
         message: hasRunningProcesses

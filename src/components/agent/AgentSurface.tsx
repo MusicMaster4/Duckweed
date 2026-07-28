@@ -7,6 +7,7 @@ import {
   useSyncExternalStore,
 } from "react";
 
+import { agentHasUnfinishedWork } from "../../lib/agents/activity";
 import { canResume } from "../../lib/agents/history";
 import * as agents from "../../lib/agents/session";
 import type { AgentImageAttachment, AgentSessionState } from "../../lib/agents/types";
@@ -208,9 +209,9 @@ export function AgentSurface({ termId, active, onClose }: Props) {
   const resumable = canResume(session.agent);
   const resumeBlocked = session.status === "working" || session.status === "waiting";
 
-  /** End the session only after the user confirms — closing kills the agent. */
+  /** Warn only while closing would interrupt an unfinished turn. */
   const requestClose = () => {
-    if (ended) {
+    if (!agentHasUnfinishedWork(session.status)) {
       onClose();
       return;
     }

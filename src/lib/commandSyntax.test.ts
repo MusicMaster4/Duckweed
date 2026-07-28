@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
 
-import { highlightCommand } from "../src/lib/commandSyntax.ts";
+import { highlightCommand } from "./commandSyntax";
 
-const compact = (input) =>
+const compact = (input: string) =>
   highlightCommand(input)
     .filter((token) => token.kind !== "plain" || token.text.trim())
     .map(({ text, kind }) => [text, kind]);

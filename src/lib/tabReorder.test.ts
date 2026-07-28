@@ -10,14 +10,16 @@ import {
   dropIndex,
   restingLeft,
   slotShift,
-} from "../src/lib/tabReorder.ts";
+  type TabSlot,
+} from "./tabReorder";
 
 /** Three tabs of `width`, laid out from x = 0 with no gap. */
-const strip = (count, width = 100) =>
+const strip = (count: number, width = 100): TabSlot[] =>
   Array.from({ length: count }, (_, i) => ({ left: i * width, width }));
 
 /** Drag the tab at `from` so its left edge lands on `left`. */
-const drop = (slots, from, left) => dropIndex(slots, from, clampLeft(slots, from, left));
+const drop = (slots: TabSlot[], from: number, left: number) =>
+  dropIndex(slots, from, clampLeft(slots, from, left));
 
 describe("tab reorder geometry", () => {
   test("a tab dragged to the far right lands last", () => {

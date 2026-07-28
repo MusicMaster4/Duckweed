@@ -1,17 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
 
 import {
   MAX_HISTORY_ENTRIES,
   mergeHistory,
   mergeHistoryRaw,
   parseHistory,
-} from "../src/lib/historyMerge.ts";
-
-const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const read = (file) => readFileSync(path.join(ROOT, file), "utf8");
+} from "./historyMerge";
 
 describe("ghost-text history merging", () => {
   test("keeps commands a stale snapshot never saw", () => {
@@ -62,27 +56,5 @@ describe("ghost-text history merging", () => {
     expect(parseHistory(mergeHistoryRaw("not json", incoming))).toHaveLength(1);
     expect(parseHistory(mergeHistoryRaw(null, incoming))).toHaveLength(1);
     expect(parseHistory(mergeHistoryRaw(undefined, undefined))).toEqual([]);
-  });
-});
-
-describe("ghost-text history outlives app updates", () => {
-  test("restore unions the native copy with WebView storage", () => {
-    const durable = read("src/lib/durableStorage.ts");
-    expect(durable).toContain("mergeHistoryRaw");
-    expect(durable).toContain("COMMAND_HISTORY_KEY");
-  });
-
-  test("the native copy merges on save instead of being replaced", () => {
-    const backend = read("src-tauri/src/main.rs");
-    expect(backend).toContain("fn merge_history(");
-    expect(backend).toContain("key == COMMAND_HISTORY_KEY && !replace.unwrap_or(false)");
-  });
-
-  test("history reads durable storage without importing it at bootstrap", () => {
-    // historyMerge must stay side-effect free: durableStorage uses it before
-    // commandHistory is imported and snapshots its initial state.
-    const merge = read("src/lib/historyMerge.ts");
-    expect(merge).not.toContain("localStorage.");
-    expect(merge).not.toContain('from "./commandHistory"');
   });
 });

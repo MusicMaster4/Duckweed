@@ -11,9 +11,9 @@ import {
   latestStable,
   parseVersion,
   resolveVersion,
-} from "../src/lib/version.ts";
+} from "./version";
 
-const v = (input) => {
+const v = (input: string) => {
   const parsed = parseVersion(input);
   if (!parsed) throw new Error(`bad test fixture: ${input}`);
   return parsed;

@@ -35,7 +35,7 @@ mock.module("@tauri-apps/plugin-updater", () => ({
 /** Fresh import each time: update.ts caches the running version. */
 async function updateModule(version) {
   currentVersion = version;
-  const module = await import(`../src/lib/update.ts?v=${Math.random()}`);
+  const module = await import(`./update.ts?v=${Math.random()}`);
   return module;
 }
 

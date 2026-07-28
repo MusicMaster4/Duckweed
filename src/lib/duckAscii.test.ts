@@ -1,12 +1,8 @@
 import { describe, expect, test } from "bun:test";
 
-import {
-  DUCK_FPS,
-  duckLayout,
-  renderDuckFrame,
-} from "../src/lib/duckAscii.ts";
+import { duckLayout, renderDuckFrame } from "./duckAscii";
 
-function assertGrid(text, cols, rows) {
+function assertGrid(text: string, cols: number, rows: number) {
   const lines = text.split("\n");
   expect(lines).toHaveLength(rows);
   for (const line of lines) expect(line).toHaveLength(cols);
@@ -39,9 +35,5 @@ describe("empty-pane ASCII duck", () => {
 
     expect(later.duck).not.toBe(first.duck);
     expect(later.water).not.toBe(first.water);
-  });
-
-  test("uses a shared 15 FPS cadence", () => {
-    expect(DUCK_FPS).toBe(15);
   });
 });

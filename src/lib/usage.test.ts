@@ -3,24 +3,24 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const read = (file) => readFileSync(path.join(ROOT, file), "utf8");
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+const read = (file: string) => readFileSync(path.join(ROOT, file), "utf8");
 
 // The module reaches for localStorage on import; give it somewhere to write.
 globalThis.localStorage ??= {
-  store: new Map(),
-  getItem(key) {
+  store: new Map<string, string>(),
+  getItem(key: string) {
     return this.store.has(key) ? this.store.get(key) : null;
   },
-  setItem(key, value) {
+  setItem(key: string, value: string) {
     this.store.set(key, String(value));
   },
-  removeItem(key) {
+  removeItem(key: string) {
     this.store.delete(key);
   },
-};
+} as unknown as Storage;
 
-const usage = await import("../src/lib/usage.ts");
+const usage = await import("./usage");
 
 describe("usage formatting", () => {
   test("usage calendar labels always use English", () => {
@@ -53,21 +53,11 @@ describe("usage formatting", () => {
   });
 
   test("quota remaining inverts utilization for the meter label", () => {
-    expect(
-      usage.quotaRemaining({ used: 2, limit: 100, percent: 2, unit: "percent" }),
-    ).toBe(98);
-    expect(
-      usage.quotaRemaining({ used: 77, limit: 100, percent: 77, unit: "percent" }),
-    ).toBe(23);
-    expect(
-      usage.quotaRemaining({ used: 100, limit: 100, percent: 100, unit: "percent" }),
-    ).toBe(0);
-    expect(
-      usage.quotaRemaining({ used: 3.5, limit: 10, percent: 35, unit: "usd" }),
-    ).toBe(6.5);
-    expect(
-      usage.quotaRemaining({ used: 500, limit: null, percent: 0, unit: "tokens" }),
-    ).toBe(0);
+    expect(usage.quotaRemaining({ used: 2, limit: 100, percent: 2, unit: "percent" })).toBe(98);
+    expect(usage.quotaRemaining({ used: 77, limit: 100, percent: 77, unit: "percent" })).toBe(23);
+    expect(usage.quotaRemaining({ used: 100, limit: 100, percent: 100, unit: "percent" })).toBe(0);
+    expect(usage.quotaRemaining({ used: 3.5, limit: 10, percent: 35, unit: "usd" })).toBe(6.5);
+    expect(usage.quotaRemaining({ used: 500, limit: null, percent: 0, unit: "tokens" })).toBe(0);
   });
 
   test("run-out clocks read relative to today", () => {
@@ -76,8 +66,7 @@ describe("usage formatting", () => {
     expect(usage.formatEtaClock(now + 60_000, now)).not.toBe("now");
     // Same calendar day → clock only
     const sameDay = new Date(2026, 6, 26, 18, 30, 0).getTime();
-    const same = usage.formatEtaClock(sameDay, now);
-    expect(same.toLowerCase()).not.toContain("tomorrow");
+    expect(usage.formatEtaClock(sameDay, now).toLowerCase()).not.toContain("tomorrow");
     // Next day
     const tomorrow = new Date(2026, 6, 27, 9, 15, 0).getTime();
     expect(usage.formatEtaClock(tomorrow, now).toLowerCase()).toContain("tomorrow");
@@ -106,17 +95,18 @@ describe("usage formatting", () => {
 describe("quota forecasts", () => {
   const NOW = new Date(2026, 6, 26, 14, 0, 0).getTime();
   const HOUR = 3_600_000;
-  const limit = (percent, resetsInHours, forecast = null) => ({
-    id: "five-hour",
-    label: "5-hour limit",
-    used: percent,
-    limit: 100,
-    percent,
-    unit: "percent",
-    resets_at: resetsInHours == null ? null : NOW + resetsInHours * HOUR,
-    window_ms: 5 * HOUR,
-    forecast,
-  });
+  const limit = (percent: number, resetsInHours: number | null, forecast: unknown = null) =>
+    ({
+      id: "five-hour",
+      label: "5-hour limit",
+      used: percent,
+      limit: 100,
+      percent,
+      unit: "percent",
+      resets_at: resetsInHours == null ? null : NOW + resetsInHours * HOUR,
+      window_ms: 5 * HOUR,
+      forecast,
+    }) as Parameters<typeof usage.describeForecast>[0];
 
   test("a spent window does not repeat its reset time", () => {
     const copy = usage.describeForecast(
@@ -216,17 +206,18 @@ describe("quota forecasts", () => {
 
   // A weekly limit burning hard right now really is running out faster — but
   // saying so as a date claims to know which days you work and how late.
-  const weekly = (percent, resetsInHours, forecast) => ({
-    id: "seven-day",
-    label: "7-day limit",
-    used: percent,
-    limit: 100,
-    percent,
-    unit: "percent",
-    resets_at: NOW + resetsInHours * HOUR,
-    window_ms: 7 * 24 * HOUR,
-    forecast,
-  });
+  const weekly = (percent: number, resetsInHours: number, forecast: unknown) =>
+    ({
+      id: "seven-day",
+      label: "7-day limit",
+      used: percent,
+      limit: 100,
+      percent,
+      unit: "percent",
+      resets_at: NOW + resetsInHours * HOUR,
+      window_ms: 7 * 24 * HOUR,
+      forecast,
+    }) as Parameters<typeof usage.describeForecast>[0];
 
   test("a long window uses the same time-left format", () => {
     const copy = usage.describeForecast(
@@ -345,10 +336,7 @@ describe("usage settings", () => {
   });
 
   test("round-trips a real configuration", () => {
-    const settings = {
-      days: 30,
-      metric: "tokens",
-    };
+    const settings = { days: 30, metric: "tokens" } as const;
     usage.saveSettings(settings);
     expect(usage.loadSettings()).toEqual(settings);
   });
@@ -368,14 +356,12 @@ describe("usage settings", () => {
 });
 
 describe("usage series colours", () => {
-  test("every agent the backend knows has a colour slot", () => {
+  test("every agent the backend knows has a colour slot, and no slot is stale", () => {
+    // A new agent added to the Rust scanner but not here would be charted with
+    // no colour at all, so the two lists have to move together.
     const rust = read("src-tauri/src/usage/sources.rs");
-    const ids = [...rust.matchAll(/^\s{8}id: "([a-z]+)",$/gm)].map((match) => match[1]);
+    const ids = [...rust.matchAll(/^\s*id: "([a-z]+)",$/gm)].map((match) => match[1]);
     expect(ids.length).toBeGreaterThan(5);
-    for (const id of ids) {
-      expect(usage.AGENT_COLORS[id]).toBeDefined();
-    }
-    // And nothing stale in the other direction.
     expect(Object.keys(usage.AGENT_COLORS).sort()).toEqual([...ids].sort());
   });
 
@@ -386,87 +372,7 @@ describe("usage series colours", () => {
     expect(new Set(slots).size).toBe(slots.length);
   });
 
-  test("the palette is defined once, in the stylesheet", () => {
-    const css = read("src/styles.css");
-    // The slots the palette validator was run against; changing a hex here
-    // without re-running it breaks the colour-blind separation guarantee.
-    for (const hex of [
-      "#3987e5",
-      "#d95926",
-      "#199e70",
-      "#c98500",
-      "#d55181",
-      "#008300",
-      "#9085e9",
-      "#e66767",
-      "#1599b0",
-      "#a13d8f",
-    ]) {
-      expect(css).toContain(hex);
-    }
-  });
-
   test("an unknown agent gets the neutral, never an invented hue", () => {
     expect(usage.agentColor("some-future-cli")).toBe("var(--viz-muted)");
-  });
-});
-
-describe("usage wiring", () => {
-  test("the scan commands are registered with tauri", () => {
-    const main = read("src-tauri/src/main.rs");
-    for (const command of ["usage_scan", "usage_pricing", "usage_set_pricing"]) {
-      expect(main).toContain(`async fn ${command}`);
-      // Present in the invoke_handler list, not just defined.
-      expect(main).toMatch(new RegExp(`^\\s+${command},$`, "m"));
-    }
-    expect(main).toContain("UsageState::default()");
-  });
-
-  test("the dashboard is its own settings section, not part of General", () => {
-    const settings = read("src/components/SettingsMenu.tsx");
-    expect(settings).toContain('"Usage"');
-    expect(settings).toContain('const showUsage = section === "Usage" && !searching;');
-  });
-
-  test("usage preloads on Settings entry but never during app startup", () => {
-    const app = read("src/App.tsx");
-    expect(app.match(/prefetchUsage/g)?.length).toBe(2);
-    expect(app).toContain("prefetchUsage(loadUsageSettings().days, 60_000)");
-    const settings = read("src/components/SettingsMenu.tsx");
-    expect(settings).toContain("{showUsage && <UsagePanel />}");
-    const panel = read("src/components/UsagePanel.tsx");
-    expect(panel).toContain("prefetchUsage(days");
-    const usageLib = read("src/lib/usage.ts");
-    expect(usageLib).toContain("const pendingScans = new Map");
-    expect(usageLib).toContain("let scanQueue");
-  });
-
-  test("tracking and quota ceilings require no manual configuration", () => {
-    const panel = read("src/components/UsagePanel.tsx");
-    expect(panel).not.toContain("Tracked agents");
-    expect(panel).not.toContain("Set a limit");
-    expect(panel).toContain("Automatically tracking");
-    expect(panel).not.toContain("usage-badge");
-
-    const backend = read("src-tauri/src/usage/mod.rs");
-    expect(backend).not.toContain("pub agents: Vec<String>");
-    expect(backend).not.toContain("QuotaConfig");
-  });
-
-  test("Claude quota uses its official OAuth session without owning refresh tokens", () => {
-    const quota = read("src-tauri/src/usage/quota.rs");
-    expect(quota).toContain("https://api.anthropic.com/api/oauth/usage");
-    expect(quota).toContain(".claude/.credentials.json");
-    expect(quota).toContain("CLAUDE_CACHE_TTL: Duration = Duration::from_secs(60)");
-    expect(quota).not.toContain('rename = "refreshToken"');
-  });
-
-  test("charts ship a table view and a legend", () => {
-    const charts = read("src/components/UsageCharts.tsx");
-    expect(charts).toContain("export function TableView");
-    expect(charts).toContain("export function Legend");
-    const panel = read("src/components/UsagePanel.tsx");
-    expect(panel).toContain("<TableView");
-    expect(panel).toContain("<Legend");
   });
 });

@@ -7,6 +7,7 @@ import { WebglAddon } from "@xterm/addon-webgl";
 import { Channel } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
+import { agentHasUnfinishedWork } from "./agents/activity";
 import { parseAgentLaunch } from "./agents/launch";
 import * as agentSessions from "./agents/session";
 import type { AgentId } from "./agents/types";
@@ -1881,13 +1882,54 @@ export async function anyHasRunningProcess(ids: string[]): Promise<boolean> {
 }
 
 /**
+ * True when closing `id` would interrupt work that has not finished.
+ *
+ * Unlike {@link hasRunningProcess}, an idle long-lived agent does not count.
+ */
+export async function hasCloseBlockingWork(id: string): Promise<boolean> {
+  const agent = agentSessions.get(id);
+  if (agent) return agentHasUnfinishedWork(agent.status);
+  const session = sessions.get(id);
+  if (!session || session.exited || !session.spawned) return false;
+  if (session.agent) return session.agentTurns.length > 0;
+  try {
+    return await ptyIsBusy(id);
+  } catch {
+    return false;
+  }
+}
+
+/** True when closing any listed terminal would interrupt unfinished work. */
+export async function anyHasCloseBlockingWork(ids: string[]): Promise<boolean> {
+  if (
+    ids.some((id) => {
+      const agent = agentSessions.get(id);
+      return agent ? agentHasUnfinishedWork(agent.status) : false;
+    })
+  ) {
+    return true;
+  }
+  if (ids.some((id) => sessions.get(id)?.agentTurns.length)) return true;
+  const live = ids.filter((id) => {
+    const s = sessions.get(id);
+    return s && s.spawned && !s.exited && !s.agent && !agentSessions.get(id);
+  });
+  if (live.length === 0) return false;
+  try {
+    return await ptyAnyBusy(live);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * The agent running in one of `ids`, if any, so a close prompt can name what
  * it is about to end instead of saying "a process".
  */
 export function runningAgentLabel(ids: string[]): string | null {
   for (const id of ids) {
     const state = agentSessions.get(id);
-    if (state) return state.label;
+    if (state && agentHasUnfinishedWork(state.status)) return state.label;
   }
   return null;
 }

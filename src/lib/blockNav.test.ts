@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { nextBlockSelection, selectionIndex } from "../src/lib/blockNav.ts";
+import { nextBlockSelection, selectionIndex } from "./blockNav";
 
 describe("block navigation helpers", () => {
   const ids = [1, 2, 3, 4];

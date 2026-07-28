@@ -3,12 +3,12 @@ import { describe, expect, test } from "bun:test";
 import {
   createFrameBuffer,
   stabilizeCursorDuringFrame,
-} from "../src/lib/frames.ts";
+} from "./frames";
 import {
   CURSOR_SETTLE_MS,
   createCursorSettler,
   cursorMoveNeedsSettling,
-} from "../src/lib/cursor.ts";
+} from "./cursor";
 
 const ESC = "\x1b";
 const OPEN = `${ESC}[?2026h`;
