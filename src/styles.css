@@ -2770,7 +2770,9 @@ svg.tab-glyph-fill path {
 /*
  * Outline only the finished pane (not shared dividers). Shared bars would light
  * both neighbours; drawing on the pane keeps the signal on the terminal that
- * actually completed. Always present so opacity can fade in/out in 500ms.
+ * actually completed. It must sit above `.agent-surface` (z-index 6), whose
+ * opaque background otherwise covers the outline below the pane header.
+ * Always present so opacity can fade in/out in 500ms.
  */
 .pane::after {
   content: "";
@@ -2780,7 +2782,7 @@ svg.tab-glyph-fill path {
   border-radius: var(--pane-radius, 0);
   box-shadow: inset 0 0 10px rgba(242, 104, 111, 0.18);
   pointer-events: none;
-  z-index: 5;
+  z-index: 7;
   opacity: 0;
   transition: opacity 500ms ease;
 }
@@ -2800,7 +2802,8 @@ svg.tab-glyph-fill path {
   border-radius: var(--pane-radius, 0);
   box-shadow: inset 0 0 10px rgba(242, 104, 111, 0.18);
   pointer-events: none;
-  z-index: 5;
+  /* Keep the focused completion pulse above the opaque agent surface too. */
+  z-index: 7;
   opacity: 0;
   animation: pane-completion-flash 1500ms linear both;
 }
