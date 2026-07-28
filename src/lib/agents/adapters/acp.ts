@@ -2,7 +2,7 @@ import {
   asArray,
   asRecord,
   asString,
-  imageBase64,
+  imagePayloadBase64,
   oneLine,
   parseJson,
   type AdapterContext,
@@ -830,7 +830,7 @@ export function createAcpAdapter(): AgentAdapter {
           ...(prompt.text ? [{ type: "text", text: prompt.text }] : []),
           ...prompt.images.map((image) => ({
             type: "image",
-            data: imageBase64(image.dataUrl),
+            data: imagePayloadBase64(image),
             mimeType: image.mimeType,
           })),
         ],

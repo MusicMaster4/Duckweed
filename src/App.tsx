@@ -62,6 +62,7 @@ import {
   shouldSignalCompletion,
   type ProcessState,
 } from "./lib/processActivity";
+import { setCompletionTaskbarBadge } from "./lib/taskbarCompletion";
 import {
   adjustSettingsIndexOnAppend,
   adjustSettingsIndexOnClose,
@@ -222,6 +223,10 @@ export default function App() {
   const [completionFlashes, setCompletionFlashes] = useState<Map<string, number>>(
     () => new Map(),
   );
+  const unreadTermIdsRef = useRef(unreadTermIds);
+  unreadTermIdsRef.current = unreadTermIds;
+  const completionFlashesRef = useRef(completionFlashes);
+  completionFlashesRef.current = completionFlashes;
   const [toolsWidth, setToolsWidth] = useState(
     Math.min(TOOLS_MAX_WIDTH, Math.max(TOOLS_MIN_WIDTH, initial.toolsWidth)),
   );
@@ -270,6 +275,19 @@ export default function App() {
     [],
   );
 
+  const syncTaskbarCompletionBadge = useCallback(() => {
+    if (document.hasFocus() || !completionHighlightsRef.current) {
+      setCompletionTaskbarBadge(false);
+      return;
+    }
+    if (unreadTermIdsRef.current.size > 0 || completionFlashesRef.current.size > 0) {
+      // Do not clear this just because a transient pane flash expires. Once the
+      // user leaves with a completion visible, the taskbar marker stays until
+      // the window is focused again.
+      setCompletionTaskbarBadge(true);
+    }
+  }, []);
+
   const updateTab = useCallback((tabId: string, fn: (tab: Tab) => Tab) => {
     setTabs((prev) => prev.map((t) => (t.id === tabId ? fn(t) : t)));
   }, []);
@@ -279,18 +297,21 @@ export default function App() {
       if (!prev.has(termId)) return prev;
       const next = new Set(prev);
       next.delete(termId);
+      unreadTermIdsRef.current = next;
       return next;
     });
   }, []);
 
-  const flashFocusedCompletion = useCallback((termId: string) => {
+  const flashFocusedCompletion = useCallback((termId: string, restored = false) => {
     const previousTimer = completionFlashTimers.current.get(termId);
     if (previousTimer !== undefined) window.clearTimeout(previousTimer);
 
     const pulse = ++completionFlashSeq.current;
     setCompletionFlashes((previous) => {
       const next = new Map(previous);
-      next.set(termId, pulse);
+      // A negative pulse tells the pane that its already-visible unread frame
+      // should hold before fading, rather than fading in again.
+      next.set(termId, restored ? -pulse : pulse);
       return next;
     });
 
@@ -325,6 +346,42 @@ export default function App() {
     },
     [isSelectedTerm],
   );
+
+  // A completion in the selected terminal becomes unread while the native
+  // window is minimized or unfocused. On return, it has already been seen at
+  // full opacity, so hold the frame for one second and then fade it away.
+  useEffect(() => {
+    const reviewSelectedCompletion = () => {
+      if (settingsActiveRef.current || !completionHighlightsRef.current) return;
+      const tab = currentTab();
+      const term = tab ? findLeaf(tab.root, tab.activeLeaf)?.term : null;
+      if (!term || !unreadTermIdsRef.current.has(term)) return;
+      acknowledgeTerm(term);
+      flashFocusedCompletion(term, true);
+    };
+
+    window.addEventListener("focus", reviewSelectedCompletion);
+    return () => window.removeEventListener("focus", reviewSelectedCompletion);
+  }, [acknowledgeTerm, currentTab, flashFocusedCompletion]);
+
+  useEffect(() => {
+    window.addEventListener("focus", syncTaskbarCompletionBadge);
+    window.addEventListener("blur", syncTaskbarCompletionBadge);
+    return () => {
+      window.removeEventListener("focus", syncTaskbarCompletionBadge);
+      window.removeEventListener("blur", syncTaskbarCompletionBadge);
+      setCompletionTaskbarBadge(false);
+    };
+  }, [syncTaskbarCompletionBadge]);
+
+  useEffect(() => {
+    syncTaskbarCompletionBadge();
+  }, [
+    completionFlashes,
+    completionHighlights,
+    syncTaskbarCompletionBadge,
+    unreadTermIds,
+  ]);
 
   /** cwd a new pane should start in: follow the focused shell, then the tab's project. */
   const inheritCwd = useCallback((): string | null => {
@@ -424,6 +481,7 @@ export default function App() {
         if (prev.has(termId)) return prev;
         const next = new Set(prev);
         next.add(termId);
+        unreadTermIdsRef.current = next;
         return next;
       });
     };

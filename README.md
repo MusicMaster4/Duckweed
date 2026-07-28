@@ -11,6 +11,11 @@ context, diffs, tabs, and panes in one place. There is no Duckweed account to
 create, no cloud workspace to set up, and nothing to sync before your first
 command.
 
+Launch several coding agents side by side in the same window. Duckweed gives
+each one a dedicated interface for conversations, tool calls, plans,
+permissions, and file changes, without taking away the terminal when you need
+it.
+
 <p>
   <a href="https://github.com/MusicMaster4/Duckweed/releases/latest">
     <img src="https://img.shields.io/badge/Download-stable-78dc50?style=for-the-badge&logo=windows&logoColor=111511" alt="Download the latest stable release" />
@@ -48,7 +53,9 @@ somewhere behind all of them.
 Duckweed is the terminal workspace I wanted for that kind of work. It has the
 freedom of a tiling layout, but it still behaves like a regular terminal. Open
 your project, arrange the panes once, and let each agent or command have its own
-space.
+space. Multiple panes can show Duckweed's custom agent interface at the same
+time, so separate agents can work in parallel without being spread across
+separate application windows.
 
 Duckweed does not host your repository or wrap your coding tools in another
 service. It runs the shells and CLIs already installed on your computer. Layouts
@@ -97,12 +104,49 @@ later updates can be installed from the version chip in the status bar or from
   the status bar or press `Ctrl+Shift+G`.
 - **A useful command palette.** Projects, shells, tabs, panes, settings, and
   updates are available through `Ctrl+Shift+P`.
+- **First-class coding agent interfaces.** Launch Claude Code, Codex, Cursor
+  Agent, Grok, or OpenCode in a pane and Duckweed can replace the terminal UI
+  with a native conversation, tool, plan, permission, and diff timeline. Run
+  several of these interfaces side by side in the same window.
 - **Search and readable output.** Search terminal scrollback and optionally
   highlight paths, URLs, flags, hashes, diffs, warnings, and errors.
 - **Shell discovery.** Duckweed finds PowerShell, `cmd`, Git Bash, WSL, Nushell,
   Bash, Zsh, and Fish when they are installed.
+- **Workspace tools.** Keep a persistent checklist for each tab, browse project
+  files, and arm a power watch that sleeps or shuts down the machine after all
+  panes finish.
 - **Local persistence.** Pane arrangements come back after a restart without
   pretending the old processes are still alive.
+
+## Coding agents
+
+When the custom agent UI is enabled, launching `claude`, `codex`, `agent`,
+`grok`, or `opencode` opens a focused interface inside the current pane. The
+installed CLI still runs locally and keeps its own authentication and provider
+configuration.
+
+Each pane owns its agent session. Split the workspace and launch another agent
+to keep multiple custom interfaces visible and working at once, all within the
+same Duckweed window. You can mix agent interfaces and regular shells in any
+layout.
+
+The interface presents streamed responses, reasoning, tool calls, file changes,
+plans, permission requests, token usage, and session history in a consistent
+timeline while preserving each provider's identity. The composer supports slash
+commands, workspace file mentions, queued follow-ups, and image attachments
+where the provider accepts them. Model and reasoning controls appear when the
+agent protocol exposes those choices.
+
+Supported custom interfaces currently include:
+
+- Claude Code and compatible Claudex launches
+- Codex CLI
+- Cursor Agent
+- Grok CLI
+- OpenCode
+
+Turn off **Custom Agent UI** from the command palette whenever you prefer to use
+an agent's original terminal interface.
 
 ## Agent usage
 
@@ -209,8 +253,9 @@ setup is documented in [docs/releases.md](docs/releases.md).
 
 ## Current scope
 
-Duckweed is an active project. Projects, tabs, panes, real shells, search, Git
-diffs, local usage analytics, updates, and layout persistence are implemented.
+Duckweed is an active project. Projects, tabs, panes, real shells, custom coding
+agent interfaces, search, Git diffs, local usage analytics, checklists, power
+watch, updates, and layout persistence are implemented.
 
 Command blocks currently group commands submitted through Duckweed's composer.
 Grouping raw-mode input the same way still needs OSC 133 shell integration.

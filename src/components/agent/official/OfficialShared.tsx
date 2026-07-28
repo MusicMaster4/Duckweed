@@ -416,6 +416,7 @@ export function MessageItem({
       <article
         ref={elementRef}
         className={`official-user official-user--${variant}${className ? ` ${className}` : ""}`}
+        data-agent-user-message={item.id}
       >
         <AgentImageAttachments images={item.images ?? []} />
         {item.text && <p>{item.text}</p>}
@@ -628,7 +629,7 @@ function ThinkingHistory({
   const [open, setOpen] = useState(false);
   const panelId = useId();
   const latest = showLatestFull ? thoughts[thoughts.length - 1] : undefined;
-  const active = working && (!latest || latest.streaming);
+  const active = working;
   const earlierThoughts = showLatestFull ? thoughts.slice(0, -1) : thoughts;
   const expandable = earlierThoughts.length > 0;
 
@@ -760,9 +761,6 @@ export function ActivityHistory({
     (item): item is ThinkingItem => item.kind === "thinking",
   );
   const tools = activities.filter((item): item is ToolItem => item.kind === "tool");
-  const latestActivity = activities[activities.length - 1];
-  const thinkingActive =
-    working && (!latestActivity || latestActivity.kind === "thinking");
 
   if (!thoughts.length && !tools.length && !working) return null;
 
@@ -771,7 +769,7 @@ export function ActivityHistory({
       {(thoughts.length > 0 || working) && (
         <ThinkingHistory
           thoughts={thoughts}
-          working={thinkingActive}
+          working={working}
           showLatestFull={showLatestThinking}
         />
       )}

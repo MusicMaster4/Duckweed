@@ -24,6 +24,7 @@ const image = {
   name: "screenshot.png",
   mimeType: "image/png" as const,
   dataUrl: "data:image/png;base64,aGVsbG8=",
+  thumbnailDataUrl: "data:image/webp;base64,dGh1bWJuYWls",
   size: 5,
 };
 
@@ -114,6 +115,67 @@ describe("claude adapter", () => {
       streaming: false,
     });
     expect(items[1]).toMatchObject({ text: "Hey!", streaming: false });
+  });
+
+  test("uses the settled assistant message to catch up a lagging text stream", () => {
+    const h = harness();
+    h.feed({ type: "stream_event", event: { type: "message_start" } });
+    h.feed({
+      type: "stream_event",
+      event: {
+        type: "content_block_start",
+        index: 0,
+        content_block: { type: "text" },
+      },
+    });
+    h.feed({
+      type: "stream_event",
+      event: {
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "text_delta", text: "The partial answer" },
+      },
+    });
+
+    h.feed({
+      type: "assistant",
+      message: {
+        id: "message-1",
+        content: [
+          {
+            type: "text",
+            text: "The partial answer is replaced immediately by the complete response.",
+          },
+        ],
+      },
+    });
+
+    expect(h.state().items).toEqual([
+      expect.objectContaining({
+        kind: "assistant",
+        id: "m1-b0",
+        text: "The partial answer is replaced immediately by the complete response.",
+        streaming: false,
+      }),
+    ]);
+  });
+
+  test("shows settled assistant text even when no text delta was received", () => {
+    const h = harness();
+    h.feed({
+      type: "assistant",
+      message: {
+        id: "message-2",
+        content: [{ type: "text", text: "Already complete." }],
+      },
+    });
+
+    expect(h.state().items[0]).toMatchObject({
+      kind: "assistant",
+      id: "message-2-b0",
+      text: "Already complete.",
+      streaming: false,
+    });
   });
 
   test("names a tool call from its streamed input before the result lands", () => {
@@ -330,7 +392,7 @@ describe("claude adapter", () => {
     expect(h.state().items[0]).toMatchObject({ kind: "user", text: "fix the bug" });
   });
 
-  test("sends attached images as Anthropic base64 content", () => {
+  test("sends the original image instead of its thumbnail to Claude", () => {
     const h = harness();
     h.adapter.prompt({ text: "Describe this", images: [image] }, h.ctx);
     expect(h.sent[0]).toMatchObject({

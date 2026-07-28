@@ -1,6 +1,6 @@
 import type { AgentEvent } from "./events";
 import type { AgentLaunch } from "./launch";
-import type { AgentPrompt } from "./types";
+import type { AgentImageAttachment, AgentPrompt } from "./types";
 
 /** What an adapter is given to do its job. */
 export interface AdapterContext {
@@ -62,8 +62,14 @@ export interface AgentAdapter {
   endsOnStdinClose?: boolean;
 }
 
-/** Strip the data-URL header for protocols that carry MIME and base64 separately. */
-export function imageBase64(dataUrl: string): string {
+/** Return the exact original image source, never its display-only thumbnail. */
+export function imagePayloadDataUrl(image: AgentImageAttachment): string {
+  return image.dataUrl;
+}
+
+/** Strip the original data-URL header for protocols that carry MIME separately. */
+export function imagePayloadBase64(image: AgentImageAttachment): string {
+  const dataUrl = imagePayloadDataUrl(image);
   const comma = dataUrl.indexOf(",");
   return comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl;
 }

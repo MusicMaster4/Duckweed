@@ -79,8 +79,10 @@ export interface AgentImageAttachment {
   name: string;
   /** MIME type accepted by the agent protocols. */
   mimeType: "image/png" | "image/jpeg" | "image/gif" | "image/webp";
-  /** Self-contained source used for previews and protocol conversion. */
+  /** Exact original source used by the full-size viewer and agent protocols. */
   dataUrl: string;
+  /** Optional derived image used only by the small attachment tile. */
+  thumbnailDataUrl?: string;
   /** Original encoded file size in bytes. */
   size: number;
 }

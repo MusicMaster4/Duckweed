@@ -117,8 +117,17 @@ export function AgentSurface({ termId, active, onClose }: Props) {
   const pinnedRef = useRef(true);
   const userPausedRef = useRef(false);
   const lastScrollTopRef = useRef(0);
+  const previousUserMessageIdRef = useRef<string | null | undefined>(undefined);
   const [showJumpToBottom, setShowJumpToBottom] = useState(false);
   const timelineRevision = agentTimelineRevision(session?.items ?? []);
+  let latestUserMessageId: string | null = null;
+  for (let index = (session?.items.length ?? 0) - 1; index >= 0; index -= 1) {
+    const item = session?.items[index];
+    if (item?.kind === "user") {
+      latestUserMessageId = item.id;
+      break;
+    }
+  }
   const workflow = latestWorkflow(session?.items ?? []);
   const workflowComplete = workflowIsComplete(workflow, session?.status);
   const [expiredWorkflowId, setExpiredWorkflowId] = useState<string | null>(null);
@@ -149,6 +158,45 @@ export function AgentSurface({ termId, active, onClose }: Props) {
     session?.permission?.id,
     session?.error,
   ]);
+
+  // Codex already uses a prompt-docking FLIP inside ChatGPTExperience. Give
+  // every other provider the same upward handoff from composer to transcript
+  // without coupling their deliberately different timeline layouts.
+  useLayoutEffect(() => {
+    const previousId = previousUserMessageIdRef.current;
+    previousUserMessageIdRef.current = latestUserMessageId;
+    if (
+      session?.agent === "codex" ||
+      !latestUserMessageId ||
+      previousId === undefined ||
+      previousId === latestUserMessageId ||
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches
+    ) {
+      return;
+    }
+
+    const message = Array.from(
+      scrollRef.current?.querySelectorAll<HTMLElement>("[data-agent-user-message]") ?? [],
+    ).find((node) => node.dataset.agentUserMessage === latestUserMessageId);
+    const composer = composerRef.current;
+    if (!message || !composer || typeof message.animate !== "function") return;
+
+    const messageRect = message.getBoundingClientRect();
+    const composerRect = composer.getBoundingClientRect();
+    const deltaY = composerRect.top - 12 - messageRect.bottom;
+    if (deltaY < 1) return;
+
+    message.animate(
+      [
+        { transform: `translateY(${deltaY}px)`, offset: 0 },
+        { transform: "translateY(0)", offset: 1 },
+      ],
+      {
+        duration: 220,
+        easing: "cubic-bezier(0.2, 0.82, 0.2, 1)",
+      },
+    );
+  }, [latestUserMessageId, session?.agent]);
 
   useEffect(() => {
     const node = scrollRef.current;

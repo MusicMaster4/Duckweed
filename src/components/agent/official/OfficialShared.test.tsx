@@ -389,33 +389,35 @@ describe("official agent presentation", () => {
     });
   }
 
-  test("stops the thinking animation while the latest tool is active", () => {
-    const html = renderAgentActivity("grok", [
-      { kind: "user", id: "user", at: 1, text: "Inspect" },
-      {
-        kind: "thinking",
-        id: "stale-stream-flag",
-        at: 2,
-        text: "The adapter has not closed this trace yet.",
-        streaming: true,
-      },
-      {
-        kind: "tool",
-        id: "tool",
-        at: 3,
-        callId: "call",
-        name: "Read",
-        tool: "read",
-        title: "Read package metadata",
-        status: "running",
-        command: null,
-        output: "",
-        changes: [],
-      },
-    ]);
+  test("keeps the thinking animation active through running and completed tool calls", () => {
+    for (const toolStatus of ["running", "done"] as const) {
+      const html = renderAgentActivity("claude", [
+        { kind: "user", id: "user", at: 1, text: "Inspect" },
+        {
+          kind: "thinking",
+          id: "completed-thinking",
+          at: 2,
+          text: "I will inspect the package metadata.",
+          streaming: false,
+        },
+        {
+          kind: "tool",
+          id: `tool-${toolStatus}`,
+          at: 3,
+          callId: `call-${toolStatus}`,
+          name: "Read",
+          tool: "read",
+          title: "Read package metadata",
+          status: toolStatus,
+          command: null,
+          output: "",
+          changes: [],
+        },
+      ]);
 
-    expect(html).toContain("agent-activity-pulse is-settled");
-    expect(html).not.toContain("agent-activity-pulse is-active");
+      expect(html).toContain("agent-activity-pulse is-active");
+      expect(html).not.toContain("agent-activity-pulse is-settled");
+    }
   });
 
   test("keeps Grok planning prose visible when work continues", () => {

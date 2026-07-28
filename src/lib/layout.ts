@@ -170,6 +170,44 @@ export function balance(node: LayoutNode): LayoutNode {
   };
 }
 
+/**
+ * Which sides of a pane sit on the outer frame, as a bitmask so the value stays
+ * a primitive and never breaks a memo. Panes on the frame have to round the
+ * corners of their completion outline: a square 2px border gets clipped by the
+ * rounded workspace and the corner reads as broken.
+ */
+export const EDGE_TOP = 1;
+export const EDGE_RIGHT = 2;
+export const EDGE_BOTTOM = 4;
+export const EDGE_LEFT = 8;
+export const ALL_EDGES = EDGE_TOP | EDGE_RIGHT | EDGE_BOTTOM | EDGE_LEFT;
+
+/** Edges a split child keeps: those across the split axis, plus its outer end. */
+export function edgesForChild(edges: number, dir: "row" | "col", index: number, count: number): number {
+  const [across, first, last] =
+    dir === "row"
+      ? [EDGE_TOP | EDGE_BOTTOM, EDGE_LEFT, EDGE_RIGHT]
+      : [EDGE_LEFT | EDGE_RIGHT, EDGE_TOP, EDGE_BOTTOM];
+  let kept = edges & across;
+  if (index === 0) kept |= edges & first;
+  if (index === count - 1) kept |= edges & last;
+  return kept;
+}
+
+/**
+ * `border-radius` shorthand for an overlay that has to hug the rounded frame:
+ * a corner is rounded only when both of its sides are on the outer frame.
+ */
+export function edgeRadius(edges: number): string {
+  const r = (a: number, b: number) => ((edges & a) && (edges & b) ? "var(--pane-edge-radius)" : "0px");
+  return [
+    r(EDGE_TOP, EDGE_LEFT),
+    r(EDGE_TOP, EDGE_RIGHT),
+    r(EDGE_BOTTOM, EDGE_RIGHT),
+    r(EDGE_BOTTOM, EDGE_LEFT),
+  ].join(" ");
+}
+
 /** Depth-first leaf order, used for tab-order pane cycling. */
 export function nextLeaf(root: LayoutNode, currentId: string, step: 1 | -1): string | null {
   const all = leaves(root);

@@ -2,6 +2,7 @@ import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 import * as bus from "../lib/bus";
+import { edgeRadius } from "../lib/layout";
 import * as terminals from "../lib/terminals";
 import type { DropZone, LeafNode, ProjectInfo } from "../lib/types";
 import { AgentSurface } from "./agent/AgentSurface";
@@ -23,6 +24,8 @@ interface Props {
   isSource: boolean;
   spawn: { cwd: string | null; shell: string | null };
   highlight: boolean;
+  /** Bitmask of the sides sitting on the rounded outer frame — see PaneTree. */
+  edges: number;
   completionFlash: number;
   /** Background completion not reviewed yet — drives the pane outline, not a header dot. */
   unread: boolean;
@@ -52,6 +55,7 @@ export const TerminalPane = memo(function TerminalPane({
   isSource,
   spawn,
   highlight,
+  edges,
   completionFlash,
   unread,
   project,
@@ -188,13 +192,21 @@ export const TerminalPane = memo(function TerminalPane({
       ]
         .filter(Boolean)
         .join(" ")}
+      // Only the corners that meet the rounded outer frame get a radius; the
+      // ones against a divider stay square so the outline meets it flush.
+      style={{ "--pane-radius": edgeRadius(edges) } as React.CSSProperties}
       data-pane-id={node.id}
       onPointerDownCapture={onActivate}
     >
-      {completionFlash > 0 && (
+      {completionFlash !== 0 && (
         <span
           key={completionFlash}
-          className="pane-completion-flash"
+          className={[
+            "pane-completion-flash",
+            completionFlash < 0 ? "is-restored" : "",
+          ]
+            .filter(Boolean)
+            .join(" ")}
           aria-hidden="true"
         />
       )}

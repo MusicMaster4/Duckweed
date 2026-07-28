@@ -24,6 +24,7 @@ const image = {
   name: "screenshot.png",
   mimeType: "image/png" as const,
   dataUrl: "data:image/png;base64,aGVsbG8=",
+  thumbnailDataUrl: "data:image/webp;base64,dGh1bWJuYWls",
   size: 5,
 };
 
@@ -487,7 +488,7 @@ describe("codex adapter", () => {
     expect(h.state().items[0]).toMatchObject({ kind: "user", text: "fix the bug" });
   });
 
-  test("sends attached images as Codex image inputs", async () => {
+  test("sends the original image instead of its thumbnail to Codex", async () => {
     const h = harness();
     await h.handshake();
     h.adapter.prompt({ text: "What is wrong here?", images: [image] }, h.ctx);

@@ -1,6 +1,6 @@
 import { Fragment, memo, useRef, useState } from "react";
 
-import { resizeSplit } from "../lib/layout";
+import { ALL_EDGES, edgesForChild, resizeSplit } from "../lib/layout";
 import type { DropZone, LayoutNode, LeafNode, ProjectInfo, SplitNode } from "../lib/types";
 import type { DragState } from "../hooks/useDragPane";
 import { TerminalPane } from "./TerminalPane";
@@ -43,7 +43,15 @@ function dropZoneFor(drag: DragState | null, leafId: string): DropZone | null {
   return drag.target.zone;
 }
 
-export const PaneTree = memo(function PaneTree({ node, shared }: { node: LayoutNode; shared: PaneTreeShared }) {
+export const PaneTree = memo(function PaneTree({
+  node,
+  shared,
+  edges = ALL_EDGES,
+}: {
+  node: LayoutNode;
+  shared: PaneTreeShared;
+  edges?: number;
+}) {
   if (node.kind === "leaf") {
     return (
       <TerminalPane
@@ -58,6 +66,7 @@ export const PaneTree = memo(function PaneTree({ node, shared }: { node: LayoutN
         isSource={shared.drag?.leafId === node.id}
         spawn={shared.spawnFor(node.term)}
         highlight={shared.highlight}
+        edges={edges}
         unread={shared.unreadTerms.has(node.term)}
         completionFlash={shared.completionFlashes.get(node.term) ?? 0}
         project={shared.project}
@@ -72,10 +81,18 @@ export const PaneTree = memo(function PaneTree({ node, shared }: { node: LayoutN
       />
     );
   }
-  return <SplitView node={node} shared={shared} />;
+  return <SplitView node={node} shared={shared} edges={edges} />;
 });
 
-const SplitView = memo(function SplitView({ node, shared }: { node: SplitNode; shared: PaneTreeShared }) {
+const SplitView = memo(function SplitView({
+  node,
+  shared,
+  edges,
+}: {
+  node: SplitNode;
+  shared: PaneTreeShared;
+  edges: number;
+}) {
   const containerRef = useRef<HTMLDivElement>(null);
   const count = node.children.length;
 
@@ -101,7 +118,7 @@ const SplitView = memo(function SplitView({ node, shared }: { node: SplitNode; s
               />
             )}
             <div className="split-cell" style={{ flexBasis: basis }}>
-              <PaneTree node={child} shared={shared} />
+              <PaneTree node={child} shared={shared} edges={edgesForChild(edges, node.dir, index, count)} />
             </div>
           </Fragment>
         );

@@ -462,6 +462,7 @@ const OpenCodeModule = memo(function OpenCodeModule({
       data-lane={module.lane}
       data-live={live || undefined}
       data-failed={failed || undefined}
+      data-agent-user-message={module.lane === "you" ? module.key : undefined}
     >
       <div className="oc-mod-gutter">
         <span className="oc-mod-tag">{module.lane}</span>

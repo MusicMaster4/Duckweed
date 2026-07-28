@@ -2150,6 +2150,10 @@ svg.tab-glyph-fill path {
    a split has no edge of its own, only the dividers around it. */
 .pane {
   position: relative;
+  /* Inner curve of the workspace frame (1px border inside var(--radius)), so an
+     overlay drawn on an edge pane traces the same arc instead of being clipped
+     square. `--pane-radius` is set per pane from the sides it sits on. */
+  --pane-edge-radius: calc(var(--radius) - 1px);
   display: flex;
   flex-direction: column;
   min-width: 0;
@@ -2168,6 +2172,7 @@ svg.tab-glyph-fill path {
   position: absolute;
   inset: 0;
   border: 2px solid var(--rose);
+  border-radius: var(--pane-radius, 0);
   box-shadow: inset 0 0 10px rgba(242, 104, 111, 0.18);
   pointer-events: none;
   z-index: 5;
@@ -2187,6 +2192,7 @@ svg.tab-glyph-fill path {
   position: absolute;
   inset: 0;
   border: 2px solid var(--rose);
+  border-radius: var(--pane-radius, 0);
   box-shadow: inset 0 0 10px rgba(242, 104, 111, 0.18);
   pointer-events: none;
   z-index: 5;
@@ -2200,6 +2206,26 @@ svg.tab-glyph-fill path {
   }
 
   33.333%,
+  66.667% {
+    opacity: 1;
+  }
+
+  100% {
+    opacity: 0;
+  }
+}
+
+/*
+ * Returning to a selected terminal that completed while the app was away
+ * starts from the unread frame's full opacity. Keep it for one second, then
+ * use the same 500ms fade as the persistent unread frame.
+ */
+.pane-completion-flash.is-restored {
+  animation-name: pane-restored-completion-flash;
+}
+
+@keyframes pane-restored-completion-flash {
+  0%,
   66.667% {
     opacity: 1;
   }
@@ -6805,10 +6831,12 @@ body.is-resizing * {
 }
 
 .agent-image-lightbox figure {
-  display: flex;
+  display: grid;
+  width: min(94vw, 1500px);
+  height: calc(100vh - 90px);
   max-width: min(94vw, 1500px);
   max-height: calc(100vh - 90px);
-  flex-direction: column;
+  grid-template-rows: minmax(0, 1fr) auto;
   gap: 8px;
   margin: 0;
 }
@@ -6816,8 +6844,8 @@ body.is-resizing * {
 .agent-image-lightbox figure img {
   min-width: 0;
   min-height: 0;
-  max-width: 100%;
-  max-height: calc(100vh - 120px);
+  width: 100%;
+  height: 100%;
   border: 1px solid rgba(255, 255, 255, 0.14);
   border-radius: 8px;
   object-fit: contain;

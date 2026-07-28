@@ -2,7 +2,7 @@ import {
   asArray,
   asRecord,
   asString,
-  imageBase64,
+  imagePayloadDataUrl,
   oneLine,
   parseJson,
   type AdapterContext,
@@ -691,7 +691,7 @@ export function createCodexAdapter(): AgentAdapter {
           ...(prompt.text ? [{ type: "text", text: prompt.text }] : []),
           ...prompt.images.map((image) => ({
             type: "image",
-            url: `data:${image.mimeType};base64,${imageBase64(image.dataUrl)}`,
+            url: imagePayloadDataUrl(image),
           })),
         ],
         approvalPolicy: "on-request",

@@ -28,6 +28,20 @@ describe("focused completion highlight", () => {
     );
   });
 
+  test("returning to a selected unread terminal holds for 1s, then fades for 500ms", () => {
+    const app = read("src/App.tsx");
+    const pane = read("src/components/TerminalPane.tsx");
+    const css = read("src/styles.css");
+
+    expect(app).toContain('window.addEventListener("focus", reviewSelectedCompletion)');
+    expect(app).toContain("unreadTermIdsRef.current.has(term)");
+    expect(app).toContain("flashFocusedCompletion(term, true)");
+    expect(pane).toContain('completionFlash < 0 ? "is-restored" : ""');
+    expect(css).toMatch(
+      /@keyframes pane-restored-completion-flash[\s\S]*0%,\s*66\.667%[\s\S]*opacity:\s*1[\s\S]*100%[\s\S]*opacity:\s*0/,
+    );
+  });
+
   test("turning completion highlights off clears active pulses", () => {
     const app = read("src/App.tsx");
     expect(app).toContain("completionFlashTimers.current.clear()");

@@ -42,6 +42,12 @@ export type AgentEvent =
   /** The user's own message, echoed into the transcript. */
   | { type: "user"; text: string; images?: AgentImageAttachment[] }
   | { type: "assistant-delta"; id: string; text: string }
+  /**
+   * The provider's settled copy of an assistant block. Replacing the partial
+   * stream here lets a fast final frame catch the UI up immediately instead
+   * of waiting for every already-generated delta to be painted.
+   */
+  | { type: "assistant-snapshot"; id: string; text: string }
   | { type: "assistant-end"; id: string }
   | { type: "thinking-delta"; id: string; text: string }
   | { type: "thinking-end"; id: string }
@@ -277,6 +283,33 @@ export function applyEvent(state: AgentSessionState, event: AgentEvent): AgentSe
       const items = state.items.slice();
       const current = items[index] as { text: string };
       items[index] = { ...items[index], text: clampEnd(current.text + event.text, MAX_TEXT) } as never;
+      return { ...state, items };
+    }
+
+    case "assistant-snapshot": {
+      const index = findStreaming(state, "assistant", event.id);
+      if (index < 0) {
+        return {
+          ...state,
+          started: true,
+          items: [
+            ...state.items,
+            {
+              kind: "assistant",
+              id: event.id,
+              at: Date.now(),
+              text: clampEnd(event.text, MAX_TEXT),
+              streaming: false,
+            },
+          ],
+        };
+      }
+      const items = state.items.slice();
+      items[index] = {
+        ...items[index],
+        text: clampEnd(event.text, MAX_TEXT),
+        streaming: false,
+      } as never;
       return { ...state, items };
     }
 

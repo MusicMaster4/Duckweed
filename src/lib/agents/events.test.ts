@@ -106,6 +106,27 @@ describe("transient notices", () => {
   });
 });
 
+describe("assistant snapshots", () => {
+  test("replaces a partial stream with the provider's complete text", () => {
+    let state = applyEvent(blank(), {
+      type: "assistant-delta",
+      id: "answer-1",
+      text: "Partial",
+    });
+    state = applyEvent(state, {
+      type: "assistant-snapshot",
+      id: "answer-1",
+      text: "Partial response, now complete.",
+    });
+
+    expect(state.items[0]).toMatchObject({
+      kind: "assistant",
+      text: "Partial response, now complete.",
+      streaming: false,
+    });
+  });
+});
+
 describe("double Ctrl+C exit", () => {
   test("arms and disarms without adding chat timeline content", () => {
     const armed = applyEvent(blank(), { type: "exit-armed", armed: true });

@@ -737,6 +737,10 @@
   --activity-accent: #d97757;
 }
 
+.agent-surface[data-program="claudex"] .agent-activity-cluster[data-variant="claude"] {
+  --activity-accent: var(--agent-accent);
+}
+
 .agent-activity-cluster[data-variant="grok"] {
   --activity-accent: #b8b8b8;
 }

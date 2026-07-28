@@ -44,7 +44,7 @@ export function AgentImageAttachments({
               title={`View ${image.name}`}
               aria-label={`View ${image.name} full size`}
             >
-              <img src={image.dataUrl} alt={image.name} />
+              <img src={image.thumbnailDataUrl ?? image.dataUrl} alt={image.name} />
             </button>
             {onRemove && (
               <button

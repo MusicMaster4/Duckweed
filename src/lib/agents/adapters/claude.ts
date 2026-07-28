@@ -2,7 +2,7 @@ import {
   asArray,
   asRecord,
   asString,
-  imageBase64,
+  imagePayloadBase64,
   oneLine,
   parseJson,
   type AdapterContext,
@@ -110,6 +110,7 @@ export function createClaudeAdapter(): AgentAdapter {
   const blocks = new Map<number, { kind: "text" | "thinking" | "tool"; id: string }>();
   const tools = new Map<string, ToolCall>();
   let messageSeq = 0;
+  let settledMessageSeq = 0;
   let controlSeq = 0;
   /** Control request ids Claude is waiting on, keyed by our permission id. */
   const pendingPermissions = new Map<string, { requestId: string; input: unknown }>();
@@ -278,10 +279,24 @@ export function createClaudeAdapter(): AgentAdapter {
       }
       return;
     }
-    for (const raw of asArray(message.content)) {
+    const fallbackMessageId =
+      asString(message.id) ?? `settled-${++settledMessageSeq}`;
+    for (const [index, raw] of asArray(message.content).entries()) {
       const block = asRecord(raw);
       if (!block) continue;
-      if (asString(block.type) !== "tool_use") continue;
+      const blockType = asString(block.type);
+      if (blockType === "text") {
+        const text = asString(block.text);
+        if (!text) continue;
+        const streamed = blocks.get(index);
+        const id =
+          streamed?.kind === "text"
+            ? streamed.id
+            : `${fallbackMessageId}-b${index}`;
+        ctx.emit({ type: "assistant-snapshot", id, text });
+        continue;
+      }
+      if (blockType !== "tool_use") continue;
       const callId = asString(block.id);
       const name = asString(block.name) ?? "tool";
       const input = asRecord(block.input) ?? {};
@@ -520,7 +535,7 @@ export function createClaudeAdapter(): AgentAdapter {
               source: {
                 type: "base64",
                 media_type: image.mimeType,
-                data: imageBase64(image.dataUrl),
+                data: imagePayloadBase64(image),
               },
             })),
             ...(prompt.text ? [{ type: "text", text: prompt.text }] : []),
