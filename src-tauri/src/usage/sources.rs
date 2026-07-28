@@ -68,7 +68,7 @@ pub static AGENTS: &[Agent] = &[
         vendor: "Proxied",
         format: Format::Append,
         caveat: Some(
-            "Claude Code driving a non-Anthropic model through a local proxy. It shares Claude Code's transcripts, so these turns are split out by model rather than by file, and they bill to the proxied provider — not to your Anthropic plan.",
+            "Claude Code driving a non-Anthropic model through a local proxy. It shares Claude Code's transcripts, so these turns are split out by model rather than by file, and they bill to the proxied provider, not to your Anthropic plan.",
         ),
     },
     Agent {

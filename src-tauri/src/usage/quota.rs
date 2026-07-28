@@ -33,7 +33,7 @@
 //! never runs out at all.
 
 use std::collections::{HashMap, HashSet};
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -719,19 +719,82 @@ fn claude_access(home: &Path) -> Option<ClaudeAccess> {
     oauth.insert("accessToken".into(), Value::String(new_access.clone()));
     oauth.insert("refreshToken".into(), Value::String(new_refresh));
     oauth.insert("expiresAt".into(), Value::from(new_expires_at));
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
     // Write the whole file, not just the OAuth block — Claude Code keeps other
     // top-level keys here and must keep finding them after a Duckweed refresh.
-    if let Ok(bytes) = serde_json::to_vec_pretty(&root) {
-        let _ = std::fs::write(&path, bytes);
-    }
+    let bytes = serde_json::to_vec_pretty(&root).ok()?;
+    write_atomically(&path, &bytes).ok()?;
 
     Some(ClaudeAccess {
         access_token: new_access,
         subscription_type,
     })
+}
+
+fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("credentials path has no parent"))?;
+    std::fs::create_dir_all(parent)?;
+
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("credentials");
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let temporary = parent.join(format!(
+        ".{file_name}.duckweed-{}-{nonce}.tmp",
+        std::process::id()
+    ));
+
+    let result = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        replace_file(&temporary, path)?;
+        #[cfg(unix)]
+        std::fs::File::open(parent)?.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
+}
+
+#[cfg(not(windows))]
+fn replace_file(temporary: &Path, target: &Path) -> std::io::Result<()> {
+    std::fs::rename(temporary, target)
+}
+
+#[cfg(windows)]
+fn replace_file(temporary: &Path, target: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::ReplaceFileW;
+
+    let target_wide: Vec<u16> = target.as_os_str().encode_wide().chain(Some(0)).collect();
+    let temporary_wide: Vec<u16> = temporary.as_os_str().encode_wide().chain(Some(0)).collect();
+    let replaced = unsafe {
+        ReplaceFileW(
+            target_wide.as_ptr(),
+            temporary_wide.as_ptr(),
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            std::ptr::null(),
+        )
+    };
+    if replaced == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 /// Exchange Claude Code's refresh token for a fresh access token.
@@ -1655,6 +1718,29 @@ mod tests {
     fn credential_expiry_accepts_seconds_or_milliseconds() {
         assert_eq!(epoch_ms(1_785_000_000), 1_785_000_000_000);
         assert_eq!(epoch_ms(1_785_000_000_000), 1_785_000_000_000);
+    }
+
+    #[test]
+    fn credential_updates_replace_the_file_atomically() {
+        let root = std::env::temp_dir().join(format!(
+            "duckweed-atomic-credentials-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let path = root.join(".claude/.credentials.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"old credentials").unwrap();
+
+        write_atomically(&path, b"new credentials").unwrap();
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"new credentials");
+        let leftovers: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".duckweed-"))
+            .collect();
+        assert!(leftovers.is_empty());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

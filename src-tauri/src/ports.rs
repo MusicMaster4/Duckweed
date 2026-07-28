@@ -59,7 +59,15 @@ pub struct PortSnapshot {
 struct ForwardRecord {
     info: ForwardInfo,
     stop: Arc<AtomicBool>,
+    connections: ActiveConnections,
 }
+
+struct ActiveConnection {
+    client: TcpStream,
+    target: Option<TcpStream>,
+}
+
+type ActiveConnections = Arc<Mutex<HashMap<u64, ActiveConnection>>>;
 
 #[derive(Default)]
 struct PortInner {
@@ -125,7 +133,12 @@ impl PortManager {
         }
     }
 
-    pub fn start(&self, pid: u32, target_port: u16) -> Result<ForwardInfo, String> {
+    pub fn start(
+        &self,
+        pid: u32,
+        target_port: u16,
+        target_address: &str,
+    ) -> Result<ForwardInfo, String> {
         if let Some(existing) = self
             .forwards()
             .into_iter()
@@ -148,11 +161,22 @@ impl PortManager {
             url: format!("http://{ip}:{public_port}"),
         };
         let stop = Arc::new(AtomicBool::new(false));
+        let connections = ActiveConnections::default();
         let thread_stop = Arc::clone(&stop);
+        let thread_connections = Arc::clone(&connections);
+        let target_addresses = forward_target_addresses(target_address);
 
         std::thread::Builder::new()
             .name(format!("port-forward-{public_port}"))
-            .spawn(move || forward_loop(listener, target_port, thread_stop))
+            .spawn(move || {
+                forward_loop(
+                    listener,
+                    target_port,
+                    target_addresses,
+                    thread_stop,
+                    thread_connections,
+                )
+            })
             .map_err(err)?;
 
         self.inner.forwards.lock().unwrap().insert(
@@ -160,6 +184,7 @@ impl PortManager {
             ForwardRecord {
                 info: info.clone(),
                 stop,
+                connections,
             },
         );
         Ok(info)
@@ -167,7 +192,11 @@ impl PortManager {
 
     pub fn stop(&self, id: &str) -> Result<(), String> {
         if let Some(record) = self.inner.forwards.lock().unwrap().remove(id) {
-            record.stop.store(true, Ordering::Relaxed);
+            record.stop.store(true, Ordering::Release);
+            let mut connections = record.connections.lock().unwrap();
+            for (_, connection) in connections.drain() {
+                shutdown_connection(&connection);
+            }
         }
         Ok(())
     }
@@ -187,16 +216,46 @@ impl PortManager {
     }
 }
 
-fn forward_loop(listener: TcpListener, target_port: u16, stop: Arc<AtomicBool>) {
-    while !stop.load(Ordering::Relaxed) {
+fn forward_loop(
+    listener: TcpListener,
+    target_port: u16,
+    target_addresses: Vec<String>,
+    stop: Arc<AtomicBool>,
+    connections: ActiveConnections,
+) {
+    let mut next_connection_id = 0_u64;
+    while !stop.load(Ordering::Acquire) {
         match listener.accept() {
             Ok((client, _)) => {
+                if stop.load(Ordering::Acquire) {
+                    let _ = client.shutdown(Shutdown::Both);
+                    break;
+                }
+                let Ok(tracked_client) = client.try_clone() else {
+                    let _ = client.shutdown(Shutdown::Both);
+                    continue;
+                };
+                let connection_id = next_connection_id;
+                next_connection_id = next_connection_id.wrapping_add(1);
+                connections.lock().unwrap().insert(
+                    connection_id,
+                    ActiveConnection {
+                        client: tracked_client,
+                        target: None,
+                    },
+                );
+                let connection_stop = Arc::clone(&stop);
+                let connection_list = Arc::clone(&connections);
+                let connection_targets = target_addresses.clone();
                 std::thread::spawn(move || {
-                    let target = TcpStream::connect(("127.0.0.1", target_port))
-                        .or_else(|_| TcpStream::connect(("::1", target_port)));
-                    if let Ok(target) = target {
-                        proxy_connection(client, target);
-                    }
+                    forward_connection(
+                        client,
+                        target_port,
+                        &connection_targets,
+                        connection_id,
+                        connection_stop,
+                        connection_list,
+                    );
                 });
             }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
@@ -204,6 +263,80 @@ fn forward_loop(listener: TcpListener, target_port: u16, stop: Arc<AtomicBool>) 
             }
             Err(_) => break,
         }
+    }
+}
+
+fn forward_connection(
+    client: TcpStream,
+    target_port: u16,
+    target_addresses: &[String],
+    connection_id: u64,
+    stop: Arc<AtomicBool>,
+    connections: ActiveConnections,
+) {
+    if stop.load(Ordering::Acquire) {
+        remove_connection(&connections, connection_id);
+        let _ = client.shutdown(Shutdown::Both);
+        return;
+    }
+
+    let target = target_addresses
+        .iter()
+        .find_map(|address| TcpStream::connect((address.as_str(), target_port)).ok());
+    let Some(target) = target else {
+        remove_connection(&connections, connection_id);
+        let _ = client.shutdown(Shutdown::Both);
+        return;
+    };
+    let Ok(tracked_target) = target.try_clone() else {
+        remove_connection(&connections, connection_id);
+        let _ = client.shutdown(Shutdown::Both);
+        let _ = target.shutdown(Shutdown::Both);
+        return;
+    };
+
+    let registered = {
+        let mut active = connections.lock().unwrap();
+        if stop.load(Ordering::Acquire) {
+            active.remove(&connection_id);
+            false
+        } else if let Some(connection) = active.get_mut(&connection_id) {
+            connection.target = Some(tracked_target);
+            true
+        } else {
+            false
+        }
+    };
+    if !registered {
+        let _ = client.shutdown(Shutdown::Both);
+        let _ = target.shutdown(Shutdown::Both);
+        return;
+    }
+
+    proxy_connection(client, target);
+    remove_connection(&connections, connection_id);
+}
+
+fn remove_connection(connections: &ActiveConnections, connection_id: u64) {
+    connections.lock().unwrap().remove(&connection_id);
+}
+
+fn shutdown_connection(connection: &ActiveConnection) {
+    let _ = connection.client.shutdown(Shutdown::Both);
+    if let Some(target) = &connection.target {
+        let _ = target.shutdown(Shutdown::Both);
+    }
+}
+
+fn forward_target_addresses(address: &str) -> Vec<String> {
+    let address = address.trim_matches(['[', ']']);
+    if address == "*" {
+        return vec!["127.0.0.1".to_string(), "::1".to_string()];
+    }
+    match address.parse::<IpAddr>() {
+        Ok(IpAddr::V4(ip)) if ip.is_unspecified() => vec!["127.0.0.1".to_string()],
+        Ok(IpAddr::V6(ip)) if ip.is_unspecified() => vec!["::1".to_string()],
+        _ => vec![address.to_string()],
     }
 }
 
@@ -377,7 +510,12 @@ pub fn forward(
     {
         return Err("that port is no longer owned by a Duckweed process".to_string());
     }
-    manager.start(pid, port)
+    let target = current
+        .ports
+        .iter()
+        .find(|entry| entry.pid == pid && entry.port == port)
+        .ok_or_else(|| "that port is no longer owned by a Duckweed process".to_string())?;
+    manager.start(pid, port, &target.address)
 }
 
 fn kill_process_tree(pid: u32) -> Result<(), String> {
@@ -553,7 +691,7 @@ mod tests {
         });
 
         let manager = PortManager::default();
-        let forward = manager.start(123, target_port).unwrap();
+        let forward = manager.start(123, target_port, "127.0.0.1").unwrap();
         let mut client = TcpStream::connect(("127.0.0.1", forward.public_port)).unwrap();
         client.write_all(b"ping").unwrap();
         let mut response = [0_u8; 4];
@@ -561,6 +699,64 @@ mod tests {
         assert_eq!(&response, b"pong");
 
         manager.stop_all();
+        source_thread.join().unwrap();
+    }
+
+    #[test]
+    fn forwarding_uses_explicit_listener_addresses_and_maps_wildcards() {
+        assert_eq!(
+            forward_target_addresses("192.168.1.20"),
+            vec!["192.168.1.20"]
+        );
+        assert_eq!(forward_target_addresses("0.0.0.0"), vec!["127.0.0.1"]);
+        assert_eq!(forward_target_addresses("::"), vec!["::1"]);
+        assert_eq!(forward_target_addresses("*"), vec!["127.0.0.1", "::1"]);
+    }
+
+    #[test]
+    fn stopping_a_forward_disconnects_active_clients() {
+        use std::io::Read;
+        use std::sync::mpsc;
+
+        let source = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let target_port = source.local_addr().unwrap().port();
+        let (accepted_tx, accepted_rx) = mpsc::channel();
+        let source_thread = std::thread::spawn(move || {
+            let (mut stream, _) = source.accept().unwrap();
+            accepted_tx.send(()).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut byte = [0_u8; 1];
+            match stream.read(&mut byte) {
+                Ok(0) => {}
+                Ok(_) => panic!("the target received data after the forward stopped"),
+                Err(error) => assert!(!matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                )),
+            }
+        });
+
+        let manager = PortManager::default();
+        let forward = manager.start(123, target_port, "127.0.0.1").unwrap();
+        let mut client = TcpStream::connect(("127.0.0.1", forward.public_port)).unwrap();
+        accepted_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+
+        manager.stop(&forward.id).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut byte = [0_u8; 1];
+        match client.read(&mut byte) {
+            Ok(0) => {}
+            Ok(_) => panic!("the client received data after the forward stopped"),
+            Err(error) => assert!(!matches!(
+                error.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+            )),
+        }
+
         source_thread.join().unwrap();
     }
 
