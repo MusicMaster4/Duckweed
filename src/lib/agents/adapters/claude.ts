@@ -14,6 +14,7 @@ import {
   toolKind,
   type AgentAccessMode,
   type AgentFileChange,
+  type AgentPrompt,
   type ToolStatus,
 } from "../types";
 
@@ -123,7 +124,10 @@ export function createClaudeAdapter(): AgentAdapter {
   /** Our outbound `set_model` requests, keyed by the id we gave them. */
   const pendingModelChanges = new Map<string, string>();
   /** Our outbound `set_permission_mode` requests, keyed by request id. */
-  const pendingAccessChanges = new Map<string, AgentAccessMode>();
+  const pendingAccessChanges = new Map<
+    string,
+    { mode: AgentAccessMode; announce: boolean }
+  >();
   /**
    * Claude can report one API failure through several protocol frames: a
    * synthetic assistant message, a forwarded child-agent message, and the
@@ -411,20 +415,22 @@ export function createClaudeAdapter(): AgentAdapter {
       return;
     }
 
-    const accessMode = pendingAccessChanges.get(requestId);
-    if (accessMode === undefined) return;
+    const accessChange = pendingAccessChanges.get(requestId);
+    if (accessChange === undefined) return;
     pendingAccessChanges.delete(requestId);
     if (asString(response?.subtype) === "success") {
-      ctx.emit({ type: "session", accessMode });
+      ctx.emit({ type: "session", accessMode: accessChange.mode });
       const label =
-        accessMode === "default"
+        accessChange.mode === "default"
           ? "Agent default"
-          : accessMode === "read-only"
+          : accessChange.mode === "read-only"
             ? "Read only"
-            : accessMode === "workspace"
+            : accessChange.mode === "workspace"
               ? "Workspace"
               : "Full access";
-      ctx.emit({ type: "notice", tone: "info", text: `Access set to ${label}.` });
+      if (accessChange.announce) {
+        ctx.emit({ type: "notice", tone: "info", text: `Access set to ${label}.` });
+      }
       return;
     }
     ctx.emit({
@@ -440,6 +446,29 @@ export function createClaudeAdapter(): AgentAdapter {
    * returns a clear refusal when unavailable (verified against claude 2.1.220).
    */
   const EFFORT_LEVELS = new Set(["low", "medium", "high", "xhigh", "max", "auto", "ultracode"]);
+
+  function setAccessMode(
+    mode: AgentAccessMode,
+    ctx: AdapterContext,
+    announce: boolean,
+  ): void {
+    const nativeMode =
+      mode === "read-only"
+        ? "plan"
+        : mode === "workspace"
+          ? "acceptEdits"
+          : mode === "full-access"
+            ? "bypassPermissions"
+            : "default";
+    controlSeq += 1;
+    const requestId = `dw-access-${controlSeq}`;
+    pendingAccessChanges.set(requestId, { mode, announce });
+    ctx.send({
+      type: "control_request",
+      request_id: requestId,
+      request: { subtype: "set_permission_mode", mode: nativeMode },
+    });
+  }
 
   function handleCommand(text: string, ctx: AdapterContext): "handled" | "prompt" {
     const space = text.search(/\s/);
@@ -485,6 +514,26 @@ export function createClaudeAdapter(): AgentAdapter {
     return "prompt";
   }
 
+  function sendUserMessage(prompt: AgentPrompt, ctx: AdapterContext): void {
+    ctx.send({
+      type: "user",
+      message: {
+        role: "user",
+        content: [
+          ...prompt.images.map((image) => ({
+            type: "image",
+            source: {
+              type: "base64",
+              media_type: image.mimeType,
+              data: imagePayloadBase64(image),
+            },
+          })),
+          ...(prompt.text ? [{ type: "text", text: prompt.text }] : []),
+        ],
+      },
+    });
+  }
+
   return {
     endsOnStdinClose: true,
 
@@ -505,6 +554,8 @@ export function createClaudeAdapter(): AgentAdapter {
       // `system/init` frame that names the model only arrives with the first
       // turn. Opening prompts are sent by the session, not here. The session
       // already seeded Claude's model aliases so the picker works immediately.
+      const accessMode = ctx.launch.accessMode ?? "default";
+      if (accessMode !== "default") setAccessMode(accessMode, ctx, false);
       ctx.emit({ type: "status", status: "idle" });
     },
 
@@ -564,44 +615,22 @@ export function createClaudeAdapter(): AgentAdapter {
       seenTurnErrors.clear();
       ctx.emit({ type: "user", text: prompt.text, images: prompt.images });
       ctx.emit({ type: "status", status: "working" });
-      ctx.send({
-        type: "user",
-        message: {
-          role: "user",
-          content: [
-            ...prompt.images.map((image) => ({
-              type: "image",
-              source: {
-                type: "base64",
-                media_type: image.mimeType,
-                data: imagePayloadBase64(image),
-              },
-            })),
-            ...(prompt.text ? [{ type: "text", text: prompt.text }] : []),
-          ],
-        },
-      });
+      sendUserMessage(prompt, ctx);
+    },
+
+    // Stream-json keeps stdin open while Claude is working. A user message
+    // written during that time is applied to the active conversation at the
+    // next safe processing boundary, which is Claude Code's steering path.
+    steer: (prompt, ctx) => {
+      ctx.emit({ type: "user", text: prompt.text, images: prompt.images });
+      sendUserMessage(prompt, ctx);
+      return true;
     },
 
     command: handleCommand,
 
     configureAccess: (mode, ctx) => {
-      const nativeMode =
-        mode === "read-only"
-          ? "plan"
-          : mode === "workspace"
-            ? "acceptEdits"
-            : mode === "full-access"
-              ? "bypassPermissions"
-              : "default";
-      controlSeq += 1;
-      const requestId = `dw-access-${controlSeq}`;
-      pendingAccessChanges.set(requestId, mode);
-      ctx.send({
-        type: "control_request",
-        request_id: requestId,
-        request: { subtype: "set_permission_mode", mode: nativeMode },
-      });
+      setAccessMode(mode, ctx, true);
       return true;
     },
 

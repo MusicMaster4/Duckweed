@@ -13,6 +13,7 @@ import { openUrl } from "../../../lib/ipc";
 import { AgentAsciiLoader } from "../AgentAsciiLoader";
 import { AgentDiff } from "../AgentDiff";
 import { AgentImageAttachments } from "../AgentImageAttachments";
+import { MessageCopyButton } from "../MessageCopyButton";
 import { AgentProviderIcon } from "../AgentProviderIcon";
 import { nextPreparingMessage } from "./preparingMessages";
 import { nextThinkingPulsePattern } from "./thinkingPulsePatterns";
@@ -424,12 +425,13 @@ export function MessageItem({
 }) {
   if (item.kind === "user") {
     return (
-      <article
-        className={`official-user official-user--${variant}${className ? ` ${className}` : ""}`}
-      >
-        <AgentImageAttachments images={item.images ?? []} />
-        {item.text && <p>{item.text}</p>}
-      </article>
+      <div className={`official-user-turn${className ? ` ${className}` : ""}`}>
+        <article className={`official-user official-user--${variant}`}>
+          <AgentImageAttachments images={item.images ?? []} />
+          {item.text && <p>{item.text}</p>}
+        </article>
+        {item.text && <MessageCopyButton text={item.text} />}
+      </div>
     );
   }
   if (item.kind === "assistant") {
@@ -700,12 +702,39 @@ function ThinkingHistory({
   );
 }
 
-function ToolHistory({ tools, variant }: { tools: ToolItem[]; variant: ActivityVariant }) {
+function ToolHistory({
+  tools,
+  variant,
+  showLatestDiff,
+}: {
+  tools: ToolItem[];
+  variant: ActivityVariant;
+  showLatestDiff: boolean;
+}) {
   const [open, setOpen] = useState(false);
   const panelId = useId();
   const latest = tools[tools.length - 1];
   if (!latest) return null;
   const running = latest.status === "running" || latest.status === "pending";
+  // The CLI prints each edit's diff as it happens; the same live feel here is
+  // the newest changed file pinned under the head while history stays folded.
+  let latestChanged: ToolItem | undefined;
+  if (showLatestDiff) {
+    for (let index = tools.length - 1; index >= 0; index -= 1) {
+      if (tools[index].changes.length > 0) {
+        latestChanged = tools[index];
+        break;
+      }
+    }
+  }
+  const insertions = tools.reduce(
+    (sum, tool) => sum + tool.changes.reduce((total, change) => total + change.insertions, 0),
+    0,
+  );
+  const deletions = tools.reduce(
+    (sum, tool) => sum + tool.changes.reduce((total, change) => total + change.deletions, 0),
+    0,
+  );
 
   return (
     <section
@@ -730,10 +759,23 @@ function ToolHistory({ tools, variant }: { tools: ToolItem[]; variant: ActivityV
         </span>
         <strong className="agent-activity-history-summary">{latest.title || latest.name}</strong>
         <span className="agent-activity-history-status">{activityStatus(latest)}</span>
+        {(insertions > 0 || deletions > 0) && (
+          <span className="official-tool-stats">
+            {insertions > 0 && <span className="is-add">+{insertions}</span>}
+            {deletions > 0 && <span className="is-del">−{deletions}</span>}
+          </span>
+        )}
         {latest.status === "done" && <span className="official-tool-done">✓</span>}
         {latest.status === "error" && <ToolErrorMark />}
         <Chevron open={open} />
       </button>
+      {latestChanged && (
+        <div className="agent-tool-latest-diff" aria-label="Latest file changes">
+          {latestChanged.changes.map((change, index) => (
+            <AgentDiff key={`${change.path}-${index}`} change={change} />
+          ))}
+        </div>
+      )}
       {open && (
         <div
           id={panelId}
@@ -783,7 +825,9 @@ export function ActivityHistory({
           showLatestFull={showLatestThinking}
         />
       )}
-      {tools.length > 0 && <ToolHistory tools={tools} variant={variant} />}
+      {tools.length > 0 && (
+        <ToolHistory tools={tools} variant={variant} showLatestDiff={showLatestThinking} />
+      )}
     </div>
   );
 }

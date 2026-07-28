@@ -1,5 +1,5 @@
 import { AGENTS, AGENT_IDS } from "./catalog";
-import type { AgentId } from "./types";
+import type { AgentAccessMode, AgentId } from "./types";
 
 /**
  * A command the custom UI should answer instead of the shell.
@@ -34,6 +34,11 @@ export interface AgentLaunch {
    * `-c model_reasoning_effort=…`: how hard the model should think.
    */
   effort: string | null;
+  /**
+   * Access level restored by the custom UI. Command parsing leaves this
+   * unset; the durable preference layer fills it before the adapter starts.
+   */
+  accessMode?: AgentAccessMode;
   /** `-c` / `--continue`, or `--resume` with no id: pick up where they left off. */
   resume: boolean;
   /**

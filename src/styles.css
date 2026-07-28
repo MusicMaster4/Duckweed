@@ -3765,10 +3765,8 @@ svg.tab-glyph-fill path {
 }
 
 /*
- * Gap band between blocks: TRANSPARENT so the bottom of the previous chunk's
- * last line shows through uncut (an opaque band used to slice it in half).
- * Only the hairline is painted, snug at the band's bottom edge — centered
- * would strike through the previous line's descenders.
+ * Gap band between blocks: TRANSPARENT so terminal output is never masked.
+ * The hairline sits in the middle with 4px of breathing room on either side.
  */
 .command-block-separator {
   position: absolute;
@@ -3782,7 +3780,7 @@ svg.tab-glyph-fill path {
   background: transparent;
   will-change: transform;
   display: flex;
-  align-items: flex-end;
+  align-items: center;
 }
 
 .command-block-separator::after {

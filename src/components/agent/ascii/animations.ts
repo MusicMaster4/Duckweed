@@ -3,6 +3,8 @@ import {
   clamp01,
   fbm,
   Field,
+  fieldU,
+  fieldV,
   H,
   hash,
   makeStepper,
@@ -390,6 +392,195 @@ function paintRibbon(t: number): string {
   });
 }
 
+/* -- Tetrahedron: the simplest solid, tumbling ----------------------------- */
+
+const TETRAHEDRON_VERTICES: readonly Vertex[] = [
+  [1, 1, 1],
+  [1, -1, -1],
+  [-1, 1, -1],
+  [-1, -1, 1],
+];
+
+const TETRAHEDRON_EDGES: readonly Edge[] = [
+  [0, 1],
+  [0, 2],
+  [0, 3],
+  [1, 2],
+  [1, 3],
+  [2, 3],
+];
+
+const paintTetrahedron: Painter = (t) =>
+  paintWireframe(TETRAHEDRON_VERTICES, TETRAHEDRON_EDGES, t, 1.25, 1.05);
+
+/* -- Trefoil: a knot spinning on a turntable, shaded by depth -------------- */
+
+function paintTrefoil(t: number): string {
+  const yaw = t * 0.9;
+  const cosYaw = Math.cos(yaw);
+  const sinYaw = Math.sin(yaw);
+  return paintPlotted((plot) => {
+    for (let sample = 0; sample <= 240; sample += 1) {
+      const s = (sample / 240) * TAU;
+      const x = (Math.sin(s) + 2 * Math.sin(2 * s)) / 3;
+      const y = (Math.cos(s) - 2 * Math.cos(2 * s)) / 3;
+      const z = -Math.sin(3 * s) / 1.5;
+      const rx = x * cosYaw + z * sinYaw;
+      const rz = z * cosYaw - x * sinYaw;
+      /* Strands brighten as they swing toward the camera. */
+      plot(rx * ASPECT * 0.62, y * 0.82, 0.2 + 0.8 * clamp01((rz + 1.15) / 2.3));
+    }
+  });
+}
+
+/* -- Rose: a three-petal rhodonea with a highlight chasing the stem -------- */
+
+function paintRose(t: number): string {
+  return paintPlotted((plot) => {
+    const samples = 300;
+    for (let i = 0; i < samples; i += 1) {
+      const s = (i / samples) * TAU;
+      const radius = Math.sin(3 * s) * 0.92;
+      const angle = s + t * 0.35;
+      const lead = (((t * 0.5 - i / samples) % 1) + 1) % 1;
+      plot(
+        Math.cos(angle) * radius * 1.4,
+        Math.sin(angle) * radius,
+        0.14 + 0.86 * Math.pow(1 - lead, 4),
+      );
+    }
+  });
+}
+
+/* -- Spirograph: a five-lobed hypotrochoid, slowly morphing ---------------- */
+
+function paintSpirograph(t: number): string {
+  const wobble = Math.sin(t * 0.3) * 1.5;
+  return paintPlotted((plot) => {
+    const samples = 320;
+    for (let i = 0; i < samples; i += 1) {
+      const s = (i / samples) * TAU;
+      const u = (Math.cos(s) * 0.62 + Math.cos(5 * s + wobble) * 0.3) * ASPECT * 0.85;
+      const v = (Math.sin(s) * 0.62 - Math.sin(5 * s + wobble) * 0.3) * 0.9;
+      const lead = (((t * 0.45 - i / samples) % 1) + 1) % 1;
+      plot(u, v, 0.15 + 0.85 * Math.pow(1 - lead, 4));
+    }
+  });
+}
+
+/* -- Gear: a toothed wheel grinding around its hub ------------------------- */
+
+function paintGear(t: number): string {
+  return paintPlotted((plot) => {
+    for (let step = 0; step <= 320; step += 1) {
+      const angle = (step / 320) * TAU;
+      /* Squash a cosine into a near-square profile so the teeth get flat tops. */
+      const tooth = clamp01(Math.cos(8 * (angle - t * 0.55)) * 2.6 + 0.5);
+      const radius = 0.58 + tooth * 0.24;
+      plot(Math.cos(angle) * radius * 1.42, Math.sin(angle) * radius, 0.45 + 0.5 * tooth);
+    }
+    for (let step = 0; step <= 70; step += 1) {
+      const angle = (step / 70) * TAU;
+      plot(Math.cos(angle) * 0.22 * 1.42, Math.sin(angle) * 0.22, 0.4);
+    }
+  });
+}
+
+/* -- Clock: hands sweeping a dial at demo speed ---------------------------- */
+
+function paintClock(t: number): string {
+  return paintPlotted((plot) => {
+    for (let tick = 0; tick < 12; tick += 1) {
+      const angle = (tick / 12) * TAU;
+      plot(Math.cos(angle) * 1.3, Math.sin(angle) * 0.86, tick % 3 === 0 ? 0.75 : 0.28);
+    }
+    const minute = Math.PI / 2 - t * 2.4;
+    const hour = Math.PI / 2 - t * 0.2;
+    for (let step = 0; step <= 30; step += 1) {
+      const f = step / 30;
+      plot(Math.cos(minute) * 1.12 * f, -Math.sin(minute) * 0.74 * f, 0.9);
+      if (f <= 0.6) plot(Math.cos(hour) * 1.12 * f, -Math.sin(hour) * 0.74 * f, 0.55);
+    }
+    plot(0, 0, 1);
+  });
+}
+
+/* -- Atom: electrons circling a nucleus on tilted shells ------------------- */
+
+function paintAtom(t: number): string {
+  return paintPlotted((plot) => {
+    plot(0, 0, 1);
+    for (let glow = 0; glow < TAU; glow += 0.9) {
+      plot(Math.cos(glow) * 0.1, Math.sin(glow) * 0.08, 0.8);
+    }
+    for (let shell = 0; shell < 3; shell += 1) {
+      const tilt = (shell / 3) * Math.PI;
+      const cosTilt = Math.cos(tilt);
+      const sinTilt = Math.sin(tilt);
+      const place = (s: number): readonly [number, number] => {
+        const x = Math.cos(s) * 1.08;
+        const y = Math.sin(s) * 0.34;
+        return [x * cosTilt - y * sinTilt, x * sinTilt + y * cosTilt];
+      };
+      for (let step = 0; step <= 90; step += 1) {
+        const [u, v] = place((step / 90) * TAU);
+        plot(u, v, 0.13);
+      }
+      const [eu, ev] = place(t * (2 + shell * 0.5) + shell * 2.1);
+      plot(eu, ev, 1);
+      plot(eu + 0.1, ev, 0.45);
+      plot(eu - 0.1, ev, 0.45);
+    }
+  });
+}
+
+/* -- Spring: a coil breathing between compression and extension ------------ */
+
+function paintSpring(t: number): string {
+  const half = ASPECT * (0.6 + 0.3 * Math.sin(t * 1.7));
+  return paintPlotted((plot) => {
+    for (let step = 0; step <= 14; step += 1) {
+      const v = -0.62 + (step / 14) * 1.24;
+      plot(-half - 0.14, v, 0.5);
+      plot(half + 0.14, v, 0.5);
+    }
+    for (let sample = 0; sample <= 240; sample += 1) {
+      const f = sample / 240;
+      /* The winding phase drifts with time, so the coil visibly turns. */
+      const angle = f * TAU * 7 - t * 2.6;
+      const depth = (Math.cos(angle) + 1) / 2;
+      plot(-half + f * half * 2, Math.sin(angle) * 0.55, 0.25 + 0.75 * depth);
+    }
+  });
+}
+
+/* -- Heartbeat: an ECG trace scrolling across the screen ------------------- */
+
+function ecgPulse(x: number): number {
+  /* P wave, QRS complex, T wave: five gaussians along one beat. */
+  return (
+    0.16 * Math.exp(-Math.pow((x - 0.18) / 0.04, 2)) -
+    0.13 * Math.exp(-Math.pow((x - 0.34) / 0.015, 2)) +
+    0.85 * Math.exp(-Math.pow((x - 0.38) / 0.016, 2)) -
+    0.2 * Math.exp(-Math.pow((x - 0.42) / 0.015, 2)) +
+    0.24 * Math.exp(-Math.pow((x - 0.62) / 0.05, 2))
+  );
+}
+
+function paintEcg(t: number): string {
+  return paintPlotted((plot) => {
+    for (let step = 0; step <= 250; step += 1) {
+      const f = step / 250;
+      const value = ecgPulse((((f + t * 0.42) % 1) + 1) % 1);
+      plot(
+        f * ASPECT * 2 - ASPECT,
+        0.18 - value * 1.2,
+        0.25 + 0.75 * clamp01(Math.abs(value) * 2.4),
+      );
+    }
+  });
+}
+
 /* ========================================================================
    Motion: particles, physics, and things that travel.
    ===================================================================== */
@@ -633,6 +824,169 @@ function paintNetwork(t: number): string {
   });
 }
 
+/* -- Galaxy: two spiral arms of twinkling stars turning together ----------- */
+
+function paintGalaxy(t: number): string {
+  return paintPlotted((plot) => {
+    plot(0, 0, 1);
+    for (let glow = 0; glow < TAU; glow += 0.8) {
+      plot(Math.cos(glow) * 0.1, Math.sin(glow) * 0.07, 0.9);
+    }
+    for (let arm = 0; arm < 2; arm += 1) {
+      for (let star = 0; star < 55; star += 1) {
+        const f = star / 55;
+        const radius = (0.14 + f * 0.85) * (1 + (hash(star * 3.1 + arm * 17) - 0.5) * 0.16);
+        const angle = arm * Math.PI + f * 3.3 + t * 0.7 + (hash(star * 7.3 + arm * 29) - 0.5) * 0.5;
+        const twinkle = 0.65 + 0.35 * Math.sin(t * 2.8 + star * 2.1 + arm * 3.3);
+        plot(Math.cos(angle) * radius * 1.45, Math.sin(angle) * radius, (1 - f * 0.75) * twinkle);
+      }
+    }
+  });
+}
+
+/* -- Waves: swells rolling toward the viewer with parallax ----------------- */
+
+function paintWaves(t: number): string {
+  return paintPlotted((plot) => {
+    for (let row = 0; row <= 5; row += 1) {
+      const depth = row / 5;
+      const width = ASPECT * (1.88 - depth);
+      for (let col = 0; col <= 60; col += 1) {
+        const x = col / 60 - 0.5;
+        const crest = Math.sin(x * 7.5 + depth * 4.2 - t * 2.3);
+        const v = 0.84 - depth * 1.66 - crest * 0.15 * (1 - depth * 0.45);
+        plot(x * width, v, (0.3 + 0.7 * (1 - depth)) * (0.55 + 0.45 * crest));
+      }
+    }
+  });
+}
+
+/* -- Bubbles: wobbling rings rising and dissolving -------------------------- */
+
+function paintBubbles(t: number): string {
+  return paintPlotted((plot) => {
+    for (let bubble = 0; bubble < 7; bubble += 1) {
+      const speed = 0.16 + hash(bubble * 5.7) * 0.2;
+      const cycle = (t * speed + hash(bubble * 3.3)) % 1;
+      const radius = 0.08 + hash(bubble * 9.1) * 0.14;
+      const u = (hash(bubble * 7.7) * 2 - 1) * ASPECT * 0.7 + Math.sin(t * 1.7 + bubble * 2.2) * 0.14;
+      const v = 0.95 - cycle * 1.9;
+      /* Fade in at the bottom and out at the top, so respawns never pop. */
+      const life = Math.sin(cycle * Math.PI);
+      for (let angle = 0; angle < TAU; angle += 0.45) {
+        plot(
+          u + Math.cos(angle) * radius * 1.6,
+          v + Math.sin(angle) * radius,
+          life * (0.4 + 0.6 * ((Math.sin(angle + 0.8) + 1) / 2)),
+        );
+      }
+    }
+  });
+}
+
+/* -- Screensaver: the bouncing box that never quite hits the corner -------- */
+
+function bouncePhase(x: number): number {
+  const cycle = ((x % 2) + 2) % 2;
+  return cycle < 1 ? cycle : 2 - cycle;
+}
+
+function paintScreensaver(t: number): string {
+  return paintPlotted((plot) => {
+    for (let ghost = 2; ghost >= 0; ghost -= 1) {
+      const moment = t - ghost * 0.11;
+      const cu = (bouncePhase(moment * 0.41 + 0.3) * 2 - 1) * (ASPECT - 0.62);
+      const cv = (bouncePhase(moment * 0.567) * 2 - 1) * 0.56;
+      const weight = 1 - ghost * 0.38;
+      for (let step = 0; step <= 18; step += 1) {
+        const f = step / 18;
+        plot(cu - 0.5 + f, cv - 0.3, weight);
+        plot(cu - 0.5 + f, cv + 0.3, weight);
+        plot(cu - 0.5, cv - 0.3 + f * 0.6, weight);
+        plot(cu + 0.5, cv - 0.3 + f * 0.6, weight);
+      }
+    }
+  });
+}
+
+/* -- Raindrops: streaks falling onto a floor and splashing ------------------ */
+
+function paintRaindrops(t: number): string {
+  return paintPlotted((plot) => {
+    for (let step = 0; step <= 44; step += 1) {
+      plot((step / 44) * ASPECT * 2 - ASPECT, 0.82, 0.1);
+    }
+    for (let drop = 0; drop < 6; drop += 1) {
+      const period = 1.1 + hash(drop * 3.7) * 0.9;
+      const clock = t / period + hash(drop * 8.1);
+      const round = Math.floor(clock);
+      const local = clock - round;
+      /* Each round lands somewhere new, seeded by the round number. */
+      const u = (hash(round * 17 + drop * 29) * 2 - 1) * ASPECT * 0.82;
+      if (local < 0.55) {
+        const v = -1 + (local / 0.55) * 1.8;
+        plot(u, v, 0.95);
+        plot(u, v - 0.16, 0.45);
+        plot(u, v - 0.32, 0.18);
+        continue;
+      }
+      const age = (local - 0.55) / 0.45;
+      const reach = age * 0.55;
+      const fade = 1 - age;
+      plot(u - reach * 1.3, 0.82 - reach * 0.35, fade * 0.8);
+      plot(u + reach * 1.3, 0.82 - reach * 0.35, fade * 0.8);
+      plot(u - reach * 0.8, 0.82 - reach * 0.5, fade * 0.5);
+      plot(u + reach * 0.8, 0.82 - reach * 0.5, fade * 0.5);
+    }
+  });
+}
+
+/* -- Windmill: four blades turning on a mast -------------------------------- */
+
+function paintWindmill(t: number): string {
+  return paintPlotted((plot) => {
+    for (let step = 0; step <= 20; step += 1) {
+      plot(0, -0.25 + (step / 20) * 1.15, 0.3);
+    }
+    for (let step = 0; step <= 30; step += 1) {
+      plot((step / 30) * ASPECT * 1.4 - ASPECT * 0.7, 0.9, 0.12);
+    }
+    for (let blade = 0; blade < 4; blade += 1) {
+      const angle = t * 1.6 + (blade / 4) * TAU;
+      for (let step = 0; step <= 26; step += 1) {
+        const f = step / 26;
+        plot(Math.cos(angle) * 1.05 * f, -0.25 + Math.sin(angle) * 0.62 * f, 0.35 + 0.65 * f);
+      }
+    }
+    plot(0, -0.25, 1);
+  });
+}
+
+/* -- Hourglass: sand draining from the top bulb into a rising pile ---------- */
+
+const HOURGLASS_PERIOD = 3.4;
+
+function paintHourglass(t: number): string {
+  const drained = (t / HOURGLASS_PERIOD) % 1;
+  return paintGrid((x, y) => {
+    const u = fieldU(x);
+    const v = fieldV(y);
+    const funnel = 0.16 + Math.abs(v) * 0.75;
+    const outside = Math.abs(u) - funnel;
+    if (outside > 0.12) return 0;
+    if (outside > -0.12 || Math.abs(v) > 0.82) return 0.4;
+    if (v < 0) {
+      /* Sand left in the top bulb sits against the neck. */
+      return v >= -0.82 * (1 - drained) ? 0.75 : 0;
+    }
+    /* The pile grows into a cone; the stream above it flickers. */
+    const pile = 0.85 - 0.8 * drained + Math.abs(u) * 0.45;
+    if (v >= pile) return 0.75;
+    if (Math.abs(u) < 0.09) return 0.5 + 0.5 * hash(y * 3.1 + Math.floor(t * 11) * 7.7);
+    return 0;
+  });
+}
+
 /* ========================================================================
    Fields: continuous patterns sampled per cell.
    ===================================================================== */
@@ -846,6 +1200,54 @@ const radarField: Field = (u, v, t) => {
   return Math.max(rings, Math.max(beam, contacts));
 };
 
+/* -- Checker: the rotozoom floor from every 90s demo ------------------------ */
+
+const checkerField: Field = (u, v, t) => {
+  const zoom = 2.6 + Math.sin(t * 0.7) * 1.2;
+  const spin = t * 0.35;
+  const x = (u * Math.cos(spin) - v * Math.sin(spin)) * zoom;
+  const y = (u * Math.sin(spin) + v * Math.cos(spin)) * zoom;
+  const cell = (Math.floor(x) + Math.floor(y)) & 1;
+  const vignette = Math.exp(-Math.pow(Math.hypot(u * 0.62, v * 0.95), 4) * 0.9);
+  return (cell === 1 ? 0.9 : 0.18) * vignette;
+};
+
+/* -- Aurora: curtains of light rippling under a wavy crest ------------------ */
+
+const auroraField: Field = (u, v, t) => {
+  const crest = -0.35 + (fbm(u * 0.55 + t * 0.2, t * 0.11, 2) - 0.5) * 1.2;
+  const below = v - crest;
+  /* Sharp above the crest, a long soft drape below it. */
+  const drape = below >= 0 ? Math.exp(-below * 2.4) : Math.exp(-(below * below) / 0.02);
+  const rays =
+    0.35 + 0.65 * Math.pow(0.5 + 0.5 * Math.sin(u * 7.5 + fbm(u * 1.1 + 40, t * 0.26, 2) * 8), 2);
+  return clamp01(drape * rays * 1.2) * clamp01((0.92 - v) / 0.5);
+};
+
+/* -- Square tunnel: concentric frames rushing out of a wandering eye -------- */
+
+const squareTunnelField: Field = (u, v, t) => {
+  const x = u / ASPECT - Math.sin(t * 0.4) * 0.2;
+  const y = v - Math.cos(t * 0.55) * 0.16;
+  /* Chebyshev distance is what makes the rings square. */
+  const radius = Math.max(Math.abs(x), Math.abs(y), 0.07);
+  const rings = 0.5 + 0.5 * Math.cos(0.85 / radius + t * 2.4);
+  return Math.pow(rings, 2.2) * clamp01(radius * 1.5) * 1.25;
+};
+
+/* -- Petals: a flower outline blooming and turning -------------------------- */
+
+const petalsField: Field = (u, v, t) => {
+  /* Stretch the flower horizontally so it fills the wide canvas. */
+  const radius = Math.hypot(u / 1.4, v);
+  const theta = Math.atan2(v, u / 1.4);
+  const petals = 0.5 + 0.5 * Math.cos(theta * 6 - t * 0.9);
+  const bloom = 0.55 + 0.3 * Math.sin(t * 1.3);
+  const outline = Math.exp(-Math.pow((radius - bloom * petals) / 0.2, 2));
+  const core = Math.exp(-(radius * radius) / 0.02);
+  return Math.max(outline * (0.4 + 0.6 * petals), core);
+};
+
 /* ========================================================================
    Simulations: state that advances a generation at a time.
    ===================================================================== */
@@ -946,6 +1348,51 @@ function createRule30Painter(): Painter {
   };
 }
 
+/* -- Langton's ant: a two-colour ant plowing its highway ------------------- */
+
+const ANT_SECONDS_PER_STEP = 0.04;
+
+interface AntState {
+  cells: Uint8Array;
+  x: number;
+  y: number;
+  /** 0 up, 1 right, 2 down, 3 left. */
+  heading: number;
+}
+
+function createLangtonPainter(): Painter {
+  const antAt = makeStepper<AntState>(
+    (epoch) => ({
+      cells: new Uint8Array(W * H),
+      x: Math.floor(hash(epoch * 7.3) * W),
+      y: Math.floor(hash(epoch * 13.7) * H),
+      heading: Math.floor(hash(epoch * 3.1) * 4),
+    }),
+    (state) => {
+      /* Turn right on a dark cell, left on a lit one, flip it, walk on. */
+      const index = state.y * W + state.x;
+      const lit = state.cells[index] === 1;
+      state.cells[index] = lit ? 0 : 1;
+      const heading = (state.heading + (lit ? 3 : 1)) % 4;
+      return {
+        cells: state.cells,
+        x: (state.x + (heading === 1 ? 1 : heading === 3 ? -1 : 0) + W) % W,
+        y: (state.y + (heading === 2 ? 1 : heading === 0 ? -1 : 0) + H) % H,
+        heading,
+      };
+    },
+    520,
+  );
+
+  return (t) => {
+    const state = antAt(Math.floor(t / ANT_SECONDS_PER_STEP));
+    return paintGrid((x, y) => {
+      if (x === state.x && y === state.y) return 1;
+      return state.cells[y * W + x] === 1 ? 0.5 : 0;
+    });
+  };
+}
+
 /* -- Equalizer: bars driven by layered oscillators ------------------------ */
 
 function paintEqualizer(t: number): string {
@@ -980,9 +1427,10 @@ function field(source: Field): PainterFactory {
 }
 
 /**
- * The pool the loader draws from. Nothing here is provider-specific — a
- * terminal picks one at random the first time it shows the loader, and keeps
- * it for as long as that terminal lives.
+ * The pool the loader draws from. Nothing here is provider-specific: the
+ * first time a terminal shows the loader it draws one (random, behind the
+ * shared half-pool cooldown so recent picks sit out), and keeps it for as
+ * long as that terminal lives.
  */
 export const ASCII_ANIMATIONS: readonly PainterFactory[] = [
   stateless(paintBraid),
@@ -1029,4 +1477,26 @@ export const ASCII_ANIMATIONS: readonly PainterFactory[] = [
   stateless(paintFlowField),
   stateless(paintStarPoly),
   stateless(paintOscilloscope),
+  stateless(paintTetrahedron),
+  field(checkerField),
+  stateless(paintGalaxy),
+  stateless(paintTrefoil),
+  field(auroraField),
+  stateless(paintBubbles),
+  stateless(paintGear),
+  stateless(paintRose),
+  field(squareTunnelField),
+  stateless(paintRaindrops),
+  stateless(paintClock),
+  stateless(paintSpring),
+  field(petalsField),
+  stateless(paintWaves),
+  stateless(paintAtom),
+  stateless(paintScreensaver),
+  stateless(paintSpirograph),
+  stateless(paintWindmill),
+  stateless(paintEcg),
+  stateless(paintHourglass),
+  /* A simulation like Rule 30 above: each surface needs its own instance. */
+  createLangtonPainter,
 ];

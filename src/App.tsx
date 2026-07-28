@@ -1767,8 +1767,9 @@ export default function App() {
       // focus-on-xterm after a drag turns Ctrl+C into \x03 and PowerShell paints
       // a stack of `PS …> ^C` lines under the blocks.
       if (ctrl && !e.shiftKey && !e.altKey && key === "c") {
-        // A custom surface is still a terminal harness. With no selection,
-        // Ctrl+C exits it; Claude and Grok arm a quick second press first.
+        // A custom surface is still a terminal harness. Empty composer Ctrl+C
+        // exits it (Claude/Grok arm a quick second press first). With draft
+        // text, the field clears instead — same gesture as the shell editor.
         const field = isTextField(e.target)
           ? (e.target as HTMLInputElement | HTMLTextAreaElement)
           : null;
@@ -1777,11 +1778,13 @@ export default function App() {
           field.selectionStart !== null &&
           field.selectionEnd !== null &&
           field.selectionStart !== field.selectionEnd;
+        const fieldHasText = field !== null && field.value.length > 0;
         const pageHasSelection = Boolean(window.getSelection()?.toString());
         if (
           activeTerm &&
           !fieldHasSelection &&
           !pageHasSelection &&
+          !fieldHasText &&
           terminals.requestCloseAgentUi(activeTerm)
         ) {
           return take();

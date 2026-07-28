@@ -79,6 +79,21 @@ function renderAgentActivity(agent: AgentId, items: AgentItem[]): string {
 }
 
 describe("official agent presentation", () => {
+  test("offers a persistent copy action for user messages in every custom UI", () => {
+    const prompt: AgentItem = {
+      kind: "user",
+      id: "prompt",
+      at: 1,
+      text: "Copy this exact message",
+    };
+
+    for (const agent of ["codex", "claude", "grok", "cursor", "opencode"] as const) {
+      const html = renderAgentActivity(agent, [prompt]);
+      expect(html).toContain('aria-label="Copy message"');
+      expect(html).toContain("Copy this exact message");
+    }
+  });
+
   test("renders agent markdown as structure instead of literal markers", () => {
     const html = renderToStaticMarkup(
       <AssistantMarkdown

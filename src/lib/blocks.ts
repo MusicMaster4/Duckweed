@@ -19,14 +19,14 @@ import { nextBlockSelection, type BlockNavAction } from "./blockNav";
  */
 
 /**
- * Height of the gap band above each block header (px). Warp's default
- * (non-compact) dividers sit in a short band of air before the 1px rule.
+ * Clear space on each side of a block separator (px). Warp's default
+ * (non-compact) dividers sit in a short band of air between terminal chunks.
  * xterm rows have no inter-row gap, so the band overlaps the bottom of the
  * preceding output cell — it must stay TRANSPARENT (only the hairline is
- * painted, snug at the band's bottom edge). An opaque band used to slice the
- * last output line of the previous chunk in half.
+ * painted). An opaque band used to slice the last output line of the previous
+ * chunk in half.
  */
-const BLOCK_GAP = 5;
+const BLOCK_GAP = 4;
 
 export interface CommandBlock {
   id: number;
@@ -270,11 +270,11 @@ export class BlockTracker {
 
         if (block.sepEl) {
           // Hairline only in editor mode, only with its command label, and
-          // only at the top of the header band (true chunk boundary). The
-          // band itself stays transparent so the previous line's descenders
-          // are not sliced by an opaque fill.
+          // only inside the header band (true chunk boundary). The band stays
+          // transparent and gives the rule equal breathing room above and
+          // below without masking terminal text.
           if (this.editorMode) {
-            const band = BLOCK_GAP * 2;
+            const band = BLOCK_GAP * 2 + 1;
             block.sepEl.hidden = false;
             block.sepEl.style.transform = `translate3d(0, ${y - band}px, 0)`;
             block.sepEl.style.width = `${fullWidth}px`;

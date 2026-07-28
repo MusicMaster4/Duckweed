@@ -2,6 +2,7 @@ import { memo, useMemo, useState } from "react";
 
 import type { AgentItem, AgentPlanStep, ToolItem, ToolStatus } from "../../../lib/agents/types";
 import { AgentImageAttachments } from "../AgentImageAttachments";
+import { MessageCopyButton } from "../MessageCopyButton";
 import {
   ActivityHistory,
   activeAssistantId,
@@ -409,6 +410,7 @@ function OpenCodeItem({
         <>
           <AgentImageAttachments images={item.images ?? []} />
           {item.text && <p className="oc-said">{item.text}</p>}
+          {item.text && <MessageCopyButton text={item.text} />}
         </>
       );
     case "assistant":

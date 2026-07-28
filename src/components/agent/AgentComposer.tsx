@@ -125,6 +125,8 @@ export function AgentComposer({ session, active, inputRef, onSubmit, onInterrupt
   const [value, setValue] = useState(() => agents.getDraft(session.termId));
   const [images, setImages] = useState(() => agents.getDraftImages(session.termId));
   const imagesRef = useRef(images);
+  /** Draft wiped by Ctrl+C — restored by the next Ctrl+Z while the box stays empty. */
+  const undoClearRef = useRef<string | null>(null);
   const [highlighted, setHighlighted] = useState(0);
   const [cursor, setCursor] = useState(value.length);
   const [fileRows, setFileRows] = useState<MenuRow[]>([]);
@@ -205,6 +207,7 @@ export function AgentComposer({ session, active, inputRef, onSubmit, onInterrupt
   const commit = (text: string, delivery: "default" | "alternate" = "default") => {
     if (!text.trim() && imagesRef.current.length === 0) return;
     onSubmit(text, imagesRef.current, delivery);
+    undoClearRef.current = null;
     setValue("");
     setCursor(0);
     imagesRef.current = [];
@@ -464,13 +467,51 @@ export function AgentComposer({ session, active, inputRef, onSubmit, onInterrupt
       return;
     }
 
-    // Ctrl+C is what a terminal user reaches for to stop a runaway turn, and
-    // Escape is what the agent's own TUI uses. Both should mean the same here.
+    // Ctrl+C with draft text clears the box (shell editor / Warp). Empty
+    // Ctrl+C is the custom-UI close gesture handled in App (capture phase).
+    // Escape still stops a runaway turn when the box is empty.
     if (
-      working &&
-      ((event.key.toLowerCase() === "c" && event.ctrlKey && !window.getSelection()?.toString()) ||
-        (event.key === "Escape" && !value))
+      event.key.toLowerCase() === "c" &&
+      (event.ctrlKey || event.metaKey) &&
+      !event.shiftKey &&
+      !event.altKey
     ) {
+      if (window.getSelection()?.toString()) return;
+      const el = event.currentTarget;
+      if (el.selectionStart !== el.selectionEnd) return;
+      if (value.length > 0) {
+        event.preventDefault();
+        undoClearRef.current = value;
+        change("");
+        placeCursor(0);
+        return;
+      }
+      if (working) {
+        event.preventDefault();
+        onInterrupt();
+      }
+      return;
+    }
+
+    // Ctrl+Z restores a draft just wiped by Ctrl+C (while the box is still empty).
+    // Programmatic clears don't join the browser undo stack, so we keep our own.
+    if (
+      event.key.toLowerCase() === "z" &&
+      (event.ctrlKey || event.metaKey) &&
+      !event.shiftKey &&
+      !event.altKey &&
+      value.length === 0 &&
+      undoClearRef.current !== null
+    ) {
+      event.preventDefault();
+      const restored = undoClearRef.current;
+      undoClearRef.current = null;
+      change(restored);
+      placeCursor(restored.length);
+      return;
+    }
+
+    if (working && event.key === "Escape" && !value) {
       event.preventDefault();
       onInterrupt();
     }
@@ -612,7 +653,11 @@ export function AgentComposer({ session, active, inputRef, onSubmit, onInterrupt
                 : `Message ${session.label}…`
           }
           aria-label={`Message ${session.label}`}
-          onChange={(event) => change(event.target.value, event.target.selectionStart)}
+          onChange={(event) => {
+            // Typing after a Ctrl+C clear discards that one-shot undo.
+            if (undoClearRef.current !== null) undoClearRef.current = null;
+            change(event.target.value, event.target.selectionStart);
+          }}
           onClick={(event) => setCursor(event.currentTarget.selectionStart)}
           onKeyUp={(event) => setCursor(event.currentTarget.selectionStart)}
           onSelect={(event) => setCursor(event.currentTarget.selectionStart)}

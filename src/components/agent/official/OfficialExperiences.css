@@ -14,9 +14,17 @@
   padding: 8px 2px 24px;
 }
 
-.official-user {
+.official-user-turn {
   align-self: flex-end;
+  display: flex;
+  width: fit-content;
   max-width: min(78%, 680px);
+  flex-direction: column;
+  align-items: flex-end;
+}
+
+.official-user {
+  max-width: 100%;
   padding: 10px 14px;
   border: 1px solid rgba(255, 255, 255, 0.035);
   border-radius: 18px;
@@ -1227,6 +1235,27 @@ strong.agent-activity-history-summary {
   gap: 1px;
 }
 
+/* Newest file change pinned under the cluster head, mirroring the live
+   thinking trace: the diff streams in as the agent edits, history stays
+   one click away. */
+.agent-tool-latest-diff {
+  min-width: 0;
+  margin: 1px 5px 6px 29px;
+  padding: 4px 0 2px 10px;
+  border-left: 1px solid color-mix(in srgb, var(--activity-accent) 24%, var(--border));
+}
+
+.agent-tool-latest-diff .agent-diff {
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.012);
+}
+
+.agent-tool-latest-diff .agent-diff + .agent-diff {
+  margin-top: 6px;
+}
+
 .agent-tool-history-list .official-tool.is-compact {
   border: 0;
   background: transparent;
@@ -2036,7 +2065,7 @@ button.chatgpt-thinking-row.is-selected {
 }
 
 @container agent-pane (max-width: 720px) {
-  .official-user {
+  .official-user-turn {
     max-width: 90%;
   }
 
@@ -2088,8 +2117,11 @@ button.chatgpt-thinking-row.is-selected {
     padding-top: 4px;
   }
 
-  .official-user {
+  .official-user-turn {
     max-width: 94%;
+  }
+
+  .official-user {
     padding: 8px 11px;
   }
 

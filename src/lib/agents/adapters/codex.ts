@@ -174,6 +174,7 @@ export function createCodexAdapter(): AgentAdapter {
 
       currentModel = ctx.launch.model;
       currentEffort = ctx.launch.effort;
+      currentAccess = ctx.launch.accessMode ?? "default";
       const thread = await request(ctx, "thread/start", {
         cwd: ctx.cwd,
         ...threadAccessParams(currentAccess),

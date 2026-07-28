@@ -29,13 +29,13 @@ const image = {
   size: 5,
 };
 
-function harness() {
+function harness(overrides: Partial<AgentLaunch> = {}) {
   const events: AgentEvent[] = [];
   const sent: unknown[] = [];
   const adapter = createClaudeAdapter();
   const ctx: AdapterContext = {
     cwd: "H:/project",
-    launch,
+    launch: { ...launch, ...overrides },
     send: (message) => sent.push(message),
     emit: (event) => events.push(event),
   };
@@ -484,6 +484,34 @@ describe("claude adapter", () => {
     expect(h.state().items[0]).toMatchObject({ kind: "user", images: [image] });
   });
 
+  test("steers the active turn through the open stream-json input", async () => {
+    const h = harness();
+    const accepted = await h.adapter.steer?.(
+      { text: "Focus on the failing test instead", images: [image] },
+      h.ctx,
+    );
+
+    expect(accepted).toBe(true);
+    expect(h.sent[0]).toMatchObject({
+      type: "user",
+      message: {
+        role: "user",
+        content: [
+          {
+            type: "image",
+            source: { type: "base64", media_type: "image/png", data: "aGVsbG8=" },
+          },
+          { type: "text", text: "Focus on the failing test instead" },
+        ],
+      },
+    });
+    expect(h.state().items[0]).toMatchObject({
+      kind: "user",
+      text: "Focus on the failing test instead",
+      images: [image],
+    });
+  });
+
   test("interrupts over the control channel", () => {
     const h = harness();
     h.adapter.interrupt(h.ctx);
@@ -564,6 +592,23 @@ describe("claude adapter", () => {
       tone: "info",
       text: "Access set to Full access.",
     });
+  });
+
+  test("applies remembered access when the session starts", () => {
+    const h = harness({ accessMode: "read-only" });
+    h.adapter.start(h.ctx);
+
+    expect(h.sent[0]).toMatchObject({
+      type: "control_request",
+      request: { subtype: "set_permission_mode", mode: "plan" },
+    });
+    const requestId = (h.sent[0] as { request_id: string }).request_id;
+    h.feed({
+      type: "control_response",
+      response: { subtype: "success", request_id: requestId },
+    });
+    expect(h.state().accessMode).toBe("read-only");
+    expect(h.state().items.some((item) => item.kind === "notice")).toBe(false);
   });
 
   test("maps the other shared access levels onto Claude modes", () => {

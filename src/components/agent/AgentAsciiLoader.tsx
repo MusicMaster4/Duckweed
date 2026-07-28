@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import type { AgentId } from "../../lib/agents/types";
+import { createCooldownPicker } from "../../lib/cooldownPicker";
 import { ASCII_ANIMATIONS } from "./ascii/animations";
 import type { Painter } from "./ascii/canvas";
 
@@ -27,11 +28,21 @@ interface Assignment {
  */
 const assignments = new Map<string, Assignment>();
 
+/**
+ * Draws with the usual half-pool cooldown: a freshly assigned animation sits
+ * out the next floor(pool / 2) assignments, so terminals opened back to back
+ * never start on the same art. The random source is late-bound so tests that
+ * stub Math.random can fix the draw.
+ */
+const pickAnimation = createCooldownPicker(ASCII_ANIMATIONS, ASCII_ANIMATIONS[0]!, () =>
+  Math.random(),
+);
+
 function assignmentFor(termId: string): Assignment {
   const existing = assignments.get(termId);
   if (existing) return existing;
 
-  const factory = ASCII_ANIMATIONS[Math.floor(Math.random() * ASCII_ANIMATIONS.length)];
+  const factory = pickAnimation();
   const assignment: Assignment = { paint: factory(), origin: performance.now() };
   if (assignments.size >= REGISTRY_LIMIT) {
     const oldest = assignments.keys().next().value;
@@ -42,9 +53,9 @@ function assignmentFor(termId: string): Assignment {
 }
 
 /**
- * Startup art. The animation is picked at random from a shared pool rather
- * than being bound to a provider — the provider only supplies the colour, by
- * way of `--agent-accent`.
+ * Startup art. The animation is drawn from a shared pool (random, with a
+ * half-pool cooldown against recent draws) rather than being bound to a
+ * provider: the provider only supplies the colour, by way of `--agent-accent`.
  */
 export function AgentAsciiLoader({
   agent,

@@ -523,6 +523,19 @@ describe("codex adapter", () => {
     }
   });
 
+  test("opens a new thread with the remembered access level", async () => {
+    const h = harness({ accessMode: "workspace" });
+    await h.handshake();
+
+    expect(h.sent.find((message) => message.method === "thread/start")).toMatchObject({
+      params: {
+        approvalPolicy: "on-request",
+        approvalsReviewer: "user",
+        sandbox: "workspace-write",
+      },
+    });
+  });
+
   test("returns to inherited permissions without sending overrides", async () => {
     const h = harness();
     await h.handshake();

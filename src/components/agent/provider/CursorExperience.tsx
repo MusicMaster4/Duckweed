@@ -3,6 +3,7 @@ import { memo, useMemo, useState } from "react";
 import type { AgentItem, ToolItem, ToolStatus } from "../../../lib/agents/types";
 import { AgentAsciiLoader } from "../AgentAsciiLoader";
 import { AgentImageAttachments } from "../AgentImageAttachments";
+import { MessageCopyButton } from "../MessageCopyButton";
 import {
   ActivityHistory,
   activeAssistantId,
@@ -308,6 +309,7 @@ const CursorNode = memo(function CursorNode({
           <>
             <AgentImageAttachments images={item.images ?? []} />
             {item.text && <p className="cx-said">{item.text}</p>}
+            {item.text && <MessageCopyButton text={item.text} />}
           </>
         )}
         {item.kind === "assistant" && (

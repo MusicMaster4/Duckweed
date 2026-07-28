@@ -63,6 +63,37 @@ describe("agent startup animation", () => {
   });
 
   /**
+   * Assignments go through the shared half-pool cooldown picker, so terminals
+   * opened back to back must land on different animations.
+   */
+  test("terminals opened back to back get different animations", () => {
+    const realNow = performance.now;
+    const realRandom = Math.random;
+    let clock = 9000;
+    performance.now = () => clock;
+    /* Pin the draw: without the cooldown every pick would now be identical. */
+    Math.random = () => 0;
+
+    try {
+      renderToStaticMarkup(<AgentAsciiLoader agent="claude" termId="burst-a" />);
+      renderToStaticMarkup(<AgentAsciiLoader agent="claude" termId="burst-b" />);
+      renderToStaticMarkup(<AgentAsciiLoader agent="claude" termId="burst-c" />);
+
+      /* Compare mature frames; right at mount some art is still near-blank. */
+      clock = 10600;
+      const a = renderToStaticMarkup(<AgentAsciiLoader agent="claude" termId="burst-a" />);
+      const b = renderToStaticMarkup(<AgentAsciiLoader agent="claude" termId="burst-b" />);
+      const c = renderToStaticMarkup(<AgentAsciiLoader agent="claude" termId="burst-c" />);
+      expect(a).not.toBe(b);
+      expect(b).not.toBe(c);
+      expect(a).not.toBe(c);
+    } finally {
+      performance.now = realNow;
+      Math.random = realRandom;
+    }
+  });
+
+  /**
    * Splitting or closing a pane re-parents the terminal subtree, which remounts
    * this component. The same terminal has to come back with the same animation,
    * still running on the same clock, or the remount is visible as a jump.

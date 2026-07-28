@@ -388,11 +388,14 @@ function emit(session: Session, event: AgentEvent): void {
   if (next === session.state) return;
   if (
     event.type === "session" &&
-    (next.model !== session.state.model || next.effort !== session.state.effort)
+    (next.model !== session.state.model ||
+      next.effort !== session.state.effort ||
+      next.accessMode !== session.state.accessMode)
   ) {
     rememberPreferences(session.launch, {
       model: next.model,
       effort: next.effort,
+      accessMode: next.accessMode ?? "default",
     });
   }
   session.state = next;
@@ -554,7 +557,7 @@ export async function start(
       cwd,
       model: seedModel,
       effort: launch.effort,
-      accessMode: "default",
+      accessMode: launch.accessMode ?? "default",
       // Live model lists from the adapter replace this; Claude/Claudex start
       // with their known aliases so the picker works before the first turn.
       models: fallbackModels(launch.agent, launch.program),

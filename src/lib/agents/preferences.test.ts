@@ -93,4 +93,35 @@ describe("custom agent model preferences", () => {
       effort: "high",
     });
   });
+
+  test("restores the last access level in a later session", () => {
+    const codex = launch("codex", "codex");
+    rememberPreferences(codex, { accessMode: "workspace" });
+
+    expect(withRememberedPreferences(codex).accessMode).toBe("workspace");
+  });
+
+  test("keeps access levels independent for different CLIs", () => {
+    const codex = launch("codex", "codex");
+    const claude = launch("claude", "claude");
+    rememberPreferences(codex, { accessMode: "full-access" });
+    rememberPreferences(claude, { accessMode: "read-only" });
+
+    expect(withRememberedPreferences(codex).accessMode).toBe("full-access");
+    expect(withRememberedPreferences(claude).accessMode).toBe("read-only");
+  });
+
+  test("returning to agent default clears only the access override", () => {
+    const codex = launch("codex", "codex");
+    rememberPreferences(codex, {
+      model: "gpt-5.6-sol",
+      accessMode: "full-access",
+    });
+    rememberPreferences(codex, { accessMode: "default" });
+
+    expect(withRememberedPreferences(codex)).toMatchObject({
+      model: "gpt-5.6-sol",
+      accessMode: "default",
+    });
+  });
 });

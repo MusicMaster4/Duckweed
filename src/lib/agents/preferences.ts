@@ -1,11 +1,13 @@
 import { saveDurably } from "../durableStorage";
 import type { AgentLaunch } from "./launch";
+import type { AgentAccessMode } from "./types";
 
 export const AGENT_PREFERENCES_KEY = "duckweed:agent-preferences:v1";
 
 interface AgentPreference {
   model: string | null;
   effort: string | null;
+  accessMode: AgentAccessMode;
 }
 
 interface PreferenceStore {
@@ -23,6 +25,12 @@ function cleanValue(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
+function cleanAccessMode(value: unknown): AgentAccessMode {
+  return value === "read-only" || value === "workspace" || value === "full-access"
+    ? value
+    : "default";
+}
+
 function load(): PreferenceStore {
   if (cached) return cached;
   try {
@@ -38,7 +46,10 @@ function load(): PreferenceStore {
       const record = value as Partial<AgentPreference>;
       const model = cleanValue(record.model);
       const effort = cleanValue(record.effort);
-      if (model || effort) choices[scope] = { model, effort };
+      const accessMode = cleanAccessMode(record.accessMode);
+      if (model || effort || accessMode !== "default") {
+        choices[scope] = { model, effort, accessMode };
+      }
     }
     return (cached = { version: 1, choices });
   } catch {
@@ -75,6 +86,7 @@ export function withRememberedPreferences(launch: AgentLaunch): AgentLaunch {
     ...launch,
     model: launch.model ?? preference.model,
     effort: launch.effort ?? preference.effort,
+    accessMode: launch.accessMode ?? preference.accessMode,
   };
 }
 
@@ -83,18 +95,38 @@ export function rememberPreferences(
   launch: AgentLaunch,
   selection: Partial<AgentPreference>,
 ): void {
-  if (selection.model === undefined && selection.effort === undefined) return;
+  if (
+    selection.model === undefined &&
+    selection.effort === undefined &&
+    selection.accessMode === undefined
+  ) {
+    return;
+  }
   const store = load();
   const scope = preferenceScope(launch);
-  const previous = store.choices[scope] ?? { model: null, effort: null };
+  const previous = store.choices[scope] ?? {
+    model: null,
+    effort: null,
+    accessMode: "default" as const,
+  };
   const next = {
     model: selection.model === undefined ? previous.model : cleanValue(selection.model),
     effort: selection.effort === undefined ? previous.effort : cleanValue(selection.effort),
+    accessMode:
+      selection.accessMode === undefined
+        ? previous.accessMode
+        : cleanAccessMode(selection.accessMode),
   };
-  if (next.model === previous.model && next.effort === previous.effort) return;
+  if (
+    next.model === previous.model &&
+    next.effort === previous.effort &&
+    next.accessMode === previous.accessMode
+  ) {
+    return;
+  }
 
   const choices = { ...store.choices };
-  if (next.model || next.effort) choices[scope] = next;
+  if (next.model || next.effort || next.accessMode !== "default") choices[scope] = next;
   else delete choices[scope];
   persist({ version: 1, choices });
 }
