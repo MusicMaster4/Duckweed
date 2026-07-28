@@ -91,6 +91,18 @@ later updates can be installed from the version chip in the status bar or from
 > yet code-signed. Duckweed's built-in updater still verifies every update with
 > the project's update signature.
 
+## Platform support and prerequisites
+
+Official prebuilt releases are currently available for Windows only. Linux and
+macOS users can build Duckweed from source, but those platforms do not yet have
+official installers or the same release testing as Windows.
+
+Duckweed runs shells and coding-agent CLIs that are already installed on your
+computer. Before launching an agent in Duckweed, install its CLI, sign in or
+configure its provider credentials, and confirm that its command works in a
+regular terminal. Duckweed does not provide agent accounts, subscriptions, or
+API credentials.
+
 ## What it does
 
 - **Real terminal sessions.** Every pane owns a PTY-backed shell: ConPTY on
@@ -153,6 +165,10 @@ Supported custom interfaces currently include:
 - Grok CLI
 - OpenCode
 
+The longer list in [Agent usage](#agent-usage) includes tools whose local
+transcripts Duckweed can measure even when they do not have a custom agent
+interface. Usage scanning support does not imply custom-interface support.
+
 Turn off **Custom Agent UI** from the command palette whenever you prefer to use
 an agent's original terminal interface.
 
@@ -180,6 +196,18 @@ Quota cards use provider information only when it is available locally. Claude
 can query the official usage endpoint with Claude Code's existing OAuth session;
 Codex and Grok use the latest quota snapshots saved by their CLIs. Duckweed does
 not invent limits for agents that do not expose them.
+
+## Local data and network sharing
+
+Projects, layouts, settings, agent sessions, and usage indexes stay on your
+computer. Duckweed does not upload repository contents or agent transcripts.
+Provider CLIs may still contact their own services, and Claude quota cards can
+query Claude's official usage endpoint with the local Claude Code session.
+
+The Ports tool's **Share on network** action makes the selected local service
+reachable from other devices on the same network. Do not share unauthenticated
+development servers on public or untrusted networks. Stop sharing from the Ports
+tool when access is no longer needed.
 
 ## Keyboard shortcuts
 
@@ -210,7 +238,7 @@ Right-click copies a selection. With no selection, it pastes from the clipboard.
 
 You will need [Bun](https://bun.sh/), [Rust](https://www.rust-lang.org/tools/install),
 and the [Tauri 2 prerequisites](https://v2.tauri.app/start/prerequisites/) for
-your operating system.
+your operating system. Duckweed's Rust crates require Rust 1.77 or newer.
 
 ```bash
 git clone https://github.com/MusicMaster4/Duckweed.git
@@ -218,6 +246,9 @@ cd Duckweed
 bun install
 bun run app
 ```
+
+`bun run app` starts Tauri without watching the Rust backend. During backend
+development, use `bun run app:watch` to rebuild when Rust files change.
 
 Build the native installer or application bundle with:
 
@@ -267,6 +298,10 @@ bun run typecheck
 bun test
 cd src-tauri && cargo check
 ```
+
+GitHub CI currently runs the TypeScript check and Bun test suite. Run
+`cargo check` locally before submitting Rust changes; it is not currently part
+of the automated CI workflow.
 
 Release builds come from two branches: `main` publishes stable releases and
 `testing` publishes beta releases. The full versioning, signing, and updater
