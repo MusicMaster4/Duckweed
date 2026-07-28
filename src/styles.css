@@ -1280,8 +1280,7 @@ svg.tab-glyph-fill path {
 }
 
 /* Same pill as a shared port's badge, so an accented number reads as live. */
-.statistics-pace,
-.statistics-tag {
+.statistics-pace {
   flex: none;
   padding: 1px 6px;
   border-radius: 999px;
@@ -1291,13 +1290,6 @@ svg.tab-glyph-fill path {
   font-style: normal;
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.04em;
-}
-
-/* Accent is reserved for the money pill; a plain marker stays quiet. */
-.statistics-tag {
-  background: var(--hover);
-  color: var(--text-faint);
-  text-transform: uppercase;
 }
 
 /* The one number the panel is about, so it gets the only large type. */
@@ -1310,15 +1302,6 @@ svg.tab-glyph-fill path {
   font-variant-numeric: tabular-nums;
   letter-spacing: -0.02em;
   line-height: 1.1;
-}
-
-.statistics-hero.is-live {
-  border-color: var(--accent-line);
-  background: linear-gradient(
-    150deg,
-    color-mix(in srgb, var(--accent) 7%, var(--bg-pane)),
-    var(--bg-pane) 60%
-  );
 }
 
 .statistics-meta {
@@ -7830,7 +7813,11 @@ body.is-resizing * {
   border-bottom: 1px solid var(--border);
 }
 
+/* Title over note, like every other tool head. Inline spans in a block would
+   run the two together on one line. */
 .layouts-head > div {
+  display: flex;
+  flex-direction: column;
   flex: 1 1 auto;
   min-width: 0;
 }

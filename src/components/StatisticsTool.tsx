@@ -164,7 +164,7 @@ export function StatisticsTool({ tabs, panes, projects }: Props) {
       </div>
 
       <div className="statistics-scroll">
-        <article className={`statistics-card statistics-hero ${worked ? "is-live" : ""}`}>
+        <article className="statistics-card">
           <header>
             <span className="statistics-card-title">Estimated cost</span>
             {pace !== null && (
@@ -204,7 +204,6 @@ export function StatisticsTool({ tabs, panes, projects }: Props) {
         <article className="statistics-card">
           <header>
             <span className="statistics-card-title">Workspace</span>
-            <em className="statistics-tag">Live</em>
           </header>
           <ul className="statistics-rows">
             <Row label="Tabs" value={String(tabs)} />
