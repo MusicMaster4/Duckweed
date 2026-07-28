@@ -10,7 +10,8 @@
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "tauri": "tauri",
-    "app": "tauri dev",
+    "app": "tauri dev --no-watch",
+    "app:watch": "tauri dev",
     "app:build": "tauri build",
     "gen:icon": "tauri icon duckweed_icon.ico",
     "version:next": "bun scripts/release-version.mjs --dry-run"

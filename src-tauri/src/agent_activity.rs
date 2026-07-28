@@ -5,6 +5,13 @@
 //! so process-tree idleness cannot describe a completed turn. Codex, Claude,
 //! and Grok expose durable session records; hook-capable agents use a tiny
 //! app-owned bridge that records only the terminal id and agent kind.
+//!
+//! Long multi-step turns often write intermediate "done" records. Codex
+//! auto-continues with `task_complete` → `task_started` a few milliseconds
+//! later; Grok emits `turn_completed` for sub-task callbacks; OpenCode can
+//! publish `session.idle` while background work is still running. Candidate
+//! completions therefore wait a quiet period, and any fresh working signal
+//! cancels the pending notification.
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
@@ -20,8 +27,18 @@ use tauri::{AppHandle, Emitter, Manager};
 
 const POLL: Duration = Duration::from_millis(350);
 const DISCOVERY_POLL: Duration = Duration::from_secs(2);
+/// Cadence for a pane that is following a transcript it is not sure about.
+/// Agents like Claude Code only create their session file with the first
+/// prompt, which the user may not send for minutes, so the search never stops
+/// — it just stops costing a directory walk every two seconds.
+const WEAK_RECHECK_POLL: Duration = Duration::from_secs(15);
+const WEAK_RECHECK_AFTER: Duration = Duration::from_secs(60);
 const DISCOVERY_START_DELAY: Duration = Duration::from_secs(1);
 const START_TOLERANCE: Duration = Duration::from_secs(3);
+/// Codex auto-continues within ~5–10 ms of `task_complete`. A short quiet
+/// window absorbs that hand-off (and OpenCode's premature idle) without
+/// making a real idle turn feel laggy.
+const COMPLETE_QUIET: Duration = Duration::from_millis(800);
 const LOG_AGENTS: &[&str] = &["codex", "claude", "grok"];
 const SUPPORTED_AGENTS: &[&str] = &[
     "codex",
@@ -42,6 +59,16 @@ struct Watch {
     next_discovery: Instant,
     file: Option<PathBuf>,
     offset: u64,
+    /// The transcript was matched by creation time, so it is certainly the
+    /// session this pane launched. A `false` here means the pane fell back to
+    /// "most recently written transcript for this project", which can belong
+    /// to another copy of the same CLI — an editor's integrated terminal, a
+    /// second Duckweed window — because agents like Claude Code only create
+    /// their transcript once the first prompt is sent, several seconds after
+    /// discovery starts. Weak matches keep looking for the real one.
+    strong: bool,
+    /// Candidate turn end waiting for a quiet period before emit.
+    pending_complete: Option<Instant>,
 }
 
 struct SessionCandidate {
@@ -55,10 +82,28 @@ struct HookEvents {
     offset: u64,
 }
 
+/// Bridge-hook completions also wait for quiet: a single premature
+/// `session.idle` / Stop hook must not beat the next activity line.
+struct PendingHook {
+    agent: String,
+    since: Instant,
+}
+
+/// How a new session-log line affects completion state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LineSignal {
+    None,
+    /// Agent is actively working — cancel any pending completion.
+    Working,
+    /// Candidate turn end — schedule emit after [`COMPLETE_QUIET`].
+    Completed,
+}
+
 #[derive(Default)]
 pub struct AgentActivityManager {
     watches: Mutex<HashMap<String, Watch>>,
     hook_events: Mutex<Option<HookEvents>>,
+    pending_hooks: Mutex<HashMap<String, PendingHook>>,
 }
 
 #[derive(Clone, Serialize)]
@@ -91,12 +136,15 @@ impl AgentActivityManager {
                 next_discovery: Instant::now() + DISCOVERY_START_DELAY,
                 file: None,
                 offset: 0,
+                strong: false,
+                pending_complete: None,
             },
         );
     }
 
     pub fn unwatch(&self, id: &str) {
         self.watches.lock().unwrap().remove(id);
+        self.pending_hooks.lock().unwrap().remove(id);
     }
 
     fn poll(&self, app: &AppHandle) {
@@ -107,39 +155,55 @@ impl AgentActivityManager {
             .collect();
 
         for (id, watch) in watches.iter_mut() {
-            if watch.file.is_none() {
-                if !LOG_AGENTS.contains(&watch.agent.as_str()) {
-                    continue;
-                }
-                if Instant::now() < watch.next_discovery {
-                    continue;
-                }
-                watch.next_discovery = Instant::now() + DISCOVERY_POLL;
-                let Some(path) = discover_session(watch, &claimed) else {
-                    continue;
-                };
-                watch.offset = fs::metadata(&path)
-                    .map(|meta| {
-                        let new_session = meta.created().ok().is_some_and(|created| {
-                            created
-                                >= watch
-                                    .started
-                                    .checked_sub(START_TOLERANCE)
-                                    .unwrap_or(SystemTime::UNIX_EPOCH)
-                        });
-                        if new_session {
-                            0
+            // Keep searching while nothing is bound, and also while the bound
+            // transcript is only a guess: the pane's own session file may not
+            // have existed yet when the first search ran.
+            if !watch.strong && LOG_AGENTS.contains(&watch.agent.as_str()) {
+                if Instant::now() >= watch.next_discovery {
+                    let waited = SystemTime::now()
+                        .duration_since(watch.started)
+                        .unwrap_or_default();
+                    watch.next_discovery = Instant::now()
+                        + if waited > WEAK_RECHECK_AFTER {
+                            WEAK_RECHECK_POLL
                         } else {
-                            meta.len()
+                            DISCOVERY_POLL
+                        };
+                    if let Some((path, strong)) = discover_session(watch, &claimed) {
+                        // A guess never replaces a guess — that would only
+                        // trade one wrong transcript for another and reset the
+                        // read offset each time.
+                        if watch.file.as_ref() == Some(&path) {
+                            // Same transcript we already follow: just promote a
+                            // weak match. Resetting the offset here would
+                            // re-ingest historical end-of-turn lines and play
+                            // the completion sound again minutes later.
+                            if strong {
+                                watch.strong = true;
+                            }
+                        } else if watch.file.is_none() || strong {
+                            watch.offset = initial_offset(&path, watch.started);
+                            watch.pending_complete = None;
+                            watch.strong = strong;
+                            claimed.insert(path.clone());
+                            watch.file = Some(path);
                         }
-                    })
-                    .unwrap_or(0);
-                claimed.insert(path.clone());
-                watch.file = Some(path);
+                    }
+                }
+                if watch.file.is_none() {
+                    continue;
+                }
+            } else if watch.file.is_none() {
                 continue;
             }
 
-            if read_completions(watch) {
+            let signal = ingest_session_lines(watch);
+            apply_line_signal(watch, signal);
+            if watch
+                .pending_complete
+                .is_some_and(|since| since.elapsed() >= COMPLETE_QUIET)
+            {
+                watch.pending_complete = None;
                 let _ = app.emit(
                     "agent:complete",
                     CompletionPayload {
@@ -154,42 +218,81 @@ impl AgentActivityManager {
     fn poll_hook_events(&self, app: &AppHandle) {
         // Log-backed agents never write this bridge file. Avoid opening and
         // stat-ing it every 350 ms while Codex/Claude/Grok are starting.
-        if !self
+        let has_hook_agent = self
             .watches
             .lock()
             .unwrap()
             .values()
-            .any(|watch| !LOG_AGENTS.contains(&watch.agent.as_str()))
-        {
-            return;
-        }
-        let lines = {
-            let mut state = self.hook_events.lock().unwrap();
-            let Some(events) = state.as_mut() else {
-                return;
-            };
-            read_appended_lines(&events.path, &mut events.offset)
-        };
-        if lines.is_empty() {
+            .any(|watch| !LOG_AGENTS.contains(&watch.agent.as_str()));
+        if !has_hook_agent && self.pending_hooks.lock().unwrap().is_empty() {
             return;
         }
 
-        let watches = self.watches.lock().unwrap();
-        for line in lines {
-            let Some((id, agent)) = parse_hook_event(&line) else {
-                continue;
+        if has_hook_agent {
+            let lines = {
+                let mut state = self.hook_events.lock().unwrap();
+                let Some(events) = state.as_mut() else {
+                    return;
+                };
+                read_appended_lines(&events.path, &mut events.offset)
             };
-            if !watches.get(id).is_some_and(|watch| watch.agent == agent) {
-                continue;
+
+            let watches = self.watches.lock().unwrap();
+            let mut pending = self.pending_hooks.lock().unwrap();
+            for line in lines {
+                let Some((id, agent)) = parse_hook_event(&line) else {
+                    continue;
+                };
+                if !watches.get(id).is_some_and(|watch| watch.agent == agent) {
+                    continue;
+                }
+                // Fresh idle/stop from the bridge restarts the quiet window.
+                pending.insert(
+                    id.to_owned(),
+                    PendingHook {
+                        agent: agent.to_owned(),
+                        since: Instant::now(),
+                    },
+                );
             }
+        }
+
+        let mut pending = self.pending_hooks.lock().unwrap();
+        let watches = self.watches.lock().unwrap();
+        let ready: Vec<(String, String)> = pending
+            .iter()
+            .filter(|(id, hook)| {
+                hook.since.elapsed() >= COMPLETE_QUIET
+                    && watches
+                        .get(id.as_str())
+                        .is_some_and(|watch| watch.agent == hook.agent)
+            })
+            .map(|(id, hook)| (id.clone(), hook.agent.clone()))
+            .collect();
+        for (id, agent) in ready {
+            pending.remove(&id);
             let _ = app.emit(
                 "agent:complete",
                 CompletionPayload {
-                    id: id.to_owned(),
-                    agent: agent.to_owned(),
+                    id,
+                    agent,
                 },
             );
         }
+        // Drop hooks for panes that were unwatched or rebound mid-quiet.
+        pending.retain(|id, hook| {
+            watches
+                .get(id.as_str())
+                .is_some_and(|watch| watch.agent == hook.agent)
+        });
+    }
+}
+
+fn apply_line_signal(watch: &mut Watch, signal: LineSignal) {
+    match signal {
+        LineSignal::None => {}
+        LineSignal::Working => watch.pending_complete = None,
+        LineSignal::Completed => watch.pending_complete = Some(Instant::now()),
     }
 }
 
@@ -456,18 +559,54 @@ fn opencode_inline_config(plugin: &Path) -> Option<String> {
 }
 
 fn install_opencode_plugin(path: &Path) -> Result<(), String> {
+    // session.idle can fire while subagents / background work still run.
+    // Debounce the bridge write and cancel it if tools or chat restart.
     let plugin = r#"// Installed by Duckweed. Inert unless OpenCode runs inside a Duckweed PTY.
 import { appendFileSync } from "node:fs"
 
-export const DuckweedTerminalNotifications = async () => ({
-  event: async ({ event }) => {
-    if (event.type !== "session.idle") return
+const QUIET_MS = 800
+
+export const DuckweedTerminalNotifications = async () => {
+  let idleTimer = null
+  const cancel = () => {
+    if (idleTimer) {
+      clearTimeout(idleTimer)
+      idleTimer = null
+    }
+  }
+  const notify = () => {
     const id = process.env.DUCKWEED_TERMINAL_ID
     const target = process.env.DUCKWEED_AGENT_EVENTS
     if (!id || !target) return
     appendFileSync(target, `${id}|opencode\n`, "utf8")
-  },
-})
+  }
+  return {
+    event: async ({ event }) => {
+      if (event.type === "session.idle") {
+        cancel()
+        idleTimer = setTimeout(() => {
+          idleTimer = null
+          notify()
+        }, QUIET_MS)
+        return
+      }
+      if (
+        event.type === "session.error" ||
+        event.type === "message.updated" ||
+        event.type === "message.part.updated" ||
+        event.type === "session.status"
+      ) {
+        cancel()
+      }
+    },
+    "tool.execute.before": async () => {
+      cancel()
+    },
+    "chat.message": async () => {
+      cancel()
+    },
+  }
+}
 "#;
     fs::write(path, plugin).map_err(|error| error.to_string())
 }
@@ -616,7 +755,29 @@ fn discovery_roots(watch: &Watch, home: &Path) -> Vec<PathBuf> {
     roots
 }
 
-fn discover_session(watch: &Watch, claimed: &HashSet<PathBuf>) -> Option<PathBuf> {
+/// Start at the beginning of a transcript created for this pane, and at the end
+/// of one that was already running — its history is somebody else's turn.
+fn initial_offset(path: &Path, started: SystemTime) -> u64 {
+    fs::metadata(path)
+        .map(|meta| {
+            let new_session = meta.created().ok().is_some_and(|created| {
+                created
+                    >= started
+                        .checked_sub(START_TOLERANCE)
+                        .unwrap_or(SystemTime::UNIX_EPOCH)
+            });
+            if new_session {
+                0
+            } else {
+                meta.len()
+            }
+        })
+        .unwrap_or(0)
+}
+
+/// Returns the transcript to follow and whether the match is a certain one
+/// (see [`Watch::strong`]).
+fn discover_session(watch: &Watch, claimed: &HashSet<PathBuf>) -> Option<(PathBuf, bool)> {
     let home = home_dir()?;
     let roots = discovery_roots(watch, &home);
     if roots.is_empty() {
@@ -639,15 +800,15 @@ fn discover_session(watch: &Watch, claimed: &HashSet<PathBuf>) -> Option<PathBuf
     // watching it. Prefer that creation-time correlation over last-modified:
     // another Codex/Claude/Grok process in the same project may be writing at
     // the same time and would otherwise steal this pane's watch.
-    nearest_new_session(watch.started, earliest, &matching)
-        .or_else(|| {
-            matching
-                .iter()
-                .max_by_key(|candidate| candidate.modified)
-                .copied()
-        })
+    if let Some(candidate) = nearest_new_session(watch.started, earliest, &matching) {
+        return Some((candidate.path.clone(), true));
+    }
+    matching
+        .iter()
+        .max_by_key(|candidate| candidate.modified)
+        .copied()
         .or_else(|| (candidates.len() == 1).then(|| &candidates[0]))
-        .map(|candidate| candidate.path.clone())
+        .map(|candidate| (candidate.path.clone(), false))
 }
 
 fn nearest_new_session<'a>(
@@ -781,79 +942,221 @@ fn claude_project_slug(cwd: &Path) -> String {
         .collect()
 }
 
-fn read_completions(watch: &mut Watch) -> bool {
+/// Read newly appended session lines and fold them into one signal.
+///
+/// The last non-[`LineSignal::None`] line wins: a `task_complete` followed
+/// immediately by `task_started` in the same batch collapses to Working.
+fn ingest_session_lines(watch: &mut Watch) -> LineSignal {
     let Some(path) = watch.file.as_ref() else {
-        return false;
+        return LineSignal::None;
     };
     let Ok(mut file) = File::open(path) else {
-        return false;
+        return LineSignal::None;
     };
     let len = file.metadata().map(|meta| meta.len()).unwrap_or(0);
     if len < watch.offset {
         watch.offset = len;
-        return false;
+        return LineSignal::None;
     }
     if len == watch.offset || file.seek(SeekFrom::Start(watch.offset)).is_err() {
-        return false;
+        return LineSignal::None;
     }
 
     let mut bytes = Vec::new();
     if file.read_to_end(&mut bytes).is_err() {
-        return false;
+        return LineSignal::None;
     }
     let Some(last_newline) = bytes.iter().rposition(|byte| *byte == b'\n') else {
-        return false;
+        return LineSignal::None;
     };
     let complete = &bytes[..=last_newline];
     watch.offset += complete.len() as u64;
 
-    complete
+    let mut last = LineSignal::None;
+    for line in complete
         .split(|byte| *byte == b'\n')
         .filter(|line| !line.is_empty())
-        .any(|line| is_completion_line(&watch.agent, line))
+    {
+        let next = classify_session_line(&watch.agent, line);
+        if next != LineSignal::None {
+            last = next;
+        }
+    }
+    last
 }
 
-fn is_completion_line(agent: &str, line: &[u8]) -> bool {
+fn classify_session_line(agent: &str, line: &[u8]) -> LineSignal {
     let Ok(value) = serde_json::from_slice::<Value>(line) else {
-        return false;
+        return LineSignal::None;
     };
     match agent {
-        "codex" => {
-            value.get("type").and_then(Value::as_str) == Some("event_msg")
-                && value.pointer("/payload/type").and_then(Value::as_str) == Some("task_complete")
+        "codex" => classify_codex(&value),
+        "claude" => classify_claude(&value),
+        "grok" => classify_grok(&value),
+        _ => LineSignal::None,
+    }
+}
+
+fn classify_codex(value: &Value) -> LineSignal {
+    if value.get("type").and_then(Value::as_str) != Some("event_msg") {
+        return LineSignal::None;
+    }
+    match value.pointer("/payload/type").and_then(Value::as_str) {
+        // Auto-continue starts the next task within milliseconds of complete.
+        Some("task_started") => LineSignal::Working,
+        Some("task_complete") => LineSignal::Completed,
+        Some("turn_aborted") => match value.pointer("/payload/reason").and_then(Value::as_str) {
+            // The user pressed Esc, or sent a new prompt over the running
+            // turn. They are at the keyboard: nothing finished, and a sound
+            // for their own keystroke is pure noise.
+            Some("interrupted") | Some("replaced") => LineSignal::Working,
+            // Aborted for any other reason (an error, a refused turn) still
+            // hands the prompt back and is worth surfacing.
+            _ => LineSignal::Completed,
+        },
+        _ => LineSignal::None,
+    }
+}
+
+fn classify_claude(value: &Value) -> LineSignal {
+    match value.get("type").and_then(Value::as_str) {
+        // Claude Code writes this once the full turn is done (including tool
+        // loops). Prefer it over intermediate assistant stop_reason records.
+        Some("system")
+            if value.get("subtype").and_then(Value::as_str) == Some("turn_duration") =>
+        {
+            LineSignal::Completed
         }
-        "claude" => {
-            value.get("type").and_then(Value::as_str) == Some("assistant")
-                && matches!(
-                    value
-                        .pointer("/message/stop_reason")
-                        .and_then(Value::as_str),
-                    Some("end_turn" | "stop_sequence")
-                )
-        }
-        "grok" => {
-            value
-                .pointer("/params/update/sessionUpdate")
+        Some("assistant") => {
+            // Subagent / sidechain transcripts can share the project log.
+            if value.get("isSidechain").and_then(Value::as_bool) == Some(true) {
+                return LineSignal::None;
+            }
+            match value
+                .pointer("/message/stop_reason")
                 .and_then(Value::as_str)
-                == Some("turn_completed")
+            {
+                // Still calling tools — the turn is not idle.
+                Some("tool_use") => LineSignal::Working,
+                // Text-only final reply. `stop_sequence` is often a synthetic
+                // rate-limit row and is covered by turn_duration when real.
+                Some("end_turn") => LineSignal::Completed,
+                _ => LineSignal::None,
+            }
         }
+        // Tool results and follow-up user turns mean work is still flowing.
+        Some("user") => {
+            let content = value.pointer("/message/content");
+            // Esc during a turn: Claude Code records the interruption as a
+            // user message. The user stopped the work themselves, so a pending
+            // completion for that turn must be dropped, not announced.
+            if content.is_some_and(content_is_interrupt) {
+                return LineSignal::Working;
+            }
+            if content
+                .map(|content| content_has_tool_result(content))
+                .unwrap_or(false)
+            {
+                LineSignal::Working
+            } else {
+                LineSignal::None
+            }
+        }
+        _ => LineSignal::None,
+    }
+}
+
+/// Claude Code's marker for a turn the user stopped, as plain text or as a
+/// single text block.
+fn content_is_interrupt(content: &Value) -> bool {
+    const MARKER: &str = "[Request interrupted by user";
+    match content {
+        Value::String(text) => text.starts_with(MARKER),
+        Value::Array(items) => items.iter().any(|item| {
+            item.get("text")
+                .and_then(Value::as_str)
+                .is_some_and(|text| text.starts_with(MARKER))
+        }),
         _ => false,
     }
+}
+
+fn content_has_tool_result(content: &Value) -> bool {
+    match content {
+        Value::Array(items) => items.iter().any(|item| {
+            item.get("type").and_then(Value::as_str) == Some("tool_result")
+                || item
+                    .get("content")
+                    .map(content_has_tool_result)
+                    .unwrap_or(false)
+        }),
+        Value::Object(map) => map
+            .get("type")
+            .and_then(Value::as_str)
+            .is_some_and(|kind| kind == "tool_result"),
+        _ => false,
+    }
+}
+
+fn classify_grok(value: &Value) -> LineSignal {
+    let Some(update) = value.pointer("/params/update") else {
+        return LineSignal::None;
+    };
+    match update.get("sessionUpdate").and_then(Value::as_str) {
+        Some("tool_call" | "tool_call_update" | "agent_message_chunk" | "agent_thought_chunk") => {
+            LineSignal::Working
+        }
+        Some("user_message_chunk") => LineSignal::Working,
+        Some("turn_completed") => {
+            // Background Task tool completions are tagged as turn_completed
+            // with a synthetic prompt id while the parent turn continues.
+            let prompt_id = update.get("prompt_id").and_then(Value::as_str).unwrap_or("");
+            // Synthetic ids look like `task-completed-call-<uuid>-N`.
+            if prompt_id.starts_with("task-completed-call-") {
+                LineSignal::None
+            } else {
+                LineSignal::Completed
+            }
+        }
+        // Sub-task lifecycle is not the outer agent turn.
+        Some("task_completed" | "task_backgrounded") => LineSignal::None,
+        _ => LineSignal::None,
+    }
+}
+
+/// Test helper: true when a line is a completion *candidate* (not Working).
+#[cfg(test)]
+fn is_completion_line(agent: &str, line: &[u8]) -> bool {
+    classify_session_line(agent, line) == LineSignal::Completed
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        claude_project_slug, discovery_roots, gemini_defaults, install_antigravity_plugin,
-        install_copilot_hook, install_opencode_plugin, is_completion_line, nearest_new_session,
-        parse_hook_event, qwen_defaults, read_appended_lines, read_completions, write_hook_script,
-        SessionCandidate, Watch, START_TOLERANCE,
+        apply_line_signal, claude_project_slug, classify_session_line, discovery_roots,
+        gemini_defaults, ingest_session_lines, install_antigravity_plugin, install_copilot_hook,
+        install_opencode_plugin, is_completion_line, nearest_new_session, parse_hook_event,
+        qwen_defaults, read_appended_lines, write_hook_script, LineSignal, SessionCandidate, Watch,
+        START_TOLERANCE,
     };
     use std::fs::{self, OpenOptions};
     use std::io::Write;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant, SystemTime};
+
+    fn bare_watch(agent: &str, file: Option<PathBuf>, offset: u64) -> Watch {
+        Watch {
+            agent: agent.into(),
+            cwd: PathBuf::from(r"H:\work"),
+            started: SystemTime::now(),
+            next_discovery: Instant::now(),
+            file,
+            offset,
+            strong: true,
+            pending_complete: None,
+        }
+    }
 
     #[test]
     fn a_new_session_beats_an_old_session_modified_more_recently() {
@@ -888,21 +1191,71 @@ mod tests {
             br#"{"type":"assistant","message":{"stop_reason":"end_turn"}}"#,
         ));
         assert!(is_completion_line(
+            "claude",
+            br#"{"type":"system","subtype":"turn_duration","durationMs":1200}"#,
+        ));
+        assert!(is_completion_line(
             "grok",
-            br#"{"params":{"update":{"sessionUpdate":"turn_completed"}}}"#,
+            br#"{"params":{"update":{"sessionUpdate":"turn_completed","prompt_id":"0586a3a5-bf76-4ee8-be99-6f229196e8a7"}}}"#,
         ));
     }
 
     #[test]
     fn ignores_in_progress_agent_records() {
+        assert_eq!(
+            classify_session_line(
+                "codex",
+                br#"{"type":"event_msg","payload":{"type":"task_started"}}"#,
+            ),
+            LineSignal::Working
+        );
+        assert_eq!(
+            classify_session_line(
+                "claude",
+                br#"{"type":"assistant","message":{"stop_reason":"tool_use"}}"#,
+            ),
+            LineSignal::Working
+        );
         assert!(!is_completion_line(
-            "codex",
-            br#"{"type":"event_msg","payload":{"type":"task_started"}}"#,
+            "claude",
+            br#"{"type":"assistant","message":{"stop_reason":"stop_sequence"}}"#,
         ));
         assert!(!is_completion_line(
             "claude",
-            br#"{"type":"assistant","message":{"stop_reason":"tool_use"}}"#,
+            br#"{"type":"assistant","isSidechain":true,"message":{"stop_reason":"end_turn"}}"#,
         ));
+        assert!(!is_completion_line(
+            "grok",
+            br#"{"params":{"update":{"sessionUpdate":"turn_completed","prompt_id":"task-completed-call-99f7904f-2551-46b0-aeb6-cf7ede36dbad-27"}}}"#,
+        ));
+        // Esc during a turn: the user is at the keyboard and stopped the work
+        // themselves, and a pending completion for that turn must be dropped.
+        assert_eq!(
+            classify_session_line(
+                "codex",
+                br#"{"type":"event_msg","payload":{"type":"turn_aborted","reason":"interrupted"}}"#,
+            ),
+            LineSignal::Working
+        );
+        assert_eq!(
+            classify_session_line(
+                "claude",
+                br#"{"type":"user","message":{"content":[{"type":"text","text":"[Request interrupted by user]"}]}}"#,
+            ),
+            LineSignal::Working
+        );
+        // An abort Codex reports for its own reasons still hands back control.
+        assert!(is_completion_line(
+            "codex",
+            br#"{"type":"event_msg","payload":{"type":"turn_aborted","reason":"error"}}"#,
+        ));
+        assert_eq!(
+            classify_session_line(
+                "grok",
+                br#"{"params":{"update":{"sessionUpdate":"tool_call"}}}"#,
+            ),
+            LineSignal::Working
+        );
     }
 
     #[test]
@@ -917,14 +1270,7 @@ mod tests {
     fn session_discovery_stays_out_of_historical_roots() {
         let home = Path::new(r"C:\Users\duck");
         let started = SystemTime::now();
-        let codex = Watch {
-            agent: "codex".into(),
-            cwd: Path::new(r"H:\work").into(),
-            started,
-            next_discovery: Instant::now(),
-            file: None,
-            offset: 0,
-        };
+        let codex = bare_watch("codex", None, 0);
         let codex_roots = discovery_roots(&codex, home);
         assert!(!codex_roots.is_empty());
         assert!(codex_roots.len() <= 4);
@@ -939,6 +1285,8 @@ mod tests {
             next_discovery: Instant::now(),
             file: None,
             offset: 0,
+            strong: false,
+            pending_complete: None,
         };
         assert!(discovery_roots(&claude, home)
             .iter()
@@ -956,21 +1304,49 @@ mod tests {
             b"{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n",
         )
         .unwrap();
-        let mut watch = Watch {
-            agent: "codex".into(),
-            cwd: dir.clone(),
-            started: SystemTime::now(),
-            next_discovery: Instant::now(),
-            file: Some(path.clone()),
-            offset: fs::metadata(&path).unwrap().len(),
-        };
-        assert!(!read_completions(&mut watch));
+        let mut watch = bare_watch(
+            "codex",
+            Some(path.clone()),
+            fs::metadata(&path).unwrap().len(),
+        );
+        assert_eq!(ingest_session_lines(&mut watch), LineSignal::None);
 
         let mut file = OpenOptions::new().append(true).open(&path).unwrap();
         file.write_all(b"{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\"}}\n")
             .unwrap();
-        assert!(read_completions(&mut watch));
-        assert!(!read_completions(&mut watch));
+        assert_eq!(ingest_session_lines(&mut watch), LineSignal::Completed);
+        assert_eq!(ingest_session_lines(&mut watch), LineSignal::None);
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn codex_auto_continue_cancels_a_pending_completion() {
+        let dir = std::env::temp_dir().join(format!(
+            "duckweed-agent-activity-continue-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("rollout.jsonl");
+        fs::write(&path, b"").unwrap();
+        let mut watch = bare_watch("codex", Some(path.clone()), 0);
+
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        // Real Codex multi-turn chain: complete then start within a few ms.
+        file.write_all(
+            b"{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\"}}\n\
+              {\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n",
+        )
+        .unwrap();
+        let signal = ingest_session_lines(&mut watch);
+        apply_line_signal(&mut watch, signal);
+        assert!(watch.pending_complete.is_none());
+
+        file.write_all(b"{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\"}}\n")
+            .unwrap();
+        let signal = ingest_session_lines(&mut watch);
+        apply_line_signal(&mut watch, signal);
+        assert!(watch.pending_complete.is_some());
 
         fs::remove_dir_all(dir).unwrap();
     }
@@ -1049,9 +1425,10 @@ mod tests {
         fs::create_dir_all(dir.join(".copilot")).unwrap();
         install_copilot_hook(&dir, &hook).unwrap();
 
-        assert!(fs::read_to_string(dir.join("opencode-plugin.js"))
-            .unwrap()
-            .contains("session.idle"));
+        let plugin = fs::read_to_string(dir.join("opencode-plugin.js")).unwrap();
+        assert!(plugin.contains("session.idle"));
+        assert!(plugin.contains("QUIET_MS"));
+        assert!(plugin.contains("tool.execute.before"));
         assert!(dir
             .join(".gemini/config/plugins/duckweed-terminal-notifications/hooks.json")
             .is_file());

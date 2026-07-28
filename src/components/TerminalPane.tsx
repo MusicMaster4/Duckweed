@@ -2,8 +2,10 @@ import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 import * as bus from "../lib/bus";
+import { edgeRadius } from "../lib/layout";
 import * as terminals from "../lib/terminals";
 import type { DropZone, LeafNode, ProjectInfo } from "../lib/types";
+import { AgentSurface } from "./agent/AgentSurface";
 import { CommandInput } from "./CommandInput";
 import { PaneWelcome } from "./PaneWelcome";
 import { SearchBar } from "./SearchBar";
@@ -20,8 +22,10 @@ interface Props {
   dropZone: DropZone | null;
   /** This pane is the one being dragged. */
   isSource: boolean;
-  spawn: { cwd: string | null; shell: string | null };
+  spawn: { cwd: string | null; shell: string | null; command: string | null };
   highlight: boolean;
+  /** Bitmask of the sides sitting on the rounded outer frame — see PaneTree. */
+  edges: number;
   completionFlash: number;
   /** Background completion not reviewed yet — drives the pane outline, not a header dot. */
   unread: boolean;
@@ -51,6 +55,7 @@ export const TerminalPane = memo(function TerminalPane({
   isSource,
   spawn,
   highlight,
+  edges,
   completionFlash,
   unread,
   project,
@@ -102,7 +107,11 @@ export const TerminalPane = memo(function TerminalPane({
   useLayoutEffect(() => {
     const body = bodyRef.current;
     if (!body) return;
-    terminals.attach(node.term, body, { cwd: spawn.cwd, shell: spawn.shell });
+    terminals.attach(node.term, body, {
+      cwd: spawn.cwd,
+      shell: spawn.shell,
+      command: spawn.command,
+    });
     setMeta(terminals.getMeta(node.term));
     return () => terminals.detach(node.term);
     // `spawn` only matters for the very first attach, which creates the shell.
@@ -136,21 +145,23 @@ export const TerminalPane = memo(function TerminalPane({
   // The grid owns the keyboard when the app is set to raw input, while a child
   // process is running, or once the shell is gone.
   const busy = meta?.busy ?? false;
+  const agentUi = meta?.agentUi ?? null;
   const effectiveRaw = inputMode === "raw" || busy || !!meta?.exited;
 
   useEffect(() => {
     terminals.setEditorMode(node.term, !effectiveRaw);
   }, [node.term, effectiveRaw]);
 
-  // Hand keyboard to the grid while a child is running; reclaim the editor after.
+  // Hand keyboard to the grid while a child is running; reclaim the editor
+  // after. An agent surface has its own composer and focuses itself.
   useEffect(() => {
-    if (!active || meta?.exited) return;
+    if (!active || meta?.exited || agentUi) return;
     const id = window.setTimeout(
       () => (effectiveRaw ? terminals.focusTerminal(node.term) : terminals.focus(node.term)),
       0,
     );
     return () => window.clearTimeout(id);
-  }, [effectiveRaw, active, meta?.exited, node.term]);
+  }, [effectiveRaw, active, meta?.exited, agentUi, node.term]);
 
   const title = meta?.title || meta?.shellLabel || "shell";
   const cwdLabel = meta?.cwd ? basename(meta.cwd) : "";
@@ -161,7 +172,7 @@ export const TerminalPane = memo(function TerminalPane({
    * keeps the bar — it is the only thing left saying what happened. No project
    * yet means no composer either: pick a folder before any command runs.
    */
-  const showComposer = inputMode === "editor" && !busy && !!project;
+  const showComposer = inputMode === "editor" && !busy && !!project && !agentUi;
   /** Nothing has been run — hide the shell's lone prompt behind the empty state. */
   const blank = !!meta && !meta.ran && !effectiveRaw;
   /**
@@ -185,13 +196,21 @@ export const TerminalPane = memo(function TerminalPane({
       ]
         .filter(Boolean)
         .join(" ")}
+      // Only the corners that meet the rounded outer frame get a radius; the
+      // ones against a divider stay square so the outline meets it flush.
+      style={{ "--pane-radius": edgeRadius(edges) } as React.CSSProperties}
       data-pane-id={node.id}
       onPointerDownCapture={onActivate}
     >
-      {completionFlash > 0 && (
+      {completionFlash !== 0 && (
         <span
           key={completionFlash}
-          className="pane-completion-flash"
+          className={[
+            "pane-completion-flash",
+            completionFlash < 0 ? "is-restored" : "",
+          ]
+            .filter(Boolean)
+            .join(" ")}
           aria-hidden="true"
         />
       )}
@@ -324,6 +343,14 @@ export const TerminalPane = memo(function TerminalPane({
             terminals.focusTerminal(node.term);
           }
         }}
+        onClick={() => {
+          // A press focuses the grid so a drag can select; a click that
+          // selected nothing was the user asking to type, so the composer
+          // takes the keyboard back rather than making them click it too.
+          if (blank || busy || meta?.exited || agentUi) return;
+          if (terminals.selection(node.term)) return;
+          terminals.focus(node.term);
+        }}
         onContextMenu={(e) => {
           // Terminal convention: right-click copies a selection, else pastes.
           e.preventDefault();
@@ -349,6 +376,14 @@ export const TerminalPane = memo(function TerminalPane({
           />
         )}
       </div>
+
+      {agentUi && (
+        <AgentSurface
+          termId={node.term}
+          active={active && !searching}
+          onClose={() => terminals.closeAgentUi(node.term)}
+        />
+      )}
 
       {showComposer && (
         <CommandInput

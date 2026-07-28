@@ -14,13 +14,20 @@ class FakeAudio {
     this.src = src;
     this.currentTime = 19;
     this.preload = "";
+    this.readyState = 4; // HAVE_ENOUGH_DATA
+    this.muted = false;
     this.loads = 0;
     this.plays = 0;
+    this.pauses = 0;
     players.push(this);
   }
 
   load() {
     this.loads += 1;
+  }
+
+  pause() {
+    this.pauses += 1;
   }
 
   play() {
@@ -62,16 +69,18 @@ describe("completion sound", () => {
     expect(persist).toContain("completionSoundEnabled: state.completionSoundEnabled");
   });
 
-  test("sound requires the selected pane and a job longer than one minute", () => {
+  test("sound follows completion eligibility without requiring the selected pane", () => {
     const app = read("src/App.tsx");
-    const signal = app.indexOf("if (!shouldSignalCompletion(previous, meta)) return;");
-    const soundGate = app.indexOf("shouldPlayCompletionSound(previous, meta)", signal);
+    const signal = app.indexOf("if (!shouldSignalCompletion(previous, current)) return;");
+    const soundGate = app.indexOf("shouldPlayCompletionSound(previous, current)", signal);
     const sound = app.indexOf("playCompletionSound();", signal);
+    const selectedGate = app.indexOf("isSelectedTerm(termId)", signal);
     const focusGate = app.indexOf("isFocusedTerm(termId)", signal);
     expect(signal).toBeGreaterThan(-1);
     expect(soundGate).toBeGreaterThan(signal);
-    expect(focusGate).toBeGreaterThan(signal);
-    expect(focusGate).toBeLessThan(sound);
+    expect(selectedGate === -1 || selectedGate > sound).toBe(true);
     expect(soundGate).toBeLessThan(sound);
+    // Flash/unread still use document focus; sound does not.
+    expect(focusGate).toBeGreaterThan(sound);
   });
 });

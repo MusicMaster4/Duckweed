@@ -1,6 +1,16 @@
 import { describe, expect, test } from "bun:test";
 
-import { clampLeft, dropIndex, restingLeft, slotShift } from "../src/lib/tabReorder.ts";
+import {
+  SETTINGS_TAB_ID,
+  adjustSettingsIndexOnAppend,
+  adjustSettingsIndexOnClose,
+  applyStripReorder,
+  buildStripOrder,
+  clampLeft,
+  dropIndex,
+  restingLeft,
+  slotShift,
+} from "../src/lib/tabReorder.ts";
 
 /** Three tabs of `width`, laid out from x = 0 with no gap. */
 const strip = (count, width = 100) =>
@@ -99,5 +109,48 @@ describe("pinned tab reorder bounds", () => {
     expect(slotShift(1, 3, 2, 100, 2)).toBe(0);
     // Movable neighbour still shifts.
     expect(slotShift(2, 3, 2, 100, 2)).toBe(100);
+  });
+});
+
+describe("settings strip order", () => {
+  test("settings inserts at the given index, including after the last tab", () => {
+    expect(buildStripOrder(["a", "b"], true, 0)).toEqual([SETTINGS_TAB_ID, "a", "b"]);
+    expect(buildStripOrder(["a", "b"], true, 1)).toEqual(["a", SETTINGS_TAB_ID, "b"]);
+    expect(buildStripOrder(["a", "b"], true, 2)).toEqual(["a", "b", SETTINGS_TAB_ID]);
+    expect(buildStripOrder(["a", "b"], false, 1)).toEqual(["a", "b"]);
+  });
+
+  test("settings can be dragged among unpinned tabs", () => {
+    // [a, b, settings] → drag settings (2) to front of unpinned (0), no pins.
+    const moved = applyStripReorder(["a", "b"], true, 2, 2, 0, 0);
+    expect(moved).toEqual({ tabIds: ["a", "b"], settingsIndex: 0 });
+
+    // [a, settings, b] → drag settings (1) after b → index 2.
+    const right = applyStripReorder(["a", "b"], true, 1, 1, 2, 0);
+    expect(right).toEqual({ tabIds: ["a", "b"], settingsIndex: 2 });
+  });
+
+  test("dragging a tab past settings reorders the tab list and keeps settings seated", () => {
+    // [a, settings, b] — drag b (2) to 0 → [b, a, settings]
+    const result = applyStripReorder(["a", "b"], true, 1, 2, 0, 0);
+    expect(result).toEqual({ tabIds: ["b", "a"], settingsIndex: 2 });
+  });
+
+  test("settings cannot land inside the pinned block", () => {
+    // pins: a,b | unpinned: c + settings at end → strip [a,b,c,settings]
+    const blocked = applyStripReorder(["a", "b", "c"], true, 3, 3, 0, 2);
+    // clamped to index 2 → [a,b,settings,c]
+    expect(blocked).toEqual({ tabIds: ["a", "b", "c"], settingsIndex: 2 });
+  });
+
+  test("closing/appending tabs keeps the settings index coherent", () => {
+    // [a, settings, b] settingsIndex=1; close a (0) → [settings, b]
+    expect(adjustSettingsIndexOnClose(1, 0)).toBe(0);
+    // close b (1) with settings at 1 → still 1 ([a, settings])
+    expect(adjustSettingsIndexOnClose(1, 1)).toBe(1);
+    // settings at end (2) of 2 tabs; append → stay at end (3)
+    expect(adjustSettingsIndexOnAppend(2, 2)).toBe(3);
+    // settings in the middle (1); append leaves it put
+    expect(adjustSettingsIndexOnAppend(1, 2)).toBe(1);
   });
 });

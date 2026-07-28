@@ -46,6 +46,20 @@ describe("settings tab", () => {
   test("only the visible view reports an active tab", () => {
     const strip = read("src/components/TabStrip.tsx");
     expect(strip).toContain("tab.id === activeTabId && !settingsActive");
-    expect(strip).toContain("settingsOpen &&");
+    expect(strip).toContain("settingsOpen");
+  });
+
+  test("settings is a strip citizen that can be reordered", () => {
+    const strip = read("src/components/TabStrip.tsx");
+    const app = read("src/App.tsx");
+    const reorder = read("src/lib/tabReorder.ts");
+    expect(reorder).toContain('export const SETTINGS_TAB_ID = "__settings__"');
+    expect(strip).toContain("data-strip-id={SETTINGS_TAB_ID}");
+    expect(strip).toContain("beginReorder(event, SETTINGS_TAB_ID)");
+    // Pane drops stay on real terminal tabs only.
+    expect(strip).toContain("data-strip-id={tab.id}");
+    expect(strip).toContain("data-tab-id={tab.id}");
+    expect(app).toContain("settingsTabIndex");
+    expect(app).toContain("applyStripReorder");
   });
 });

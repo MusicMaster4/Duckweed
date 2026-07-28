@@ -2,9 +2,10 @@
 //!
 //! A transcript total is not a quota. We only draw a meter when the provider
 //! reports the current percentage and reset time, either through its official
-//! OAuth usage endpoint or a snapshot persisted by the CLI. Agents without
-//! either source still get a card, but it says why no trustworthy limit is
-//! available instead of asking the user to invent a ceiling.
+//! OAuth usage endpoint or a snapshot persisted by the CLI. Agents with no
+//! account limit source at all (multi-provider CLIs, local proxies, activity-only
+//! tools) are omitted. Agents that can report but currently can't (missing
+//! OAuth session, no recent snapshot) still get a card that says why.
 //!
 //! Each successful snapshot is also appended to a small local history so we
 //! can estimate how long the remaining allowance lasts at the recent burn
@@ -158,8 +159,10 @@ pub struct Quota {
     pub limits: Vec<QuotaLimit>,
 }
 
-/// Build one card for every agent with at least one request in the selected
-/// dashboard range. Empty/installed-only agents are deliberately omitted.
+/// Build one card for every agent that both saw activity in the selected range
+/// and has a real provider limit source. Agents with no account quota to read
+/// (multi-provider CLIs, local proxies, activity-only tools) are omitted rather
+/// than shown as permanent "unavailable" cards.
 ///
 /// `duty` carries each agent's active share of the wall clock, measured from
 /// the transcripts rather than from this history — the transcripts record
@@ -175,7 +178,7 @@ pub fn build(
     let mut history = load_history(history_path);
     let mut quotas: Vec<Quota> = crate::usage::sources::AGENTS
         .iter()
-        .filter(|agent| used_agents.contains(agent.id))
+        .filter(|agent| used_agents.contains(agent.id) && supports_quota_reporting(agent.id))
         .map(|agent| {
             reported_for_with_codex_session(agent.id, home, latest_codex_session).unwrap_or_else(
                 || Quota {
@@ -201,6 +204,13 @@ pub fn build(
     quotas
 }
 
+/// Agents whose CLI (or OAuth session) can expose an account-wide limit. Everyone
+/// else either multi-homes providers, proxies someone else's quota, or only logs
+/// local activity — none of those produce a trustworthy remaining bar.
+fn supports_quota_reporting(agent_id: &str) -> bool {
+    matches!(agent_id, "claude" | "codex" | "grok")
+}
+
 fn unavailable_message(agent_id: &str) -> &'static str {
     match agent_id {
         "claude" => {
@@ -209,14 +219,8 @@ fn unavailable_message(agent_id: &str) -> &'static str {
         "codex" => {
             "No usable Codex rate-limit snapshot found in recent sessions. Run Codex after signing in so it can write usage limits, then refresh Usage."
         }
-        "gemini" => {
-            "Gemini reports session statistics in /stats; it does not persist a reliable account-wide remaining quota."
-        }
-        "opencode" => {
-            "OpenCode can use many providers, so it has no single account quota to report."
-        }
-        "antigravity" => {
-            "Antigravity records local activity, but not token counts or an account limit snapshot."
+        "grok" => {
+            "No Grok credit snapshot found in recent logs. Run Grok after signing in so it can write usage limits, then refresh Usage."
         }
         _ => "This agent does not persist provider-reported account limits locally.",
     }
@@ -987,16 +991,22 @@ mod tests {
     }
 
     #[test]
-    fn only_agents_used_in_the_range_receive_cards() {
-        let used = HashSet::from(["claude", "opencode"]);
+    fn only_agents_that_can_report_limits_receive_cards() {
+        let used = HashSet::from(["claude", "opencode", "claudex", "antigravity", "grok"]);
         let empty = std::env::temp_dir().join("duckweed-no-such-home");
         let history = std::env::temp_dir().join(format!(
             "duckweed-quota-history-empty-{}",
             std::process::id()
         ));
         let quotas = build(&used, &empty, &history, None, &HashMap::new());
+        // OpenCode / Claudex / Antigravity have no account limit to read.
         assert_eq!(quotas.len(), 2);
         assert!(quotas.iter().all(|quota| quota.source == "unavailable"));
+        assert!(quotas.iter().any(|quota| quota.agent == "claude"));
+        assert!(quotas.iter().any(|quota| quota.agent == "grok"));
+        assert!(!quotas.iter().any(|quota| quota.agent == "opencode"));
+        assert!(!quotas.iter().any(|quota| quota.agent == "claudex"));
+        assert!(!quotas.iter().any(|quota| quota.agent == "antigravity"));
         assert!(!quotas.iter().any(|quota| quota.agent == "codex"));
         let _ = std::fs::remove_file(&history);
     }

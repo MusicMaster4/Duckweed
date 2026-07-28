@@ -63,6 +63,15 @@ pub static AGENTS: &[Agent] = &[
         caveat: None,
     },
     Agent {
+        id: "claudex",
+        label: "Claudex",
+        vendor: "Proxied",
+        format: Format::Append,
+        caveat: Some(
+            "Claude Code driving a non-Anthropic model through a local proxy. It shares Claude Code's transcripts, so these turns are split out by model rather than by file, and they bill to the proxied provider — not to your Anthropic plan.",
+        ),
+    },
+    Agent {
         id: "codex",
         label: "Codex CLI",
         vendor: "OpenAI",
@@ -137,6 +146,11 @@ pub fn discover(agent_id: &str, home: &Path) -> Vec<PathBuf> {
             collect(&home.join(".claude/projects"), "jsonl", &mut out);
             collect(&home.join(".config/claude/projects"), "jsonl", &mut out);
         }
+        // Claudex has no store of its own — it runs `claude` against a proxy,
+        // so its turns land in the Claude Code transcripts already discovered
+        // above. Listing those files here too would parse and bill them twice;
+        // `route` is what separates the two agents, per record.
+        "claudex" => {}
         "codex" => {
             collect(&home.join(".codex/sessions"), "jsonl", &mut out);
             collect(&home.join(".codex/archived_sessions"), "jsonl", &mut out);
@@ -148,16 +162,23 @@ pub fn discover(agent_id: &str, home: &Path) -> Vec<PathBuf> {
             });
         }
         "opencode" => {
-            collect(
-                &home.join(".local/share/opencode/storage/message"),
-                "json",
-                &mut out,
-            );
-            collect(
-                &home.join("AppData/Local/opencode/storage/message"),
-                "json",
-                &mut out,
-            );
+            // Current OpenCode stores messages in SQLite (`opencode.db`). Prefer
+            // that over the legacy per-message JSON tree so we do not double-
+            // count the same requests after a migration.
+            let mut dbs = Vec::new();
+            for base in opencode_data_dirs(home) {
+                let db = base.join("opencode.db");
+                if db.is_file() {
+                    dbs.push(db);
+                }
+            }
+            if !dbs.is_empty() {
+                out.extend(dbs);
+            } else {
+                for base in opencode_data_dirs(home) {
+                    collect(&base.join("storage/message"), "json", &mut out);
+                }
+            }
         }
         "grok" => {
             collect_matching(&home.join(".grok/sessions"), "jsonl", &mut out, |p| {
@@ -199,6 +220,35 @@ pub fn discover(agent_id: &str, home: &Path) -> Vec<PathBuf> {
         _ => {}
     }
     out
+}
+
+/// Which agent a record belongs to, given the file's agent and the model.
+///
+/// Only Claude Code is ambiguous. Wrappers like `claudex` point it at a local
+/// proxy (`ANTHROPIC_BASE_URL`) that serves GPT, Grok or an OpenRouter model
+/// behind the Anthropic API, and the CLI writes those turns into its normal
+/// `~/.claude/projects` transcripts. The model id is the only trace left, and
+/// it is enough: a turn Claude Code did not run on an Anthropic model was not
+/// billed to the Anthropic plan, so folding it into Claude Code's totals — and
+/// into the quota card next to them — is simply wrong.
+pub fn route(agent_id: &'static str, model: &str) -> &'static str {
+    if agent_id == "claude" && !is_anthropic_model(model) {
+        return "claudex";
+    }
+    agent_id
+}
+
+/// Whether a model id names an Anthropic model, allowing for the provider
+/// prefixes proxies bolt on (`anthropic/claude-opus-5`).
+fn is_anthropic_model(model: &str) -> bool {
+    let id = super::pricing::normalize(model);
+    // Claude Code writes the full model id on assistant turns, but the aliases
+    // it accepts on the command line cost nothing to honour here, and a missing
+    // id is not evidence of a proxy.
+    const ALIASES: &[&str] = &[
+        "opus", "opusplan", "sonnet", "haiku", "fable", "mythos", "default", "unknown",
+    ];
+    id.starts_with("claude") || id.is_empty() || ALIASES.contains(&id.as_str())
 }
 
 fn collect(dir: &Path, ext: &str, out: &mut Vec<PathBuf>) {
@@ -255,11 +305,69 @@ pub fn parse(agent_id: &str, path: &Path, offset: u64) -> (Vec<Record>, u64) {
         "antigravity" => lines(path, offset, "\"timestamp\"", antigravity_line),
         "pi" => lines(path, offset, "\"usage\"", pi_line),
         "gemini" => (whole(path, gemini_file), 0),
-        "opencode" => (whole(path, opencode_file), 0),
+        "opencode" => {
+            if is_opencode_db(path) {
+                (opencode_db(path), 0)
+            } else {
+                (whole(path, opencode_file), 0)
+            }
+        }
         "droid" => (whole(path, droid_file), 0),
         "kilocode" => (whole(path, kilocode_file), 0),
         _ => (Vec::new(), 0),
     }
+}
+
+/// Size + mtime used to decide whether a discovered file needs re-parsing.
+///
+/// For OpenCode's SQLite database, live writes often land in the `-wal` file
+/// until a checkpoint, so the main `.db` alone can look unchanged while new
+/// usage has already been recorded. Fold the WAL into the fingerprint.
+pub fn fingerprint(path: &Path) -> Option<(u64, i64)> {
+    let meta = std::fs::metadata(path).ok()?;
+    let mut size = meta.len();
+    let mut mtime = meta_mtime_ms(&meta);
+    if is_opencode_db(path) {
+        let wal = {
+            let mut name = path.as_os_str().to_owned();
+            name.push("-wal");
+            PathBuf::from(name)
+        };
+        if let Ok(wal_meta) = std::fs::metadata(&wal) {
+            size = size.saturating_add(wal_meta.len());
+            mtime = mtime.max(meta_mtime_ms(&wal_meta));
+        }
+    }
+    Some((size, mtime))
+}
+
+fn meta_mtime_ms(meta: &std::fs::Metadata) -> i64 {
+    meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+fn is_opencode_db(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("db"))
+}
+
+/// Directories where OpenCode keeps its local data store.
+fn opencode_data_dirs(home: &Path) -> Vec<PathBuf> {
+    let mut dirs = vec![
+        home.join(".local/share/opencode"),
+        home.join("AppData/Local/opencode"),
+    ];
+    if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
+        if !xdg.is_empty() {
+            dirs.push(PathBuf::from(xdg).join("opencode"));
+        }
+    }
+    dirs.sort();
+    dirs.dedup();
+    dirs
 }
 
 /// Stream a line-delimited file, parsing only lines containing `needle`.
@@ -697,7 +805,8 @@ fn gemini_file(value: &Value, _path: &Path) -> Vec<Record> {
 
 /// `~/.local/share/opencode/storage/message/<session>/<message>.json`
 ///
-/// One file per message, and the only agent here that prices its own calls.
+/// One file per message (legacy), and the only agent here that prices its own
+/// calls. Current OpenCode keeps the same JSON shape inside `opencode.db`.
 fn opencode_file(value: &Value, _path: &Path) -> Vec<Record> {
     if s(value, "role") != Some("assistant") {
         return Vec::new();
@@ -724,13 +833,61 @@ fn opencode_file(value: &Value, _path: &Path) -> Vec<Record> {
     if tokens.total() == 0 {
         return Vec::new();
     }
+    let model = s(value, "modelID")
+        .map(str::to_string)
+        .or_else(|| {
+            value
+                .get("model")
+                .and_then(|m| s(m, "modelID").map(str::to_string))
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+    // Prefer the message id; fall back to a stable hash of the payload so
+    // rows without an id still dedup across JSON ↔ SQLite migrations.
+    let dedup = s(value, "id").map(hash).unwrap_or_else(|| hash(&format!("{model}:{at}:{}", tokens.total())));
     vec![Record {
         at,
-        model: s(value, "modelID").unwrap_or("unknown").to_string(),
+        model,
         tokens,
         reported_cost: value.get("cost").and_then(Value::as_f64),
-        dedup: s(value, "id").map(hash).unwrap_or(0),
+        dedup,
     }]
+}
+
+/// `~/.local/share/opencode/opencode.db` — current on-disk store.
+///
+/// The `message` table holds one JSON document per row in the same shape the
+/// legacy per-file storage used, so the record parser is shared.
+fn opencode_db(path: &Path) -> Vec<Record> {
+    use rusqlite::{Connection, OpenFlags};
+
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let Ok(conn) = Connection::open_with_flags(path, flags) else {
+        return Vec::new();
+    };
+    let mut stmt = match conn.prepare("SELECT data FROM message") {
+        Ok(stmt) => stmt,
+        Err(_) => return Vec::new(),
+    };
+    let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0)) else {
+        return Vec::new();
+    };
+
+    let mut out = Vec::new();
+    for data in rows.flatten() {
+        // Same prefilter idea as line-delimited sources: skip user rows and
+        // anything without token totals before paying for a full parse.
+        if !data.contains("tokens") {
+            continue;
+        }
+        if !(data.contains("\"role\":\"assistant\"") || data.contains("\"role\": \"assistant\"")) {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(&data) else {
+            continue;
+        };
+        out.extend(opencode_file(&value, path));
+    }
+    out
 }
 
 /// `~/.factory/sessions/**/<session>.settings.json`
@@ -859,6 +1016,31 @@ mod tests {
     }
 
     #[test]
+    fn proxied_claude_turns_route_to_claudex() {
+        // claudex sets ANTHROPIC_BASE_URL at a local proxy; Claude Code still
+        // writes the turn to ~/.claude/projects, but it was not billed to the
+        // Anthropic plan.
+        assert_eq!(route("claude", "gpt-5.6-sol"), "claudex");
+        assert_eq!(route("claude", "grok-4.5-build"), "claudex");
+        assert_eq!(route("claude", "or/selected"), "claudex");
+        // Real Claude Code turns stay put, prefixed or not.
+        assert_eq!(route("claude", "claude-opus-5"), "claude");
+        assert_eq!(route("claude", "anthropic/claude-sonnet-4-5"), "claude");
+        assert_eq!(route("claude", "unknown"), "claude");
+        assert_eq!(route("claude", "opus"), "claude");
+        assert_eq!(route("claude", "sonnet"), "claude");
+        // No other agent is ambiguous.
+        assert_eq!(route("codex", "gpt-5.6"), "codex");
+    }
+
+    #[test]
+    fn claudex_has_no_files_of_its_own() {
+        // Discovering the Claude transcripts twice would bill them twice.
+        let home = std::env::temp_dir();
+        assert!(discover("claudex", &home).is_empty());
+    }
+
+    #[test]
     fn claude_skips_synthetic_turns() {
         let value: Value = serde_json::from_str(
             r#"{"type":"assistant","timestamp":"2026-07-06T12:34:15.306Z",
@@ -941,6 +1123,90 @@ mod tests {
         let records = opencode_file(&value, Path::new("x"));
         assert_eq!(records[0].reported_cost, Some(0.0104335));
         assert_eq!(records[0].at, 1770727895423);
+        assert_eq!(records[0].model, "google/gemini-3-flash-preview");
+    }
+
+    #[test]
+    fn opencode_sqlite_reads_assistant_usage_rows() {
+        let dir = std::env::temp_dir().join(format!(
+            "duckweed-opencode-db-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("opencode.db");
+
+        {
+            use rusqlite::Connection;
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE message (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    time_created INTEGER NOT NULL,
+                    time_updated INTEGER NOT NULL,
+                    data TEXT NOT NULL
+                );",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![
+                    "msg_1",
+                    "ses_1",
+                    1770727888601i64,
+                    1770727895423i64,
+                    r#"{"id":"msg_1","role":"assistant","modelID":"anthropic/claude-sonnet-4-5",
+                        "providerID":"openrouter",
+                        "time":{"created":1770727888601,"completed":1770727895423},
+                        "cost":1.25,
+                        "tokens":{"input":1000,"output":200,"reasoning":50,"cache":{"read":10,"write":5}}}"#,
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![
+                    "msg_user",
+                    "ses_1",
+                    1770727888000i64,
+                    1770727888000i64,
+                    r#"{"id":"msg_user","role":"user","time":{"created":1770727888000}}"#,
+                ],
+            )
+            .unwrap();
+        }
+
+        let (records, _) = parse("opencode", &path, 0);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].model, "anthropic/claude-sonnet-4-5");
+        assert_eq!(records[0].tokens.input, 1000);
+        assert_eq!(records[0].tokens.output, 200);
+        assert_eq!(records[0].tokens.reasoning, 50);
+        assert_eq!(records[0].tokens.cache_read, 10);
+        assert_eq!(records[0].tokens.cache_write, 5);
+        assert_eq!(records[0].reported_cost, Some(1.25));
+        assert_eq!(records[0].at, 1770727895423);
+
+        // Prefer the database when both stores exist under the same home.
+        let home = dir.join("home");
+        let base = home.join(".local/share/opencode");
+        std::fs::create_dir_all(base.join("storage/message/ses")).unwrap();
+        std::fs::copy(&path, base.join("opencode.db")).unwrap();
+        std::fs::write(
+            base.join("storage/message/ses/msg.json"),
+            r#"{"id":"legacy","role":"assistant","modelID":"x","time":{"completed":1},
+                "cost":9,"tokens":{"input":1,"output":1,"reasoning":0,"cache":{"read":0,"write":0}}}"#,
+        )
+        .unwrap();
+        let found = discover("opencode", &home);
+        assert_eq!(found.len(), 1);
+        assert_eq!(
+            found[0].file_name().and_then(|n| n.to_str()),
+            Some("opencode.db")
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -359,8 +359,8 @@ export function Meter({
   unknown?: boolean;
 }) {
   const remaining = Math.max(0, Math.min(100, percent));
-  // Drain toward empty: critical when almost gone, warning when under a third left.
-  const level = remaining <= 10 ? "is-critical" : remaining <= 30 ? "is-warning" : "is-ok";
+  // Drain toward empty: red under 20%, yellow under 40%, otherwise green.
+  const level = remaining < 20 ? "is-critical" : remaining < 40 ? "is-warning" : "is-ok";
   return (
     <div className="viz-meter">
       <div className="viz-meter-head">

@@ -18,9 +18,14 @@ describe("settings survive app updates", () => {
     const durable = read("src/lib/durableStorage.ts");
     expect(durable).toContain('"duckweed:state:v1"');
     expect(durable).toContain('"duckweed:usage:v1"');
+    expect(durable).toContain('"duckweed:agent-preferences:v1"');
+    expect(durable).toContain('"duckweed:layouts:v1"');
     expect(durable).toContain('"duckweed:command-history:v1"');
     expect(read("src/lib/persist.ts")).toContain("saveDurably(KEY, raw)");
     expect(read("src/lib/usage.ts")).toContain("saveDurably(KEY, raw)");
+    expect(read("src/lib/agents/preferences.ts")).toContain(
+      "saveDurably(AGENT_PREFERENCES_KEY, raw)",
+    );
   });
 
   test("native storage lives in the stable per-user app-data directory", () => {
@@ -28,5 +33,7 @@ describe("settings survive app updates", () => {
     expect(backend).toContain(".app_data_dir()");
     expect(backend).toContain('join("durable-settings.json")');
     expect(backend).toContain("DURABLE_SETTING_KEYS");
+    expect(backend).toContain('"duckweed:agent-preferences:v1"');
+    expect(backend).toContain('"duckweed:layouts:v1"');
   });
 });

@@ -2,9 +2,13 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod agent_activity;
+mod agent_proc;
+mod agent_sessions;
 mod fs;
 mod git;
 mod launch;
+mod power;
+mod ports;
 mod process_tree;
 mod project;
 mod pty;
@@ -20,9 +24,14 @@ use std::sync::Mutex;
 use tauri::{ipc::Channel, AppHandle, Emitter, Manager, State};
 
 use agent_activity::AgentActivityManager;
-use fs::{DirEntry, FileContent};
+use agent_proc::{
+    AgentAvailability, AgentFrame, AgentProcManager, AgentSpawnOptions, AgentStarted,
+};
+use agent_sessions::{AgentSessionSummary, AgentTranscriptItem};
+use fs::{DirEntry, FileContent, WorkspacePath};
 use git::{Branches, Diff, DiffStats, FileDiff};
 use launch::{LaunchIntent, PendingLaunch};
+use ports::{ForwardInfo, PortManager, PortSnapshot};
 use project::ProjectInfo;
 use pty::{PtyManager, SpawnResult};
 use shells::ShellInfo;
@@ -34,9 +43,12 @@ struct DurableSettings(Mutex<()>);
 
 const COMMAND_HISTORY_KEY: &str = "duckweed:command-history:v1";
 
-const DURABLE_SETTING_KEYS: [&str; 3] = [
+const DURABLE_SETTING_KEYS: [&str; 6] = [
     "duckweed:state:v1",
     "duckweed:usage:v1",
+    "duckweed:checklist:v1",
+    "duckweed:agent-preferences:v1",
+    "duckweed:layouts:v1",
     COMMAND_HISTORY_KEY,
 ];
 
@@ -283,6 +295,54 @@ fn pty_any_busy(manager: State<'_, PtyManager>, ids: Vec<String>) -> bool {
     manager.any_busy(&ids)
 }
 
+/// TCP listeners opened by processes launched from a Duckweed pane or agent.
+#[tauri::command]
+async fn ports_list(
+    ptys: State<'_, PtyManager>,
+    agents: State<'_, AgentProcManager>,
+    ports: State<'_, PortManager>,
+) -> Result<PortSnapshot, String> {
+    let ptys = ptys.inner().clone();
+    let agents = agents.inner().clone();
+    let ports = ports.inner().clone();
+    blocking(move || Ok(ports::snapshot(&ptys, &agents, &ports))).await
+}
+
+/// Stop the process that owns a listener, after rechecking its Duckweed ancestry.
+#[tauri::command]
+async fn port_close(
+    ptys: State<'_, PtyManager>,
+    agents: State<'_, AgentProcManager>,
+    ports: State<'_, PortManager>,
+    pid: u32,
+    port: u16,
+) -> Result<(), String> {
+    let ptys = ptys.inner().clone();
+    let agents = agents.inner().clone();
+    let ports = ports.inner().clone();
+    blocking(move || ports::close(pid, port, &ptys, &agents, &ports)).await
+}
+
+/// Proxy one owned local listener through a Duckweed port bound to the LAN.
+#[tauri::command]
+async fn port_forward(
+    ptys: State<'_, PtyManager>,
+    agents: State<'_, AgentProcManager>,
+    ports: State<'_, PortManager>,
+    pid: u32,
+    port: u16,
+) -> Result<ForwardInfo, String> {
+    let ptys = ptys.inner().clone();
+    let agents = agents.inner().clone();
+    let ports = ports.inner().clone();
+    blocking(move || ports::forward(pid, port, &ptys, &agents, &ports)).await
+}
+
+#[tauri::command]
+fn port_forward_stop(ports: State<'_, PortManager>, id: String) -> Result<(), String> {
+    ports.stop(&id)
+}
+
 #[tauri::command]
 fn agent_watch(manager: State<'_, AgentActivityManager>, id: String, agent: String, cwd: String) {
     manager.watch(id, agent, cwd);
@@ -291,6 +351,66 @@ fn agent_watch(manager: State<'_, AgentActivityManager>, id: String, agent: Stri
 #[tauri::command]
 fn agent_unwatch(manager: State<'_, AgentActivityManager>, id: String) {
     manager.unwatch(&id);
+}
+
+/// Past conversations `agent` recorded for `cwd`, so the custom UI can offer
+/// to resume one. Reads the CLI's own session store — no agent is started.
+#[tauri::command]
+async fn agent_sessions_list(
+    agent: String,
+    cwd: String,
+) -> Result<Vec<AgentSessionSummary>, String> {
+    blocking(move || agent_sessions::list(&agent, &cwd)).await
+}
+
+/// Visible turns for agents whose resume protocol does not replay history.
+#[tauri::command]
+async fn agent_session_transcript(
+    agent: String,
+    cwd: String,
+    session_id: String,
+) -> Result<Vec<AgentTranscriptItem>, String> {
+    blocking(move || agent_sessions::transcript(&agent, &cwd, &session_id)).await
+}
+
+/// Which headless agent CLIs this machine has, so the custom UI only takes
+/// over commands it can actually drive.
+#[tauri::command]
+async fn agent_proc_probe(names: Vec<String>) -> Result<Vec<AgentAvailability>, String> {
+    blocking(move || Ok(agent_proc::probe(names))).await
+}
+
+/// Launch a coding agent in its line-delimited JSON mode.
+#[tauri::command]
+async fn agent_proc_start(
+    manager: State<'_, AgentProcManager>,
+    on_frame: Channel<AgentFrame>,
+    id: String,
+    options: AgentSpawnOptions,
+) -> Result<AgentStarted, String> {
+    let manager = manager.inner().clone();
+    blocking(move || agent_proc::start(&manager, on_frame, id, options)).await
+}
+
+/// One protocol message to the agent's stdin.
+#[tauri::command]
+fn agent_proc_send(
+    manager: State<'_, AgentProcManager>,
+    id: String,
+    line: String,
+) -> Result<(), String> {
+    manager.send(&id, &line)
+}
+
+/// Signal end-of-input without killing the agent.
+#[tauri::command]
+fn agent_proc_close_stdin(manager: State<'_, AgentProcManager>, id: String) -> Result<(), String> {
+    manager.close_stdin(&id)
+}
+
+#[tauri::command]
+fn agent_proc_stop(manager: State<'_, AgentProcManager>, id: String) -> Result<(), String> {
+    manager.stop(&id)
 }
 
 fn home_path() -> PathBuf {
@@ -362,6 +482,91 @@ fn frontend_ready(app: AppHandle) -> Result<(), String> {
     window.set_focus().map_err(|error| error.to_string())
 }
 
+/// Open an http(s) URL in the user's default browser.
+///
+/// Used for Ctrl/Cmd-click on terminal links. Only http and https are allowed —
+/// anything else would let the terminal shell out to arbitrary schemes.
+#[tauri::command]
+fn open_url(url: String) -> Result<(), String> {
+    open_external_url(&url)
+}
+
+/// Suspend or shut the machine down for the power watch.
+///
+/// Runs on a blocking task: a Windows sleep does not return until the machine
+/// wakes, and holding the IPC thread there would freeze the window that is
+/// about to be suspended.
+#[tauri::command]
+async fn power_action(action: String) -> Result<(), String> {
+    let action = power::Action::parse(&action)?;
+    blocking(move || power::run(action)).await
+}
+
+/// Validate and hand `url` to the OS default handler.
+fn open_external_url(url: &str) -> Result<(), String> {
+    let url = url.trim();
+    if !is_safe_http_url(url) {
+        return Err("only http(s) URLs can be opened".into());
+    }
+    open_in_browser(url)
+}
+
+/// True for plain `http://` / `https://` URLs with no control characters.
+fn is_safe_http_url(url: &str) -> bool {
+    if url.is_empty() || url.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return false;
+    }
+    let lower = url.to_ascii_lowercase();
+    lower.starts_with("https://") || lower.starts_with("http://")
+}
+
+#[cfg(windows)]
+fn open_in_browser(url: &str) -> Result<(), String> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+
+    fn wide(s: &str) -> Vec<u16> {
+        OsStr::new(s).encode_wide().chain(Some(0)).collect()
+    }
+
+    // ShellExecute returns a HINSTANCE cast to a pointer; values ≤ 32 are errors.
+    let operation = wide("open");
+    let file = wide(url);
+    let result = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            operation.as_ptr(),
+            file.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            1, // SW_SHOWNORMAL
+        )
+    };
+    if (result as isize) <= 32 {
+        return Err(format!("could not open URL (code {})", result as isize));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn open_in_browser(url: &str) -> Result<(), String> {
+    std::process::Command::new("open")
+        .arg(url)
+        .spawn()
+        .map_err(|error| format!("could not open URL: {error}"))?;
+    Ok(())
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn open_in_browser(url: &str) -> Result<(), String> {
+    std::process::Command::new("xdg-open")
+        .arg(url)
+        .spawn()
+        .map_err(|error| format!("could not open URL: {error}"))?;
+    Ok(())
+}
+
 /// Cold-start folder request from Explorer / the CLI, consumed once.
 #[tauri::command]
 fn take_launch_intent(pending: State<'_, PendingLaunch>) -> Option<LaunchIntent> {
@@ -407,6 +612,11 @@ fn watch_project(
     path: Option<String>,
 ) -> Result<(), String> {
     manager.set(path)
+}
+
+#[tauri::command]
+fn workspace_paths(path: String) -> Result<Vec<WorkspacePath>, String> {
+    fs::workspace_paths(&path)
 }
 
 #[cfg(not(debug_assertions))]
@@ -489,6 +699,8 @@ fn main() {
         )
         .manage(PtyManager::default())
         .manage(AgentActivityManager::default())
+        .manage(AgentProcManager::default())
+        .manage(PortManager::default())
         .manage(ProjectWatchManager::default())
         .manage(UsageState::default())
         .manage(DurableSettings::default())
@@ -515,6 +727,7 @@ fn main() {
             home_dir,
             project_info,
             list_dir,
+            workspace_paths,
             read_file,
             write_file,
             git_branches,
@@ -528,9 +741,22 @@ fn main() {
             pty_kill,
             pty_is_busy,
             pty_any_busy,
+            ports_list,
+            port_close,
+            port_forward,
+            port_forward_stop,
             agent_watch,
             agent_unwatch,
+            agent_sessions_list,
+            agent_session_transcript,
+            agent_proc_probe,
+            agent_proc_start,
+            agent_proc_send,
+            agent_proc_close_stdin,
+            agent_proc_stop,
             frontend_ready,
+            open_url,
+            power_action,
             take_launch_intent,
             shell_integration_status,
             shell_integration_set,
@@ -546,6 +772,12 @@ fn main() {
             if let tauri::WindowEvent::Destroyed = event {
                 if let Some(manager) = window.app_handle().try_state::<PtyManager>() {
                     manager.kill_all();
+                }
+                if let Some(manager) = window.app_handle().try_state::<AgentProcManager>() {
+                    manager.stop_all();
+                }
+                if let Some(manager) = window.app_handle().try_state::<PortManager>() {
+                    manager.stop_all();
                 }
             }
         })
@@ -600,5 +832,17 @@ mod tests {
     fn merge_survives_a_corrupt_stored_copy() {
         let incoming = r#"[{"command":"ls","cwd":null,"at":1}]"#;
         assert_eq!(commands(&merge_history("not json", incoming)), ["ls"]);
+    }
+
+    #[test]
+    fn only_http_urls_are_openable() {
+        assert!(is_safe_http_url("https://example.com/path?q=1"));
+        assert!(is_safe_http_url("http://localhost:3000"));
+        assert!(is_safe_http_url("HTTPS://Example.COM"));
+        assert!(!is_safe_http_url("file:///etc/passwd"));
+        assert!(!is_safe_http_url("javascript:alert(1)"));
+        assert!(!is_safe_http_url("https://example.com/a b"));
+        assert!(!is_safe_http_url("https://example.com/\n"));
+        assert!(!is_safe_http_url(""));
     }
 }

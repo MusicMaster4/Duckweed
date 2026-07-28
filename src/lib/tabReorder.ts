@@ -8,12 +8,83 @@
  *
  * Pinned tabs occupy a fixed block on the left. Unpinned tabs can only reorder
  * among themselves; `minIndex` (count of pinned tabs) clamps every calculation.
+ *
+ * The Settings tab is a strip citizen too (`SETTINGS_TAB_ID`), but it is not a
+ * real terminal tab — helpers below keep its index in sync with the tab list.
  */
+
+/** Stable id for the Settings strip entry (not a real Tab). */
+export const SETTINGS_TAB_ID = "__settings__";
 
 /** Where a tab sat when the drag began. */
 export interface TabSlot {
   left: number;
   width: number;
+}
+
+/**
+ * Visual strip order: tab ids with Settings spliced in when open.
+ * `settingsIndex` is 0..tabIds.length (inclusive = after every tab).
+ */
+export function buildStripOrder(
+  tabIds: string[],
+  settingsOpen: boolean,
+  settingsIndex: number,
+): string[] {
+  if (!settingsOpen) return [...tabIds];
+  const order = [...tabIds];
+  const idx = Math.min(Math.max(0, settingsIndex), order.length);
+  order.splice(idx, 0, SETTINGS_TAB_ID);
+  return order;
+}
+
+/**
+ * Reorder the strip (tabs + optional Settings). Returns the new tab id order
+ * and Settings index, or null when nothing should change.
+ */
+export function applyStripReorder(
+  tabIds: string[],
+  settingsOpen: boolean,
+  settingsIndex: number,
+  from: number,
+  to: number,
+  pinnedCount: number,
+): { tabIds: string[]; settingsIndex: number } | null {
+  const strip = buildStripOrder(tabIds, settingsOpen, settingsIndex);
+  if (from === to || from < 0 || to < 0 || from >= strip.length || to >= strip.length) {
+    return null;
+  }
+  // Pinned tabs (and anything in their block) never move.
+  if (from < pinnedCount) return null;
+  const clampedTo = Math.max(to, pinnedCount);
+  if (from === clampedTo) return null;
+
+  const next = [...strip];
+  const [moved] = next.splice(from, 1);
+  next.splice(clampedTo, 0, moved);
+
+  const newTabIds = next.filter((id) => id !== SETTINGS_TAB_ID);
+  const newSettingsIndex = settingsOpen
+    ? Math.max(0, next.indexOf(SETTINGS_TAB_ID))
+    : settingsIndex;
+  return { tabIds: newTabIds, settingsIndex: newSettingsIndex };
+}
+
+/** After a terminal tab is closed, keep Settings' index consistent. */
+export function adjustSettingsIndexOnClose(
+  settingsIndex: number,
+  closedTabIndex: number,
+): number {
+  if (closedTabIndex < settingsIndex) return settingsIndex - 1;
+  return settingsIndex;
+}
+
+/** After a terminal tab is appended, keep Settings at the end if it was there. */
+export function adjustSettingsIndexOnAppend(
+  settingsIndex: number,
+  previousTabCount: number,
+): number {
+  return settingsIndex >= previousTabCount ? settingsIndex + 1 : settingsIndex;
 }
 
 /** Clamp the dragged tab so it can reach the far edges of the movable range. */

@@ -13,6 +13,8 @@ interface Props {
   highlight: boolean;
   completionHighlights: boolean;
   completionSoundEnabled: boolean;
+  /** Draw Duckweed's own interface over a recognised coding-agent CLI. */
+  customAgentUi: boolean;
   confirmCloseRunning: boolean;
   /** Windows Explorer folder verbs; null when unavailable. */
   explorerIntegration: ShellIntegrationStatus | null;
@@ -24,6 +26,7 @@ interface Props {
   onToggleHighlight: () => void;
   onToggleCompletionHighlights: () => void;
   onToggleCompletionSound: () => void;
+  onToggleCustomAgentUi: () => void;
   onToggleConfirmCloseRunning: () => void;
   onToggleExplorerTab: () => void;
   onToggleExplorerWindow: () => void;
@@ -62,6 +65,7 @@ export function SettingsMenu({
   highlight,
   completionHighlights,
   completionSoundEnabled,
+  customAgentUi,
   confirmCloseRunning,
   explorerIntegration,
   shell,
@@ -72,6 +76,7 @@ export function SettingsMenu({
   onToggleHighlight,
   onToggleCompletionHighlights,
   onToggleCompletionSound,
+  onToggleCustomAgentUi,
   onToggleConfirmCloseRunning,
   onToggleExplorerTab,
   onToggleExplorerWindow,
@@ -125,7 +130,10 @@ export function SettingsMenu({
     (matches("appearance font size terminal text command editor") ||
       matches("syntax highlighting colour commands plain terminal output") ||
       matches("completion highlights finished process unread tab outline rose") ||
-      matches("completion sound audio cue process agent finished"));
+      matches("completion sound audio cue process agent finished") ||
+      matches(
+        "custom agent ui claude code codex cursor grok opencode coding agent interface overlay cli",
+      ));
   const showTerminal =
     (section === "General" || section === "Terminal" || searching) &&
     (matches("terminal command editor compose commands grid type directly") ||
@@ -329,9 +337,27 @@ export function SettingsMenu({
                 >
                   <span className="settings-copy">
                     <strong>Completion sound</strong>
-                    <span>Play on the selected pane when a job has run for more than one minute</span>
+                    <span>Play for finished agent turns and terminal jobs longer than one minute</span>
                   </span>
                   <Toggle enabled={completionSoundEnabled} />
+                </button>
+              )}
+              {matches(
+                "custom agent ui claude code codex cursor grok opencode coding agent interface overlay cli",
+              ) && (
+                <button
+                  type="button"
+                  className="settings-row settings-action"
+                  onClick={onToggleCustomAgentUi}
+                >
+                  <span className="settings-copy">
+                    <strong>Custom Agent UI</strong>
+                    <span>
+                      Show thinking, tool calls, and live diffs instead of the terminal UI for
+                      Claude Code, Codex, Cursor, Grok, and OpenCode
+                    </span>
+                  </span>
+                  <Toggle enabled={customAgentUi} />
                 </button>
               )}
             </section>

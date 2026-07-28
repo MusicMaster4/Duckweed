@@ -61,6 +61,15 @@ export interface DirEntry {
   ignored: boolean;
 }
 
+/** A file available to the agent composer's `@` completion. */
+export interface WorkspacePath {
+  name: string;
+  /** Absolute path, used for tooltips. */
+  path: string;
+  /** Project-relative path inserted in the prompt. */
+  relative: string;
+}
+
 /** What the project explorer's file popup loads from disk. */
 export interface FileContent {
   path: string;

@@ -1,3 +1,5 @@
+import { createCooldownPicker as createHalfCooldownPicker } from "./cooldownPicker";
+
 /**
  * Lines for the empty-pane state.
  *
@@ -1131,32 +1133,7 @@ const UNCLAIMED: readonly string[] = [
  * State is module-level so new panes share the same anti-repeat history.
  */
 function createCooldownPicker(phrases: readonly string[]): () => string {
-  /** Indices still cooling down, oldest first. Length ≤ floor(n / 2). */
-  const recent: number[] = [];
-  const cooldown = Math.floor(phrases.length / 2);
-
-  return () => {
-    if (phrases.length === 0) return "";
-    if (cooldown <= 0) {
-      return phrases[Math.floor(Math.random() * phrases.length)] ?? phrases[0]!;
-    }
-
-    const blocked = new Set(recent);
-    const available: number[] = [];
-    for (let i = 0; i < phrases.length; i++) {
-      if (!blocked.has(i)) available.push(i);
-    }
-    // Cooldown is half the list, so available should never be empty; fall back
-    // to the full set if the list is tiny or state got weird.
-    const pool = available.length > 0 ? available : phrases.map((_, i) => i);
-    const idx = pool[Math.floor(Math.random() * pool.length)]!;
-
-    recent.push(idx);
-    if (recent.length > cooldown) {
-      recent.shift();
-    }
-    return phrases[idx]!;
-  };
+  return createHalfCooldownPicker(phrases, "");
 }
 
 const pickGreeting = createCooldownPicker(GREETINGS);
