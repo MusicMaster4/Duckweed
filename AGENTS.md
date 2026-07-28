@@ -6,7 +6,7 @@ If the user requests a feature similar from T3 code, you can look at T3 code's c
 
 Everything in the app must be written in english.
 
-Do not use glow on UI elements.
+Do not use glow on UI elements unless requested.
 
 Don't write with em dashes.
 
