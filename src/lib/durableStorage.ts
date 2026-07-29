@@ -18,6 +18,8 @@ export const DURABLE_KEYS = [
   "duckweed:agent-preferences:v1",
   // Named pane arrangements and their optional startup commands.
   "duckweed:layouts:v1",
+  // Focused time, daily limit, and the local day it belongs to.
+  "duckweed:wellbeing:v1",
   COMMAND_HISTORY_KEY,
 ] as const;
 

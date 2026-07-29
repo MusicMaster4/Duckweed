@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { exit } from "@tauri-apps/plugin-process";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 
@@ -19,13 +20,16 @@ import {
   type SectionId as ToolsSectionId,
 } from "./components/ToolsPanel";
 import { ConfirmCloseDialog } from "./components/ConfirmCloseDialog";
+import { DailyLimitLockout } from "./components/DailyLimitLockout";
 import { UpdateDialog } from "./components/UpdateDialog";
 import { useDragPane, type DragState } from "./hooks/useDragPane";
 import { useGitChanges } from "./hooks/useGitChanges";
 import { useUpdater } from "./hooks/useUpdater";
+import { useDailyUsage } from "./hooks/useDailyUsage";
 import * as bus from "./lib/bus";
 import * as checklist from "./lib/checklist";
 import * as powerWatch from "./lib/powerWatch";
+import type { BusyEntry } from "./lib/powerWatch";
 import * as agentSessions from "./lib/agents/session";
 import {
   confirmCloseRunning,
@@ -237,6 +241,13 @@ function isTextField(target: EventTarget | null): boolean {
 
 export default function App() {
   const initial = useMemo(boot, []);
+  const dailyUsage = useDailyUsage();
+  const dailyLocked = dailyUsage.locked;
+  const dailyLockedRef = useRef(dailyLocked);
+  dailyLockedRef.current = dailyLocked;
+  const [lockoutBusy, setLockoutBusy] = useState<BusyEntry[]>([]);
+  const lockoutHadBusyRef = useRef(false);
+  const backgroundExitRequestedRef = useRef(false);
 
   const [tabs, setTabs] = useState<Tab[]>(initial.tabs);
   const [activeTabId, setActiveTabId] = useState(initial.activeTabId);
@@ -594,6 +605,7 @@ export default function App() {
       // coalesces simultaneous finishes, so several agents returning together
       // do not stack copies of the effect.
       if (
+        !dailyLockedRef.current &&
         completionSoundEnabledRef.current &&
         shouldPlayCompletionSound(previous, current)
       ) {
@@ -683,6 +695,64 @@ export default function App() {
     () => powerWatch.connect({ probe: probeActivity, fire: powerAction }),
     [probeActivity],
   );
+
+  // Once the daily allowance is spent, keep the underlying terminals mounted
+  // and mirror their live work into the lock screen. Entries disappear as
+  // their agents or commands settle.
+  useEffect(() => {
+    if (!dailyLocked) {
+      setLockoutBusy([]);
+      lockoutHadBusyRef.current = false;
+      backgroundExitRequestedRef.current = false;
+      return;
+    }
+
+    const refresh = () => {
+      const next = probeActivity();
+      if (next.length > 0) lockoutHadBusyRef.current = true;
+      setLockoutBusy(next);
+    };
+    refresh();
+    const offAgents = agentSessions.subscribeAll(refresh);
+    const offTurnEnd = agentSessions.subscribeTurnEnd(refresh);
+    const offTerminals = termIds.map((termId) => terminals.subscribeSession(termId, refresh));
+    const fallback = window.setInterval(refresh, 1_000);
+    return () => {
+      offAgents();
+      offTurnEnd();
+      for (const off of offTerminals) off();
+      window.clearInterval(fallback);
+    };
+  }, [dailyLocked, probeActivity, termIdsKey]);
+
+  // Closing a locked window with work left hides it instead. Once the last
+  // entry settles, exit quietly without playing completion cues.
+  useEffect(() => {
+    if (!TAURI_RUNTIME || !dailyLocked || lockoutBusy.length > 0) return;
+    if (!backgroundExitRequestedRef.current && !lockoutHadBusyRef.current) return;
+    if (backgroundExitRequestedRef.current) {
+      void exit(0);
+      return;
+    }
+    // Leave the finished state visible long enough to register, then complete
+    // the promised automatic shutdown.
+    const timer = window.setTimeout(() => void exit(0), 1_500);
+    return () => window.clearTimeout(timer);
+  }, [dailyLocked, lockoutBusy.length]);
+
+  const continueLockedInBackground = useCallback(() => {
+    if (!TAURI_RUNTIME) return;
+    backgroundExitRequestedRef.current = true;
+    void getCurrentWindow().hide();
+  }, []);
+
+  const closeLockedApp = useCallback(() => {
+    if (TAURI_RUNTIME) {
+      void getCurrentWindow().close();
+      return;
+    }
+    window.close();
+  }, []);
 
   // ---------------------------------------------------------------- tabs
 
@@ -1607,6 +1677,15 @@ export default function App() {
     let unlisten: (() => void) | undefined;
     void getCurrentWindow()
       .onCloseRequested(async (event) => {
+        if (dailyLockedRef.current) {
+          const busy = probeActivity();
+          if (busy.length > 0) {
+            event.preventDefault();
+            backgroundExitRequestedRef.current = true;
+            await getCurrentWindow().hide();
+          }
+          return;
+        }
         const ids = terminals.allSessionIds();
         if (!(await terminals.anyHasCloseBlockingWork(ids))) return;
         const agent = terminals.runningAgentLabel(ids);
@@ -1628,7 +1707,7 @@ export default function App() {
       disposed = true;
       unlisten?.();
     };
-  }, []);
+  }, [probeActivity]);
 
   // Each pane has a ResizeObserver, but maximize/fullscreen/DPI changes can land
   // as a single reflow that those observers coalesce away — re-measure everything
@@ -1776,6 +1855,13 @@ export default function App() {
         e.preventDefault();
         e.stopPropagation();
       };
+
+      if (dailyLockedRef.current) {
+        const lockoutControl =
+          e.target instanceof Element && e.target.closest(".daily-lockout");
+        if (lockoutControl) return;
+        return take();
+      }
 
       if (e.key === "F11") {
         void toggleFullscreen();
@@ -2384,11 +2470,15 @@ export default function App() {
     activeTab?.zoomedLeaf ? findLeaf(activeTab.root, activeTab.zoomedLeaf) : null;
   const activeTerm = activeTab ? (findLeaf(activeTab.root, activeTab.activeLeaf)?.term ?? null) : null;
   const activeWindowColor =
-    tintWorkspaceWithTabColor && !settingsActive ? tabColorHex(activeTab?.color) : null;
+    tintWorkspaceWithTabColor && !settingsActive && !dailyLocked
+      ? tabColorHex(activeTab?.color)
+      : null;
 
   return (
     <div
-      className={`app${activeWindowColor ? " has-tab-color" : ""}`}
+      className={`app${activeWindowColor ? " has-tab-color" : ""}${
+        dailyLocked ? " is-daily-locked" : ""
+      }`}
       style={
         activeWindowColor
           ? ({ "--active-tab-color": activeWindowColor } as CSSProperties)
@@ -2400,6 +2490,7 @@ export default function App() {
         onOpenSettings={openSettings}
         toolsOpen={toolsOpen}
         onToggleTools={() => setToolsOpen((open) => !open)}
+        locked={dailyLocked}
       >
         <TabStrip
           tabs={tabs}
@@ -2468,6 +2559,9 @@ export default function App() {
                 completionHighlights={completionHighlights}
                 completionSoundEnabled={completionSoundEnabled}
                 tintWorkspaceWithTabColor={tintWorkspaceWithTabColor}
+                wellbeingEnabled={dailyUsage.state.enabled}
+                dailyLimitMinutes={dailyUsage.state.limitMinutes}
+                dailyUsedMs={dailyUsage.state.usedMs}
                 customAgentUi={customAgentUi}
                 agentFollowupMode={agentFollowupMode}
                 confirmCloseRunning={confirmCloseRunningPref}
@@ -2483,6 +2577,10 @@ export default function App() {
                 onToggleTintWorkspaceWithTabColor={() =>
                   setTintWorkspaceWithTabColor((enabled) => !enabled)
                 }
+                onToggleWellbeing={() =>
+                  dailyUsage.setEnabled(!dailyUsage.state.enabled)
+                }
+                onDailyLimitMinutes={dailyUsage.setLimitMinutes}
                 onToggleCustomAgentUi={toggleCustomAgentUi}
                 onAgentFollowupMode={(mode) => {
                   agentSessions.setFollowupMode(mode);
@@ -2545,6 +2643,15 @@ export default function App() {
         onOpenChanges={() => setChangesOpen(true)}
         onProjectRefresh={() => void refreshProject(activeTab?.id)}
       />
+
+      {dailyLocked && (
+        <DailyLimitLockout
+          limitMinutes={dailyUsage.state.limitMinutes}
+          busy={lockoutBusy}
+          onBackground={continueLockedInBackground}
+          onClose={closeLockedApp}
+        />
+      )}
 
       {drag && (
         <div className="drag-ghost">
