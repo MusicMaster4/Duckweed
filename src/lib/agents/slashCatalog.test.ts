@@ -36,6 +36,13 @@ describe("slashCatalog", () => {
     );
   });
 
+  test("offers /goal only to harnesses with a goal control plane", () => {
+    expect(fallbackCommands("codex").some((command) => command.name === "/goal")).toBe(true);
+    for (const agent of ["claude", "grok", "opencode", "cursor"] as const) {
+      expect(fallbackCommands(agent).some((command) => command.name === "/goal")).toBe(false);
+    }
+  });
+
   test("accepts /n as a direct new-chat alias", () => {
     expect(isNewChatCommand("/new")).toBe(true);
     expect(isNewChatCommand("/NEW ")).toBe(true);

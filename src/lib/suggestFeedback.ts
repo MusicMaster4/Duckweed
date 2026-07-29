@@ -10,9 +10,12 @@ import { saveDurably } from "./durableStorage";
  * rival completion can win) and finally suppressed altogether.
  *
  * Signals, all recorded per suggested command:
- * - accept: the user took the ghost (Tab/→/Ctrl+F) or typed and ran it anyway.
- *   Clears the reject streak — the pattern is re-learned immediately.
- * - reject: a ghost was on screen and the user ran/discarded something else.
+ * - accept: the user took the ghost (Tab/→/Ctrl+F/Ctrl+→). Clears the reject
+ *   streak — the pattern is re-learned immediately.
+ * - reject: a ghost was *shown* during the draft and never accepted. Typing
+ *   past it, running another command, or discarding the draft all count — the
+ *   suggestion was unused. Running the same command by hand still clears the
+ *   streak via {@link recordUsed}.
  *
  * Rejects are a *streak*, not a lifetime total, so one bad week cannot bury a
  * command the user has since gone back to.

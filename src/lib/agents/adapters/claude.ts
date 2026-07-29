@@ -16,6 +16,7 @@ import {
   type AgentFileChange,
   type AgentPrompt,
   type AgentQuestionItem,
+  type AgentPlanStep,
   type SubagentMeta,
   type ToolStatus,
 } from "../types";
@@ -44,6 +45,83 @@ interface ToolCall {
   name: string;
   /** Accumulated `input_json_delta` text, parsed once the block closes. */
   partialInput: string;
+}
+
+interface TrackedTask {
+  id: string;
+  text: string;
+  status: AgentPlanStep["status"];
+}
+
+const CLAUDE_TASK_TOOLS = new Set([
+  "taskcreate",
+  "taskupdate",
+  "tasklist",
+  "taskget",
+]);
+
+function isClaudeTaskTool(name: string): boolean {
+  return CLAUDE_TASK_TOOLS.has(name.toLowerCase());
+}
+
+function taskStatus(value: unknown): AgentPlanStep["status"] {
+  const status = asString(value)?.toLowerCase();
+  if (status === "completed" || status === "done") return "done";
+  if (status === "in_progress" || status === "running") return "running";
+  return "pending";
+}
+
+function parseTaskList(output: string): TrackedTask[] | null {
+  if (/^\s*No tasks found\s*$/i.test(output)) return [];
+  const tasks: TrackedTask[] = [];
+  for (const line of output.split(/\r?\n/)) {
+    const match = /^\s*#(\S+)\s+\[([^\]]+)\]\s+(.+?)\s*$/.exec(line);
+    if (!match) continue;
+    tasks.push({
+      id: match[1],
+      text: match[3],
+      status: taskStatus(match[2]),
+    });
+  }
+  return tasks.length ? tasks : null;
+}
+
+function parseTaskGet(output: string): TrackedTask | null {
+  const heading = /^\s*Task #(\S+):\s*(.+?)\s*$/m.exec(output);
+  const status = /^\s*Status:\s*(.+?)\s*$/m.exec(output);
+  if (!heading) return null;
+  return {
+    id: heading[1],
+    text: heading[2],
+    status: taskStatus(status?.[1]),
+  };
+}
+
+function batchTasks(input: Record<string, unknown>): Array<{
+  text: string;
+  status: AgentPlanStep["status"];
+}> {
+  const raw = input.tasks;
+  let parsed: unknown = raw;
+  if (typeof raw === "string") {
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return [];
+    }
+  }
+  return asArray(parsed)
+    .map((entry) => asRecord(entry))
+    .filter((entry): entry is Record<string, unknown> => entry !== null)
+    .map((entry) => ({
+      text:
+        asString(entry.subject)?.trim() ??
+        asString(entry.content)?.trim() ??
+        asString(entry.description)?.trim() ??
+        "",
+      status: taskStatus(entry.status),
+    }))
+    .filter((entry) => entry.text);
 }
 
 /**
@@ -80,6 +158,25 @@ function describeTool(name: string, input: Record<string, unknown>): string {
   if (toolKind(name) === "task") {
     const label = first("description", "subagent_type", "name", "prompt");
     return label ? oneLine(label) : "Subagent";
+  }
+  if (isClaudeTaskTool(name)) {
+    const lower = name.toLowerCase();
+    if (lower === "taskcreate") {
+      const subject = asString(input.subject)?.trim();
+      return subject ? `Create task: ${oneLine(subject)}` : "Create tasks";
+    }
+    if (lower === "taskupdate") {
+      const id = asString(input.taskId)?.trim();
+      const status = asString(input.status)?.trim();
+      return id
+        ? `Update task #${id}${status ? `: ${status.replaceAll("_", " ")}` : ""}`
+        : "Update task";
+    }
+    if (lower === "taskget") {
+      const id = asString(input.taskId)?.trim();
+      return id ? `Read task #${id}` : "Read task";
+    }
+    return "Check task list";
   }
   const detail =
     first("command", "file_path", "path", "pattern", "query", "url", "description", "prompt") ??
@@ -198,6 +295,12 @@ export function createClaudeAdapter(): AgentAdapter {
       changes: AgentFileChange[];
     }
   >();
+  /** Claude's current task list, independently tracked for the parent and each child. */
+  const taskScopes = new Map<string, Map<string, TrackedTask>>();
+  /** Provisional rows created before TaskCreate returns the provider task id. */
+  const taskCreateKeys = new Map<string, string[]>();
+  /** Optimistic TaskUpdate snapshots, restored if Claude reports an error. */
+  const taskUpdateUndo = new Map<string, { scope: string; tasks: Map<string, TrackedTask> }>();
   let messageSeq = 0;
   let settledMessageSeq = 0;
   let controlSeq = 0;
@@ -226,6 +329,169 @@ export function createClaudeAdapter(): AgentAdapter {
   const seenTurnErrors = new Set<string>();
 
   const blockId = (index: number) => `m${messageSeq}-b${index}`;
+  const ROOT_TASK_SCOPE = "";
+
+  function tasksFor(scope: string): Map<string, TrackedTask> {
+    let tasks = taskScopes.get(scope);
+    if (!tasks) {
+      tasks = new Map();
+      taskScopes.set(scope, tasks);
+    }
+    return tasks;
+  }
+
+  function emitTaskPlan(scope: string, ctx: AdapterContext): void {
+    const steps = [...tasksFor(scope).values()].map(({ text, status }) => ({
+      text,
+      status,
+    }));
+    if (scope === ROOT_TASK_SCOPE) {
+      ctx.emit({ type: "plan", steps });
+      return;
+    }
+    ctx.emit({
+      type: "tool",
+      callId: scope,
+      subagentItem: {
+        kind: "plan",
+        id: `child-plan-${scope}`,
+        at: Date.now(),
+        steps,
+      },
+    });
+  }
+
+  function replaceTaskId(
+    tasks: Map<string, TrackedTask>,
+    oldId: string,
+    task: TrackedTask,
+  ): void {
+    const replaced = new Map<string, TrackedTask>();
+    let found = false;
+    for (const [id, current] of tasks) {
+      if (id === oldId) {
+        replaced.set(task.id, task);
+        found = true;
+      } else {
+        replaced.set(id, current);
+      }
+    }
+    if (!found) replaced.set(task.id, task);
+    tasks.clear();
+    for (const [id, current] of replaced) tasks.set(id, current);
+  }
+
+  function trackTaskUse(
+    scope: string,
+    callId: string,
+    name: string,
+    input: Record<string, unknown>,
+    ctx: AdapterContext,
+  ): void {
+    const lower = name.toLowerCase();
+    if (!CLAUDE_TASK_TOOLS.has(lower)) return;
+    const tasks = tasksFor(scope);
+
+    if (lower === "taskcreate") {
+      const entries = batchTasks(input);
+      const subject = asString(input.subject)?.trim();
+      if (subject) entries.unshift({ text: subject, status: "pending" });
+      if (!entries.length) return;
+      const keys = entries.map((entry, index) => {
+        const key = `create:${callId}:${index}`;
+        tasks.set(key, { id: key, ...entry });
+        return key;
+      });
+      taskCreateKeys.set(callId, keys);
+      emitTaskPlan(scope, ctx);
+      return;
+    }
+
+    if (lower !== "taskupdate") return;
+    const id = asString(input.taskId)?.trim();
+    const rawStatus = asString(input.status)?.toLowerCase();
+    if (!id || (!rawStatus && !tasks.has(id))) return;
+    if (!taskUpdateUndo.has(callId)) {
+      taskUpdateUndo.set(callId, { scope, tasks: new Map(tasks) });
+    }
+    if (rawStatus === "deleted") {
+      tasks.delete(id);
+    } else {
+      const current = tasks.get(id);
+      tasks.set(id, {
+        id,
+        text:
+          current?.text ??
+          asString(input.activeForm)?.trim() ??
+          `Task #${id}`,
+        status: rawStatus ? taskStatus(rawStatus) : current?.status ?? "pending",
+      });
+    }
+    emitTaskPlan(scope, ctx);
+  }
+
+  function trackTaskResult(
+    scope: string,
+    callId: string,
+    name: string,
+    output: string,
+    failed: boolean,
+    ctx: AdapterContext,
+  ): void {
+    const lower = name.toLowerCase();
+    if (!CLAUDE_TASK_TOOLS.has(lower)) return;
+    const tasks = tasksFor(scope);
+
+    if (lower === "taskcreate") {
+      const keys = taskCreateKeys.get(callId) ?? [];
+      taskCreateKeys.delete(callId);
+      if (failed) {
+        for (const key of keys) tasks.delete(key);
+        emitTaskPlan(scope, ctx);
+        return;
+      }
+      const created = [
+        ...output.matchAll(/Task #(\S+) created successfully:\s*(.+?)(?:\r?\n|$)/gi),
+      ];
+      for (const [index, match] of created.entries()) {
+        const oldId = keys[index];
+        if (!oldId) break;
+        const current = tasks.get(oldId);
+        replaceTaskId(tasks, oldId, {
+          id: match[1],
+          text: match[2].trim() || current?.text || `Task #${match[1]}`,
+          status: current?.status ?? "pending",
+        });
+      }
+      emitTaskPlan(scope, ctx);
+      return;
+    }
+
+    if (lower === "taskupdate") {
+      const undo = taskUpdateUndo.get(callId);
+      taskUpdateUndo.delete(callId);
+      if (failed && undo) {
+        taskScopes.set(undo.scope, new Map(undo.tasks));
+        emitTaskPlan(undo.scope, ctx);
+      }
+      return;
+    }
+
+    if (failed) return;
+    if (lower === "tasklist") {
+      const listed = parseTaskList(output);
+      if (listed === null) return;
+      taskScopes.set(scope, new Map(listed.map((task) => [task.id, task])));
+      emitTaskPlan(scope, ctx);
+      return;
+    }
+    if (lower === "taskget") {
+      const task = parseTaskGet(output);
+      if (!task) return;
+      tasks.set(task.id, task);
+      emitTaskPlan(scope, ctx);
+    }
+  }
 
   function emitTurnError(text: string, ctx: AdapterContext) {
     if (seenTurnErrors.has(text)) return;
@@ -239,6 +505,7 @@ export function createClaudeAdapter(): AgentAdapter {
       const steps = planFrom(input);
       if (steps.length) ctx.emit({ type: "plan", steps });
     }
+    trackTaskUse(ROOT_TASK_SCOPE, callId, name, input, ctx);
     const subagent = subagentForTool(name, input);
     ctx.emit({
       type: "tool",
@@ -455,6 +722,7 @@ export function createClaudeAdapter(): AgentAdapter {
       const changes = changesFor(name, input);
       const subagent = subagentForTool(name, input);
       nestedTools.set(callId, { name, title, command, changes });
+      trackTaskUse(parentCallId, callId, name, input, ctx);
       ctx.emit({
         type: "tool",
         callId: parentCallId,
@@ -492,6 +760,14 @@ export function createClaudeAdapter(): AgentAdapter {
       const output = resultText(block.content);
       const name = known?.name ?? "tool";
       const title = known?.title ?? name;
+      trackTaskResult(
+        parentCallId,
+        callId,
+        name,
+        output,
+        failed,
+        ctx,
+      );
       ctx.emit({
         type: "tool",
         callId: parentCallId,
@@ -528,11 +804,21 @@ export function createClaudeAdapter(): AgentAdapter {
       const callId = asString(block.tool_use_id);
       if (!callId) continue;
       const failed = block.is_error === true;
+      const known = tools.get(callId);
+      const output = resultText(block.content);
+      trackTaskResult(
+        ROOT_TASK_SCOPE,
+        callId,
+        known?.name ?? "tool",
+        output,
+        failed,
+        ctx,
+      );
       ctx.emit({
         type: "tool",
         callId,
         status: failed ? ("error" as ToolStatus) : ("done" as ToolStatus),
-        output: resultText(block.content),
+        output,
       });
     }
   }

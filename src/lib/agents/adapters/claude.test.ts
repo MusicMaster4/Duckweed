@@ -381,6 +381,71 @@ describe("claude adapter", () => {
     });
   });
 
+  test("keeps child-created tasks in the subagent workflow", () => {
+    const h = harness();
+    h.feed({
+      type: "assistant",
+      message: {
+        content: [
+          {
+            type: "tool_use",
+            id: "parent-task",
+            name: "Agent",
+            input: { description: "Inspect parser tests" },
+          },
+        ],
+      },
+    });
+    h.feed({
+      type: "assistant",
+      parent_tool_use_id: "parent-task",
+      message: {
+        content: [
+          {
+            type: "tool_use",
+            id: "child-task-create",
+            name: "TaskCreate",
+            input: { subject: "Find the failing fixture" },
+          },
+        ],
+      },
+    });
+    h.feed({
+      type: "user",
+      parent_tool_use_id: "parent-task",
+      message: {
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "child-task-create",
+            content: "Task #3 created successfully: Find the failing fixture",
+          },
+        ],
+      },
+    });
+
+    expect(h.state().items[0]).toMatchObject({
+      kind: "tool",
+      callId: "parent-task",
+      subagent: {
+        items: [
+          {
+            kind: "plan",
+            steps: [
+              { text: "Find the failing fixture", status: "pending" },
+            ],
+          },
+          {
+            kind: "tool",
+            callId: "child-task-create",
+            tool: "todo",
+            status: "done",
+          },
+        ],
+      },
+    });
+  });
+
   test("turns an Edit tool into a file change with counted lines", () => {
     const h = harness();
     h.feed({
@@ -437,6 +502,167 @@ describe("claude adapter", () => {
       { text: "Write the adapter", status: "done" },
       { text: "Wire the UI", status: "running" },
       { text: "Ship it", status: "pending" },
+    ]);
+  });
+
+  test("shows TaskCreate and TaskUpdate as one live Claudex workflow", () => {
+    const h = harness({ program: "claudex" });
+    h.feed({
+      type: "assistant",
+      message: {
+        content: [
+          {
+            type: "tool_use",
+            id: "create-1",
+            name: "TaskCreate",
+            input: {
+              subject: "Find matrix loading animation code",
+              description: "Locate the animation implementation",
+              activeForm: "Finding matrix animation code",
+            },
+          },
+        ],
+      },
+    });
+
+    let plan = h.state().items.find((item) => item.kind === "plan");
+    expect(plan?.kind === "plan" && plan.steps).toEqual([
+      { text: "Find matrix loading animation code", status: "pending" },
+    ]);
+
+    h.feed({
+      type: "user",
+      message: {
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "create-1",
+            content:
+              "Task #1 created successfully: Find matrix loading animation code",
+          },
+        ],
+      },
+    });
+    h.feed({
+      type: "assistant",
+      message: {
+        content: [
+          {
+            type: "tool_use",
+            id: "update-1",
+            name: "TaskUpdate",
+            input: { taskId: "1", status: "in_progress" },
+          },
+        ],
+      },
+    });
+
+    plan = h.state().items.find((item) => item.kind === "plan");
+    expect(plan?.kind === "plan" && plan.steps).toEqual([
+      { text: "Find matrix loading animation code", status: "running" },
+    ]);
+    expect(
+      h.state().items.find(
+        (item) => item.kind === "tool" && item.callId === "create-1",
+      ),
+    ).toMatchObject({
+      tool: "todo",
+      title: "Create task: Find matrix loading animation code",
+      status: "done",
+    });
+  });
+
+  test("rebuilds the workflow from a TaskList result", () => {
+    const h = harness();
+    h.feed({
+      type: "assistant",
+      message: {
+        content: [
+          { type: "tool_use", id: "list-1", name: "TaskList", input: {} },
+        ],
+      },
+    });
+    h.feed({
+      type: "user",
+      message: {
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "list-1",
+            content:
+              "#2 [completed] Build Uvicorn job API\n" +
+              "#5 [in_progress] Add tests and verify\n" +
+              "#11 [pending] Verify correctness findings",
+          },
+        ],
+      },
+    });
+
+    const plan = h.state().items.find((item) => item.kind === "plan");
+    expect(plan?.kind === "plan" && plan.steps).toEqual([
+      { text: "Build Uvicorn job API", status: "done" },
+      { text: "Add tests and verify", status: "running" },
+      { text: "Verify correctness findings", status: "pending" },
+    ]);
+  });
+
+  test("restores a task when TaskUpdate fails", () => {
+    const h = harness();
+    h.feed({
+      type: "assistant",
+      message: {
+        content: [
+          {
+            type: "tool_use",
+            id: "create-1",
+            name: "TaskCreate",
+            input: { subject: "Inspect parser" },
+          },
+        ],
+      },
+    });
+    h.feed({
+      type: "user",
+      message: {
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "create-1",
+            content: "Task #7 created successfully: Inspect parser",
+          },
+        ],
+      },
+    });
+    h.feed({
+      type: "assistant",
+      message: {
+        content: [
+          {
+            type: "tool_use",
+            id: "delete-7",
+            name: "TaskUpdate",
+            input: { taskId: "7", status: "deleted" },
+          },
+        ],
+      },
+    });
+    h.feed({
+      type: "user",
+      message: {
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "delete-7",
+            content: "Task could not be deleted",
+            is_error: true,
+          },
+        ],
+      },
+    });
+
+    const plan = h.state().items.find((item) => item.kind === "plan");
+    expect(plan?.kind === "plan" && plan.steps).toEqual([
+      { text: "Inspect parser", status: "pending" },
     ]);
   });
 

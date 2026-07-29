@@ -126,6 +126,34 @@ describe("tool subagent metadata", () => {
   });
 });
 
+describe("plans", () => {
+  test("starts a fresh live checklist when a later user turn updates the plan", () => {
+    let state = applyEvent(blank(), { type: "user", text: "First turn" });
+    state = applyEvent(state, {
+      type: "plan",
+      steps: [{ text: "Inspect", status: "running" }],
+    });
+    state = applyEvent(state, { type: "user", text: "Second turn" });
+    state = applyEvent(state, {
+      type: "plan",
+      steps: [
+        { text: "Inspect", status: "done" },
+        { text: "Fix", status: "running" },
+      ],
+    });
+
+    const plans = state.items.filter((item) => item.kind === "plan");
+    expect(plans).toHaveLength(2);
+    expect(state.items.at(-1)).toMatchObject({
+      kind: "plan",
+      steps: [
+        { text: "Inspect", status: "done" },
+        { text: "Fix", status: "running" },
+      ],
+    });
+  });
+});
+
 describe("resumed", () => {
   test("replaces the current pane with a restored transcript", () => {
     let state = applyEvent(blank(), { type: "user", text: "Current conversation" });

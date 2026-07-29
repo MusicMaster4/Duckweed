@@ -52,9 +52,9 @@ function NestedSubagentItem({
         <ToolActivity item={item} variant={nestedVariant(agent)} compact />
       );
     case "plan":
-      return (
+      return item.steps.length > 0 ? (
         <PlanTracker item={item} variant={nestedVariant(agent)} />
-      );
+      ) : null;
     case "notice":
       return <p className={`agent-sub-nested-notice is-${item.tone}`}>{item.text}</p>;
     case "user":

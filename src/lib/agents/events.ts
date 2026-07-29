@@ -464,9 +464,10 @@ export function applyEvent(state: AgentSessionState, event: AgentEvent): AgentSe
 
     case "plan": {
       // A plan is a live checklist, not a log: the agent rewrites it every
-      // time it ticks a box, so the existing item is replaced in place rather
-      // than stacking a dozen near-identical lists down the transcript.
-      const index = lastIndexOfKind(state, "plan");
+      // time it ticks a box. Only replace a checklist from this user turn,
+      // though. Updating an older row in place would leave it before the latest
+      // user message, where the current-turn workflow dock cannot see it.
+      const index = lastIndexOfKindInCurrentTurn(state, "plan");
       if (index < 0) {
         return {
           ...state,
@@ -595,9 +596,13 @@ function findStreaming(
   return -1;
 }
 
-function lastIndexOfKind(state: AgentSessionState, kind: "plan"): number {
+function lastIndexOfKindInCurrentTurn(
+  state: AgentSessionState,
+  kind: "plan",
+): number {
   for (let i = state.items.length - 1; i >= 0; i--) {
     if (state.items[i].kind === kind) return i;
+    if (state.items[i].kind === "user") return -1;
   }
   return -1;
 }

@@ -32,7 +32,8 @@ import {
  * commands are client-side, so this adapter wires the important ones itself —
  * `/model` and `/effort` are `turn/start` overrides ("for this turn and
  * subsequent turns", so they stick), `/compact` is `thread/compact/start`,
- * and `model/list` supplies the valid ids and per-model effort levels.
+ * `/goal` uses the persisted `thread/goal/*` control plane, and `model/list`
+ * supplies the valid ids and per-model effort levels.
  */
 
 /** One row of `model/list`, trimmed to what the commands need. */
@@ -42,6 +43,16 @@ interface CodexModel {
   efforts: string[];
   isDefault: boolean;
 }
+
+interface CodexGoal {
+  objective: string;
+  status: string;
+  tokenBudget: number | null;
+  tokensUsed: number;
+  timeUsedSeconds: number;
+}
+
+const MAX_GOAL_OBJECTIVE_CHARS = 4_000;
 
 const EXEC_STATUS: Record<string, ToolStatus> = {
   inProgress: "running",
@@ -98,6 +109,42 @@ function turnAccessParams(mode: AgentAccessMode): Record<string, unknown> {
     case "default":
       return {};
   }
+}
+
+function numberOr(value: unknown, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function readGoal(value: unknown): CodexGoal | null {
+  const goal = asRecord(value);
+  const objective = asString(goal?.objective);
+  if (!goal || objective === null) return null;
+  return {
+    objective,
+    status: asString(goal.status) ?? "active",
+    tokenBudget:
+      typeof goal.tokenBudget === "number" && Number.isFinite(goal.tokenBudget)
+        ? goal.tokenBudget
+        : null,
+    tokensUsed: numberOr(goal.tokensUsed, 0),
+    timeUsedSeconds: numberOr(goal.timeUsedSeconds, 0),
+  };
+}
+
+function compactCount(value: number): string {
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}k`;
+  return String(value);
+}
+
+function formatGoal(goal: CodexGoal): string {
+  const status = goal.status.replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase();
+  const usage = [
+    `${compactCount(goal.tokensUsed)} tokens`,
+    `${Math.round(goal.timeUsedSeconds)}s`,
+    ...(goal.tokenBudget === null ? [] : [`${compactCount(goal.tokenBudget)} token budget`]),
+  ];
+  return `Goal ${status}. Objective: ${goal.objective} · ${usage.join(" · ")}`;
 }
 
 const COLLAB_STATUS: Record<string, ToolStatus> = {
@@ -626,7 +673,147 @@ export function createCodexAdapter(): AgentAdapter {
     });
   }
 
-  /** `/model`, `/effort`, `/compact` — the TUI's controls, wired to RPCs. */
+  function goalError(error: unknown, fallback: string, ctx: AdapterContext): void {
+    const record = asRecord(error);
+    const message = asString(record?.message);
+    ctx.emit({
+      type: "notice",
+      tone: "error",
+      text:
+        message?.includes("Method not found") || message?.includes("not supported")
+          ? "This Codex version does not support persistent goals."
+          : message ?? fallback,
+    });
+  }
+
+  function showGoalResult(result: Record<string, unknown>, ctx: AdapterContext): void {
+    const goal = readGoal(result.goal);
+    ctx.emit({
+      type: "notice",
+      tone: "info",
+      text: goal
+        ? formatGoal(goal)
+        : "No goal is currently set. Use /goal <objective> to create one.",
+    });
+  }
+
+  function getGoal(ctx: AdapterContext): void {
+    if (!threadId) return;
+    void request(ctx, "thread/goal/get", { threadId })
+      .then((result) => showGoalResult(result, ctx))
+      .catch((error: unknown) => goalError(error, "Codex could not read the goal.", ctx));
+  }
+
+  function clearGoal(ctx: AdapterContext): void {
+    if (!threadId) return;
+    void request(ctx, "thread/goal/clear", { threadId })
+      .then((result) => {
+        ctx.emit({
+          type: "notice",
+          tone: "info",
+          text: result.cleared === false ? "No goal was set." : "Goal cleared.",
+        });
+      })
+      .catch((error: unknown) => goalError(error, "Codex could not clear the goal.", ctx));
+  }
+
+  function setGoalStatus(status: "active" | "paused", ctx: AdapterContext): void {
+    if (!threadId) return;
+    void request(ctx, "thread/goal/set", { threadId, status })
+      .then((result) => showGoalResult(result, ctx))
+      .catch((error: unknown) =>
+        goalError(
+          error,
+          status === "active" ? "Codex could not resume the goal." : "Codex could not pause the goal.",
+          ctx,
+        ),
+      );
+  }
+
+  function editGoal(objective: string, ctx: AdapterContext): void {
+    if (!threadId) return;
+    void request(ctx, "thread/goal/get", { threadId })
+      .then((result) => {
+        const current = readGoal(result.goal);
+        if (!current) {
+          ctx.emit({
+            type: "notice",
+            tone: "error",
+            text: "No goal is currently set. Use /goal <objective> to create one.",
+          });
+          return null;
+        }
+        const keepStatus = ["active", "paused", "blocked", "usageLimited"].includes(current.status);
+        return request(ctx, "thread/goal/set", {
+          threadId,
+          objective,
+          status: keepStatus ? current.status : "active",
+        });
+      })
+      .then((result) => {
+        if (result) showGoalResult(result, ctx);
+      })
+      .catch((error: unknown) => goalError(error, "Codex could not edit the goal.", ctx));
+  }
+
+  function replaceGoal(objective: string, ctx: AdapterContext): void {
+    if (!threadId) return;
+    // A new `/goal <objective>` starts fresh accounting, matching Codex's TUI.
+    void request(ctx, "thread/goal/clear", { threadId })
+      .then(() =>
+        request(ctx, "thread/goal/set", {
+          threadId,
+          objective,
+          status: "active",
+        }),
+      )
+      .then((result) => showGoalResult(result, ctx))
+      .catch((error: unknown) => goalError(error, "Codex could not set the goal.", ctx));
+  }
+
+  function handleGoalCommand(arg: string, ctx: AdapterContext): void {
+    if (!arg) {
+      getGoal(ctx);
+      return;
+    }
+    const action = arg.toLowerCase();
+    if (action === "clear") {
+      clearGoal(ctx);
+      return;
+    }
+    if (action === "pause") {
+      setGoalStatus("paused", ctx);
+      return;
+    }
+    if (action === "resume") {
+      setGoalStatus("active", ctx);
+      return;
+    }
+    if (action === "edit" || action === "help") {
+      ctx.emit({
+        type: "notice",
+        tone: "info",
+        text:
+          "Usage: /goal <objective>, /goal edit <objective>, /goal pause, /goal resume, or /goal clear.",
+      });
+      return;
+    }
+
+    const edit = /^edit\s+([\s\S]+)$/i.exec(arg);
+    const objective = (edit?.[1] ?? arg).trim();
+    if (Array.from(objective).length > MAX_GOAL_OBJECTIVE_CHARS) {
+      ctx.emit({
+        type: "notice",
+        tone: "error",
+        text: `Goal objectives can be at most ${MAX_GOAL_OBJECTIVE_CHARS.toLocaleString("en-US")} characters. Put longer instructions in a file and refer to it from the goal.`,
+      });
+      return;
+    }
+    if (edit) editGoal(objective, ctx);
+    else replaceGoal(objective, ctx);
+  }
+
+  /** `/model`, `/effort`, `/compact`, `/goal` — TUI controls wired to RPCs. */
   function handleCommand(text: string, ctx: AdapterContext): "handled" | "prompt" {
     const space = text.search(/\s/);
     const name = (space < 0 ? text : text.slice(0, space)).toLowerCase();
@@ -706,10 +893,15 @@ export function createCodexAdapter(): AgentAdapter {
       return "handled";
     }
 
+    if (name === "/goal") {
+      handleGoalCommand(arg, ctx);
+      return "handled";
+    }
+
     ctx.emit({
       type: "notice",
       tone: "error",
-      text: `Unknown command ${name}. Codex knows /model, /effort, /compact.`,
+      text: `Unknown command ${name}. Codex knows /model, /effort, /compact, /goal.`,
     });
     return "handled";
   }

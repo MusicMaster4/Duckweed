@@ -295,7 +295,9 @@ export function AgentSurface({ termId, active, onClose }: Props) {
 
   const { usage } = session;
   const visibleWorkflow =
-    workflow && workflow.id !== expiredWorkflowId ? workflow : null;
+    workflow && workflow.steps.length > 0 && workflow.id !== expiredWorkflowId
+      ? workflow
+      : null;
   const timelineItems = workflow
     ? session.items.filter((item) => item.kind !== "plan")
     : session.items;

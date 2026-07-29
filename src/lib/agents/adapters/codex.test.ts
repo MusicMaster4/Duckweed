@@ -253,6 +253,142 @@ describe("codex adapter", () => {
     });
   });
 
+  test("sets a fresh persistent goal through the Codex control plane", async () => {
+    const h = harness();
+    await h.handshake();
+
+    expect(h.adapter.command?.("/goal Finish the migration and keep tests green", h.ctx)).toBe(
+      "handled",
+    );
+    expect(h.sent.at(-1)).toMatchObject({
+      id: 4,
+      method: "thread/goal/clear",
+      params: { threadId: "thread_1" },
+    });
+
+    h.feed({ jsonrpc: "2.0", id: 4, result: { cleared: false } });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(h.sent.at(-1)).toMatchObject({
+      id: 5,
+      method: "thread/goal/set",
+      params: {
+        threadId: "thread_1",
+        objective: "Finish the migration and keep tests green",
+        status: "active",
+      },
+    });
+
+    h.feed({
+      jsonrpc: "2.0",
+      id: 5,
+      result: {
+        goal: {
+          objective: "Finish the migration and keep tests green",
+          status: "active",
+          tokenBudget: null,
+          tokensUsed: 1200,
+          timeUsedSeconds: 7,
+        },
+      },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(h.state().items.at(-1)).toMatchObject({
+      kind: "notice",
+      tone: "info",
+      text: "Goal active. Objective: Finish the migration and keep tests green · 1.2k tokens · 7s",
+    });
+  });
+
+  test("views, pauses, resumes, clears, and edits the current goal", async () => {
+    const h = harness();
+    await h.handshake();
+
+    h.adapter.command?.("/goal", h.ctx);
+    expect(h.sent.at(-1)).toMatchObject({
+      id: 4,
+      method: "thread/goal/get",
+      params: { threadId: "thread_1" },
+    });
+    h.feed({ jsonrpc: "2.0", id: 4, result: { goal: null } });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(h.state().items.at(-1)).toMatchObject({
+      text: "No goal is currently set. Use /goal <objective> to create one.",
+    });
+
+    h.adapter.command?.("/goal pause", h.ctx);
+    expect(h.sent.at(-1)).toMatchObject({
+      id: 5,
+      method: "thread/goal/set",
+      params: { threadId: "thread_1", status: "paused" },
+    });
+    h.feed({
+      jsonrpc: "2.0",
+      id: 5,
+      result: { goal: { objective: "Old goal", status: "paused" } },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    h.adapter.command?.("/goal resume", h.ctx);
+    expect(h.sent.at(-1)).toMatchObject({
+      id: 6,
+      method: "thread/goal/set",
+      params: { threadId: "thread_1", status: "active" },
+    });
+    h.feed({
+      jsonrpc: "2.0",
+      id: 6,
+      result: { goal: { objective: "Old goal", status: "active" } },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    h.adapter.command?.("/goal edit Revised goal", h.ctx);
+    expect(h.sent.at(-1)).toMatchObject({ id: 7, method: "thread/goal/get" });
+    h.feed({
+      jsonrpc: "2.0",
+      id: 7,
+      result: { goal: { objective: "Old goal", status: "paused" } },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(h.sent.at(-1)).toMatchObject({
+      id: 8,
+      method: "thread/goal/set",
+      params: { threadId: "thread_1", objective: "Revised goal", status: "paused" },
+    });
+    h.feed({
+      jsonrpc: "2.0",
+      id: 8,
+      result: { goal: { objective: "Revised goal", status: "paused" } },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    h.adapter.command?.("/goal clear", h.ctx);
+    expect(h.sent.at(-1)).toMatchObject({
+      id: 9,
+      method: "thread/goal/clear",
+      params: { threadId: "thread_1" },
+    });
+  });
+
+  test("rejects oversized goal objectives before sending an RPC", async () => {
+    const h = harness();
+    await h.handshake();
+    const before = h.sent.length;
+    h.adapter.command?.(`/goal ${"x".repeat(4_001)}`, h.ctx);
+    expect(h.sent).toHaveLength(before);
+    expect(h.state().items.at(-1)).toMatchObject({
+      kind: "notice",
+      tone: "error",
+      text: expect.stringContaining("4,000 characters"),
+    });
+  });
+
   test("refuses an unknown command locally instead of paying for a turn", async () => {
     const h = harness();
     await h.handshake();
@@ -261,7 +397,7 @@ describe("codex adapter", () => {
     expect(h.sent.at(-1)).toMatchObject({ method: "model/list" });
     expect(h.state().items.find((item) => item.kind === "notice")).toMatchObject({
       tone: "error",
-      text: "Unknown command /frobnicate. Codex knows /model, /effort, /compact.",
+      text: "Unknown command /frobnicate. Codex knows /model, /effort, /compact, /goal.",
     });
   });
 
