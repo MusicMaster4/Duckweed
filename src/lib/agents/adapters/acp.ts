@@ -25,8 +25,10 @@ import {
  *
  * ACP is JSON-RPC 2.0 over stdio with a small, well-shaped vocabulary: the
  * client opens a session, sends a prompt, and receives `session/update`
- * notifications until the prompt request resolves with a stop reason. Because
- * three of the five supported agents speak it, this one adapter is most of the
+ * notifications until the prompt request resolves with a stop reason. Grok
+ * can keep a workflow running after that response, so its private workflow
+ * lifecycle also participates in turn completion. Because three of the five
+ * supported agents speak ACP, this one adapter is most of the
  * protocol coverage — the per-agent differences live in the catalog's spawn
  * arguments and in the `_meta` fields read below.
  *
@@ -208,6 +210,14 @@ export function createAcpAdapter(): AgentAdapter {
    */
   let slashPending = false;
   let turnHadContent = false;
+  /**
+   * Grok workflows outlive the foreground `session/prompt` request. Resolving
+   * that request only means the model handed control to the workflow runner;
+   * the turn remains busy until every run reports a terminal status.
+   */
+  const activeWorkflows = new Set<string>();
+  let promptRequestSettled = true;
+  let turnOpen = false;
   /** The agent advertised `session/load` — see {@link AgentAdapter.resume}. */
   let canLoadSession = false;
   /**
@@ -223,6 +233,40 @@ export function createAcpAdapter(): AgentAdapter {
     activeContent = null;
     assistantSegment = 0;
     thinkingSegment = 0;
+  }
+
+  function workflowId(update: Record<string, unknown>): string {
+    return (
+      asString(update.run_id) ??
+      asString(update.runId) ??
+      asString(update.workflow_id) ??
+      asString(update.workflowId) ??
+      asString(update.name) ??
+      "grok-workflow"
+    );
+  }
+
+  function workflowIsTerminal(status: string): boolean {
+    return (
+      status === "completed" ||
+      status === "done" ||
+      status === "failed" ||
+      status === "error" ||
+      status === "stopped" ||
+      status === "interrupted" ||
+      status === "cancelled" ||
+      status === "canceled" ||
+      status === "budget_limited" ||
+      status === "budgetlimited"
+    );
+  }
+
+  function finishTurnWhenReady(ctx: AdapterContext, force = false) {
+    if (!turnOpen || !promptRequestSettled) return;
+    if (!force && activeWorkflows.size > 0) return;
+    if (force) activeWorkflows.clear();
+    turnOpen = false;
+    ctx.emit({ type: "turn-end" });
   }
 
   function activeContentId(): string | null {
@@ -683,12 +727,25 @@ export function createAcpAdapter(): AgentAdapter {
       case "workflow_updated": {
         // Grok Build publishes background workflow state on
         // `_x.ai/session/update`, not ACP's standard plan notification. Lift
-        // its phase rail into the shared workflow dock so it remains visible
-        // after the foreground turn has returned.
+        // its phase rail into the shared workflow dock and keep the turn busy
+        // after the foreground request has returned.
+        const workflowStatus = asString(update.status)?.toLowerCase() ?? "";
+        const id = workflowId(update);
+        if (!loading) {
+          if (workflowIsTerminal(workflowStatus)) {
+            if (id === "grok-workflow") activeWorkflows.clear();
+            else activeWorkflows.delete(id);
+          } else {
+            activeWorkflows.add(id);
+          }
+        }
         const steps = readWorkflowSteps(update);
         if (steps.length) {
           turnHadContent = true;
           ctx.emit({ type: "plan", steps });
+        }
+        if (!loading && workflowIsTerminal(workflowStatus)) {
+          finishTurnWhenReady(ctx);
         }
         return;
       }
@@ -942,7 +999,11 @@ export function createAcpAdapter(): AgentAdapter {
         return;
       }
 
-      if (method === "session/update" || method === "_x.ai/session/update") {
+      if (
+        method === "session/update" ||
+        method === "_x.ai/session/update" ||
+        method === "_x.ai/session_notification"
+      ) {
         handleSessionUpdate(params, ctx);
       }
     },
@@ -951,6 +1012,8 @@ export function createAcpAdapter(): AgentAdapter {
       if (!sessionId) return;
       turnSeq += 1;
       resetContentSegments();
+      promptRequestSettled = false;
+      turnOpen = true;
       slashPending = prompt.text.startsWith("/");
       turnHadContent = false;
       ctx.emit({ type: "user", text: prompt.text, images: prompt.images });
@@ -968,6 +1031,7 @@ export function createAcpAdapter(): AgentAdapter {
       })
         .then((result) => {
           const stop = asString(result.stopReason);
+          promptRequestSettled = true;
           if (stop === "refusal") {
             if (goalResponsePending) {
               currentGoal = goalBeforeCommand;
@@ -984,9 +1048,13 @@ export function createAcpAdapter(): AgentAdapter {
           slashPending = false;
           goalResponsePending = false;
           goalResponseText = "";
-          ctx.emit({ type: "turn-end" });
+          finishTurnWhenReady(
+            ctx,
+            stop === "refusal" || stop === "cancelled" || stop === "canceled",
+          );
         })
         .catch((error: unknown) => {
+          promptRequestSettled = true;
           slashPending = false;
           if (goalResponsePending) {
             currentGoal = goalBeforeCommand;
@@ -1000,7 +1068,7 @@ export function createAcpAdapter(): AgentAdapter {
             tone: "error",
             text: asString(record?.message) ?? "The turn failed.",
           });
-          ctx.emit({ type: "turn-end" });
+          finishTurnWhenReady(ctx, true);
         });
     },
 

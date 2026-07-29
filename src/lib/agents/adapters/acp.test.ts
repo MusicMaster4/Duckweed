@@ -403,6 +403,34 @@ describe("acp adapter", () => {
     expect(plan?.kind === "plan" && plan.steps.every((step) => step.status === "done")).toBe(true);
   });
 
+  test("accepts Grok workflow completion notifications sent after the turn", async () => {
+    const h = harness();
+    await h.handshake();
+    h.feed({
+      jsonrpc: "2.0",
+      method: "_x.ai/session_notification",
+      params: {
+        sessionId: "s1",
+        update: {
+          sessionUpdate: "workflow_updated",
+          status: "completed",
+          phases: [
+            { title: "Map", state: "done" },
+            { title: "Explore", state: "done" },
+            { title: "Synthesize", state: "done" },
+          ],
+        },
+      },
+    });
+
+    const plan = h.state().items.find((item) => item.kind === "plan");
+    expect(plan?.kind === "plan" && plan.steps).toEqual([
+      { text: "Map", status: "done" },
+      { text: "Explore", status: "done" },
+      { text: "Synthesize", status: "done" },
+    ]);
+  });
+
   test("raises a permission prompt with the agent's own options", async () => {
     const h = harness();
     await h.handshake();
@@ -452,6 +480,101 @@ describe("acp adapter", () => {
     h.feed({ jsonrpc: "2.0", id: 3, result: { stopReason: "end_turn" } });
     await Promise.resolve();
     await Promise.resolve();
+    expect(h.state().status).toBe("idle");
+  });
+
+  test("keeps Grok working after the prompt resolves while its workflow is active", async () => {
+    const h = harness();
+    await h.handshake();
+    h.adapter.prompt({ text: "/suggest-improvements", images: [] }, h.ctx);
+    h.feed({
+      jsonrpc: "2.0",
+      method: "_x.ai/session/update",
+      params: {
+        sessionId: "s1",
+        update: {
+          sessionUpdate: "workflow_updated",
+          run_id: "wf_1",
+          status: "active",
+          phases: [
+            { title: "Map", state: "done" },
+            { title: "Explore", state: "active" },
+            { title: "Synthesize", state: "pending" },
+          ],
+        },
+      },
+    });
+
+    h.feed({ jsonrpc: "2.0", id: 3, result: { stopReason: "end_turn" } });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(h.state().status).toBe("working");
+    expect(h.events.filter((event) => event.type === "turn-end")).toHaveLength(0);
+
+    h.feed({
+      jsonrpc: "2.0",
+      method: "_x.ai/session/update",
+      params: {
+        sessionId: "s1",
+        update: {
+          sessionUpdate: "workflow_updated",
+          run_id: "wf_1",
+          status: "completed",
+          phases: [
+            { title: "Map", state: "done" },
+            { title: "Explore", state: "done" },
+            { title: "Synthesize", state: "done" },
+          ],
+        },
+      },
+    });
+
+    expect(h.state().status).toBe("idle");
+    expect(h.events.filter((event) => event.type === "turn-end")).toHaveLength(1);
+  });
+
+  test("releases a Grok turn when its workflow is interrupted", async () => {
+    const h = harness();
+    await h.handshake();
+    h.adapter.prompt({ text: "/suggest-improvements", images: [] }, h.ctx);
+    h.feed({
+      jsonrpc: "2.0",
+      method: "_x.ai/session/update",
+      params: {
+        sessionId: "s1",
+        update: {
+          sessionUpdate: "workflow_updated",
+          run_id: "wf_1",
+          status: "active",
+          phases: [
+            { title: "Map", state: "done" },
+            { title: "Explore", state: "active" },
+          ],
+        },
+      },
+    });
+    h.feed({ jsonrpc: "2.0", id: 3, result: { stopReason: "end_turn" } });
+    await Promise.resolve();
+    await Promise.resolve();
+    h.feed({
+      jsonrpc: "2.0",
+      method: "_x.ai/session_notification",
+      params: {
+        sessionId: "s1",
+        update: {
+          sessionUpdate: "workflow_updated",
+          run_id: "wf_1",
+          status: "interrupted",
+          phases: [
+            { title: "Map", state: "done" },
+            { title: "Explore", state: "active" },
+          ],
+        },
+      },
+    });
+
+    expect(h.events.filter((event) => event.type === "turn-end")).toHaveLength(1);
     expect(h.state().status).toBe("idle");
   });
 

@@ -166,7 +166,7 @@ for r in explore_results {
         }
         log("explore:" + domain_id + " returned ideas");
     } else {
-        log("explore:" + domain_id + " failed or empty — skipping");
+        log("explore:" + domain_id + " failed or empty - skipping");
     }
     i += 1;
 }
@@ -196,7 +196,7 @@ synth_prompt += "- Cool factor: prefer distinctive Duckweed-native ideas over ge
 synth_prompt += "- Grounded: every suggestion must cite real evidence (paths, modules, existing behaviors).\n";
 synth_prompt += "- Actionable: approach should be concrete enough that an engineer could start tomorrow.\n";
 synth_prompt += "- Respect product constraints: local-first, no required cloud account, English UI, no glow effects, multi-agent + real terminals.\n";
-synth_prompt += "- Rank 1 = best overall (impact × cool × fit / effort). ranks 1..5.\n";
+synth_prompt += "- Rank 1 = best overall (impact x cool x fit / effort). ranks 1..5.\n";
 synth_prompt += "- Write pitches and approaches in clear English (complete sentences).\n";
 synth_prompt += "- summary: 2-4 sentences on the theme of the set.\n";
 synth_prompt += "Return only the structured schema.";
@@ -226,7 +226,7 @@ for s in synth.output.suggestions {
     report += "**Pitch:** " + s.pitch + "\n\n";
     report += "**Why now:** " + s.why_now + "\n\n";
     report += "**Approach:** " + s.approach + "\n\n";
-    report += "**Effort:** " + s.effort + " · **Impact:** " + s.impact + "\n\n";
+    report += "**Effort:** " + s.effort + " | **Impact:** " + s.impact + "\n\n";
     report += "**Risks:** " + s.risks + "\n\n";
     report += "**Evidence:** " + s.evidence + "\n\n";
     report += "---\n\n";
