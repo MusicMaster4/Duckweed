@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
 
 import type { AdapterContext } from "../adapter";
+import {
+  autoQuestionAnswers,
+  handleUnattendedPermission,
+} from "../autoApproval";
 import { applyEvent, type AgentEvent } from "../events";
 import type { AgentLaunch } from "../launch";
 import { emptyUsage, type AgentSessionState } from "../types";
@@ -876,6 +880,37 @@ export const meta = {
     expect(h.state().permission).toBeNull();
   });
 
+  test("automatic approval sends Claude an allow response", () => {
+    const h = harness();
+    h.feed({
+      type: "control_request",
+      request_id: "req_auto",
+      request: {
+        subtype: "can_use_tool",
+        tool_name: "Bash",
+        input: { command: "bun run build" },
+      },
+    });
+
+    const permission = h.state().permission;
+    expect(
+      handleUnattendedPermission(permission, {
+        respond: (permissionId, optionId) =>
+          h.adapter.respond(permissionId, optionId, h.ctx),
+        answer: (permissionId, answers) =>
+          h.adapter.answer?.(permissionId, answers, h.ctx),
+      }),
+    ).toBe(true);
+    expect(h.sent.at(-1)).toMatchObject({
+      type: "control_response",
+      response: {
+        request_id: "req_auto",
+        response: { behavior: "allow" },
+      },
+    });
+    expect(h.state().permission).toBeNull();
+  });
+
   test("turns AskUserQuestion into an answerable question rather than an approval", () => {
     const h = harness();
     h.feed({
@@ -920,11 +955,11 @@ export const meta = {
       },
     ]);
 
-    h.adapter.answer?.(
-      waiting.permission!.id,
-      [{ questionId: "q0", labels: ["date-fns"], custom: null }],
-      h.ctx,
-    );
+    const unattendedAnswers = autoQuestionAnswers(waiting.permission);
+    expect(unattendedAnswers).toEqual([
+      { questionId: "q0", labels: ["date-fns"], custom: null },
+    ]);
+    h.adapter.answer?.(waiting.permission!.id, unattendedAnswers!, h.ctx);
     expect(h.sent.at(-1)).toMatchObject({
       type: "control_response",
       response: {

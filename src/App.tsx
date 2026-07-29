@@ -31,6 +31,7 @@ import * as checklist from "./lib/checklist";
 import * as powerWatch from "./lib/powerWatch";
 import type { BusyEntry } from "./lib/powerWatch";
 import * as agentSessions from "./lib/agents/session";
+import { handleUnattendedPermission } from "./lib/agents/autoApproval";
 import {
   confirmCloseRunning,
   isConfirmCloseRunningEnabled,
@@ -187,6 +188,7 @@ function boot() {
       tintWorkspaceWithTabColor: saved.tintWorkspaceWithTabColor,
       customAgentUi: saved.customAgentUi,
       agentFollowupMode: saved.agentFollowupMode,
+      autoApproveLockedRequests: saved.autoApproveLockedRequests,
       inputMode: saved.inputMode,
       confirmCloseRunning: saved.confirmCloseRunning,
       toolsOpen: saved.toolsOpen,
@@ -217,6 +219,7 @@ function boot() {
     tintWorkspaceWithTabColor: false,
     customAgentUi: true,
     agentFollowupMode: "queue" as const,
+    autoApproveLockedRequests: false,
     inputMode: "editor" as terminals.InputMode,
     confirmCloseRunning: true,
     toolsOpen: false,
@@ -265,6 +268,9 @@ export default function App() {
   );
   const [customAgentUi, setCustomAgentUi] = useState(initial.customAgentUi);
   const [agentFollowupMode, setAgentFollowupMode] = useState(initial.agentFollowupMode);
+  const [autoApproveLockedRequests, setAutoApproveLockedRequests] = useState(
+    initial.autoApproveLockedRequests,
+  );
   const [inputMode, setInputMode] = useState(initial.inputMode);
   const [confirmCloseRunningPref, setConfirmCloseRunningPref] = useState(() => {
     // Honour the saved preference before any close handler can run.
@@ -724,6 +730,28 @@ export default function App() {
       window.clearInterval(fallback);
     };
   }, [dailyLocked, probeActivity, termIdsKey]);
+
+  // With explicit consent, keep unattended agents moving after the daily limit
+  // screen takes over. Structured questions follow the consented unattended
+  // policy by choosing the first option for each question.
+  useEffect(() => {
+    if (!dailyLocked || !autoApproveLockedRequests) return;
+
+    const approvePending = () => {
+      for (const termId of agentSessions.activeTermIds()) {
+        const permission = agentSessions.get(termId)?.permission ?? null;
+        handleUnattendedPermission(permission, {
+          respond: (permissionId, optionId) =>
+            agentSessions.respond(termId, permissionId, optionId),
+          answer: (permissionId, answers) =>
+            agentSessions.answer(termId, permissionId, answers),
+        });
+      }
+    };
+
+    approvePending();
+    return agentSessions.subscribeAll(approvePending);
+  }, [autoApproveLockedRequests, dailyLocked]);
 
   // Closing a locked window with work left hides it instead. Once the last
   // entry settles, exit quietly without playing completion cues.
@@ -1608,6 +1636,7 @@ export default function App() {
           tintWorkspaceWithTabColor,
           customAgentUi,
           agentFollowupMode,
+          autoApproveLockedRequests,
           inputMode,
           confirmCloseRunning: confirmCloseRunningPref,
           toolsOpen,
@@ -1630,6 +1659,7 @@ export default function App() {
     tintWorkspaceWithTabColor,
     customAgentUi,
     agentFollowupMode,
+    autoApproveLockedRequests,
     inputMode,
     confirmCloseRunningPref,
     toolsOpen,
@@ -2564,6 +2594,7 @@ export default function App() {
                 dailyUsedMs={dailyUsage.state.usedMs}
                 customAgentUi={customAgentUi}
                 agentFollowupMode={agentFollowupMode}
+                autoApproveLockedRequests={autoApproveLockedRequests}
                 confirmCloseRunning={confirmCloseRunningPref}
                 explorerIntegration={explorerIntegration}
                 shell={shell}
@@ -2586,6 +2617,7 @@ export default function App() {
                   agentSessions.setFollowupMode(mode);
                   setAgentFollowupMode(mode);
                 }}
+                onAutoApproveLockedRequests={setAutoApproveLockedRequests}
                 onToggleConfirmCloseRunning={() =>
                   setConfirmCloseRunningPref((prev) => !prev)
                 }

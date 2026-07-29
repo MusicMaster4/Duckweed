@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { UsagePanel } from "./UsagePanel";
 import { formatDailyLimit, formatUsageDuration } from "../lib/dailyUsage";
@@ -22,6 +22,7 @@ interface Props {
   /** Draw Duckweed's own interface over a recognised coding-agent CLI. */
   customAgentUi: boolean;
   agentFollowupMode: AgentFollowupMode;
+  autoApproveLockedRequests: boolean;
   confirmCloseRunning: boolean;
   /** Windows Explorer folder verbs; null when unavailable. */
   explorerIntegration: ShellIntegrationStatus | null;
@@ -38,6 +39,7 @@ interface Props {
   onDailyLimitMinutes: (minutes: number) => void;
   onToggleCustomAgentUi: () => void;
   onAgentFollowupMode: (mode: AgentFollowupMode) => void;
+  onAutoApproveLockedRequests: (enabled: boolean) => void;
   onToggleConfirmCloseRunning: () => void;
   onToggleExplorerTab: () => void;
   onToggleExplorerWindow: () => void;
@@ -52,6 +54,70 @@ function Toggle({ enabled }: { enabled: boolean }) {
     <span className={`settings-switch ${enabled ? "is-on" : ""}`} aria-hidden="true">
       <span />
     </span>
+  );
+}
+
+function ApprovalConsentDialog({
+  onCancel,
+  onConfirm,
+}: {
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const [acknowledged, setAcknowledged] = useState(false);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      onCancel();
+    };
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => window.removeEventListener("keydown", onKeyDown, true);
+  }, [onCancel]);
+
+  return (
+    <div className="approval-consent-backdrop" onPointerDown={onCancel}>
+      <div
+        className="approval-consent-dialog"
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby="approval-consent-title"
+        aria-describedby="approval-consent-body"
+        onPointerDown={(event) => event.stopPropagation()}
+      >
+        <span className="approval-consent-kicker">Unattended access</span>
+        <h2 id="approval-consent-title">Allow automatic approvals?</h2>
+        <p id="approval-consent-body">
+          While the daily limit screen is active, Duckweed will approve agent
+          permission requests without asking you. This may run destructive
+          commands, change or delete files, expose data, or cause other damage.
+          If an agent asks a question, Duckweed will choose its first option.
+        </p>
+        <label className="approval-consent-check">
+          <input
+            type="checkbox"
+            checked={acknowledged}
+            onChange={(event) => setAcknowledged(event.target.checked)}
+          />
+          <span>I understand and accept these risks.</span>
+        </label>
+        <div className="approval-consent-actions">
+          <button type="button" onClick={onCancel}>
+            Cancel
+          </button>
+          <button
+            type="button"
+            className="is-danger"
+            disabled={!acknowledged}
+            onClick={onConfirm}
+          >
+            Enable automatic approvals
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -91,6 +157,7 @@ export function SettingsMenu({
   dailyUsedMs,
   customAgentUi,
   agentFollowupMode,
+  autoApproveLockedRequests,
   confirmCloseRunning,
   explorerIntegration,
   shell,
@@ -106,6 +173,7 @@ export function SettingsMenu({
   onDailyLimitMinutes,
   onToggleCustomAgentUi,
   onAgentFollowupMode,
+  onAutoApproveLockedRequests,
   onToggleConfirmCloseRunning,
   onToggleExplorerTab,
   onToggleExplorerWindow,
@@ -116,6 +184,7 @@ export function SettingsMenu({
   const [section, setSectionState] = useState<SettingsSection>(lastSettingsSection);
   const [query, setQuery] = useState("");
   const [suggestionsCleared, setSuggestionsCleared] = useState(false);
+  const [approvalConsentOpen, setApprovalConsentOpen] = useState(false);
   const contentRef = useRef<HTMLElement | null>(null);
   const sectionRef = useRef(section);
   const searchingRef = useRef(false);
@@ -194,7 +263,10 @@ export function SettingsMenu({
   const showWellbeing =
     (section === "Wellbeing" || searching) &&
     (matches("wellbeing health daily usage time limit focus lock lockout hours") ||
-      matches("today focused time remaining midnight agents background"));
+      matches("today focused time remaining midnight agents background") ||
+      matches(
+        "automatic approvals unattended agents permission requests risk damage destructive",
+      ));
   const visibleTitle = searching ? "Search results" : section;
 
   // When the host is about to hide, lock in the current scroll before the
@@ -327,8 +399,9 @@ export function SettingsMenu({
           {showUsage && <UsagePanel />}
 
           {showWellbeing && (
-            <section className="settings-section">
-              <h2>Daily usage</h2>
+            <>
+              <section className="settings-section">
+                <h2>Daily usage</h2>
               {matches("wellbeing health daily usage time limit focus lock lockout hours") && (
                 <button
                   type="button"
@@ -407,7 +480,41 @@ export function SettingsMenu({
                   </div>
                 </div>
               )}
-            </section>
+              </section>
+
+              {matches(
+                "automatic approvals unattended agents permission requests risk damage destructive",
+              ) && (
+                <section className="settings-section">
+                  <h2>Unattended agents</h2>
+                  <button
+                    type="button"
+                    className="settings-row settings-action"
+                    aria-pressed={autoApproveLockedRequests}
+                    onClick={() => {
+                      if (autoApproveLockedRequests) {
+                        onAutoApproveLockedRequests(false);
+                        return;
+                      }
+                      setApprovalConsentOpen(true);
+                    }}
+                  >
+                    <span className="settings-copy">
+                      <strong>Approve requests during lockout</strong>
+                      <span>
+                        Let agents continue by automatically approving permission
+                        requests after the daily limit is reached
+                      </span>
+                    </span>
+                    <Toggle enabled={autoApproveLockedRequests} />
+                  </button>
+                  <p className="settings-risk-note">
+                    Automatic approvals can run destructive actions and cause data
+                    loss. Agent questions automatically use their first option.
+                  </p>
+                </section>
+              )}
+            </>
           )}
 
           {showAppearance && (
@@ -658,6 +765,15 @@ export function SettingsMenu({
           )}
         </div>
       </main>
+      {approvalConsentOpen && (
+        <ApprovalConsentDialog
+          onCancel={() => setApprovalConsentOpen(false)}
+          onConfirm={() => {
+            onAutoApproveLockedRequests(true);
+            setApprovalConsentOpen(false);
+          }}
+        />
+      )}
     </div>
   );
 }
