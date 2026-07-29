@@ -8,6 +8,7 @@ import {
   portsList,
   type AppPort,
 } from "../lib/ipc";
+import { AsciiAmbient } from "./AsciiAmbient";
 
 interface Props {
   ownerNames: ReadonlyMap<string, string>;
@@ -181,11 +182,7 @@ export function PortsTool({ ownerNames }: Props) {
 
         {!loading && ports.length === 0 && (
           <div className="tools-empty ports-empty">
-            <span className="ports-empty-mark" aria-hidden="true">
-              <svg viewBox="0 0 16 16">
-                <path d="M5 3v3M11 3v3M3.5 6h9v2.5a4.5 4.5 0 0 1-9 0zM8 13v1.5" />
-              </svg>
-            </span>
+            <AsciiAmbient surfaceId="ports-empty" scene="sonar" />
             <strong>Nothing is listening</strong>
             <p>Start a server in a pane and it appears here.</p>
           </div>

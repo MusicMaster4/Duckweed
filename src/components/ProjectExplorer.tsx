@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { listDir } from "../lib/ipc";
 import type { DirEntry, ProjectInfo } from "../lib/types";
+import { AsciiAmbient } from "./AsciiAmbient";
 
 interface Props {
   /** Folder of the visible tab — the tree's root, and all it ever shows. */
@@ -141,7 +142,8 @@ export function ProjectExplorer({
 
   if (!project || !root) {
     return (
-      <div className="tools-empty">
+      <div className="tools-empty tools-empty-ambient">
+        <AsciiAmbient surfaceId="project-no-folder" scene="network" />
         <p>This tab has no folder yet.</p>
         <button type="button" className="tools-btn" onClick={onBrowseProject}>
           Open a folder…
