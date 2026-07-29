@@ -1419,6 +1419,8 @@ export function createCodexAdapter(): AgentAdapter {
 
     command: handleCommand,
 
+    commandAvailableDuringTurn: (text) => /^\/goal(?:\s|$)/i.test(text.trim()),
+
     configureAccess: (mode, ctx) => {
       currentAccess = mode;
       ctx.emit({ type: "session", accessMode: mode });
@@ -1447,6 +1449,7 @@ export function createCodexAdapter(): AgentAdapter {
      */
     resume: (sessionId, ctx) => {
       ctx.emit({ type: "status", status: "working" });
+      ctx.emit({ type: "goal", goal: null });
       return request(ctx, "thread/resume", { threadId: sessionId })
         .then((result) => {
           const thread = asRecord(result.thread) ?? result;

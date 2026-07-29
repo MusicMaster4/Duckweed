@@ -818,6 +818,40 @@ export function foldOrphanPrompts(
 }
 
 /**
+ * Resolve a block's end without trusting a reflow-sensitive end marker.
+ *
+ * End markers attached to wrapped continuations can stay before newly
+ * inserted rows when a pane narrows, or be disposed when a pane widens. A
+ * following block start is therefore the authoritative sealed boundary.
+ */
+export function resolveBlockEnd(
+  start: number,
+  nextStart: number | null,
+  markerEnd: number | null,
+  liveEnd: () => number,
+): number {
+  if (nextStart !== null && nextStart > start) return nextStart - 1;
+  if (markerEnd !== null && markerEnd >= start) return markerEnd;
+  return Math.max(start, liveEnd());
+}
+
+/**
+ * Last row occupied by the command's logical line after xterm reflow.
+ *
+ * `isWrapped(y)` describes whether row `y` continues the row above it. The
+ * upper bound prevents malformed buffer state from consuming command output.
+ */
+export function wrappedCommandEnd(
+  isWrapped: (y: number) => boolean,
+  commandStart: number,
+  blockEnd: number,
+): number {
+  let end = commandStart;
+  while (end < blockEnd && isWrapped(end + 1)) end += 1;
+  return end;
+}
+
+/**
  * Last absolute buffer line of an open block. Skips a trailing idle prompt so
  * the next `PS path>` is not part of the previous command's chunk.
  */

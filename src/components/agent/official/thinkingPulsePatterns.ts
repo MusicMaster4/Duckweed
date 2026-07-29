@@ -13,7 +13,8 @@ export type ThinkingPulseMotion =
   | "spark"
   | "settle"
   | "echo"
-  | "triplet";
+  | "triplet"
+  | "bloom";
 
 export interface ThinkingPulsePattern {
   id: string;
@@ -172,35 +173,39 @@ const WAVES: ReadonlyArray<readonly [string, readonly number[]]> = [
  * every mask of lit cells is symmetric under a 180 degree rotation so partial
  * grids read as designed instead of broken. The echo and triplet motions make
  * each lit cell fire more than once per cycle.
+ *
+ * Anything that used to light fewer than half the cells now runs the bloom
+ * motion instead: a springy pop that starts on the cells the sparse mask lit
+ * first, then keeps going until all nine cells have bloomed.
  */
 const ACCENTS: ReadonlyArray<
   readonly [string, readonly number[], ThinkingPulseMotion]
 > = [
-  ["corners-alternate", [0, -1, 1, -1, -1, -1, 1, -1, 0], "echo"],
-  ["corners-orbit-solo", [0, -1, 1, -1, -1, -1, 3, -1, 2], "chase"],
+  ["corners-alternate", [0, 4, 2, 5, 6, 7, 3, 8, 1], "bloom"],
+  ["corners-orbit-solo", [0, 4, 1, 5, 6, 7, 3, 8, 2], "bloom"],
   ["x-bloom", [1, -1, 1, -1, 0, -1, 1, -1, 1], "ripple"],
   ["x-chase", [0, -1, 1, -1, 2, -1, 3, -1, 4], "comet"],
   ["plus-bloom", [-1, 1, -1, 1, 0, 1, -1, 1, -1], "breathe"],
   ["plus-orbit", [-1, 0, -1, 3, 2, 1, -1, 4, -1], "triplet"],
-  ["edge-orbit", [-1, 0, -1, 3, -1, 1, -1, 2, -1], "chase"],
-  ["edge-pairs", [-1, 0, -1, 1, -1, 1, -1, 0, -1], "echo"],
+  ["edge-orbit", [4, 0, 5, 3, 6, 1, 7, 2, 8], "bloom"],
+  ["edge-pairs", [4, 0, 5, 2, 6, 3, 7, 1, 8], "bloom"],
   ["ring-orbit", [0, 1, 2, 7, -1, 3, 6, 5, 4], "comet"],
   ["ring-counter", [0, 7, 6, 1, -1, 5, 2, 3, 4], "spark"],
   ["ring-converge", [0, 1, 2, 3, -1, 3, 2, 1, 0], "ripple"],
-  ["diagonal-solo", [0, -1, -1, -1, 1, -1, -1, -1, 2], "echo"],
-  ["anti-diagonal-solo", [-1, -1, 0, -1, 1, -1, 2, -1, -1], "triplet"],
+  ["diagonal-solo", [0, 3, 4, 5, 1, 6, 7, 8, 2], "bloom"],
+  ["anti-diagonal-solo", [3, 4, 0, 5, 1, 6, 2, 7, 8], "bloom"],
   ["rows-apart", [0, 0, 0, -1, -1, -1, 1, 1, 1], "blink"],
   ["rows-clap", [0, 1, 0, -1, -1, -1, 0, 1, 0], "echo"],
   ["columns-apart", [0, -1, 1, 0, -1, 1, 0, -1, 1], "swell"],
   ["columns-clap", [0, -1, 0, 1, -1, 1, 0, -1, 0], "triplet"],
-  ["middle-row-pulse", [-1, -1, -1, 0, 1, 0, -1, -1, -1], "breathe"],
-  ["middle-column-pulse", [-1, 0, -1, -1, 1, -1, -1, 0, -1], "echo"],
-  ["center-beat", [-1, -1, -1, -1, 0, -1, -1, -1, -1], "triplet"],
-  ["corner-pair-main", [0, -1, -1, -1, -1, -1, -1, -1, 1], "echo"],
-  ["corner-pair-anti", [-1, -1, 0, -1, -1, -1, 1, -1, -1], "flicker"],
-  ["vertical-gates", [-1, 0, -1, -1, -1, -1, -1, 1, -1], "sway"],
-  ["horizontal-gates", [-1, -1, -1, 0, -1, 1, -1, -1, -1], "drift"],
-  ["diamond-spin", [-1, 0, -1, 1, -1, 3, -1, 2, -1], "chase"],
+  ["middle-row-pulse", [3, 4, 5, 0, 2, 1, 6, 7, 8], "bloom"],
+  ["middle-column-pulse", [3, 0, 4, 5, 2, 6, 7, 1, 8], "bloom"],
+  ["center-beat", [5, 1, 6, 2, 0, 3, 7, 4, 8], "bloom"],
+  ["corner-pair-main", [0, 2, 3, 4, 5, 6, 7, 8, 1], "bloom"],
+  ["corner-pair-anti", [2, 3, 0, 4, 5, 6, 1, 7, 8], "bloom"],
+  ["vertical-gates", [2, 0, 3, 4, 5, 6, 7, 1, 8], "bloom"],
+  ["horizontal-gates", [2, 3, 4, 0, 5, 1, 6, 7, 8], "bloom"],
+  ["diamond-spin", [4, 0, 5, 1, 6, 3, 7, 2, 8], "bloom"],
   ["checker-echo", [0, 1, 0, 1, 0, 1, 0, 1, 0], "echo"],
   ["frame-echo", [0, 0, 0, 0, 1, 0, 0, 0, 0], "echo"],
   ["x-alternate", [0, -1, 0, -1, 1, -1, 0, -1, 0], "blink"],
@@ -212,7 +217,7 @@ const ACCENTS: ReadonlyArray<
   ["ring-beat", [0, 0, 0, 0, -1, 0, 0, 0, 0], "triplet"],
   ["x-beat", [0, -1, 0, -1, 0, -1, 0, -1, 0], "echo"],
   ["plus-beat", [-1, 0, -1, 0, 0, 0, -1, 0, -1], "triplet"],
-  ["corner-beat", [0, -1, 0, -1, -1, -1, 0, -1, 0], "triplet"],
+  ["corner-beat", [0, 4, 1, 5, 6, 7, 2, 8, 3], "bloom"],
 ];
 
 const BASE_PATTERNS: readonly BasePattern[] = [

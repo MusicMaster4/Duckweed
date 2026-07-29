@@ -780,6 +780,18 @@ export function submit(
     queuePrompt(session, prompt);
     return;
   }
+  if (
+    images.length === 0 &&
+    session.state.status !== "idle" &&
+    session.state.status !== "starting" &&
+    session.adapter.commandAvailableDuringTurn?.(trimmed) &&
+    session.adapter.command?.(trimmed, session.context) === "handled"
+  ) {
+    // Control-plane commands such as `/goal pause` must take effect while the
+    // provider is working. Sending them through the normal follow-up queue can
+    // strand them behind the automatic continuation they are meant to stop.
+    return;
+  }
   if (session.state.status === "starting") {
     // Show the opening prompt immediately. The handshake still owns when it
     // can actually be sent, but the adapter's later echo is suppressed so the

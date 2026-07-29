@@ -16,17 +16,17 @@ describe("thinking pulse patterns", () => {
     );
 
     expect(originals).toHaveLength(163);
-    expect(rotations).toHaveLength(399);
-    expect(THINKING_PULSE_PATTERNS).toHaveLength(562);
+    expect(rotations).toHaveLength(413);
+    expect(THINKING_PULSE_PATTERNS).toHaveLength(576);
     expect(
       rotations.filter((pattern) => pattern.id.endsWith("-rotated-90")),
-    ).toHaveLength(145);
+    ).toHaveLength(147);
     expect(
       rotations.filter((pattern) => pattern.id.endsWith("-rotated-180")),
-    ).toHaveLength(127);
+    ).toHaveLength(133);
     expect(
       rotations.filter((pattern) => pattern.id.endsWith("-rotated-270")),
-    ).toHaveLength(127);
+    ).toHaveLength(133);
 
     const rotateClockwise = (steps: readonly number[]) =>
       steps.map((_, target) => {
@@ -114,6 +114,7 @@ describe("thinking pulse patterns", () => {
         "settle",
         "echo",
         "triplet",
+        "bloom",
       ]),
     );
   });

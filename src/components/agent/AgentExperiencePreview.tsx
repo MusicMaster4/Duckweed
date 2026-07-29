@@ -198,6 +198,21 @@ function previewItems(): AgentItem[] {
   ];
 }
 
+function stillWorkingPreviewItems(): AgentItem[] {
+  const items = previewItems();
+  return [
+    ...items.slice(0, 5),
+    {
+      kind: "assistant",
+      id: "preview-long-progress",
+      at: Date.now() - 2_000,
+      text:
+        "I found the compatibility boundary and updated the parser. The main implementation is in place, but I am still checking the remaining event paths, backwards-compatible payloads, and the focused test coverage before I finish. This longer progress update intentionally leaves the turn active so the continuity state can be inspected.",
+      streaming: false,
+    },
+  ];
+}
+
 export function AgentExperiencePreview() {
   const query = new URLSearchParams(window.location.search);
   const requested = query.get("provider") as AgentId | null;
@@ -205,13 +220,17 @@ export function AgentExperiencePreview() {
   const completed = query.get("complete") === "1";
   const starting = query.get("starting") === "1";
   const exitArmed = query.get("exit-armed") === "1";
+  const stillWorking = query.get("still-working") === "1";
   const [agent, setAgent] = useState<AgentId>(
     PROVIDERS.some((provider) => provider.id === requested) && requested ? requested : "codex",
   );
   const [visibleCount, setVisibleCount] = useState(playTurn ? 1 : Number.POSITIVE_INFINITY);
   const [selectedSubagentCallId, setSelectedSubagentCallId] = useState<string | null>(null);
   const provider = PROVIDERS.find((entry) => entry.id === agent) ?? PROVIDERS[0];
-  const allItems = useMemo(previewItems, []);
+  const allItems = useMemo(
+    () => (stillWorking ? stillWorkingPreviewItems() : previewItems()),
+    [stillWorking],
+  );
   const items = useMemo(
     () =>
       allItems.slice(0, visibleCount).map((item) => {
@@ -279,7 +298,9 @@ export function AgentExperiencePreview() {
     models: [],
     sessionId: "preview-session",
     goal:
-      agent === "codex" || agent === "claude"
+      !starting &&
+      !completed &&
+      (agent === "codex" || agent === "claude")
         ? { objective: "Ship the session parser safely", status: "active" }
         : null,
     items: visibleItems,

@@ -1012,6 +1012,11 @@ strong.agent-activity-history-summary {
   animation-timing-function: ease-out;
 }
 
+.agent-activity-pulse.is-active[data-motion="bloom"] > span {
+  animation-name: agent-activity-bloom;
+  animation-timing-function: cubic-bezier(0.3, 1.35, 0.5, 1);
+}
+
 /* Cells a pattern leaves dark on purpose; kept dimmer than the resting glow. */
 .agent-activity-pulse.is-active > span.is-idle {
   animation: none;
@@ -1260,6 +1265,36 @@ strong.agent-activity-history-summary {
   44% {
     opacity: 0.78;
     transform: scale(0.98);
+  }
+}
+
+/* Springy pop that overshoots, rebounds, then swells once more before fading.
+   Every cell in the grid fires, so the whole matrix blooms open. */
+@keyframes agent-activity-bloom {
+  0%,
+  100% {
+    opacity: 0.16;
+    transform: scale(0.58);
+  }
+
+  16% {
+    opacity: 1;
+    transform: scale(1.32);
+  }
+
+  30% {
+    opacity: 0.86;
+    transform: scale(0.94);
+  }
+
+  44% {
+    opacity: 0.95;
+    transform: scale(1.1);
+  }
+
+  68% {
+    opacity: 0.28;
+    transform: scale(0.76);
   }
 }
 

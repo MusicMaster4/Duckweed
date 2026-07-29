@@ -45,6 +45,7 @@ const FALLBACKS: Record<AgentId, { name: string; description: string }[]> = {
     { name: "/init", description: "Create or refresh the project memory file" },
     { name: "/mcp", description: "Manage MCP servers" },
     { name: "/agents", description: "Manage subagents" },
+    { name: "/goal", description: "Set or view a goal for a long-running task" },
     { name: "/config", description: "Open configuration" },
     { name: "/rename", description: "Rename this session" },
     { name: "/doctor", description: "Diagnose the installation" },

@@ -7,6 +7,8 @@ import {
   logicalLineEnd,
   logicalLineStart,
   looksLikePrompt,
+  resolveBlockEnd,
+  wrappedCommandEnd,
 } from "./blocks";
 
 describe("looksLikePrompt", () => {
@@ -217,5 +219,33 @@ describe("BlockTracker reflow boundaries", () => {
     });
 
     expect(tracker.copyText()).toBe("long command\nresult");
+  });
+});
+
+describe("resolveBlockEnd", () => {
+  test("uses the next block start after a narrower reflow inserts rows", () => {
+    // The old end marker stayed at 8, but the wrapped output now reaches 11.
+    expect(resolveBlockEnd(4, 12, 8, () => 30)).toBe(11);
+  });
+
+  test("uses the next block start after a wider reflow disposes the end marker", () => {
+    expect(resolveBlockEnd(4, 9, null, () => 30)).toBe(8);
+  });
+
+  test("keeps marker and live fallbacks for the final block", () => {
+    expect(resolveBlockEnd(4, null, 8, () => 30)).toBe(8);
+    expect(resolveBlockEnd(4, null, null, () => 12)).toBe(12);
+  });
+});
+
+describe("wrappedCommandEnd", () => {
+  test("covers every continuation row created by terminal reflow", () => {
+    const wrapped = new Set([6, 7]);
+    expect(wrappedCommandEnd((y) => wrapped.has(y), 5, 12)).toBe(7);
+  });
+
+  test("stops before output and never passes the block boundary", () => {
+    expect(wrappedCommandEnd((y) => y === 6, 5, 5)).toBe(5);
+    expect(wrappedCommandEnd((y) => y === 6, 5, 9)).toBe(6);
   });
 });

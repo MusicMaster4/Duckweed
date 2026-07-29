@@ -668,6 +668,35 @@ function ActivityPulse({
   );
 }
 
+/**
+ * Inline continuity marker for the gap after an interim assistant update.
+ * It is driven by the live turn status and is replaced as soon as fresh
+ * reasoning or tool activity reaches the transcript.
+ */
+export function StillWorking({
+  variant,
+  clusterId,
+}: {
+  variant: ActivityVariant;
+  clusterId: string;
+}) {
+  return (
+    <div
+      className="agent-activity-cluster agent-still-working"
+      data-variant={variant}
+      role="status"
+      aria-label="Still working"
+    >
+      <div className="agent-activity-history is-thinking is-active">
+        <div className="agent-activity-history-head">
+          <ActivityPulse active clusterId={clusterId} />
+          <span className="agent-activity-history-label">Still working</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function activityStatus(item: ToolItem): string {
   if (item.status === "error") return "Failed";
   if (item.status === "done") return "Completed";

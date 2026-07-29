@@ -9,6 +9,7 @@ import {
   PlanTracker,
   ProviderEmpty,
   shortAssistantUpdatesAsThinking,
+  StillWorking,
   type ExperienceProps,
 } from "./OfficialShared";
 
@@ -60,6 +61,20 @@ export function ChatGPTExperience(props: ExperienceProps) {
     status === "working" && latestUserIndex >= 0 && !hasActivityAfterPrompt;
   const liveUserId =
     latestUserIndex >= 0 ? transcriptItems[latestUserIndex]?.id : "session-start";
+  let latestLiveContent: (typeof transcriptItems)[number] | undefined;
+  for (let index = transcriptItems.length - 1; index > latestUserIndex; index -= 1) {
+    const item = transcriptItems[index];
+    if (
+      item.kind === "assistant" ||
+      item.kind === "thinking" ||
+      item.kind === "tool"
+    ) {
+      latestLiveContent = item;
+      break;
+    }
+  }
+  const needsStillWorking =
+    status === "working" && latestLiveContent?.kind === "assistant";
 
   if (!started && status !== "error") {
     return (
@@ -146,6 +161,12 @@ export function ChatGPTExperience(props: ExperienceProps) {
             variant="chatgpt"
             working
             clusterId={`${termId}:live:${liveUserId}`}
+          />
+        )}
+        {needsStillWorking && (
+          <StillWorking
+            variant="chatgpt"
+            clusterId={`${termId}:still:${liveUserId}`}
           />
         )}
       </div>
