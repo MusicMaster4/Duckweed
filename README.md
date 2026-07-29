@@ -40,7 +40,8 @@ it.
 <a href="#what-it-does">What it does</a> ·
 <a href="#agent-usage">Agent usage</a> ·
 <a href="#keyboard-shortcuts">Shortcuts</a> ·
-<a href="#building-from-source">Build from source</a>
+<a href="#building-from-source">Build from source</a> ·
+<a href="#contributing">Contributing</a>
 
 </div>
 
@@ -321,6 +322,14 @@ Grouping raw-mode input the same way still needs OSC 133 shell integration.
 
 Issues, ideas, and pull requests are welcome. For bug reports, please include the
 operating system, shell, reproduction steps, and relevant terminal output.
+
+Most contributions branch from `testing` and open a pull request back into
+`testing`. A successful code merge publishes a beta for validation. Maintainers
+later promote tested changes from `testing` to `main`, which publishes the
+stable release.
+
+Read [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, required checks,
+branch conventions, pull request expectations, and the complete release flow.
 
 ## License
 

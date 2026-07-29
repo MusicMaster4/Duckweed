@@ -27,6 +27,7 @@ function blank(): AgentSessionState {
     effort: null,
     models: [],
     sessionId: null,
+    goal: null,
     items: [],
     pending: [],
     permission: null,
@@ -80,6 +81,19 @@ describe("resumed", () => {
       kind: "notice",
       text: "Resumed the previous session",
     });
+  });
+});
+
+describe("goal state", () => {
+  test("stores provider updates and clears stale goals with a replacement transcript", () => {
+    let state = applyEvent(blank(), {
+      type: "goal",
+      goal: { objective: "Ship the release", status: "active" },
+    });
+    expect(state.goal).toEqual({ objective: "Ship the release", status: "active" });
+
+    state = applyEvent(state, { type: "transcript" });
+    expect(state.goal).toBeNull();
   });
 });
 

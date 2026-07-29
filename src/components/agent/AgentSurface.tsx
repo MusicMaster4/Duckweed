@@ -24,6 +24,7 @@ import {
 import { workStatusLabel } from "../../lib/agentWorkDuration";
 import { confirmCloseRunning } from "../../lib/confirmClose";
 import { AgentComposer } from "./AgentComposer";
+import { AgentGoalIndicator } from "./AgentGoalIndicator";
 import { AgentImageAttachments } from "./AgentImageAttachments";
 import { AgentPermission } from "./AgentPermission";
 import { AgentProviderIcon } from "./AgentProviderIcon";
@@ -319,6 +320,7 @@ export function AgentSurface({ termId, active, onClose }: Props) {
             />
           </span>
         )}
+        <AgentGoalIndicator goal={session.goal} />
         {/* Keep history discoverable on every resumable provider. Mid-turn it
             stays visible but disabled because swapping sessions would strand
             the work currently in flight. */}

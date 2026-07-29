@@ -9,6 +9,7 @@ import {
   PlanTracker,
   ProviderEmpty,
   shortAssistantUpdatesAsThinking,
+  StillWorking,
   type ExperienceProps,
 } from "./OfficialShared";
 
@@ -58,6 +59,20 @@ export function ChatGPTExperience(props: ExperienceProps) {
   });
   const needsEmptyLiveTrace =
     status === "working" && latestUserIndex >= 0 && !hasActivityAfterPrompt;
+  let latestLiveContent: (typeof transcriptItems)[number] | undefined;
+  for (let index = transcriptItems.length - 1; index > latestUserIndex; index -= 1) {
+    const item = transcriptItems[index];
+    if (
+      item.kind === "assistant" ||
+      item.kind === "thinking" ||
+      item.kind === "tool"
+    ) {
+      latestLiveContent = item;
+      break;
+    }
+  }
+  const needsStillWorking =
+    status === "working" && latestLiveContent?.kind === "assistant";
 
   if (!started && status !== "error") {
     return (
@@ -140,6 +155,7 @@ export function ChatGPTExperience(props: ExperienceProps) {
         {needsEmptyLiveTrace && (
           <ActivityHistory activities={[]} variant="chatgpt" working />
         )}
+        {needsStillWorking && <StillWorking variant="chatgpt" />}
       </div>
     </div>
   );

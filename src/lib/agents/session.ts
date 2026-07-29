@@ -592,6 +592,7 @@ export async function start(
       // with their known aliases so the picker works before the first turn.
       models: fallbackModels(launch.agent, launch.program),
       sessionId: null,
+      goal: null,
       items: [],
       pending: [],
       permission: null,

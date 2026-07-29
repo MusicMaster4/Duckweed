@@ -8,12 +8,14 @@ import {
   type AdapterContext,
   type AgentAdapter,
 } from "../adapter";
+import { goalAfterCommand, goalAfterProviderText } from "../goal";
 import type { AgentLaunch } from "../launch";
 import {
   makeChange,
   toolKind,
   type AgentAccessMode,
   type AgentFileChange,
+  type AgentGoal,
   type AgentPrompt,
   type AgentQuestionItem,
   type ToolStatus,
@@ -190,6 +192,9 @@ export function createClaudeAdapter(): AgentAdapter {
    * final result. Keep one visible error for the submitted turn.
    */
   const seenTurnErrors = new Set<string>();
+  let currentGoal: AgentGoal | null = null;
+  let goalResponsePending = false;
+  let goalBeforeCommand: AgentGoal | null = null;
 
   const blockId = (index: number) => `m${messageSeq}-b${index}`;
 
@@ -328,6 +333,21 @@ export function createClaudeAdapter(): AgentAdapter {
         .join("\n")
         .trim();
       if (text) {
+        if (goalResponsePending) {
+          const goal = goalAfterProviderText(currentGoal, text);
+          if (goal !== undefined) {
+            currentGoal = goal;
+            ctx.emit({ type: "goal", goal });
+          } else if (
+            /unknown command|invalid argument|goals? (?:are|is) disabled|could not|cannot|failed/i.test(
+              text,
+            )
+          ) {
+            currentGoal = goalBeforeCommand;
+            ctx.emit({ type: "goal", goal: currentGoal });
+          }
+          goalResponsePending = false;
+        }
         // Keep the header in sync when the CLI confirms an effort change
         // (or refuses ultracode / a bad level).
         const setEffort = /Set effort level to (\w+)/i.exec(text);
@@ -471,8 +491,13 @@ export function createClaudeAdapter(): AgentAdapter {
     const cost = frame.total_cost_usd;
     if (typeof cost === "number") ctx.emit({ type: "usage", usage: { costUsd: cost } });
     if (frame.is_error === true) {
+      if (goalResponsePending) {
+        currentGoal = goalBeforeCommand;
+        ctx.emit({ type: "goal", goal: currentGoal });
+      }
       emitTurnError(asString(frame.result) ?? "The turn failed.", ctx);
     }
+    goalResponsePending = false;
     ctx.emit({ type: "turn-end" });
   }
 
@@ -556,6 +581,17 @@ export function createClaudeAdapter(): AgentAdapter {
     const space = text.search(/\s/);
     const name = (space < 0 ? text : text.slice(0, space)).toLowerCase();
     const arg = space < 0 ? "" : text.slice(space + 1).trim();
+
+    if (name === "/goal") {
+      goalBeforeCommand = currentGoal;
+      goalResponsePending = true;
+      const goal = goalAfterCommand(currentGoal, text);
+      if (goal !== undefined) {
+        currentGoal = goal;
+        ctx.emit({ type: "goal", goal });
+      }
+      return "prompt";
+    }
 
     if (name === "/model" && arg) {
       // A structured switch, so the header can trust what it shows. The CLI

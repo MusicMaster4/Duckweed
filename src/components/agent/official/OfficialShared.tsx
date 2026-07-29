@@ -497,9 +497,21 @@ export function PlanTracker({
       {open && (
         <ol className="official-plan-steps">
           {item.steps.map((step, index) => (
-            <li key={`${index}-${step.text}`} className={`is-${step.status}`}>
+            <li
+              key={`${index}-${step.text}`}
+              className={`is-${step.status}`}
+              aria-current={step.status === "running" ? "step" : undefined}
+            >
               <span className="official-plan-step-mark" aria-hidden="true">
-                {step.status === "done" ? "✓" : step.status === "running" ? "" : index + 1}
+                {step.status === "done" ? (
+                  "✓"
+                ) : step.status === "running" ? (
+                  <svg className="official-plan-running-arrow" viewBox="0 0 14 10">
+                    <path d="M1.5 5h10M8 1.75 11.5 5 8 8.25" />
+                  </svg>
+                ) : (
+                  index + 1
+                )}
               </span>
               <span>{step.text}</span>
             </li>
@@ -620,6 +632,29 @@ function ActivityPulse({ active }: { active: boolean }) {
         );
       })}
     </span>
+  );
+}
+
+/**
+ * Inline continuity marker for the gap after an interim assistant update.
+ * It is driven by the live turn status and is replaced as soon as fresh
+ * reasoning or tool activity reaches the transcript.
+ */
+export function StillWorking({ variant }: { variant: ActivityVariant }) {
+  return (
+    <div
+      className="agent-activity-cluster agent-still-working"
+      data-variant={variant}
+      role="status"
+      aria-label="Still working"
+    >
+      <div className="agent-activity-history is-thinking is-active">
+        <div className="agent-activity-history-head">
+          <ActivityPulse active />
+          <span className="agent-activity-history-label">Still working</span>
+        </div>
+      </div>
+    </div>
   );
 }
 

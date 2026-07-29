@@ -1,7 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import type { AgentId, AgentItem, AgentSessionState } from "../../../lib/agents/types";
+import type {
+  AgentId,
+  AgentItem,
+  AgentSessionState,
+  PlanItem,
+} from "../../../lib/agents/types";
 import { AgentProviderIcon } from "../AgentProviderIcon";
 import { CursorExperience } from "../provider/CursorExperience";
 import { OpenCodeExperience } from "../provider/OpenCodeExperience";
@@ -13,6 +18,7 @@ import {
   activityGroups,
   AssistantMarkdown,
   continuedAssistantIds,
+  PlanTracker,
   ProviderEmpty,
   shortAssistantUpdatesAsThinking,
 } from "./OfficialShared";
@@ -79,6 +85,27 @@ function renderAgentActivity(agent: AgentId, items: AgentItem[]): string {
 }
 
 describe("official agent presentation", () => {
+  test("uses an animated arrow only for the running workflow step", () => {
+    const plan: PlanItem = {
+      kind: "plan",
+      id: "plan",
+      at: 1,
+      title: "Workflow",
+      steps: [
+        { text: "Completed task", status: "done" },
+        { text: "Active task", status: "running" },
+        { text: "Pending task", status: "pending" },
+      ],
+    };
+
+    const html = renderToStaticMarkup(<PlanTracker item={plan} variant="codex" />);
+
+    expect(html).toContain('class="official-plan-running-arrow"');
+    expect(html).toContain('aria-current="step"');
+    expect(html.match(/official-plan-running-arrow/g)?.length).toBe(1);
+    expect(html).toContain("✓");
+  });
+
   test("offers a persistent copy action for user messages in every custom UI", () => {
     const prompt: AgentItem = {
       kind: "user",
@@ -749,6 +776,63 @@ describe("official agent presentation", () => {
     expect(presented[2]).toMatchObject({ id: "long", kind: "assistant" });
   });
 
+  test("shows Still working after a long Codex update until fresh activity arrives", () => {
+    const interimItems: AgentItem[] = [
+      { kind: "user", id: "user", at: 1, text: "Inspect" },
+      {
+        kind: "thinking",
+        id: "thinking-before-update",
+        at: 2,
+        text: "Reviewing the existing documentation.",
+        streaming: false,
+      },
+      {
+        kind: "assistant",
+        id: "long-update",
+        at: 3,
+        text: `I found the relevant section and I am continuing with the remaining checks. ${"x".repeat(190)}`,
+        streaming: false,
+      },
+    ];
+
+    const waitingHtml = renderAgentActivity("codex", interimItems);
+
+    expect(waitingHtml).toContain("I found the relevant section");
+    expect(waitingHtml).toContain("agent-still-working");
+    expect(waitingHtml).toContain(">Still working<");
+    expect(waitingHtml).toContain("agent-activity-pulse is-active");
+    expect(waitingHtml).not.toContain("Reviewing the existing documentation.");
+
+    const resumedHtml = renderAgentActivity("codex", [
+      ...interimItems,
+      {
+        kind: "thinking",
+        id: "thinking-after-update",
+        at: 4,
+        text: "Checking the remaining references.",
+        streaming: true,
+      },
+      {
+        kind: "tool",
+        id: "tool-after-update",
+        at: 5,
+        callId: "call-after-update",
+        name: "Search",
+        tool: "search",
+        title: "Find remaining references",
+        status: "running",
+        command: null,
+        output: "",
+        changes: [],
+      },
+    ]);
+
+    expect(resumedHtml).not.toContain("agent-still-working");
+    expect(resumedHtml).not.toContain(">Still working<");
+    expect(resumedHtml).toContain("Checking the remaining references.");
+    expect(resumedHtml).toContain("Find remaining references");
+  });
+
   test("keeps a completed turn's final response even when it is short", () => {
     const items: AgentItem[] = [
       { kind: "user", id: "user", at: 1, text: "Inspect" },
@@ -822,6 +906,7 @@ describe("official agent presentation", () => {
       effort: null,
       models: [],
       sessionId: null,
+      goal: null,
       items: [],
       pending: [],
       permission: null,

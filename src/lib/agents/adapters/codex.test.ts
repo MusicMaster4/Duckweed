@@ -286,6 +286,10 @@ describe("codex adapter", () => {
       tone: "info",
       text: "Goal active.\nObjective: finish the migration\nTokens: 120 of 1,000.\nTime used: 1 min.",
     });
+    expect(h.state().goal).toEqual({
+      objective: "finish the migration",
+      status: "active",
+    });
 
     h.adapter.command?.("/goal", h.ctx);
     const get = h.sent.at(-1) as { id: number };
@@ -299,6 +303,7 @@ describe("codex adapter", () => {
     expect(h.state().items.filter((item) => item.kind === "notice").at(-1)).toMatchObject({
       text: "No goal is set for this thread.",
     });
+    expect(h.state().goal).toBeNull();
 
     for (const [command, status] of [
       ["/goal pause", "paused"],
@@ -325,6 +330,7 @@ describe("codex adapter", () => {
       });
       await Promise.resolve();
       await Promise.resolve();
+      expect(h.state().goal?.status).toBe(status);
     }
 
     h.adapter.command?.("/goal clear", h.ctx);
@@ -339,6 +345,42 @@ describe("codex adapter", () => {
     expect(h.state().items.filter((item) => item.kind === "notice").at(-1)).toMatchObject({
       text: "Thread goal cleared.",
     });
+    expect(h.state().goal).toBeNull();
+  });
+
+  test("follows native goal lifecycle notifications", async () => {
+    const h = harness();
+    await h.handshake();
+
+    h.notify("thread/goal/updated", {
+      threadId: "thread_1",
+      goal: {
+        objective: "finish the migration",
+        status: "active",
+        tokenBudget: null,
+        tokensUsed: 0,
+        timeUsedSeconds: 0,
+      },
+    });
+    expect(h.state().goal).toEqual({
+      objective: "finish the migration",
+      status: "active",
+    });
+
+    h.notify("thread/goal/updated", {
+      threadId: "thread_1",
+      goal: {
+        objective: "finish the migration",
+        status: "complete",
+        tokenBudget: null,
+        tokensUsed: 240,
+        timeUsedSeconds: 12,
+      },
+    });
+    expect(h.state().goal?.status).toBe("complete");
+
+    h.notify("thread/goal/cleared", { threadId: "thread_1" });
+    expect(h.state().goal).toBeNull();
   });
 
   test("supports inline goal edits and surfaces app-server goal errors", async () => {
@@ -496,6 +538,14 @@ describe("codex adapter", () => {
     h.notify("turn/started", {
       threadId: "thread_child",
       turn: { id: "turn_child", status: "inProgress", items: [] },
+    });
+    // Defense in depth for older/malformed app-server payloads: a child turn
+    // must not replace the already-active parent even without thread routing.
+    h.notify("turn/started", {
+      turn: { id: "turn_child_without_thread", status: "inProgress", items: [] },
+    });
+    h.notify("turn/completed", {
+      turn: { id: "turn_child_without_thread", status: "completed", items: [] },
     });
     h.notify("item/completed", {
       threadId: "thread_child",

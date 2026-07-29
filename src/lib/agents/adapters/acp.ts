@@ -8,8 +8,15 @@ import {
   type AdapterContext,
   type AgentAdapter,
 } from "../adapter";
+import { goalAfterCommand, goalAfterProviderText } from "../goal";
 import type { AgentLaunch } from "../launch";
-import { makeChange, toolKind, type AgentFileChange, type ToolStatus } from "../types";
+import {
+  makeChange,
+  toolKind,
+  type AgentFileChange,
+  type AgentGoal,
+  type ToolStatus,
+} from "../types";
 
 /**
  * Agent Client Protocol — the shared language of Cursor, Grok, and OpenCode.
@@ -98,6 +105,10 @@ export function createAcpAdapter(): AgentAdapter {
    */
   let activeContent: "assistant" | "thinking" | null = null;
   let assistantSegment = 0;
+  let currentGoal: AgentGoal | null = null;
+  let goalBeforeCommand: AgentGoal | null = null;
+  let goalResponsePending = false;
+  let goalResponseText = "";
   let thinkingSegment = 0;
   /** Permission id → the JSON-RPC request id ACP is waiting on. */
   const permissionRequests = new Map<string, string | number>();
@@ -515,6 +526,14 @@ export function createAcpAdapter(): AgentAdapter {
       case "agent_message_chunk": {
         const text = readContentText(update.content);
         if (text) {
+          if (goalResponsePending) {
+            goalResponseText += text;
+            const goal = goalAfterProviderText(currentGoal, goalResponseText);
+            if (goal !== undefined) {
+              currentGoal = goal;
+              ctx.emit({ type: "goal", goal });
+            }
+          }
           turnHadContent = true;
           ctx.emit({ type: "assistant-delta", id: contentId("assistant", ctx), text });
         }
@@ -665,7 +684,19 @@ export function createAcpAdapter(): AgentAdapter {
 
     // Advertised commands are the agent's own — it intercepts them when they
     // come back as prompt text (verified: instant, zero tokens).
-    if (advertised.has(name.slice(1))) return "prompt";
+    if (advertised.has(name.slice(1))) {
+      if (name === "/goal") {
+        goalBeforeCommand = currentGoal;
+        goalResponsePending = true;
+        goalResponseText = "";
+        const goal = goalAfterCommand(currentGoal, text);
+        if (goal !== undefined) {
+          currentGoal = goal;
+          ctx.emit({ type: "goal", goal });
+        }
+      }
+      return "prompt";
+    }
 
     ctx.emit({ type: "user", text });
 
@@ -838,6 +869,10 @@ export function createAcpAdapter(): AgentAdapter {
         .then((result) => {
           const stop = asString(result.stopReason);
           if (stop === "refusal") {
+            if (goalResponsePending) {
+              currentGoal = goalBeforeCommand;
+              ctx.emit({ type: "goal", goal: currentGoal });
+            }
             ctx.emit({ type: "notice", tone: "error", text: "The agent refused the request." });
           } else if (slashPending && !turnHadContent) {
             ctx.emit({
@@ -847,10 +882,18 @@ export function createAcpAdapter(): AgentAdapter {
             });
           }
           slashPending = false;
+          goalResponsePending = false;
+          goalResponseText = "";
           ctx.emit({ type: "turn-end" });
         })
         .catch((error: unknown) => {
           slashPending = false;
+          if (goalResponsePending) {
+            currentGoal = goalBeforeCommand;
+            ctx.emit({ type: "goal", goal: currentGoal });
+          }
+          goalResponsePending = false;
+          goalResponseText = "";
           const record = asRecord(error);
           ctx.emit({
             type: "notice",
@@ -872,6 +915,7 @@ export function createAcpAdapter(): AgentAdapter {
     resume: (id, ctx) => {
       if (!canLoadSession) return false;
       ctx.emit({ type: "transcript" });
+      currentGoal = null;
       loading = true;
       replayedUser = "";
       ctx.emit({ type: "status", status: "working" });

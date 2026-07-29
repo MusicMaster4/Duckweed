@@ -14,6 +14,7 @@ import {
   toolKind,
   type AgentAccessMode,
   type AgentFileChange,
+  type AgentGoalStatus,
   type ToolStatus,
 } from "../types";
 
@@ -113,7 +114,7 @@ interface Pending {
 
 interface CodexGoal {
   objective: string;
-  status: string;
+  status: AgentGoalStatus;
   tokenBudget: number | null;
   tokensUsed: number;
   timeUsedSeconds: number;
@@ -135,10 +136,17 @@ function readGoal(raw: unknown): CodexGoal | null {
   const goal = asRecord(raw);
   const objective = asString(goal?.objective);
   const status = asString(goal?.status);
-  if (!goal || objective === null || status === null) return null;
+  if (
+    !goal ||
+    objective === null ||
+    !status ||
+    !["active", "paused", "blocked", "usageLimited", "budgetLimited", "complete"].includes(status)
+  ) {
+    return null;
+  }
   return {
     objective,
-    status,
+    status: status as AgentGoalStatus,
     tokenBudget: typeof goal.tokenBudget === "number" ? goal.tokenBudget : null,
     tokensUsed: typeof goal.tokensUsed === "number" ? goal.tokensUsed : 0,
     timeUsedSeconds: typeof goal.timeUsedSeconds === "number" ? goal.timeUsedSeconds : 0,
@@ -211,12 +219,17 @@ export function createCodexAdapter(): AgentAdapter {
       return false;
     }
 
-    // A started event establishes the active turn, so there is no previous
-    // turn id to compare it with. Thread scoping above is sufficient.
-    if (method === "turn/started") return true;
-
     const turn = asRecord(params.turn);
     const notificationTurnId = asString(params.turnId) ?? asString(turn?.id);
+    if (method === "turn/started") {
+      // The root turn is always running before it can spawn a child. Never let
+      // a concurrent child start replace that root id, even if an older or
+      // malformed app-server payload omitted its threadId. Otherwise the
+      // child's later `turn/completed` looks like the parent handing control
+      // back and fires the completion sound/highlight early.
+      return !currentTurnId || notificationTurnId === currentTurnId;
+    }
+
     if (currentTurnId && notificationTurnId && notificationTurnId !== currentTurnId) {
       return false;
     }
@@ -522,6 +535,19 @@ export function createCodexAdapter(): AgentAdapter {
 
   function handleNotification(method: string, params: Record<string, unknown>, ctx: AdapterContext) {
     switch (method) {
+      case "thread/goal/updated": {
+        const goal = readGoal(params.goal);
+        if (goal) {
+          ctx.emit({
+            type: "goal",
+            goal: { objective: goal.objective, status: goal.status },
+          });
+        }
+        return;
+      }
+      case "thread/goal/cleared":
+        ctx.emit({ type: "goal", goal: null });
+        return;
       case "thread/started": {
         const thread = asRecord(params.thread);
         const id = asString(thread?.id);
@@ -694,6 +720,10 @@ export function createCodexAdapter(): AgentAdapter {
       .then((result) => {
         const goal = readGoal(result.goal);
         ctx.emit({
+          type: "goal",
+          goal: goal ? { objective: goal.objective, status: goal.status } : null,
+        });
+        ctx.emit({
           type: "notice",
           tone: "info",
           text: goal ? formatGoal(goal) : "No goal is set for this thread.",
@@ -712,6 +742,12 @@ export function createCodexAdapter(): AgentAdapter {
     void request(ctx, "thread/goal/set", { threadId, ...params })
       .then((result) => {
         const goal = readGoal(result.goal);
+        if (goal) {
+          ctx.emit({
+            type: "goal",
+            goal: { objective: goal.objective, status: goal.status },
+          });
+        }
         ctx.emit({
           type: "notice",
           tone: "info",
@@ -727,6 +763,7 @@ export function createCodexAdapter(): AgentAdapter {
     if (!threadId) return;
     void request(ctx, "thread/goal/clear", { threadId })
       .then((result) => {
+        if (result.cleared !== false) ctx.emit({ type: "goal", goal: null });
         ctx.emit({
           type: "notice",
           tone: "info",
@@ -990,6 +1027,7 @@ export function createCodexAdapter(): AgentAdapter {
      */
     resume: (sessionId, ctx) => {
       ctx.emit({ type: "status", status: "working" });
+      ctx.emit({ type: "goal", goal: null });
       return request(ctx, "thread/resume", { threadId: sessionId })
         .then((result) => {
           const thread = asRecord(result.thread) ?? result;
@@ -1004,6 +1042,17 @@ export function createCodexAdapter(): AgentAdapter {
             sessionId: asString(thread.sessionId) ?? threadId,
             ...(model ? { model } : {}),
           });
+          void request(ctx, "thread/goal/get", { threadId })
+            .then((goalResult) => {
+              const goal = readGoal(goalResult.goal);
+              ctx.emit({
+                type: "goal",
+                goal: goal ? { objective: goal.objective, status: goal.status } : null,
+              });
+            })
+            .catch(() => {
+              // Older Codex builds keep the indicator empty after resume.
+            });
           ctx.emit({ type: "status", status: "idle" });
           return true;
         })

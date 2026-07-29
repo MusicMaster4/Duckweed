@@ -618,6 +618,10 @@ describe("acp adapter", () => {
     // Advertised: the agent intercepts this when it arrives as prompt text.
     expect(h.adapter.command?.("/compact", h.ctx)).toBe("prompt");
     expect(h.adapter.command?.("/goal finish the migration", h.ctx)).toBe("prompt");
+    expect(h.state().goal).toEqual({
+      objective: "finish the migration",
+      status: "active",
+    });
 
     // Unknown: kept off the wire entirely — slash text would be chatted to
     // the model at full token price otherwise.

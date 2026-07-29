@@ -247,14 +247,20 @@ export class BlockTracker {
         prevEnd + 1,
       );
 
+      const commandEnd = wrappedCommandEnd(
+        (y) => Boolean(buf.getLine(y)?.isWrapped),
+        range.start,
+        range.end,
+      );
       const cmdRow = range.start - viewportY;
       const coverRow = coverStart - viewportY;
-      // Label tracks the command row only while that row is on-screen. Do not
-      // keep a lone hairline when the command has scrolled one row off (that
-      // used to paint a free-floating rule over whatever content sits at the
-      // top of the viewport).
-      const cmdOnScreen = cmdRow >= 0 && cmdRow < rows;
-      if (cmdOnScreen) {
+      const commandEndRow = commandEnd - viewportY;
+      // Keep the opaque command cover for every row occupied by a reflowed
+      // prompt+echo. A narrow pane can turn one command row into several; only
+      // covering the first row exposed the raw continuation and made adjacent
+      // chunks appear to overlap after a resize.
+      const headerOnScreen = coverRow < rows && commandEndRow >= 0;
+      if (headerOnScreen) {
         const coveredRows = cmdRow - coverRow;
         const y = offsetY + coverRow * cellHeight;
         block.cmdEl.hidden = false;
@@ -264,19 +270,21 @@ export class BlockTracker {
         );
         block.cmdEl.style.transform = `translate3d(0, ${y}px, 0)`;
         block.cmdEl.style.width = `${fullWidth}px`;
-        block.cmdEl.style.height = `${(coveredRows + 1) * cellHeight}px`;
+        block.cmdEl.style.height = `${(commandEnd - coverStart + 1) * cellHeight}px`;
         block.cmdEl.style.padding = `${coveredRows * cellHeight}px 6px 0`;
         block.cmdEl.style.lineHeight = `${cellHeight}px`;
 
         if (block.sepEl) {
-          // Hairline only in editor mode, only with its command label, and
-          // only inside the header band (true chunk boundary). The band stays
-          // transparent and gives the rule equal breathing room above and
-          // below without masking terminal text.
-          if (this.editorMode) {
+          // A separator is only valid while its exact boundary is visible.
+          // The command cover may still intersect the viewport after that
+          // boundary scrolls away, but the hairline must never float over the
+          // first visible output row.
+          const boundaryOnScreen = coverRow >= 0 && coverRow < rows;
+          if (this.editorMode && boundaryOnScreen) {
             const band = BLOCK_GAP * 2 + 1;
             block.sepEl.hidden = false;
-            block.sepEl.style.transform = `translate3d(0, ${y - band}px, 0)`;
+            const separatorY = snapToDevicePixel(y - band);
+            block.sepEl.style.transform = `translate3d(0, ${separatorY}px, 0)`;
             block.sepEl.style.width = `${fullWidth}px`;
             block.sepEl.style.height = `${band}px`;
           } else {
@@ -365,12 +373,10 @@ export class BlockTracker {
   range(block: CommandBlock): { start: number; end: number } | null {
     if (block.start.isDisposed || block.start.line < 0) return null;
     const start = block.start.line;
-    let end: number;
-    if (block.end && !block.end.isDisposed && block.end.line >= 0) {
-      end = block.end.line;
-    } else {
-      end = liveEndLine(this.term, start);
-    }
+    const nextStart = this.nextBlockStart(block);
+    const markerEnd =
+      block.end && !block.end.isDisposed && block.end.line >= 0 ? block.end.line : null;
+    let end = resolveBlockEnd(start, nextStart, markerEnd, () => liveEndLine(this.term, start));
     // Sealed markers can land on the idle `PS path>` (seal race / off-by-one).
     // Never treat shell chrome as part of the chunk — it shows through the soft
     // select overlay and looks like a raw terminal when you scroll a selection.
@@ -459,8 +465,14 @@ export class BlockTracker {
 
     const lines: string[] = [block.command];
     const buf = this.term.buffer.active;
-    // Skip the first row (prompt + echoed command) — we already have `command`.
-    for (let y = range.start + 1; y <= range.end; y++) {
+    // Skip every reflowed prompt+echo row. After a narrow resize the command
+    // can occupy several wrapped rows, but `command` already contains it once.
+    const commandEnd = wrappedCommandEnd(
+      (y) => Boolean(buf.getLine(y)?.isWrapped),
+      range.start,
+      range.end,
+    );
+    for (let y = commandEnd + 1; y <= range.end; y++) {
       const line = buf.getLine(y);
       if (!line) continue;
       lines.push(line.translateToString(true));
@@ -545,6 +557,21 @@ export class BlockTracker {
       if (range) return range.end;
     }
     return -1;
+  }
+
+  /**
+   * First valid block start after `block`. Start markers sit on the first row
+   * of a logical line, so xterm preserves them while wrapped continuation rows
+   * are inserted or removed during column reflow.
+   */
+  private nextBlockStart(block: CommandBlock): number | null {
+    const index = this.blocks.indexOf(block);
+    if (index < 0) return null;
+    for (let i = index + 1; i < this.blocks.length; i++) {
+      const marker = this.blocks[i].start;
+      if (!marker.isDisposed && marker.line > block.start.line) return marker.line;
+    }
+    return null;
   }
 
   // ---------------------------------------------------------------------------
@@ -805,6 +832,46 @@ export function foldOrphanPrompts(
     coverStart -= 1;
   }
   return coverStart;
+}
+
+/**
+ * Resolve a block's end without trusting a reflow-sensitive end marker.
+ *
+ * End markers attached to wrapped continuations can stay before newly
+ * inserted rows when a pane narrows, or be disposed when a pane widens. A
+ * following block start is therefore the authoritative sealed boundary.
+ */
+export function resolveBlockEnd(
+  start: number,
+  nextStart: number | null,
+  markerEnd: number | null,
+  liveEnd: () => number,
+): number {
+  if (nextStart !== null && nextStart > start) return nextStart - 1;
+  if (markerEnd !== null && markerEnd >= start) return markerEnd;
+  return Math.max(start, liveEnd());
+}
+
+/**
+ * Last row occupied by the command's logical line after xterm reflow.
+ *
+ * `isWrapped(y)` describes whether row `y` continues the row above it. The
+ * upper bound prevents malformed buffer state from consuming command output.
+ */
+export function wrappedCommandEnd(
+  isWrapped: (y: number) => boolean,
+  commandStart: number,
+  blockEnd: number,
+): number {
+  let end = commandStart;
+  while (end < blockEnd && isWrapped(end + 1)) end += 1;
+  return end;
+}
+
+/** Align a DOM hairline to the physical pixel grid after fractional resizes. */
+function snapToDevicePixel(value: number): number {
+  const dpr = window.devicePixelRatio || 1;
+  return Math.round(value * dpr) / dpr;
 }
 
 /**

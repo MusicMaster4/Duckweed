@@ -846,6 +846,20 @@ describe("claude adapter", () => {
     const h = harness();
     expect(h.adapter.command?.("/goal keep working until the tests pass", h.ctx)).toBe("prompt");
     expect(h.sent).toHaveLength(0);
+    expect(h.state().goal).toEqual({
+      objective: "keep working until the tests pass",
+      status: "active",
+    });
+
+    h.feed({
+      type: "assistant",
+      message: {
+        model: "<synthetic>",
+        role: "assistant",
+        content: [{ type: "text", text: "Goal completed." }],
+      },
+    });
+    expect(h.state().goal?.status).toBe("complete");
   });
 
   test("rejects an invalid effort locally instead of wasting a turn", () => {
