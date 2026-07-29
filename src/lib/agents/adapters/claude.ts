@@ -68,6 +68,8 @@ interface TrackedWorkflow {
   status: "launching" | "running" | "completed" | "failed" | "stopped";
 }
 
+type GoalToolAction = "create" | "get" | "update";
+
 const CLAUDE_TASK_TOOLS = new Set([
   "taskcreate",
   "taskupdate",
@@ -77,6 +79,67 @@ const CLAUDE_TASK_TOOLS = new Set([
 
 function isClaudeTaskTool(name: string): boolean {
   return CLAUDE_TASK_TOOLS.has(name.toLowerCase());
+}
+
+/**
+ * Goal controls can arrive as bare tool names or namespaced MCP tools such as
+ * `mcp__functions__create_goal`. Match the stable suffix so Claudex mirrors
+ * provider-owned goal state regardless of how the tool is exposed.
+ */
+function goalToolAction(name: string): GoalToolAction | null {
+  const normalized = name.toLowerCase().replace(/[^a-z0-9]+/g, "_");
+  for (const action of ["create", "get", "update"] as const) {
+    if (
+      normalized === `${action}_goal` ||
+      normalized.endsWith(`_${action}_goal`)
+    ) {
+      return action;
+    }
+  }
+  return null;
+}
+
+function goalStatus(value: unknown): AgentGoal["status"] | null {
+  const normalized = asString(value)
+    ?.trim()
+    .toLowerCase()
+    .replace(/[\s_-]+/g, "");
+  switch (normalized) {
+    case "active":
+      return "active";
+    case "paused":
+      return "paused";
+    case "blocked":
+      return "blocked";
+    case "complete":
+    case "completed":
+    case "achieved":
+      return "complete";
+    case "usagelimited":
+      return "usageLimited";
+    case "budgetlimited":
+      return "budgetLimited";
+    default:
+      return null;
+  }
+}
+
+function goalFromToolOutput(
+  current: AgentGoal | null,
+  output: string,
+): AgentGoal | null | undefined {
+  const root = asRecord(parseJson(output));
+  if (root && "goal" in root && root.goal === null) return null;
+  const record = asRecord(root?.goal) ?? root;
+  const objective = asString(record?.objective)?.trim() || null;
+  const status = goalStatus(record?.status);
+  if (record && (objective || status)) {
+    return {
+      objective: objective ?? current?.objective ?? null,
+      status: status ?? current?.status ?? "active",
+    };
+  }
+  return goalAfterProviderText(current, output);
 }
 
 function taskStatus(value: unknown): AgentPlanStep["status"] {
@@ -442,6 +505,8 @@ export function createClaudeAdapter(): AgentAdapter {
   const workflowsByCallId = new Map<string, TrackedWorkflow>();
   const workflowCallByTaskId = new Map<string, string>();
   let latestWorkflowCallId: string | null = null;
+  /** Goal state before an optimistic create/update, restored if the tool fails. */
+  const goalToolUndo = new Map<string, AgentGoal | null>();
   /** The foreground result arrived, but an async Workflow still owns the turn. */
   let turnResultPending = false;
   let messageSeq = 0;
@@ -646,8 +711,58 @@ export function createClaudeAdapter(): AgentAdapter {
     ctx.emit({ type: "notice", tone: "error", text });
   }
 
+  function trackGoalUse(
+    callId: string,
+    name: string,
+    input: Record<string, unknown>,
+    ctx: AdapterContext,
+  ): void {
+    const action = goalToolAction(name);
+    if (!action || action === "get" || goalToolUndo.has(callId)) return;
+    goalToolUndo.set(callId, currentGoal);
+
+    if (action === "create") {
+      const objective = asString(input.objective)?.trim();
+      if (!objective) return;
+      currentGoal = { objective, status: "active" };
+    } else {
+      const status = goalStatus(input.status);
+      if (!status) return;
+      currentGoal = { objective: currentGoal?.objective ?? null, status };
+    }
+    ctx.emit({ type: "goal", goal: currentGoal });
+  }
+
+  function trackGoalResult(
+    callId: string,
+    name: string,
+    output: string,
+    failed: boolean,
+    ctx: AdapterContext,
+  ): void {
+    const action = goalToolAction(name);
+    if (!action) return;
+
+    if (failed) {
+      if (goalToolUndo.has(callId)) {
+        currentGoal = goalToolUndo.get(callId) ?? null;
+        ctx.emit({ type: "goal", goal: currentGoal });
+      }
+      goalToolUndo.delete(callId);
+      return;
+    }
+
+    const reported = goalFromToolOutput(currentGoal, output);
+    if (reported !== undefined) {
+      currentGoal = reported;
+      ctx.emit({ type: "goal", goal: currentGoal });
+    }
+    goalToolUndo.delete(callId);
+  }
+
   /** Apply a settled tool input: title, command, diffs, and plans. */
   function settleTool(callId: string, name: string, input: Record<string, unknown>, ctx: AdapterContext) {
+    trackGoalUse(callId, name, input, ctx);
     if (name.toLowerCase() === "todowrite") {
       const steps = planFrom(input);
       if (steps.length) ctx.emit({ type: "plan", planType: "tasks", steps });
@@ -1038,6 +1153,13 @@ export function createClaudeAdapter(): AgentAdapter {
       }
       trackTaskResult(
         ROOT_TASK_SCOPE,
+        callId,
+        known?.name ?? "tool",
+        output,
+        failed,
+        ctx,
+      );
+      trackGoalResult(
         callId,
         known?.name ?? "tool",
         output,

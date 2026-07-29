@@ -1412,6 +1412,94 @@ export const meta = {
     expect(h.state().goal).toBeNull();
   });
 
+  test("mirrors Claudex goal tools into the shared header state", () => {
+    const h = harness({ program: "claudex" });
+    h.feed({
+      type: "assistant",
+      message: {
+        content: [
+          {
+            type: "tool_use",
+            id: "goal-create-1",
+            name: "mcp__functions__create_goal",
+            input: { objective: "Ship the session parser safely" },
+          },
+        ],
+      },
+    });
+
+    expect(h.state().goal).toEqual({
+      objective: "Ship the session parser safely",
+      status: "active",
+    });
+
+    h.feed({
+      type: "user",
+      message: {
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "goal-create-1",
+            content:
+              '{"goal":{"objective":"Ship the session parser safely","status":"active"}}',
+          },
+        ],
+      },
+    });
+    h.feed({
+      type: "assistant",
+      message: {
+        content: [
+          {
+            type: "tool_use",
+            id: "goal-update-1",
+            name: "update_goal",
+            input: { status: "blocked" },
+          },
+        ],
+      },
+    });
+
+    expect(h.state().goal).toEqual({
+      objective: "Ship the session parser safely",
+      status: "blocked",
+    });
+  });
+
+  test("restores the previous goal when a Claudex goal tool fails", () => {
+    const h = harness({ program: "claudex" });
+    h.feed({
+      type: "assistant",
+      message: {
+        content: [
+          {
+            type: "tool_use",
+            id: "goal-create-failed",
+            name: "create_goal",
+            input: { objective: "A goal that will be rejected" },
+          },
+        ],
+      },
+    });
+    expect(h.state().goal?.objective).toBe("A goal that will be rejected");
+
+    h.feed({
+      type: "user",
+      message: {
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "goal-create-failed",
+            content: "Goal creation failed",
+            is_error: true,
+          },
+        ],
+      },
+    });
+
+    expect(h.state().goal).toBeNull();
+  });
+
   test("rejects an invalid effort locally instead of wasting a turn", () => {
     const h = harness();
     expect(h.adapter.command?.("/effort ludicrous", h.ctx)).toBe("handled");
