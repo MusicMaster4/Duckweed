@@ -9,7 +9,13 @@ import {
   type AgentAdapter,
 } from "../adapter";
 import type { AgentLaunch } from "../launch";
-import { makeChange, toolKind, type AgentFileChange, type ToolStatus } from "../types";
+import {
+  makeChange,
+  toolKind,
+  type AgentFileChange,
+  type SubagentMeta,
+  type ToolStatus,
+} from "../types";
 
 /**
  * Agent Client Protocol — the shared language of Cursor, Grok, and OpenCode.
@@ -84,6 +90,46 @@ function readContentText(value: unknown): string {
   return inner ? (asString(inner.text) ?? "") : "";
 }
 
+function lastLine(text: string): string | null {
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  return lines.at(-1) ?? null;
+}
+
+/** Lift task-like raw input without inventing a thread ACP never reported. */
+function readSubagentMeta(
+  title: string | null,
+  input: Record<string, unknown> | null,
+): SubagentMeta | null {
+  if (!input) return null;
+  const prompt = asString(input.prompt)?.trim();
+  const description = asString(input.description)?.trim();
+  const role =
+    asString(input.subagent_type)?.trim() ||
+    asString(input.agent)?.trim() ||
+    asString(input.agent_name)?.trim() ||
+    asString(input.agentName)?.trim();
+  const rawTool =
+    asString(input.tool)?.trim() ||
+    asString(input.tool_name)?.trim() ||
+    asString(input.toolName)?.trim();
+  const taskShaped =
+    (rawTool ? toolKind(rawTool) === "task" : false) ||
+    Boolean(role) ||
+    Boolean(prompt && description);
+  if (!taskShaped) return null;
+  const label = description || role || title?.trim() || prompt || "Subagent";
+  const model = asString(input.model)?.trim();
+  return {
+    label: oneLine(label, 80),
+    ...(role ? { role } : {}),
+    ...(prompt ? { prompt } : {}),
+    ...(model ? { model } : {}),
+  };
+}
+
 export function createAcpAdapter(): AgentAdapter {
   let nextId = 1;
   const pending = new Map<number, Pending>();
@@ -103,6 +149,8 @@ export function createAcpAdapter(): AgentAdapter {
   const permissionRequests = new Map<string, string | number>();
   /** Tool calls whose content we have already seen, to merge partial updates. */
   const toolTitles = new Map<string, string>();
+  /** ACP updates omit raw input, so remember which calls were delegated work. */
+  const taskCalls = new Set<string>();
   /**
    * Slash commands the agent advertised, without the leading slash. Only
    * these may go out as prompt text — anything else slash-shaped would be
@@ -542,6 +590,10 @@ export function createAcpAdapter(): AgentAdapter {
         const { text, changes } = readToolContent(asArray(update.content));
         const name = title ?? toolTitles.get(callId) ?? "tool";
         const acpKind = asString(update.kind);
+        const taskMeta = readSubagentMeta(title, rawInput);
+        if (taskMeta) taskCalls.add(callId);
+        const isTask = taskCalls.has(callId);
+        const activity = isTask && text ? lastLine(text) : null;
         ctx.emit({
           type: "tool",
           callId,
@@ -549,12 +601,24 @@ export function createAcpAdapter(): AgentAdapter {
           // family from a frame that omits `kind` would downgrade a known
           // tool to "other" halfway through the call.
           ...(title ? { name: oneLine(name, 40) } : {}),
-          ...(acpKind ? { tool: toolKind(name, acpKind) } : {}),
+          ...(isTask
+            ? { tool: "task" as const }
+            : acpKind
+              ? { tool: toolKind(name, acpKind) }
+              : {}),
           ...(title ? { title: oneLine(title) } : {}),
           ...(status && ACP_STATUS[status] ? { status: ACP_STATUS[status] } : {}),
           ...(command ? { command } : {}),
           ...(text ? { output: text } : {}),
           ...(changes.length ? { changes } : {}),
+          ...(isTask
+            ? {
+                subagent: {
+                  ...taskMeta,
+                  ...(activity ? { activity: oneLine(activity) } : {}),
+                },
+              }
+            : {}),
         });
         return;
       }

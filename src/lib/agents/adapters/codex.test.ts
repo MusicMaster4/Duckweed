@@ -343,6 +343,13 @@ describe("codex adapter", () => {
       status: "running",
       title: "Spawned subagent: Inspect the parser tests",
       output: expect.stringContaining("thread_child · running · Reading tests"),
+      subagent: {
+        label: "Inspect the parser tests",
+        threadId: "thread_child",
+        model: "gpt-5.6-sol",
+        prompt: "Inspect the parser tests",
+        activity: "Reading tests",
+      },
     });
 
     h.notify("item/completed", {
@@ -368,6 +375,9 @@ describe("codex adapter", () => {
       tool: "task",
       status: "done",
       output: expect.stringContaining("thread_child · completed · Found the failing case"),
+      subagent: expect.objectContaining({
+        activity: "Found the failing case",
+      }),
     });
   });
 

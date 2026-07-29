@@ -272,6 +272,115 @@ describe("claude adapter", () => {
     });
   });
 
+  test("lifts Agent identity and prompt into structured subagent metadata", () => {
+    const h = harness();
+    h.feed({
+      type: "assistant",
+      message: {
+        content: [
+          {
+            type: "tool_use",
+            id: "task-1",
+            name: "Agent",
+            input: {
+              description: "Inspect parser tests",
+              subagent_type: "Explore",
+              prompt: "Find the fixture that breaks the parser",
+              model: "haiku",
+            },
+          },
+        ],
+      },
+    });
+
+    expect(h.state().items[0]).toMatchObject({
+      kind: "tool",
+      tool: "task",
+      title: "Inspect parser tests",
+      subagent: {
+        label: "Inspect parser tests",
+        role: "Explore",
+        prompt: "Find the fixture that breaks the parser",
+        model: "haiku",
+      },
+    });
+  });
+
+  test("attributes complete child messages and tools through parent_tool_use_id", () => {
+    const h = harness();
+    h.feed({
+      type: "assistant",
+      message: {
+        content: [
+          {
+            type: "tool_use",
+            id: "parent-task",
+            name: "Agent",
+            input: {
+              description: "Inspect parser tests",
+              prompt: "Find the failing parser fixture",
+            },
+          },
+        ],
+      },
+    });
+    h.feed({
+      type: "assistant",
+      parent_tool_use_id: "parent-task",
+      message: {
+        id: "child-message",
+        content: [
+          { type: "text", text: "I am checking the parser fixtures." },
+          {
+            type: "tool_use",
+            id: "child-read",
+            name: "Read",
+            input: { file_path: "tests/parser.test.ts" },
+          },
+        ],
+      },
+    });
+    h.feed({
+      type: "user",
+      parent_tool_use_id: "parent-task",
+      message: {
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "child-read",
+            content: "Found the legacy fixture",
+            is_error: false,
+          },
+        ],
+      },
+    });
+
+    expect(h.state().items).toHaveLength(1);
+    expect(h.state().items[0]).toMatchObject({
+      kind: "tool",
+      callId: "parent-task",
+      tool: "task",
+      subagent: {
+        activity: "Found the legacy fixture",
+        items: [
+          {
+            kind: "assistant",
+            text: "I am checking the parser fixtures.",
+            streaming: false,
+          },
+          {
+            kind: "tool",
+            callId: "child-read",
+            tool: "read",
+            title: "Read · tests/parser.test.ts",
+            status: "done",
+            output: "Found the legacy fixture",
+          },
+        ],
+      },
+    });
+  });
+
   test("turns an Edit tool into a file change with counted lines", () => {
     const h = harness();
     h.feed({

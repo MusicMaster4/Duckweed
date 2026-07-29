@@ -334,8 +334,9 @@ export function createCodexAdapter(): AgentAdapter {
           .map((entry) => asString(entry) ?? "")
           .filter(Boolean);
         const states = asRecord(item.agentsStates);
-        const stateLines = states
-          ? Object.entries(states).map(([agentId, raw]) => {
+        const stateEntries = states ? Object.entries(states) : [];
+        const stateLines = stateEntries.length
+          ? stateEntries.map(([agentId, raw]) => {
               const state = asRecord(raw);
               const agentStatus = asString(state?.status) ?? "unknown";
               const message = asString(state?.message);
@@ -362,6 +363,18 @@ export function createCodexAdapter(): AgentAdapter {
         ]
           .filter(Boolean)
           .join("\n");
+        const primaryStateRaw =
+          receiverIds
+            .map((receiverId) => asRecord(states?.[receiverId]))
+            .find((state) => state !== null) ??
+          asRecord(stateEntries[0]?.[1]);
+        const primaryState = asString(primaryStateRaw?.status);
+        const primaryMessage = asString(primaryStateRaw?.message);
+        const activity =
+          primaryMessage?.trim() ||
+          (primaryState
+            ? `Status: ${primaryState.replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase()}`
+            : "");
         ctx.emit({
           type: "tool",
           callId: id,
@@ -370,6 +383,13 @@ export function createCodexAdapter(): AgentAdapter {
           title: prompt ? `${operation}: ${oneLine(prompt)}` : operation,
           status: COLLAB_STATUS[status] ?? (settled ? "done" : "running"),
           ...(detail ? { output: detail } : {}),
+          subagent: {
+            label: prompt ? oneLine(prompt, 80) : operation,
+            ...(receiverIds.length === 1 ? { threadId: receiverIds[0] } : {}),
+            ...(model ? { model } : {}),
+            ...(prompt ? { prompt } : {}),
+            ...(activity ? { activity: oneLine(activity) } : {}),
+          },
         });
         return;
       }
@@ -390,6 +410,12 @@ export function createCodexAdapter(): AgentAdapter {
           ]
             .filter(Boolean)
             .join("\n"),
+          subagent: {
+            label: agentPath ? oneLine(agentPath, 80) : "Subagent activity",
+            ...(agentPath ? { role: agentPath } : {}),
+            ...(agentThreadId ? { threadId: agentThreadId } : {}),
+            activity: kind.replace(/([a-z])([A-Z])/g, "$1 $2"),
+          },
         });
         return;
       }

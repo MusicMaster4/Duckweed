@@ -3,6 +3,7 @@ import { memo, useMemo, useState } from "react";
 import type { AgentItem, AgentPlanStep, ToolItem, ToolStatus } from "../../../lib/agents/types";
 import { AgentImageAttachments } from "../AgentImageAttachments";
 import { MessageCopyButton } from "../MessageCopyButton";
+import { useSubagentUi } from "../subagents/SubagentUiContext";
 import {
   ActivityHistory,
   activeAssistantId,
@@ -242,34 +243,31 @@ function OpenCodePlan({ steps }: { steps: AgentPlanStep[] }) {
 
 /** A turn OpenCode handed to another agent — its `task` calls. */
 function OpenCodeSubagent({ item, elapsed }: { item: ToolItem; elapsed: string | null }) {
-  const hasOutput = item.output.trim().length > 0;
-  const [open, setOpen] = useState(item.status === "error");
+  const { selectedCallId, selectSubagent } = useSubagentUi();
   const head = (
     <>
       <span className="oc-sub-bracket" aria-hidden="true">
         ⌈
       </span>
       <span className="oc-sub-title">{item.title}</span>
-      {hasOutput && <span className="oc-chevron" aria-hidden="true" data-open={open} />}
       <OpenCodeStatus status={item.status} elapsed={elapsed} />
     </>
   );
   return (
-    <div className={`oc-sub is-${item.status}`}>
-      {hasOutput ? (
-        <Disclosure
-          open={open}
-          onToggle={() => setOpen(!open)}
-          className="oc-sub-head"
-          panelClassName="oc-sub-panel"
-          head={head}
-          label={`Subagent: ${item.title}`}
-        >
-          <pre className="oc-output">{item.output}</pre>
-        </Disclosure>
-      ) : (
-        <div className="oc-sub-head is-static">{head}</div>
-      )}
+    <div
+      className={`oc-sub is-${item.status}${
+        selectedCallId === item.callId ? " is-selected" : ""
+      }`}
+      data-subagent-call-id={item.callId}
+    >
+      <button
+        type="button"
+        className="oc-sub-head"
+        onClick={() => selectSubagent(item.callId)}
+        aria-label={`Inspect subagent: ${item.title}`}
+      >
+        {head}
+      </button>
       <ChangeSet changes={item.changes} className="oc-changes" />
     </div>
   );

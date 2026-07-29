@@ -236,6 +236,52 @@ describe("acp adapter", () => {
     });
   });
 
+  test("enriches task-shaped ACP tools without inventing a child thread", async () => {
+    const h = harness();
+    await h.handshake();
+    h.update({
+      sessionUpdate: "tool_call",
+      toolCallId: "task_1",
+      title: "Delegate parser review",
+      kind: "other",
+      status: "in_progress",
+      rawInput: {
+        description: "Review parser compatibility",
+        prompt: "Check the old parser fixtures",
+        subagent_type: "Explore",
+        model: "fast",
+      },
+    });
+    h.update({
+      sessionUpdate: "tool_call_update",
+      toolCallId: "task_1",
+      status: "completed",
+      content: [
+        {
+          type: "content",
+          content: { type: "text", text: "Checked fixtures\nCompatibility passed" },
+        },
+      ],
+    });
+
+    expect(h.state().items[0]).toMatchObject({
+      kind: "tool",
+      tool: "task",
+      status: "done",
+      subagent: {
+        label: "Review parser compatibility",
+        role: "Explore",
+        prompt: "Check the old parser fixtures",
+        model: "fast",
+        activity: "Compatibility passed",
+      },
+    });
+    expect(
+      h.state().items[0].kind === "tool" &&
+        h.state().items[0].subagent?.threadId,
+    ).toBeUndefined();
+  });
+
   test("turns a diff content block into a file change", async () => {
     const h = harness();
     await h.handshake();

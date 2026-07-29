@@ -424,12 +424,28 @@
   text-transform: uppercase;
 }
 
-.official-plan-head strong {
+.official-plan-summary {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.official-plan-summary strong {
   min-width: 0;
   overflow: hidden;
   color: var(--text);
   font-size: 11.5px;
   font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.official-plan-summary small {
+  overflow: hidden;
+  color: var(--text-faint);
+  font-size: 9px;
+  font-weight: 400;
   text-overflow: ellipsis;
   white-space: nowrap;
 }

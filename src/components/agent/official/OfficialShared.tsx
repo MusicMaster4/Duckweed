@@ -15,6 +15,7 @@ import { AgentDiff } from "../AgentDiff";
 import { AgentImageAttachments } from "../AgentImageAttachments";
 import { MessageCopyButton } from "../MessageCopyButton";
 import { AgentProviderIcon } from "../AgentProviderIcon";
+import { useSubagentUi } from "../subagents/SubagentUiContext";
 import { preparingMessageFor } from "./preparingMessages";
 import { thinkingPulsePatternFor } from "./thinkingPulsePatterns";
 
@@ -466,9 +467,11 @@ function completedCount(steps: AgentPlanStep[]): number {
 export function PlanTracker({
   item,
   variant,
+  runningSubagents = 0,
 }: {
   item: PlanItem;
   variant: OfficialVariant | "cursor" | "opencode";
+  runningSubagents?: number;
 }) {
   const running = item.steps.find((step) => step.status === "running");
   const completed = completedCount(item.steps);
@@ -485,7 +488,17 @@ export function PlanTracker({
         aria-expanded={open}
       >
         <span className="official-plan-kicker">Workflow</span>
-        <strong>{running?.text ?? (completed === total ? "Tasks completed" : "Task plan")}</strong>
+        <span className="official-plan-summary">
+          <strong>
+            {running?.text ?? (completed === total ? "Tasks completed" : "Task plan")}
+          </strong>
+          {runningSubagents > 0 && (
+            <small>
+              {runningSubagents} running{" "}
+              {runningSubagents === 1 ? "subagent" : "subagents"}
+            </small>
+          )}
+        </span>
         <span className="official-plan-count">
           {completed}/{total}
         </span>
@@ -525,6 +538,8 @@ export function ToolActivity({
   variant: OfficialVariant | "cursor" | "opencode";
   compact?: boolean;
 }) {
+  const { selectedCallId, selectSubagent } = useSubagentUi();
+  const isSubagent = item.tool === "task";
   const hasOutput = item.output.trim().length > 0;
   const hasChanges = item.changes.length > 0;
   const expandable = hasOutput || hasChanges || Boolean(item.command);
@@ -548,15 +563,25 @@ export function ToolActivity({
   return (
     <section
       className={`official-tool official-tool--${variant} is-${item.status}${
-        item.tool === "task" ? " is-subagent" : ""
-      }${compact ? " is-compact" : ""}${open ? " is-open" : ""}`}
+        isSubagent ? " is-subagent" : ""
+      }${selectedCallId === item.callId ? " is-selected" : ""}${
+        compact ? " is-compact" : ""
+      }${open && !isSubagent ? " is-open" : ""}`}
+      {...(isSubagent ? { "data-subagent-call-id": item.callId } : {})}
     >
       <button
         type="button"
         className="official-tool-head"
-        onClick={() => expandable && setOpen((value) => !value)}
-        aria-expanded={expandable ? open : undefined}
-        disabled={!expandable}
+        onClick={() => {
+          if (isSubagent) {
+            selectSubagent(item.callId);
+          } else if (expandable) {
+            setOpen((value) => !value);
+          }
+        }}
+        aria-expanded={!isSubagent && expandable ? open : undefined}
+        aria-label={isSubagent ? `Inspect subagent: ${item.title}` : undefined}
+        disabled={!isSubagent && !expandable}
       >
         <span className="official-tool-mark">
           <ToolIcon kind={item.tool} />
@@ -575,9 +600,9 @@ export function ToolActivity({
           {item.status === "done" && <span className="official-tool-done">✓</span>}
           {item.status === "error" && <ToolErrorMark />}
         </span>
-        {expandable && <Chevron open={open} />}
+        {expandable && !isSubagent && <Chevron open={open} />}
       </button>
-      {open && (
+      {open && !isSubagent && (
         <div className="official-tool-body">
           {item.command && (
             <pre className="official-command">

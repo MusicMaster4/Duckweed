@@ -4,6 +4,7 @@ import type { AgentItem, ToolItem, ToolStatus } from "../../../lib/agents/types"
 import { AgentAsciiLoader } from "../AgentAsciiLoader";
 import { AgentImageAttachments } from "../AgentImageAttachments";
 import { MessageCopyButton } from "../MessageCopyButton";
+import { useSubagentUi } from "../subagents/SubagentUiContext";
 import {
   ActivityHistory,
   activeAssistantId,
@@ -157,32 +158,29 @@ function CursorTracker({ plan }: { plan: PlanSummary }) {
  * its own live marker, and the sub-agent's output folded behind it.
  */
 function CursorSubagent({ item, elapsed }: { item: ToolItem; elapsed: string | null }) {
-  const hasOutput = item.output.trim().length > 0;
-  const [open, setOpen] = useState(item.status === "error");
+  const { selectedCallId, selectSubagent } = useSubagentUi();
   const head = (
     <>
       <span className="cx-sub-tag">Subagent</span>
       <span className="cx-sub-title">{item.title}</span>
-      {hasOutput && <span className="cx-chevron" aria-hidden="true" data-open={open} />}
       <CursorStatus status={item.status} elapsed={elapsed} />
     </>
   );
   return (
-    <div className={`cx-sub is-${item.status}`}>
-      {hasOutput ? (
-        <Disclosure
-          open={open}
-          onToggle={() => setOpen(!open)}
-          className="cx-sub-head"
-          panelClassName="cx-sub-panel"
-          head={head}
-          label={`Subagent: ${item.title}`}
-        >
-          <pre className="cx-output">{item.output}</pre>
-        </Disclosure>
-      ) : (
-        <div className="cx-sub-head is-static">{head}</div>
-      )}
+    <div
+      className={`cx-sub is-${item.status}${
+        selectedCallId === item.callId ? " is-selected" : ""
+      }`}
+      data-subagent-call-id={item.callId}
+    >
+      <button
+        type="button"
+        className="cx-sub-head"
+        onClick={() => selectSubagent(item.callId)}
+        aria-label={`Inspect subagent: ${item.title}`}
+      >
+        {head}
+      </button>
       <ChangeSet changes={item.changes} className="cx-changes" />
     </div>
   );
@@ -335,6 +333,7 @@ const CursorNode = memo(function CursorNode({
 });
 
 export function CursorExperience({ session, items, className }: ProviderExperienceProps) {
+  const { selectSubagent } = useSubagentUi();
   const list = items ?? session.items;
   const plan = useMemo(() => planSummary(list), [list]);
   const activity = useMemo(() => activitySummary(list), [list]);
@@ -411,9 +410,21 @@ export function CursorExperience({ session, items, className }: ProviderExperien
               </span>
             )}
             {activity.subagents.length > 0 && (
-              <span className="cx-metric is-agent" title="Delegated turns">
+              <button
+                type="button"
+                className="cx-metric is-agent"
+                title="Inspect delegated turns"
+                onClick={() =>
+                  selectSubagent(
+                    activity.subagents.find(
+                      (subagent) =>
+                        subagent.status === "running" || subagent.status === "pending",
+                    )?.callId ?? activity.subagents[0].callId,
+                  )
+                }
+              >
                 {activity.subagents.length} sub
-              </span>
+              </button>
             )}
             {files > 0 && (
               <span className="cx-metric" title={activity.files.map(basename).join(", ")}>

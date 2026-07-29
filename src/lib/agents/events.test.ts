@@ -37,6 +37,95 @@ function blank(): AgentSessionState {
   };
 }
 
+describe("tool subagent metadata", () => {
+  test("creates and incrementally enriches one task row", () => {
+    let state = applyEvent(blank(), {
+      type: "tool",
+      callId: "child-1",
+      name: "Agent",
+      tool: "task",
+      title: "Inspect parser tests",
+      subagent: {
+        label: "Inspect parser tests",
+        role: "Explore",
+        threadId: "thread-child",
+      },
+    });
+    state = applyEvent(state, {
+      type: "tool",
+      callId: "child-1",
+      status: "done",
+      subagent: {
+        activity: "Found the failing fixture",
+      },
+    });
+
+    expect(state.items).toHaveLength(1);
+    expect(state.items[0]).toMatchObject({
+      kind: "tool",
+      status: "done",
+      subagent: {
+        label: "Inspect parser tests",
+        role: "Explore",
+        threadId: "thread-child",
+        activity: "Found the failing fixture",
+      },
+    });
+  });
+
+  test("upserts nested child activity without duplicating tool rows", () => {
+    let state = applyEvent(blank(), {
+      type: "tool",
+      callId: "parent",
+      name: "Agent",
+      tool: "task",
+      subagentItem: {
+        kind: "tool",
+        id: "child-tool",
+        at: 2,
+        callId: "read-1",
+        name: "Read",
+        tool: "read",
+        title: "Read parser tests",
+        status: "running",
+        command: null,
+        output: "",
+        changes: [],
+      },
+    });
+    state = applyEvent(state, {
+      type: "tool",
+      callId: "parent",
+      subagentItem: {
+        kind: "tool",
+        id: "child-tool",
+        at: 3,
+        callId: "read-1",
+        name: "Read",
+        tool: "read",
+        title: "Read parser tests",
+        status: "done",
+        command: null,
+        output: "fixture found",
+        changes: [],
+      },
+    });
+
+    expect(state.items[0]).toMatchObject({
+      kind: "tool",
+      subagent: {
+        items: [
+          {
+            id: "child-tool",
+            status: "done",
+            output: "fixture found",
+          },
+        ],
+      },
+    });
+  });
+});
+
 describe("resumed", () => {
   test("replaces the current pane with a restored transcript", () => {
     let state = applyEvent(blank(), { type: "user", text: "Current conversation" });

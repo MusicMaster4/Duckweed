@@ -16,6 +16,7 @@ import {
   type AgentFileChange,
   type AgentPrompt,
   type AgentQuestionItem,
+  type SubagentMeta,
   type ToolStatus,
 } from "../types";
 
@@ -76,10 +77,34 @@ function describeTool(name: string, input: Record<string, unknown>): string {
     }
     return null;
   };
+  if (toolKind(name) === "task") {
+    const label = first("description", "subagent_type", "name", "prompt");
+    return label ? oneLine(label) : "Subagent";
+  }
   const detail =
     first("command", "file_path", "path", "pattern", "query", "url", "description", "prompt") ??
     "";
   return detail ? `${name} · ${oneLine(detail)}` : name;
+}
+
+function subagentForTool(
+  name: string,
+  input: Record<string, unknown>,
+): SubagentMeta | undefined {
+  if (toolKind(name) !== "task") return undefined;
+  const description = asString(input.description)?.trim();
+  const role = asString(input.subagent_type)?.trim();
+  const prompt = asString(input.prompt)?.trim();
+  const label = description || role || asString(input.name)?.trim() || prompt;
+  const model = asString(input.model)?.trim();
+  const parentCallId = asString(input.parent_tool_use_id)?.trim();
+  return {
+    ...(label ? { label: oneLine(label, 80) } : {}),
+    ...(role ? { role } : {}),
+    ...(prompt ? { prompt } : {}),
+    ...(model ? { model } : {}),
+    ...(parentCallId ? { parentCallId } : {}),
+  };
 }
 
 /** File edits a tool call is making, as far as its input reveals them. */
@@ -164,6 +189,15 @@ export function createClaudeAdapter(): AgentAdapter {
   /** Content-block index → the item id the deltas belong to. */
   const blocks = new Map<number, { kind: "text" | "thinking" | "tool"; id: string }>();
   const tools = new Map<string, ToolCall>();
+  const nestedTools = new Map<
+    string,
+    {
+      name: string;
+      title: string;
+      command: string | null;
+      changes: AgentFileChange[];
+    }
+  >();
   let messageSeq = 0;
   let settledMessageSeq = 0;
   let controlSeq = 0;
@@ -205,6 +239,7 @@ export function createClaudeAdapter(): AgentAdapter {
       const steps = planFrom(input);
       if (steps.length) ctx.emit({ type: "plan", steps });
     }
+    const subagent = subagentForTool(name, input);
     ctx.emit({
       type: "tool",
       callId,
@@ -213,6 +248,7 @@ export function createClaudeAdapter(): AgentAdapter {
       title: describeTool(name, input),
       command: asString(input.command),
       changes: changesFor(name, input),
+      ...(subagent ? { subagent } : {}),
     });
   }
 
@@ -378,6 +414,109 @@ export function createClaudeAdapter(): AgentAdapter {
       if (!callId) continue;
       tools.set(callId, { name, partialInput: "" });
       settleTool(callId, name, input, ctx);
+    }
+  }
+
+  function handleSubagentAssistant(
+    message: Record<string, unknown>,
+    parentCallId: string,
+    ctx: AdapterContext,
+  ) {
+    const messageId =
+      asString(message.id) ?? `child-${parentCallId}-${++settledMessageSeq}`;
+    for (const [index, raw] of asArray(message.content).entries()) {
+      const block = asRecord(raw);
+      if (!block) continue;
+      const blockType = asString(block.type);
+      if (blockType === "text") {
+        const text = asString(block.text)?.trim();
+        if (!text) continue;
+        ctx.emit({
+          type: "tool",
+          callId: parentCallId,
+          subagent: { activity: oneLine(text.split(/\r?\n/).filter(Boolean).at(-1) ?? text) },
+          subagentItem: {
+            kind: "assistant",
+            id: `child-${parentCallId}-${messageId}-b${index}`,
+            at: Date.now(),
+            text,
+            streaming: false,
+          },
+        });
+        continue;
+      }
+      if (blockType !== "tool_use") continue;
+      const callId = asString(block.id);
+      if (!callId) continue;
+      const name = asString(block.name) ?? "tool";
+      const input = asRecord(block.input) ?? {};
+      const title = describeTool(name, input);
+      const command = asString(input.command);
+      const changes = changesFor(name, input);
+      const subagent = subagentForTool(name, input);
+      nestedTools.set(callId, { name, title, command, changes });
+      ctx.emit({
+        type: "tool",
+        callId: parentCallId,
+        subagent: { activity: `Using ${oneLine(title, 100)}` },
+        subagentItem: {
+          kind: "tool",
+          id: `child-tool-${callId}`,
+          at: Date.now(),
+          callId,
+          name,
+          tool: toolKind(name),
+          title,
+          status: "running",
+          command,
+          output: "",
+          changes,
+          ...(subagent ? { subagent } : {}),
+        },
+      });
+    }
+  }
+
+  function handleSubagentToolResults(
+    message: Record<string, unknown>,
+    parentCallId: string,
+    ctx: AdapterContext,
+  ) {
+    for (const raw of asArray(message.content)) {
+      const block = asRecord(raw);
+      if (!block || asString(block.type) !== "tool_result") continue;
+      const callId = asString(block.tool_use_id);
+      if (!callId) continue;
+      const failed = block.is_error === true;
+      const known = nestedTools.get(callId);
+      const output = resultText(block.content);
+      const name = known?.name ?? "tool";
+      const title = known?.title ?? name;
+      ctx.emit({
+        type: "tool",
+        callId: parentCallId,
+        subagent: {
+          activity: failed
+            ? `Failed: ${oneLine(title, 100)}`
+            : output.trim()
+              ? oneLine(output.split(/\r?\n/).filter(Boolean).at(-1) ?? output)
+              : `Completed ${oneLine(title, 100)}`,
+        },
+        subagentItem: {
+          kind: "tool",
+          id: `child-tool-${callId}`,
+          at: Date.now(),
+          callId,
+          name,
+          tool: toolKind(name),
+          title,
+          status: failed ? "error" : "done",
+          command: known?.command ?? null,
+          output,
+          changes: known?.changes ?? [],
+        },
+      });
+      nestedTools.delete(callId);
     }
   }
 
@@ -671,12 +810,28 @@ export function createClaudeAdapter(): AgentAdapter {
         }
         case "assistant": {
           const message = asRecord(frame.message);
-          if (message) handleAssistant(message, frame, ctx);
+          if (!message) return;
+          const parentCallId =
+            asString(frame.parent_tool_use_id) ??
+            asString(message.parent_tool_use_id);
+          if (parentCallId) {
+            handleSubagentAssistant(message, parentCallId, ctx);
+          } else {
+            handleAssistant(message, frame, ctx);
+          }
           return;
         }
         case "user": {
           const message = asRecord(frame.message);
-          if (message) handleToolResults(message, ctx);
+          if (!message) return;
+          const parentCallId =
+            asString(frame.parent_tool_use_id) ??
+            asString(message.parent_tool_use_id);
+          if (parentCallId) {
+            handleSubagentToolResults(message, parentCallId, ctx);
+          } else {
+            handleToolResults(message, ctx);
+          }
           return;
         }
         case "control_request":

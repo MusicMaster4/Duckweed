@@ -192,6 +192,33 @@ export interface ToolItem extends ItemBase {
   output: string;
   /** File edits this call is making. */
   changes: AgentFileChange[];
+  /**
+   * Optional identity and live context for delegated work.
+   *
+   * Flat task tools remain the source of truth. Adapters lift richer protocol
+   * details here when they have them, while L1 providers can omit the object
+   * and still appear in the shared fleet.
+   */
+  subagent?: SubagentMeta;
+}
+
+export interface SubagentMeta {
+  /** Short task name shown in the fleet. */
+  label?: string;
+  /** Provider role or agent type, such as Explore. */
+  role?: string;
+  /** Child thread id when the protocol exposes one. */
+  threadId?: string;
+  /** Parent delegation call for nested protocol messages. */
+  parentCallId?: string;
+  /** Model selected for this child. */
+  model?: string;
+  /** Current one-line work update. */
+  activity?: string;
+  /** Original delegated prompt. */
+  prompt?: string;
+  /** Nested settled activity when the provider attributes child messages. */
+  items?: AgentItem[];
 }
 
 export interface PlanItem extends ItemBase {
