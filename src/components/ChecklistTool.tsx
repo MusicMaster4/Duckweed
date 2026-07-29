@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "
 
 import { Tooltip } from "./Tooltip";
 import * as checklist from "../lib/checklist";
+import { AsciiAmbient } from "./AsciiAmbient";
 
 interface Props {
   /** Tab whose list this is. Null before any tab exists. */
@@ -63,7 +64,8 @@ export function ChecklistTool({ scope, scopeLabel }: Props) {
 
   if (!scope || !store) {
     return (
-      <div className="tools-empty">
+      <div className="tools-empty tools-empty-ambient">
+        <AsciiAmbient surfaceId="checklist-no-tab" scene="pendulum" />
         <p>No tab to keep a list for.</p>
       </div>
     );
@@ -207,11 +209,7 @@ export function ChecklistTool({ scope, scopeLabel }: Props) {
       <div className="check-list">
         {total === 0 ? (
           <div className="check-blank">
-            <svg viewBox="0 0 16 16" aria-hidden="true">
-              <path d="M2.5 4.5l1.5 1.5 2.5-3" />
-              <path d="M2.5 11l1.5 1.5 2.5-3" />
-              <path d="M8.5 4.5h5M8.5 11h5" />
-            </svg>
+            <AsciiAmbient surfaceId={`checklist-blank-${scope}`} scene="pendulum" />
             <p className="check-blank-title">Nothing on the list</p>
             <p className="check-blank-body">
               Write down what this tab is for. Items you check off stay for a day, then clear

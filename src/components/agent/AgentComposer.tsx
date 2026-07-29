@@ -22,6 +22,10 @@ import {
 } from "../../lib/agents/types";
 import * as agents from "../../lib/agents/session";
 import * as terminals from "../../lib/terminals";
+import {
+  isCaretOnFirstVisualLine,
+  shouldNavigatePromptHistory,
+} from "../../lib/textareaCaret";
 import { AgentControls } from "./AgentControls";
 import { AgentImageAttachments } from "./AgentImageAttachments";
 
@@ -462,9 +466,8 @@ export function AgentComposer({ session, active, inputRef, onSubmit, onInterrupt
     }
 
     // ↑/↓ prompt history (shell-style). Queued follow-ups come first; further
-    // ups walk this pane's submitted prompts. Multi-line buffers only start
-    // the walk from the first line (cursor at 0), so mid-message arrows move
-    // the caret like a normal textarea.
+    // ups walk this pane's submitted prompts. A new walk only starts from the
+    // first rendered line, including lines created by automatic text wrapping.
     if (
       rows.length === 0 &&
       (event.key === "ArrowUp" || event.key === "ArrowDown") &&
@@ -474,21 +477,19 @@ export function AgentComposer({ session, active, inputRef, onSubmit, onInterrupt
       !event.shiftKey
     ) {
       const el = event.currentTarget;
-      const multiLine = value.includes("\n");
-      if (
-        multiLine &&
-        (el.selectionStart !== 0 || el.selectionEnd !== 0) &&
-        event.key === "ArrowUp"
-      ) {
-        // Let the caret move within the draft.
-      } else if (
-        multiLine &&
-        event.key === "ArrowDown" &&
-        historyIndex === null &&
-        historyDraftRef.current === null
-      ) {
-        // Not browsing — keep native line movement.
-      } else if (event.key === "ArrowUp") {
+      const key = event.key as "ArrowUp" | "ArrowDown";
+      const browsingHistory = historyIndex !== null || historyDraftRef.current !== null;
+      const caretOnFirstLine =
+        key === "ArrowUp" && !browsingHistory
+          ? isCaretOnFirstVisualLine(el)
+          : false;
+
+      if (!shouldNavigatePromptHistory(key, browsingHistory, caretOnFirstLine)) {
+        // Let the textarea move its caret between rendered lines.
+        return;
+      }
+
+      if (event.key === "ArrowUp") {
         if (historyIndex === null) {
           // Prefer the newest waiting follow-up before submitted history.
           const queued = agents.editLastQueued(session.termId);

@@ -499,6 +499,7 @@ describe("claude adapter", () => {
     });
 
     const plan = h.state().items.find((item) => item.kind === "plan");
+    expect(plan?.kind === "plan" && plan.planType).toBe("tasks");
     expect(plan?.kind === "plan" && plan.steps).toEqual([
       { text: "Write the adapter", status: "done" },
       { text: "Wire the UI", status: "running" },
@@ -508,6 +509,7 @@ describe("claude adapter", () => {
 
   test("keeps an asynchronously launched Workflow running and exposes its phases", () => {
     const h = harness({ program: "claudex" });
+    h.feed({ type: "stream_event", event: { type: "message_start" } });
     h.feed({
       type: "assistant",
       message: {
@@ -559,7 +561,8 @@ phase('Map')
     });
     h.feed({ type: "result", subtype: "success", is_error: false });
 
-    expect(h.state().status).toBe("idle");
+    expect(h.state().status).toBe("working");
+    expect(h.events.filter((event) => event.type === "turn-end")).toHaveLength(0);
     expect(
       h.state().items.find(
         (item) => item.kind === "tool" && item.callId === "workflow-1",
@@ -579,6 +582,7 @@ phase('Map')
 
   test("settles a background Workflow when Claude sends its task notification", () => {
     const h = harness();
+    h.feed({ type: "stream_event", event: { type: "message_start" } });
     h.feed({
       type: "assistant",
       message: {
@@ -637,11 +641,14 @@ export const meta = {
       output: 'Dynamic workflow "Review the repository" completed',
     });
     expect(h.state().items.find((item) => item.kind === "plan")).toMatchObject({
+      planType: "workflow",
       steps: [
         { text: "Map", status: "done" },
         { text: "Report", status: "done" },
       ],
     });
+    expect(h.state().status).toBe("idle");
+    expect(h.events.filter((event) => event.type === "turn-end")).toHaveLength(1);
   });
 
   test("shows TaskCreate and TaskUpdate as one live Claudex workflow", () => {

@@ -858,7 +858,7 @@ export function createCodexAdapter(): AgentAdapter {
                   : ("pending" as const),
           }))
           .filter((step) => step.text);
-        if (steps.length) ctx.emit({ type: "plan", steps });
+        if (steps.length) ctx.emit({ type: "plan", planType: "tasks", steps });
         return;
       }
       case "thread/tokenUsage/updated": {
@@ -1034,7 +1034,9 @@ export function createCodexAdapter(): AgentAdapter {
                   : ("pending" as const),
           }))
           .filter((step) => step.text);
-        if (steps.length) emitChild(childThreadId, { type: "plan", steps }, ctx);
+        if (steps.length) {
+          emitChild(childThreadId, { type: "plan", planType: "tasks", steps }, ctx);
+        }
         return;
       }
       default:

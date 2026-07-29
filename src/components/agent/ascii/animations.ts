@@ -1400,6 +1400,25 @@ function field(source: Field): PainterFactory {
 }
 
 /**
+ * Named scenes for tool empty states and other ambient surfaces. Kept separate
+ * from the random startup pool so each place can pick art that matches what it
+ * is saying, rather than rolling the dice every mount.
+ */
+export const ASCII_SCENES = {
+  sonar: field(sonarField),
+  radar: field(radarField),
+  hourglass: stateless(paintHourglass),
+  ripple: field(rippleField),
+  network: stateless(paintNetwork),
+  pendulum: stateless(paintPendulum),
+  waves: stateless(paintWaves),
+  clouds: field(cloudsField),
+  clock: stateless(paintClock),
+} as const;
+
+export type AsciiSceneId = keyof typeof ASCII_SCENES;
+
+/**
  * The pool the loader draws from. Nothing here is provider-specific: the
  * first time a terminal shows the loader it draws one (random, behind the
  * shared half-pool cooldown so recent picks sit out), and keeps it for as

@@ -688,6 +688,7 @@ describe("codex adapter", () => {
     });
 
     const plan = h.state().items.find((item) => item.kind === "plan");
+    expect(plan?.kind === "plan" && plan.planType).toBe("tasks");
     expect(plan?.kind === "plan" && plan.steps).toEqual([
       { text: "Read the failing test", status: "done" },
       { text: "Fix the bug", status: "running" },

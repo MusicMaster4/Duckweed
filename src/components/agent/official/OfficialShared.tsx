@@ -478,20 +478,30 @@ export function PlanTracker({
   const total = item.steps.length;
   const [open, setOpen] = useState(true);
   const progress = total ? Math.round((completed / total) * 100) : 0;
+  const isWorkflow = item.planType === "workflow";
+  const label = isWorkflow ? "Workflow" : "Tasks";
+  const fallbackSummary = isWorkflow
+    ? completed === total
+      ? "Workflow completed"
+      : "Workflow progress"
+    : completed === total
+      ? "Tasks completed"
+      : "Task plan";
 
   return (
-    <section className={`official-plan official-plan--${variant}`} aria-label="Task progress">
+    <section
+      className={`official-plan official-plan--${variant}`}
+      aria-label={`${label} progress`}
+    >
       <button
         type="button"
         className="official-plan-head"
         onClick={() => setOpen((value) => !value)}
         aria-expanded={open}
       >
-        <span className="official-plan-kicker">Workflow</span>
+        <span className="official-plan-kicker">{label}</span>
         <span className="official-plan-summary">
-          <strong>
-            {running?.text ?? (completed === total ? "Tasks completed" : "Task plan")}
-          </strong>
+          <strong>{running?.text ?? fallbackSummary}</strong>
           {runningSubagents > 0 && (
             <small>
               {runningSubagents} running{" "}

@@ -123,16 +123,17 @@ function CursorStatus({ status, elapsed }: { status: ToolStatus; elapsed: string
 /** Completed / total, as a rail of ticks — one per step, in order. */
 function CursorTracker({ plan }: { plan: PlanSummary }) {
   const current = plan.active ?? plan.next;
+  const label = plan.planType === "workflow" ? "Workflow" : "Tasks";
   return (
     <div className="cx-track">
-      <span className="cx-track-label">Tasks</span>
+      <span className="cx-track-label">{label}</span>
       <span
         className="cx-track-rail"
         role="progressbar"
         aria-valuemin={0}
         aria-valuemax={plan.total}
         aria-valuenow={plan.done}
-        aria-label={`${plan.done} of ${plan.total} tasks complete`}
+        aria-label={`${plan.done} of ${plan.total} ${label.toLowerCase()} complete`}
       >
         {plan.steps.map((step, index) => (
           <span key={index} className={`cx-track-tick is-${step.status}`} aria-hidden="true" />
@@ -249,12 +250,17 @@ function CursorTool({ item, elapsed }: { item: ToolItem; elapsed: string | null 
  * Numbered, because a plan is ordered and a checkbox list does not say so; the
  * running step keeps the only bright text in the block.
  */
-function CursorPlan({ steps }: { steps: PlanSummary["steps"] }) {
+function CursorPlan({
+  planType,
+  steps,
+}: Pick<PlanSummary, "planType" | "steps">) {
   const done = steps.filter((step) => step.status === "done").length;
   return (
     <div className="cx-plan">
       <div className="cx-plan-head">
-        <span className="cx-plan-label">Workflow</span>
+        <span className="cx-plan-label">
+          {planType === "workflow" ? "Workflow" : "Tasks"}
+        </span>
         <span className="cx-plan-count">
           {done}/{steps.length}
         </span>
@@ -319,7 +325,9 @@ const CursorNode = memo(function CursorNode({
             <AssistantMarkdown text={item.text} />
           </div>
         )}
-        {item.kind === "plan" && <CursorPlan steps={item.steps} />}
+        {item.kind === "plan" && (
+          <CursorPlan planType={item.planType ?? "tasks"} steps={item.steps} />
+        )}
         {item.kind === "notice" && <div className={`cx-notice is-${item.tone}`}>{item.text}</div>}
         {item.kind === "tool" &&
           (item.tool === "task" ? (

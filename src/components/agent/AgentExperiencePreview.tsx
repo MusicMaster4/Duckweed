@@ -52,6 +52,7 @@ function previewItems(): AgentItem[] {
       kind: "plan",
       id: "preview-plan",
       at: now - 40_000,
+      planType: "tasks",
       steps: [
         { text: "Trace the current session lifecycle", status: "done" },
         { text: "Refactor the parser and stream file changes", status: "running" },

@@ -18,6 +18,12 @@ import { nextBlockSelection, type BlockNavAction } from "./blockNav";
  * WebGL renderer and resize with the pane the same way the visual cursor does.
  */
 
+/**
+ * Clear space between a block separator and the command below it. The band is
+ * transparent, so only the 1px hairline is painted over the terminal grid.
+ */
+const BLOCK_GAP = 8;
+
 export interface CommandBlock {
   id: number;
   command: string;
@@ -274,14 +280,14 @@ export class BlockTracker {
         block.cmdEl.style.lineHeight = `${cellHeight}px`;
 
         if (block.sepEl) {
-          // A terminal grid has no real inter-row gap. Put the hairline on the
-          // exact row boundary so it cannot drift through the previous output
-          // cell. It is only visible while that boundary itself is on-screen.
+          // Center the hairline in a transparent band above the command. The
+          // gap stays visual only, so it does not hide terminal output.
           if (i > 0 && this.editorMode && coverRow >= 0 && coverRow < rows) {
+            const band = BLOCK_GAP * 2 + 1;
             block.sepEl.hidden = false;
-            block.sepEl.style.transform = `translate3d(0, ${y}px, 0)`;
+            block.sepEl.style.transform = `translate3d(0, ${y - band}px, 0)`;
             block.sepEl.style.width = `${fullWidth}px`;
-            block.sepEl.style.height = "1px";
+            block.sepEl.style.height = `${band}px`;
           } else {
             block.sepEl.hidden = true;
           }

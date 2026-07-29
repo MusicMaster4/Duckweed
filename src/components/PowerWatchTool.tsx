@@ -16,6 +16,7 @@ import {
   type BusyReason,
   type PowerAction,
 } from "../lib/powerWatch";
+import { AsciiAmbient } from "./AsciiAmbient";
 
 const MoonIcon = () => (
   <svg viewBox="0 0 16 16" aria-hidden="true">
@@ -110,6 +111,11 @@ export function PowerWatchTool() {
                 Cancel
               </button>
             </header>
+            <AsciiAmbient
+              surfaceId="power-countdown"
+              scene="clock"
+              className="ascii-ambient-power is-countdown"
+            />
             <strong className="power-clock">{formatCountdown(left)}</strong>
             <p className="power-card-note">
               Every pane is idle. Anything that wakes up stops the clock.
@@ -121,7 +127,7 @@ export function PowerWatchTool() {
         )}
 
         {armed && !counting && (
-          <article className="power-card">
+          <article className="power-card is-armed-watch">
             <header>
               <span className="power-card-title">
                 {state.busy.length === 0 ? "Checking the panes" : "Still running"}
@@ -131,6 +137,12 @@ export function PowerWatchTool() {
                 Cancel
               </button>
             </header>
+
+            <AsciiAmbient
+              surfaceId="power-armed"
+              scene="radar"
+              className="ascii-ambient-power is-armed"
+            />
 
             {state.busy.length === 0 ? (
               <p className="power-card-note">Reading what is running right now.</p>

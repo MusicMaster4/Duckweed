@@ -137,6 +137,7 @@ describe("plans", () => {
     state = applyEvent(state, { type: "user", text: "Second turn" });
     state = applyEvent(state, {
       type: "plan",
+      planType: "workflow",
       steps: [
         { text: "Inspect", status: "done" },
         { text: "Fix", status: "running" },
@@ -147,6 +148,7 @@ describe("plans", () => {
     expect(plans).toHaveLength(2);
     expect(state.items.at(-1)).toMatchObject({
       kind: "plan",
+      planType: "workflow",
       steps: [
         { text: "Inspect", status: "done" },
         { text: "Fix", status: "running" },

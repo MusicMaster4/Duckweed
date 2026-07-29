@@ -325,6 +325,7 @@ describe("acp adapter", () => {
 
     const plans = h.state().items.filter((item) => item.kind === "plan");
     expect(plans).toHaveLength(1);
+    expect(plans[0].kind === "plan" && plans[0].planType).toBe("tasks");
     expect(plans[0].kind === "plan" && plans[0].steps[1].status).toBe("done");
   });
 
@@ -372,6 +373,7 @@ describe("acp adapter", () => {
 
     const plans = h.state().items.filter((item) => item.kind === "plan");
     expect(plans).toHaveLength(1);
+    expect(plans[0].kind === "plan" && plans[0].planType).toBe("workflow");
     expect(plans[0].kind === "plan" && plans[0].steps).toEqual([
       { text: "Map", status: "done" },
       { text: "Explore", status: "running" },

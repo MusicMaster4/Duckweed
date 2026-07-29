@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { gitDiff, gitFileDiff } from "../lib/ipc";
 import type { Diff, DiffHunk, FileDiff, ProjectInfo } from "../lib/types";
+import { AsciiAmbient } from "./AsciiAmbient";
 
 interface Props {
   /** The tab's repo — every path in the panel is relative to its root. */
@@ -367,7 +368,10 @@ export function ChangesPanel({ project, onClose }: Props) {
           {load.kind === "loading" && <div className="diff-empty">reading the working tree…</div>}
           {load.kind === "error" && <div className="menu-error">{load.message}</div>}
           {load.kind === "ready" && files.length === 0 && (
-            <div className="diff-empty">Nothing uncommitted — the working tree is clean.</div>
+            <div className="diff-empty is-ambient">
+              <AsciiAmbient surfaceId="changes-clean" scene="ripple" />
+              <p>Nothing uncommitted — the working tree is clean.</p>
+            </div>
           )}
           {body}
         </div>

@@ -382,7 +382,7 @@ button.chip:hover {
   padding: 0 7px 0 11px;
   border: 1px solid rgba(255, 255, 255, 0.065);
   border-radius: 9px;
-  background: rgba(255, 255, 255, 0.035);
+  background: color-mix(in srgb, #fff 3.5%, var(--bg));
   color: var(--text-dim);
   font-size: 12px;
   cursor: pointer;
@@ -472,14 +472,14 @@ body.is-dragging-tab .tab.is-reordering,
 }
 
 .tab:hover {
-  background: rgba(255, 255, 255, 0.07);
+  background: color-mix(in srgb, #fff 7%, var(--bg));
   border-color: var(--border-strong);
   color: var(--text);
 }
 
 .tab.is-active {
   /* Neutral lift only — no accent tint, so default tabs stay distinct from Moss. */
-  background: rgba(255, 255, 255, 0.12);
+  background: color-mix(in srgb, #fff 12%, var(--bg));
   border-color: transparent;
   color: #fff;
 }
@@ -1203,6 +1203,63 @@ svg.tab-glyph-fill path {
   margin: 0;
 }
 
+/* Empty tools that lead with ambient ASCII sit the art above the copy. */
+.tools-empty-ambient {
+  justify-items: center;
+  text-align: center;
+  padding-top: 20px;
+  padding-bottom: 20px;
+}
+
+/* ------------------------------------------------ ambient ASCII (tools) */
+
+/* Quiet character-grid decoration for empty panels and long waits. Same
+   painters as agent startup, but muted and compact so they stay decoration. */
+.ascii-ambient {
+  display: grid;
+  place-items: center;
+  color: color-mix(in srgb, var(--accent) 42%, transparent);
+  pointer-events: none;
+  user-select: none;
+}
+
+.ascii-ambient pre {
+  margin: 0;
+  color: inherit;
+  font-family: var(--font-mono);
+  font-size: 8.5px;
+  font-weight: 500;
+  line-height: 1;
+  letter-spacing: 0;
+  text-align: left;
+  white-space: pre;
+  -webkit-mask-image: radial-gradient(ellipse 78% 90% at 50% 50%, #000 48%, transparent 100%);
+  mask-image: radial-gradient(ellipse 78% 90% at 50% 50%, #000 48%, transparent 100%);
+}
+
+/* Ports / checklist blanks: a little larger, still secondary to the copy. */
+.ports-empty .ascii-ambient pre,
+.check-blank .ascii-ambient pre {
+  font-size: 9px;
+}
+
+/* Power watch: amber while counting, quiet green while only armed. */
+.ascii-ambient-power {
+  margin: 2px 0 0;
+}
+
+.ascii-ambient-power.is-armed {
+  color: color-mix(in srgb, var(--accent) 38%, transparent);
+}
+
+.ascii-ambient-power.is-countdown {
+  color: color-mix(in srgb, var(--amber) 55%, transparent);
+}
+
+.ascii-ambient-power pre {
+  font-size: 9px;
+}
+
 /* A 5px grab strip hanging off the right edge, over the grid's padding. */
 .tools-resize {
   position: absolute;
@@ -1512,15 +1569,8 @@ svg.tab-glyph-fill path {
 .ports-empty {
   justify-items: center;
   gap: 6px;
-  padding: 26px 14px;
+  padding: 22px 14px;
   text-align: center;
-}
-
-.ports-empty-mark svg {
-  width: 22px;
-  height: 22px;
-  color: var(--text-faint);
-  opacity: 0.5;
 }
 
 .ports-empty strong {
@@ -1949,16 +1999,12 @@ svg.tab-glyph-fill path {
   display: grid;
   justify-items: center;
   gap: 3px;
-  padding: 26px 16px;
+  padding: 20px 16px 26px;
   text-align: center;
 }
 
-.check-blank svg {
-  width: 20px;
-  height: 20px;
-  margin-bottom: 5px;
-  color: var(--text-faint);
-  opacity: 0.5;
+.check-blank .ascii-ambient {
+  margin-bottom: 4px;
 }
 
 .check-blank-title {
@@ -3811,7 +3857,7 @@ svg.tab-glyph-fill path {
   will-change: transform;
 }
 
-/* Hairline on the exact boundary between terminal rows. */
+/* Transparent spacing band with a centered 1px command-block hairline. */
 .command-block-separator {
   position: absolute;
   z-index: 5;
@@ -3821,12 +3867,20 @@ svg.tab-glyph-fill path {
   padding: 0;
   border: none;
   pointer-events: none;
-  background: var(--block-separator);
+  background: transparent;
   will-change: transform;
+  display: flex;
+  align-items: center;
 }
 
 .command-block-separator::after {
-  content: none;
+  content: "";
+  display: block;
+  width: 100%;
+  height: 1px;
+  flex-shrink: 0;
+  border: none;
+  background: var(--block-separator);
 }
 
 /* Hides the idle shell prompt under the last block in editor mode. */
@@ -5176,6 +5230,25 @@ body.is-resizing * {
   color: var(--text-faint);
   font-size: 12px;
   text-align: center;
+}
+
+.diff-empty.is-ambient {
+  display: grid;
+  justify-items: center;
+  gap: 8px;
+  padding: 28px 16px;
+}
+
+.diff-empty.is-ambient p {
+  margin: 0;
+}
+
+.diff-empty .ascii-ambient {
+  color: color-mix(in srgb, var(--accent) 36%, transparent);
+}
+
+.diff-empty .ascii-ambient pre {
+  font-size: 10px;
 }
 
 /* --------------------------------------------------- file editor popup */
