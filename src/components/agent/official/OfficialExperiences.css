@@ -532,7 +532,8 @@
 }
 
 .official-plan-steps li.is-running .official-plan-step-mark {
-  overflow: hidden;
+  /* The animated arrow travels beyond the marker at both ends of its path. */
+  overflow: visible;
   border-color: transparent;
   border-radius: 0;
   background: transparent;

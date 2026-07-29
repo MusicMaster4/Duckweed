@@ -1371,6 +1371,10 @@ function create(id: string, opts: TerminalStartOptions): Session {
     session.cols = cols;
     session.rows = rows;
     if (session.spawned) void ptyResize(id, cols, rows);
+    // Any resize can reflow scrollback before the next PTY write. Reposition
+    // block chrome from the reflowed logical anchors on the next frame even
+    // when the resize did not come through FitAddon/refit.
+    session.blocks.scheduleLayout();
     notifySession(id);
   });
 
