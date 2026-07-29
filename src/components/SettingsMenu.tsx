@@ -1,7 +1,11 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { UsagePanel } from "./UsagePanel";
-import { formatDailyLimit, formatUsageDuration } from "../lib/dailyUsage";
+import {
+  formatDailyLimit,
+  formatUsageDuration,
+  remainingMinutesOf,
+} from "../lib/dailyUsage";
 import type { ShellIntegrationStatus } from "../lib/ipc";
 import type { InputMode } from "../lib/terminals";
 import type { ShellInfo } from "../lib/types";
@@ -450,8 +454,8 @@ export function SettingsMenu({
                     <strong>Today</strong>
                     <span>
                       {wellbeingEnabled
-                        ? `${formatUsageDuration(dailyUsedMs)} used · ${formatUsageDuration(
-                            Math.max(0, dailyLimitMinutes * 60_000 - dailyUsedMs),
+                        ? `${formatUsageDuration(dailyUsedMs)} used · ${formatDailyLimit(
+                            remainingMinutesOf(dailyLimitMinutes, dailyUsedMs),
                           )} remaining`
                         : "Turn on the daily limit to begin tracking focused time"}
                     </span>

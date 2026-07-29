@@ -105,14 +105,32 @@ export function isDailyLimitReached(state: DailyUsageState): boolean {
 }
 
 export function formatUsageDuration(milliseconds: number): string {
-  const totalMinutes = Math.max(0, Math.floor(milliseconds / 60_000));
-  const hours = Math.floor(totalMinutes / 60);
-  const minutes = totalMinutes % 60;
+  const totalSeconds = Math.max(0, Math.floor(milliseconds / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  // Sub-minute values show seconds so the wellbeing meter is visibly live
+  // during the first minute of focused use (flooring to 0m looked stuck).
+  // Exact zero stays "0m" so limit/remaining copy does not flip to "0s".
+  if (hours === 0 && minutes === 0) {
+    return totalSeconds === 0 ? "0m" : `${seconds}s`;
+  }
   if (hours === 0) return `${minutes}m`;
   if (minutes === 0) return `${hours}h`;
   return `${hours}h ${minutes}m`;
 }
 
+/** Whole minutes already used today (floored). */
+export function usedMinutesOf(usedMs: number): number {
+  return Math.max(0, Math.floor(usedMs / 60_000));
+}
+
+/** Whole minutes still available today, paired with {@link usedMinutesOf}. */
+export function remainingMinutesOf(limitMinutes: number, usedMs: number): number {
+  return Math.max(0, limitMinutes - usedMinutesOf(usedMs));
+}
+
 export function formatDailyLimit(minutes: number): string {
+  if (minutes <= 0) return "0m";
   return formatUsageDuration(minutes * 60_000);
 }

@@ -7,7 +7,9 @@ import {
   formatUsageDuration,
   isDailyLimitReached,
   normalizeDailyUsage,
+  remainingMinutesOf,
   rollDailyUsage,
+  usedMinutesOf,
 } from "./dailyUsage";
 
 const TODAY = new Date(2026, 6, 29, 10, 30);
@@ -51,5 +53,19 @@ describe("daily usage wellbeing", () => {
     expect(clampDailyLimit(76)).toBe(90);
     expect(formatDailyLimit(90)).toBe("1h 30m");
     expect(formatUsageDuration(4 * 60_000 + 59_000)).toBe("4m");
+    // First minute is live in seconds so the meter does not look stuck at 0m.
+    expect(formatUsageDuration(0)).toBe("0m");
+    expect(formatUsageDuration(12_400)).toBe("12s");
+    expect(formatUsageDuration(60_000)).toBe("1m");
+    expect(formatDailyLimit(0)).toBe("0m");
+  });
+
+  test("pairs used and remaining whole minutes without a 29m cliff at 1s", () => {
+    expect(usedMinutesOf(0)).toBe(0);
+    expect(remainingMinutesOf(30, 0)).toBe(30);
+    expect(usedMinutesOf(45_000)).toBe(0);
+    expect(remainingMinutesOf(30, 45_000)).toBe(30);
+    expect(usedMinutesOf(60_000)).toBe(1);
+    expect(remainingMinutesOf(30, 60_000)).toBe(29);
   });
 });
