@@ -11,6 +11,7 @@ interface Props {
   canCloseOthers: boolean;
   onPin: () => void;
   onRename: () => void;
+  onChangeFolder: () => void;
   onColor: (colorId: string | null) => void;
   onIcon: (iconId: string | null) => void;
   onClose: () => void;
@@ -41,6 +42,7 @@ export function TabContextMenu({
   canCloseOthers,
   onPin,
   onRename,
+  onChangeFolder,
   onColor,
   onIcon,
   onClose,
@@ -99,6 +101,18 @@ export function TabContextMenu({
           }}
         >
           <span>Rename tab</span>
+        </button>
+
+        <button
+          type="button"
+          className="menu-item menu-item-row"
+          role="menuitem"
+          onClick={() => {
+            onDismiss();
+            onChangeFolder();
+          }}
+        >
+          <span>Change folder…</span>
         </button>
 
         <div className="menu-separator" />

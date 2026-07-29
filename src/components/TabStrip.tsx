@@ -3,7 +3,6 @@ import {
   useRef,
   useState,
   type CSSProperties,
-  type MouseEvent,
   type PointerEvent as ReactPointerEvent,
 } from "react";
 
@@ -291,11 +290,16 @@ export function TabStrip({
   const paneDropTab = drag?.target?.kind === "tab" ? drag.target.tabId : null;
   const paneDropNew = drag?.target?.kind === "newTab";
 
-  /** Hang the folder picker under whatever was clicked. */
-  const openPicker = (e: MouseEvent, tabId: string) => {
-    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+  /** Hang a menu under the tab icon (or at a click point). */
+  const openContextAt = (tabId: string, x: number, y: number) => {
+    setPicker(null);
+    setContext({ tabId, x, y });
+  };
+
+  /** Hang the folder picker under the tab icon / at the last menu point. */
+  const openPickerAt = (tabId: string, x: number, y: number) => {
     setContext(null);
-    setPicker({ tabId, x: rect.left, y: rect.bottom + 6 });
+    setPicker({ tabId, x, y });
   };
 
   /** Begin a strip reorder after the pointer moves past the slop threshold. */
@@ -448,8 +452,7 @@ export function TabStrip({
                 e.preventDefault();
                 e.stopPropagation();
                 onSelect(tab.id);
-                setPicker(null);
-                setContext({ tabId: tab.id, x: e.clientX, y: e.clientY });
+                openContextAt(tab.id, e.clientX, e.clientY);
               }}
             >
               {reviewFlashKey !== undefined && (
@@ -483,14 +486,15 @@ export function TabStrip({
                     className="tab-folder"
                     title={
                       tab.project
-                        ? `${tab.project.path} — click to change this tab's folder`
-                        : "This tab has no folder — click to choose one"
+                        ? `${tab.project.path} — click for tab menu`
+                        : "This tab has no folder — click for tab menu"
                     }
                     onPointerDown={(e) => e.stopPropagation()}
                     onClick={(e) => {
                       e.stopPropagation();
                       onSelect(tab.id);
-                      openPicker(e, tab.id);
+                      const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                      openContextAt(tab.id, rect.left, rect.bottom + 6);
                     }}
                   >
                     <TabGlyph iconId={tab.icon} />
@@ -556,6 +560,7 @@ export function TabStrip({
           canCloseOthers={tabs.length > 1}
           onPin={() => onPin(contextTab.id)}
           onRename={() => setEditing(contextTab.id)}
+          onChangeFolder={() => openPickerAt(contextTab.id, context.x, context.y)}
           onColor={(colorId) => onColor(contextTab.id, colorId)}
           onIcon={(iconId) => onIcon(contextTab.id, iconId)}
           onClose={() => onClose(contextTab.id)}
