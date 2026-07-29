@@ -55,6 +55,7 @@ function harness(overrides: Partial<AgentLaunch> = {}) {
       effort: null,
       models: [],
       sessionId: null,
+      goal: null,
       items: [],
       pending: [],
       permission: null,
@@ -253,6 +254,163 @@ describe("codex adapter", () => {
     });
   });
 
+  test("sets a fresh persistent goal through the Codex control plane", async () => {
+    const h = harness();
+    await h.handshake();
+
+    expect(h.adapter.command?.("/goal Finish the migration and keep tests green", h.ctx)).toBe(
+      "handled",
+    );
+    expect(h.sent.at(-1)).toMatchObject({
+      id: 4,
+      method: "thread/goal/clear",
+      params: { threadId: "thread_1" },
+    });
+
+    h.feed({ jsonrpc: "2.0", id: 4, result: { cleared: false } });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(h.sent.at(-1)).toMatchObject({
+      id: 5,
+      method: "thread/goal/set",
+      params: {
+        threadId: "thread_1",
+        objective: "Finish the migration and keep tests green",
+        status: "active",
+      },
+    });
+
+    h.feed({
+      jsonrpc: "2.0",
+      id: 5,
+      result: {
+        goal: {
+          objective: "Finish the migration and keep tests green",
+          status: "active",
+          tokenBudget: null,
+          tokensUsed: 1200,
+          timeUsedSeconds: 7,
+        },
+      },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(h.state().items.at(-1)).toMatchObject({
+      kind: "notice",
+      tone: "info",
+      text: "Goal active. Objective: Finish the migration and keep tests green · 1.2k tokens · 7s",
+    });
+    expect(h.state().goal).toEqual({
+      objective: "Finish the migration and keep tests green",
+      status: "active",
+    });
+  });
+
+  test("keeps the goal indicator synchronized with provider notifications", async () => {
+    const h = harness();
+    await h.handshake();
+
+    h.notify("thread/goal/updated", {
+      threadId: "thread_1",
+      goal: { objective: "Track the rollout", status: "active" },
+    });
+    expect(h.state().goal).toEqual({
+      objective: "Track the rollout",
+      status: "active",
+    });
+
+    h.notify("thread/goal/cleared", { threadId: "thread_1" });
+    expect(h.state().goal).toBeNull();
+  });
+
+  test("views, pauses, resumes, clears, and edits the current goal", async () => {
+    const h = harness();
+    await h.handshake();
+
+    h.adapter.command?.("/goal", h.ctx);
+    expect(h.sent.at(-1)).toMatchObject({
+      id: 4,
+      method: "thread/goal/get",
+      params: { threadId: "thread_1" },
+    });
+    h.feed({ jsonrpc: "2.0", id: 4, result: { goal: null } });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(h.state().items.at(-1)).toMatchObject({
+      text: "No goal is currently set. Use /goal <objective> to create one.",
+    });
+
+    h.adapter.command?.("/goal pause", h.ctx);
+    expect(h.sent.at(-1)).toMatchObject({
+      id: 5,
+      method: "thread/goal/set",
+      params: { threadId: "thread_1", status: "paused" },
+    });
+    h.feed({
+      jsonrpc: "2.0",
+      id: 5,
+      result: { goal: { objective: "Old goal", status: "paused" } },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    h.adapter.command?.("/goal resume", h.ctx);
+    expect(h.sent.at(-1)).toMatchObject({
+      id: 6,
+      method: "thread/goal/set",
+      params: { threadId: "thread_1", status: "active" },
+    });
+    h.feed({
+      jsonrpc: "2.0",
+      id: 6,
+      result: { goal: { objective: "Old goal", status: "active" } },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    h.adapter.command?.("/goal edit Revised goal", h.ctx);
+    expect(h.sent.at(-1)).toMatchObject({ id: 7, method: "thread/goal/get" });
+    h.feed({
+      jsonrpc: "2.0",
+      id: 7,
+      result: { goal: { objective: "Old goal", status: "paused" } },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(h.sent.at(-1)).toMatchObject({
+      id: 8,
+      method: "thread/goal/set",
+      params: { threadId: "thread_1", objective: "Revised goal", status: "paused" },
+    });
+    h.feed({
+      jsonrpc: "2.0",
+      id: 8,
+      result: { goal: { objective: "Revised goal", status: "paused" } },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    h.adapter.command?.("/goal clear", h.ctx);
+    expect(h.sent.at(-1)).toMatchObject({
+      id: 9,
+      method: "thread/goal/clear",
+      params: { threadId: "thread_1" },
+    });
+  });
+
+  test("rejects oversized goal objectives before sending an RPC", async () => {
+    const h = harness();
+    await h.handshake();
+    const before = h.sent.length;
+    h.adapter.command?.(`/goal ${"x".repeat(4_001)}`, h.ctx);
+    expect(h.sent).toHaveLength(before);
+    expect(h.state().items.at(-1)).toMatchObject({
+      kind: "notice",
+      tone: "error",
+      text: expect.stringContaining("4,000 characters"),
+    });
+  });
+
   test("refuses an unknown command locally instead of paying for a turn", async () => {
     const h = harness();
     await h.handshake();
@@ -261,7 +419,7 @@ describe("codex adapter", () => {
     expect(h.sent.at(-1)).toMatchObject({ method: "model/list" });
     expect(h.state().items.find((item) => item.kind === "notice")).toMatchObject({
       tone: "error",
-      text: "Unknown command /frobnicate. Codex knows /model, /effort, /compact.",
+      text: "Unknown command /frobnicate. Codex knows /model, /effort, /compact, /goal.",
     });
   });
 
@@ -343,6 +501,13 @@ describe("codex adapter", () => {
       status: "running",
       title: "Spawned subagent: Inspect the parser tests",
       output: expect.stringContaining("thread_child · running · Reading tests"),
+      subagent: {
+        label: "Inspect the parser tests",
+        threadId: "thread_child",
+        model: "gpt-5.6-sol",
+        prompt: "Inspect the parser tests",
+        activity: "Reading tests",
+      },
     });
 
     h.notify("item/completed", {
@@ -368,7 +533,124 @@ describe("codex adapter", () => {
       tool: "task",
       status: "done",
       output: expect.stringContaining("thread_child · completed · Found the failing case"),
+      subagent: expect.objectContaining({
+        activity: "Found the failing case",
+      }),
     });
+  });
+
+  test("routes child thread progress into the subagent without polluting the root", async () => {
+    const h = harness();
+    await h.handshake();
+    h.notify("item/started", {
+      threadId: "thread_1",
+      item: {
+        id: "sub-live",
+        type: "collabAgentToolCall",
+        tool: "spawnAgent",
+        status: "inProgress",
+        receiverThreadIds: ["thread_child_live"],
+        prompt: "Inspect the live event stream",
+        agentsStates: {
+          thread_child_live: { status: "pendingInit" },
+        },
+      },
+    });
+
+    expect(h.state().items[0]).toMatchObject({
+      kind: "tool",
+      status: "pending",
+      subagent: { activity: "Pending initialization" },
+    });
+
+    h.notify("thread/started", {
+      thread: {
+        id: "thread_child_live",
+        parentThreadId: "thread_1",
+        agentNickname: "Researcher",
+        agentRole: "explorer",
+      },
+    });
+    h.notify("turn/started", {
+      threadId: "thread_child_live",
+      turn: { id: "child_turn" },
+    });
+    h.notify("item/reasoning/textDelta", {
+      threadId: "thread_child_live",
+      turnId: "child_turn",
+      itemId: "child_reasoning",
+      delta: "Reading the event handlers",
+    });
+
+    let root = h.state();
+    expect(root.items).toHaveLength(1);
+    expect(root.items[0]).toMatchObject({
+      kind: "tool",
+      status: "running",
+      subagent: {
+        role: "explorer",
+        activity: "Reading the event handlers",
+        items: [
+          {
+            kind: "thinking",
+            text: "Reading the event handlers",
+            streaming: true,
+          },
+        ],
+      },
+    });
+
+    h.notify("item/completed", {
+      threadId: "thread_child_live",
+      turnId: "child_turn",
+      item: {
+        id: "child_answer",
+        type: "agentMessage",
+        text: "The child events are now isolated.",
+      },
+    });
+    h.notify("turn/completed", {
+      threadId: "thread_child_live",
+      turn: { id: "child_turn" },
+    });
+
+    root = h.state();
+    expect(root.items).toHaveLength(1);
+    expect(root.items[0]).toMatchObject({
+      kind: "tool",
+      status: "done",
+      subagent: {
+        activity: "The child events are now isolated.",
+        items: expect.arrayContaining([
+          expect.objectContaining({
+            kind: "assistant",
+            text: "The child events are now isolated.",
+          }),
+        ]),
+      },
+    });
+  });
+
+  test("keeps collaboration control operations out of the subagent fleet", async () => {
+    const h = harness();
+    await h.handshake();
+    h.notify("item/completed", {
+      threadId: "thread_1",
+      item: {
+        id: "wait-1",
+        type: "collabAgentToolCall",
+        tool: "wait",
+        status: "completed",
+        receiverThreadIds: ["thread_child"],
+      },
+    });
+
+    expect(h.state().items[0]).toMatchObject({
+      kind: "tool",
+      tool: "other",
+      title: "Waiting for subagents",
+    });
+    expect(h.state().items[0]).not.toHaveProperty("subagent");
   });
 
   test("counts a unified patch into insertions and deletions", async () => {

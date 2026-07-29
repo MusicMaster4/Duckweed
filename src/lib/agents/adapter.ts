@@ -53,6 +53,13 @@ export interface AgentAdapter {
    */
   command?: (text: string, ctx: AdapterContext) => "handled" | "prompt";
   /**
+   * Whether a local command may bypass the follow-up queue while a turn is
+   * running. This is reserved for control-plane operations such as Codex
+   * `/goal pause`: queueing the command would make it impossible to stop the
+   * automatic continuation it is meant to control.
+   */
+  commandAvailableDuringTurn?: (text: string) => boolean;
+  /**
    * Apply a session-wide access level. `default` must remove Duckweed's
    * overrides so the agent's own configuration remains authoritative.
    */

@@ -1,7 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import type { AgentId, AgentItem, AgentSessionState } from "../../../lib/agents/types";
+import type {
+  AgentId,
+  AgentItem,
+  AgentSessionState,
+  PlanItem,
+} from "../../../lib/agents/types";
 import { AgentProviderIcon } from "../AgentProviderIcon";
 import { CursorExperience } from "../provider/CursorExperience";
 import { OpenCodeExperience } from "../provider/OpenCodeExperience";
@@ -13,6 +18,7 @@ import {
   activityGroups,
   AssistantMarkdown,
   continuedAssistantIds,
+  PlanTracker,
   ProviderEmpty,
   shortAssistantUpdatesAsThinking,
 } from "./OfficialShared";
@@ -79,6 +85,27 @@ function renderAgentActivity(agent: AgentId, items: AgentItem[]): string {
 }
 
 describe("official agent presentation", () => {
+  test("uses an animated arrow only for the running workflow step", () => {
+    const plan: PlanItem = {
+      kind: "plan",
+      id: "plan",
+      at: 1,
+      title: "Workflow",
+      steps: [
+        { text: "Completed task", status: "done" },
+        { text: "Active task", status: "running" },
+        { text: "Pending task", status: "pending" },
+      ],
+    };
+
+    const html = renderToStaticMarkup(<PlanTracker item={plan} variant="codex" />);
+
+    expect(html).toContain('class="official-plan-running-arrow"');
+    expect(html).toContain('aria-current="step"');
+    expect(html.match(/official-plan-running-arrow/g)?.length).toBe(1);
+    expect(html).toContain("✓");
+  });
+
   test("offers a persistent copy action for user messages in every custom UI", () => {
     const prompt: AgentItem = {
       kind: "user",
@@ -487,6 +514,94 @@ describe("official agent presentation", () => {
     }
   });
 
+  /**
+   * Tab switches remount the custom UI. The thinking matrix is keyed by cluster
+   * id, so a remount during the same wait must keep the same pattern instead of
+   * drawing a new animation.
+   */
+  test("keeps the thinking matrix pattern across remounts of the same wait", () => {
+    const items: AgentItem[] = [
+      { kind: "user", id: "user-remount", at: 1, text: "Keep the matrix" },
+      {
+        kind: "thinking",
+        id: "thinking-remount",
+        at: 2,
+        text: "Still working.",
+        streaming: true,
+      },
+    ];
+
+    const first = renderAgentActivity("claude", items);
+    const second = renderAgentActivity("claude", items);
+    const pattern = first.match(/data-pattern="([^"]+)"/)?.[1];
+
+    expect(pattern).toBeTruthy();
+    expect(second).toContain(`data-pattern="${pattern}"`);
+  });
+
+  /**
+   * An interim agent message closes one activity phase and opens another under
+   * it. That second matrix must roll a new pattern even though it is still the
+   * same user turn — only tab remounts should freeze the draw.
+   */
+  test("draws a new thinking matrix after an interim agent message", () => {
+    const phaseOne: AgentItem[] = [
+      { kind: "user", id: "user-phase", at: 1, text: "Inspect" },
+      {
+        kind: "thinking",
+        id: "thinking-before-interim",
+        at: 2,
+        text: "Planning the search carefully before I write anything.",
+        streaming: false,
+      },
+    ];
+    const phaseTwo: AgentItem[] = [
+      ...phaseOne,
+      {
+        kind: "assistant",
+        id: "interim-phase",
+        at: 3,
+        text: "I found the entry point and I will keep checking every caller next.",
+        streaming: false,
+      },
+      {
+        kind: "thinking",
+        id: "thinking-after-interim",
+        at: 4,
+        text: "Checking callers now thoroughly after that update.",
+        streaming: true,
+      },
+      {
+        kind: "tool",
+        id: "tool-after-interim",
+        at: 5,
+        callId: "call-after-interim",
+        name: "Search",
+        tool: "search",
+        title: "Find entry point callers",
+        status: "running",
+        command: null,
+        output: "",
+        changes: [],
+      },
+    ];
+
+    // Grok keeps interim comments as assistant messages, so activity reappears
+    // as a fresh cluster under the comment — that is the case that must re-roll.
+    const before = renderAgentActivity("grok", phaseOne);
+    const after = renderAgentActivity("grok", phaseTwo);
+    const firstPattern = before.match(/data-pattern="([^"]+)"/)?.[1];
+    const secondPattern = after.match(/data-pattern="([^"]+)"/)?.[1];
+
+    expect(firstPattern).toBeTruthy();
+    expect(secondPattern).toBeTruthy();
+    expect(secondPattern).not.toBe(firstPattern);
+
+    // Remounting the second phase still has to keep the second pattern.
+    const remounted = renderAgentActivity("grok", phaseTwo);
+    expect(remounted).toContain(`data-pattern="${secondPattern}"`);
+  });
+
   test("keeps Grok planning prose visible when work continues", () => {
     const html = renderAgentActivity("grok", [
         { kind: "user", id: "u1", at: 1, text: "Inspect" },
@@ -749,6 +864,63 @@ describe("official agent presentation", () => {
     expect(presented[2]).toMatchObject({ id: "long", kind: "assistant" });
   });
 
+  test("shows Still working after a long Codex update until fresh activity arrives", () => {
+    const interimItems: AgentItem[] = [
+      { kind: "user", id: "user", at: 1, text: "Inspect" },
+      {
+        kind: "thinking",
+        id: "thinking-before-update",
+        at: 2,
+        text: "Reviewing the existing documentation.",
+        streaming: false,
+      },
+      {
+        kind: "assistant",
+        id: "long-update",
+        at: 3,
+        text: `I found the relevant section and I am continuing with the remaining checks. ${"x".repeat(240)}`,
+        streaming: false,
+      },
+    ];
+
+    const waitingHtml = renderAgentActivity("codex", interimItems);
+
+    expect(waitingHtml).toContain("I found the relevant section");
+    expect(waitingHtml).toContain("agent-still-working");
+    expect(waitingHtml).toContain(">Still working<");
+    expect(waitingHtml).toContain("agent-activity-pulse is-active");
+    expect(waitingHtml).not.toContain("Reviewing the existing documentation.");
+
+    const resumedHtml = renderAgentActivity("codex", [
+      ...interimItems,
+      {
+        kind: "thinking",
+        id: "thinking-after-update",
+        at: 4,
+        text: "Checking the remaining references.",
+        streaming: true,
+      },
+      {
+        kind: "tool",
+        id: "tool-after-update",
+        at: 5,
+        callId: "call-after-update",
+        name: "Search",
+        tool: "search",
+        title: "Find remaining references",
+        status: "running",
+        command: null,
+        output: "",
+        changes: [],
+      },
+    ]);
+
+    expect(resumedHtml).not.toContain("agent-still-working");
+    expect(resumedHtml).not.toContain(">Still working<");
+    expect(resumedHtml).toContain("Checking the remaining references.");
+    expect(resumedHtml).toContain("Find remaining references");
+  });
+
   test("keeps a completed turn's final response even when it is short", () => {
     const items: AgentItem[] = [
       { kind: "user", id: "user", at: 1, text: "Inspect" },
@@ -763,7 +935,7 @@ describe("official agent presentation", () => {
   });
 
   test("uses provider-specific limits for Codex and Claude Code", () => {
-    // Codex keeps short updates as thinking up to 250 chars; Claude promotes
+    // Codex keeps short updates as thinking up to 300 chars; Claude promotes
     // anything above 110 chars to a normal assistant message.
     const codexHtml = renderAgentActivity("codex", [
       { kind: "user", id: "codex-user", at: 1, text: "Inspect" },
@@ -771,7 +943,7 @@ describe("official agent presentation", () => {
         kind: "assistant",
         id: "codex-update",
         at: 2,
-        text: "c".repeat(150),
+        text: "c".repeat(275),
         streaming: true,
       },
     ]);
@@ -781,7 +953,7 @@ describe("official agent presentation", () => {
         kind: "assistant",
         id: "claude-update",
         at: 2,
-        text: "c".repeat(150),
+        text: "c".repeat(275),
         streaming: true,
       },
     ]);
@@ -822,6 +994,7 @@ describe("official agent presentation", () => {
       effort: null,
       models: [],
       sessionId: null,
+      goal: null,
       items: [],
       pending: [],
       permission: null,

@@ -715,6 +715,8 @@ fn main() {
             pty::start_busy_monitor(app.handle().clone())?;
             agent_activity::start_monitor(app.handle().clone())?;
             watch::start_monitor(app.handle().clone())?;
+            // Heal context-menu entries left pointing at a development binary.
+            shell_integration::repair_enabled_verbs();
             // Register "Open Duckweed in new tab" on first Windows run.
             let _ = shell_integration::ensure_defaults();
             // After an in-place update the exe icon can change while Explorer

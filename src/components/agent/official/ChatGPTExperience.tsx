@@ -9,13 +9,14 @@ import {
   PlanTracker,
   ProviderEmpty,
   shortAssistantUpdatesAsThinking,
+  StillWorking,
   type ExperienceProps,
 } from "./OfficialShared";
 
 export function ChatGPTExperience(props: ExperienceProps) {
   const { items, termId, status, started, agent, label, program, cwd } = props;
   const transcriptItems = useMemo(
-    () => shortAssistantUpdatesAsThinking(items, status === "working", 250),
+    () => shortAssistantUpdatesAsThinking(items, status === "working", 300),
     [items, status],
   );
   const groups = useMemo(() => activityGroups(transcriptItems), [transcriptItems]);
@@ -58,6 +59,22 @@ export function ChatGPTExperience(props: ExperienceProps) {
   });
   const needsEmptyLiveTrace =
     status === "working" && latestUserIndex >= 0 && !hasActivityAfterPrompt;
+  const liveUserId =
+    latestUserIndex >= 0 ? transcriptItems[latestUserIndex]?.id : "session-start";
+  let latestLiveContent: (typeof transcriptItems)[number] | undefined;
+  for (let index = transcriptItems.length - 1; index > latestUserIndex; index -= 1) {
+    const item = transcriptItems[index];
+    if (
+      item.kind === "assistant" ||
+      item.kind === "thinking" ||
+      item.kind === "tool"
+    ) {
+      latestLiveContent = item;
+      break;
+    }
+  }
+  const needsStillWorking =
+    status === "working" && latestLiveContent?.kind === "assistant";
 
   if (!started && status !== "error") {
     return (
@@ -93,6 +110,7 @@ export function ChatGPTExperience(props: ExperienceProps) {
                 variant="chatgpt"
                 working={status === "working" && group === liveGroup}
                 showLatestThinking={group === groups[groups.length - 1]}
+                clusterId={`${termId}:${group.firstId}`}
               />
             );
           }
@@ -138,7 +156,18 @@ export function ChatGPTExperience(props: ExperienceProps) {
           );
         })}
         {needsEmptyLiveTrace && (
-          <ActivityHistory activities={[]} variant="chatgpt" working />
+          <ActivityHistory
+            activities={[]}
+            variant="chatgpt"
+            working
+            clusterId={`${termId}:live:${liveUserId}`}
+          />
+        )}
+        {needsStillWorking && (
+          <StillWorking
+            variant="chatgpt"
+            clusterId={`${termId}:still:${liveUserId}`}
+          />
         )}
       </div>
     </div>

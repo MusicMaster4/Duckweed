@@ -74,7 +74,8 @@ const SHRINK_SPAN_MS: f64 = 30.0 * 60.0 * 1000.0;
 const QUANTUM_PERCENT: f64 = 1.0;
 /// Below this much observed time there is no measurement at all.
 const MIN_EVIDENCE_MS: i64 = 5 * 60 * 1000;
-/// The window average needs at least this much of its window elapsed.
+/// Preferred observation span for the window average. A shorter span is used
+/// only when it clears both the live-evidence and reporting-noise floors.
 const MIN_SPAN_MS: i64 = 15 * 60 * 1000;
 /// Utilization drop of this many points counts as a window reset. Only used
 /// when the provider gives no window length to cut on exactly.
@@ -416,8 +417,12 @@ fn window_average_per_hour(limit: &QuotaLimit, now: i64) -> Option<f64> {
         return None;
     }
     let elapsed = limit.window_ms? - (limit.resets_at? - now);
-    if elapsed < MIN_SPAN_MS {
-        // Too early in the window for the average to mean anything.
+    if elapsed < MIN_EVIDENCE_MS
+        || (elapsed < MIN_SPAN_MS && limit.percent <= QUANTUM_PERCENT)
+    {
+        // A few minutes or a single rounded reporting step is too little to
+        // extrapolate. Meaningful consumption after five minutes is enough to
+        // restart an estimate when a known window has just reset.
         return None;
     }
     let per_hour = limit.percent / (elapsed as f64 / 3_600_000.0);
@@ -1626,6 +1631,54 @@ mod tests {
     }
 
     #[test]
+    fn a_known_reset_boundary_immediately_restarts_the_five_hour_eta() {
+        let now = 1_700_000_000_000i64;
+        let minute = 60 * 1000;
+        let mut history = QuotaHistory {
+            samples: vec![
+                // The previous window was exhausted.
+                QuotaSample {
+                    at: now - 8 * minute,
+                    agent: "claude".into(),
+                    limit_id: "five-hour".into(),
+                    percent: 100.0,
+                },
+                // Duckweed's first fetch arrived three minutes after reset.
+                QuotaSample {
+                    at: now - 4 * minute,
+                    agent: "claude".into(),
+                    limit_id: "five-hour".into(),
+                    percent: 4.0,
+                },
+                QuotaSample {
+                    at: now - 3 * minute,
+                    agent: "claude".into(),
+                    limit_id: "five-hour".into(),
+                    percent: 8.0,
+                },
+            ],
+        };
+        let mut quota = sample_quota("claude", vec![("five-hour", 18.0)]);
+        quota.limits[0].window_ms = Some(5 * HOUR);
+        // Seven minutes into the new window, matching the rollover where the
+        // UI previously showed only "82% left".
+        quota.limits[0].resets_at = Some(now + 5 * HOUR - 7 * minute);
+        apply_estimate(&mut quota, &mut history, now, None);
+
+        let forecast = quota.limits[0]
+            .forecast
+            .as_ref()
+            .expect("forecast should restart after reset");
+        let eta_minutes = forecast.usage_hours_left.expect("usage time left") * 60.0;
+        // 18% over seven minutes leaves about 32 minutes at the same pace.
+        assert!((eta_minutes - 31.9).abs() < 1.0, "{forecast:?}");
+        assert!(
+            forecast.runs_out_at.expect("run-out") < quota.limits[0].resets_at.unwrap(),
+            "{forecast:?}"
+        );
+    }
+
+    #[test]
     fn exhausted_limit_runs_out_now() {
         let now = 1_700_000_000_000i64;
         let mut history = QuotaHistory::default();
@@ -1684,8 +1737,9 @@ mod tests {
         let mut history = QuotaHistory::default();
         let mut quota = sample_quota("claude", vec![("five-hour", 8.0)]);
         quota.limits[0].window_ms = Some(5 * 60 * 60 * 1000);
-        // Only 5 minutes in — below MIN_SPAN_MS.
-        quota.limits[0].resets_at = Some(now + 5 * 60 * 60 * 1000 - 5 * 60 * 1000);
+        // Only one minute in, below the minimum live evidence span even with
+        // the known zero-percent reset boundary.
+        quota.limits[0].resets_at = Some(now + 5 * 60 * 60 * 1000 - 60 * 1000);
         apply_estimate(&mut quota, &mut history, now, None);
         assert!(quota.limits[0].forecast.is_none());
     }

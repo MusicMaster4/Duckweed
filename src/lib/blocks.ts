@@ -18,25 +18,17 @@ import { nextBlockSelection, type BlockNavAction } from "./blockNav";
  * WebGL renderer and resize with the pane the same way the visual cursor does.
  */
 
-/**
- * Clear space on each side of a block separator (px). Warp's default
- * (non-compact) dividers sit in a short band of air between terminal chunks.
- * xterm rows have no inter-row gap, so the band overlaps the bottom of the
- * preceding output cell — it must stay TRANSPARENT (only the hairline is
- * painted). An opaque band used to slice the last output line of the previous
- * chunk in half.
- */
-const BLOCK_GAP = 4;
-
 export interface CommandBlock {
   id: number;
   command: string;
+  /**
+   * Marker on the first physical row of the logical prompt + command line.
+   * xterm disposes markers placed on wrapped continuation rows during reflow.
+   */
   start: IMarker;
-  /** Set when the next command starts or the process goes idle. */
-  end: IMarker | null;
   /** Covers the prompt+echo row; shows only the command text. */
   cmdEl: HTMLDivElement;
-  /** Full-width hairline + gap above the block (null for the first). */
+  /** Full-width hairline above the block (null for the first). */
   sepEl: HTMLDivElement | null;
 }
 
@@ -109,10 +101,7 @@ export class BlockTracker {
     this.scrollDisposable = this.term.onScroll(this.onScroll);
   }
 
-  /**
-   * Open a block for a submitted command. Seals the previous open block so its
-   * end sits on the last line of that command's output.
-   */
+  /** Open a block for a submitted command at the current logical prompt line. */
   open(command: string): void {
     // No editorMode guard: submits only ever come from the composer, and a
     // busy→idle race (the native busy poll lags a ^C) must not drop the block
@@ -125,9 +114,17 @@ export class BlockTracker {
       this.selectedId = null;
       this.selectOverlay.hidden = true;
     }
-    this.sealOpen(-1);
-
-    const start = this.term.registerMarker(0);
+    // A PowerShell prompt can already be wrapped before the command is echoed.
+    // A marker at the cursor would then sit on a continuation row, which xterm
+    // deletes when the terminal grows wider. Anchor the first physical row of
+    // the logical line instead. That row survives both directions of reflow.
+    const buffer = this.term.buffer.active;
+    const cursorLine = buffer.baseY + buffer.cursorY;
+    const startLine = logicalLineStart(
+      (line) => buffer.getLine(line)?.isWrapped ?? false,
+      cursorLine,
+    );
+    const start = this.term.registerMarker(startLine - cursorLine);
     if (!start) return;
 
     const cmdEl = document.createElement("div");
@@ -151,7 +148,6 @@ export class BlockTracker {
       id: this.nextId++,
       command,
       start,
-      end: null,
       cmdEl,
       sepEl,
     };
@@ -245,17 +241,26 @@ export class BlockTracker {
         },
         range.start,
         prevEnd + 1,
+        (y) => buf.getLine(y)?.isWrapped ?? false,
       );
 
-      const cmdRow = range.start - viewportY;
+      const commandEnd = Math.min(
+        range.end,
+        logicalLineEnd(
+          (line) => buf.getLine(line)?.isWrapped ?? false,
+          range.start,
+          buf.length - 1,
+        ),
+      );
       const coverRow = coverStart - viewportY;
-      // Label tracks the command row only while that row is on-screen. Do not
-      // keep a lone hairline when the command has scrolled one row off (that
-      // used to paint a free-floating rule over whatever content sits at the
-      // top of the viewport).
-      const cmdOnScreen = cmdRow >= 0 && cmdRow < rows;
-      if (cmdOnScreen) {
-        const coveredRows = cmdRow - coverRow;
+      const commandEndRow = commandEnd - viewportY;
+      // Cover every physical row in a wrapped command echo. Keeping the div at
+      // its real buffer position also clips a partially visible header cleanly
+      // when its first row has just scrolled above the viewport.
+      const headerOnScreen = commandEndRow >= 0 && coverRow < rows;
+      if (headerOnScreen) {
+        const rowsBeforeCommand = range.start - coverStart;
+        const headerRows = commandEnd - coverStart + 1;
         const y = offsetY + coverRow * cellHeight;
         block.cmdEl.hidden = false;
         block.cmdEl.classList.toggle(
@@ -264,21 +269,19 @@ export class BlockTracker {
         );
         block.cmdEl.style.transform = `translate3d(0, ${y}px, 0)`;
         block.cmdEl.style.width = `${fullWidth}px`;
-        block.cmdEl.style.height = `${(coveredRows + 1) * cellHeight}px`;
-        block.cmdEl.style.padding = `${coveredRows * cellHeight}px 6px 0`;
+        block.cmdEl.style.height = `${headerRows * cellHeight}px`;
+        block.cmdEl.style.padding = `${rowsBeforeCommand * cellHeight}px 6px 0`;
         block.cmdEl.style.lineHeight = `${cellHeight}px`;
 
         if (block.sepEl) {
-          // Hairline only in editor mode, only with its command label, and
-          // only inside the header band (true chunk boundary). The band stays
-          // transparent and gives the rule equal breathing room above and
-          // below without masking terminal text.
-          if (this.editorMode) {
-            const band = BLOCK_GAP * 2 + 1;
+          // A terminal grid has no real inter-row gap. Put the hairline on the
+          // exact row boundary so it cannot drift through the previous output
+          // cell. It is only visible while that boundary itself is on-screen.
+          if (i > 0 && this.editorMode && coverRow >= 0 && coverRow < rows) {
             block.sepEl.hidden = false;
-            block.sepEl.style.transform = `translate3d(0, ${y - band}px, 0)`;
+            block.sepEl.style.transform = `translate3d(0, ${y}px, 0)`;
             block.sepEl.style.width = `${fullWidth}px`;
-            block.sepEl.style.height = `${band}px`;
+            block.sepEl.style.height = "1px";
           } else {
             block.sepEl.hidden = true;
           }
@@ -361,19 +364,29 @@ export class BlockTracker {
     this.scheduleLayout();
   }
 
-  /** Absolute buffer line range of a block, or null if the markers are gone. */
+  /**
+   * Absolute buffer line range of a block.
+   *
+   * The next command's stable logical-start marker is the exclusive boundary.
+   * End markers are deliberately not used: if an output line wraps, xterm can
+   * redistribute or delete the physical row carrying such a marker on resize.
+   */
   range(block: CommandBlock): { start: number; end: number } | null {
     if (block.start.isDisposed || block.start.line < 0) return null;
     const start = block.start.line;
-    let end: number;
-    if (block.end && !block.end.isDisposed && block.end.line >= 0) {
-      end = block.end.line;
-    } else {
-      end = liveEndLine(this.term, start);
+    const index = this.blocks.indexOf(block);
+    if (index < 0) return null;
+    let nextStart: number | null = null;
+    for (let i = index + 1; i < this.blocks.length; i++) {
+      const marker = this.blocks[i].start;
+      if (marker.isDisposed || marker.line < 0) continue;
+      nextStart = marker.line;
+      break;
     }
-    // Sealed markers can land on the idle `PS path>` (seal race / off-by-one).
-    // Never treat shell chrome as part of the chunk — it shows through the soft
-    // select overlay and looks like a raw terminal when you scroll a selection.
+
+    let end = nextStart === null ? liveEndLine(this.term, start) : nextStart - 1;
+    // Idle prompt rows between submissions belong to the next header, not the
+    // previous command. Trim them after resolving the semantic boundary.
     end = trimTrailingPrompt(this.term, start, end);
     if (end < start) end = start;
     return { start, end };
@@ -459,8 +472,17 @@ export class BlockTracker {
 
     const lines: string[] = [block.command];
     const buf = this.term.buffer.active;
-    // Skip the first row (prompt + echoed command) — we already have `command`.
-    for (let y = range.start + 1; y <= range.end; y++) {
+    // Skip the whole logical prompt + command echo, including every physical
+    // continuation row created by a narrow terminal.
+    const commandEnd = Math.min(
+      range.end,
+      logicalLineEnd(
+        (line) => buf.getLine(line)?.isWrapped ?? false,
+        range.start,
+        buf.length - 1,
+      ),
+    );
+    for (let y = commandEnd + 1; y <= range.end; y++) {
       const line = buf.getLine(y);
       if (!line) continue;
       lines.push(line.translateToString(true));
@@ -670,53 +692,6 @@ export class BlockTracker {
     this.promptCover.style.height = `${(visEnd - visStart + 1) * cellHeight}px`;
   }
 
-  private sealOpen(cursorYOffset: number): void {
-    const open = this.blocks[this.blocks.length - 1];
-    if (!open || open.end) return;
-    if (open.start.isDisposed || open.start.line < 0) return;
-
-    // Cursor sits on the new prompt; the previous block ends one row above it.
-    const end = this.term.registerMarker(cursorYOffset);
-    if (!end || end.isDisposed || end.line < 0) return;
-    if (end.line < open.start.line) {
-      end.dispose();
-      open.end = this.term.registerMarker(0);
-      this.scheduleLayout();
-      return;
-    }
-
-    // If the marker landed on an idle prompt (cursor was one row below it, or
-    // ConPTY reported a soft wrap), walk back so the chunk ends on real output.
-    let line = end.line;
-    const startLine = open.start.line;
-    while (line > startLine) {
-      const row = this.term.buffer.active.getLine(line);
-      const text = row ? row.translateToString(true) : "";
-      if (!looksLikePrompt(text)) break;
-      line -= 1;
-    }
-    if (line !== end.line) {
-      end.dispose();
-      // registerMarker is relative to the cursor; compute offset from cursor.
-      const cursorLine = this.term.buffer.active.baseY + this.term.buffer.active.cursorY;
-      const offset = line - cursorLine;
-      const fixed = this.term.registerMarker(offset);
-      if (!fixed || fixed.isDisposed || fixed.line < startLine) {
-        fixed?.dispose();
-        // Fallback: keep the original marker even if it includes the prompt;
-        // range() trims prompts for layout/selection either way.
-        open.end = this.term.registerMarker(cursorYOffset);
-      } else {
-        open.end = fixed;
-      }
-      this.scheduleLayout();
-      return;
-    }
-
-    open.end = end;
-    this.scheduleLayout();
-  }
-
   private prune(): void {
     this.blocks = this.blocks.filter((b) => {
       if (!b.start.isDisposed && b.start.line >= 0) return true;
@@ -782,29 +757,98 @@ export class BlockTracker {
 function disposeBlock(block: CommandBlock): void {
   block.cmdEl.remove();
   block.sepEl?.remove();
-  block.end?.dispose();
   block.start.dispose();
 }
 
 /**
- * Extend a block header upward through consecutive idle prompt rows sitting
+ * First physical row of a logical terminal line.
+ *
+ * `isWrapped(y)` means row `y` continues the row above it. The first row is
+ * the only safe place for a durable marker because xterm can delete any of the
+ * continuation rows when a terminal grows wider.
+ */
+export function logicalLineStart(
+  isWrapped: (y: number) => boolean,
+  line: number,
+  minLine = 0,
+): number {
+  const floor = Math.max(0, minLine);
+  let start = Math.max(floor, line);
+  while (start > floor && isWrapped(start)) start -= 1;
+  return start;
+}
+
+/** Last physical row currently occupied by the logical line at `line`. */
+export function logicalLineEnd(
+  isWrapped: (y: number) => boolean,
+  line: number,
+  maxLine: number,
+): number {
+  let end = Math.max(0, line);
+  const ceiling = Math.max(end, maxLine);
+  while (end < ceiling && isWrapped(end + 1)) end += 1;
+  return end;
+}
+
+/**
+ * Extend a block header upward through consecutive idle prompt lines sitting
  * between chunks, stopping at `minLine` so we never steal lines from the
  * previous block (or from buffer start).
  *
- * Pure helper so the clamp can be unit-tested without a Terminal.
+ * `isWrapped` is optional for simple callers, but the tracker passes it so a
+ * long PowerShell prompt is evaluated as one logical line after reflow.
  */
 export function foldOrphanPrompts(
   getLine: (y: number) => string,
   commandStart: number,
   minLine: number,
+  isWrapped: (y: number) => boolean = () => false,
 ): number {
   let coverStart = commandStart;
   const floor = Math.max(0, minLine);
   while (coverStart > floor) {
-    if (!looksLikePrompt(getLine(coverStart - 1))) break;
-    coverStart -= 1;
+    const candidateEnd = coverStart - 1;
+    const candidateStart = logicalLineStart(isWrapped, candidateEnd, floor);
+    let text = "";
+    for (let y = candidateStart; y <= candidateEnd; y++) text += getLine(y);
+    if (!looksLikePrompt(text)) break;
+    coverStart = candidateStart;
   }
   return coverStart;
+}
+
+/**
+ * Resolve a block's end without trusting a reflow-sensitive end marker.
+ *
+ * End markers attached to wrapped continuations can stay before newly
+ * inserted rows when a pane narrows, or be disposed when a pane widens. A
+ * following block start is therefore the authoritative sealed boundary.
+ */
+export function resolveBlockEnd(
+  start: number,
+  nextStart: number | null,
+  markerEnd: number | null,
+  liveEnd: () => number,
+): number {
+  if (nextStart !== null && nextStart > start) return nextStart - 1;
+  if (markerEnd !== null && markerEnd >= start) return markerEnd;
+  return Math.max(start, liveEnd());
+}
+
+/**
+ * Last row occupied by the command's logical line after xterm reflow.
+ *
+ * `isWrapped(y)` describes whether row `y` continues the row above it. The
+ * upper bound prevents malformed buffer state from consuming command output.
+ */
+export function wrappedCommandEnd(
+  isWrapped: (y: number) => boolean,
+  commandStart: number,
+  blockEnd: number,
+): number {
+  let end = commandStart;
+  while (end < blockEnd && isWrapped(end + 1)) end += 1;
+  return end;
 }
 
 /**
@@ -832,11 +876,19 @@ function liveEndLine(term: Terminal, start: number): number {
 function trimTrailingPrompt(term: Terminal, start: number, end: number): number {
   let e = end;
   if (e < start) return start;
+  const buf = term.buffer.active;
   while (e > start) {
-    const line = term.buffer.active.getLine(e);
-    const text = line ? line.translateToString(true) : "";
+    const promptStart = logicalLineStart(
+      (line) => buf.getLine(line)?.isWrapped ?? false,
+      e,
+      start + 1,
+    );
+    let text = "";
+    for (let y = promptStart; y <= e; y++) {
+      text += buf.getLine(y)?.translateToString(true) ?? "";
+    }
     if (!looksLikePrompt(text)) break;
-    e -= 1;
+    e = promptStart - 1;
   }
   return e;
 }

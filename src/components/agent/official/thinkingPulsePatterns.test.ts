@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 
-import { THINKING_PULSE_PATTERNS } from "./thinkingPulsePatterns";
+import {
+  THINKING_PULSE_PATTERNS,
+  thinkingPulsePatternFor,
+} from "./thinkingPulsePatterns";
 
 describe("thinking pulse patterns", () => {
   test("the pool includes every distinct quarter-turn orientation", () => {
@@ -13,17 +16,17 @@ describe("thinking pulse patterns", () => {
     );
 
     expect(originals).toHaveLength(163);
-    expect(rotations).toHaveLength(399);
-    expect(THINKING_PULSE_PATTERNS).toHaveLength(562);
+    expect(rotations).toHaveLength(413);
+    expect(THINKING_PULSE_PATTERNS).toHaveLength(576);
     expect(
       rotations.filter((pattern) => pattern.id.endsWith("-rotated-90")),
-    ).toHaveLength(145);
+    ).toHaveLength(147);
     expect(
       rotations.filter((pattern) => pattern.id.endsWith("-rotated-180")),
-    ).toHaveLength(127);
+    ).toHaveLength(133);
     expect(
       rotations.filter((pattern) => pattern.id.endsWith("-rotated-270")),
-    ).toHaveLength(127);
+    ).toHaveLength(133);
 
     const rotateClockwise = (steps: readonly number[]) =>
       steps.map((_, target) => {
@@ -111,6 +114,7 @@ describe("thinking pulse patterns", () => {
         "settle",
         "echo",
         "triplet",
+        "bloom",
       ]),
     );
   });
@@ -133,5 +137,18 @@ describe("thinking pulse patterns", () => {
       expect(css).toContain(`[data-motion="${motion}"]`);
       expect(css).toContain(`@keyframes agent-activity-${motion}`);
     }
+  });
+
+  /**
+   * Tab switches and pane splits remount the thinking row. The pattern must be
+   * keyed by cluster id, not component identity, or the matrix jumps mid-wait.
+   */
+  test("keeps one pattern per cluster across remount-style lookups", () => {
+    const first = thinkingPulsePatternFor("term-a:group-1");
+    const again = thinkingPulsePatternFor("term-a:group-1");
+    const other = thinkingPulsePatternFor("term-a:group-2");
+
+    expect(again).toBe(first);
+    expect(other.id).not.toBe(first.id);
   });
 });

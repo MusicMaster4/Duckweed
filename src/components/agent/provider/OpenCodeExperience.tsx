@@ -3,6 +3,7 @@ import { memo, useMemo, useState } from "react";
 import type { AgentItem, AgentPlanStep, ToolItem, ToolStatus } from "../../../lib/agents/types";
 import { AgentImageAttachments } from "../AgentImageAttachments";
 import { MessageCopyButton } from "../MessageCopyButton";
+import { useSubagentUi } from "../subagents/SubagentUiContext";
 import {
   ActivityHistory,
   activeAssistantId,
@@ -242,34 +243,31 @@ function OpenCodePlan({ steps }: { steps: AgentPlanStep[] }) {
 
 /** A turn OpenCode handed to another agent — its `task` calls. */
 function OpenCodeSubagent({ item, elapsed }: { item: ToolItem; elapsed: string | null }) {
-  const hasOutput = item.output.trim().length > 0;
-  const [open, setOpen] = useState(item.status === "error");
+  const { selectedCallId, selectSubagent } = useSubagentUi();
   const head = (
     <>
       <span className="oc-sub-bracket" aria-hidden="true">
         ⌈
       </span>
       <span className="oc-sub-title">{item.title}</span>
-      {hasOutput && <span className="oc-chevron" aria-hidden="true" data-open={open} />}
       <OpenCodeStatus status={item.status} elapsed={elapsed} />
     </>
   );
   return (
-    <div className={`oc-sub is-${item.status}`}>
-      {hasOutput ? (
-        <Disclosure
-          open={open}
-          onToggle={() => setOpen(!open)}
-          className="oc-sub-head"
-          panelClassName="oc-sub-panel"
-          head={head}
-          label={`Subagent: ${item.title}`}
-        >
-          <pre className="oc-output">{item.output}</pre>
-        </Disclosure>
-      ) : (
-        <div className="oc-sub-head is-static">{head}</div>
-      )}
+    <div
+      className={`oc-sub is-${item.status}${
+        selectedCallId === item.callId ? " is-selected" : ""
+      }`}
+      data-subagent-call-id={item.callId}
+    >
+      <button
+        type="button"
+        className="oc-sub-head"
+        onClick={() => selectSubagent(item.callId)}
+        aria-label={`Inspect subagent: ${item.title}`}
+      >
+        {head}
+      </button>
       <ChangeSet changes={item.changes} className="oc-changes" />
     </div>
   );
@@ -474,6 +472,8 @@ export function OpenCodeExperience({ session, items, className }: ProviderExperi
     return new Set([...continuedIds, liveGroup.answerId]);
   }, [continuedIds, liveGroup?.answerId, session.status]);
   const needsEmptyLiveTrace = session.status === "working" && !liveGroup;
+  const liveUserId =
+    latestUserIndex >= 0 ? list[latestUserIndex]?.id : "session-start";
 
   // Outside the `.oc` column, like the official surfaces do it: the empty state
   // centres itself against the full pane, not against the transcript's width.
@@ -525,6 +525,7 @@ export function OpenCodeExperience({ session, items, className }: ProviderExperi
                       variant="opencode"
                       working={working}
                       showLatestThinking={group === groups[groups.length - 1]}
+                      clusterId={`${session.termId}:${group.firstId}`}
                     />
                   </div>
                 </section>
@@ -546,7 +547,12 @@ export function OpenCodeExperience({ session, items, className }: ProviderExperi
                 <span className="oc-mod-tag">activity</span>
               </div>
               <div className="oc-mod-body">
-                <ActivityHistory activities={[]} variant="opencode" working />
+                <ActivityHistory
+                  activities={[]}
+                  variant="opencode"
+                  working
+                  clusterId={`${session.termId}:live:${liveUserId}`}
+                />
               </div>
             </section>
           )}

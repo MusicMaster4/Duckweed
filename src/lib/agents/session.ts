@@ -592,6 +592,7 @@ export async function start(
       // with their known aliases so the picker works before the first turn.
       models: fallbackModels(launch.agent, launch.program),
       sessionId: null,
+      goal: null,
       items: [],
       pending: [],
       permission: null,
@@ -777,6 +778,18 @@ export function submit(
   }
   if (session.configuring) {
     queuePrompt(session, prompt);
+    return;
+  }
+  if (
+    images.length === 0 &&
+    session.state.status !== "idle" &&
+    session.state.status !== "starting" &&
+    session.adapter.commandAvailableDuringTurn?.(trimmed) &&
+    session.adapter.command?.(trimmed, session.context) === "handled"
+  ) {
+    // Control-plane commands such as `/goal pause` must take effect while the
+    // provider is working. Sending them through the normal follow-up queue can
+    // strand them behind the automatic continuation they are meant to stop.
     return;
   }
   if (session.state.status === "starting") {

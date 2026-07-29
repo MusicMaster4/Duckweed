@@ -68,3 +68,26 @@ const pickPreparingMessage = createCooldownPicker(
 export function nextPreparingMessage(): string {
   return pickPreparingMessage();
 }
+
+/** Enough for any plausible number of live thinking clusters. */
+const REGISTRY_LIMIT = 128;
+
+/**
+ * Preparing labels remount with their thinking row on tab switch / pane split.
+ * Hold the pick by cluster id so the same wait keeps the same stand-in line.
+ */
+const messageAssignments = new Map<string, string>();
+
+/** Same preparing line for the same cluster across remounts. */
+export function preparingMessageFor(clusterId: string): string {
+  const existing = messageAssignments.get(clusterId);
+  if (existing) return existing;
+
+  const message = nextPreparingMessage();
+  if (messageAssignments.size >= REGISTRY_LIMIT) {
+    const oldest = messageAssignments.keys().next().value;
+    if (oldest !== undefined) messageAssignments.delete(oldest);
+  }
+  messageAssignments.set(clusterId, message);
+  return message;
+}

@@ -1,11 +1,21 @@
 import { useEffect, useMemo, useState } from "react";
 
+import {
+  runningSubagentCount,
+  subagentForCallId,
+  subagentsForTurn,
+} from "../../lib/agents/subagents";
 import type { AgentId, AgentItem, AgentSessionState, PlanItem } from "../../lib/agents/types";
 import { emptyUsage, makeChange } from "../../lib/agents/types";
 import { AgentComposer } from "./AgentComposer";
+import { AgentGoalIndicator } from "./AgentGoalIndicator";
 import { AgentProviderIcon } from "./AgentProviderIcon";
 import { AgentTimeline } from "./AgentTimeline";
 import { PlanTracker, type OfficialVariant } from "./official/OfficialShared";
+import { SubagentFleet } from "./subagents/SubagentFleet";
+import { SubagentInspector } from "./subagents/SubagentInspector";
+import { SubagentUiProvider } from "./subagents/SubagentUiContext";
+import "./subagents/subagents.css";
 import "./AgentExperiencePreview.css";
 
 const PROVIDERS: Array<{
@@ -75,6 +85,72 @@ function previewItems(): AgentItem[] {
       command: null,
       output: "Model: provider default · high\nReviewing the ACP and app-server event mappings",
       changes: [],
+      subagent: {
+        label: "Review protocol compatibility",
+        role: "Reviewer",
+        model: "provider default",
+        prompt: "Review the ACP and app-server event mappings for compatibility.",
+        activity: "Reviewing adapter event mappings",
+        items: [
+          {
+            kind: "assistant",
+            id: "preview-child-update",
+            at: now - 23_500,
+            text: "I found the compatibility boundary and am checking the fixtures.",
+            streaming: false,
+          },
+          {
+            kind: "tool",
+            id: "preview-child-read",
+            at: now - 23_000,
+            callId: "preview-child-read",
+            name: "Read",
+            tool: "read",
+            title: "Read adapter fixtures",
+            status: "done",
+            command: null,
+            output: "All provider fixtures loaded",
+            changes: [],
+          },
+        ],
+      },
+    },
+    {
+      kind: "tool",
+      id: "preview-subagent-layout",
+      at: now - 23_000,
+      callId: "preview-subagent-layout",
+      name: "task",
+      tool: "task",
+      title: "Check narrow pane layout",
+      status: "running",
+      command: null,
+      output: "Testing fleet overflow and bottom-docked inspector behavior",
+      changes: [],
+      subagent: {
+        label: "Check narrow pane layout",
+        role: "UI reviewer",
+        prompt: "Verify the fleet and inspector in a half-width terminal pane.",
+        activity: "Testing the half-width pane",
+      },
+    },
+    {
+      kind: "tool",
+      id: "preview-subagent-tests",
+      at: now - 22_000,
+      callId: "preview-subagent-tests",
+      name: "task",
+      tool: "task",
+      title: "Review selector tests",
+      status: "done",
+      command: null,
+      output: "Current-turn isolation and L1 fallback coverage passed",
+      changes: [],
+      subagent: {
+        label: "Review selector tests",
+        role: "Test reviewer",
+        activity: "Selector coverage passed",
+      },
     },
     {
       kind: "assistant",
@@ -122,6 +198,21 @@ function previewItems(): AgentItem[] {
   ];
 }
 
+function stillWorkingPreviewItems(): AgentItem[] {
+  const items = previewItems();
+  return [
+    ...items.slice(0, 5),
+    {
+      kind: "assistant",
+      id: "preview-long-progress",
+      at: Date.now() - 2_000,
+      text:
+        "I found the compatibility boundary and updated the parser. The main implementation is in place, but I am still checking the remaining event paths, backwards-compatible payloads, and the focused test coverage before I finish. This longer progress update intentionally leaves the turn active so the continuity state can be inspected.",
+      streaming: false,
+    },
+  ];
+}
+
 export function AgentExperiencePreview() {
   const query = new URLSearchParams(window.location.search);
   const requested = query.get("provider") as AgentId | null;
@@ -129,12 +220,17 @@ export function AgentExperiencePreview() {
   const completed = query.get("complete") === "1";
   const starting = query.get("starting") === "1";
   const exitArmed = query.get("exit-armed") === "1";
+  const stillWorking = query.get("still-working") === "1";
   const [agent, setAgent] = useState<AgentId>(
     PROVIDERS.some((provider) => provider.id === requested) && requested ? requested : "codex",
   );
   const [visibleCount, setVisibleCount] = useState(playTurn ? 1 : Number.POSITIVE_INFINITY);
+  const [selectedSubagentCallId, setSelectedSubagentCallId] = useState<string | null>(null);
   const provider = PROVIDERS.find((entry) => entry.id === agent) ?? PROVIDERS[0];
-  const allItems = useMemo(previewItems, []);
+  const allItems = useMemo(
+    () => (stillWorking ? stillWorkingPreviewItems() : previewItems()),
+    [stillWorking],
+  );
   const items = useMemo(
     () =>
       allItems.slice(0, visibleCount).map((item) => {
@@ -150,8 +246,8 @@ export function AgentExperiencePreview() {
 
   useEffect(() => {
     if (!playTurn) return;
-    const timers = [900, 1450, 2050, 2700, 3300, 3900, 4550, 5150].map((delay, index) =>
-      window.setTimeout(() => setVisibleCount(index + 2), delay),
+    const timers = [900, 1450, 2050, 2700, 3300, 3900, 4550, 5150, 5750, 6350].map(
+      (delay, index) => window.setTimeout(() => setVisibleCount(index + 2), delay),
     );
     return () => timers.forEach((timer) => window.clearTimeout(timer));
   }, [playTurn]);
@@ -159,7 +255,7 @@ export function AgentExperiencePreview() {
   const replay = () => {
     setVisibleCount(0);
     window.requestAnimationFrame(() => setVisibleCount(1));
-    [900, 1450, 2050, 2700, 3300, 3900, 4550, 5150].forEach((delay, index) => {
+    [900, 1450, 2050, 2700, 3300, 3900, 4550, 5150, 5750, 6350].forEach((delay, index) => {
       window.setTimeout(() => setVisibleCount(index + 2), delay);
     });
   };
@@ -170,6 +266,10 @@ export function AgentExperiencePreview() {
       ? "idle"
       : "working";
   const visibleItems = starting ? [] : items;
+  const fleet = subagentsForTurn(visibleItems);
+  const selectedSubagent = selectedSubagentCallId
+    ? subagentForCallId(visibleItems, selectedSubagentCallId)
+    : null;
   let workflow: PlanItem | null = null;
   for (let index = visibleItems.length - 1; index >= 0; index -= 1) {
     if (visibleItems[index].kind === "plan") {
@@ -197,6 +297,12 @@ export function AgentExperiencePreview() {
     effort: "high",
     models: [],
     sessionId: "preview-session",
+    goal:
+      !starting &&
+      !completed &&
+      (agent === "codex" || agent === "claude")
+        ? { objective: "Ship the session parser safely", status: "active" }
+        : null,
     items: visibleItems,
     pending: [],
     permission: null,
@@ -245,27 +351,43 @@ export function AgentExperiencePreview() {
           </span>
           <span className="agent-head-spacer" />
           <span className="agent-usage">12.4k in · 2.1k out</span>
+          <AgentGoalIndicator goal={session.goal} />
         </header>
         <div className="agent-scroll">
-          <AgentTimeline
-            session={session}
-            items={timelineItems}
-            /* Per provider, so switching the preview draws a new animation. */
-            termId={`${session.termId}:${provider.id}`}
-            agent={provider.id}
-            status={status}
-            started={!starting}
-            label={provider.label}
-            mark={provider.mark}
-            program={provider.id}
-            cwd="H:\\Python\\Slop\\duckweed"
-          />
+          <SubagentUiProvider
+            selectedCallId={selectedSubagentCallId}
+            onSelect={setSelectedSubagentCallId}
+          >
+            <AgentTimeline
+              session={session}
+              items={timelineItems}
+              /* Per provider, so switching the preview draws a new animation. */
+              termId={`${session.termId}:${provider.id}`}
+              agent={provider.id}
+              status={status}
+              started={!starting}
+              label={provider.label}
+              mark={provider.mark}
+              program={provider.id}
+              cwd="H:\\Python\\Slop\\duckweed"
+            />
+          </SubagentUiProvider>
         </div>
         {!starting && (
           <div className="agent-composer-shell">
+            <SubagentFleet
+              agent={agent}
+              subagents={fleet}
+              selectedCallId={selectedSubagentCallId}
+              onSelect={setSelectedSubagentCallId}
+            />
             {workflow && (
               <div className="agent-workflow-dock">
-                <PlanTracker item={workflow} variant={workflowVariant} />
+                <PlanTracker
+                  item={workflow}
+                  variant={workflowVariant}
+                  runningSubagents={runningSubagentCount(fleet)}
+                />
               </div>
             )}
             <AgentComposer
@@ -275,6 +397,19 @@ export function AgentExperiencePreview() {
               onInterrupt={() => {}}
             />
           </div>
+        )}
+        {selectedSubagent && (
+          <SubagentInspector
+            agent={agent}
+            subagent={selectedSubagent}
+            onClose={() => setSelectedSubagentCallId(null)}
+            onShowInTimeline={(callId) => {
+              const target = Array.from(
+                document.querySelectorAll<HTMLElement>("[data-subagent-call-id]"),
+              ).find((element) => element.dataset.subagentCallId === callId);
+              target?.scrollIntoView({ block: "center", behavior: "smooth" });
+            }}
+          />
         )}
       </section>
     </main>

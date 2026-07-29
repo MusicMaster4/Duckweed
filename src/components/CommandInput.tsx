@@ -44,6 +44,13 @@ export function CommandInput({ termId, active, exited, highlight }: Props) {
   const valueRef = useRef(value);
   valueRef.current = value;
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  /**
+   * Ghosts shown during this draft. Accept (Tab / → / Ctrl+F / Ctrl+→) marks
+   * interest; anything still unaccepted when the draft ends is a reject —
+   * typing past the ghost without accepting means the suggestion was unused.
+   */
+  const offeredRef = useRef<Set<string>>(new Set());
+  const acceptedRef = useRef<Set<string>>(new Set());
 
   const setValue = useCallback(
     (next: string | ((prev: string) => string)) => {
@@ -56,13 +63,35 @@ export function CommandInput({ termId, active, exited, highlight }: Props) {
     [termId],
   );
 
+  const clearOfferTracking = useCallback(() => {
+    offeredRef.current = new Set();
+    acceptedRef.current = new Set();
+  }, []);
+
+  /** Reject every ghost shown this draft that the user never accepted. */
+  const flushUnusedOffers = useCallback(() => {
+    for (const command of offeredRef.current) {
+      if (!acceptedRef.current.has(command)) {
+        suggestFeedback.recordReject(command);
+      }
+    }
+    clearOfferTracking();
+  }, [clearOfferTracking]);
+
+  const noteAccept = useCallback((command: string) => {
+    offeredRef.current.add(command);
+    acceptedRef.current.add(command);
+    suggestFeedback.recordAccept(command);
+  }, []);
+
   // Leaf term swaps (drag-swap) reuse this component instance — reseed the
   // buffer from the new session instead of carrying the previous pane's draft.
   useEffect(() => {
     setValueState(terminals.getDraft(termId));
     setHistoryIndex(null);
     draftRef.current = "";
-  }, [termId]);
+    clearOfferTracking();
+  }, [termId, clearOfferTracking]);
 
   const resize = useCallback(() => {
     const el = textareaRef.current;
@@ -150,6 +179,12 @@ export function CommandInput({ termId, active, exited, highlight }: Props) {
     [value, highlight],
   );
 
+  // Remember every ghost that appeared; unused ones are rejected when the draft ends.
+  useEffect(() => {
+    if (!suggestion || !ghost) return;
+    offeredRef.current.add(suggestion);
+  }, [suggestion, ghost]);
+
   const cursorAtEnd = (): boolean => {
     const el = textareaRef.current;
     if (!el) return true;
@@ -172,10 +207,9 @@ export function CommandInput({ termId, active, exited, highlight }: Props) {
   const submit = () => {
     if (exited) return;
     const command = value;
-    // A ghost was on screen and the user ran something else — one reject. A
-    // fully accepted suggestion leaves no ghost, so it never lands here.
-    if (suggestion && ghost) suggestFeedback.recordReject(suggestion);
-    // Running a demoted command by hand means the user still wants it.
+    // Any ghost shown this draft and not accepted (Tab/→) is unused.
+    // recordUsed may clear the streak if they still ran that same command.
+    flushUnusedOffers();
     suggestFeedback.recordUsed(command);
     setValue("");
     setHistoryIndex(null);
@@ -235,7 +269,7 @@ export function CommandInput({ termId, active, exited, highlight }: Props) {
       if (fullAcceptTab || fullAcceptRight || fullAcceptCtrlF) {
         e.preventDefault();
         e.stopPropagation();
-        suggestFeedback.recordAccept(suggestion);
+        noteAccept(suggestion);
         applyValue(acceptFull(value, suggestion));
         return;
       }
@@ -250,7 +284,7 @@ export function CommandInput({ termId, active, exited, highlight }: Props) {
         e.preventDefault();
         e.stopPropagation();
         // Partial accept is still interest — clear any reject streak.
-        suggestFeedback.recordAccept(suggestion);
+        noteAccept(suggestion);
         const next = acceptPartialComponent(value, suggestion);
         applyValue(next);
         return;
@@ -318,6 +352,7 @@ export function CommandInput({ termId, active, exited, highlight }: Props) {
         return;
       }
       if (value.length > 0) {
+        flushUnusedOffers();
         setValue("");
         setHistoryIndex(null);
         draftRef.current = "";
@@ -351,8 +386,8 @@ export function CommandInput({ termId, active, exited, highlight }: Props) {
     if (e.key === "Escape" && !e.ctrlKey && !e.metaKey && !e.altKey && value.length > 0) {
       e.preventDefault();
       e.stopPropagation();
-      // Throwing the draft away with a ghost on screen rejects it too.
-      if (suggestion && ghost) suggestFeedback.recordReject(suggestion);
+      // Discarding the draft without accepting a ghost rejects every unused offer.
+      flushUnusedOffers();
       setValue("");
       setHistoryIndex(null);
       draftRef.current = "";

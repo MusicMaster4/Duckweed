@@ -78,6 +78,21 @@ export type AgentStatus =
   /** Startup or the protocol failed; `error` explains. */
   | "error";
 
+/** Provider-owned state for a long-running session objective. */
+export type AgentGoalStatus =
+  | "active"
+  | "paused"
+  | "blocked"
+  | "usageLimited"
+  | "budgetLimited"
+  | "complete";
+
+export interface AgentGoal {
+  /** Null when the protocol reports a status but not the objective text. */
+  objective: string | null;
+  status: AgentGoalStatus;
+}
+
 export type ToolStatus = "pending" | "running" | "done" | "error";
 
 /**
@@ -192,6 +207,33 @@ export interface ToolItem extends ItemBase {
   output: string;
   /** File edits this call is making. */
   changes: AgentFileChange[];
+  /**
+   * Optional identity and live context for delegated work.
+   *
+   * Flat task tools remain the source of truth. Adapters lift richer protocol
+   * details here when they have them, while L1 providers can omit the object
+   * and still appear in the shared fleet.
+   */
+  subagent?: SubagentMeta;
+}
+
+export interface SubagentMeta {
+  /** Short task name shown in the fleet. */
+  label?: string;
+  /** Provider role or agent type, such as Explore. */
+  role?: string;
+  /** Child thread id when the protocol exposes one. */
+  threadId?: string;
+  /** Parent delegation call for nested protocol messages. */
+  parentCallId?: string;
+  /** Model selected for this child. */
+  model?: string;
+  /** Current one-line work update. */
+  activity?: string;
+  /** Original delegated prompt. */
+  prompt?: string;
+  /** Nested settled activity when the provider attributes child messages. */
+  items?: AgentItem[];
 }
 
 export interface PlanItem extends ItemBase {
@@ -343,6 +385,8 @@ export interface AgentSessionState {
   models: AgentModelChoice[];
   /** Provider-side session id, shown so a transcript can be found later. */
   sessionId: string | null;
+  /** Long-running objective currently owned by the provider, when known. */
+  goal: AgentGoal | null;
   items: AgentItem[];
   /**
    * Prompts the user sent while a turn was still running, oldest first.
@@ -472,6 +516,14 @@ const TOOL_KINDS: Record<string, ToolKind> = {
   delegation: "task",
   todowrite: "todo",
   todo_write: "todo",
+  taskcreate: "todo",
+  task_create: "todo",
+  taskupdate: "todo",
+  task_update: "todo",
+  tasklist: "todo",
+  task_list: "todo",
+  taskget: "todo",
+  task_get: "todo",
   update_plan: "todo",
   think: "think",
   thinking: "think",

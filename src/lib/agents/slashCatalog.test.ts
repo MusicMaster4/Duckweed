@@ -7,6 +7,7 @@ import {
   formatSessionUsage,
   GUIDED_ARG_COMMANDS,
   isNewChatCommand,
+  mergeCommands,
 } from "./slashCatalog";
 import { effortsFor, shortModelLabel } from "./types";
 
@@ -34,6 +35,22 @@ describe("slashCatalog", () => {
     expect(fallbackCommands("claude", "claudex").some((command) => command.name === "/new")).toBe(
       true,
     );
+  });
+
+  test("offers /goal only where the harness can dispatch it", () => {
+    expect(fallbackCommands("codex").some((command) => command.name === "/goal")).toBe(true);
+    expect(fallbackCommands("claude").some((command) => command.name === "/goal")).toBe(true);
+    for (const agent of ["grok", "opencode", "cursor"] as const) {
+      expect(fallbackCommands(agent).some((command) => command.name === "/goal")).toBe(false);
+    }
+
+    // ACP has no standard goal RPC. A compatible harness advertises the
+    // command live, at which point the shared composer exposes it.
+    expect(
+      mergeCommands(fallbackCommands("grok"), [
+        { name: "/goal", description: "Manage a long-running goal" },
+      ]).find((command) => command.name === "/goal"),
+    ).toEqual({ name: "/goal", description: "Manage a long-running goal" });
   });
 
   test("accepts /n as a direct new-chat alias", () => {

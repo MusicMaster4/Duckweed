@@ -54,6 +54,7 @@ function harness(overrides: Partial<AgentLaunch> = {}) {
       effort: null,
       models: [],
       sessionId: null,
+      goal: null,
       items: [],
       pending: [],
       permission: null,
@@ -272,6 +273,180 @@ describe("claude adapter", () => {
     });
   });
 
+  test("lifts Agent identity and prompt into structured subagent metadata", () => {
+    const h = harness();
+    h.feed({
+      type: "assistant",
+      message: {
+        content: [
+          {
+            type: "tool_use",
+            id: "task-1",
+            name: "Agent",
+            input: {
+              description: "Inspect parser tests",
+              subagent_type: "Explore",
+              prompt: "Find the fixture that breaks the parser",
+              model: "haiku",
+            },
+          },
+        ],
+      },
+    });
+
+    expect(h.state().items[0]).toMatchObject({
+      kind: "tool",
+      tool: "task",
+      title: "Inspect parser tests",
+      subagent: {
+        label: "Inspect parser tests",
+        role: "Explore",
+        prompt: "Find the fixture that breaks the parser",
+        model: "haiku",
+      },
+    });
+  });
+
+  test("attributes complete child messages and tools through parent_tool_use_id", () => {
+    const h = harness();
+    h.feed({
+      type: "assistant",
+      message: {
+        content: [
+          {
+            type: "tool_use",
+            id: "parent-task",
+            name: "Agent",
+            input: {
+              description: "Inspect parser tests",
+              prompt: "Find the failing parser fixture",
+            },
+          },
+        ],
+      },
+    });
+    h.feed({
+      type: "assistant",
+      parent_tool_use_id: "parent-task",
+      message: {
+        id: "child-message",
+        content: [
+          { type: "text", text: "I am checking the parser fixtures." },
+          {
+            type: "tool_use",
+            id: "child-read",
+            name: "Read",
+            input: { file_path: "tests/parser.test.ts" },
+          },
+        ],
+      },
+    });
+    h.feed({
+      type: "user",
+      parent_tool_use_id: "parent-task",
+      message: {
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "child-read",
+            content: "Found the legacy fixture",
+            is_error: false,
+          },
+        ],
+      },
+    });
+
+    expect(h.state().items).toHaveLength(1);
+    expect(h.state().items[0]).toMatchObject({
+      kind: "tool",
+      callId: "parent-task",
+      tool: "task",
+      subagent: {
+        activity: "Found the legacy fixture",
+        items: [
+          {
+            kind: "assistant",
+            text: "I am checking the parser fixtures.",
+            streaming: false,
+          },
+          {
+            kind: "tool",
+            callId: "child-read",
+            tool: "read",
+            title: "Read · tests/parser.test.ts",
+            status: "done",
+            output: "Found the legacy fixture",
+          },
+        ],
+      },
+    });
+  });
+
+  test("keeps child-created tasks in the subagent workflow", () => {
+    const h = harness();
+    h.feed({
+      type: "assistant",
+      message: {
+        content: [
+          {
+            type: "tool_use",
+            id: "parent-task",
+            name: "Agent",
+            input: { description: "Inspect parser tests" },
+          },
+        ],
+      },
+    });
+    h.feed({
+      type: "assistant",
+      parent_tool_use_id: "parent-task",
+      message: {
+        content: [
+          {
+            type: "tool_use",
+            id: "child-task-create",
+            name: "TaskCreate",
+            input: { subject: "Find the failing fixture" },
+          },
+        ],
+      },
+    });
+    h.feed({
+      type: "user",
+      parent_tool_use_id: "parent-task",
+      message: {
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "child-task-create",
+            content: "Task #3 created successfully: Find the failing fixture",
+          },
+        ],
+      },
+    });
+
+    expect(h.state().items[0]).toMatchObject({
+      kind: "tool",
+      callId: "parent-task",
+      subagent: {
+        items: [
+          {
+            kind: "plan",
+            steps: [
+              { text: "Find the failing fixture", status: "pending" },
+            ],
+          },
+          {
+            kind: "tool",
+            callId: "child-task-create",
+            tool: "todo",
+            status: "done",
+          },
+        ],
+      },
+    });
+  });
+
   test("turns an Edit tool into a file change with counted lines", () => {
     const h = harness();
     h.feed({
@@ -328,6 +503,305 @@ describe("claude adapter", () => {
       { text: "Write the adapter", status: "done" },
       { text: "Wire the UI", status: "running" },
       { text: "Ship it", status: "pending" },
+    ]);
+  });
+
+  test("keeps an asynchronously launched Workflow running and exposes its phases", () => {
+    const h = harness({ program: "claudex" });
+    h.feed({
+      type: "assistant",
+      message: {
+        content: [
+          {
+            type: "tool_use",
+            id: "workflow-1",
+            name: "Workflow",
+            input: {
+              script: `
+export const meta = {
+  name: 'repo-review',
+  description: 'Review the repository',
+  phases: [
+    { title: 'Map', detail: 'Map the codebase' },
+    { title: 'Verify', detail: 'Verify findings' },
+    { title: 'Synthesize', detail: 'Write the report' },
+  ],
+}
+
+phase('Map')
+`,
+            },
+          },
+        ],
+      },
+    });
+    h.feed({
+      type: "user",
+      message: {
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "workflow-1",
+            content:
+              "Workflow launched in background. Task ID: task-123\n" +
+              "You will be notified when it completes.",
+            is_error: false,
+          },
+        ],
+      },
+      toolUseResult: {
+        status: "async_launched",
+        taskId: "task-123",
+        taskType: "local_workflow",
+        workflowName: "repo-review",
+        summary: "Review the repository",
+      },
+    });
+    h.feed({ type: "result", subtype: "success", is_error: false });
+
+    expect(h.state().status).toBe("idle");
+    expect(
+      h.state().items.find(
+        (item) => item.kind === "tool" && item.callId === "workflow-1",
+      ),
+    ).toMatchObject({
+      title: "Workflow · repo-review",
+      status: "running",
+    });
+    expect(h.state().items.find((item) => item.kind === "plan")).toMatchObject({
+      steps: [
+        { text: "Map", status: "running" },
+        { text: "Verify", status: "pending" },
+        { text: "Synthesize", status: "pending" },
+      ],
+    });
+  });
+
+  test("settles a background Workflow when Claude sends its task notification", () => {
+    const h = harness();
+    h.feed({
+      type: "assistant",
+      message: {
+        content: [
+          {
+            type: "tool_use",
+            id: "workflow-1",
+            name: "Workflow",
+            input: {
+              script: `
+export const meta = {
+  name: "repo-review",
+  phases: [{ title: "Map" }, { title: "Report" }],
+}
+`,
+            },
+          },
+        ],
+      },
+    });
+    h.feed({
+      type: "user",
+      message: {
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "workflow-1",
+            content: "Workflow launched in background. Task ID: task-123",
+          },
+        ],
+      },
+      tool_use_result: {
+        status: "async_launched",
+        task_id: "task-123",
+        task_type: "local_workflow",
+      },
+    });
+    h.feed({ type: "result", subtype: "success", is_error: false });
+    h.feed({
+      type: "queue-operation",
+      operation: "enqueue",
+      content:
+        "<task-notification>\n" +
+        "<task-id>task-123</task-id>\n" +
+        "<status>completed</status>\n" +
+        '<summary>Dynamic workflow "Review the repository" completed</summary>\n' +
+        "</task-notification>",
+    });
+
+    expect(
+      h.state().items.find(
+        (item) => item.kind === "tool" && item.callId === "workflow-1",
+      ),
+    ).toMatchObject({
+      status: "done",
+      output: 'Dynamic workflow "Review the repository" completed',
+    });
+    expect(h.state().items.find((item) => item.kind === "plan")).toMatchObject({
+      steps: [
+        { text: "Map", status: "done" },
+        { text: "Report", status: "done" },
+      ],
+    });
+  });
+
+  test("shows TaskCreate and TaskUpdate as one live Claudex workflow", () => {
+    const h = harness({ program: "claudex" });
+    h.feed({
+      type: "assistant",
+      message: {
+        content: [
+          {
+            type: "tool_use",
+            id: "create-1",
+            name: "TaskCreate",
+            input: {
+              subject: "Find matrix loading animation code",
+              description: "Locate the animation implementation",
+              activeForm: "Finding matrix animation code",
+            },
+          },
+        ],
+      },
+    });
+
+    let plan = h.state().items.find((item) => item.kind === "plan");
+    expect(plan?.kind === "plan" && plan.steps).toEqual([
+      { text: "Find matrix loading animation code", status: "pending" },
+    ]);
+
+    h.feed({
+      type: "user",
+      message: {
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "create-1",
+            content:
+              "Task #1 created successfully: Find matrix loading animation code",
+          },
+        ],
+      },
+    });
+    h.feed({
+      type: "assistant",
+      message: {
+        content: [
+          {
+            type: "tool_use",
+            id: "update-1",
+            name: "TaskUpdate",
+            input: { taskId: "1", status: "in_progress" },
+          },
+        ],
+      },
+    });
+
+    plan = h.state().items.find((item) => item.kind === "plan");
+    expect(plan?.kind === "plan" && plan.steps).toEqual([
+      { text: "Find matrix loading animation code", status: "running" },
+    ]);
+    expect(
+      h.state().items.find(
+        (item) => item.kind === "tool" && item.callId === "create-1",
+      ),
+    ).toMatchObject({
+      tool: "todo",
+      title: "Create task: Find matrix loading animation code",
+      status: "done",
+    });
+  });
+
+  test("rebuilds the workflow from a TaskList result", () => {
+    const h = harness();
+    h.feed({
+      type: "assistant",
+      message: {
+        content: [
+          { type: "tool_use", id: "list-1", name: "TaskList", input: {} },
+        ],
+      },
+    });
+    h.feed({
+      type: "user",
+      message: {
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "list-1",
+            content:
+              "#2 [completed] Build Uvicorn job API\n" +
+              "#5 [in_progress] Add tests and verify\n" +
+              "#11 [pending] Verify correctness findings",
+          },
+        ],
+      },
+    });
+
+    const plan = h.state().items.find((item) => item.kind === "plan");
+    expect(plan?.kind === "plan" && plan.steps).toEqual([
+      { text: "Build Uvicorn job API", status: "done" },
+      { text: "Add tests and verify", status: "running" },
+      { text: "Verify correctness findings", status: "pending" },
+    ]);
+  });
+
+  test("restores a task when TaskUpdate fails", () => {
+    const h = harness();
+    h.feed({
+      type: "assistant",
+      message: {
+        content: [
+          {
+            type: "tool_use",
+            id: "create-1",
+            name: "TaskCreate",
+            input: { subject: "Inspect parser" },
+          },
+        ],
+      },
+    });
+    h.feed({
+      type: "user",
+      message: {
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "create-1",
+            content: "Task #7 created successfully: Inspect parser",
+          },
+        ],
+      },
+    });
+    h.feed({
+      type: "assistant",
+      message: {
+        content: [
+          {
+            type: "tool_use",
+            id: "delete-7",
+            name: "TaskUpdate",
+            input: { taskId: "7", status: "deleted" },
+          },
+        ],
+      },
+    });
+    h.feed({
+      type: "user",
+      message: {
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "delete-7",
+            content: "Task could not be deleted",
+            is_error: true,
+          },
+        ],
+      },
+    });
+
+    const plan = h.state().items.find((item) => item.kind === "plan");
+    expect(plan?.kind === "plan" && plan.steps).toEqual([
+      { text: "Inspect parser", status: "pending" },
     ]);
   });
 
@@ -840,6 +1314,60 @@ describe("claude adapter", () => {
       type: "user",
       message: { role: "user", content: [{ type: "text", text: "/effort high" }] },
     });
+  });
+
+  test("mirrors a supported /goal response into the shared header state", () => {
+    const h = harness();
+    expect(
+      h.adapter.command?.(
+        "/goal research only, no code changes",
+        h.ctx,
+      ),
+    ).toBe("prompt");
+    expect(h.state().goal).toEqual({
+      objective: "research only, no code changes",
+      status: "active",
+    });
+
+    h.adapter.prompt(
+      { text: "/goal research only, no code changes", images: [] },
+      h.ctx,
+    );
+    h.feed({
+      type: "assistant",
+      message: {
+        model: "<synthetic>",
+        role: "assistant",
+        content: [
+          {
+            type: "text",
+            text: "Goal set: research only, no code changes, with five findings",
+          },
+        ],
+      },
+    });
+
+    expect(h.state().goal).toEqual({
+      objective: "research only, no code changes, with five findings",
+      status: "active",
+    });
+  });
+
+  test("rolls back the provisional goal when the CLI rejects /goal", () => {
+    const h = harness();
+    h.adapter.command?.("/goal inspect the repository", h.ctx);
+    expect(h.state().goal?.status).toBe("active");
+
+    h.feed({
+      type: "assistant",
+      message: {
+        model: "<synthetic>",
+        role: "assistant",
+        content: [{ type: "text", text: "Unknown command: /goal" }],
+      },
+    });
+
+    expect(h.state().goal).toBeNull();
   });
 
   test("rejects an invalid effort locally instead of wasting a turn", () => {
