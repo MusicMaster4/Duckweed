@@ -1,9 +1,13 @@
 import { describe, expect, test } from "bun:test";
 
-import { goalAfterCommand, goalAfterProviderText } from "./goal";
+import {
+  goalAfterCommand,
+  goalAfterProviderText,
+  goalResponseFailed,
+} from "./goal";
 
 describe("goal state normalization", () => {
-  test("tracks provider-owned goal commands without changing status queries", () => {
+  test("tracks provider-owned commands without changing status queries", () => {
     expect(goalAfterCommand(null, "/goal ship the release")).toEqual({
       objective: "ship the release",
       status: "active",
@@ -24,7 +28,7 @@ describe("goal state normalization", () => {
     expect(goalAfterCommand(null, "/goal clear")).toBeNull();
   });
 
-  test("reads authoritative goal status replies from slash-command output", () => {
+  test("reads structured and compact provider responses", () => {
     expect(
       goalAfterProviderText(null, "Goal active.\nObjective: finish the migration"),
     ).toEqual({
@@ -32,14 +36,16 @@ describe("goal state normalization", () => {
       status: "active",
     });
     expect(
-      goalAfterProviderText(
-        { objective: "finish the migration", status: "active" },
-        "Goal achieved.",
-      ),
+      goalAfterProviderText(null, "Goal set: research only, no code changes"),
     ).toEqual({
-      objective: "finish the migration",
-      status: "complete",
+      objective: "research only, no code changes",
+      status: "active",
     });
     expect(goalAfterProviderText(null, "No goal is set for this thread.")).toBeNull();
+  });
+
+  test("recognizes a provider refusing the goal command", () => {
+    expect(goalResponseFailed("Unknown command: /goal")).toBe(true);
+    expect(goalResponseFailed("Goal set: inspect the repository")).toBe(false);
   });
 });

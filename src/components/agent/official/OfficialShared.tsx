@@ -15,8 +15,9 @@ import { AgentDiff } from "../AgentDiff";
 import { AgentImageAttachments } from "../AgentImageAttachments";
 import { MessageCopyButton } from "../MessageCopyButton";
 import { AgentProviderIcon } from "../AgentProviderIcon";
-import { nextPreparingMessage } from "./preparingMessages";
-import { nextThinkingPulsePattern } from "./thinkingPulsePatterns";
+import { useSubagentUi } from "../subagents/SubagentUiContext";
+import { preparingMessageFor } from "./preparingMessages";
+import { thinkingPulsePatternFor } from "./thinkingPulsePatterns";
 
 export interface ExperienceProps {
   items: AgentItem[];
@@ -466,9 +467,11 @@ function completedCount(steps: AgentPlanStep[]): number {
 export function PlanTracker({
   item,
   variant,
+  runningSubagents = 0,
 }: {
   item: PlanItem;
   variant: OfficialVariant | "cursor" | "opencode";
+  runningSubagents?: number;
 }) {
   const running = item.steps.find((step) => step.status === "running");
   const completed = completedCount(item.steps);
@@ -485,7 +488,17 @@ export function PlanTracker({
         aria-expanded={open}
       >
         <span className="official-plan-kicker">Workflow</span>
-        <strong>{running?.text ?? (completed === total ? "Tasks completed" : "Task plan")}</strong>
+        <span className="official-plan-summary">
+          <strong>
+            {running?.text ?? (completed === total ? "Tasks completed" : "Task plan")}
+          </strong>
+          {runningSubagents > 0 && (
+            <small>
+              {runningSubagents} running{" "}
+              {runningSubagents === 1 ? "subagent" : "subagents"}
+            </small>
+          )}
+        </span>
         <span className="official-plan-count">
           {completed}/{total}
         </span>
@@ -537,6 +550,8 @@ export function ToolActivity({
   variant: OfficialVariant | "cursor" | "opencode";
   compact?: boolean;
 }) {
+  const { selectedCallId, selectSubagent } = useSubagentUi();
+  const isSubagent = item.tool === "task";
   const hasOutput = item.output.trim().length > 0;
   const hasChanges = item.changes.length > 0;
   const expandable = hasOutput || hasChanges || Boolean(item.command);
@@ -560,15 +575,25 @@ export function ToolActivity({
   return (
     <section
       className={`official-tool official-tool--${variant} is-${item.status}${
-        item.tool === "task" ? " is-subagent" : ""
-      }${compact ? " is-compact" : ""}${open ? " is-open" : ""}`}
+        isSubagent ? " is-subagent" : ""
+      }${selectedCallId === item.callId ? " is-selected" : ""}${
+        compact ? " is-compact" : ""
+      }${open && !isSubagent ? " is-open" : ""}`}
+      {...(isSubagent ? { "data-subagent-call-id": item.callId } : {})}
     >
       <button
         type="button"
         className="official-tool-head"
-        onClick={() => expandable && setOpen((value) => !value)}
-        aria-expanded={expandable ? open : undefined}
-        disabled={!expandable}
+        onClick={() => {
+          if (isSubagent) {
+            selectSubagent(item.callId);
+          } else if (expandable) {
+            setOpen((value) => !value);
+          }
+        }}
+        aria-expanded={!isSubagent && expandable ? open : undefined}
+        aria-label={isSubagent ? `Inspect subagent: ${item.title}` : undefined}
+        disabled={!isSubagent && !expandable}
       >
         <span className="official-tool-mark">
           <ToolIcon kind={item.tool} />
@@ -587,9 +612,9 @@ export function ToolActivity({
           {item.status === "done" && <span className="official-tool-done">✓</span>}
           {item.status === "error" && <ToolErrorMark />}
         </span>
-        {expandable && <Chevron open={open} />}
+        {expandable && !isSubagent && <Chevron open={open} />}
       </button>
-      {open && (
+      {open && !isSubagent && (
         <div className="official-tool-body">
           {item.command && (
             <pre className="official-command">
@@ -607,8 +632,16 @@ export function ToolActivity({
   );
 }
 
-function ActivityPulse({ active }: { active: boolean }) {
-  const [pattern] = useState(nextThinkingPulsePattern);
+function ActivityPulse({
+  active,
+  clusterId,
+}: {
+  active: boolean;
+  /** Stable id for this thinking wait; keeps the matrix across remounts. */
+  clusterId: string;
+}) {
+  // Registry-backed: remounts (tab switch, pane split) must not roll a new pattern.
+  const pattern = thinkingPulsePatternFor(clusterId);
   return (
     <span
       className={`agent-activity-pulse${active ? " is-active" : " is-settled"}`}
@@ -640,7 +673,13 @@ function ActivityPulse({ active }: { active: boolean }) {
  * It is driven by the live turn status and is replaced as soon as fresh
  * reasoning or tool activity reaches the transcript.
  */
-export function StillWorking({ variant }: { variant: ActivityVariant }) {
+export function StillWorking({
+  variant,
+  clusterId,
+}: {
+  variant: ActivityVariant;
+  clusterId: string;
+}) {
   return (
     <div
       className="agent-activity-cluster agent-still-working"
@@ -650,7 +689,7 @@ export function StillWorking({ variant }: { variant: ActivityVariant }) {
     >
       <div className="agent-activity-history is-thinking is-active">
         <div className="agent-activity-history-head">
-          <ActivityPulse active />
+          <ActivityPulse active clusterId={clusterId} />
           <span className="agent-activity-history-label">Still working</span>
         </div>
       </div>
@@ -669,15 +708,18 @@ function ThinkingHistory({
   thoughts,
   working,
   showLatestFull,
+  clusterId,
 }: {
   thoughts: ThinkingItem[];
   working: boolean;
   showLatestFull: boolean;
+  /** Stable id for this thinking wait; keeps pulse + preparing line across remounts. */
+  clusterId: string;
 }) {
   const [open, setOpen] = useState(false);
-  // Picked once per mount, same as the pulse pattern: a fresh preparing
-  // cluster gets a new line; remounts during the same wait do not flicker.
-  const [preparingMessage] = useState(nextPreparingMessage);
+  // Registry-backed like the pulse: a fresh preparing cluster gets a new line;
+  // remounts during the same wait keep the same stand-in text.
+  const preparingMessage = preparingMessageFor(clusterId);
   const panelId = useId();
   const latest = showLatestFull ? thoughts[thoughts.length - 1] : undefined;
   const active = working;
@@ -703,7 +745,7 @@ function ThinkingHistory({
             : "Thinking"
         }
       >
-        <ActivityPulse active={active} />
+        <ActivityPulse active={active} clusterId={clusterId} />
         <span className="agent-activity-history-label">Thinking</span>
         {!latest && thoughts.length === 0 && (
           <span className="agent-activity-history-summary">{preparingMessage}</span>
@@ -842,11 +884,18 @@ export function ActivityHistory({
   variant,
   working = false,
   showLatestThinking = true,
+  clusterId,
 }: {
   activities: Array<ThinkingItem | ToolItem>;
   variant: ActivityVariant;
   working?: boolean;
   showLatestThinking?: boolean;
+  /**
+   * Stable id for this activity phase (terminal + group/phase). Survives tab
+   * remounts, but a new user prompt, interim agent message, or session starts a
+   * fresh phase and draws a new matrix pattern.
+   */
+  clusterId: string;
 }) {
   const thoughts = activities.filter(
     (item): item is ThinkingItem => item.kind === "thinking",
@@ -862,6 +911,7 @@ export function ActivityHistory({
           thoughts={thoughts}
           working={working}
           showLatestFull={showLatestThinking}
+          clusterId={clusterId}
         />
       )}
       {tools.length > 0 && (

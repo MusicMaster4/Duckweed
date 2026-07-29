@@ -12,11 +12,11 @@ const GOAL_STATUS_FROM_TEXT: Record<string, AgentGoalStatus> = {
 };
 
 /**
- * Mirror a provider-owned `/goal` command into the shared session state.
+ * Mirror a provider-owned `/goal` command into shared session state.
  *
  * Codex has structured goal RPCs and does not need this fallback. Claude and
- * ACP agents receive slash commands as prompt text, so this keeps their header
- * indicator useful even when the protocol does not expose a goal object.
+ * ACP agents receive supported slash commands as prompt text, so their chrome
+ * needs a provisional state until the provider responds.
  */
 export function goalAfterCommand(
   current: AgentGoal | null,
@@ -47,15 +47,21 @@ export function goalAfterCommand(
 }
 
 /**
- * Read the compact status text returned by a provider-owned goal command.
- * This is intentionally used only for slash-command responses, never normal
- * assistant prose, so a sentence about a completed goal cannot alter chrome.
+ * Read provider feedback only while a `/goal` response is pending.
+ *
+ * Keeping this parser scoped to a goal command prevents ordinary assistant
+ * prose about completed or blocked work from changing the header indicator.
  */
 export function goalAfterProviderText(
   current: AgentGoal | null,
   text: string,
 ): AgentGoal | null | undefined {
   if (/\b(?:no goal is set|goal (?:was )?cleared)\b/i.test(text)) return null;
+
+  const setMatch = /(?:^|\n)\s*goal set:\s*(.+?)\s*$/im.exec(text);
+  if (setMatch) {
+    return { objective: setMatch[1].trim(), status: "active" };
+  }
 
   const statusMatch =
     /\bgoal(?:\s+is|\s+status:)?\s+(active|paused|blocked|complete|completed|achieved|usage limited|budget limited)\b/i.exec(
@@ -69,4 +75,10 @@ export function goalAfterProviderText(
     objective: objectiveMatch?.[1].trim() || current?.objective || null,
     status,
   };
+}
+
+export function goalResponseFailed(text: string): boolean {
+  return /unknown command|invalid argument|goals? (?:are|is) disabled|could not|cannot|failed/i.test(
+    text,
+  );
 }

@@ -59,6 +59,8 @@ export function ChatGPTExperience(props: ExperienceProps) {
   });
   const needsEmptyLiveTrace =
     status === "working" && latestUserIndex >= 0 && !hasActivityAfterPrompt;
+  const liveUserId =
+    latestUserIndex >= 0 ? transcriptItems[latestUserIndex]?.id : "session-start";
   let latestLiveContent: (typeof transcriptItems)[number] | undefined;
   for (let index = transcriptItems.length - 1; index > latestUserIndex; index -= 1) {
     const item = transcriptItems[index];
@@ -108,6 +110,7 @@ export function ChatGPTExperience(props: ExperienceProps) {
                 variant="chatgpt"
                 working={status === "working" && group === liveGroup}
                 showLatestThinking={group === groups[groups.length - 1]}
+                clusterId={`${termId}:${group.firstId}`}
               />
             );
           }
@@ -153,9 +156,19 @@ export function ChatGPTExperience(props: ExperienceProps) {
           );
         })}
         {needsEmptyLiveTrace && (
-          <ActivityHistory activities={[]} variant="chatgpt" working />
+          <ActivityHistory
+            activities={[]}
+            variant="chatgpt"
+            working
+            clusterId={`${termId}:live:${liveUserId}`}
+          />
         )}
-        {needsStillWorking && <StillWorking variant="chatgpt" />}
+        {needsStillWorking && (
+          <StillWorking
+            variant="chatgpt"
+            clusterId={`${termId}:still:${liveUserId}`}
+          />
+        )}
       </div>
     </div>
   );

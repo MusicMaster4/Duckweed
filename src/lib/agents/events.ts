@@ -12,6 +12,7 @@ import type {
   AgentSessionState,
   AgentStatus,
   AgentUsage,
+  SubagentMeta,
   ToolKind,
   ToolStatus,
 } from "./types";
@@ -72,6 +73,10 @@ export type AgentEvent =
       /** Appends to the collected output. */
       outputDelta?: string;
       changes?: AgentFileChange[];
+      /** Optional structured identity and live context for delegated work. */
+      subagent?: SubagentMeta;
+      /** One nested child item to append or update by id. */
+      subagentItem?: AgentItem;
     }
   | { type: "plan"; steps: AgentPlanStep[] }
   | { type: "notice"; text: string; tone: "info" | "error"; transient?: boolean }
@@ -250,6 +255,27 @@ export function isAnnounceableTurn(input: TurnAnnounceInput): boolean {
   return true;
 }
 
+function mergeSubagentMeta(
+  current: SubagentMeta | undefined,
+  patch: SubagentMeta | undefined,
+  nestedItem: AgentItem | undefined,
+): SubagentMeta | undefined {
+  if (!current && !patch && !nestedItem) return undefined;
+  const baseItems = patch?.items ?? current?.items ?? [];
+  if (!nestedItem) {
+    return { ...current, ...patch };
+  }
+
+  const items = baseItems.slice();
+  const index = items.findIndex((item) => item.id === nestedItem.id);
+  if (index < 0) {
+    items.push(nestedItem);
+  } else {
+    items[index] = { ...items[index], ...nestedItem } as AgentItem;
+  }
+  return { ...current, ...patch, items };
+}
+
 /**
  * Fold one event into the session.
  *
@@ -391,6 +417,11 @@ export function applyEvent(state: AgentSessionState, event: AgentEvent): AgentSe
         (item) => item.kind === "tool" && item.callId === event.callId,
       );
       if (index < 0) {
+        const subagent = mergeSubagentMeta(
+          undefined,
+          event.subagent,
+          event.subagentItem,
+        );
         return {
           ...state,
           started: true,
@@ -408,6 +439,7 @@ export function applyEvent(state: AgentSessionState, event: AgentEvent): AgentSe
               command: event.command ?? null,
               output: clampEnd(event.output ?? event.outputDelta ?? "", MAX_TOOL_OUTPUT),
               changes: event.changes ?? [],
+              ...(subagent ? { subagent } : {}),
             },
           ],
         };
@@ -430,15 +462,21 @@ export function applyEvent(state: AgentSessionState, event: AgentEvent): AgentSe
         command: event.command === undefined ? current.command : event.command,
         output: clampEnd(output, MAX_TOOL_OUTPUT),
         changes: event.changes ?? current.changes,
+        subagent: mergeSubagentMeta(
+          current.subagent,
+          event.subagent,
+          event.subagentItem,
+        ),
       };
       return { ...state, items };
     }
 
     case "plan": {
       // A plan is a live checklist, not a log: the agent rewrites it every
-      // time it ticks a box, so the existing item is replaced in place rather
-      // than stacking a dozen near-identical lists down the transcript.
-      const index = lastIndexOfKind(state, "plan");
+      // time it ticks a box. Only replace a checklist from this user turn,
+      // though. Updating an older row in place would leave it before the latest
+      // user message, where the current-turn workflow dock cannot see it.
+      const index = lastIndexOfKindInCurrentTurn(state, "plan");
       if (index < 0) {
         return {
           ...state,
@@ -568,9 +606,13 @@ function findStreaming(
   return -1;
 }
 
-function lastIndexOfKind(state: AgentSessionState, kind: "plan"): number {
+function lastIndexOfKindInCurrentTurn(
+  state: AgentSessionState,
+  kind: "plan",
+): number {
   for (let i = state.items.length - 1; i >= 0; i--) {
     if (state.items[i].kind === kind) return i;
+    if (state.items[i].kind === "user") return -1;
   }
   return -1;
 }

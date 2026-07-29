@@ -120,6 +120,24 @@ pub fn set_verb(_verb: ShellVerb, _enabled: bool) -> Result<ShellIntegrationStat
     Err("Explorer context menus are only available on Windows".into())
 }
 
+/// Re-write enabled verbs with the executable that Explorer should launch.
+///
+/// Development builds used to register `target\debug\duckweed.exe`. That
+/// binary depends on the Vite development server, so launching it later from
+/// Explorer opens a console and leaves the app window blank. Running either an
+/// installed or development build now repairs those stale entries.
+#[cfg(windows)]
+pub fn repair_enabled_verbs() {
+    for verb in [ShellVerb::Tab, ShellVerb::Window] {
+        if verb_installed(verb) {
+            let _ = install_verb(verb);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+pub fn repair_enabled_verbs() {}
+
 /// After an update, Windows often keeps showing the previous app icon.
 /// Call once per product version so Explorer reloads the icon from the exe.
 #[cfg(windows)]
@@ -131,12 +149,8 @@ pub fn refresh_icons_if_needed(version: &str) {
         return;
     }
     // Re-write Icon registry values for any installed verbs so they still
-    // point at the running binary (and index 0 of its icon resource).
-    for verb in [ShellVerb::Tab, ShellVerb::Window] {
-        if verb_installed(verb) {
-            let _ = install_verb(verb);
-        }
-    }
+    // point at the installed binary (and index 0 of its icon resource).
+    repair_enabled_verbs();
     notify_shell_icons_changed();
     let _ = store_icon_refresh_version(version);
 }
@@ -152,7 +166,7 @@ fn notify_shell_icons_changed() {
     };
 
     unsafe {
-        if let Ok(exe) = current_exe() {
+        if let Ok(exe) = registration_exe() {
             let wide: Vec<u16> = exe
                 .as_os_str()
                 .encode_wide()
@@ -203,7 +217,7 @@ fn verb_installed(verb: ShellVerb) -> bool {
 
 #[cfg(windows)]
 fn install_verb(verb: ShellVerb) -> Result<(), String> {
-    let exe = current_exe()?;
+    let exe = registration_exe()?;
     let icon = icon_value(&exe);
     let exe_quoted = quote_path(&exe);
     let action = verb.action();
@@ -304,6 +318,56 @@ fn current_exe() -> Result<PathBuf, String> {
     std::env::current_exe().map_err(|error| error.to_string())
 }
 
+/// Release builds register themselves. A development build must target the
+/// installed app because its own executable cannot run without the dev server.
+#[cfg(windows)]
+fn registration_exe() -> Result<PathBuf, String> {
+    choose_registration_exe(current_exe()?, installed_exe(), cfg!(debug_assertions))
+}
+
+#[cfg(windows)]
+fn choose_registration_exe(
+    current: PathBuf,
+    installed: Option<PathBuf>,
+    debug: bool,
+) -> Result<PathBuf, String> {
+    if !debug {
+        return Ok(current);
+    }
+    installed.ok_or_else(|| {
+        "Install Duckweed before enabling its Windows Explorer context menu".to_string()
+    })
+}
+
+/// Resolve the NSIS installation independently of the development checkout.
+/// The uninstall entry covers custom install locations; LOCALAPPDATA is the
+/// normal current-user fallback.
+#[cfg(windows)]
+fn installed_exe() -> Option<PathBuf> {
+    const UNINSTALL_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\Duckweed";
+
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    if let Ok(key) = hkcu.open_subkey(UNINSTALL_KEY) {
+        if let Ok(raw) = key.get_value::<String, _>("InstallLocation") {
+            let candidate = PathBuf::from(raw.trim().trim_matches('"')).join("duckweed.exe");
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+        if let Ok(raw) = key.get_value::<String, _>("DisplayIcon") {
+            let candidate = PathBuf::from(raw.trim().trim_matches('"'));
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+
+    std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .map(|dir| dir.join("Duckweed").join("duckweed.exe"))
+        .filter(|candidate| candidate.is_file())
+}
+
 #[cfg(windows)]
 fn icon_value(exe: &std::path::Path) -> String {
     // Prefer a sibling icon.ico when the app is installed next to one; fall
@@ -319,4 +383,35 @@ fn icon_value(exe: &std::path::Path) -> String {
 #[cfg(windows)]
 fn quote_path(path: &std::path::Path) -> String {
     format!("\"{}\"", path.to_string_lossy())
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn release_build_registers_the_running_executable() {
+        let current = PathBuf::from(r"C:\Duckweed\duckweed.exe");
+        let installed = PathBuf::from(r"D:\Installed\duckweed.exe");
+        assert_eq!(
+            choose_registration_exe(current.clone(), Some(installed), false).unwrap(),
+            current
+        );
+    }
+
+    #[test]
+    fn debug_build_registers_the_installed_executable() {
+        let current = PathBuf::from(r"H:\repo\target\debug\duckweed.exe");
+        let installed = PathBuf::from(r"C:\Users\me\AppData\Local\Duckweed\duckweed.exe");
+        assert_eq!(
+            choose_registration_exe(current, Some(installed.clone()), true).unwrap(),
+            installed
+        );
+    }
+
+    #[test]
+    fn debug_build_never_registers_itself_without_an_install() {
+        let current = PathBuf::from(r"H:\repo\target\debug\duckweed.exe");
+        assert!(choose_registration_exe(current, None, true).is_err());
+    }
 }

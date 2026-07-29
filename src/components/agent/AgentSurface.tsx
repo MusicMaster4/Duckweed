@@ -11,6 +11,13 @@ import { agentHasUnfinishedWork } from "../../lib/agents/activity";
 import { canResume } from "../../lib/agents/history";
 import * as agents from "../../lib/agents/session";
 import { isNewChatCommand } from "../../lib/agents/slashCatalog";
+import {
+  COMPLETED_SUBAGENT_FLEET_TTL_MS,
+  runningSubagentCount,
+  subagentForCallId,
+  subagentFleetIsComplete,
+  subagentsForTurn,
+} from "../../lib/agents/subagents";
 import type { AgentImageAttachment, AgentSessionState } from "../../lib/agents/types";
 import {
   isAtScrollBottom,
@@ -32,6 +39,10 @@ import { AgentQuestion } from "./AgentQuestion";
 import { AgentSessions } from "./AgentSessions";
 import { AgentTimeline } from "./AgentTimeline";
 import { PlanTracker, type OfficialVariant } from "./official/OfficialShared";
+import { SubagentFleet } from "./subagents/SubagentFleet";
+import { SubagentInspector } from "./subagents/SubagentInspector";
+import { SubagentUiProvider } from "./subagents/SubagentUiContext";
+import "./subagents/subagents.css";
 
 interface Props {
   termId: string;
@@ -67,6 +78,16 @@ export function agentTimelineRevision(items: AgentSessionState["items"]): number
         item.output.length +
         (item.command?.length ?? 0) +
         item.status.length +
+        (item.subagent
+          ? (item.subagent.label?.length ?? 0) +
+            (item.subagent.role?.length ?? 0) +
+            (item.subagent.threadId?.length ?? 0) +
+            (item.subagent.parentCallId?.length ?? 0) +
+            (item.subagent.model?.length ?? 0) +
+            (item.subagent.activity?.length ?? 0) +
+            (item.subagent.prompt?.length ?? 0) +
+            JSON.stringify(item.subagent.items ?? []).length
+          : 0) +
         item.changes.reduce(
           (sum, change) =>
             sum +
@@ -106,6 +127,7 @@ export function AgentSurface({ termId, active, onClose }: Props) {
   );
 
   const scrollRef = useRef<HTMLDivElement>(null);
+  const surfaceRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   /** Open with the text typed after `/resume`, so it doubles as a filter. */
   const [resumeQuery, setResumeQuery] = useState<string | null>(null);
@@ -120,6 +142,101 @@ export function AgentSurface({ termId, active, onClose }: Props) {
   const workflowComplete = workflowIsComplete(workflow, session?.status);
   const [expiredWorkflowId, setExpiredWorkflowId] = useState<string | null>(null);
   const [clockNow, setClockNow] = useState(() => Date.now());
+  const [selectedSubagentCallId, setSelectedSubagentCallId] = useState<string | null>(
+    null,
+  );
+  const fleet = subagentsForTurn(session?.items ?? []);
+  const fleetKey = fleet.map((subagent) => subagent.callId).join("\u001f");
+  const fleetComplete = subagentFleetIsComplete(fleet, session?.status);
+  const [expiredFleetKey, setExpiredFleetKey] = useState<string | null>(null);
+  const selectedSubagent = selectedSubagentCallId
+    ? subagentForCallId(session?.items ?? [], selectedSubagentCallId)
+    : null;
+  const dockedFleet =
+    fleetComplete && expiredFleetKey === fleetKey ? [] : fleet;
+  const visibleFleet =
+    selectedSubagent &&
+    !dockedFleet.some((subagent) => subagent.callId === selectedSubagent.callId)
+      ? [...dockedFleet, selectedSubagent]
+      : dockedFleet;
+
+  const closeSubagentInspector = useCallback(() => {
+    setSelectedSubagentCallId(null);
+    window.requestAnimationFrame(() => composerRef.current?.focus());
+  }, []);
+
+  useEffect(() => {
+    if (!selectedSubagentCallId) return;
+    if (!selectedSubagent) {
+      setSelectedSubagentCallId(null);
+      return;
+    }
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      closeSubagentInspector();
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [closeSubagentInspector, selectedSubagent, selectedSubagentCallId]);
+
+  useEffect(() => {
+    if (!fleetComplete) {
+      if (expiredFleetKey === fleetKey) setExpiredFleetKey(null);
+      return;
+    }
+    if (!fleetKey || expiredFleetKey === fleetKey || selectedSubagentCallId) return;
+    const timer = window.setTimeout(
+      () => setExpiredFleetKey(fleetKey),
+      COMPLETED_SUBAGENT_FLEET_TTL_MS,
+    );
+    return () => window.clearTimeout(timer);
+  }, [
+    expiredFleetKey,
+    fleetComplete,
+    fleetKey,
+    selectedSubagentCallId,
+  ]);
+
+  useEffect(() => {
+    if (!visibleFleet.length) return;
+    const navigateFleet = (event: KeyboardEvent) => {
+      if (!event.altKey || event.ctrlKey || event.metaKey) return;
+      if (event.code === "Backslash") {
+        event.preventDefault();
+        if (selectedSubagentCallId) {
+          closeSubagentInspector();
+        } else {
+          const first =
+            visibleFleet.find(
+              (subagent) =>
+                subagent.status === "running" || subagent.status === "pending",
+            ) ?? visibleFleet[0];
+          setSelectedSubagentCallId(first.callId);
+        }
+        return;
+      }
+      if (event.code !== "BracketLeft" && event.code !== "BracketRight") return;
+      event.preventDefault();
+      const current = visibleFleet.findIndex(
+        (subagent) => subagent.callId === selectedSubagentCallId,
+      );
+      const direction = event.code === "BracketRight" ? 1 : -1;
+      const next =
+        current < 0
+          ? direction > 0
+            ? 0
+            : visibleFleet.length - 1
+          : (current + direction + visibleFleet.length) % visibleFleet.length;
+      setSelectedSubagentCallId(visibleFleet[next].callId);
+    };
+    window.addEventListener("keydown", navigateFleet);
+    return () => window.removeEventListener("keydown", navigateFleet);
+  }, [
+    closeSubagentInspector,
+    selectedSubagentCallId,
+    visibleFleet,
+  ]);
 
   useEffect(() => {
     if (session?.status !== "working" || session.workStartedAt === null) return;
@@ -204,7 +321,9 @@ export function AgentSurface({ termId, active, onClose }: Props) {
 
   const { usage } = session;
   const visibleWorkflow =
-    workflow && workflow.id !== expiredWorkflowId ? workflow : null;
+    workflow && workflow.steps.length > 0 && workflow.id !== expiredWorkflowId
+      ? workflow
+      : null;
   const timelineItems = workflow
     ? session.items.filter((item) => item.kind !== "plan")
     : session.items;
@@ -274,6 +393,19 @@ export function AgentSurface({ termId, active, onClose }: Props) {
     lastScrollTopRef.current = node.scrollTop;
   };
 
+  const showSubagentInTimeline = (callId: string) => {
+    const target = Array.from(
+      surfaceRef.current?.querySelectorAll<HTMLElement>("[data-subagent-call-id]") ?? [],
+    ).find((element) => element.dataset.subagentCallId === callId);
+    if (!target) return;
+    target.scrollIntoView({ block: "center", behavior: "smooth" });
+    target.classList.remove("agent-sub-timeline-selected");
+    window.requestAnimationFrame(() => {
+      target.classList.add("agent-sub-timeline-selected");
+      window.setTimeout(() => target.classList.remove("agent-sub-timeline-selected"), 1_050);
+    });
+  };
+
   /**
    * Clicking anywhere quiet in the transcript hands the keyboard back to the
    * composer, the way a chat pane does. A drag that selected text is exempt —
@@ -290,6 +422,7 @@ export function AgentSurface({ termId, active, onClose }: Props) {
 
   return (
     <div
+      ref={surfaceRef}
       className={`agent-surface is-${session.status}`}
       style={{ ["--agent-accent" as string]: session.accent }}
       data-agent={session.agent}
@@ -358,18 +491,23 @@ export function AgentSurface({ termId, active, onClose }: Props) {
       </header>
 
       <div className="agent-scroll" ref={scrollRef}>
-        <AgentTimeline
-          session={session}
-          items={timelineItems}
-          termId={termId}
-          agent={session.agent}
-          status={session.status}
-          started={session.started}
-          label={session.label}
-          mark={session.mark}
-          program={session.program}
-          cwd={session.cwd}
-        />
+        <SubagentUiProvider
+          selectedCallId={selectedSubagentCallId}
+          onSelect={setSelectedSubagentCallId}
+        >
+          <AgentTimeline
+            session={session}
+            items={timelineItems}
+            termId={termId}
+            agent={session.agent}
+            status={session.status}
+            started={session.started}
+            label={session.label}
+            mark={session.mark}
+            program={session.program}
+            cwd={session.cwd}
+          />
+        </SubagentUiProvider>
 
         {session.pending.map((prompt) => (
           <div key={prompt.id} className="agent-turn is-pending">
@@ -477,9 +615,19 @@ export function AgentSurface({ termId, active, onClose }: Props) {
               <span>Jump to bottom</span>
             </button>
           )}
+          <SubagentFleet
+            agent={session.agent}
+            subagents={visibleFleet}
+            selectedCallId={selectedSubagentCallId}
+            onSelect={setSelectedSubagentCallId}
+          />
           {visibleWorkflow && (
             <div className="agent-workflow-dock">
-              <PlanTracker item={visibleWorkflow} variant={workflowVariant(session.agent)} />
+              <PlanTracker
+                item={visibleWorkflow}
+                variant={workflowVariant(session.agent)}
+                runningSubagents={runningSubagentCount(fleet)}
+              />
             </div>
           )}
           <AgentComposer
@@ -490,6 +638,15 @@ export function AgentSurface({ termId, active, onClose }: Props) {
             onInterrupt={() => agents.interrupt(termId)}
           />
         </div>
+      )}
+
+      {selectedSubagent && (
+        <SubagentInspector
+          agent={session.agent}
+          subagent={selectedSubagent}
+          onClose={closeSubagentInspector}
+          onShowInTimeline={showSubagentInTimeline}
+        />
       )}
 
       {resumeQuery !== null && (

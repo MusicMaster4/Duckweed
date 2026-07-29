@@ -8,7 +8,11 @@ import {
   type AdapterContext,
   type AgentAdapter,
 } from "../adapter";
-import { goalAfterCommand, goalAfterProviderText } from "../goal";
+import {
+  goalAfterCommand,
+  goalAfterProviderText,
+  goalResponseFailed,
+} from "../goal";
 import type { AgentLaunch } from "../launch";
 import {
   makeChange,
@@ -18,6 +22,8 @@ import {
   type AgentGoal,
   type AgentPrompt,
   type AgentQuestionItem,
+  type AgentPlanStep,
+  type SubagentMeta,
   type ToolStatus,
 } from "../types";
 
@@ -45,6 +51,210 @@ interface ToolCall {
   name: string;
   /** Accumulated `input_json_delta` text, parsed once the block closes. */
   partialInput: string;
+}
+
+interface TrackedTask {
+  id: string;
+  text: string;
+  status: AgentPlanStep["status"];
+}
+
+interface TrackedWorkflow {
+  callId: string;
+  taskId: string | null;
+  name: string;
+  summary: string;
+  phases: string[];
+  status: "launching" | "running" | "completed" | "failed" | "stopped";
+}
+
+const CLAUDE_TASK_TOOLS = new Set([
+  "taskcreate",
+  "taskupdate",
+  "tasklist",
+  "taskget",
+]);
+
+function isClaudeTaskTool(name: string): boolean {
+  return CLAUDE_TASK_TOOLS.has(name.toLowerCase());
+}
+
+function taskStatus(value: unknown): AgentPlanStep["status"] {
+  const status = asString(value)?.toLowerCase();
+  if (status === "completed" || status === "done") return "done";
+  if (status === "in_progress" || status === "running") return "running";
+  return "pending";
+}
+
+function parseTaskList(output: string): TrackedTask[] | null {
+  if (/^\s*No tasks found\s*$/i.test(output)) return [];
+  const tasks: TrackedTask[] = [];
+  for (const line of output.split(/\r?\n/)) {
+    const match = /^\s*#(\S+)\s+\[([^\]]+)\]\s+(.+?)\s*$/.exec(line);
+    if (!match) continue;
+    tasks.push({
+      id: match[1],
+      text: match[3],
+      status: taskStatus(match[2]),
+    });
+  }
+  return tasks.length ? tasks : null;
+}
+
+function parseTaskGet(output: string): TrackedTask | null {
+  const heading = /^\s*Task #(\S+):\s*(.+?)\s*$/m.exec(output);
+  const status = /^\s*Status:\s*(.+?)\s*$/m.exec(output);
+  if (!heading) return null;
+  return {
+    id: heading[1],
+    text: heading[2],
+    status: taskStatus(status?.[1]),
+  };
+}
+
+function batchTasks(input: Record<string, unknown>): Array<{
+  text: string;
+  status: AgentPlanStep["status"];
+}> {
+  const raw = input.tasks;
+  let parsed: unknown = raw;
+  if (typeof raw === "string") {
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return [];
+    }
+  }
+  return asArray(parsed)
+    .map((entry) => asRecord(entry))
+    .filter((entry): entry is Record<string, unknown> => entry !== null)
+    .map((entry) => ({
+      text:
+        asString(entry.subject)?.trim() ??
+        asString(entry.content)?.trim() ??
+        asString(entry.description)?.trim() ??
+        "",
+      status: taskStatus(entry.status),
+    }))
+    .filter((entry) => entry.text);
+}
+
+function decodedJsString(value: string): string {
+  return value
+    .replace(/\\(['"`\\])/g, "$1")
+    .replace(/\\n/g, " ")
+    .trim();
+}
+
+/**
+ * Dynamic workflows carry their display metadata in the JavaScript passed to
+ * the Workflow tool. Read only the small `meta` prelude, never evaluate it.
+ */
+function workflowMeta(input: Record<string, unknown>): {
+  name: string;
+  summary: string;
+  phases: string[];
+} {
+  const script = asString(input.script) ?? "";
+  const metaStart = script.search(/\bexport\s+const\s+meta\s*=/);
+  const afterMeta = metaStart >= 0 ? script.slice(metaStart) : script;
+  const metaEnd = afterMeta.search(/\n\s*}\s*\n/);
+  const meta = metaEnd >= 0 ? afterMeta.slice(0, metaEnd + 2) : afterMeta.slice(0, 8_000);
+  const capture = (key: string): string => {
+    const match = new RegExp(`\\b${key}\\s*:\\s*(['"\`])([\\s\\S]*?)\\1`).exec(meta);
+    return match ? decodedJsString(match[2]) : "";
+  };
+  const phases = [
+    ...meta.matchAll(/\btitle\s*:\s*(['"`])([\s\S]*?)\1/g),
+  ]
+    .map((match) => decodedJsString(match[2]))
+    .filter(Boolean);
+
+  // Older scripts may omit `meta.phases` but still call phase("...").
+  if (!phases.length) {
+    for (const match of script.matchAll(/\bphase\s*\(\s*(['"`])([\s\S]*?)\1\s*\)/g)) {
+      const title = decodedJsString(match[2]);
+      if (title && !phases.includes(title)) phases.push(title);
+    }
+  }
+
+  return {
+    name: capture("name") || "Workflow",
+    summary: capture("description"),
+    phases,
+  };
+}
+
+function workflowSteps(
+  workflow: TrackedWorkflow,
+  status: "running" | "completed",
+): AgentPlanStep[] {
+  const phases = workflow.phases.length ? workflow.phases : [workflow.summary || workflow.name];
+  return phases.map((text, index) => ({
+    text,
+    status:
+      status === "completed"
+        ? ("done" as const)
+        : index === 0
+          ? ("running" as const)
+          : ("pending" as const),
+  }));
+}
+
+function workflowLaunch(
+  frame: Record<string, unknown>,
+  output: string,
+): {
+  taskId: string;
+  name: string;
+  summary: string;
+} | null {
+  const result =
+    asRecord(frame.toolUseResult) ??
+    asRecord(frame.tool_use_result) ??
+    asRecord(frame.tool_result);
+  const status = asString(result?.status);
+  const taskType = asString(result?.taskType) ?? asString(result?.task_type);
+  const launched =
+    status === "async_launched" ||
+    taskType === "local_workflow" ||
+    /Workflow launched in background/i.test(output);
+  if (!launched) return null;
+  const taskId =
+    asString(result?.taskId) ??
+    asString(result?.task_id) ??
+    /Task ID:\s*(\S+)/i.exec(output)?.[1] ??
+    "";
+  if (!taskId) return null;
+  return {
+    taskId,
+    name:
+      asString(result?.workflowName) ??
+      asString(result?.workflow_name) ??
+      "",
+    summary: asString(result?.summary) ?? "",
+  };
+}
+
+function taskNotification(text: string): {
+  taskId: string;
+  status: "completed" | "failed" | "stopped";
+  summary: string;
+} | null {
+  if (!text.includes("<task-notification>")) return null;
+  const taskId = /<task-id>([^<]+)<\/task-id>/i.exec(text)?.[1]?.trim() ?? "";
+  const rawStatus = /<status>([^<]+)<\/status>/i.exec(text)?.[1]?.trim().toLowerCase();
+  if (
+    !taskId ||
+    (rawStatus !== "completed" && rawStatus !== "failed" && rawStatus !== "stopped")
+  ) {
+    return null;
+  }
+  return {
+    taskId,
+    status: rawStatus,
+    summary: /<summary>([\s\S]*?)<\/summary>/i.exec(text)?.[1]?.trim() ?? "",
+  };
 }
 
 /**
@@ -78,10 +288,57 @@ function describeTool(name: string, input: Record<string, unknown>): string {
     }
     return null;
   };
+  if (toolKind(name) === "task") {
+    const label = first("description", "subagent_type", "name", "prompt");
+    return label ? oneLine(label) : "Subagent";
+  }
+  if (isClaudeTaskTool(name)) {
+    const lower = name.toLowerCase();
+    if (lower === "taskcreate") {
+      const subject = asString(input.subject)?.trim();
+      return subject ? `Create task: ${oneLine(subject)}` : "Create tasks";
+    }
+    if (lower === "taskupdate") {
+      const id = asString(input.taskId)?.trim();
+      const status = asString(input.status)?.trim();
+      return id
+        ? `Update task #${id}${status ? `: ${status.replaceAll("_", " ")}` : ""}`
+        : "Update task";
+    }
+    if (lower === "taskget") {
+      const id = asString(input.taskId)?.trim();
+      return id ? `Read task #${id}` : "Read task";
+    }
+    return "Check task list";
+  }
+  if (name.toLowerCase() === "workflow") {
+    const meta = workflowMeta(input);
+    return meta.name === "Workflow" ? meta.name : `Workflow · ${meta.name}`;
+  }
   const detail =
     first("command", "file_path", "path", "pattern", "query", "url", "description", "prompt") ??
     "";
   return detail ? `${name} · ${oneLine(detail)}` : name;
+}
+
+function subagentForTool(
+  name: string,
+  input: Record<string, unknown>,
+): SubagentMeta | undefined {
+  if (toolKind(name) !== "task") return undefined;
+  const description = asString(input.description)?.trim();
+  const role = asString(input.subagent_type)?.trim();
+  const prompt = asString(input.prompt)?.trim();
+  const label = description || role || asString(input.name)?.trim() || prompt;
+  const model = asString(input.model)?.trim();
+  const parentCallId = asString(input.parent_tool_use_id)?.trim();
+  return {
+    ...(label ? { label: oneLine(label, 80) } : {}),
+    ...(role ? { role } : {}),
+    ...(prompt ? { prompt } : {}),
+    ...(model ? { model } : {}),
+    ...(parentCallId ? { parentCallId } : {}),
+  };
 }
 
 /** File edits a tool call is making, as far as its input reveals them. */
@@ -166,6 +423,25 @@ export function createClaudeAdapter(): AgentAdapter {
   /** Content-block index → the item id the deltas belong to. */
   const blocks = new Map<number, { kind: "text" | "thinking" | "tool"; id: string }>();
   const tools = new Map<string, ToolCall>();
+  const nestedTools = new Map<
+    string,
+    {
+      name: string;
+      title: string;
+      command: string | null;
+      changes: AgentFileChange[];
+    }
+  >();
+  /** Claude's current task list, independently tracked for the parent and each child. */
+  const taskScopes = new Map<string, Map<string, TrackedTask>>();
+  /** Provisional rows created before TaskCreate returns the provider task id. */
+  const taskCreateKeys = new Map<string, string[]>();
+  /** Optimistic TaskUpdate snapshots, restored if Claude reports an error. */
+  const taskUpdateUndo = new Map<string, { scope: string; tasks: Map<string, TrackedTask> }>();
+  /** Background dynamic workflows remain running after their launch tool returns. */
+  const workflowsByCallId = new Map<string, TrackedWorkflow>();
+  const workflowCallByTaskId = new Map<string, string>();
+  let latestWorkflowCallId: string | null = null;
   let messageSeq = 0;
   let settledMessageSeq = 0;
   let controlSeq = 0;
@@ -193,10 +469,173 @@ export function createClaudeAdapter(): AgentAdapter {
    */
   const seenTurnErrors = new Set<string>();
   let currentGoal: AgentGoal | null = null;
-  let goalResponsePending = false;
   let goalBeforeCommand: AgentGoal | null = null;
+  let goalResponsePending = false;
 
   const blockId = (index: number) => `m${messageSeq}-b${index}`;
+  const ROOT_TASK_SCOPE = "";
+
+  function tasksFor(scope: string): Map<string, TrackedTask> {
+    let tasks = taskScopes.get(scope);
+    if (!tasks) {
+      tasks = new Map();
+      taskScopes.set(scope, tasks);
+    }
+    return tasks;
+  }
+
+  function emitTaskPlan(scope: string, ctx: AdapterContext): void {
+    const steps = [...tasksFor(scope).values()].map(({ text, status }) => ({
+      text,
+      status,
+    }));
+    if (scope === ROOT_TASK_SCOPE) {
+      ctx.emit({ type: "plan", steps });
+      return;
+    }
+    ctx.emit({
+      type: "tool",
+      callId: scope,
+      subagentItem: {
+        kind: "plan",
+        id: `child-plan-${scope}`,
+        at: Date.now(),
+        steps,
+      },
+    });
+  }
+
+  function replaceTaskId(
+    tasks: Map<string, TrackedTask>,
+    oldId: string,
+    task: TrackedTask,
+  ): void {
+    const replaced = new Map<string, TrackedTask>();
+    let found = false;
+    for (const [id, current] of tasks) {
+      if (id === oldId) {
+        replaced.set(task.id, task);
+        found = true;
+      } else {
+        replaced.set(id, current);
+      }
+    }
+    if (!found) replaced.set(task.id, task);
+    tasks.clear();
+    for (const [id, current] of replaced) tasks.set(id, current);
+  }
+
+  function trackTaskUse(
+    scope: string,
+    callId: string,
+    name: string,
+    input: Record<string, unknown>,
+    ctx: AdapterContext,
+  ): void {
+    const lower = name.toLowerCase();
+    if (!CLAUDE_TASK_TOOLS.has(lower)) return;
+    const tasks = tasksFor(scope);
+
+    if (lower === "taskcreate") {
+      const entries = batchTasks(input);
+      const subject = asString(input.subject)?.trim();
+      if (subject) entries.unshift({ text: subject, status: "pending" });
+      if (!entries.length) return;
+      const keys = entries.map((entry, index) => {
+        const key = `create:${callId}:${index}`;
+        tasks.set(key, { id: key, ...entry });
+        return key;
+      });
+      taskCreateKeys.set(callId, keys);
+      emitTaskPlan(scope, ctx);
+      return;
+    }
+
+    if (lower !== "taskupdate") return;
+    const id = asString(input.taskId)?.trim();
+    const rawStatus = asString(input.status)?.toLowerCase();
+    if (!id || (!rawStatus && !tasks.has(id))) return;
+    if (!taskUpdateUndo.has(callId)) {
+      taskUpdateUndo.set(callId, { scope, tasks: new Map(tasks) });
+    }
+    if (rawStatus === "deleted") {
+      tasks.delete(id);
+    } else {
+      const current = tasks.get(id);
+      tasks.set(id, {
+        id,
+        text:
+          current?.text ??
+          asString(input.activeForm)?.trim() ??
+          `Task #${id}`,
+        status: rawStatus ? taskStatus(rawStatus) : current?.status ?? "pending",
+      });
+    }
+    emitTaskPlan(scope, ctx);
+  }
+
+  function trackTaskResult(
+    scope: string,
+    callId: string,
+    name: string,
+    output: string,
+    failed: boolean,
+    ctx: AdapterContext,
+  ): void {
+    const lower = name.toLowerCase();
+    if (!CLAUDE_TASK_TOOLS.has(lower)) return;
+    const tasks = tasksFor(scope);
+
+    if (lower === "taskcreate") {
+      const keys = taskCreateKeys.get(callId) ?? [];
+      taskCreateKeys.delete(callId);
+      if (failed) {
+        for (const key of keys) tasks.delete(key);
+        emitTaskPlan(scope, ctx);
+        return;
+      }
+      const created = [
+        ...output.matchAll(/Task #(\S+) created successfully:\s*(.+?)(?:\r?\n|$)/gi),
+      ];
+      for (const [index, match] of created.entries()) {
+        const oldId = keys[index];
+        if (!oldId) break;
+        const current = tasks.get(oldId);
+        replaceTaskId(tasks, oldId, {
+          id: match[1],
+          text: match[2].trim() || current?.text || `Task #${match[1]}`,
+          status: current?.status ?? "pending",
+        });
+      }
+      emitTaskPlan(scope, ctx);
+      return;
+    }
+
+    if (lower === "taskupdate") {
+      const undo = taskUpdateUndo.get(callId);
+      taskUpdateUndo.delete(callId);
+      if (failed && undo) {
+        taskScopes.set(undo.scope, new Map(undo.tasks));
+        emitTaskPlan(undo.scope, ctx);
+      }
+      return;
+    }
+
+    if (failed) return;
+    if (lower === "tasklist") {
+      const listed = parseTaskList(output);
+      if (listed === null) return;
+      taskScopes.set(scope, new Map(listed.map((task) => [task.id, task])));
+      emitTaskPlan(scope, ctx);
+      return;
+    }
+    if (lower === "taskget") {
+      const task = parseTaskGet(output);
+      if (!task) return;
+      tasks.set(task.id, task);
+      emitTaskPlan(scope, ctx);
+    }
+  }
 
   function emitTurnError(text: string, ctx: AdapterContext) {
     if (seenTurnErrors.has(text)) return;
@@ -210,6 +649,22 @@ export function createClaudeAdapter(): AgentAdapter {
       const steps = planFrom(input);
       if (steps.length) ctx.emit({ type: "plan", steps });
     }
+    if (name.toLowerCase() === "workflow") {
+      const meta = workflowMeta(input);
+      const workflow: TrackedWorkflow = {
+        callId,
+        taskId: null,
+        name: meta.name,
+        summary: meta.summary,
+        phases: meta.phases,
+        status: "launching",
+      };
+      workflowsByCallId.set(callId, workflow);
+      latestWorkflowCallId = callId;
+      ctx.emit({ type: "plan", steps: workflowSteps(workflow, "running") });
+    }
+    trackTaskUse(ROOT_TASK_SCOPE, callId, name, input, ctx);
+    const subagent = subagentForTool(name, input);
     ctx.emit({
       type: "tool",
       callId,
@@ -218,6 +673,7 @@ export function createClaudeAdapter(): AgentAdapter {
       title: describeTool(name, input),
       command: asString(input.command),
       changes: changesFor(name, input),
+      ...(subagent ? { subagent } : {}),
     });
   }
 
@@ -338,11 +794,7 @@ export function createClaudeAdapter(): AgentAdapter {
           if (goal !== undefined) {
             currentGoal = goal;
             ctx.emit({ type: "goal", goal });
-          } else if (
-            /unknown command|invalid argument|goals? (?:are|is) disabled|could not|cannot|failed/i.test(
-              text,
-            )
-          ) {
+          } else if (goalResponseFailed(text)) {
             currentGoal = goalBeforeCommand;
             ctx.emit({ type: "goal", goal: currentGoal });
           }
@@ -361,11 +813,34 @@ export function createClaudeAdapter(): AgentAdapter {
           asString(frame.error) !== null ||
           frame.is_api_error_message === true ||
           frame.isApiErrorMessage === true;
-        const refused = /needs dynamic workflows|Invalid argument|Valid options are/i.test(text);
+        const refused =
+          goalResponseFailed(text) ||
+          /needs dynamic workflows|Invalid argument|Valid options are/i.test(text);
         if (failed) emitTurnError(text, ctx);
         else ctx.emit({ type: "notice", tone: refused ? "error" : "info", text });
       }
       return;
+    }
+    if (goalResponsePending) {
+      const responseText = asArray(message.content)
+        .map((raw) => asRecord(raw))
+        .filter((block): block is Record<string, unknown> => block !== null)
+        .filter((block) => asString(block.type) === "text")
+        .map((block) => asString(block.text) ?? "")
+        .filter(Boolean)
+        .join("\n")
+        .trim();
+      if (responseText) {
+        const goal = goalAfterProviderText(currentGoal, responseText);
+        if (goal !== undefined) {
+          currentGoal = goal;
+          ctx.emit({ type: "goal", goal });
+        } else if (goalResponseFailed(responseText)) {
+          currentGoal = goalBeforeCommand;
+          ctx.emit({ type: "goal", goal: currentGoal });
+        }
+        goalResponsePending = false;
+      }
     }
     const fallbackMessageId =
       asString(message.id) ?? `settled-${++settledMessageSeq}`;
@@ -401,20 +876,219 @@ export function createClaudeAdapter(): AgentAdapter {
     }
   }
 
-  /** Tool results come back wrapped in a synthetic user message. */
-  function handleToolResults(message: Record<string, unknown>, ctx: AdapterContext) {
+  function handleSubagentAssistant(
+    message: Record<string, unknown>,
+    parentCallId: string,
+    ctx: AdapterContext,
+  ) {
+    const messageId =
+      asString(message.id) ?? `child-${parentCallId}-${++settledMessageSeq}`;
+    for (const [index, raw] of asArray(message.content).entries()) {
+      const block = asRecord(raw);
+      if (!block) continue;
+      const blockType = asString(block.type);
+      if (blockType === "text") {
+        const text = asString(block.text)?.trim();
+        if (!text) continue;
+        ctx.emit({
+          type: "tool",
+          callId: parentCallId,
+          subagent: { activity: oneLine(text.split(/\r?\n/).filter(Boolean).at(-1) ?? text) },
+          subagentItem: {
+            kind: "assistant",
+            id: `child-${parentCallId}-${messageId}-b${index}`,
+            at: Date.now(),
+            text,
+            streaming: false,
+          },
+        });
+        continue;
+      }
+      if (blockType !== "tool_use") continue;
+      const callId = asString(block.id);
+      if (!callId) continue;
+      const name = asString(block.name) ?? "tool";
+      const input = asRecord(block.input) ?? {};
+      const title = describeTool(name, input);
+      const command = asString(input.command);
+      const changes = changesFor(name, input);
+      const subagent = subagentForTool(name, input);
+      nestedTools.set(callId, { name, title, command, changes });
+      trackTaskUse(parentCallId, callId, name, input, ctx);
+      ctx.emit({
+        type: "tool",
+        callId: parentCallId,
+        subagent: { activity: `Using ${oneLine(title, 100)}` },
+        subagentItem: {
+          kind: "tool",
+          id: `child-tool-${callId}`,
+          at: Date.now(),
+          callId,
+          name,
+          tool: toolKind(name),
+          title,
+          status: "running",
+          command,
+          output: "",
+          changes,
+          ...(subagent ? { subagent } : {}),
+        },
+      });
+    }
+  }
+
+  function handleSubagentToolResults(
+    message: Record<string, unknown>,
+    parentCallId: string,
+    ctx: AdapterContext,
+  ) {
     for (const raw of asArray(message.content)) {
       const block = asRecord(raw);
       if (!block || asString(block.type) !== "tool_result") continue;
       const callId = asString(block.tool_use_id);
       if (!callId) continue;
       const failed = block.is_error === true;
+      const known = nestedTools.get(callId);
+      const output = resultText(block.content);
+      const name = known?.name ?? "tool";
+      const title = known?.title ?? name;
+      trackTaskResult(
+        parentCallId,
+        callId,
+        name,
+        output,
+        failed,
+        ctx,
+      );
+      ctx.emit({
+        type: "tool",
+        callId: parentCallId,
+        subagent: {
+          activity: failed
+            ? `Failed: ${oneLine(title, 100)}`
+            : output.trim()
+              ? oneLine(output.split(/\r?\n/).filter(Boolean).at(-1) ?? output)
+              : `Completed ${oneLine(title, 100)}`,
+        },
+        subagentItem: {
+          kind: "tool",
+          id: `child-tool-${callId}`,
+          at: Date.now(),
+          callId,
+          name,
+          tool: toolKind(name),
+          title,
+          status: failed ? "error" : "done",
+          command: known?.command ?? null,
+          output,
+          changes: known?.changes ?? [],
+        },
+      });
+      nestedTools.delete(callId);
+    }
+  }
+
+  /** Tool results come back wrapped in a synthetic user message. */
+  function handleToolResults(
+    message: Record<string, unknown>,
+    frame: Record<string, unknown>,
+    ctx: AdapterContext,
+  ) {
+    for (const raw of asArray(message.content)) {
+      const block = asRecord(raw);
+      if (!block || asString(block.type) !== "tool_result") continue;
+      const callId = asString(block.tool_use_id);
+      if (!callId) continue;
+      const failed = block.is_error === true;
+      const known = tools.get(callId);
+      const output = resultText(block.content);
+      const workflow = workflowsByCallId.get(callId);
+      const launch = workflow ? workflowLaunch(frame, output) : null;
+      if (workflow && launch && !failed) {
+        workflow.taskId = launch.taskId;
+        if (launch.name) workflow.name = launch.name;
+        if (launch.summary) workflow.summary = launch.summary;
+        workflow.status = "running";
+        workflowCallByTaskId.set(launch.taskId, callId);
+        ctx.emit({
+          type: "tool",
+          callId,
+          status: "running",
+          title:
+            workflow.name === "Workflow"
+              ? workflow.name
+              : `Workflow · ${workflow.name}`,
+          output,
+        });
+        if (latestWorkflowCallId === callId) {
+          ctx.emit({ type: "plan", steps: workflowSteps(workflow, "running") });
+        }
+        continue;
+      }
+      trackTaskResult(
+        ROOT_TASK_SCOPE,
+        callId,
+        known?.name ?? "tool",
+        output,
+        failed,
+        ctx,
+      );
       ctx.emit({
         type: "tool",
         callId,
         status: failed ? ("error" as ToolStatus) : ("done" as ToolStatus),
-        output: resultText(block.content),
+        output,
       });
+    }
+  }
+
+  function handleTaskNotification(text: string, ctx: AdapterContext): void {
+    const notification = taskNotification(text);
+    if (!notification) return;
+    const callId = workflowCallByTaskId.get(notification.taskId);
+    if (!callId) return;
+    const workflow = workflowsByCallId.get(callId);
+    if (!workflow) return;
+    const completed = notification.status === "completed";
+    workflow.status = notification.status;
+    ctx.emit({
+      type: "tool",
+      callId,
+      status: completed ? "done" : "error",
+      output: notification.summary,
+    });
+    if (latestWorkflowCallId === callId && completed) {
+      ctx.emit({ type: "plan", steps: workflowSteps(workflow, "completed") });
+    }
+    if (!completed) {
+      ctx.emit({
+        type: "notice",
+        tone: "error",
+        text:
+          notification.summary ||
+          `${workflow.name} ${notification.status}.`,
+      });
+    }
+  }
+
+  function handleNotificationFrame(
+    frame: Record<string, unknown>,
+    message: Record<string, unknown> | null,
+    ctx: AdapterContext,
+  ): void {
+    const candidates = [
+      asString(frame.content),
+      asString(frame.prompt),
+      asString(asRecord(frame.attachment)?.prompt),
+      asString(message?.content),
+      ...asArray(message?.content).map((raw) => {
+        if (typeof raw === "string") return raw;
+        const block = asRecord(raw);
+        return asString(block?.text) ?? asString(block?.content);
+      }),
+    ];
+    for (const candidate of candidates) {
+      if (candidate) handleTaskNotification(candidate, ctx);
     }
   }
 
@@ -593,6 +1267,24 @@ export function createClaudeAdapter(): AgentAdapter {
       return "prompt";
     }
 
+    if (name === "/workflows" && workflowsByCallId.size > 0) {
+      const running = [...workflowsByCallId.values()].filter(
+        (workflow) =>
+          workflow.status === "launching" || workflow.status === "running",
+      ).length;
+      ctx.emit({
+        type: "notice",
+        tone: "info",
+        text:
+          running > 0
+            ? `Workflow progress is shown above the composer. ${running} ${
+                running === 1 ? "workflow is" : "workflows are"
+              } still running.`
+            : "Workflow progress is shown above the composer.",
+      });
+      return "handled";
+    }
+
     if (name === "/model" && arg) {
       // A structured switch, so the header can trust what it shows. The CLI
       // would also accept this as plain slash text, but its confirmation
@@ -684,7 +1376,10 @@ export function createClaudeAdapter(): AgentAdapter {
 
       switch (type) {
         case "system": {
-          if (asString(frame.subtype) !== "init") return;
+          if (asString(frame.subtype) !== "init") {
+            handleNotificationFrame(frame, null, ctx);
+            return;
+          }
           const commands = asArray(frame.slash_commands)
             .map((name) => asString(name))
             .filter((name): name is string => name !== null)
@@ -707,14 +1402,35 @@ export function createClaudeAdapter(): AgentAdapter {
         }
         case "assistant": {
           const message = asRecord(frame.message);
-          if (message) handleAssistant(message, frame, ctx);
+          if (!message) return;
+          const parentCallId =
+            asString(frame.parent_tool_use_id) ??
+            asString(message.parent_tool_use_id);
+          if (parentCallId) {
+            handleSubagentAssistant(message, parentCallId, ctx);
+          } else {
+            handleAssistant(message, frame, ctx);
+          }
           return;
         }
         case "user": {
           const message = asRecord(frame.message);
-          if (message) handleToolResults(message, ctx);
+          if (!message) return;
+          handleNotificationFrame(frame, message, ctx);
+          const parentCallId =
+            asString(frame.parent_tool_use_id) ??
+            asString(message.parent_tool_use_id);
+          if (parentCallId) {
+            handleSubagentToolResults(message, parentCallId, ctx);
+          } else {
+            handleToolResults(message, frame, ctx);
+          }
           return;
         }
+        case "queue-operation":
+        case "attachment":
+          handleNotificationFrame(frame, null, ctx);
+          return;
         case "control_request":
           handleControlRequest(frame, ctx);
           return;

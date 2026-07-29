@@ -37,6 +37,7 @@
 }
 
 .agent-preview-surface {
+  position: relative;
   display: flex;
   overflow: hidden;
   min-height: 0;

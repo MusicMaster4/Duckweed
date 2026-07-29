@@ -514,6 +514,94 @@ describe("official agent presentation", () => {
     }
   });
 
+  /**
+   * Tab switches remount the custom UI. The thinking matrix is keyed by cluster
+   * id, so a remount during the same wait must keep the same pattern instead of
+   * drawing a new animation.
+   */
+  test("keeps the thinking matrix pattern across remounts of the same wait", () => {
+    const items: AgentItem[] = [
+      { kind: "user", id: "user-remount", at: 1, text: "Keep the matrix" },
+      {
+        kind: "thinking",
+        id: "thinking-remount",
+        at: 2,
+        text: "Still working.",
+        streaming: true,
+      },
+    ];
+
+    const first = renderAgentActivity("claude", items);
+    const second = renderAgentActivity("claude", items);
+    const pattern = first.match(/data-pattern="([^"]+)"/)?.[1];
+
+    expect(pattern).toBeTruthy();
+    expect(second).toContain(`data-pattern="${pattern}"`);
+  });
+
+  /**
+   * An interim agent message closes one activity phase and opens another under
+   * it. That second matrix must roll a new pattern even though it is still the
+   * same user turn — only tab remounts should freeze the draw.
+   */
+  test("draws a new thinking matrix after an interim agent message", () => {
+    const phaseOne: AgentItem[] = [
+      { kind: "user", id: "user-phase", at: 1, text: "Inspect" },
+      {
+        kind: "thinking",
+        id: "thinking-before-interim",
+        at: 2,
+        text: "Planning the search carefully before I write anything.",
+        streaming: false,
+      },
+    ];
+    const phaseTwo: AgentItem[] = [
+      ...phaseOne,
+      {
+        kind: "assistant",
+        id: "interim-phase",
+        at: 3,
+        text: "I found the entry point and I will keep checking every caller next.",
+        streaming: false,
+      },
+      {
+        kind: "thinking",
+        id: "thinking-after-interim",
+        at: 4,
+        text: "Checking callers now thoroughly after that update.",
+        streaming: true,
+      },
+      {
+        kind: "tool",
+        id: "tool-after-interim",
+        at: 5,
+        callId: "call-after-interim",
+        name: "Search",
+        tool: "search",
+        title: "Find entry point callers",
+        status: "running",
+        command: null,
+        output: "",
+        changes: [],
+      },
+    ];
+
+    // Grok keeps interim comments as assistant messages, so activity reappears
+    // as a fresh cluster under the comment — that is the case that must re-roll.
+    const before = renderAgentActivity("grok", phaseOne);
+    const after = renderAgentActivity("grok", phaseTwo);
+    const firstPattern = before.match(/data-pattern="([^"]+)"/)?.[1];
+    const secondPattern = after.match(/data-pattern="([^"]+)"/)?.[1];
+
+    expect(firstPattern).toBeTruthy();
+    expect(secondPattern).toBeTruthy();
+    expect(secondPattern).not.toBe(firstPattern);
+
+    // Remounting the second phase still has to keep the second pattern.
+    const remounted = renderAgentActivity("grok", phaseTwo);
+    expect(remounted).toContain(`data-pattern="${secondPattern}"`);
+  });
+
   test("keeps Grok planning prose visible when work continues", () => {
     const html = renderAgentActivity("grok", [
         { kind: "user", id: "u1", at: 1, text: "Inspect" },

@@ -260,7 +260,7 @@ fn claude_tool_kind(name: &str) -> &'static str {
         "bash" => "execute",
         "webfetch" | "websearch" => "fetch",
         "task" | "sendmessage" => "task",
-        "todowrite" => "todo",
+        "todowrite" | "taskcreate" | "taskupdate" | "tasklist" | "taskget" => "todo",
         _ => "other",
     }
 }
@@ -272,6 +272,8 @@ fn claude_tool_title(name: &str, input: &Value) -> String {
         "grep" | "glob" => "pattern",
         "webfetch" => "url",
         "task" => "description",
+        "taskcreate" => "subject",
+        "taskupdate" | "taskget" => "taskId",
         _ => "",
     };
     let detail = if key.is_empty() {
@@ -975,6 +977,13 @@ mod tests {
             claude_project_slug(Path::new(r"H:\Python\Slop\duckweed")),
             "H--Python-Slop-duckweed"
         );
+    }
+
+    #[test]
+    fn claude_task_management_tools_restore_as_todo_activity() {
+        for name in ["TaskCreate", "TaskUpdate", "TaskList", "TaskGet"] {
+            assert_eq!(claude_tool_kind(name), "todo");
+        }
     }
 
     #[test]

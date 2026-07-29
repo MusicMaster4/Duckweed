@@ -4,27 +4,26 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { AgentGoalIndicator } from "./AgentGoalIndicator";
 
 describe("AgentGoalIndicator", () => {
-  test("shows an accessible target for an active objective", () => {
+  test("shows an accessible icon for an active goal", () => {
     const html = renderToStaticMarkup(
       <AgentGoalIndicator
         goal={{ objective: "Finish the migration", status: "active" }}
       />,
     );
 
-    expect(html).toContain('class="agent-goal-indicator"');
+    expect(html).toContain('role="status"');
     expect(html).toContain('aria-label="Active goal: Finish the migration"');
-    expect(html).toContain("<svg");
+    expect(html).toContain("agent-goal-indicator");
   });
 
-  test("disappears when the objective is complete or inactive", () => {
+  test("stays hidden when there is no active goal", () => {
     expect(
       renderToStaticMarkup(
         <AgentGoalIndicator
-          goal={{ objective: "Finish the migration", status: "complete" }}
+          goal={{ objective: "Finished", status: "complete" }}
         />,
       ),
     ).toBe("");
     expect(renderToStaticMarkup(<AgentGoalIndicator goal={null} />)).toBe("");
   });
 });
-

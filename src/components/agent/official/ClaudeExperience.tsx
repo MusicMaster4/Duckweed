@@ -57,6 +57,8 @@ export function ClaudeExperience({
     if (group.firstIndex > latestUserIndex) liveGroup = group;
   }
   const needsEmptyLiveTrace = status === "working" && !liveGroup;
+  const liveUserId =
+    latestUserIndex >= 0 ? transcriptItems[latestUserIndex]?.id : "session-start";
 
   if (!started && status !== "error") {
     return (
@@ -92,6 +94,7 @@ export function ClaudeExperience({
                 variant="claude"
                 working={status === "working" && group === liveGroup}
                 showLatestThinking={group === groups[groups.length - 1]}
+                clusterId={`${termId}:${group.firstId}`}
               />
             );
           }
@@ -133,7 +136,12 @@ export function ClaudeExperience({
           );
         })}
         {needsEmptyLiveTrace && (
-          <ActivityHistory activities={[]} variant="claude" working />
+          <ActivityHistory
+            activities={[]}
+            variant="claude"
+            working
+            clusterId={`${termId}:live:${liveUserId}`}
+          />
         )}
       </div>
     </div>

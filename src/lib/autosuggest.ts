@@ -11,7 +11,7 @@
  *
  * Completions menus and path/flag engines are out of scope — history only.
  *
- * Ranking also *unlearns*: commands the user is repeatedly shown and ignores
+ * Ranking also *unlearns*: ghosts the user is shown and never accepts (Tab/→)
  * are demoted and eventually skipped (see {@link ./suggestFeedback}).
  */
 

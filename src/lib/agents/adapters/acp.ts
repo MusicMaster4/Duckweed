@@ -15,6 +15,8 @@ import {
   toolKind,
   type AgentFileChange,
   type AgentGoal,
+  type AgentPlanStep,
+  type SubagentMeta,
   type ToolStatus,
 } from "../types";
 
@@ -23,8 +25,10 @@ import {
  *
  * ACP is JSON-RPC 2.0 over stdio with a small, well-shaped vocabulary: the
  * client opens a session, sends a prompt, and receives `session/update`
- * notifications until the prompt request resolves with a stop reason. Because
- * three of the five supported agents speak it, this one adapter is most of the
+ * notifications until the prompt request resolves with a stop reason. Grok
+ * can keep a workflow running after that response, so its private workflow
+ * lifecycle also participates in turn completion. Because three of the five
+ * supported agents speak ACP, this one adapter is most of the
  * protocol coverage — the per-agent differences live in the catalog's spawn
  * arguments and in the `_meta` fields read below.
  *
@@ -91,6 +95,72 @@ function readContentText(value: unknown): string {
   return inner ? (asString(inner.text) ?? "") : "";
 }
 
+function lastLine(text: string): string | null {
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  return lines.at(-1) ?? null;
+}
+
+/** Grok's private ACP extension reports background workflow phases this way. */
+function readWorkflowSteps(update: Record<string, unknown>): AgentPlanStep[] {
+  const workflowStatus = asString(update.status)?.toLowerCase();
+  return asArray(update.phases)
+    .map((raw) => asRecord(raw))
+    .filter((phase): phase is Record<string, unknown> => phase !== null)
+    .map((phase) => {
+      const state = asString(phase.state)?.toLowerCase();
+      const done =
+        state === "done" ||
+        state === "completed" ||
+        workflowStatus === "done" ||
+        workflowStatus === "completed";
+      const running =
+        state === "active" ||
+        state === "running" ||
+        state === "in_progress" ||
+        state === "inprogress";
+      return {
+        text: asString(phase.title) ?? asString(phase.name) ?? "",
+        status: done ? ("done" as const) : running ? ("running" as const) : ("pending" as const),
+      };
+    })
+    .filter((step) => step.text);
+}
+
+/** Lift task-like raw input without inventing a thread ACP never reported. */
+function readSubagentMeta(
+  title: string | null,
+  input: Record<string, unknown> | null,
+): SubagentMeta | null {
+  if (!input) return null;
+  const prompt = asString(input.prompt)?.trim();
+  const description = asString(input.description)?.trim();
+  const role =
+    asString(input.subagent_type)?.trim() ||
+    asString(input.agent)?.trim() ||
+    asString(input.agent_name)?.trim() ||
+    asString(input.agentName)?.trim();
+  const rawTool =
+    asString(input.tool)?.trim() ||
+    asString(input.tool_name)?.trim() ||
+    asString(input.toolName)?.trim();
+  const taskShaped =
+    (rawTool ? toolKind(rawTool) === "task" : false) ||
+    Boolean(role) ||
+    Boolean(prompt && description);
+  if (!taskShaped) return null;
+  const label = description || role || title?.trim() || prompt || "Subagent";
+  const model = asString(input.model)?.trim();
+  return {
+    label: oneLine(label, 80),
+    ...(role ? { role } : {}),
+    ...(prompt ? { prompt } : {}),
+    ...(model ? { model } : {}),
+  };
+}
+
 export function createAcpAdapter(): AgentAdapter {
   let nextId = 1;
   const pending = new Map<number, Pending>();
@@ -114,6 +184,8 @@ export function createAcpAdapter(): AgentAdapter {
   const permissionRequests = new Map<string, string | number>();
   /** Tool calls whose content we have already seen, to merge partial updates. */
   const toolTitles = new Map<string, string>();
+  /** ACP updates omit raw input, so remember which calls were delegated work. */
+  const taskCalls = new Set<string>();
   /**
    * Slash commands the agent advertised, without the leading slash. Only
    * these may go out as prompt text — anything else slash-shaped would be
@@ -138,6 +210,14 @@ export function createAcpAdapter(): AgentAdapter {
    */
   let slashPending = false;
   let turnHadContent = false;
+  /**
+   * Grok workflows outlive the foreground `session/prompt` request. Resolving
+   * that request only means the model handed control to the workflow runner;
+   * the turn remains busy until every run reports a terminal status.
+   */
+  const activeWorkflows = new Set<string>();
+  let promptRequestSettled = true;
+  let turnOpen = false;
   /** The agent advertised `session/load` — see {@link AgentAdapter.resume}. */
   let canLoadSession = false;
   /**
@@ -153,6 +233,40 @@ export function createAcpAdapter(): AgentAdapter {
     activeContent = null;
     assistantSegment = 0;
     thinkingSegment = 0;
+  }
+
+  function workflowId(update: Record<string, unknown>): string {
+    return (
+      asString(update.run_id) ??
+      asString(update.runId) ??
+      asString(update.workflow_id) ??
+      asString(update.workflowId) ??
+      asString(update.name) ??
+      "grok-workflow"
+    );
+  }
+
+  function workflowIsTerminal(status: string): boolean {
+    return (
+      status === "completed" ||
+      status === "done" ||
+      status === "failed" ||
+      status === "error" ||
+      status === "stopped" ||
+      status === "interrupted" ||
+      status === "cancelled" ||
+      status === "canceled" ||
+      status === "budget_limited" ||
+      status === "budgetlimited"
+    );
+  }
+
+  function finishTurnWhenReady(ctx: AdapterContext, force = false) {
+    if (!turnOpen || !promptRequestSettled) return;
+    if (!force && activeWorkflows.size > 0) return;
+    if (force) activeWorkflows.clear();
+    turnOpen = false;
+    ctx.emit({ type: "turn-end" });
   }
 
   function activeContentId(): string | null {
@@ -561,6 +675,10 @@ export function createAcpAdapter(): AgentAdapter {
         const { text, changes } = readToolContent(asArray(update.content));
         const name = title ?? toolTitles.get(callId) ?? "tool";
         const acpKind = asString(update.kind);
+        const taskMeta = readSubagentMeta(title, rawInput);
+        if (taskMeta) taskCalls.add(callId);
+        const isTask = taskCalls.has(callId);
+        const activity = isTask && text ? lastLine(text) : null;
         ctx.emit({
           type: "tool",
           callId,
@@ -568,12 +686,24 @@ export function createAcpAdapter(): AgentAdapter {
           // family from a frame that omits `kind` would downgrade a known
           // tool to "other" halfway through the call.
           ...(title ? { name: oneLine(name, 40) } : {}),
-          ...(acpKind ? { tool: toolKind(name, acpKind) } : {}),
+          ...(isTask
+            ? { tool: "task" as const }
+            : acpKind
+              ? { tool: toolKind(name, acpKind) }
+              : {}),
           ...(title ? { title: oneLine(title) } : {}),
           ...(status && ACP_STATUS[status] ? { status: ACP_STATUS[status] } : {}),
           ...(command ? { command } : {}),
           ...(text ? { output: text } : {}),
           ...(changes.length ? { changes } : {}),
+          ...(isTask
+            ? {
+                subagent: {
+                  ...taskMeta,
+                  ...(activity ? { activity: oneLine(activity) } : {}),
+                },
+              }
+            : {}),
         });
         return;
       }
@@ -592,6 +722,31 @@ export function createAcpAdapter(): AgentAdapter {
           }))
           .filter((step) => step.text);
         if (steps.length) ctx.emit({ type: "plan", steps });
+        return;
+      }
+      case "workflow_updated": {
+        // Grok Build publishes background workflow state on
+        // `_x.ai/session/update`, not ACP's standard plan notification. Lift
+        // its phase rail into the shared workflow dock and keep the turn busy
+        // after the foreground request has returned.
+        const workflowStatus = asString(update.status)?.toLowerCase() ?? "";
+        const id = workflowId(update);
+        if (!loading) {
+          if (workflowIsTerminal(workflowStatus)) {
+            if (id === "grok-workflow") activeWorkflows.clear();
+            else activeWorkflows.delete(id);
+          } else {
+            activeWorkflows.add(id);
+          }
+        }
+        const steps = readWorkflowSteps(update);
+        if (steps.length) {
+          turnHadContent = true;
+          ctx.emit({ type: "plan", steps });
+        }
+        if (!loading && workflowIsTerminal(workflowStatus)) {
+          finishTurnWhenReady(ctx);
+        }
         return;
       }
       case "available_commands_update": {
@@ -844,13 +999,21 @@ export function createAcpAdapter(): AgentAdapter {
         return;
       }
 
-      if (method === "session/update") handleSessionUpdate(params, ctx);
+      if (
+        method === "session/update" ||
+        method === "_x.ai/session/update" ||
+        method === "_x.ai/session_notification"
+      ) {
+        handleSessionUpdate(params, ctx);
+      }
     },
 
     prompt: (prompt, ctx) => {
       if (!sessionId) return;
       turnSeq += 1;
       resetContentSegments();
+      promptRequestSettled = false;
+      turnOpen = true;
       slashPending = prompt.text.startsWith("/");
       turnHadContent = false;
       ctx.emit({ type: "user", text: prompt.text, images: prompt.images });
@@ -868,6 +1031,7 @@ export function createAcpAdapter(): AgentAdapter {
       })
         .then((result) => {
           const stop = asString(result.stopReason);
+          promptRequestSettled = true;
           if (stop === "refusal") {
             if (goalResponsePending) {
               currentGoal = goalBeforeCommand;
@@ -884,9 +1048,13 @@ export function createAcpAdapter(): AgentAdapter {
           slashPending = false;
           goalResponsePending = false;
           goalResponseText = "";
-          ctx.emit({ type: "turn-end" });
+          finishTurnWhenReady(
+            ctx,
+            stop === "refusal" || stop === "cancelled" || stop === "canceled",
+          );
         })
         .catch((error: unknown) => {
+          promptRequestSettled = true;
           slashPending = false;
           if (goalResponsePending) {
             currentGoal = goalBeforeCommand;
@@ -900,7 +1068,7 @@ export function createAcpAdapter(): AgentAdapter {
             tone: "error",
             text: asString(record?.message) ?? "The turn failed.",
           });
-          ctx.emit({ type: "turn-end" });
+          finishTurnWhenReady(ctx, true);
         });
     },
 
@@ -916,6 +1084,9 @@ export function createAcpAdapter(): AgentAdapter {
       if (!canLoadSession) return false;
       ctx.emit({ type: "transcript" });
       currentGoal = null;
+      goalBeforeCommand = null;
+      goalResponsePending = false;
+      goalResponseText = "";
       loading = true;
       replayedUser = "";
       ctx.emit({ type: "status", status: "working" });

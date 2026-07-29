@@ -7,7 +7,12 @@ export function AgentGoalIndicator({ goal }: { goal: AgentGoal | null }) {
   const label = `Active goal${detail}`;
 
   return (
-    <span className="agent-goal-indicator" role="status" aria-label={label} title={label}>
+    <span
+      className="agent-goal-indicator"
+      role="status"
+      aria-label={label}
+      title={label}
+    >
       <svg viewBox="0 0 16 16" aria-hidden="true">
         <circle cx="6.5" cy="9.5" r="4.25" />
         <circle cx="6.5" cy="9.5" r="1.25" />

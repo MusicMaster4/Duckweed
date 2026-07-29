@@ -1375,6 +1375,10 @@ function create(id: string, opts: TerminalStartOptions): Session {
     // when the resize did not originate in refit().
     session.blocks.scheduleLayout();
     if (session.spawned) void ptyResize(id, cols, rows);
+    // Any resize can reflow scrollback before the next PTY write. Reposition
+    // block chrome from the reflowed logical anchors on the next frame even
+    // when the resize did not come through FitAddon/refit.
+    session.blocks.scheduleLayout();
     notifySession(id);
   });
 
