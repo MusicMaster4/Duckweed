@@ -842,6 +842,12 @@ describe("claude adapter", () => {
     });
   });
 
+  test("passes /goal through to Claude Code's native goal harness", () => {
+    const h = harness();
+    expect(h.adapter.command?.("/goal keep working until the tests pass", h.ctx)).toBe("prompt");
+    expect(h.sent).toHaveLength(0);
+  });
+
   test("rejects an invalid effort locally instead of wasting a turn", () => {
     const h = harness();
     expect(h.adapter.command?.("/effort ludicrous", h.ctx)).toBe("handled");

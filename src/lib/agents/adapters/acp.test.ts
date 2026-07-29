@@ -607,11 +607,17 @@ describe("acp adapter", () => {
   test("passes advertised commands through, refuses unknown ones locally", async () => {
     const h = harness();
     await h.handshake({
-      _meta: { availableCommands: [{ name: "compact", description: "Compress history" }] },
+      _meta: {
+        availableCommands: [
+          { name: "compact", description: "Compress history" },
+          { name: "goal", description: "Manage a long-running goal" },
+        ],
+      },
     });
 
     // Advertised: the agent intercepts this when it arrives as prompt text.
     expect(h.adapter.command?.("/compact", h.ctx)).toBe("prompt");
+    expect(h.adapter.command?.("/goal finish the migration", h.ctx)).toBe("prompt");
 
     // Unknown: kept off the wire entirely — slash text would be chatted to
     // the model at full token price otherwise.

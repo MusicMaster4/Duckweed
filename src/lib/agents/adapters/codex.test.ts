@@ -253,6 +253,120 @@ describe("codex adapter", () => {
     });
   });
 
+  test("sets, reads, pauses, resumes, and clears the thread goal over app-server", async () => {
+    const h = harness();
+    await h.handshake();
+
+    h.adapter.command?.("/goal finish the migration", h.ctx);
+    const set = h.sent.at(-1) as { id: number };
+    expect(set).toMatchObject({
+      method: "thread/goal/set",
+      params: {
+        threadId: "thread_1",
+        objective: "finish the migration",
+        status: "active",
+      },
+    });
+    h.feed({
+      jsonrpc: "2.0",
+      id: set.id,
+      result: {
+        goal: {
+          objective: "finish the migration",
+          status: "active",
+          tokenBudget: 1_000,
+          tokensUsed: 120,
+          timeUsedSeconds: 61,
+        },
+      },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(h.state().items.filter((item) => item.kind === "notice").at(-1)).toMatchObject({
+      tone: "info",
+      text: "Goal active.\nObjective: finish the migration\nTokens: 120 of 1,000.\nTime used: 1 min.",
+    });
+
+    h.adapter.command?.("/goal", h.ctx);
+    const get = h.sent.at(-1) as { id: number };
+    expect(get).toMatchObject({
+      method: "thread/goal/get",
+      params: { threadId: "thread_1" },
+    });
+    h.feed({ jsonrpc: "2.0", id: get.id, result: { goal: null } });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(h.state().items.filter((item) => item.kind === "notice").at(-1)).toMatchObject({
+      text: "No goal is set for this thread.",
+    });
+
+    for (const [command, status] of [
+      ["/goal pause", "paused"],
+      ["/goal resume", "active"],
+    ] as const) {
+      h.adapter.command?.(command, h.ctx);
+      const update = h.sent.at(-1) as { id: number };
+      expect(update).toMatchObject({
+        method: "thread/goal/set",
+        params: { threadId: "thread_1", status },
+      });
+      h.feed({
+        jsonrpc: "2.0",
+        id: update.id,
+        result: {
+          goal: {
+            objective: "finish the migration",
+            status,
+            tokenBudget: null,
+            tokensUsed: 0,
+            timeUsedSeconds: 0,
+          },
+        },
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+    }
+
+    h.adapter.command?.("/goal clear", h.ctx);
+    const clear = h.sent.at(-1) as { id: number };
+    expect(clear).toMatchObject({
+      method: "thread/goal/clear",
+      params: { threadId: "thread_1" },
+    });
+    h.feed({ jsonrpc: "2.0", id: clear.id, result: { cleared: true } });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(h.state().items.filter((item) => item.kind === "notice").at(-1)).toMatchObject({
+      text: "Thread goal cleared.",
+    });
+  });
+
+  test("supports inline goal edits and surfaces app-server goal errors", async () => {
+    const h = harness();
+    await h.handshake();
+
+    h.adapter.command?.("/goal edit keep every test green", h.ctx);
+    const edit = h.sent.at(-1) as { id: number };
+    expect(edit).toMatchObject({
+      method: "thread/goal/set",
+      params: {
+        threadId: "thread_1",
+        objective: "keep every test green",
+        status: "active",
+      },
+    });
+    h.feed({ jsonrpc: "2.0", id: edit.id, error: { message: "goals are disabled" } });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(h.state().items.filter((item) => item.kind === "notice").at(-1)).toMatchObject({
+      tone: "error",
+      text: "goals are disabled",
+    });
+
+    expect(h.adapter.commandAvailableDuringTurn?.("/goal pause")).toBe(true);
+    expect(h.adapter.commandAvailableDuringTurn?.("/compact")).toBe(false);
+  });
+
   test("refuses an unknown command locally instead of paying for a turn", async () => {
     const h = harness();
     await h.handshake();
@@ -261,7 +375,7 @@ describe("codex adapter", () => {
     expect(h.sent.at(-1)).toMatchObject({ method: "model/list" });
     expect(h.state().items.find((item) => item.kind === "notice")).toMatchObject({
       tone: "error",
-      text: "Unknown command /frobnicate. Codex knows /model, /effort, /compact.",
+      text: "Unknown command /frobnicate. Codex knows /model, /effort, /compact, and /goal.",
     });
   });
 
@@ -369,6 +483,64 @@ describe("codex adapter", () => {
       status: "done",
       output: expect.stringContaining("thread_child · completed · Found the failing case"),
     });
+  });
+
+  test("ignores child-thread messages and completion while the parent turn is running", async () => {
+    const h = harness();
+    await h.handshake();
+    h.notify("turn/started", {
+      threadId: "thread_1",
+      turn: { id: "turn_parent", status: "inProgress", items: [] },
+    });
+
+    h.notify("turn/started", {
+      threadId: "thread_child",
+      turn: { id: "turn_child", status: "inProgress", items: [] },
+    });
+    h.notify("item/completed", {
+      threadId: "thread_child",
+      turnId: "turn_child",
+      item: {
+        id: "child-answer",
+        type: "agentMessage",
+        text: "Completed the read-only audit. No files were changed.",
+      },
+    });
+    h.notify("turn/completed", {
+      threadId: "thread_child",
+      turn: { id: "turn_child", status: "completed", items: [] },
+    });
+
+    expect(h.state().status).toBe("working");
+    expect(h.state().items).toEqual([]);
+
+    h.adapter.interrupt(h.ctx);
+    expect(h.sent.at(-1)).toMatchObject({
+      method: "turn/interrupt",
+      params: { threadId: "thread_1", turnId: "turn_parent" },
+    });
+
+    h.notify("item/completed", {
+      threadId: "thread_1",
+      turnId: "turn_parent",
+      item: {
+        id: "parent-answer",
+        type: "agentMessage",
+        text: "The parent task is actually complete.",
+      },
+    });
+    h.notify("turn/completed", {
+      threadId: "thread_1",
+      turn: { id: "turn_parent", status: "completed", items: [] },
+    });
+
+    expect(h.state().status).toBe("idle");
+    expect(h.state().items).toEqual([
+      expect.objectContaining({
+        kind: "assistant",
+        text: "The parent task is actually complete.",
+      }),
+    ]);
   });
 
   test("counts a unified patch into insertions and deletions", async () => {

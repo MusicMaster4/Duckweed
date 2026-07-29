@@ -111,6 +111,14 @@ interface Pending {
   reject: (error: Record<string, unknown>) => void;
 }
 
+interface CodexGoal {
+  objective: string;
+  status: string;
+  tokenBudget: number | null;
+  tokensUsed: number;
+  timeUsedSeconds: number;
+}
+
 /** Codex sends a unified patch per changed file. */
 function readFileChanges(raw: unknown): AgentFileChange[] {
   return asArray(raw)
@@ -121,6 +129,40 @@ function readFileChanges(raw: unknown): AgentFileChange[] {
       return makePatchChange(path, asString(change.diff) ?? "");
     })
     .filter((change) => change.path);
+}
+
+function readGoal(raw: unknown): CodexGoal | null {
+  const goal = asRecord(raw);
+  const objective = asString(goal?.objective);
+  const status = asString(goal?.status);
+  if (!goal || objective === null || status === null) return null;
+  return {
+    objective,
+    status,
+    tokenBudget: typeof goal.tokenBudget === "number" ? goal.tokenBudget : null,
+    tokensUsed: typeof goal.tokensUsed === "number" ? goal.tokensUsed : 0,
+    timeUsedSeconds: typeof goal.timeUsedSeconds === "number" ? goal.timeUsedSeconds : 0,
+  };
+}
+
+function formatGoal(goal: CodexGoal): string {
+  const status =
+    goal.status === "usageLimited"
+      ? "usage limited"
+      : goal.status === "budgetLimited"
+        ? "budget limited"
+        : goal.status;
+  const details = [`Goal ${status}.`, `Objective: ${goal.objective}`];
+  if (goal.tokenBudget !== null) {
+    details.push(
+      `Tokens: ${goal.tokensUsed.toLocaleString("en-US")} of ${goal.tokenBudget.toLocaleString("en-US")}.`,
+    );
+  }
+  if (goal.timeUsedSeconds > 0) {
+    const minutes = Math.max(1, Math.round(goal.timeUsedSeconds / 60));
+    details.push(`Time used: ${minutes} min.`);
+  }
+  return details.join("\n");
 }
 
 export function createCodexAdapter(): AgentAdapter {
@@ -148,6 +190,42 @@ export function createCodexAdapter(): AgentAdapter {
   const streamed = new Set<string>();
   /** Permission id → the JSON-RPC id Codex is waiting on, and its shape. */
   const approvals = new Map<string, { id: string | number; kind: "command" | "file" }>();
+
+  /**
+   * app-server multiplexes the root thread and every spawned subagent over the
+   * same JSON-RPC stream. Child notifications carry their own thread/turn ids;
+   * accepting them here would render a child's final message as the parent's
+   * answer and, worse, turn the parent's session idle when the child emits
+   * `turn/completed`.
+   *
+   * Keep missing ids compatible with older app-server builds, but whenever an
+   * id is present require it to match the root conversation and active turn.
+   */
+  function notificationBelongsToCurrentTurn(
+    method: string,
+    params: Record<string, unknown>,
+  ): boolean {
+    const nestedThread = method === "thread/started" ? asRecord(params.thread) : null;
+    const notificationThreadId = asString(params.threadId) ?? asString(nestedThread?.id);
+    if (threadId && notificationThreadId && notificationThreadId !== threadId) {
+      return false;
+    }
+
+    // A started event establishes the active turn, so there is no previous
+    // turn id to compare it with. Thread scoping above is sufficient.
+    if (method === "turn/started") return true;
+
+    const turn = asRecord(params.turn);
+    const notificationTurnId = asString(params.turnId) ?? asString(turn?.id);
+    if (currentTurnId && notificationTurnId && notificationTurnId !== currentTurnId) {
+      return false;
+    }
+    // A completed turn with no active counterpart is stale or already handled.
+    if (method === "turn/completed" && !currentTurnId && notificationTurnId) {
+      return false;
+    }
+    return true;
+  }
 
   function request(
     ctx: AdapterContext,
@@ -600,7 +678,66 @@ export function createCodexAdapter(): AgentAdapter {
     });
   }
 
-  /** `/model`, `/effort`, `/compact` — the TUI's controls, wired to RPCs. */
+  /** TUI-owned slash controls, wired to app-server RPCs for the custom UI. */
+  function goalError(error: unknown, ctx: AdapterContext, fallback: string): void {
+    const record = asRecord(error);
+    ctx.emit({
+      type: "notice",
+      tone: "error",
+      text: asString(record?.message) ?? fallback,
+    });
+  }
+
+  function getGoal(ctx: AdapterContext): void {
+    if (!threadId) return;
+    void request(ctx, "thread/goal/get", { threadId })
+      .then((result) => {
+        const goal = readGoal(result.goal);
+        ctx.emit({
+          type: "notice",
+          tone: "info",
+          text: goal ? formatGoal(goal) : "No goal is set for this thread.",
+        });
+      })
+      .catch((error: unknown) => {
+        goalError(error, ctx, "Codex could not read the thread goal.");
+      });
+  }
+
+  function setGoal(
+    params: { objective?: string; status?: "active" | "paused" },
+    ctx: AdapterContext,
+  ): void {
+    if (!threadId) return;
+    void request(ctx, "thread/goal/set", { threadId, ...params })
+      .then((result) => {
+        const goal = readGoal(result.goal);
+        ctx.emit({
+          type: "notice",
+          tone: "info",
+          text: goal ? formatGoal(goal) : "The thread goal was updated.",
+        });
+      })
+      .catch((error: unknown) => {
+        goalError(error, ctx, "Codex could not update the thread goal.");
+      });
+  }
+
+  function clearGoal(ctx: AdapterContext): void {
+    if (!threadId) return;
+    void request(ctx, "thread/goal/clear", { threadId })
+      .then((result) => {
+        ctx.emit({
+          type: "notice",
+          tone: "info",
+          text: result.cleared === false ? "No goal was set for this thread." : "Thread goal cleared.",
+        });
+      })
+      .catch((error: unknown) => {
+        goalError(error, ctx, "Codex could not clear the thread goal.");
+      });
+  }
+
   function handleCommand(text: string, ctx: AdapterContext): "handled" | "prompt" {
     const space = text.search(/\s/);
     const name = (space < 0 ? text : text.slice(0, space)).toLowerCase();
@@ -680,10 +817,46 @@ export function createCodexAdapter(): AgentAdapter {
       return "handled";
     }
 
+    if (name === "/goal") {
+      const [action, ...rest] = arg.split(/\s+/);
+      const lowerAction = action?.toLowerCase() ?? "";
+      if (!arg || lowerAction === "status") {
+        getGoal(ctx);
+        return "handled";
+      }
+      if (lowerAction === "pause") {
+        setGoal({ status: "paused" }, ctx);
+        return "handled";
+      }
+      if (lowerAction === "resume") {
+        setGoal({ status: "active" }, ctx);
+        return "handled";
+      }
+      if (lowerAction === "clear") {
+        clearGoal(ctx);
+        return "handled";
+      }
+      if (lowerAction === "edit") {
+        const objective = rest.join(" ").trim();
+        if (!objective) {
+          ctx.emit({
+            type: "notice",
+            tone: "info",
+            text: "Use /goal edit <objective> or /goal <objective> to replace the current goal.",
+          });
+          return "handled";
+        }
+        setGoal({ objective, status: "active" }, ctx);
+        return "handled";
+      }
+      setGoal({ objective: arg, status: "active" }, ctx);
+      return "handled";
+    }
+
     ctx.emit({
       type: "notice",
       tone: "error",
-      text: `Unknown command ${name}. Codex knows /model, /effort, /compact.`,
+      text: `Unknown command ${name}. Codex knows /model, /effort, /compact, and /goal.`,
     });
     return "handled";
   }
@@ -731,6 +904,7 @@ export function createCodexAdapter(): AgentAdapter {
         return;
       }
 
+      if (!notificationBelongsToCurrentTurn(method, params)) return;
       handleNotification(method, params, ctx);
     },
 
@@ -785,6 +959,8 @@ export function createCodexAdapter(): AgentAdapter {
     },
 
     command: handleCommand,
+
+    commandAvailableDuringTurn: (text) => /^\/goal(?:\s|$)/i.test(text.trim()),
 
     configureAccess: (mode, ctx) => {
       currentAccess = mode;

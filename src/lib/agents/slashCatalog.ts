@@ -45,6 +45,7 @@ const FALLBACKS: Record<AgentId, { name: string; description: string }[]> = {
     { name: "/init", description: "Create or refresh the project memory file" },
     { name: "/mcp", description: "Manage MCP servers" },
     { name: "/agents", description: "Manage subagents" },
+    { name: "/goal", description: "Set or view a goal for a long-running task" },
     { name: "/config", description: "Open configuration" },
     { name: "/rename", description: "Rename this session" },
     { name: "/doctor", description: "Diagnose the installation" },
@@ -55,6 +56,7 @@ const FALLBACKS: Record<AgentId, { name: string; description: string }[]> = {
     { name: "/model", description: "Change the model for later turns" },
     { name: "/effort", description: "Set reasoning effort for later turns" },
     { name: "/compact", description: "Compact the conversation to free context" },
+    { name: "/goal", description: "Set or view the goal for a long-running task" },
   ],
   grok: [
     { name: "/resume", description: "Continue a past Grok Build session in this folder" },
