@@ -3857,7 +3857,7 @@ svg.tab-glyph-fill path {
   will-change: transform;
 }
 
-/* Hairline on the exact boundary between terminal rows. */
+/* Transparent spacing band with a centered 1px command-block hairline. */
 .command-block-separator {
   position: absolute;
   z-index: 5;
@@ -3867,12 +3867,20 @@ svg.tab-glyph-fill path {
   padding: 0;
   border: none;
   pointer-events: none;
-  background: var(--block-separator);
+  background: transparent;
   will-change: transform;
+  display: flex;
+  align-items: center;
 }
 
 .command-block-separator::after {
-  content: none;
+  content: "";
+  display: block;
+  width: 100%;
+  height: 1px;
+  flex-shrink: 0;
+  border: none;
+  background: var(--block-separator);
 }
 
 /* Hides the idle shell prompt under the last block in editor mode. */
