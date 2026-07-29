@@ -996,6 +996,18 @@ export function createClaudeAdapter(): AgentAdapter {
       tools.set(callId, { name, partialInput: "" });
       settleTool(callId, name, input, ctx);
     }
+
+    const backgroundWorkflowRunning = [...workflowsByCallId.values()].some(
+      (workflow) => workflow.taskId !== null && workflow.status === "running",
+    );
+    if (
+      turnResultPending &&
+      !backgroundWorkflowRunning &&
+      asString(message.stop_reason) === "end_turn"
+    ) {
+      turnResultPending = false;
+      ctx.emit({ type: "turn-end" });
+    }
   }
 
   function handleSubagentAssistant(
@@ -1206,13 +1218,10 @@ export function createClaudeAdapter(): AgentAdapter {
           `${workflow.name} ${notification.status}.`,
       });
     }
-    const backgroundWorkflowRunning = [...workflowsByCallId.values()].some(
-      (tracked) => tracked.taskId !== null && tracked.status === "running",
-    );
-    if (turnResultPending && !backgroundWorkflowRunning) {
-      turnResultPending = false;
-      ctx.emit({ type: "turn-end" });
-    }
+    // The task notification becomes a new, provider-initiated turn. Claude
+    // normally follows it with a final assistant message, but it does not send
+    // another top-level result frame for that automatic continuation. Keep the
+    // original turn open until that message reports stop_reason=end_turn.
   }
 
   function handleNotificationFrame(
@@ -1321,9 +1330,10 @@ export function createClaudeAdapter(): AgentAdapter {
     );
     // A successful result after launching an asynchronous Workflow only means
     // Claude's foreground response returned. The provider remains responsible
-    // for the background job, so keep the turn open until its task notification
-    // arrives. Otherwise this intermediate result produces a false completion
-    // sound and highlight while the workflow is visibly still running.
+    // for the background job, so keep the turn open through its task
+    // notification and the automatic final response that follows. Otherwise
+    // this intermediate result produces a false completion sound and highlight
+    // while the workflow is visibly still running.
     if (backgroundWorkflowRunning && frame.is_error !== true) {
       turnResultPending = true;
       return;

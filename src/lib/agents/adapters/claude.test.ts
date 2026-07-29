@@ -584,7 +584,7 @@ phase('Map')
     });
   });
 
-  test("settles a background Workflow when Claude sends its task notification", () => {
+  test("settles a background Workflow after its automatic final response", () => {
     const h = harness();
     h.feed({ type: "stream_event", event: { type: "message_start" } });
     h.feed({
@@ -651,6 +651,26 @@ export const meta = {
         { text: "Report", status: "done" },
       ],
     });
+    expect(h.state().status).toBe("working");
+    expect(h.events.filter((event) => event.type === "turn-end")).toHaveLength(0);
+
+    // Background task notifications automatically prompt Claude to summarize
+    // the result. In persistent stream-json mode that continuation ends with
+    // an assistant end_turn message, not another top-level result frame.
+    h.feed({
+      type: "assistant",
+      message: {
+        id: "workflow-summary",
+        stop_reason: "end_turn",
+        content: [
+          {
+            type: "text",
+            text: "The research workflow finished successfully.",
+          },
+        ],
+      },
+    });
+
     expect(h.state().status).toBe("idle");
     expect(h.events.filter((event) => event.type === "turn-end")).toHaveLength(1);
   });
