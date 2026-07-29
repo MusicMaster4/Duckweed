@@ -248,8 +248,12 @@ export default function App() {
   const dailyLocked = dailyUsage.locked;
   const dailyLockedRef = useRef(dailyLocked);
   dailyLockedRef.current = dailyLocked;
+  // A persisted lockout must not attach terminals or run default-layout
+  // commands. Once the lock clears, keep existing panes mounted across future
+  // lockouts so work that was already running can settle safely.
+  const workbenchStartedRef = useRef(!dailyLocked);
+  if (!dailyLocked) workbenchStartedRef.current = true;
   const [lockoutBusy, setLockoutBusy] = useState<BusyEntry[]>([]);
-  const lockoutHadBusyRef = useRef(false);
   const backgroundExitRequestedRef = useRef(false);
 
   const [tabs, setTabs] = useState<Tab[]>(initial.tabs);
@@ -708,14 +712,12 @@ export default function App() {
   useEffect(() => {
     if (!dailyLocked) {
       setLockoutBusy([]);
-      lockoutHadBusyRef.current = false;
       backgroundExitRequestedRef.current = false;
       return;
     }
 
     const refresh = () => {
       const next = probeActivity();
-      if (next.length > 0) lockoutHadBusyRef.current = true;
       setLockoutBusy(next);
     };
     refresh();
@@ -753,19 +755,12 @@ export default function App() {
     return agentSessions.subscribeAll(approvePending);
   }, [autoApproveLockedRequests, dailyLocked]);
 
-  // Closing a locked window with work left hides it instead. Once the last
-  // entry settles, exit quietly without playing completion cues.
+  // After the user sends locked work to the background, exit quietly once the
+  // last entry settles. A visible finished lockout remains open for the user.
   useEffect(() => {
     if (!TAURI_RUNTIME || !dailyLocked || lockoutBusy.length > 0) return;
-    if (!backgroundExitRequestedRef.current && !lockoutHadBusyRef.current) return;
-    if (backgroundExitRequestedRef.current) {
-      void exit(0);
-      return;
-    }
-    // Leave the finished state visible long enough to register, then complete
-    // the promised automatic shutdown.
-    const timer = window.setTimeout(() => void exit(0), 1_500);
-    return () => window.clearTimeout(timer);
+    if (!backgroundExitRequestedRef.current) return;
+    void exit(0);
   }, [dailyLocked, lockoutBusy.length]);
 
   const continueLockedInBackground = useCallback(() => {
@@ -2653,6 +2648,7 @@ export default function App() {
             </div>
           )}
           {!settingsActive &&
+            workbenchStartedRef.current &&
             (!booted ? (
               <div className="booting">starting shell…</div>
             ) : zoomedNode && activeTab ? (
