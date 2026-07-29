@@ -108,8 +108,12 @@ export function subagentsForTurn(items: AgentItem[]): SubagentSummary[] {
   }
 
   return items
-    .slice(turnStart + 1)
-    .filter((item): item is ToolItem => item.kind === "tool" && item.tool === "task")
+    .filter(
+      (item, index): item is ToolItem =>
+        item.kind === "tool" &&
+        item.tool === "task" &&
+        (index > turnStart || item.status === "running" || item.status === "pending"),
+    )
     .map(summaryFor);
 }
 

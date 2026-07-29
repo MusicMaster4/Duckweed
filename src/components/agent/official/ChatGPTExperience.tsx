@@ -16,7 +16,7 @@ import {
 export function ChatGPTExperience(props: ExperienceProps) {
   const { items, termId, status, started, agent, label, program, cwd } = props;
   const transcriptItems = useMemo(
-    () => shortAssistantUpdatesAsThinking(items, status === "working", 250),
+    () => shortAssistantUpdatesAsThinking(items, status === "working", 300),
     [items, status],
   );
   const groups = useMemo(() => activityGroups(transcriptItems), [transcriptItems]);

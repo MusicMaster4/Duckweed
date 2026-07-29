@@ -545,16 +545,19 @@ export function ToolActivity({
   item,
   variant,
   compact = false,
+  expandSubagentLocally = false,
 }: {
   item: ToolItem;
   variant: OfficialVariant | "cursor" | "opencode";
   compact?: boolean;
+  expandSubagentLocally?: boolean;
 }) {
   const { selectedCallId, selectSubagent } = useSubagentUi();
   const isSubagent = item.tool === "task";
   const hasOutput = item.output.trim().length > 0;
   const hasChanges = item.changes.length > 0;
   const expandable = hasOutput || hasChanges || Boolean(item.command);
+  const expandsHere = !isSubagent || expandSubagentLocally;
   const [open, setOpen] = useState(
     !compact && (hasChanges || item.status === "error" || item.tool === "task"),
   );
@@ -578,22 +581,28 @@ export function ToolActivity({
         isSubagent ? " is-subagent" : ""
       }${selectedCallId === item.callId ? " is-selected" : ""}${
         compact ? " is-compact" : ""
-      }${open && !isSubagent ? " is-open" : ""}`}
+      }${open && expandsHere ? " is-open" : ""}`}
       {...(isSubagent ? { "data-subagent-call-id": item.callId } : {})}
     >
       <button
         type="button"
         className="official-tool-head"
         onClick={() => {
-          if (isSubagent) {
+          if (isSubagent && !expandSubagentLocally) {
             selectSubagent(item.callId);
           } else if (expandable) {
             setOpen((value) => !value);
           }
         }}
-        aria-expanded={!isSubagent && expandable ? open : undefined}
-        aria-label={isSubagent ? `Inspect subagent: ${item.title}` : undefined}
-        disabled={!isSubagent && !expandable}
+        aria-expanded={expandsHere && expandable ? open : undefined}
+        aria-label={
+          isSubagent
+            ? expandSubagentLocally
+              ? `Toggle subagent details: ${item.title}`
+              : `Inspect subagent: ${item.title}`
+            : undefined
+        }
+        disabled={expandsHere && !expandable}
       >
         <span className="official-tool-mark">
           <ToolIcon kind={item.tool} />
@@ -612,9 +621,9 @@ export function ToolActivity({
           {item.status === "done" && <span className="official-tool-done">✓</span>}
           {item.status === "error" && <ToolErrorMark />}
         </span>
-        {expandable && !isSubagent && <Chevron open={open} />}
+        {expandable && expandsHere && <Chevron open={open} />}
       </button>
-      {open && !isSubagent && (
+      {open && expandsHere && (
         <div className="official-tool-body">
           {item.command && (
             <pre className="official-command">

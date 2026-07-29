@@ -166,7 +166,7 @@ export function AgentSurface({ termId, active, onClose }: Props) {
   }, []);
 
   useEffect(() => {
-    if (!selectedSubagentCallId) return;
+    if (!active || !selectedSubagentCallId) return;
     if (!selectedSubagent) {
       setSelectedSubagentCallId(null);
       return;
@@ -178,7 +178,7 @@ export function AgentSurface({ termId, active, onClose }: Props) {
     };
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [closeSubagentInspector, selectedSubagent, selectedSubagentCallId]);
+  }, [active, closeSubagentInspector, selectedSubagent, selectedSubagentCallId]);
 
   useEffect(() => {
     if (!fleetComplete) {
@@ -199,7 +199,7 @@ export function AgentSurface({ termId, active, onClose }: Props) {
   ]);
 
   useEffect(() => {
-    if (!visibleFleet.length) return;
+    if (!active || !visibleFleet.length) return;
     const navigateFleet = (event: KeyboardEvent) => {
       if (!event.altKey || event.ctrlKey || event.metaKey) return;
       if (event.code === "Backslash") {
@@ -233,6 +233,7 @@ export function AgentSurface({ termId, active, onClose }: Props) {
     window.addEventListener("keydown", navigateFleet);
     return () => window.removeEventListener("keydown", navigateFleet);
   }, [
+    active,
     closeSubagentInspector,
     selectedSubagentCallId,
     visibleFleet,

@@ -49,7 +49,12 @@ function NestedSubagentItem({
       );
     case "tool":
       return (
-        <ToolActivity item={item} variant={nestedVariant(agent)} compact />
+        <ToolActivity
+          item={item}
+          variant={nestedVariant(agent)}
+          compact
+          expandSubagentLocally
+        />
       );
     case "plan":
       return item.steps.length > 0 ? (

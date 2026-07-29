@@ -106,6 +106,26 @@ describe("subagentsForTurn", () => {
     expect(runningSubagentCount(subagents)).toBe(2);
     expect(subagentStatusLabel("error")).toBe("Failed");
   });
+
+  test("keeps unfinished children visible across same-turn steering", () => {
+    const items: AgentItem[] = [
+      { kind: "user", id: "user-1", at: 1, text: "Inspect in parallel" },
+      task("running-before-steer", "running"),
+      task("completed-before-steer", "done"),
+      {
+        kind: "user",
+        id: "steer-1",
+        at: 4,
+        text: "Also check the Windows path",
+      },
+      task("started-after-steer", "pending"),
+    ];
+
+    expect(subagentsForTurn(items).map((subagent) => subagent.callId)).toEqual([
+      "running-before-steer",
+      "started-after-steer",
+    ]);
+  });
 });
 
 describe("subagent fleet lifecycle", () => {

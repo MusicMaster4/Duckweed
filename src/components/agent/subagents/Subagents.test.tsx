@@ -35,6 +35,19 @@ const items: AgentItem[] = [
           text: "The legacy fixture is the likely failure.",
           streaming: false,
         },
+        {
+          kind: "tool",
+          id: "nested-task",
+          at: 3,
+          callId: "nested-task",
+          name: "task",
+          tool: "task",
+          title: "Inspect nested dependency",
+          status: "done",
+          command: "bun test nested",
+          output: "Nested dependency passed",
+          changes: [],
+        },
       ],
     },
   },
@@ -101,6 +114,11 @@ describe("subagent UI", () => {
     expect(html).toContain("Reading parser fixtures");
     expect(html).toContain("Nested activity");
     expect(html).toContain("The legacy fixture is the likely failure.");
+    expect(html).toContain("Inspect nested dependency");
+    expect(html).toContain(
+      'aria-label="Toggle subagent details: Inspect nested dependency"',
+    );
+    expect(html).toContain('aria-expanded="false"');
     expect(html).not.toContain("only reports a summary");
     expect(html).toContain("Copy summary");
     expect(html).toContain("Show in timeline");

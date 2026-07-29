@@ -878,7 +878,7 @@ describe("official agent presentation", () => {
         kind: "assistant",
         id: "long-update",
         at: 3,
-        text: `I found the relevant section and I am continuing with the remaining checks. ${"x".repeat(190)}`,
+        text: `I found the relevant section and I am continuing with the remaining checks. ${"x".repeat(240)}`,
         streaming: false,
       },
     ];
@@ -935,7 +935,7 @@ describe("official agent presentation", () => {
   });
 
   test("uses provider-specific limits for Codex and Claude Code", () => {
-    // Codex keeps short updates as thinking up to 250 chars; Claude promotes
+    // Codex keeps short updates as thinking up to 300 chars; Claude promotes
     // anything above 110 chars to a normal assistant message.
     const codexHtml = renderAgentActivity("codex", [
       { kind: "user", id: "codex-user", at: 1, text: "Inspect" },
@@ -943,7 +943,7 @@ describe("official agent presentation", () => {
         kind: "assistant",
         id: "codex-update",
         at: 2,
-        text: "c".repeat(150),
+        text: "c".repeat(275),
         streaming: true,
       },
     ]);
@@ -953,7 +953,7 @@ describe("official agent presentation", () => {
         kind: "assistant",
         id: "claude-update",
         at: 2,
-        text: "c".repeat(150),
+        text: "c".repeat(275),
         streaming: true,
       },
     ]);
