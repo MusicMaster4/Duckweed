@@ -2,7 +2,9 @@ import { describe, expect, test } from "bun:test";
 
 import type { AgentItem, ToolItem } from "./types";
 import {
+  COMPLETED_SUBAGENT_FLEET_TTL_MS,
   runningSubagentCount,
+  subagentFleetIsComplete,
   subagentsForTurn,
   subagentStatusLabel,
 } from "./subagents";
@@ -103,5 +105,31 @@ describe("subagentsForTurn", () => {
 
     expect(runningSubagentCount(subagents)).toBe(2);
     expect(subagentStatusLabel("error")).toBe("Failed");
+  });
+});
+
+describe("subagent fleet lifecycle", () => {
+  test("retires only after every child is terminal and the parent is idle", () => {
+    const user: AgentItem = {
+      kind: "user",
+      id: "user",
+      at: 1,
+      text: "Inspect",
+    };
+    const running = subagentsForTurn([
+      user,
+      task("one", "running"),
+      task("two", "done"),
+    ]);
+    const completed = subagentsForTurn([
+      user,
+      task("one", "done"),
+      task("two", "error"),
+    ]);
+
+    expect(subagentFleetIsComplete(running, "idle")).toBe(false);
+    expect(subagentFleetIsComplete(completed, "working")).toBe(false);
+    expect(subagentFleetIsComplete(completed, "idle")).toBe(true);
+    expect(COMPLETED_SUBAGENT_FLEET_TTL_MS).toBe(30_000);
   });
 });

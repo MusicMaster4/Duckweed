@@ -510,9 +510,21 @@ export function PlanTracker({
       {open && (
         <ol className="official-plan-steps">
           {item.steps.map((step, index) => (
-            <li key={`${index}-${step.text}`} className={`is-${step.status}`}>
+            <li
+              key={`${index}-${step.text}`}
+              className={`is-${step.status}`}
+              aria-current={step.status === "running" ? "step" : undefined}
+            >
               <span className="official-plan-step-mark" aria-hidden="true">
-                {step.status === "done" ? "✓" : step.status === "running" ? "" : index + 1}
+                {step.status === "done" ? (
+                  "✓"
+                ) : step.status === "running" ? (
+                  <svg className="official-plan-running-arrow" viewBox="0 0 14 10">
+                    <path d="M1.5 5h10M8 1.75 11.5 5 8 8.25" />
+                  </svg>
+                ) : (
+                  index + 1
+                )}
               </span>
               <span>{step.text}</span>
             </li>

@@ -5,6 +5,24 @@ import {
 } from "../../../lib/agents/subagents";
 import type { AgentId } from "../../../lib/agents/types";
 
+export function scrollFleetWithWheel(
+  node: Pick<
+    HTMLDivElement,
+    "clientWidth" | "scrollLeft" | "scrollWidth"
+  >,
+  delta: number,
+): boolean {
+  if (!delta || node.scrollWidth <= node.clientWidth) return false;
+  const maxScrollLeft = node.scrollWidth - node.clientWidth;
+  const nextScrollLeft = Math.max(
+    0,
+    Math.min(maxScrollLeft, node.scrollLeft + delta),
+  );
+  if (nextScrollLeft === node.scrollLeft) return false;
+  node.scrollLeft = nextScrollLeft;
+  return true;
+}
+
 export function SubagentFleet({
   agent,
   subagents,
@@ -23,6 +41,26 @@ export function SubagentFleet({
     <section
       className={`agent-sub-fleet agent-sub--${agent}`}
       aria-label="Subagents"
+      onWheel={(event) => {
+        const list = event.currentTarget.querySelector<HTMLDivElement>(
+          ".agent-sub-fleet-list",
+        );
+        if (!list) return;
+        const unit =
+          event.deltaMode === WheelEvent.DOM_DELTA_LINE
+            ? 16
+            : event.deltaMode === WheelEvent.DOM_DELTA_PAGE
+              ? list.clientWidth
+              : 1;
+        const delta =
+          (Math.abs(event.deltaY) >= Math.abs(event.deltaX)
+            ? event.deltaY
+            : event.deltaX) * unit;
+        if (scrollFleetWithWheel(list, delta)) {
+          event.preventDefault();
+          event.stopPropagation();
+        }
+      }}
     >
       <div className="agent-sub-fleet-head">
         <strong>Fleet</strong>
@@ -32,7 +70,11 @@ export function SubagentFleet({
             : `${subagents.length} completed`}
         </span>
       </div>
-      <div className="agent-sub-fleet-list" role="list" aria-live="polite">
+      <div
+        className="agent-sub-fleet-list"
+        role="list"
+        aria-live="polite"
+      >
         {subagents.map((subagent) => {
           const selected = selectedCallId === subagent.callId;
           const status = subagentStatusLabel(subagent.status);

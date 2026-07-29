@@ -1,10 +1,13 @@
 import type {
   AgentFileChange,
   AgentItem,
+  AgentSessionState,
   SubagentMeta,
   ToolItem,
   ToolStatus,
 } from "./types";
+
+export const COMPLETED_SUBAGENT_FLEET_TTL_MS = 30_000;
 
 export interface SubagentSummary {
   id: string;
@@ -128,5 +131,23 @@ export function runningSubagentCount(subagents: SubagentSummary[]): number {
     (count, subagent) =>
       count + (subagent.status === "running" || subagent.status === "pending" ? 1 : 0),
     0,
+  );
+}
+
+/**
+ * Keep completed children nearby while the parent is still synthesizing their
+ * work. The fleet can retire once the whole turn is quiet; its task rows remain
+ * available in the transcript.
+ */
+export function subagentFleetIsComplete(
+  subagents: SubagentSummary[],
+  status: AgentSessionState["status"] | undefined,
+): boolean {
+  return (
+    subagents.length > 0 &&
+    status === "idle" &&
+    subagents.every(
+      (subagent) => subagent.status === "done" || subagent.status === "error",
+    )
   );
 }

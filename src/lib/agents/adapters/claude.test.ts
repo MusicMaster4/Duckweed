@@ -54,6 +54,7 @@ function harness(overrides: Partial<AgentLaunch> = {}) {
       effort: null,
       models: [],
       sessionId: null,
+      goal: null,
       items: [],
       pending: [],
       permission: null,
@@ -503,6 +504,144 @@ describe("claude adapter", () => {
       { text: "Wire the UI", status: "running" },
       { text: "Ship it", status: "pending" },
     ]);
+  });
+
+  test("keeps an asynchronously launched Workflow running and exposes its phases", () => {
+    const h = harness({ program: "claudex" });
+    h.feed({
+      type: "assistant",
+      message: {
+        content: [
+          {
+            type: "tool_use",
+            id: "workflow-1",
+            name: "Workflow",
+            input: {
+              script: `
+export const meta = {
+  name: 'repo-review',
+  description: 'Review the repository',
+  phases: [
+    { title: 'Map', detail: 'Map the codebase' },
+    { title: 'Verify', detail: 'Verify findings' },
+    { title: 'Synthesize', detail: 'Write the report' },
+  ],
+}
+
+phase('Map')
+`,
+            },
+          },
+        ],
+      },
+    });
+    h.feed({
+      type: "user",
+      message: {
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "workflow-1",
+            content:
+              "Workflow launched in background. Task ID: task-123\n" +
+              "You will be notified when it completes.",
+            is_error: false,
+          },
+        ],
+      },
+      toolUseResult: {
+        status: "async_launched",
+        taskId: "task-123",
+        taskType: "local_workflow",
+        workflowName: "repo-review",
+        summary: "Review the repository",
+      },
+    });
+    h.feed({ type: "result", subtype: "success", is_error: false });
+
+    expect(h.state().status).toBe("idle");
+    expect(
+      h.state().items.find(
+        (item) => item.kind === "tool" && item.callId === "workflow-1",
+      ),
+    ).toMatchObject({
+      title: "Workflow · repo-review",
+      status: "running",
+    });
+    expect(h.state().items.find((item) => item.kind === "plan")).toMatchObject({
+      steps: [
+        { text: "Map", status: "running" },
+        { text: "Verify", status: "pending" },
+        { text: "Synthesize", status: "pending" },
+      ],
+    });
+  });
+
+  test("settles a background Workflow when Claude sends its task notification", () => {
+    const h = harness();
+    h.feed({
+      type: "assistant",
+      message: {
+        content: [
+          {
+            type: "tool_use",
+            id: "workflow-1",
+            name: "Workflow",
+            input: {
+              script: `
+export const meta = {
+  name: "repo-review",
+  phases: [{ title: "Map" }, { title: "Report" }],
+}
+`,
+            },
+          },
+        ],
+      },
+    });
+    h.feed({
+      type: "user",
+      message: {
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "workflow-1",
+            content: "Workflow launched in background. Task ID: task-123",
+          },
+        ],
+      },
+      tool_use_result: {
+        status: "async_launched",
+        task_id: "task-123",
+        task_type: "local_workflow",
+      },
+    });
+    h.feed({ type: "result", subtype: "success", is_error: false });
+    h.feed({
+      type: "queue-operation",
+      operation: "enqueue",
+      content:
+        "<task-notification>\n" +
+        "<task-id>task-123</task-id>\n" +
+        "<status>completed</status>\n" +
+        '<summary>Dynamic workflow "Review the repository" completed</summary>\n' +
+        "</task-notification>",
+    });
+
+    expect(
+      h.state().items.find(
+        (item) => item.kind === "tool" && item.callId === "workflow-1",
+      ),
+    ).toMatchObject({
+      status: "done",
+      output: 'Dynamic workflow "Review the repository" completed',
+    });
+    expect(h.state().items.find((item) => item.kind === "plan")).toMatchObject({
+      steps: [
+        { text: "Map", status: "done" },
+        { text: "Report", status: "done" },
+      ],
+    });
   });
 
   test("shows TaskCreate and TaskUpdate as one live Claudex workflow", () => {
@@ -1175,6 +1314,60 @@ describe("claude adapter", () => {
       type: "user",
       message: { role: "user", content: [{ type: "text", text: "/effort high" }] },
     });
+  });
+
+  test("mirrors a supported /goal response into the shared header state", () => {
+    const h = harness();
+    expect(
+      h.adapter.command?.(
+        "/goal research only, no code changes",
+        h.ctx,
+      ),
+    ).toBe("prompt");
+    expect(h.state().goal).toEqual({
+      objective: "research only, no code changes",
+      status: "active",
+    });
+
+    h.adapter.prompt(
+      { text: "/goal research only, no code changes", images: [] },
+      h.ctx,
+    );
+    h.feed({
+      type: "assistant",
+      message: {
+        model: "<synthetic>",
+        role: "assistant",
+        content: [
+          {
+            type: "text",
+            text: "Goal set: research only, no code changes, with five findings",
+          },
+        ],
+      },
+    });
+
+    expect(h.state().goal).toEqual({
+      objective: "research only, no code changes, with five findings",
+      status: "active",
+    });
+  });
+
+  test("rolls back the provisional goal when the CLI rejects /goal", () => {
+    const h = harness();
+    h.adapter.command?.("/goal inspect the repository", h.ctx);
+    expect(h.state().goal?.status).toBe("active");
+
+    h.feed({
+      type: "assistant",
+      message: {
+        model: "<synthetic>",
+        role: "assistant",
+        content: [{ type: "text", text: "Unknown command: /goal" }],
+      },
+    });
+
+    expect(h.state().goal).toBeNull();
   });
 
   test("rejects an invalid effort locally instead of wasting a turn", () => {

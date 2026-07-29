@@ -8,6 +8,7 @@ import {
 import type { AgentId, AgentItem, AgentSessionState, PlanItem } from "../../lib/agents/types";
 import { emptyUsage, makeChange } from "../../lib/agents/types";
 import { AgentComposer } from "./AgentComposer";
+import { AgentGoalIndicator } from "./AgentGoalIndicator";
 import { AgentProviderIcon } from "./AgentProviderIcon";
 import { AgentTimeline } from "./AgentTimeline";
 import { PlanTracker, type OfficialVariant } from "./official/OfficialShared";
@@ -277,6 +278,10 @@ export function AgentExperiencePreview() {
     effort: "high",
     models: [],
     sessionId: "preview-session",
+    goal:
+      agent === "codex" || agent === "claude"
+        ? { objective: "Ship the session parser safely", status: "active" }
+        : null,
     items: visibleItems,
     pending: [],
     permission: null,
@@ -325,6 +330,7 @@ export function AgentExperiencePreview() {
           </span>
           <span className="agent-head-spacer" />
           <span className="agent-usage">12.4k in · 2.1k out</span>
+          <AgentGoalIndicator goal={session.goal} />
         </header>
         <div className="agent-scroll">
           <SubagentUiProvider

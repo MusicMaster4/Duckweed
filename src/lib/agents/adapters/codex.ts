@@ -8,12 +8,18 @@ import {
   type AdapterContext,
   type AgentAdapter,
 } from "../adapter";
+import { applyEvent, type AgentEvent } from "../events";
 import type { AgentLaunch } from "../launch";
 import {
+  emptyUsage,
   makePatchChange,
   toolKind,
   type AgentAccessMode,
   type AgentFileChange,
+  type AgentGoalStatus,
+  type AgentItem,
+  type AgentSessionState,
+  type AgentStatus,
   type ToolStatus,
 } from "../types";
 
@@ -46,7 +52,7 @@ interface CodexModel {
 
 interface CodexGoal {
   objective: string;
-  status: string;
+  status: AgentGoalStatus;
   tokenBudget: number | null;
   tokensUsed: number;
   timeUsedSeconds: number;
@@ -119,9 +125,19 @@ function readGoal(value: unknown): CodexGoal | null {
   const goal = asRecord(value);
   const objective = asString(goal?.objective);
   if (!goal || objective === null) return null;
+  const rawStatus = asString(goal.status);
+  const statuses: AgentGoalStatus[] = [
+    "active",
+    "paused",
+    "blocked",
+    "usageLimited",
+    "budgetLimited",
+    "complete",
+  ];
+  const status = statuses.find((candidate) => candidate === rawStatus) ?? "active";
   return {
     objective,
-    status: asString(goal.status) ?? "active",
+    status,
     tokenBudget:
       typeof goal.tokenBudget === "number" && Number.isFinite(goal.tokenBudget)
         ? goal.tokenBudget
@@ -156,6 +172,16 @@ const COLLAB_STATUS: Record<string, ToolStatus> = {
 interface Pending {
   resolve: (result: Record<string, unknown>) => void;
   reject: (error: Record<string, unknown>) => void;
+}
+
+interface ChildThread {
+  callId: string | null;
+  label: string | null;
+  role: string | null;
+  model: string | null;
+  prompt: string | null;
+  activity: string | null;
+  state: AgentSessionState;
 }
 
 /** Codex sends a unified patch per changed file. */
@@ -195,6 +221,178 @@ export function createCodexAdapter(): AgentAdapter {
   const streamed = new Set<string>();
   /** Permission id → the JSON-RPC id Codex is waiting on, and its shape. */
   const approvals = new Map<string, { id: string | number; kind: "command" | "file" }>();
+  /** Child thread id to its live, independently reduced transcript. */
+  const children = new Map<string, ChildThread>();
+  /** Avoid issuing the same final transcript reconciliation more than once. */
+  const hydratedChildren = new Set<string>();
+
+  function newChildState(childThreadId: string): AgentSessionState {
+    return {
+      termId: `subagent:${childThreadId}`,
+      agent: "codex",
+      program: "codex",
+      label: "Subagent",
+      mark: "C",
+      accent: "#10a37f",
+      status: "starting",
+      workStartedAt: null,
+      lastWorkedForMs: null,
+      cwd: "",
+      model: null,
+      effort: null,
+      accessMode: "default",
+      models: [],
+      sessionId: childThreadId,
+      goal: null,
+      items: [],
+      pending: [],
+      permission: null,
+      usage: emptyUsage(),
+      error: null,
+      commands: [],
+      started: false,
+      exitArmed: false,
+    };
+  }
+
+  function childFor(childThreadId: string): ChildThread {
+    const known = children.get(childThreadId);
+    if (known) return known;
+    const child: ChildThread = {
+      callId: null,
+      label: null,
+      role: null,
+      model: null,
+      prompt: null,
+      activity: null,
+      state: newChildState(childThreadId),
+    };
+    children.set(childThreadId, child);
+    return child;
+  }
+
+  function lastChildActivity(items: AgentItem[]): string | null {
+    for (let index = items.length - 1; index >= 0; index -= 1) {
+      const item = items[index];
+      if (item.kind === "assistant" || item.kind === "thinking") {
+        const text = oneLine(item.text, 120);
+        if (text) return text;
+      }
+      if (item.kind === "tool") {
+        return oneLine(
+          `${item.status === "done" ? "Completed" : item.status === "error" ? "Failed" : "Running"}: ${item.title}`,
+          120,
+        );
+      }
+      if (item.kind === "plan") {
+        const active = item.steps.find((step) => step.status === "running");
+        if (active) return oneLine(active.text, 120);
+      }
+      if (item.kind === "notice" && item.text.trim()) return oneLine(item.text, 120);
+    }
+    return null;
+  }
+
+  function childToolStatus(status: AgentStatus): ToolStatus {
+    if (status === "error" || status === "exited") return "error";
+    if (status === "idle") return "done";
+    if (status === "working" || status === "waiting") return "running";
+    return "pending";
+  }
+
+  function syncChild(childThreadId: string, ctx: AdapterContext): void {
+    const child = children.get(childThreadId);
+    if (!child?.callId) return;
+    const status = childToolStatus(child.state.status);
+    const activity =
+      lastChildActivity(child.state.items) ??
+      child.activity ??
+      (status === "pending"
+        ? "Pending initialization"
+        : status === "running"
+          ? "Working"
+          : status === "error"
+            ? child.state.error ?? "Delegated work failed"
+            : "Delegated work completed");
+    ctx.emit({
+      type: "tool",
+      callId: child.callId,
+      status,
+      subagent: {
+        threadId: childThreadId,
+        ...(child.label ? { label: child.label } : {}),
+        ...(child.role ? { role: child.role } : {}),
+        ...(child.model ? { model: child.model } : {}),
+        ...(child.prompt ? { prompt: child.prompt } : {}),
+        activity,
+        items: child.state.items,
+      },
+    });
+  }
+
+  function emitChild(
+    childThreadId: string,
+    event: AgentEvent,
+    ctx: AdapterContext,
+  ): void {
+    const child = childFor(childThreadId);
+    child.state = applyEvent(child.state, event);
+    syncChild(childThreadId, ctx);
+  }
+
+  function childContext(childThreadId: string, ctx: AdapterContext): AdapterContext {
+    return {
+      ...ctx,
+      emit: (event) => emitChild(childThreadId, event, ctx),
+    };
+  }
+
+  function threadStatus(value: unknown): AgentStatus | null {
+    const record = asRecord(value);
+    const raw = asString(record?.type) ?? asString(value);
+    if (raw === "idle") return "idle";
+    if (raw === "active" || raw === "running") return "working";
+    if (raw === "error" || raw === "failed") return "error";
+    return null;
+  }
+
+  function hydrateChild(childThreadId: string, ctx: AdapterContext): void {
+    if (hydratedChildren.has(childThreadId)) return;
+    hydratedChildren.add(childThreadId);
+    void request(ctx, "thread/read", { threadId: childThreadId, includeTurns: true })
+      .then((result) => {
+        const thread = asRecord(result.thread) ?? result;
+        const child = childFor(childThreadId);
+        child.label =
+          asString(thread.agentNickname) ?? asString(thread.nickname) ?? child.label;
+        child.role = asString(thread.agentRole) ?? asString(thread.role) ?? child.role;
+        child.model = asString(thread.model) ?? child.model;
+
+        const nested = childContext(childThreadId, ctx);
+        emitChild(childThreadId, { type: "transcript" }, ctx);
+        for (const rawTurn of asArray(thread.turns)) {
+          const turn = asRecord(rawTurn);
+          if (!turn) continue;
+          for (const rawItem of asArray(turn.items)) {
+            const item = asRecord(rawItem);
+            if (!item || asString(item.type) === "userMessage") continue;
+            handleItem(item, true, nested);
+          }
+        }
+        emitChild(
+          childThreadId,
+          {
+            type: "status",
+            status: threadStatus(thread.status) ?? "idle",
+          },
+          ctx,
+        );
+      })
+      .catch(() => {
+        // Live child notifications remain the source of truth when this
+        // app-server build does not expose thread/read for delegated threads.
+      });
+  }
 
   function request(
     ctx: AdapterContext,
@@ -373,6 +571,7 @@ export function createCodexAdapter(): AgentAdapter {
       }
       case "collabAgentToolCall": {
         const collabTool = asString(item.tool) ?? "agent";
+        const isSpawn = collabTool === "spawnAgent";
         const status = asString(item.status) ?? "";
         const prompt = asString(item.prompt);
         const model = asString(item.model);
@@ -420,24 +619,75 @@ export function createCodexAdapter(): AgentAdapter {
         const activity =
           primaryMessage?.trim() ||
           (primaryState
-            ? `Status: ${primaryState.replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase()}`
+            ? primaryState === "pendingInit"
+              ? "Pending initialization"
+              : primaryState === "running" || primaryState === "active"
+                ? "Working"
+                : primaryState === "completed" || primaryState === "idle"
+                  ? "Delegated work completed"
+                  : `Status: ${primaryState.replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase()}`
             : "");
+        const childStatus: ToolStatus | null =
+          primaryState === "pendingInit" || primaryState === "pending"
+            ? "pending"
+            : primaryState === "running" || primaryState === "active"
+              ? "running"
+              : primaryState === "completed" || primaryState === "idle"
+                ? "done"
+                : primaryState === "failed" || primaryState === "error"
+                  ? "error"
+                  : null;
+        if (isSpawn) {
+          for (const receiverId of receiverIds) {
+            const child = childFor(receiverId);
+            child.callId = id;
+            child.label = prompt ? oneLine(prompt, 80) : child.label;
+            child.model = model ?? child.model;
+            child.prompt = prompt ?? child.prompt;
+            child.activity = activity ? oneLine(activity, 120) : child.activity;
+            if (childStatus && childStatus !== "pending") {
+              child.state = applyEvent(child.state, {
+                type: "status",
+                status:
+                  childStatus === "done"
+                    ? "idle"
+                    : childStatus === "error"
+                      ? "error"
+                      : "working",
+              });
+            }
+          }
+        }
         ctx.emit({
           type: "tool",
           callId: id,
           name: `collab/${collabTool}`,
-          tool: "task",
+          tool: isSpawn ? "task" : "other",
           title: prompt ? `${operation}: ${oneLine(prompt)}` : operation,
-          status: COLLAB_STATUS[status] ?? (settled ? "done" : "running"),
+          status:
+            isSpawn && receiverIds.length
+              ? childStatus ??
+                childToolStatus(childFor(receiverIds[0]).state.status)
+              : COLLAB_STATUS[status] ?? (settled ? "done" : "running"),
           ...(detail ? { output: detail } : {}),
-          subagent: {
-            label: prompt ? oneLine(prompt, 80) : operation,
-            ...(receiverIds.length === 1 ? { threadId: receiverIds[0] } : {}),
-            ...(model ? { model } : {}),
-            ...(prompt ? { prompt } : {}),
-            ...(activity ? { activity: oneLine(activity) } : {}),
-          },
+          ...(isSpawn
+            ? {
+                subagent: {
+                  label: prompt ? oneLine(prompt, 80) : operation,
+                  ...(receiverIds.length === 1 ? { threadId: receiverIds[0] } : {}),
+                  ...(model ? { model } : {}),
+                  ...(prompt ? { prompt } : {}),
+                  ...(activity ? { activity: oneLine(activity) } : {}),
+                },
+              }
+            : {}),
         });
+        if (isSpawn) {
+          for (const receiverId of receiverIds) {
+            syncChild(receiverId, ctx);
+            if (settled) hydrateChild(receiverId, ctx);
+          }
+        }
         return;
       }
       case "subAgentActivity": {
@@ -517,6 +767,19 @@ export function createCodexAdapter(): AgentAdapter {
 
   function handleNotification(method: string, params: Record<string, unknown>, ctx: AdapterContext) {
     switch (method) {
+      case "thread/goal/updated": {
+        const goal = readGoal(params.goal);
+        if (goal) {
+          ctx.emit({
+            type: "goal",
+            goal: { objective: goal.objective, status: goal.status },
+          });
+        }
+        return;
+      }
+      case "thread/goal/cleared":
+        ctx.emit({ type: "goal", goal: null });
+        return;
       case "thread/started": {
         const thread = asRecord(params.thread);
         const id = asString(thread?.id);
@@ -645,6 +908,140 @@ export function createCodexAdapter(): AgentAdapter {
     }
   }
 
+  function notificationThreadId(
+    method: string,
+    params: Record<string, unknown>,
+  ): string | null {
+    const nested = method === "thread/started" ? asRecord(params.thread) : null;
+    return asString(params.threadId) ?? asString(nested?.id);
+  }
+
+  function notificationBelongsToRoot(
+    method: string,
+    params: Record<string, unknown>,
+  ): boolean {
+    const eventThreadId = notificationThreadId(method, params);
+    if (threadId && eventThreadId && eventThreadId !== threadId) return false;
+
+    const turn = asRecord(params.turn);
+    const eventTurnId = asString(params.turnId) ?? asString(turn?.id);
+    if (method === "turn/started") {
+      return !currentTurnId || eventTurnId === currentTurnId;
+    }
+    if (currentTurnId && eventTurnId && eventTurnId !== currentTurnId) return false;
+    if (method === "turn/completed" && !currentTurnId && eventTurnId) return false;
+    return true;
+  }
+
+  function handleChildNotification(
+    childThreadId: string,
+    method: string,
+    params: Record<string, unknown>,
+    ctx: AdapterContext,
+  ): void {
+    const nested = childContext(childThreadId, ctx);
+    switch (method) {
+      case "thread/started": {
+        const thread = asRecord(params.thread);
+        const child = childFor(childThreadId);
+        child.label =
+          asString(thread?.agentNickname) ?? asString(thread?.nickname) ?? child.label;
+        child.role = asString(thread?.agentRole) ?? asString(thread?.role) ?? child.role;
+        child.model = asString(thread?.model) ?? child.model;
+        syncChild(childThreadId, ctx);
+        return;
+      }
+      case "turn/started":
+        childFor(childThreadId).activity = null;
+        emitChild(childThreadId, { type: "status", status: "working" }, ctx);
+        return;
+      case "turn/completed": {
+        const turn = asRecord(params.turn);
+        const error = asRecord(turn?.error);
+        if (error) {
+          emitChild(
+            childThreadId,
+            {
+              type: "status",
+              status: "error",
+              error: asString(error.message) ?? "Delegated work failed.",
+            },
+            ctx,
+          );
+        } else {
+          emitChild(childThreadId, { type: "turn-end" }, ctx);
+        }
+        hydrateChild(childThreadId, ctx);
+        return;
+      }
+      case "thread/status/changed": {
+        const status = threadStatus(params.status);
+        if (status === "working") childFor(childThreadId).activity = null;
+        if (status) emitChild(childThreadId, { type: "status", status }, ctx);
+        if (status === "idle" || status === "error") hydrateChild(childThreadId, ctx);
+        return;
+      }
+      case "item/started":
+        handleItem(asRecord(params.item) ?? {}, false, nested);
+        return;
+      case "item/completed":
+        handleItem(asRecord(params.item) ?? {}, true, nested);
+        return;
+      case "item/agentMessage/delta": {
+        const itemId = asString(params.itemId);
+        const delta = asString(params.delta);
+        if (!itemId || !delta) return;
+        streamed.add(`am-${itemId}`);
+        emitChild(childThreadId, { type: "assistant-delta", id: `am-${itemId}`, text: delta }, ctx);
+        return;
+      }
+      case "item/reasoning/textDelta":
+      case "item/reasoning/summaryTextDelta": {
+        const itemId = asString(params.itemId);
+        const delta = asString(params.delta);
+        if (!itemId || !delta) return;
+        streamed.add(`rs-${itemId}`);
+        emitChild(childThreadId, { type: "thinking-delta", id: `rs-${itemId}`, text: delta }, ctx);
+        return;
+      }
+      case "item/commandExecution/outputDelta": {
+        const itemId = asString(params.itemId);
+        const delta = asString(params.delta);
+        if (itemId && delta) {
+          emitChild(childThreadId, { type: "tool", callId: itemId, outputDelta: delta }, ctx);
+        }
+        return;
+      }
+      case "item/fileChange/patchUpdated": {
+        const itemId = asString(params.itemId);
+        const changes = readFileChanges(params.changes);
+        if (itemId && changes.length) {
+          emitChild(childThreadId, { type: "tool", callId: itemId, changes }, ctx);
+        }
+        return;
+      }
+      case "turn/plan/updated": {
+        const steps = asArray(params.plan)
+          .map((raw) => asRecord(raw))
+          .filter((step): step is Record<string, unknown> => step !== null)
+          .map((step) => ({
+            text: asString(step.step) ?? "",
+            status:
+              step.status === "completed"
+                ? ("done" as const)
+                : step.status === "inProgress"
+                  ? ("running" as const)
+                  : ("pending" as const),
+          }))
+          .filter((step) => step.text);
+        if (steps.length) emitChild(childThreadId, { type: "plan", steps }, ctx);
+        return;
+      }
+      default:
+        return;
+    }
+  }
+
   function handleApproval(
     id: string | number,
     method: string,
@@ -689,6 +1086,10 @@ export function createCodexAdapter(): AgentAdapter {
   function showGoalResult(result: Record<string, unknown>, ctx: AdapterContext): void {
     const goal = readGoal(result.goal);
     ctx.emit({
+      type: "goal",
+      goal: goal ? { objective: goal.objective, status: goal.status } : null,
+    });
+    ctx.emit({
       type: "notice",
       tone: "info",
       text: goal
@@ -708,6 +1109,7 @@ export function createCodexAdapter(): AgentAdapter {
     if (!threadId) return;
     void request(ctx, "thread/goal/clear", { threadId })
       .then((result) => {
+        ctx.emit({ type: "goal", goal: null });
         ctx.emit({
           type: "notice",
           tone: "info",
@@ -949,6 +1351,19 @@ export function createCodexAdapter(): AgentAdapter {
         return;
       }
 
+      const eventThreadId = notificationThreadId(method, params);
+      const nestedThread =
+        method === "thread/started" ? asRecord(params.thread) : null;
+      const parentThreadId = asString(nestedThread?.parentThreadId);
+      const isChildThread =
+        Boolean(eventThreadId) &&
+        Boolean(threadId) &&
+        (eventThreadId !== threadId || parentThreadId === threadId);
+      if (eventThreadId && isChildThread) {
+        handleChildNotification(eventThreadId, method, params, ctx);
+        return;
+      }
+      if (!notificationBelongsToRoot(method, params)) return;
       handleNotification(method, params, ctx);
     },
 
@@ -1046,6 +1461,18 @@ export function createCodexAdapter(): AgentAdapter {
             sessionId: asString(thread.sessionId) ?? threadId,
             ...(model ? { model } : {}),
           });
+          ctx.emit({ type: "goal", goal: null });
+          void request(ctx, "thread/goal/get", { threadId })
+            .then((goalResult) => {
+              const goal = readGoal(goalResult.goal);
+              ctx.emit({
+                type: "goal",
+                goal: goal ? { objective: goal.objective, status: goal.status } : null,
+              });
+            })
+            .catch(() => {
+              // Older app-server builds can resume threads without goal support.
+            });
           ctx.emit({ type: "status", status: "idle" });
           return true;
         })

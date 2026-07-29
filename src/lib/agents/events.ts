@@ -2,6 +2,7 @@ import { mergeCommands } from "./slashCatalog";
 import type {
   AgentAccessMode,
   AgentFileChange,
+  AgentGoal,
   AgentImageAttachment,
   AgentItem,
   AgentModelChoice,
@@ -44,6 +45,8 @@ export type AgentEvent =
       models?: AgentModelChoice[];
     }
   | { type: "status"; status: AgentStatus; error?: string }
+  /** Set, update, finish, or clear the provider's long-running objective. */
+  | { type: "goal"; goal: AgentGoal | null }
   /** The user's own message, echoed into the transcript. */
   | { type: "user"; text: string; images?: AgentImageAttachment[] }
   | { type: "assistant-delta"; id: string; text: string }
@@ -324,6 +327,12 @@ export function applyEvent(state: AgentSessionState, event: AgentEvent): AgentSe
       };
     }
 
+    case "goal":
+      return {
+        ...state,
+        goal: event.goal ? { ...event.goal } : null,
+      };
+
     case "user":
       return {
         ...state,
@@ -515,6 +524,7 @@ export function applyEvent(state: AgentSessionState, event: AgentEvent): AgentSe
       return {
         ...state,
         started: true,
+        goal: null,
         items: event.items ?? [],
         lastWorkedForMs: null,
         pending: [],

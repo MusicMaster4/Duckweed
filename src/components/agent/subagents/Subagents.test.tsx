@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import { subagentsForTurn } from "../../../lib/agents/subagents";
 import type { AgentItem } from "../../../lib/agents/types";
-import { SubagentFleet } from "./SubagentFleet";
+import { scrollFleetWithWheel, SubagentFleet } from "./SubagentFleet";
 import { SubagentInspector } from "./SubagentInspector";
 
 const items: AgentItem[] = [
@@ -54,6 +54,16 @@ const items: AgentItem[] = [
 ];
 
 describe("subagent UI", () => {
+  test("turns a vertical wheel step into bounded horizontal fleet scrolling", () => {
+    const list = { clientWidth: 300, scrollLeft: 20, scrollWidth: 800 };
+
+    expect(scrollFleetWithWheel(list, 120)).toBe(true);
+    expect(list.scrollLeft).toBe(140);
+    expect(scrollFleetWithWheel(list, 1_000)).toBe(true);
+    expect(list.scrollLeft).toBe(500);
+    expect(scrollFleetWithWheel(list, 120)).toBe(false);
+  });
+
   test("renders an accessible fleet with live activity and selection", () => {
     const subagents = subagentsForTurn(items);
     const html = renderToStaticMarkup(

@@ -8,11 +8,14 @@ import {
   type AdapterContext,
   type AgentAdapter,
 } from "../adapter";
+import { goalAfterCommand, goalAfterProviderText } from "../goal";
 import type { AgentLaunch } from "../launch";
 import {
   makeChange,
   toolKind,
   type AgentFileChange,
+  type AgentGoal,
+  type AgentPlanStep,
   type SubagentMeta,
   type ToolStatus,
 } from "../types";
@@ -98,6 +101,32 @@ function lastLine(text: string): string | null {
   return lines.at(-1) ?? null;
 }
 
+/** Grok's private ACP extension reports background workflow phases this way. */
+function readWorkflowSteps(update: Record<string, unknown>): AgentPlanStep[] {
+  const workflowStatus = asString(update.status)?.toLowerCase();
+  return asArray(update.phases)
+    .map((raw) => asRecord(raw))
+    .filter((phase): phase is Record<string, unknown> => phase !== null)
+    .map((phase) => {
+      const state = asString(phase.state)?.toLowerCase();
+      const done =
+        state === "done" ||
+        state === "completed" ||
+        workflowStatus === "done" ||
+        workflowStatus === "completed";
+      const running =
+        state === "active" ||
+        state === "running" ||
+        state === "in_progress" ||
+        state === "inprogress";
+      return {
+        text: asString(phase.title) ?? asString(phase.name) ?? "",
+        status: done ? ("done" as const) : running ? ("running" as const) : ("pending" as const),
+      };
+    })
+    .filter((step) => step.text);
+}
+
 /** Lift task-like raw input without inventing a thread ACP never reported. */
 function readSubagentMeta(
   title: string | null,
@@ -144,6 +173,10 @@ export function createAcpAdapter(): AgentAdapter {
    */
   let activeContent: "assistant" | "thinking" | null = null;
   let assistantSegment = 0;
+  let currentGoal: AgentGoal | null = null;
+  let goalBeforeCommand: AgentGoal | null = null;
+  let goalResponsePending = false;
+  let goalResponseText = "";
   let thinkingSegment = 0;
   /** Permission id → the JSON-RPC request id ACP is waiting on. */
   const permissionRequests = new Map<string, string | number>();
@@ -563,6 +596,14 @@ export function createAcpAdapter(): AgentAdapter {
       case "agent_message_chunk": {
         const text = readContentText(update.content);
         if (text) {
+          if (goalResponsePending) {
+            goalResponseText += text;
+            const goal = goalAfterProviderText(currentGoal, goalResponseText);
+            if (goal !== undefined) {
+              currentGoal = goal;
+              ctx.emit({ type: "goal", goal });
+            }
+          }
           turnHadContent = true;
           ctx.emit({ type: "assistant-delta", id: contentId("assistant", ctx), text });
         }
@@ -637,6 +678,18 @@ export function createAcpAdapter(): AgentAdapter {
           }))
           .filter((step) => step.text);
         if (steps.length) ctx.emit({ type: "plan", steps });
+        return;
+      }
+      case "workflow_updated": {
+        // Grok Build publishes background workflow state on
+        // `_x.ai/session/update`, not ACP's standard plan notification. Lift
+        // its phase rail into the shared workflow dock so it remains visible
+        // after the foreground turn has returned.
+        const steps = readWorkflowSteps(update);
+        if (steps.length) {
+          turnHadContent = true;
+          ctx.emit({ type: "plan", steps });
+        }
         return;
       }
       case "available_commands_update": {
@@ -729,7 +782,19 @@ export function createAcpAdapter(): AgentAdapter {
 
     // Advertised commands are the agent's own — it intercepts them when they
     // come back as prompt text (verified: instant, zero tokens).
-    if (advertised.has(name.slice(1))) return "prompt";
+    if (advertised.has(name.slice(1))) {
+      if (name === "/goal") {
+        goalBeforeCommand = currentGoal;
+        goalResponsePending = true;
+        goalResponseText = "";
+        const goal = goalAfterCommand(currentGoal, text);
+        if (goal !== undefined) {
+          currentGoal = goal;
+          ctx.emit({ type: "goal", goal });
+        }
+      }
+      return "prompt";
+    }
 
     ctx.emit({ type: "user", text });
 
@@ -877,7 +942,9 @@ export function createAcpAdapter(): AgentAdapter {
         return;
       }
 
-      if (method === "session/update") handleSessionUpdate(params, ctx);
+      if (method === "session/update" || method === "_x.ai/session/update") {
+        handleSessionUpdate(params, ctx);
+      }
     },
 
     prompt: (prompt, ctx) => {
@@ -902,6 +969,10 @@ export function createAcpAdapter(): AgentAdapter {
         .then((result) => {
           const stop = asString(result.stopReason);
           if (stop === "refusal") {
+            if (goalResponsePending) {
+              currentGoal = goalBeforeCommand;
+              ctx.emit({ type: "goal", goal: currentGoal });
+            }
             ctx.emit({ type: "notice", tone: "error", text: "The agent refused the request." });
           } else if (slashPending && !turnHadContent) {
             ctx.emit({
@@ -911,10 +982,18 @@ export function createAcpAdapter(): AgentAdapter {
             });
           }
           slashPending = false;
+          goalResponsePending = false;
+          goalResponseText = "";
           ctx.emit({ type: "turn-end" });
         })
         .catch((error: unknown) => {
           slashPending = false;
+          if (goalResponsePending) {
+            currentGoal = goalBeforeCommand;
+            ctx.emit({ type: "goal", goal: currentGoal });
+          }
+          goalResponsePending = false;
+          goalResponseText = "";
           const record = asRecord(error);
           ctx.emit({
             type: "notice",
@@ -936,6 +1015,10 @@ export function createAcpAdapter(): AgentAdapter {
     resume: (id, ctx) => {
       if (!canLoadSession) return false;
       ctx.emit({ type: "transcript" });
+      currentGoal = null;
+      goalBeforeCommand = null;
+      goalResponsePending = false;
+      goalResponseText = "";
       loading = true;
       replayedUser = "";
       ctx.emit({ type: "status", status: "working" });

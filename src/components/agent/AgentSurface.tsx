@@ -12,8 +12,10 @@ import { canResume } from "../../lib/agents/history";
 import * as agents from "../../lib/agents/session";
 import { isNewChatCommand } from "../../lib/agents/slashCatalog";
 import {
+  COMPLETED_SUBAGENT_FLEET_TTL_MS,
   runningSubagentCount,
   subagentForCallId,
+  subagentFleetIsComplete,
   subagentsForTurn,
 } from "../../lib/agents/subagents";
 import type { AgentImageAttachment, AgentSessionState } from "../../lib/agents/types";
@@ -29,6 +31,7 @@ import {
 import { workStatusLabel } from "../../lib/agentWorkDuration";
 import { confirmCloseRunning } from "../../lib/confirmClose";
 import { AgentComposer } from "./AgentComposer";
+import { AgentGoalIndicator } from "./AgentGoalIndicator";
 import { AgentImageAttachments } from "./AgentImageAttachments";
 import { AgentPermission } from "./AgentPermission";
 import { AgentProviderIcon } from "./AgentProviderIcon";
@@ -143,14 +146,19 @@ export function AgentSurface({ termId, active, onClose }: Props) {
     null,
   );
   const fleet = subagentsForTurn(session?.items ?? []);
+  const fleetKey = fleet.map((subagent) => subagent.callId).join("\u001f");
+  const fleetComplete = subagentFleetIsComplete(fleet, session?.status);
+  const [expiredFleetKey, setExpiredFleetKey] = useState<string | null>(null);
   const selectedSubagent = selectedSubagentCallId
     ? subagentForCallId(session?.items ?? [], selectedSubagentCallId)
     : null;
+  const dockedFleet =
+    fleetComplete && expiredFleetKey === fleetKey ? [] : fleet;
   const visibleFleet =
     selectedSubagent &&
-    !fleet.some((subagent) => subagent.callId === selectedSubagent.callId)
-      ? [...fleet, selectedSubagent]
-      : fleet;
+    !dockedFleet.some((subagent) => subagent.callId === selectedSubagent.callId)
+      ? [...dockedFleet, selectedSubagent]
+      : dockedFleet;
 
   const closeSubagentInspector = useCallback(() => {
     setSelectedSubagentCallId(null);
@@ -171,6 +179,24 @@ export function AgentSurface({ termId, active, onClose }: Props) {
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
   }, [closeSubagentInspector, selectedSubagent, selectedSubagentCallId]);
+
+  useEffect(() => {
+    if (!fleetComplete) {
+      if (expiredFleetKey === fleetKey) setExpiredFleetKey(null);
+      return;
+    }
+    if (!fleetKey || expiredFleetKey === fleetKey || selectedSubagentCallId) return;
+    const timer = window.setTimeout(
+      () => setExpiredFleetKey(fleetKey),
+      COMPLETED_SUBAGENT_FLEET_TTL_MS,
+    );
+    return () => window.clearTimeout(timer);
+  }, [
+    expiredFleetKey,
+    fleetComplete,
+    fleetKey,
+    selectedSubagentCallId,
+  ]);
 
   useEffect(() => {
     if (!visibleFleet.length) return;
@@ -427,6 +453,7 @@ export function AgentSurface({ termId, active, onClose }: Props) {
             />
           </span>
         )}
+        <AgentGoalIndicator goal={session.goal} />
         {/* Keep history discoverable on every resumable provider. Mid-turn it
             stays visible but disabled because swapping sessions would strand
             the work currently in flight. */}

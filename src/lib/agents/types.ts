@@ -78,6 +78,21 @@ export type AgentStatus =
   /** Startup or the protocol failed; `error` explains. */
   | "error";
 
+/** Provider-owned state for a long-running session objective. */
+export type AgentGoalStatus =
+  | "active"
+  | "paused"
+  | "blocked"
+  | "usageLimited"
+  | "budgetLimited"
+  | "complete";
+
+export interface AgentGoal {
+  /** Null when the protocol reports a status but not the objective text. */
+  objective: string | null;
+  status: AgentGoalStatus;
+}
+
 export type ToolStatus = "pending" | "running" | "done" | "error";
 
 /**
@@ -370,6 +385,8 @@ export interface AgentSessionState {
   models: AgentModelChoice[];
   /** Provider-side session id, shown so a transcript can be found later. */
   sessionId: string | null;
+  /** Long-running objective currently owned by the provider, when known. */
+  goal: AgentGoal | null;
   items: AgentItem[];
   /**
    * Prompts the user sent while a turn was still running, oldest first.

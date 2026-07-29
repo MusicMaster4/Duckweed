@@ -56,6 +56,7 @@ function harness(overrides: Partial<AgentLaunch> = {}) {
       effort: null,
       models: [],
       sessionId: null,
+      goal: null,
       items: [],
       pending: [],
       permission: null,
@@ -325,6 +326,81 @@ describe("acp adapter", () => {
     const plans = h.state().items.filter((item) => item.kind === "plan");
     expect(plans).toHaveLength(1);
     expect(plans[0].kind === "plan" && plans[0].steps[1].status).toBe("done");
+  });
+
+  test("surfaces Grok background workflow phases from its ACP extension", async () => {
+    const h = harness();
+    await h.handshake();
+    h.feed({
+      jsonrpc: "2.0",
+      method: "_x.ai/session/update",
+      params: {
+        sessionId: "s1",
+        update: {
+          sessionUpdate: "workflow_updated",
+          run_id: "wf_1",
+          name: "suggest-improvements",
+          status: "active",
+          phases: [
+            { title: "Map", state: "active" },
+            { title: "Explore", state: "pending" },
+            { title: "Synthesize", state: "pending" },
+          ],
+          current_phase: "Map",
+        },
+      },
+    });
+    h.feed({
+      jsonrpc: "2.0",
+      method: "_x.ai/session/update",
+      params: {
+        sessionId: "s1",
+        update: {
+          sessionUpdate: "workflow_updated",
+          run_id: "wf_1",
+          name: "suggest-improvements",
+          status: "active",
+          phases: [
+            { title: "Map", state: "done" },
+            { title: "Explore", state: "active" },
+            { title: "Synthesize", state: "pending" },
+          ],
+          current_phase: "Explore",
+        },
+      },
+    });
+
+    const plans = h.state().items.filter((item) => item.kind === "plan");
+    expect(plans).toHaveLength(1);
+    expect(plans[0].kind === "plan" && plans[0].steps).toEqual([
+      { text: "Map", status: "done" },
+      { text: "Explore", status: "running" },
+      { text: "Synthesize", status: "pending" },
+    ]);
+  });
+
+  test("settles every Grok workflow phase when the run completes", async () => {
+    const h = harness();
+    await h.handshake();
+    h.feed({
+      jsonrpc: "2.0",
+      method: "_x.ai/session/update",
+      params: {
+        sessionId: "s1",
+        update: {
+          sessionUpdate: "workflow_updated",
+          status: "completed",
+          phases: [
+            { title: "Map", state: "done" },
+            { title: "Explore", state: "done" },
+            { title: "Synthesize", state: "active" },
+          ],
+        },
+      },
+    });
+
+    const plan = h.state().items.find((item) => item.kind === "plan");
+    expect(plan?.kind === "plan" && plan.steps.every((step) => step.status === "done")).toBe(true);
   });
 
   test("raises a permission prompt with the agent's own options", async () => {
@@ -667,6 +743,54 @@ describe("acp adapter", () => {
       tone: "error",
       text: "Unknown command /frobnicate. It is not in this agent's command list.",
     });
+  });
+
+  test("tracks /goal only when the ACP harness advertises it", async () => {
+    const h = harness();
+    await h.handshake({
+      _meta: {
+        availableCommands: [
+          { name: "goal", description: "Set the session goal" },
+        ],
+      },
+    });
+
+    expect(
+      h.adapter.command?.("/goal inspect the repository", h.ctx),
+    ).toBe("prompt");
+    expect(h.state().goal).toEqual({
+      objective: "inspect the repository",
+      status: "active",
+    });
+
+    h.adapter.prompt(
+      { text: "/goal inspect the repository", images: [] },
+      h.ctx,
+    );
+    h.update({
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "Goal set: inspect the repository safely" },
+    });
+    h.feed({
+      jsonrpc: "2.0",
+      id: 3,
+      result: { stopReason: "end_turn" },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(h.state().goal).toEqual({
+      objective: "inspect the repository safely",
+      status: "active",
+    });
+  });
+
+  test("does not create goal chrome for an unadvertised ACP command", async () => {
+    const h = harness();
+    await h.handshake();
+
+    expect(h.adapter.command?.("/goal inspect", h.ctx)).toBe("handled");
+    expect(h.state().goal).toBeNull();
   });
 
   test("says so when an intercepted slash command produces no visible output", async () => {

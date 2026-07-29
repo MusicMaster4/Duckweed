@@ -532,15 +532,33 @@
 }
 
 .official-plan-steps li.is-running .official-plan-step-mark {
-  border-color: var(--plan-color);
-  box-shadow: inset 0 0 0 3px var(--bg-pane);
-  background: var(--plan-color);
-  animation: official-task-pulse 1.4s ease-in-out infinite;
+  overflow: hidden;
+  border-color: transparent;
+  border-radius: 0;
+  background: transparent;
+  color: var(--plan-color);
 }
 
-@keyframes official-task-pulse {
+.official-plan-running-arrow {
+  width: 14px;
+  height: 10px;
+  overflow: visible;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  animation: official-task-arrow 1.4s ease-in-out infinite;
+}
+
+@keyframes official-task-arrow {
+  0%,
+  100% {
+    transform: translateX(-1.5px);
+  }
+
   50% {
-    opacity: 0.45;
+    transform: translateX(1.5px);
   }
 }
 
@@ -2249,7 +2267,7 @@ button.chatgpt-thinking-row.is-selected {
 
 @media (prefers-reduced-motion: reduce) {
   .official-stream-caret,
-  .official-plan-steps li.is-running .official-plan-step-mark,
+  .official-plan-running-arrow,
   .official-tool-spinner,
   .chatgpt-thinking-row.is-entering,
   .chatgpt-shimmer,
