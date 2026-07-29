@@ -442,6 +442,8 @@ export function createClaudeAdapter(): AgentAdapter {
   const workflowsByCallId = new Map<string, TrackedWorkflow>();
   const workflowCallByTaskId = new Map<string, string>();
   let latestWorkflowCallId: string | null = null;
+  /** The foreground result arrived, but an async Workflow still owns the turn. */
+  let turnResultPending = false;
   let messageSeq = 0;
   let settledMessageSeq = 0;
   let controlSeq = 0;
@@ -1069,6 +1071,13 @@ export function createClaudeAdapter(): AgentAdapter {
           `${workflow.name} ${notification.status}.`,
       });
     }
+    const backgroundWorkflowRunning = [...workflowsByCallId.values()].some(
+      (tracked) => tracked.taskId !== null && tracked.status === "running",
+    );
+    if (turnResultPending && !backgroundWorkflowRunning) {
+      turnResultPending = false;
+      ctx.emit({ type: "turn-end" });
+    }
   }
 
   function handleNotificationFrame(
@@ -1172,6 +1181,19 @@ export function createClaudeAdapter(): AgentAdapter {
       emitTurnError(asString(frame.result) ?? "The turn failed.", ctx);
     }
     goalResponsePending = false;
+    const backgroundWorkflowRunning = [...workflowsByCallId.values()].some(
+      (workflow) => workflow.taskId !== null && workflow.status === "running",
+    );
+    // A successful result after launching an asynchronous Workflow only means
+    // Claude's foreground response returned. The provider remains responsible
+    // for the background job, so keep the turn open until its task notification
+    // arrives. Otherwise this intermediate result produces a false completion
+    // sound and highlight while the workflow is visibly still running.
+    if (backgroundWorkflowRunning && frame.is_error !== true) {
+      turnResultPending = true;
+      return;
+    }
+    turnResultPending = false;
     ctx.emit({ type: "turn-end" });
   }
 
@@ -1447,6 +1469,7 @@ export function createClaudeAdapter(): AgentAdapter {
 
     prompt: (prompt, ctx) => {
       seenTurnErrors.clear();
+      turnResultPending = false;
       ctx.emit({ type: "user", text: prompt.text, images: prompt.images });
       ctx.emit({ type: "status", status: "working" });
       sendUserMessage(prompt, ctx);
