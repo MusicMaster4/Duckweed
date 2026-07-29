@@ -134,6 +134,9 @@ export interface AgentPlanStep {
   status: "pending" | "running" | "done";
 }
 
+/** Whether a progress checklist represents discrete tasks or an orchestration workflow. */
+export type AgentPlanType = "tasks" | "workflow";
+
 /** An image the user attached to a prompt. */
 export interface AgentImageAttachment {
   /** Stable within the composer and transcript, used for removal and React keys. */
@@ -238,6 +241,8 @@ export interface SubagentMeta {
 
 export interface PlanItem extends ItemBase {
   kind: "plan";
+  /** Older restored transcripts omit this and are treated as task lists. */
+  planType?: AgentPlanType;
   steps: AgentPlanStep[];
 }
 

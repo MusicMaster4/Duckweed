@@ -1,6 +1,7 @@
 import type {
   AgentItem,
   AgentPlanStep,
+  AgentPlanType,
   AgentSessionState,
   ToolItem,
   ToolKind,
@@ -35,6 +36,7 @@ export interface ProviderExperienceProps {
 /* ── Plan ───────────────────────────────────────────────────────────────── */
 
 export interface PlanSummary {
+  planType: AgentPlanType;
   steps: AgentPlanStep[];
   done: number;
   total: number;
@@ -54,10 +56,12 @@ export interface PlanSummary {
  */
 export function planSummary(items: AgentItem[]): PlanSummary | null {
   let steps: AgentPlanStep[] | null = null;
+  let planType: AgentPlanType = "tasks";
   for (let index = items.length - 1; index >= 0; index -= 1) {
     const item = items[index];
     if (item.kind === "plan") {
       steps = item.steps;
+      planType = item.planType ?? "tasks";
       break;
     }
   }
@@ -67,6 +71,7 @@ export function planSummary(items: AgentItem[]): PlanSummary | null {
   const activeIndex = steps.findIndex((step) => step.status === "running");
   const nextIndex = steps.findIndex((step) => step.status === "pending");
   return {
+    planType,
     steps,
     done,
     total: steps.length,

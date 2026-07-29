@@ -63,7 +63,7 @@ export function SubagentFleet({
       }}
     >
       <div className="agent-sub-fleet-head">
-        <strong>Fleet</strong>
+        <strong>Subagents</strong>
         <span>
           {active > 0
             ? `${active} ${active === 1 ? "subagent" : "subagents"} running`

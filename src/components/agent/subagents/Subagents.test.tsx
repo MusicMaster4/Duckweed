@@ -89,6 +89,8 @@ describe("subagent UI", () => {
     );
 
     expect(html).toContain('aria-label="Subagents"');
+    expect(html).toContain("<strong>Subagents</strong>");
+    expect(html).not.toContain("<strong>Fleet</strong>");
     expect(html).toContain("1 subagent running");
     expect(html).toContain("Inspect parser tests");
     expect(html).toContain("Comparing parser fixtures");

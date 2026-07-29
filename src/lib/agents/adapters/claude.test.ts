@@ -499,6 +499,7 @@ describe("claude adapter", () => {
     });
 
     const plan = h.state().items.find((item) => item.kind === "plan");
+    expect(plan?.kind === "plan" && plan.planType).toBe("tasks");
     expect(plan?.kind === "plan" && plan.steps).toEqual([
       { text: "Write the adapter", status: "done" },
       { text: "Wire the UI", status: "running" },
@@ -640,6 +641,7 @@ export const meta = {
       output: 'Dynamic workflow "Review the repository" completed',
     });
     expect(h.state().items.find((item) => item.kind === "plan")).toMatchObject({
+      planType: "workflow",
       steps: [
         { text: "Map", status: "done" },
         { text: "Report", status: "done" },

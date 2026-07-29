@@ -492,7 +492,7 @@ export function createClaudeAdapter(): AgentAdapter {
       status,
     }));
     if (scope === ROOT_TASK_SCOPE) {
-      ctx.emit({ type: "plan", steps });
+      ctx.emit({ type: "plan", planType: "tasks", steps });
       return;
     }
     ctx.emit({
@@ -502,6 +502,7 @@ export function createClaudeAdapter(): AgentAdapter {
         kind: "plan",
         id: `child-plan-${scope}`,
         at: Date.now(),
+        planType: "tasks",
         steps,
       },
     });
@@ -649,7 +650,7 @@ export function createClaudeAdapter(): AgentAdapter {
   function settleTool(callId: string, name: string, input: Record<string, unknown>, ctx: AdapterContext) {
     if (name.toLowerCase() === "todowrite") {
       const steps = planFrom(input);
-      if (steps.length) ctx.emit({ type: "plan", steps });
+      if (steps.length) ctx.emit({ type: "plan", planType: "tasks", steps });
     }
     if (name.toLowerCase() === "workflow") {
       const meta = workflowMeta(input);
@@ -663,7 +664,11 @@ export function createClaudeAdapter(): AgentAdapter {
       };
       workflowsByCallId.set(callId, workflow);
       latestWorkflowCallId = callId;
-      ctx.emit({ type: "plan", steps: workflowSteps(workflow, "running") });
+      ctx.emit({
+        type: "plan",
+        planType: "workflow",
+        steps: workflowSteps(workflow, "running"),
+      });
     }
     trackTaskUse(ROOT_TASK_SCOPE, callId, name, input, ctx);
     const subagent = subagentForTool(name, input);
@@ -1023,7 +1028,11 @@ export function createClaudeAdapter(): AgentAdapter {
           output,
         });
         if (latestWorkflowCallId === callId) {
-          ctx.emit({ type: "plan", steps: workflowSteps(workflow, "running") });
+          ctx.emit({
+            type: "plan",
+            planType: "workflow",
+            steps: workflowSteps(workflow, "running"),
+          });
         }
         continue;
       }
@@ -1060,7 +1069,11 @@ export function createClaudeAdapter(): AgentAdapter {
       output: notification.summary,
     });
     if (latestWorkflowCallId === callId && completed) {
-      ctx.emit({ type: "plan", steps: workflowSteps(workflow, "completed") });
+      ctx.emit({
+        type: "plan",
+        planType: "workflow",
+        steps: workflowSteps(workflow, "completed"),
+      });
     }
     if (!completed) {
       ctx.emit({

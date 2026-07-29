@@ -9,6 +9,7 @@ import type {
   AgentPendingPrompt,
   AgentPermission,
   AgentPlanStep,
+  AgentPlanType,
   AgentSessionState,
   AgentStatus,
   AgentUsage,
@@ -78,7 +79,7 @@ export type AgentEvent =
       /** One nested child item to append or update by id. */
       subagentItem?: AgentItem;
     }
-  | { type: "plan"; steps: AgentPlanStep[] }
+  | { type: "plan"; planType?: AgentPlanType; steps: AgentPlanStep[] }
   | { type: "notice"; text: string; tone: "info" | "error"; transient?: boolean }
   | { type: "exit-armed"; armed: boolean }
   /** Remove picker confirmations and double-Ctrl+C hints without touching errors. */
@@ -483,12 +484,22 @@ export function applyEvent(state: AgentSessionState, event: AgentEvent): AgentSe
           started: true,
           items: [
             ...state.items,
-            { kind: "plan", id: nextId(state), at: Date.now(), steps: event.steps },
+            {
+              kind: "plan",
+              id: nextId(state),
+              at: Date.now(),
+              planType: event.planType ?? "tasks",
+              steps: event.steps,
+            },
           ],
         };
       }
       const items = state.items.slice();
-      items[index] = { ...items[index], steps: event.steps } as never;
+      items[index] = {
+        ...items[index],
+        planType: event.planType ?? "tasks",
+        steps: event.steps,
+      } as never;
       return { ...state, items };
     }
 

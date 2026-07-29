@@ -90,7 +90,7 @@ describe("official agent presentation", () => {
       kind: "plan",
       id: "plan",
       at: 1,
-      title: "Workflow",
+      planType: "workflow",
       steps: [
         { text: "Completed task", status: "done" },
         { text: "Active task", status: "running" },
@@ -101,9 +101,26 @@ describe("official agent presentation", () => {
     const html = renderToStaticMarkup(<PlanTracker item={plan} variant="codex" />);
 
     expect(html).toContain('class="official-plan-running-arrow"');
+    expect(html).toContain(">Workflow</span>");
     expect(html).toContain('aria-current="step"');
     expect(html.match(/official-plan-running-arrow/g)?.length).toBe(1);
     expect(html).toContain("✓");
+  });
+
+  test("labels ordinary plans as tasks", () => {
+    const plan: PlanItem = {
+      kind: "plan",
+      id: "tasks",
+      at: 1,
+      planType: "tasks",
+      steps: [{ text: "Inspect the code", status: "running" }],
+    };
+
+    const html = renderToStaticMarkup(<PlanTracker item={plan} variant="codex" />);
+
+    expect(html).toContain('aria-label="Tasks progress"');
+    expect(html).toContain(">Tasks</span>");
+    expect(html).not.toContain(">Workflow</span>");
   });
 
   test("offers a persistent copy action for user messages in every custom UI", () => {

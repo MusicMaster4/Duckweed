@@ -721,7 +721,7 @@ export function createAcpAdapter(): AgentAdapter {
                   : ("pending" as const),
           }))
           .filter((step) => step.text);
-        if (steps.length) ctx.emit({ type: "plan", steps });
+        if (steps.length) ctx.emit({ type: "plan", planType: "tasks", steps });
         return;
       }
       case "workflow_updated": {
@@ -742,7 +742,7 @@ export function createAcpAdapter(): AgentAdapter {
         const steps = readWorkflowSteps(update);
         if (steps.length) {
           turnHadContent = true;
-          ctx.emit({ type: "plan", steps });
+          ctx.emit({ type: "plan", planType: "workflow", steps });
         }
         if (!loading && workflowIsTerminal(workflowStatus)) {
           finishTurnWhenReady(ctx);
