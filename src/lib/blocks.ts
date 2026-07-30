@@ -18,12 +18,6 @@ import { nextBlockSelection, type BlockNavAction } from "./blockNav";
  * WebGL renderer and resize with the pane the same way the visual cursor does.
  */
 
-/**
- * Clear space between a block separator and the command below it. The band is
- * transparent, so only the 1px hairline is painted over the terminal grid.
- */
-const BLOCK_GAP = 8;
-
 export interface CommandBlock {
   id: number;
   command: string;
@@ -32,9 +26,9 @@ export interface CommandBlock {
    * xterm disposes markers placed on wrapped continuation rows during reflow.
    */
   start: IMarker;
-  /** Covers the prompt+echo row; shows only the command text. */
-  cmdEl: HTMLDivElement;
-  /** Full-width hairline above the block (null for the first). */
+  /** Lazily mounted cover for the prompt+echo row. */
+  cmdEl: HTMLDivElement | null;
+  /** Lazily mounted full-width hairline above the block. */
   sepEl: HTMLDivElement | null;
 }
 
@@ -56,6 +50,12 @@ export class BlockTracker {
    * scroll on tall cargo/build output).
    */
   private readonly selectOverlay: HTMLDivElement;
+  /**
+   * Blocks whose command chrome was visible during the previous layout.
+   * Keeping this small set lets scrolling hide stale overlays without walking
+   * and mutating every DOM node in a long terminal history on every PTY write.
+   */
+  private visibleBlocks = new Set<CommandBlock>();
   private layoutRaf: number | null = null;
   private readonly scrollDisposable: { dispose: () => void };
   private active = false;
@@ -133,29 +133,12 @@ export class BlockTracker {
     const start = this.term.registerMarker(startLine - cursorLine);
     if (!start) return;
 
-    const cmdEl = document.createElement("div");
-    cmdEl.className = "command-block-cmd";
-    cmdEl.setAttribute("role", "presentation");
-    // One-line label: multi-line buffers collapse to a single visual row for now.
-    cmdEl.textContent = command.replace(/\s+/g, " ").trim();
-    cmdEl.hidden = true;
-    this.host.appendChild(cmdEl);
-
-    let sepEl: HTMLDivElement | null = null;
-    if (this.blocks.length > 0) {
-      sepEl = document.createElement("div");
-      sepEl.className = "command-block-separator";
-      sepEl.setAttribute("role", "presentation");
-      sepEl.hidden = true;
-      this.host.appendChild(sepEl);
-    }
-
     const block: CommandBlock = {
       id: this.nextId++,
       command,
       start,
-      cmdEl,
-      sepEl,
+      cmdEl: null,
+      sepEl: null,
     };
 
     this.blocks.push(block);
@@ -166,6 +149,7 @@ export class BlockTracker {
   clear(): void {
     for (const b of this.blocks) disposeBlock(b);
     this.blocks = [];
+    this.visibleBlocks.clear();
     this.press = null;
     this.selectedId = null;
     this.promptCover.hidden = true;
@@ -226,20 +210,22 @@ export class BlockTracker {
     // same absolute lines, and a free-floating hairline would strike through
     // mid-output that is no longer a chunk boundary.
     const buf = this.term.buffer.active;
-    for (let i = 0; i < this.blocks.length; i++) {
+    const visibleBlocks = new Set<CommandBlock>();
+    const firstCandidate = this.firstLayoutCandidate(viewportY);
+    for (let i = firstCandidate; i < this.blocks.length; i++) {
       const block = this.blocks[i];
-      const range = this.range(block);
+      const range = this.rangeAt(i);
       if (!range) {
-        block.cmdEl.hidden = true;
-        if (block.sepEl) block.sepEl.hidden = true;
+        this.releaseBlockChrome(block);
         continue;
       }
+      const isPastViewport = range.start >= viewportY + rows;
 
       // Fold orphan idle prompts directly above the echo row into this block's
       // header — but never walk into the previous chunk. Empty Enter / ^C leave
       // `PS path>` rows that belong to no chunk; anything still owned by the
       // previous block stays there so the hairline cannot land mid-output.
-      const prevEnd = this.previousBlockEnd(i);
+      const prevEnd = i > 0 ? (this.rangeAt(i - 1)?.end ?? -1) : -1;
       const coverStart = foldOrphanPrompts(
         (y) => {
           const line = buf.getLine(y);
@@ -265,38 +251,45 @@ export class BlockTracker {
       // when its first row has just scrolled above the viewport.
       const headerOnScreen = commandEndRow >= 0 && coverRow < rows;
       if (headerOnScreen) {
+        visibleBlocks.add(block);
+        const { cmdEl, sepEl } = this.ensureBlockChrome(block, i > 0);
         const rowsBeforeCommand = range.start - coverStart;
         const headerRows = commandEnd - coverStart + 1;
         const y = offsetY + coverRow * cellHeight;
-        block.cmdEl.hidden = false;
-        block.cmdEl.classList.toggle(
+        cmdEl.hidden = false;
+        cmdEl.classList.toggle(
           "is-selected",
           this.editorMode && block.id === this.selectedId,
         );
-        block.cmdEl.style.transform = `translate3d(0, ${y}px, 0)`;
-        block.cmdEl.style.width = `${fullWidth}px`;
-        block.cmdEl.style.height = `${headerRows * cellHeight}px`;
-        block.cmdEl.style.padding = `${rowsBeforeCommand * cellHeight}px 6px 0`;
-        block.cmdEl.style.lineHeight = `${cellHeight}px`;
+        cmdEl.style.transform = `translate3d(0, ${y}px, 0)`;
+        cmdEl.style.width = `${fullWidth}px`;
+        cmdEl.style.height = `${headerRows * cellHeight}px`;
+        cmdEl.style.padding = `${rowsBeforeCommand * cellHeight}px 6px 0`;
+        cmdEl.style.lineHeight = `${cellHeight}px`;
 
-        if (block.sepEl) {
-          // Center the hairline in a transparent band above the command. The
-          // gap stays visual only, so it does not hide terminal output.
+        if (sepEl) {
+          // A terminal grid has no real inter-row gap. Keep the separator on
+          // the exact boundary so it never cuts through previous output.
           if (i > 0 && this.editorMode && coverRow >= 0 && coverRow < rows) {
-            const band = BLOCK_GAP * 2 + 1;
-            block.sepEl.hidden = false;
-            block.sepEl.style.transform = `translate3d(0, ${y - band}px, 0)`;
-            block.sepEl.style.width = `${fullWidth}px`;
-            block.sepEl.style.height = `${band}px`;
+            sepEl.hidden = false;
+            sepEl.style.transform = `translate3d(0, ${y}px, 0)`;
+            sepEl.style.width = `${fullWidth}px`;
+            sepEl.style.height = "1px";
           } else {
-            block.sepEl.hidden = true;
+            sepEl.hidden = true;
           }
         }
       } else {
-        block.cmdEl.hidden = true;
-        if (block.sepEl) block.sepEl.hidden = true;
+        this.releaseBlockChrome(block);
       }
+      if (isPastViewport) break;
     }
+
+    for (const block of this.visibleBlocks) {
+      if (visibleBlocks.has(block)) continue;
+      this.releaseBlockChrome(block);
+    }
+    this.visibleBlocks = visibleBlocks;
 
     if (this.editorMode) {
       this.layoutPromptCover(fullWidth, offsetY, cellHeight, viewportY, rows);
@@ -344,7 +337,7 @@ export class BlockTracker {
       this.selectedId = null;
       this.selectOverlay.hidden = true;
       this.promptCover.hidden = true;
-      for (const block of this.blocks) {
+      for (const block of this.visibleBlocks) {
         if (block.sepEl) block.sepEl.hidden = true;
       }
     }
@@ -378,24 +371,9 @@ export class BlockTracker {
    * redistribute or delete the physical row carrying such a marker on resize.
    */
   range(block: CommandBlock): { start: number; end: number } | null {
-    if (block.start.isDisposed || block.start.line < 0) return null;
-    const start = block.start.line;
     const index = this.blocks.indexOf(block);
     if (index < 0) return null;
-    let nextStart: number | null = null;
-    for (let i = index + 1; i < this.blocks.length; i++) {
-      const marker = this.blocks[i].start;
-      if (marker.isDisposed || marker.line < 0) continue;
-      nextStart = marker.line;
-      break;
-    }
-
-    let end = nextStart === null ? liveEndLine(this.term, start) : nextStart - 1;
-    // Idle prompt rows between submissions belong to the next header, not the
-    // previous command. Trim them after resolving the semantic boundary.
-    end = trimTrailingPrompt(this.term, start, end);
-    if (end < start) end = start;
-    return { start, end };
+    return this.rangeAt(index);
   }
 
   /**
@@ -536,11 +514,43 @@ export class BlockTracker {
     }
   }
 
-  private hideChrome(): void {
-    for (const block of this.blocks) {
-      block.cmdEl.hidden = true;
-      if (block.sepEl) block.sepEl.hidden = true;
+  private ensureBlockChrome(
+    block: CommandBlock,
+    withSeparator: boolean,
+  ): { cmdEl: HTMLDivElement; sepEl: HTMLDivElement | null } {
+    if (!block.cmdEl) {
+      const cmdEl = document.createElement("div");
+      cmdEl.className = "command-block-cmd";
+      cmdEl.setAttribute("role", "presentation");
+      // One-line label: multi-line buffers collapse to one visual row for now.
+      cmdEl.textContent = block.command.replace(/\s+/g, " ").trim();
+      cmdEl.hidden = true;
+      this.host.appendChild(cmdEl);
+      block.cmdEl = cmdEl;
     }
+    if (withSeparator && !block.sepEl) {
+      const sepEl = document.createElement("div");
+      sepEl.className = "command-block-separator";
+      sepEl.setAttribute("role", "presentation");
+      sepEl.hidden = true;
+      this.host.appendChild(sepEl);
+      block.sepEl = sepEl;
+    }
+    return { cmdEl: block.cmdEl, sepEl: block.sepEl };
+  }
+
+  private releaseBlockChrome(block: CommandBlock): void {
+    block.cmdEl?.remove();
+    block.sepEl?.remove();
+    block.cmdEl = null;
+    block.sepEl = null;
+  }
+
+  private hideChrome(): void {
+    for (const block of this.visibleBlocks) {
+      this.releaseBlockChrome(block);
+    }
+    this.visibleBlocks.clear();
     this.promptCover.hidden = true;
     this.selectOverlay.hidden = true;
   }
@@ -555,7 +565,7 @@ export class BlockTracker {
     this.prune();
     for (let i = this.blocks.length - 1; i >= 0; i--) {
       const block = this.blocks[i];
-      const range = this.range(block);
+      const range = this.rangeAt(i);
       if (!range) continue;
       if (line >= range.start && line <= range.end) return block;
     }
@@ -563,16 +573,47 @@ export class BlockTracker {
   }
 
   /**
-   * Absolute end line of the block before `index`, or `-1` when this is the
-   * first live block. Clamps orphan-prompt folding so a hairline cannot climb
-   * into the previous chunk's output.
+   * Range lookup for a known block index.
+   *
+   * Layout already walks blocks in order. Avoiding `indexOf` keeps each frame
+   * linear as the history grows; after pruning, the next marker is adjacent.
    */
-  private previousBlockEnd(index: number): number {
-    for (let i = index - 1; i >= 0; i--) {
-      const range = this.range(this.blocks[i]);
-      if (range) return range.end;
+  private rangeAt(index: number): { start: number; end: number } | null {
+    const block = this.blocks[index];
+    if (!block || block.start.isDisposed || block.start.line < 0) return null;
+    const start = block.start.line;
+    let nextStart: number | null = null;
+    for (let i = index + 1; i < this.blocks.length; i++) {
+      const marker = this.blocks[i].start;
+      if (marker.isDisposed || marker.line < 0) continue;
+      nextStart = marker.line;
+      break;
     }
-    return -1;
+
+    let end = nextStart === null ? liveEndLine(this.term, start) : nextStart - 1;
+    // Idle prompt rows between submissions belong to the next header, not the
+    // previous command. Trim them after resolving the semantic boundary.
+    end = trimTrailingPrompt(this.term, start, end);
+    if (end < start) end = start;
+    return { start, end };
+  }
+
+  /**
+   * Oldest block that can still have command chrome in the viewport.
+   *
+   * Start markers stay ordered through xterm reflow. One predecessor is kept
+   * because a wrapped command can begin above the viewport and continue into
+   * its first visible row.
+   */
+  private firstLayoutCandidate(viewportY: number): number {
+    let low = 0;
+    let high = this.blocks.length;
+    while (low < high) {
+      const mid = (low + high) >>> 1;
+      if (this.blocks[mid].start.line < viewportY) low = mid + 1;
+      else high = mid;
+    }
+    return Math.max(0, low - 1);
   }
 
   // ---------------------------------------------------------------------------
@@ -630,8 +671,7 @@ export class BlockTracker {
       return;
     }
 
-    const last = this.blocks[this.blocks.length - 1];
-    const range = this.range(last);
+    const range = this.rangeAt(this.blocks.length - 1);
     if (!range) {
       this.promptCover.hidden = true;
       return;
@@ -702,6 +742,7 @@ export class BlockTracker {
     this.blocks = this.blocks.filter((b) => {
       if (!b.start.isDisposed && b.start.line >= 0) return true;
       disposeBlock(b);
+      this.visibleBlocks.delete(b);
       if (this.selectedId === b.id) this.selectedId = null;
       return false;
     });
@@ -761,7 +802,7 @@ export class BlockTracker {
 }
 
 function disposeBlock(block: CommandBlock): void {
-  block.cmdEl.remove();
+  block.cmdEl?.remove();
   block.sepEl?.remove();
   block.start.dispose();
 }
