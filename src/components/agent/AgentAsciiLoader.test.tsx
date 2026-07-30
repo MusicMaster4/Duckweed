@@ -5,6 +5,16 @@ import { AgentAsciiLoader } from "./AgentAsciiLoader";
 import { ASCII_ANIMATIONS } from "./ascii/animations";
 
 describe("agent startup animation", () => {
+  test("includes the 25-scene expansion with distinct motion signatures", () => {
+    expect(ASCII_ANIMATIONS).toHaveLength(84);
+
+    const signatures = ASCII_ANIMATIONS.map((create) => {
+      const paint = create();
+      return [0.4, 1.1, 2.3].map(paint).join("\n---\n");
+    });
+    expect(new Set(signatures).size).toBe(ASCII_ANIMATIONS.length);
+  });
+
   test("every animation paints a full, non-empty grid", () => {
     for (const create of ASCII_ANIMATIONS) {
       const paint = create();
