@@ -193,7 +193,9 @@ jobs:
           - platform: macos
             label: macOS universal (DMG)
             runner: macos-latest
-            bundles: dmg
+            # `app` is required so createUpdaterArtifacts emits .app.tar.gz;
+            # `dmg` alone only packages the installer and cleans the .app away.
+            bundles: app,dmg
             target_args: --target universal-apple-darwin
             rust_targets: aarch64-apple-darwin,x86_64-apple-darwin
             bundle_dir: src-tauri/target/universal-apple-darwin/release/bundle
@@ -327,8 +329,15 @@ jobs:
             macos)
               stage_files "$BUNDLE_DIR/dmg"
               UPDATER="$(find "$BUNDLE_DIR/macos" -maxdepth 1 -type f -name '*.app.tar.gz' -print -quit)"
-              test -n "$UPDATER"
-              test -f "$UPDATER.sig"
+              if [ -z "$UPDATER" ]; then
+                echo "No .app.tar.gz updater artifact under $BUNDLE_DIR/macos" >&2
+                find "$BUNDLE_DIR" -type f -print >&2 || true
+                exit 1
+              fi
+              if [ ! -f "$UPDATER.sig" ]; then
+                echo "Missing signature for $UPDATER" >&2
+                exit 1
+              fi
               STAGED="release-assets/Duckweed_${VERSION}_universal.app.tar.gz"
               cp "$UPDATER" "$STAGED"
               cp "$UPDATER.sig" "$STAGED.sig"

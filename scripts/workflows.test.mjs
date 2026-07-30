@@ -153,7 +153,8 @@ describe("the build job", () => {
     });
     expect(matrix.find((entry) => entry.platform === "macos")).toMatchObject({
       runner: "macos-latest",
-      bundles: "dmg",
+      // app produces the updater archive; dmg is the installable image.
+      bundles: "app,dmg",
       target_args: "--target universal-apple-darwin",
     });
     expect(build["runs-on"]).toContain("matrix.runner");
