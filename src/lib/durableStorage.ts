@@ -33,12 +33,24 @@ export type DurableKey = (typeof DURABLE_KEYS)[number];
  * Command history is unioned rather than overwritten: an installed build and a
  * dev build see different WebView origins, so each side can hold commands the
  * other never saw. Ghost-text history must outlive updates, not ping-pong.
+ *
+ * Each key is restored independently: one save rejection must not skip history
+ * or other durable rows later in the list.
  */
 export async function restoreDurableStorage(): Promise<void> {
   if (!TAURI_RUNTIME) return;
+  let saved: Record<string, string>;
   try {
-    const saved = await invoke<Record<string, string>>("settings_load");
-    for (const key of DURABLE_KEYS) {
+    saved = await invoke<Record<string, string>>("settings_load");
+  } catch (error) {
+    // The WebView copy remains usable if native storage is temporarily
+    // unavailable. Do not prevent the terminal from starting.
+    console.error("failed to load durable settings", error);
+    return;
+  }
+
+  for (const key of DURABLE_KEYS) {
+    try {
       const nativeValue = saved[key];
       const existing = localStorage.getItem(key);
 
@@ -55,11 +67,9 @@ export async function restoreDurableStorage(): Promise<void> {
       } else if (existing !== null) {
         await invoke("settings_save", { key, value: existing });
       }
+    } catch (error) {
+      console.error(`failed to restore durable setting ${key}`, error);
     }
-  } catch (error) {
-    // The WebView copy remains usable if native storage is temporarily
-    // unavailable. Do not prevent the terminal from starting.
-    console.error("failed to restore durable settings", error);
   }
 }
 

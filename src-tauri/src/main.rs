@@ -43,9 +43,12 @@ struct DurableSettings(Mutex<()>);
 
 const COMMAND_HISTORY_KEY: &str = "duckweed:command-history:v1";
 
-const DURABLE_SETTING_KEYS: [&str; 7] = [
+const DURABLE_SETTING_KEYS: [&str; 8] = [
     "duckweed:state:v1",
     "duckweed:usage:v1",
+    // Ghost-text unlearning table — must match frontend DURABLE_KEYS or restore
+    // aborts when seeding WebView feedback into app-data and never reaches history.
+    "duckweed:suggest-feedback:v1",
     "duckweed:checklist:v1",
     "duckweed:agent-preferences:v1",
     "duckweed:layouts:v1",

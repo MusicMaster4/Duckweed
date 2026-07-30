@@ -46,6 +46,7 @@ import {
 import { playCompletionSound, preloadCompletionSound } from "./lib/completionSound";
 import * as commandHistory from "./lib/commandHistory";
 import { clearGreetings } from "./lib/greetings";
+import * as suggestFeedback from "./lib/suggestFeedback";
 import {
   frontendReady,
   listShells,
@@ -2662,7 +2663,12 @@ export default function App() {
                       "Duckweed will forget every command it learned. Ghost suggestions start fresh. This can't be undone.",
                     confirmLabel: "Reset",
                   }).then((ok) => {
-                    if (ok) commandHistory.clear();
+                    if (ok) {
+                      commandHistory.clear();
+                      // Unlearning table is the other half of ghost ranking —
+                      // leave it and suppressed commands stay invisible forever.
+                      suggestFeedback.clear();
+                    }
                     return ok;
                   })
                 }
