@@ -5,7 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::net::{IpAddr, Shutdown, TcpListener, TcpStream};
+use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -572,15 +572,23 @@ fn start_cloudflare_tunnel(
 
 fn wait_for_reachable_public_url(url: &str) -> Result<(), String> {
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let client = reqwest::blocking::Client::builder()
+    let default_client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(6))
         .build()
         .map_err(err)?;
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let dns_deadline = std::time::Instant::now() + Duration::from_secs(3);
     let mut last_error = "the public address was not reachable".to_string();
     let readiness_url = format!("{}{}", url.trim_end_matches('/'), TUNNEL_READY_PATH);
+    let host = reqwest::Url::parse(url)
+        .map_err(err)?
+        .host_str()
+        .ok_or_else(|| "the tunnel helper returned an invalid public address".to_string())?
+        .to_string();
+    let mut resolved_client = None;
 
     while std::time::Instant::now() < deadline {
+        let client = resolved_client.as_ref().unwrap_or(&default_client);
         match client
             .get(&readiness_url)
             .header(
@@ -600,7 +608,28 @@ fn wait_for_reachable_public_url(url: &str) -> Result<(), String> {
                 );
             }
             Err(error) => {
-                last_error = error.to_string();
+                last_error = format!("{error:?}");
+                if resolved_client.is_none() {
+                    match lookup_public_dns(&host) {
+                        PublicDns::Addresses(addresses) => {
+                            resolved_client = Some(
+                                reqwest::blocking::Client::builder()
+                                    .timeout(Duration::from_secs(6))
+                                    .resolve_to_addrs(&host, &addresses)
+                                    .build()
+                                    .map_err(err)?,
+                            );
+                            continue;
+                        }
+                        PublicDns::NotFound if std::time::Instant::now() >= dns_deadline => {
+                            return Err(
+                                "the tunnel provider did not register its public hostname in DNS"
+                                    .to_string(),
+                            );
+                        }
+                        PublicDns::NotFound | PublicDns::Unavailable => {}
+                    }
+                }
             }
         }
         std::thread::sleep(Duration::from_millis(500));
@@ -609,6 +638,57 @@ fn wait_for_reachable_public_url(url: &str) -> Result<(), String> {
     Err(format!(
         "the public address could not reach the local server: {last_error}"
     ))
+}
+
+enum PublicDns {
+    Addresses(Vec<SocketAddr>),
+    NotFound,
+    Unavailable,
+}
+
+fn lookup_public_dns(host: &str) -> PublicDns {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let client = match reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(4))
+        .build()
+    {
+        Ok(client) => client,
+        Err(_) => return PublicDns::Unavailable,
+    };
+    let query_url = format!("https://cloudflare-dns.com/dns-query?name={host}&type=A");
+    let response = match client
+        .get(query_url)
+        .header(reqwest::header::ACCEPT, "application/dns-json")
+        .send()
+    {
+        Ok(response) if response.status().is_success() => response,
+        _ => return PublicDns::Unavailable,
+    };
+    let payload = match response.json::<serde_json::Value>() {
+        Ok(payload) => payload,
+        Err(_) => return PublicDns::Unavailable,
+    };
+    match payload.get("Status").and_then(|status| status.as_u64()) {
+        Some(3) => PublicDns::NotFound,
+        Some(0) => {
+            let addresses: Vec<SocketAddr> = payload
+                .get("Answer")
+                .and_then(|answer| answer.as_array())
+                .into_iter()
+                .flatten()
+                .filter(|answer| answer.get("type").and_then(|kind| kind.as_u64()) == Some(1))
+                .filter_map(|answer| answer.get("data").and_then(|data| data.as_str()))
+                .filter_map(|address| address.parse::<IpAddr>().ok())
+                .map(|address| SocketAddr::new(address, 443))
+                .collect();
+            if addresses.is_empty() {
+                PublicDns::Unavailable
+            } else {
+                PublicDns::Addresses(addresses)
+            }
+        }
+        _ => PublicDns::Unavailable,
+    }
 }
 
 fn start_ssh_tunnel(proxy_port: u16, tools_dir: &Path) -> Result<(Child, String), String> {
@@ -1321,8 +1401,8 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires cloudflared and internet access"]
-    fn cloudflare_tunnel_is_reachable_end_to_end() {
+    #[ignore = "requires a tunnel helper and internet access"]
+    fn public_tunnel_is_reachable_end_to_end() {
         let origin = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let origin_port = origin.local_addr().unwrap().port();
         let server = std::thread::spawn(move || {
@@ -1336,44 +1416,22 @@ mod tests {
                 .unwrap();
         });
 
-        let tools = std::env::temp_dir().join("duckweed-missing-tools");
-        let cloudflared =
-            find_tunnel_executable("cloudflared", &tools).expect("cloudflared is installed");
         let (proxy, proxy_port) = start_origin_proxy("127.0.0.1", origin_port).unwrap();
-        let origin_url = format!("http://127.0.0.1:{proxy_port}");
-        let mut command = Command::new(cloudflared);
-        command.args([
-            "tunnel",
-            "--no-autoupdate",
-            "--protocol",
-            "http2",
-            "--url",
-            &origin_url,
-        ]);
-        let (mut child, lines) = spawn_tunnel_process(command).unwrap();
-        let url = wait_for_tunnel_url(&mut child, lines).unwrap();
-        let readiness_url = format!("{url}{TUNNEL_READY_PATH}");
+        let tools = std::env::temp_dir().join("duckweed-missing-tools");
+        let (mut child, url) = start_public_tunnel(proxy_port, &tools).unwrap();
+        let host = reqwest::Url::parse(&url)
+            .unwrap()
+            .host_str()
+            .unwrap()
+            .to_string();
+        let PublicDns::Addresses(addresses) = lookup_public_dns(&host) else {
+            panic!("public DNS did not resolve {host}");
+        };
         let client = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(20))
+            .resolve_to_addrs(&host, &addresses)
             .build()
             .unwrap();
-        let response = match client.get(&readiness_url).send() {
-            Ok(response) => response,
-            Err(error) => {
-                eprintln!("request error: {error:?}");
-                let mut source = std::error::Error::source(&error);
-                while let Some(error) = source {
-                    eprintln!("caused by: {error:?}");
-                    source = error.source();
-                }
-                let _ = child.kill();
-                let _ = child.wait();
-                proxy.stop();
-                panic!("readiness request failed");
-            }
-        };
-        assert_eq!(response.status(), reqwest::StatusCode::NO_CONTENT);
-        let response = reqwest::blocking::get(&url).unwrap();
+        let response = client.get(&url).send().unwrap();
         assert_eq!(response.status(), reqwest::StatusCode::OK);
         assert_eq!(response.text().unwrap(), "duckweed-public");
 

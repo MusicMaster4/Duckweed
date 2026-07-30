@@ -2697,6 +2697,7 @@ export default function App() {
 
       {changesOpen && project?.is_git && (
         <ChangesPanel
+          key={project.path}
           project={project}
           onClose={() => {
             setChangesOpen(false);

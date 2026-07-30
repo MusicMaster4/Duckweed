@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 
 import { gitDiff, gitFileDiff } from "../lib/ipc";
 import type { Diff, DiffHunk, FileDiff, ProjectInfo } from "../lib/types";
@@ -62,6 +63,25 @@ const CompareIcon = () => (
  * long the panel takes to appear.
  */
 const FOLD_OVER_LINES = 2000;
+
+/** How many project diffs to keep for reopening the panel without a blank wait. */
+const DIFF_CACHE_LIMIT = 8;
+
+/**
+ * Last full working-tree read per project path. A reopen (or tab switch with the
+ * panel still open) paints the previous result immediately and revalidates.
+ */
+const diffCache = new Map<string, Diff>();
+
+function rememberDiff(path: string, diff: Diff): void {
+  if (diffCache.has(path)) diffCache.delete(path);
+  diffCache.set(path, diff);
+  while (diffCache.size > DIFF_CACHE_LIMIT) {
+    const oldest = diffCache.keys().next().value;
+    if (oldest === undefined) break;
+    diffCache.delete(oldest);
+  }
+}
 
 /** Lines of a hunk that still exist in the file as it is now. */
 function newSpan(hunk: DiffHunk): number {
@@ -137,7 +157,10 @@ function StatChip({ files, insertions, deletions }: { files?: number; insertions
  * right there.
  */
 export function ChangesPanel({ project, onClose }: Props) {
-  const [load, setLoad] = useState<Load>({ kind: "loading" });
+  const [load, setLoad] = useState<Load>(() => {
+    const cached = diffCache.get(project.path);
+    return cached ? { kind: "ready", diff: cached } : { kind: "loading" };
+  });
   /** Files whose body is folded away. */
   const [closed, setClosed] = useState<Set<string>>(new Set());
   /** Files showing every line, not just the hunks. */
@@ -147,36 +170,78 @@ export function ChangesPanel({ project, onClose }: Props) {
   const [copied, setCopied] = useState<string | null>(null);
   /** Files already sized up once, so a refresh cannot re-fold what was opened. */
   const judged = useRef(new Set<string>());
+  /** Monotonic token so an older gitDiff cannot overwrite a newer one. */
+  const loadGen = useRef(0);
+
+  const applyDiff = useCallback((diff: Diff, preserveUi: boolean) => {
+    setLoad({ kind: "ready", diff });
+    if (!preserveUi) {
+      // Fresh tree: drop expanded full-file views that no longer match disk.
+      setFull({});
+      setExpanded(new Set());
+    }
+    setClosed((prev) => {
+      const next = preserveUi ? new Set(prev) : new Set<string>();
+      for (const file of diff.files) {
+        if (judged.current.has(file.path)) {
+          // Keep the user's fold choice for files already seen.
+          if (prev.has(file.path)) next.add(file.path);
+          continue;
+        }
+        judged.current.add(file.path);
+        if (lineCount(file) > FOLD_OVER_LINES) next.add(file.path);
+      }
+      return next;
+    });
+  }, []);
 
   const reload = useCallback(() => {
-    let cancelled = false;
-    setLoad({ kind: "loading" });
-    gitDiff(project.path)
+    const path = project.path;
+    const cached = diffCache.get(path);
+    const gen = ++loadGen.current;
+    // Stale-while-revalidate: keep the last good view up while git re-reads.
+    if (cached) setLoad({ kind: "ready", diff: cached });
+    else setLoad({ kind: "loading" });
+
+    gitDiff(path)
       .then((diff) => {
-        if (cancelled) return;
-        setLoad({ kind: "ready", diff });
-        // The file on disk moved on; anything already fetched is stale.
-        setFull({});
-        setExpanded(new Set());
-        setClosed((prev) => {
-          const next = new Set(prev);
-          for (const file of diff.files) {
-            if (judged.current.has(file.path)) continue;
-            judged.current.add(file.path);
-            if (lineCount(file) > FOLD_OVER_LINES) next.add(file.path);
-          }
-          return next;
-        });
+        if (gen !== loadGen.current) return;
+        rememberDiff(path, diff);
+        applyDiff(diff, Boolean(cached));
       })
       .catch((error: unknown) => {
-        if (!cancelled) setLoad({ kind: "error", message: String(error) });
+        if (gen !== loadGen.current) return;
+        // Keep the cached panel up rather than replacing a useful view with an error.
+        if (!cached) setLoad({ kind: "error", message: String(error) });
       });
-    return () => {
-      cancelled = true;
-    };
-  }, [project.path]);
+  }, [applyDiff, project.path]);
 
-  useEffect(() => reload(), [reload]);
+  useEffect(() => {
+    // Fold/expand choices are per project; a path change starts a fresh judgment.
+    judged.current = new Set();
+    setClosed(new Set());
+    setExpanded(new Set());
+    setFull({});
+    reload();
+  }, [reload]);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listen<string>("project:changed", (event) => {
+      if (event.payload !== project.path) return;
+      // Working tree moved. Leave the last paint up; reload revalidates and
+      // replaces it once the new read lands.
+      reload();
+    }).then((off) => {
+      if (disposed) off();
+      else unlisten = off;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [project.path, reload]);
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
