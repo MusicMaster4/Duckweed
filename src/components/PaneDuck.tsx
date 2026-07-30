@@ -61,7 +61,7 @@ function sameLayout(a: DuckLayout | null, b: DuckLayout): boolean {
  * Its renderer returns complete ASCII layers for each frame; CSS only colors
  * and stacks those layers.
  */
-function AnimatedDuck() {
+export function AnimatedDuck() {
   const hostRef = useRef<HTMLDivElement>(null);
   const inkRef = useRef<HTMLPreElement>(null);
   const sceneRef = useRef<HTMLPreElement>(null);

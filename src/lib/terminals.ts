@@ -34,6 +34,7 @@ import {
   ptyWrite,
 } from "./ipc";
 import { isMetaSlashCommand } from "./agents/events";
+import { cKeyAction } from "./platform";
 import {
   detectAgent,
   isAgentPromptSubmission,
@@ -1186,27 +1187,31 @@ function create(id: string, opts: TerminalStartOptions): Session {
     if (event.type !== "keydown") return true;
 
     const ctrl = event.ctrlKey || event.metaKey;
-    // Ctrl+C on the grid: copy when there is a selection (select-then-copy),
-    // otherwise only interrupt when something is running. Letting xterm turn
-    // every idle Ctrl+C into \x03 makes PowerShell stack `PS …> ^C` lines.
-    if (ctrl && !event.shiftKey && !event.altKey && event.key.toLowerCase() === "c") {
+    // C + modifier on the grid: Cmd+C copies on macOS; Ctrl+C interrupts.
+    // Windows/Linux: Ctrl+C copies when there is a selection, otherwise
+    // interrupt. Letting xterm turn every idle Ctrl+C into \x03 makes
+    // PowerShell stack `PS …> ^C` lines.
+    if (event.key.toLowerCase() === "c") {
       let text = "";
       if (session.blocks.hasBlockSelection()) {
         text = session.blocks.copyText() ?? "";
       }
       if (!text) text = term.getSelection();
-      if (/\S/.test(text)) {
+      const action = cKeyAction(event, /\S/.test(text));
+      if (action === "copy") {
         event.preventDefault();
         void navigator.clipboard.writeText(text);
         return false;
       }
-      if (session.editorMode) {
-        event.preventDefault();
-        void interrupt(session.id);
-        return false;
+      if (action === "control") {
+        if (session.editorMode) {
+          event.preventDefault();
+          void interrupt(session.id);
+          return false;
+        }
+        // Raw mode: real interrupt for the running program.
+        return true;
       }
-      // Raw mode, no selection: real interrupt for the running program.
-      return true;
     }
 
     // xterm encodes Shift+Enter exactly like Enter — a bare CR — so TUIs that

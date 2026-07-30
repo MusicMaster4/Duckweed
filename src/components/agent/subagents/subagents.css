@@ -62,7 +62,7 @@
 .agent-sub-chip {
   display: flex;
   width: clamp(170px, 29cqw, 260px);
-  height: 38px;
+  height: 42px;
   flex: 0 0 auto;
   align-items: center;
   gap: 7px;
@@ -141,20 +141,50 @@
   gap: 1px;
 }
 
-.agent-sub-chip-copy strong,
-.agent-sub-chip-copy span {
+.agent-sub-chip-heading {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.agent-sub-chip-heading strong,
+.agent-sub-chip-activity {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.agent-sub-chip-copy strong {
+.agent-sub-chip-heading strong {
+  min-width: 0;
+  flex: 1;
   color: var(--text);
   font-size: 10.5px;
   font-weight: 550;
 }
 
-.agent-sub-chip-copy span {
+.agent-sub-chip-status {
+  flex: none;
+  color: var(--text-faint);
+  font-size: 8px;
+  font-weight: 600;
+  letter-spacing: 0.35px;
+  text-transform: uppercase;
+}
+
+.agent-sub-chip-status.is-running {
+  color: var(--agent-sub-accent);
+}
+
+.agent-sub-chip-status.is-done {
+  color: var(--sage, #82c98a);
+}
+
+.agent-sub-chip-status.is-error {
+  color: var(--rose);
+}
+
+.agent-sub-chip-activity {
   color: var(--text-faint);
   font-size: 9.5px;
 }

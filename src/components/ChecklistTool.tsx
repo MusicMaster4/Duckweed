@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "
 
 import { Tooltip } from "./Tooltip";
 import * as checklist from "../lib/checklist";
+import { CONFETTI_DURATION_MS } from "../lib/checklistConfetti";
 import { AsciiAmbient } from "./AsciiAmbient";
 
 interface Props {
@@ -34,20 +35,63 @@ const Plus = () => (
  * day, each one saying how long it has left, then sweep themselves. See
  * {@link checklist} for why.
  */
+/** How long the full-area confetti overlay stays mounted. */
+const CELEBRATE_MS = CONFETTI_DURATION_MS;
+
 export function ChecklistTool({ scope, scopeLabel }: Props) {
   const read = useCallback(() => (scope ? checklist.items(scope) : null), [scope]);
   const store = useSyncExternalStore(checklist.subscribe, read, read);
   const [draft, setDraft] = useState("");
   const [editing, setEditing] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState("");
+  /** Non-null while confetti should paint; bumps each win for a fresh clock. */
+  const [celebrateGen, setCelebrateGen] = useState<number | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const prevOpenRef = useRef<number | null>(null);
+  const celebrateGenerationRef = useRef(0);
+  const celebrateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const now = useNow(store !== null && store.length > 0);
 
   // A different tab is a different list; a half-typed item does not follow it.
   useEffect(() => {
     setDraft("");
     setEditing(null);
+    setCelebrateGen(null);
+    prevOpenRef.current = null;
+    if (celebrateTimerRef.current !== null) {
+      clearTimeout(celebrateTimerRef.current);
+      celebrateTimerRef.current = null;
+    }
   }, [scope]);
+
+  useEffect(() => {
+    return () => {
+      if (celebrateTimerRef.current !== null) clearTimeout(celebrateTimerRef.current);
+    };
+  }, []);
+
+  const openCount = store ? store.filter((item) => item.doneAt === null).length : 0;
+  const totalCount = store?.length ?? 0;
+
+  // Edge only: prev open > 0 and now open === 0 with items present. Seed on
+  // mount/scope change without firing so an already-clear list stays quiet.
+  useEffect(() => {
+    if (!scope || store === null) {
+      prevOpenRef.current = null;
+      return;
+    }
+    const prev = prevOpenRef.current;
+    if (prev !== null && checklist.becameAllClear(prev, openCount, totalCount)) {
+      celebrateGenerationRef.current += 1;
+      setCelebrateGen(celebrateGenerationRef.current);
+      if (celebrateTimerRef.current !== null) clearTimeout(celebrateTimerRef.current);
+      celebrateTimerRef.current = setTimeout(() => {
+        setCelebrateGen(null);
+        celebrateTimerRef.current = null;
+      }, CELEBRATE_MS);
+    }
+    prevOpenRef.current = openCount;
+  }, [scope, store, openCount, totalCount]);
 
   const submit = useCallback(() => {
     if (!scope) return;
@@ -149,6 +193,17 @@ export function ChecklistTool({ scope, scopeLabel }: Props) {
 
   return (
     <div className="check">
+      {celebrateGen !== null && (
+        <div className="check-celebrate-overlay" aria-hidden="true">
+          <AsciiAmbient
+            surfaceId={`checklist-confetti-${scope}-${celebrateGen}`}
+            scene="confetti"
+            className="ascii-ambient-checklist-confetti"
+            fps={18}
+          />
+        </div>
+      )}
+
       <header className="check-head">
         <div className="check-head-top">
           <span className="tools-section-title">Checklist</span>

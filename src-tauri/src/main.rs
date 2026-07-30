@@ -43,12 +43,16 @@ struct DurableSettings(Mutex<()>);
 
 const COMMAND_HISTORY_KEY: &str = "duckweed:command-history:v1";
 
-const DURABLE_SETTING_KEYS: [&str; 6] = [
+const DURABLE_SETTING_KEYS: [&str; 8] = [
     "duckweed:state:v1",
     "duckweed:usage:v1",
+    // Ghost-text unlearning table — must match frontend DURABLE_KEYS or restore
+    // aborts when seeding WebView feedback into app-data and never reaches history.
+    "duckweed:suggest-feedback:v1",
     "duckweed:checklist:v1",
     "duckweed:agent-preferences:v1",
     "duckweed:layouts:v1",
+    "duckweed:wellbeing:v1",
     COMMAND_HISTORY_KEY,
 ];
 
@@ -210,6 +214,12 @@ async fn read_file(path: String) -> Result<FileContent, String> {
     blocking(move || fs::read_file(&path)).await
 }
 
+/// Read a small local image dropped from the OS into the agent composer.
+#[tauri::command]
+async fn read_dropped_image(path: String) -> Result<Vec<u8>, String> {
+    blocking(move || fs::read_dropped_image(&path)).await
+}
+
 /// Save the popup editor's buffer back to disk.
 #[tauri::command]
 async fn write_file(path: String, content: String) -> Result<(), String> {
@@ -323,9 +333,10 @@ async fn port_close(
     blocking(move || ports::close(pid, port, &ptys, &agents, &ports)).await
 }
 
-/// Proxy one owned local listener through a Duckweed port bound to the LAN.
+/// Expose one owned local HTTP listener through a temporary public tunnel.
 #[tauri::command]
 async fn port_forward(
+    app: AppHandle,
     ptys: State<'_, PtyManager>,
     agents: State<'_, AgentProcManager>,
     ports: State<'_, PortManager>,
@@ -335,7 +346,12 @@ async fn port_forward(
     let ptys = ptys.inner().clone();
     let agents = agents.inner().clone();
     let ports = ports.inner().clone();
-    blocking(move || ports::forward(pid, port, &ptys, &agents, &ports)).await
+    let tools_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?
+        .join("tools");
+    blocking(move || ports::forward(pid, port, &ptys, &agents, &ports, &tools_dir)).await
 }
 
 #[tauri::command]
@@ -649,6 +665,13 @@ fn isolate_dev_webview_profile() {
 }
 
 fn main() {
+    // Packaged Unix GUI apps start outside a login shell. Repair PATH before
+    // shell and agent discovery so Homebrew and user-installed CLIs stay visible.
+    #[cfg(unix)]
+    if let Err(error) = fix_path_env::fix() {
+        eprintln!("duckweed: could not import the login-shell PATH: {error}");
+    }
+
     #[cfg(all(windows, debug_assertions))]
     isolate_dev_webview_profile();
 
@@ -731,6 +754,7 @@ fn main() {
             list_dir,
             workspace_paths,
             read_file,
+            read_dropped_image,
             write_file,
             git_branches,
             git_checkout,

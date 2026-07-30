@@ -207,6 +207,21 @@ pub struct FileContent {
     pub size: u64,
 }
 
+const MAX_DROPPED_IMAGE_BYTES: u64 = 5 * 1024 * 1024;
+
+/// Read a dropped image without exposing an unbounded binary-file IPC endpoint.
+pub fn read_dropped_image(path: &str) -> Result<Vec<u8>, String> {
+    let file = Path::new(path);
+    let meta = std::fs::metadata(file).map_err(|e| format!("could not open `{path}`: {e}"))?;
+    if meta.is_dir() {
+        return Err(format!("`{path}` is a folder"));
+    }
+    if meta.len() > MAX_DROPPED_IMAGE_BYTES {
+        return Err("Images must be 5 MB or smaller.".into());
+    }
+    std::fs::read(file).map_err(|e| format!("could not read `{path}`: {e}"))
+}
+
 /// Read `path` as text for the project explorer's file popup.
 pub fn read_file(path: &str) -> Result<FileContent, String> {
     let file = Path::new(path);

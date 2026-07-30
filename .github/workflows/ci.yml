@@ -1,8 +1,8 @@
 name: CI
 
-# Typecheck and tests for work that is not (yet) a release. Pushes to `main` and
-# `testing` skip this: the Release workflow runs the same checks before it
-# builds, so running them here as well would just duplicate the work.
+# Frontend checks and native Rust compilation for work that is not yet a release.
+# Pushes to `main` and `testing` skip this because the Release workflow validates
+# the same source before its native build matrix.
 on:
   push:
     branches-ignore:
@@ -16,7 +16,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  check:
+  frontend:
     name: Typecheck and test
     runs-on: ubuntu-latest
     steps:
@@ -31,3 +31,34 @@ jobs:
       - run: bun run typecheck
 
       - run: bun test
+
+  rust:
+    name: Rust check (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-22.04
+          - macos-latest
+          - windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Linux dependencies
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+        with:
+          workspaces: src-tauri -> target
+          key: ci-${{ matrix.os }}
+
+      - run: cargo check --locked --manifest-path src-tauri/Cargo.toml

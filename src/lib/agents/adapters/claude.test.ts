@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
 
 import type { AdapterContext } from "../adapter";
+import {
+  autoQuestionAnswers,
+  handleUnattendedPermission,
+} from "../autoApproval";
 import { applyEvent, type AgentEvent } from "../events";
 import type { AgentLaunch } from "../launch";
 import { emptyUsage, type AgentSessionState } from "../types";
@@ -580,7 +584,7 @@ phase('Map')
     });
   });
 
-  test("settles a background Workflow when Claude sends its task notification", () => {
+  test("settles a background Workflow after its automatic final response", () => {
     const h = harness();
     h.feed({ type: "stream_event", event: { type: "message_start" } });
     h.feed({
@@ -647,6 +651,26 @@ export const meta = {
         { text: "Report", status: "done" },
       ],
     });
+    expect(h.state().status).toBe("working");
+    expect(h.events.filter((event) => event.type === "turn-end")).toHaveLength(0);
+
+    // Background task notifications automatically prompt Claude to summarize
+    // the result. In persistent stream-json mode that continuation ends with
+    // an assistant end_turn message, not another top-level result frame.
+    h.feed({
+      type: "assistant",
+      message: {
+        id: "workflow-summary",
+        stop_reason: "end_turn",
+        content: [
+          {
+            type: "text",
+            text: "The research workflow finished successfully.",
+          },
+        ],
+      },
+    });
+
     expect(h.state().status).toBe("idle");
     expect(h.events.filter((event) => event.type === "turn-end")).toHaveLength(1);
   });
@@ -876,6 +900,37 @@ export const meta = {
     expect(h.state().permission).toBeNull();
   });
 
+  test("automatic approval sends Claude an allow response", () => {
+    const h = harness();
+    h.feed({
+      type: "control_request",
+      request_id: "req_auto",
+      request: {
+        subtype: "can_use_tool",
+        tool_name: "Bash",
+        input: { command: "bun run build" },
+      },
+    });
+
+    const permission = h.state().permission;
+    expect(
+      handleUnattendedPermission(permission, {
+        respond: (permissionId, optionId) =>
+          h.adapter.respond(permissionId, optionId, h.ctx),
+        answer: (permissionId, answers) =>
+          h.adapter.answer?.(permissionId, answers, h.ctx),
+      }),
+    ).toBe(true);
+    expect(h.sent.at(-1)).toMatchObject({
+      type: "control_response",
+      response: {
+        request_id: "req_auto",
+        response: { behavior: "allow" },
+      },
+    });
+    expect(h.state().permission).toBeNull();
+  });
+
   test("turns AskUserQuestion into an answerable question rather than an approval", () => {
     const h = harness();
     h.feed({
@@ -920,11 +975,11 @@ export const meta = {
       },
     ]);
 
-    h.adapter.answer?.(
-      waiting.permission!.id,
-      [{ questionId: "q0", labels: ["date-fns"], custom: null }],
-      h.ctx,
-    );
+    const unattendedAnswers = autoQuestionAnswers(waiting.permission);
+    expect(unattendedAnswers).toEqual([
+      { questionId: "q0", labels: ["date-fns"], custom: null },
+    ]);
+    h.adapter.answer?.(waiting.permission!.id, unattendedAnswers!, h.ctx);
     expect(h.sent.at(-1)).toMatchObject({
       type: "control_response",
       response: {
@@ -1371,6 +1426,94 @@ export const meta = {
         model: "<synthetic>",
         role: "assistant",
         content: [{ type: "text", text: "Unknown command: /goal" }],
+      },
+    });
+
+    expect(h.state().goal).toBeNull();
+  });
+
+  test("mirrors Claudex goal tools into the shared header state", () => {
+    const h = harness({ program: "claudex" });
+    h.feed({
+      type: "assistant",
+      message: {
+        content: [
+          {
+            type: "tool_use",
+            id: "goal-create-1",
+            name: "mcp__functions__create_goal",
+            input: { objective: "Ship the session parser safely" },
+          },
+        ],
+      },
+    });
+
+    expect(h.state().goal).toEqual({
+      objective: "Ship the session parser safely",
+      status: "active",
+    });
+
+    h.feed({
+      type: "user",
+      message: {
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "goal-create-1",
+            content:
+              '{"goal":{"objective":"Ship the session parser safely","status":"active"}}',
+          },
+        ],
+      },
+    });
+    h.feed({
+      type: "assistant",
+      message: {
+        content: [
+          {
+            type: "tool_use",
+            id: "goal-update-1",
+            name: "update_goal",
+            input: { status: "blocked" },
+          },
+        ],
+      },
+    });
+
+    expect(h.state().goal).toEqual({
+      objective: "Ship the session parser safely",
+      status: "blocked",
+    });
+  });
+
+  test("restores the previous goal when a Claudex goal tool fails", () => {
+    const h = harness({ program: "claudex" });
+    h.feed({
+      type: "assistant",
+      message: {
+        content: [
+          {
+            type: "tool_use",
+            id: "goal-create-failed",
+            name: "create_goal",
+            input: { objective: "A goal that will be rejected" },
+          },
+        ],
+      },
+    });
+    expect(h.state().goal?.objective).toBe("A goal that will be rejected");
+
+    h.feed({
+      type: "user",
+      message: {
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "goal-create-failed",
+            content: "Goal creation failed",
+            is_error: true,
+          },
+        ],
       },
     });
 

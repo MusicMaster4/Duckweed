@@ -2,6 +2,8 @@
 
 type Events = {
   "pane:search": { leafId: string };
+  /** Switch to the tab that owns this terminal and select its pane. */
+  "term:reveal": { termId: string };
 };
 
 type Handler<K extends keyof Events> = (payload: Events[K]) => void;

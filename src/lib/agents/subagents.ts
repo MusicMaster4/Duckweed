@@ -27,6 +27,13 @@ export interface SubagentSummary {
   item: ToolItem;
 }
 
+export interface SubagentStatusCounts {
+  pending: number;
+  running: number;
+  done: number;
+  error: number;
+}
+
 const STATUS_LABEL: Record<ToolStatus, string> = {
   pending: "Queued",
   running: "Running",
@@ -136,6 +143,34 @@ export function runningSubagentCount(subagents: SubagentSummary[]): number {
       count + (subagent.status === "running" || subagent.status === "pending" ? 1 : 0),
     0,
   );
+}
+
+export function subagentStatusCounts(
+  subagents: SubagentSummary[],
+): SubagentStatusCounts {
+  const counts: SubagentStatusCounts = {
+    pending: 0,
+    running: 0,
+    done: 0,
+    error: 0,
+  };
+  for (const subagent of subagents) counts[subagent.status] += 1;
+  return counts;
+}
+
+/** A compact, truthful summary for the fleet header. */
+export function subagentFleetStatusLabel(
+  subagents: SubagentSummary[],
+): string {
+  const counts = subagentStatusCounts(subagents);
+  return [
+    counts.running ? `${counts.running} running` : "",
+    counts.pending ? `${counts.pending} queued` : "",
+    counts.done ? `${counts.done} completed` : "",
+    counts.error ? `${counts.error} failed` : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
 }
 
 /**

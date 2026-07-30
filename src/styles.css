@@ -187,6 +187,18 @@ svg {
   overflow: hidden;
 }
 
+.titlebar-tabs.is-locked {
+  display: grid;
+  place-items: center;
+}
+
+.titlebar-lock-label {
+  color: var(--text-faint);
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
 .titlebar-right {
   justify-self: end;
 }
@@ -933,6 +945,46 @@ svg.tab-glyph-fill path {
   text-align: center;
 }
 
+.settings-row.is-disabled {
+  opacity: 0.52;
+}
+
+.settings-stepper button:disabled {
+  cursor: default;
+  opacity: 0.42;
+}
+
+.settings-stepper button:disabled:hover {
+  background: transparent;
+  color: var(--text-dim);
+}
+
+.wellbeing-stepper {
+  grid-template-columns: 26px 72px 26px;
+}
+
+.wellbeing-today {
+  min-height: 64px;
+}
+
+.wellbeing-progress {
+  width: min(220px, 42%);
+  height: 5px;
+  flex: none;
+  overflow: hidden;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.wellbeing-progress > span {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 240ms ease;
+}
+
 .settings-switch {
   position: relative;
   width: 30px;
@@ -1013,6 +1065,333 @@ svg.tab-glyph-fill path {
 .settings-empty span {
   color: var(--text-faint);
   font-size: 10.5px;
+}
+
+.settings-risk-note {
+  margin: 2px 10px 0;
+  color: var(--rose);
+  font-size: 10.5px;
+  line-height: 1.5;
+}
+
+.approval-consent-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 10020;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(8, 9, 12, 0.62);
+}
+
+.approval-consent-dialog {
+  width: min(430px, 100%);
+  padding: 22px;
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  background: var(--bg-elevated);
+  box-shadow: 0 26px 70px rgba(0, 0, 0, 0.65);
+}
+
+.approval-consent-kicker {
+  display: block;
+  margin-bottom: 8px;
+  color: var(--rose);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.approval-consent-dialog h2 {
+  margin: 0 0 9px;
+  color: var(--text);
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.approval-consent-dialog > p {
+  margin: 0 0 18px;
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.approval-consent-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 11px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.035);
+  color: var(--text-dim);
+  font-size: 11.5px;
+  line-height: 1.4;
+  cursor: pointer;
+}
+
+.approval-consent-check input {
+  width: 14px;
+  height: 14px;
+  margin: 1px 0 0;
+  flex: none;
+  accent-color: var(--rose);
+}
+
+.approval-consent-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 18px;
+}
+
+.approval-consent-actions button {
+  min-height: 32px;
+  padding: 0 13px;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.055);
+  color: var(--text-dim);
+  font-size: 11.5px;
+}
+
+.approval-consent-actions button:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.09);
+  color: var(--text);
+}
+
+.approval-consent-actions .is-danger {
+  border-color: transparent;
+  background: #6b3a2e;
+  color: #f5e6e2;
+}
+
+.approval-consent-actions .is-danger:hover:not(:disabled) {
+  background: #7d4537;
+  color: #fff4f0;
+}
+
+.approval-consent-actions button:disabled {
+  cursor: default;
+  opacity: 0.42;
+}
+
+/* --------------------------------------------------- daily usage lockout */
+
+.app.is-daily-locked > .workbench,
+.app.is-daily-locked > .statusbar {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.daily-lockout {
+  position: relative;
+  z-index: 10001;
+  grid-column: 1;
+  grid-row: 2 / 4;
+  display: grid;
+  grid-template-rows: minmax(90px, 1fr) auto auto auto;
+  justify-items: center;
+  min-width: 0;
+  min-height: 0;
+  padding: 18px 24px 26px;
+  overflow: auto;
+  background: var(--bg);
+}
+
+.daily-lockout-duck {
+  width: min(760px, 100%);
+  min-height: 90px;
+  overflow: hidden;
+}
+
+.daily-lockout-duck .duck-pond {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+}
+
+.daily-lockout-copy {
+  width: min(620px, 100%);
+  text-align: center;
+}
+
+.daily-lockout-kicker {
+  display: block;
+  margin-bottom: 9px;
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.daily-lockout-copy h1 {
+  margin: 0;
+  color: var(--text);
+  font-size: clamp(20px, 3vw, 30px);
+  font-weight: 580;
+  letter-spacing: -0.025em;
+}
+
+.daily-lockout-copy p {
+  margin: 8px 0 0;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.daily-lockout-work {
+  width: min(520px, 100%);
+  margin-top: 22px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-pane);
+}
+
+.daily-lockout-work.is-finished {
+  width: auto;
+  min-width: 210px;
+}
+
+.daily-lockout-work-head {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 20px;
+}
+
+.daily-lockout-work-head strong {
+  color: var(--text);
+  font-size: 11.5px;
+  font-weight: 550;
+}
+
+.daily-lockout-status-dot {
+  width: 7px;
+  height: 7px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: daily-lockout-pulse 1.4s ease-in-out infinite;
+}
+
+.daily-lockout-work.is-finished .daily-lockout-status-dot {
+  animation: none;
+}
+
+.daily-lockout-work > p {
+  margin: 5px 0 10px;
+  color: var(--text-faint);
+  font-size: 10.5px;
+  text-align: center;
+}
+
+.daily-lockout-work ul {
+  max-height: 124px;
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+  list-style: none;
+}
+
+.daily-lockout-work li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 30px;
+  padding: 5px 7px;
+  border-top: 1px solid var(--border);
+}
+
+.daily-lockout-work li > span {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-dim);
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.daily-lockout-work li > small {
+  flex: none;
+  color: var(--text-faint);
+  font-size: 9.5px;
+}
+
+.daily-lockout-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  margin-top: 18px;
+}
+
+.daily-lockout-primary {
+  min-width: 180px;
+  height: 34px;
+  padding: 0 18px;
+  border: 1px solid var(--accent-line);
+  border-radius: 7px;
+  background: var(--accent-dim);
+  color: var(--accent-strong);
+  font-size: 11px;
+}
+
+.daily-lockout-primary:hover {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+}
+
+.daily-lockout-primary:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.daily-lockout-actions > small {
+  color: var(--text-faint);
+  font-size: 9.5px;
+}
+
+@keyframes daily-lockout-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@media (max-height: 590px) {
+  .daily-lockout {
+    grid-template-rows: minmax(60px, 0.55fr) auto auto auto;
+    padding-top: 8px;
+  }
+
+  .daily-lockout-duck {
+    min-height: 60px;
+  }
+
+  .daily-lockout-work {
+    margin-top: 14px;
+  }
+
+  .daily-lockout-actions {
+    margin-top: 12px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .daily-lockout-status-dot,
+  .wellbeing-progress > span {
+    animation: none;
+    transition: none;
+  }
 }
 
 /* ---------------------------------------------------------- tools panel */
@@ -1861,10 +2240,55 @@ svg.tab-glyph-fill path {
 /* ------------------------------------------------------------- checklist */
 
 .check {
+  position: relative;
+  container-type: size;
   display: flex;
   flex-direction: column;
   min-height: 0;
   flex: 1 1 auto;
+}
+
+/* Full-area all-clear celebration. It uses the same single-color, monospace
+   language as the ambient ASCII scenes and never steals clicks. */
+.check-celebrate-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.check-celebrate-overlay .ascii-ambient-checklist-confetti {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  display: block;
+  color: color-mix(in srgb, var(--accent) 72%, var(--text-dim));
+  pointer-events: none;
+}
+
+.check-celebrate-overlay .ascii-ambient-checklist-confetti pre {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  box-sizing: border-box;
+  padding: 0;
+  /*
+   * Match the 8.5px ambient ASCII glyphs. Row spacing, rather than character
+   * size, stretches the 32-row field from the top to the bottom of the panel.
+   */
+  font-size: 8.5px;
+  line-height: calc(100cqh / 32);
+  letter-spacing: 0;
+  text-align: center;
+  white-space: pre;
+  overflow: hidden;
+  /* Fill the panel edge-to-edge; ambient scenes use a soft mask, this does not. */
+  -webkit-mask-image: none;
+  mask-image: none;
+  opacity: 0.78;
 }
 
 .check-head {
@@ -2021,7 +2445,7 @@ svg.tab-glyph-fill path {
 }
 
 .check-cleared {
-  margin: 2px 0 0;
+  margin: 0;
   padding: 8px 6px;
   color: var(--text-faint);
   font-size: 11.5px;
@@ -2527,14 +2951,27 @@ svg.tab-glyph-fill path {
   display: flex;
   align-items: center;
   gap: 7px;
+  width: 100%;
   min-height: 24px;
+  margin: 0;
   padding: 2px 2px;
+  border: 0;
   border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
   font-size: 11px;
+  text-align: left;
+  cursor: pointer;
 }
 
 .power-busy:hover {
   background: var(--hover);
+}
+
+.power-busy:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
 }
 
 .power-dot {
@@ -3857,7 +4294,7 @@ svg.tab-glyph-fill path {
   will-change: transform;
 }
 
-/* Transparent spacing band with a centered 1px command-block hairline. */
+/* Hairline on the exact boundary between terminal rows. */
 .command-block-separator {
   position: absolute;
   z-index: 5;
@@ -3867,20 +4304,12 @@ svg.tab-glyph-fill path {
   padding: 0;
   border: none;
   pointer-events: none;
-  background: transparent;
+  background: var(--block-separator);
   will-change: transform;
-  display: flex;
-  align-items: center;
 }
 
 .command-block-separator::after {
-  content: "";
-  display: block;
-  width: 100%;
-  height: 1px;
-  flex-shrink: 0;
-  border: none;
-  background: var(--block-separator);
+  content: none;
 }
 
 /* Hides the idle shell prompt under the last block in editor mode. */
@@ -3969,7 +4398,9 @@ body.is-resizing * {
 
 .drop-hint {
   position: absolute;
-  z-index: 4;
+  /* Above `.agent-surface` (z-index 6) and completion outlines (z-index 7) so
+     the green drop target stays visible when dragging over a custom agent UI. */
+  z-index: 8;
   pointer-events: none;
   background: var(--accent-dim);
   border: 1px solid var(--accent-line);
@@ -7675,12 +8106,18 @@ body.is-resizing * {
 
 .agent-workflow-dock .official-plan-head {
   padding-block: 7px 6px;
+  /* Match the step list's stable scrollbar gutter so the count + chevron
+     stay aligned with the list edge when classic scrollbars take layout space. */
+  padding-inline-end: calc(10px + var(--scrollbar-size));
 }
 
 .agent-workflow-dock .official-plan-steps {
   max-height: min(180px, 30vh);
   overflow-y: auto;
   padding-block: 7px 9px;
+  /* Reserve the gutter even before overflow so the count does not jump
+     (and look off-center) the moment the scrollbar appears. */
+  scrollbar-gutter: stable;
 }
 
 .agent-exit-hint {

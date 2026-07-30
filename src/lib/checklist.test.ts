@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import {
   DONE_RETENTION_MS,
+  becameAllClear,
   hoursUntilSweep,
   ordered,
   sweep,
@@ -79,5 +80,24 @@ describe("hoursUntilSweep", () => {
 
   test("is zero for an open item, which is not on the clock at all", () => {
     expect(hoursUntilSweep(item("a", null), 5_000)).toBe(0);
+  });
+});
+
+describe("becameAllClear", () => {
+  test("is true only when open count drops to zero with items still present", () => {
+    expect(becameAllClear(1, 0, 1)).toBe(true);
+    expect(becameAllClear(3, 0, 5)).toBe(true);
+  });
+
+  test("stays false on mount, empty list, and non-edge re-renders", () => {
+    // Already clear (mount / tab switch onto finished list).
+    expect(becameAllClear(0, 0, 2)).toBe(false);
+    // Empty list is the blank state, not a celebration.
+    expect(becameAllClear(0, 0, 0)).toBe(false);
+    expect(becameAllClear(1, 0, 0)).toBe(false);
+    // Still has open work, or open count rose / stayed.
+    expect(becameAllClear(2, 1, 3)).toBe(false);
+    expect(becameAllClear(0, 1, 1)).toBe(false);
+    expect(becameAllClear(1, 1, 1)).toBe(false);
   });
 });

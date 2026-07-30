@@ -6,6 +6,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::thread;
 
 use serde::Serialize;
 
@@ -445,6 +446,29 @@ fn parse_patch(patch: &str) -> Vec<ParsedFile> {
     files
 }
 
+/// Count newlines in many files at once. Sequential I/O is fine for a handful;
+/// past that, fan out so a pile of untracked sources does not serialize the chip.
+fn count_lines_many(root: &Path, names: &[String]) -> Vec<usize> {
+    const PARALLEL_AFTER: usize = 4;
+    if names.len() < PARALLEL_AFTER {
+        return names
+            .iter()
+            .map(|name| count_lines(&root.join(name)))
+            .collect();
+    }
+
+    thread::scope(|scope| {
+        let handles: Vec<_> = names
+            .iter()
+            .map(|name| scope.spawn(move || count_lines(&root.join(name))))
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap_or(0))
+            .collect()
+    })
+}
+
 /// Every uncommitted change under `root`, at `context` lines of context.
 ///
 /// `only` narrows it to one path, which is how a file gets re-read with its
@@ -454,16 +478,47 @@ fn collect(root: &Path, only: Option<&str>, context: u32) -> Result<Vec<FileDiff
     let unified = format!("--unified={context}");
 
     let mut stat_args = vec!["diff", "--numstat", "-z", base];
-    let mut patch_args = vec!["diff", "--no-ext-diff", "--no-color", &unified, base];
+    let mut patch_args = vec!["diff", "--no-ext-diff", "--no-color", unified.as_str(), base];
     if let Some(name) = only {
         stat_args.extend_from_slice(&["--", name]);
         patch_args.extend_from_slice(&["--", name]);
     }
 
-    // Both commands walk the same diff in the same order, so the nth patch
-    // entry describes the nth `--numstat` record.
-    let entries = numstat(root, &stat_args)?;
-    let parsed = parse_patch(&git(root, &patch_args)?);
+    // numstat and the patch walk the same tree; overlapping them cuts wall time
+    // roughly in half when either side is non-trivial.
+    let (entries, patch_text) = thread::scope(|scope| {
+        let stat = scope.spawn(|| numstat(root, &stat_args));
+        let patch = scope.spawn(|| git(root, &patch_args));
+        match (stat.join(), patch.join()) {
+            (Ok(entries), Ok(patch)) => (entries, patch),
+            (Err(_), _) | (_, Err(_)) => (
+                Err("diff worker panicked".to_string()),
+                Err("diff worker panicked".to_string()),
+            ),
+        }
+    });
+    let entries = entries?;
+    let parsed = parse_patch(&patch_text?);
+
+    // Line counts for surviving files are independent; fan them out so a large
+    // multi-file change is not one full-file read after another.
+    let line_targets: Vec<Option<String>> = entries
+        .iter()
+        .enumerate()
+        .map(|(i, entry)| {
+            let patch = parsed.get(i);
+            let deleted = patch.is_some_and(|f| f.deleted);
+            let binary = entry.binary || patch.is_some_and(|f| f.binary);
+            if binary || deleted {
+                None
+            } else {
+                Some(entry.path.clone())
+            }
+        })
+        .collect();
+    let names_to_count: Vec<String> = line_targets.iter().filter_map(|p| p.clone()).collect();
+    let counted = count_lines_many(root, &names_to_count);
+    let mut counted_at = 0usize;
 
     let mut files = Vec::new();
     for (i, entry) in entries.iter().enumerate() {
@@ -478,6 +533,13 @@ fn collect(root: &Path, only: Option<&str>, context: u32) -> Result<Vec<FileDiff
             "modified"
         };
         let binary = entry.binary || patch.is_some_and(|f| f.binary);
+        let new_lines = if line_targets[i].is_some() {
+            let n = counted.get(counted_at).copied().unwrap_or(0);
+            counted_at += 1;
+            n
+        } else {
+            0
+        };
         files.push(FileDiff {
             path: entry.path.clone(),
             old_path: entry.old_path.clone(),
@@ -485,16 +547,13 @@ fn collect(root: &Path, only: Option<&str>, context: u32) -> Result<Vec<FileDiff
             insertions: entry.insertions,
             deletions: entry.deletions,
             binary,
-            new_lines: if binary || status == "deleted" {
-                0
-            } else {
-                count_lines(&root.join(&entry.path))
-            },
+            new_lines,
             hunks: patch.map(|f| f.hunks.clone()).unwrap_or_default(),
         });
     }
 
-    for name in untracked_paths(root) {
+    let untracked = untracked_paths(root);
+    for name in untracked {
         if only.is_some_and(|wanted| wanted != name) {
             continue;
         }
@@ -552,7 +611,21 @@ fn totals(files: &[FileDiff]) -> DiffStats {
 pub fn diff_stats(path: &str) -> Result<DiffStats, String> {
     let root = repo_root(path)?;
     let base = diff_base(&root);
-    let entries = numstat(&root, &["diff", "--numstat", "-z", base])?;
+
+    // Tracked numstat and the untracked listing are independent git walks.
+    let (entries, untracked) = thread::scope(|scope| {
+        let tracked = scope.spawn(|| numstat(&root, &["diff", "--numstat", "-z", base]));
+        let others = scope.spawn(|| untracked_paths(&root));
+        match (tracked.join(), others.join()) {
+            (Ok(entries), Ok(untracked)) => (entries, Ok(untracked)),
+            (Err(_), _) | (_, Err(_)) => (
+                Err("diff worker panicked".to_string()),
+                Err("diff worker panicked".to_string()),
+            ),
+        }
+    });
+    let entries = entries?;
+    let untracked = untracked?;
 
     let mut stats = DiffStats {
         files: entries.len(),
@@ -560,9 +633,9 @@ pub fn diff_stats(path: &str) -> Result<DiffStats, String> {
         deletions: entries.iter().map(|e| e.deletions).sum(),
     };
     // Untracked files are entirely new, so every line in them is an addition.
-    for name in untracked_paths(&root) {
-        stats.files += 1;
-        stats.insertions += count_lines(&root.join(&name));
+    stats.files += untracked.len();
+    for lines in count_lines_many(&root, &untracked) {
+        stats.insertions += lines;
     }
     Ok(stats)
 }

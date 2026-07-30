@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import {
   activeFileMention,
+  droppedImageMimeType,
   formatDroppedPaths,
   insertComposerText,
   mentionText,
@@ -40,6 +41,14 @@ describe("agent composer file mentions", () => {
 });
 
 describe("agent composer path drops", () => {
+  test("recognizes supported dropped images regardless of extension case", () => {
+    expect(droppedImageMimeType("C:\\shots\\screen.PNG")).toBe("image/png");
+    expect(droppedImageMimeType("/tmp/photo.jpeg")).toBe("image/jpeg");
+    expect(droppedImageMimeType("/tmp/animation.gif")).toBe("image/gif");
+    expect(droppedImageMimeType("/tmp/preview.webp")).toBe("image/webp");
+    expect(droppedImageMimeType("/tmp/vector.svg")).toBeNull();
+  });
+
   test("keeps absolute paths and quotes only the paths that need it", () => {
     expect(formatDroppedPaths(["C:\\repo\\app.ts", "C:\\My Repo\\notes.md"])).toBe(
       'C:\\repo\\app.ts "C:\\My Repo\\notes.md"',

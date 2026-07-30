@@ -8,9 +8,10 @@ other's releases.
 | `main`    | stable   | `1.0.4`              | Latest         | Everyone on a stable install    |
 | `testing` | beta     | `1.0.4-testing.2`    | Pre-release    | Everyone on a beta install      |
 
-Every push to one of those two branches builds a Windows installer, tags it, and
-publishes it. No other branch publishes anything — the channel is derived from
-the branch name and the run stops if the branch is not one of these two.
+Every push to one of those two branches builds Windows, macOS, and Linux
+packages, tags them, and publishes them together. No other branch publishes
+anything. The channel is derived from the branch name and the run stops if the
+branch is not one of these two.
 
 ## One-time setup
 
@@ -39,7 +40,35 @@ repository needs two secrets before the first release.
    *Read and write permissions* so the release job can push tags and create
    releases.
 
-That is all. The first push to `main` or `testing` after that publishes a release.
+That is enough for signed updater artifacts on every platform. The first push to
+`main` or `testing` after that can publish a release.
+
+### Optional macOS Developer ID signing and notarization
+
+The macOS job uses an ad-hoc signature when Apple credentials are absent. That
+keeps macOS packaging independent from Linux and Windows, but it does not remove
+Gatekeeper's first-launch warning. Add these repository secrets when a Developer
+ID certificate is available:
+
+| Secret | Value |
+| --- | --- |
+| `APPLE_CERTIFICATE` | Base64-encoded Developer ID Application `.p12` |
+| `APPLE_CERTIFICATE_PASSWORD` | Password used when exporting the `.p12` |
+| `APPLE_SIGNING_IDENTITY` | Full Developer ID Application identity |
+| `KEYCHAIN_PASSWORD` | Temporary CI keychain password |
+
+Signing works with those four secrets. To notarize the signed DMG as part of the
+same Tauri build, also add:
+
+| Secret | Value |
+| --- | --- |
+| `APPLE_ID` | Apple developer account email |
+| `APPLE_PASSWORD` | App-specific password for that Apple ID |
+| `APPLE_TEAM_ID` | Apple Developer team ID |
+
+Missing Apple secrets never block the Windows or Linux jobs. A partial Apple
+configuration fails only the macOS matrix entry, which keeps the draft release
+unpublished.
 
 ## Version numbers
 
@@ -84,12 +113,19 @@ bun run version:next -- --channel testing
    out the next version for the branch's channel, pushes the tag, and opens a
    **draft** release. Drafts are invisible to the updater, so a half-finished
    release can never be handed to an app.
-2. **Build** (Windows runner) — stamps the version into `package.json`,
-   `tauri.conf.json`, `Cargo.toml` and `Cargo.lock`, compiles in this channel's
-   update endpoint (`scripts/apply-version.mjs`), runs the typecheck and tests,
-   builds and signs the NSIS installer, then writes `latest.json`
-   (`scripts/updater-manifest.mjs`) and uploads everything to the release.
-3. **Publish** — flips the draft off. Stable becomes the repository's *Latest*;
+2. **Validate** (Linux runner) stamps the version and channel, runs the
+   TypeScript check, Bun tests, and `cargo check`, and stops the build matrix if
+   any source-level check fails.
+3. **Build** (native runner matrix) stamps the same version and channel into
+   each checkout, then builds and updater-signs Windows x64 NSIS, a universal
+   macOS DMG, and Linux x64 deb plus AppImage packages.
+4. **Assemble** downloads every matrix artifact into one job. It writes a single
+   `latest.json` with default and installer-specific entries for Windows x64,
+   Linux x64 AppImage and deb, macOS Intel, and macOS Apple Silicon. The
+   manifest script refuses a partial or ambiguous matrix.
+   Only this job uploads assets to the draft GitHub Release, avoiding concurrent
+   manifest updates.
+5. **Publish** flips the draft off. Stable becomes the repository's *Latest*;
    beta stays a *Pre-release* and is explicitly never marked latest. The
    permanent `channel-testing` release then receives the new beta manifest and
    a copy of its installer under the fixed name `duckweed-beta-setup.exe`.
@@ -115,7 +151,8 @@ lookup.
 The same permanent beta release also carries
 `duckweed-beta-setup.exe`. This gives the README a stable download URL for the
 newest beta even though GitHub has no `/releases/latest` equivalent for
-pre-releases.
+pre-releases. macOS and Linux beta packages remain on their versioned
+prerelease; the beta manifest still updates those installs automatically.
 
 On top of that, the app checks the channel of any update it is offered
 (`src/lib/update.ts`) and refuses one from the other channel. Both locks are
@@ -125,9 +162,9 @@ covered by tests.
 fixed beta installer link or the latest stable release. It overwrites the
 existing install and from then on the app follows that channel.
 
-## Installing and updating without administrator rights
+## Installing and updating
 
-The installer is built with NSIS `installMode: currentUser`: Duckweed installs
+The Windows installer uses NSIS `installMode: currentUser`: Duckweed installs
 into `%LOCALAPPDATA%\Duckweed` for the current user only. That means:
 
 - no UAC prompt when installing, and none for any later update;
@@ -141,6 +178,18 @@ on the machine.
 Windows SmartScreen may still warn on the *first* install, because the installer
 is not code-signed (that needs a paid certificate). Signing the installer is a
 separate concern from the update signature, which is always verified.
+
+The macOS DMG contains one universal application for Intel and Apple Silicon.
+Tauri's updater archive is mapped to both macOS architectures in `latest.json`.
+The optional Apple credentials above control Developer ID signing and
+notarization; update signatures are always required regardless of Apple
+signing.
+
+Linux publishes updater-signed deb and AppImage packages. The manifest includes
+bundle-specific keys so each install downloads the matching package. AppImages
+replace themselves in place; deb updates use the system package installer and
+request authentication. Linux release builds run on Ubuntu 22.04 to avoid
+needlessly raising the glibc baseline.
 
 ## Checking for updates in the app
 
@@ -158,6 +207,7 @@ started yourself always reports what happened.
 ```bash
 bun test          # version arithmetic, channel isolation, workflow rules
 bun run typecheck
+cd src-tauri && cargo check
 ```
 
 `src/lib/version.test.ts` covers the odometer and channel rules,
@@ -166,17 +216,22 @@ bun run typecheck
 plugins mocked), and `scripts/workflows.test.mjs` reads the workflow YAML to
 assert that only `main` and `testing` release, that betas are never marked
 latest, and that the endpoint the app reads is the one the workflow writes.
+CI runs `cargo check` natively on Ubuntu, macOS, and Windows. The release
+workflow additionally builds the real platform packages and verifies that every
+signed updater target reaches the combined manifest.
 
 To try a real build without publishing anything: Actions → Release → Run
-workflow, **uncheck "Publish a release"**. It builds the installer and attaches
-it as a run artifact, with no tag and no release.
+workflow, **uncheck "Publish a release"**. It builds the complete native matrix
+and attaches the packages plus `latest.json` as a run artifact, with no tag and
+no release.
 
 Locally:
 
 ```bash
 bun scripts/apply-version.mjs --version 1.0.0-testing.1   # stamp a beta version
 bun run app:build                                          # build the installer
-bun scripts/updater-manifest.mjs --version 1.0.0-testing.1 # build latest.json
+bun scripts/updater-manifest.mjs --version 1.0.0-testing.1 \
+  --bundle-dir path/to/staged-release-assets               # build latest.json
 git checkout package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock
 ```
 
@@ -186,6 +241,28 @@ Signing locally needs the private key in the environment:
 export TAURI_SIGNING_PRIVATE_KEY="$(cat duckweed-updater.key)"
 export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
 ```
+
+## Native QA before stable promotion
+
+CI typechecks and tests the frontend, compiles Rust on Linux, macOS, and Windows,
+and makes each release runner produce its real package before publication. It
+cannot prove desktop integration on an end user's machine.
+
+Before promoting a beta to stable, test these paths on physical or virtual
+machines:
+
+- Install and launch the NSIS, DMG, AppImage, and deb packages.
+- Update an existing stable or beta install from inside the app and confirm the
+  channel does not change.
+- Confirm Intel and Apple Silicon macOS launch behavior, Gatekeeper behavior,
+  and notarization when Apple credentials are enabled.
+- Confirm AppImage replacement and the deb authentication prompt.
+- Confirm shell and coding-agent CLI discovery from a desktop launch, not only
+  from `tauri dev`.
+- Smoke-test PTYs, ports, process activity, and power actions on macOS and Linux.
+
+Windows Explorer integration and the taskbar completion badge require Windows
+QA only. They intentionally remain unavailable on macOS and Linux.
 
 ## Troubleshooting
 
