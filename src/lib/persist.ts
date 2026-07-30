@@ -51,6 +51,11 @@ export interface Persisted {
   customAgentUi: boolean;
   /** Default delivery for messages submitted while an agent turn is active. */
   agentFollowupMode: AgentFollowupMode;
+  /**
+   * Approve agent permission requests while the daily usage lockout is active.
+   * This is opt-in because unattended approvals can cause destructive changes.
+   */
+  autoApproveLockedRequests: boolean;
   /** Warp-style command editor, or a conventional raw terminal. */
   inputMode: InputMode;
   /**
@@ -131,6 +136,8 @@ export function load(): Persisted | null {
       // Default on, including for saves written before the setting existed.
       customAgentUi: typeof parsed.customAgentUi === "boolean" ? parsed.customAgentUi : true,
       agentFollowupMode: parsed.agentFollowupMode === "steer" ? "steer" : "queue",
+      // Never infer consent from an older save.
+      autoApproveLockedRequests: parsed.autoApproveLockedRequests === true,
       inputMode: parsed.inputMode === "raw" ? "raw" : "editor",
       // Default on so a missing field from older saves still asks before killing work.
       confirmCloseRunning:
@@ -156,6 +163,7 @@ export function save(state: {
   tintWorkspaceWithTabColor: boolean;
   customAgentUi: boolean;
   agentFollowupMode: AgentFollowupMode;
+  autoApproveLockedRequests: boolean;
   inputMode: InputMode;
   confirmCloseRunning: boolean;
   toolsOpen: boolean;
@@ -176,6 +184,7 @@ export function save(state: {
       tintWorkspaceWithTabColor: state.tintWorkspaceWithTabColor,
       customAgentUi: state.customAgentUi,
       agentFollowupMode: state.agentFollowupMode,
+      autoApproveLockedRequests: state.autoApproveLockedRequests,
       inputMode: state.inputMode,
       confirmCloseRunning: state.confirmCloseRunning,
       toolsOpen: state.toolsOpen,

@@ -9,6 +9,7 @@
     "core:event:default",
     "core:window:allow-start-dragging",
     "core:window:allow-minimize",
+    "core:window:allow-hide",
     "core:window:allow-toggle-maximize",
     "core:window:allow-is-maximized",
     "core:window:allow-set-fullscreen",
@@ -21,6 +22,7 @@
     "dialog:allow-open",
     "dialog:allow-message",
     "updater:default",
+    "process:allow-exit",
     "process:allow-restart"
   ]
 }

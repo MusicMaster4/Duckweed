@@ -1,6 +1,11 @@
-import { useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { UsagePanel } from "./UsagePanel";
+import {
+  formatDailyLimit,
+  formatUsageDuration,
+  remainingMinutesOf,
+} from "../lib/dailyUsage";
 import type { ShellIntegrationStatus } from "../lib/ipc";
 import type { InputMode } from "../lib/terminals";
 import type { ShellInfo } from "../lib/types";
@@ -15,9 +20,13 @@ interface Props {
   completionHighlights: boolean;
   completionSoundEnabled: boolean;
   tintWorkspaceWithTabColor: boolean;
+  wellbeingEnabled: boolean;
+  dailyLimitMinutes: number;
+  dailyUsedMs: number;
   /** Draw Duckweed's own interface over a recognised coding-agent CLI. */
   customAgentUi: boolean;
   agentFollowupMode: AgentFollowupMode;
+  autoApproveLockedRequests: boolean;
   confirmCloseRunning: boolean;
   /** Windows Explorer folder verbs; null when unavailable. */
   explorerIntegration: ShellIntegrationStatus | null;
@@ -30,8 +39,11 @@ interface Props {
   onToggleCompletionHighlights: () => void;
   onToggleCompletionSound: () => void;
   onToggleTintWorkspaceWithTabColor: () => void;
+  onToggleWellbeing: () => void;
+  onDailyLimitMinutes: (minutes: number) => void;
   onToggleCustomAgentUi: () => void;
   onAgentFollowupMode: (mode: AgentFollowupMode) => void;
+  onAutoApproveLockedRequests: (enabled: boolean) => void;
   onToggleConfirmCloseRunning: () => void;
   onToggleExplorerTab: () => void;
   onToggleExplorerWindow: () => void;
@@ -49,7 +61,78 @@ function Toggle({ enabled }: { enabled: boolean }) {
   );
 }
 
-type SettingsSection = "General" | "Appearance" | "Agents" | "Terminal" | "Usage" | "About";
+function ApprovalConsentDialog({
+  onCancel,
+  onConfirm,
+}: {
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const [acknowledged, setAcknowledged] = useState(false);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      onCancel();
+    };
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => window.removeEventListener("keydown", onKeyDown, true);
+  }, [onCancel]);
+
+  return (
+    <div className="approval-consent-backdrop" onPointerDown={onCancel}>
+      <div
+        className="approval-consent-dialog"
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby="approval-consent-title"
+        aria-describedby="approval-consent-body"
+        onPointerDown={(event) => event.stopPropagation()}
+      >
+        <span className="approval-consent-kicker">Unattended access</span>
+        <h2 id="approval-consent-title">Allow automatic approvals?</h2>
+        <p id="approval-consent-body">
+          While the daily limit screen is active, Duckweed will approve agent
+          permission requests without asking you. This may run destructive
+          commands, change or delete files, expose data, or cause other damage.
+          If an agent asks a question, Duckweed will choose its first option.
+        </p>
+        <label className="approval-consent-check">
+          <input
+            type="checkbox"
+            checked={acknowledged}
+            onChange={(event) => setAcknowledged(event.target.checked)}
+          />
+          <span>I understand and accept these risks.</span>
+        </label>
+        <div className="approval-consent-actions">
+          <button type="button" onClick={onCancel}>
+            Cancel
+          </button>
+          <button
+            type="button"
+            className="is-danger"
+            disabled={!acknowledged}
+            onClick={onConfirm}
+          >
+            Enable automatic approvals
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+type SettingsSection =
+  | "General"
+  | "Appearance"
+  | "Agents"
+  | "Terminal"
+  | "Usage"
+  | "Wellbeing"
+  | "About";
 
 // Survive SettingsMenu unmount when the settings tab is closed and reopened.
 // (While the tab stays open, App keeps this tree mounted so the browser holds
@@ -61,6 +144,7 @@ const lastSettingsScroll: Record<SettingsSection, number> = {
   Agents: 0,
   Terminal: 0,
   Usage: 0,
+  Wellbeing: 0,
   About: 0,
 };
 
@@ -72,8 +156,12 @@ export function SettingsMenu({
   completionHighlights,
   completionSoundEnabled,
   tintWorkspaceWithTabColor,
+  wellbeingEnabled,
+  dailyLimitMinutes,
+  dailyUsedMs,
   customAgentUi,
   agentFollowupMode,
+  autoApproveLockedRequests,
   confirmCloseRunning,
   explorerIntegration,
   shell,
@@ -85,8 +173,11 @@ export function SettingsMenu({
   onToggleCompletionHighlights,
   onToggleCompletionSound,
   onToggleTintWorkspaceWithTabColor,
+  onToggleWellbeing,
+  onDailyLimitMinutes,
   onToggleCustomAgentUi,
   onAgentFollowupMode,
+  onAutoApproveLockedRequests,
   onToggleConfirmCloseRunning,
   onToggleExplorerTab,
   onToggleExplorerWindow,
@@ -97,6 +188,7 @@ export function SettingsMenu({
   const [section, setSectionState] = useState<SettingsSection>(lastSettingsSection);
   const [query, setQuery] = useState("");
   const [suggestionsCleared, setSuggestionsCleared] = useState(false);
+  const [approvalConsentOpen, setApprovalConsentOpen] = useState(false);
   const contentRef = useRef<HTMLElement | null>(null);
   const sectionRef = useRef(section);
   const searchingRef = useRef(false);
@@ -172,6 +264,13 @@ export function SettingsMenu({
   const showUsage = section === "Usage" && !searching;
   const usageHit =
     searching && matches("usage statistics cost tokens spend quota limits agents models pricing");
+  const showWellbeing =
+    (section === "Wellbeing" || searching) &&
+    (matches("wellbeing health daily usage time limit focus lock lockout hours") ||
+      matches("today focused time remaining midnight agents background") ||
+      matches(
+        "automatic approvals unattended agents permission requests risk damage destructive",
+      ));
   const visibleTitle = searching ? "Search results" : section;
 
   // When the host is about to hide, lock in the current scroll before the
@@ -252,7 +351,7 @@ export function SettingsMenu({
           />
         </label>
         <nav aria-label="Settings sections">
-          {(["General", "Appearance", "Agents", "Terminal", "Usage", "About"] as const).map((item) => (
+          {(["General", "Appearance", "Agents", "Terminal", "Usage", "Wellbeing", "About"] as const).map((item) => (
             <button
               key={item}
               type="button"
@@ -302,6 +401,125 @@ export function SettingsMenu({
           )}
 
           {showUsage && <UsagePanel />}
+
+          {showWellbeing && (
+            <>
+              <section className="settings-section">
+                <h2>Daily usage</h2>
+              {matches("wellbeing health daily usage time limit focus lock lockout hours") && (
+                <button
+                  type="button"
+                  className="settings-row settings-action"
+                  onClick={onToggleWellbeing}
+                >
+                  <span className="settings-copy">
+                    <strong>Daily time limit</strong>
+                    <span>
+                      Lock Duckweed after this much focused use, without stopping active work
+                    </span>
+                  </span>
+                  <Toggle enabled={wellbeingEnabled} />
+                </button>
+              )}
+              {matches("wellbeing health daily usage time limit focus lock lockout hours") && (
+                <div className={`settings-row${wellbeingEnabled ? "" : " is-disabled"}`}>
+                  <span className="settings-copy">
+                    <strong>Time allowed per day</strong>
+                    <span>Focused time only. Background and minimized time do not count</span>
+                  </span>
+                  <div className="settings-stepper wellbeing-stepper">
+                    <button
+                      type="button"
+                      aria-label="Decrease daily time limit"
+                      disabled={!wellbeingEnabled || dailyLimitMinutes <= 30}
+                      onClick={() => onDailyLimitMinutes(dailyLimitMinutes - 30)}
+                    >
+                      −
+                    </button>
+                    <span>{formatDailyLimit(dailyLimitMinutes)}</span>
+                    <button
+                      type="button"
+                      aria-label="Increase daily time limit"
+                      disabled={!wellbeingEnabled || dailyLimitMinutes >= 24 * 60}
+                      onClick={() => onDailyLimitMinutes(dailyLimitMinutes + 30)}
+                    >
+                      +
+                    </button>
+                  </div>
+                </div>
+              )}
+              {matches("today focused time remaining midnight agents background") && (
+                <div className="settings-row wellbeing-today">
+                  <span className="settings-copy">
+                    <strong>Today</strong>
+                    <span>
+                      {wellbeingEnabled
+                        ? `${formatUsageDuration(dailyUsedMs)} used · ${formatDailyLimit(
+                            remainingMinutesOf(dailyLimitMinutes, dailyUsedMs),
+                          )} remaining`
+                        : "Turn on the daily limit to begin tracking focused time"}
+                    </span>
+                  </span>
+                  <div
+                    className="wellbeing-progress"
+                    role="progressbar"
+                    aria-label="Daily focused usage"
+                    aria-valuemin={0}
+                    aria-valuemax={dailyLimitMinutes * 60_000}
+                    aria-valuenow={Math.min(
+                      dailyUsedMs,
+                      dailyLimitMinutes * 60_000,
+                    )}
+                  >
+                    <span
+                      style={{
+                        width: wellbeingEnabled
+                          ? `${Math.min(
+                              100,
+                              (dailyUsedMs / (dailyLimitMinutes * 60_000)) * 100,
+                            )}%`
+                          : "0%",
+                      }}
+                    />
+                  </div>
+                </div>
+              )}
+              </section>
+
+              {matches(
+                "automatic approvals unattended agents permission requests risk damage destructive",
+              ) && (
+                <section className="settings-section">
+                  <h2>Unattended agents</h2>
+                  <button
+                    type="button"
+                    className="settings-row settings-action"
+                    aria-pressed={autoApproveLockedRequests}
+                    onClick={() => {
+                      if (autoApproveLockedRequests) {
+                        onAutoApproveLockedRequests(false);
+                        return;
+                      }
+                      setApprovalConsentOpen(true);
+                    }}
+                  >
+                    <span className="settings-copy">
+                      <strong>Approve requests during lockout</strong>
+                      <span>
+                        Let agents continue by automatically approving permission
+                        requests after the daily limit is reached
+                      </span>
+                    </span>
+                    <Toggle enabled={autoApproveLockedRequests} />
+                  </button>
+                  <p className="settings-risk-note">
+                    Automatic approvals can run destructive actions and cause data
+                    loss. Agent questions automatically use their first option.
+                  </p>
+                </section>
+              )}
+            </>
+          )}
 
           {showAppearance && (
             <section className="settings-section">
@@ -537,7 +755,13 @@ export function SettingsMenu({
             </section>
           )}
 
-          {!showAppearance && !showAgents && !showTerminal && !showAbout && !showUsage && !usageHit && (
+          {!showAppearance &&
+            !showAgents &&
+            !showTerminal &&
+            !showAbout &&
+            !showUsage &&
+            !showWellbeing &&
+            !usageHit && (
             <div className="settings-empty">
               <strong>No settings found</strong>
               <span>Try a different search.</span>
@@ -545,6 +769,15 @@ export function SettingsMenu({
           )}
         </div>
       </main>
+      {approvalConsentOpen && (
+        <ApprovalConsentDialog
+          onCancel={() => setApprovalConsentOpen(false)}
+          onConfirm={() => {
+            onAutoApproveLockedRequests(true);
+            setApprovalConsentOpen(false);
+          }}
+        />
+      )}
     </div>
   );
 }

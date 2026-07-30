@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { exit } from "@tauri-apps/plugin-process";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 
@@ -19,14 +20,18 @@ import {
   type SectionId as ToolsSectionId,
 } from "./components/ToolsPanel";
 import { ConfirmCloseDialog } from "./components/ConfirmCloseDialog";
+import { DailyLimitLockout } from "./components/DailyLimitLockout";
 import { UpdateDialog } from "./components/UpdateDialog";
 import { useDragPane, type DragState } from "./hooks/useDragPane";
 import { useGitChanges } from "./hooks/useGitChanges";
 import { useUpdater } from "./hooks/useUpdater";
+import { useDailyUsage } from "./hooks/useDailyUsage";
 import * as bus from "./lib/bus";
 import * as checklist from "./lib/checklist";
 import * as powerWatch from "./lib/powerWatch";
+import type { BusyEntry } from "./lib/powerWatch";
 import * as agentSessions from "./lib/agents/session";
+import { handleUnattendedPermission } from "./lib/agents/autoApproval";
 import {
   confirmCloseRunning,
   isConfirmCloseRunningEnabled,
@@ -183,6 +188,7 @@ function boot() {
       tintWorkspaceWithTabColor: saved.tintWorkspaceWithTabColor,
       customAgentUi: saved.customAgentUi,
       agentFollowupMode: saved.agentFollowupMode,
+      autoApproveLockedRequests: saved.autoApproveLockedRequests,
       inputMode: saved.inputMode,
       confirmCloseRunning: saved.confirmCloseRunning,
       toolsOpen: saved.toolsOpen,
@@ -213,6 +219,7 @@ function boot() {
     tintWorkspaceWithTabColor: false,
     customAgentUi: true,
     agentFollowupMode: "queue" as const,
+    autoApproveLockedRequests: false,
     inputMode: "editor" as terminals.InputMode,
     confirmCloseRunning: true,
     toolsOpen: false,
@@ -237,6 +244,17 @@ function isTextField(target: EventTarget | null): boolean {
 
 export default function App() {
   const initial = useMemo(boot, []);
+  const dailyUsage = useDailyUsage();
+  const dailyLocked = dailyUsage.locked;
+  const dailyLockedRef = useRef(dailyLocked);
+  dailyLockedRef.current = dailyLocked;
+  // A persisted lockout must not attach terminals or run default-layout
+  // commands. Once the lock clears, keep existing panes mounted across future
+  // lockouts so work that was already running can settle safely.
+  const workbenchStartedRef = useRef(!dailyLocked);
+  if (!dailyLocked) workbenchStartedRef.current = true;
+  const [lockoutBusy, setLockoutBusy] = useState<BusyEntry[]>([]);
+  const backgroundExitRequestedRef = useRef(false);
 
   const [tabs, setTabs] = useState<Tab[]>(initial.tabs);
   const [activeTabId, setActiveTabId] = useState(initial.activeTabId);
@@ -254,6 +272,9 @@ export default function App() {
   );
   const [customAgentUi, setCustomAgentUi] = useState(initial.customAgentUi);
   const [agentFollowupMode, setAgentFollowupMode] = useState(initial.agentFollowupMode);
+  const [autoApproveLockedRequests, setAutoApproveLockedRequests] = useState(
+    initial.autoApproveLockedRequests,
+  );
   const [inputMode, setInputMode] = useState(initial.inputMode);
   const [confirmCloseRunningPref, setConfirmCloseRunningPref] = useState(() => {
     // Honour the saved preference before any close handler can run.
@@ -594,6 +615,7 @@ export default function App() {
       // coalesces simultaneous finishes, so several agents returning together
       // do not stack copies of the effect.
       if (
+        !dailyLockedRef.current &&
         completionSoundEnabledRef.current &&
         shouldPlayCompletionSound(previous, current)
       ) {
@@ -683,6 +705,79 @@ export default function App() {
     () => powerWatch.connect({ probe: probeActivity, fire: powerAction }),
     [probeActivity],
   );
+
+  // Once the daily allowance is spent, keep the underlying terminals mounted
+  // and mirror their live work into the lock screen. Entries disappear as
+  // their agents or commands settle. If the user already asked to continue in
+  // the background, keep probing across the midnight unlock so we can still
+  // exit once everything finishes.
+  useEffect(() => {
+    if (!dailyLocked && !backgroundExitRequestedRef.current) {
+      setLockoutBusy([]);
+      return;
+    }
+
+    const refresh = () => {
+      const next = probeActivity();
+      setLockoutBusy(next);
+    };
+    refresh();
+    const offAgents = agentSessions.subscribeAll(refresh);
+    const offTurnEnd = agentSessions.subscribeTurnEnd(refresh);
+    const offTerminals = termIds.map((termId) => terminals.subscribeSession(termId, refresh));
+    const fallback = window.setInterval(refresh, 1_000);
+    return () => {
+      offAgents();
+      offTurnEnd();
+      for (const off of offTerminals) off();
+      window.clearInterval(fallback);
+    };
+  }, [dailyLocked, probeActivity, termIdsKey]);
+
+  // With explicit consent, keep unattended agents moving after the daily limit
+  // screen takes over. Structured questions follow the consented unattended
+  // policy by choosing the first option for each question.
+  useEffect(() => {
+    if (!dailyLocked || !autoApproveLockedRequests) return;
+
+    const approvePending = () => {
+      for (const termId of agentSessions.activeTermIds()) {
+        const permission = agentSessions.get(termId)?.permission ?? null;
+        handleUnattendedPermission(permission, {
+          respond: (permissionId, optionId) =>
+            agentSessions.respond(termId, permissionId, optionId),
+          answer: (permissionId, answers) =>
+            agentSessions.answer(termId, permissionId, answers),
+        });
+      }
+    };
+
+    approvePending();
+    return agentSessions.subscribeAll(approvePending);
+  }, [autoApproveLockedRequests, dailyLocked]);
+
+  // After the user sends locked work to the background, exit quietly once the
+  // last entry settles (including if midnight unlocks the app first). A visible
+  // finished lockout remains open for the user.
+  useEffect(() => {
+    if (!TAURI_RUNTIME || lockoutBusy.length > 0) return;
+    if (!backgroundExitRequestedRef.current) return;
+    void exit(0);
+  }, [lockoutBusy.length]);
+
+  const continueLockedInBackground = useCallback(() => {
+    if (!TAURI_RUNTIME) return;
+    backgroundExitRequestedRef.current = true;
+    void getCurrentWindow().hide();
+  }, []);
+
+  const closeLockedApp = useCallback(() => {
+    if (TAURI_RUNTIME) {
+      void getCurrentWindow().close();
+      return;
+    }
+    window.close();
+  }, []);
 
   // ---------------------------------------------------------------- tabs
 
@@ -1538,6 +1633,7 @@ export default function App() {
           tintWorkspaceWithTabColor,
           customAgentUi,
           agentFollowupMode,
+          autoApproveLockedRequests,
           inputMode,
           confirmCloseRunning: confirmCloseRunningPref,
           toolsOpen,
@@ -1560,6 +1656,7 @@ export default function App() {
     tintWorkspaceWithTabColor,
     customAgentUi,
     agentFollowupMode,
+    autoApproveLockedRequests,
     inputMode,
     confirmCloseRunningPref,
     toolsOpen,
@@ -1607,6 +1704,15 @@ export default function App() {
     let unlisten: (() => void) | undefined;
     void getCurrentWindow()
       .onCloseRequested(async (event) => {
+        if (dailyLockedRef.current) {
+          const busy = probeActivity();
+          if (busy.length > 0) {
+            event.preventDefault();
+            backgroundExitRequestedRef.current = true;
+            await getCurrentWindow().hide();
+          }
+          return;
+        }
         const ids = terminals.allSessionIds();
         if (!(await terminals.anyHasCloseBlockingWork(ids))) return;
         const agent = terminals.runningAgentLabel(ids);
@@ -1628,7 +1734,7 @@ export default function App() {
       disposed = true;
       unlisten?.();
     };
-  }, []);
+  }, [probeActivity]);
 
   // Each pane has a ResizeObserver, but maximize/fullscreen/DPI changes can land
   // as a single reflow that those observers coalesce away — re-measure everything
@@ -1776,6 +1882,13 @@ export default function App() {
         e.preventDefault();
         e.stopPropagation();
       };
+
+      if (dailyLockedRef.current) {
+        const lockoutControl =
+          e.target instanceof Element && e.target.closest(".daily-lockout");
+        if (lockoutControl) return;
+        return take();
+      }
 
       if (e.key === "F11") {
         void toggleFullscreen();
@@ -2384,11 +2497,15 @@ export default function App() {
     activeTab?.zoomedLeaf ? findLeaf(activeTab.root, activeTab.zoomedLeaf) : null;
   const activeTerm = activeTab ? (findLeaf(activeTab.root, activeTab.activeLeaf)?.term ?? null) : null;
   const activeWindowColor =
-    tintWorkspaceWithTabColor && !settingsActive ? tabColorHex(activeTab?.color) : null;
+    tintWorkspaceWithTabColor && !settingsActive && !dailyLocked
+      ? tabColorHex(activeTab?.color)
+      : null;
 
   return (
     <div
-      className={`app${activeWindowColor ? " has-tab-color" : ""}`}
+      className={`app${activeWindowColor ? " has-tab-color" : ""}${
+        dailyLocked ? " is-daily-locked" : ""
+      }`}
       style={
         activeWindowColor
           ? ({ "--active-tab-color": activeWindowColor } as CSSProperties)
@@ -2400,6 +2517,7 @@ export default function App() {
         onOpenSettings={openSettings}
         toolsOpen={toolsOpen}
         onToggleTools={() => setToolsOpen((open) => !open)}
+        locked={dailyLocked}
       >
         <TabStrip
           tabs={tabs}
@@ -2468,8 +2586,12 @@ export default function App() {
                 completionHighlights={completionHighlights}
                 completionSoundEnabled={completionSoundEnabled}
                 tintWorkspaceWithTabColor={tintWorkspaceWithTabColor}
+                wellbeingEnabled={dailyUsage.state.enabled}
+                dailyLimitMinutes={dailyUsage.state.limitMinutes}
+                dailyUsedMs={dailyUsage.state.usedMs}
                 customAgentUi={customAgentUi}
                 agentFollowupMode={agentFollowupMode}
+                autoApproveLockedRequests={autoApproveLockedRequests}
                 confirmCloseRunning={confirmCloseRunningPref}
                 explorerIntegration={explorerIntegration}
                 shell={shell}
@@ -2483,11 +2605,16 @@ export default function App() {
                 onToggleTintWorkspaceWithTabColor={() =>
                   setTintWorkspaceWithTabColor((enabled) => !enabled)
                 }
+                onToggleWellbeing={() =>
+                  dailyUsage.setEnabled(!dailyUsage.state.enabled)
+                }
+                onDailyLimitMinutes={dailyUsage.setLimitMinutes}
                 onToggleCustomAgentUi={toggleCustomAgentUi}
                 onAgentFollowupMode={(mode) => {
                   agentSessions.setFollowupMode(mode);
                   setAgentFollowupMode(mode);
                 }}
+                onAutoApproveLockedRequests={setAutoApproveLockedRequests}
                 onToggleConfirmCloseRunning={() =>
                   setConfirmCloseRunningPref((prev) => !prev)
                 }
@@ -2523,6 +2650,7 @@ export default function App() {
             </div>
           )}
           {!settingsActive &&
+            workbenchStartedRef.current &&
             (!booted ? (
               <div className="booting">starting shell…</div>
             ) : zoomedNode && activeTab ? (
@@ -2545,6 +2673,15 @@ export default function App() {
         onOpenChanges={() => setChangesOpen(true)}
         onProjectRefresh={() => void refreshProject(activeTab?.id)}
       />
+
+      {dailyLocked && (
+        <DailyLimitLockout
+          limitMinutes={dailyUsage.state.limitMinutes}
+          busy={lockoutBusy}
+          onBackground={continueLockedInBackground}
+          onClose={closeLockedApp}
+        />
+      )}
 
       {drag && (
         <div className="drag-ghost">
