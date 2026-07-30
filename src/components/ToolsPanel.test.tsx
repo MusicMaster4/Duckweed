@@ -3,7 +3,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import { ChecklistTool } from "./ChecklistTool";
 import { LayoutsTool } from "./LayoutsTool";
-import { PortsTool } from "./PortsTool";
+import { PortsTool, portsForOwners } from "./PortsTool";
+import type { AppPort } from "../lib/ipc";
 import { PowerWatchTool } from "./PowerWatchTool";
 import { StatisticsTool } from "./StatisticsTool";
 import * as checklist from "../lib/checklist";
@@ -170,6 +171,16 @@ describe("power watch panel", () => {
 });
 
 describe("statistics and ports panels", () => {
+  const appPort = (owner_id: string, port: number): AppPort => ({
+    pid: port,
+    port,
+    address: "127.0.0.1",
+    process: "node",
+    owner_id,
+    owner_kind: "terminal",
+    forward: null,
+  });
+
   test("statistics leads with what this session cost, not a 7-day total", () => {
     const html = renderToStaticMarkup(<StatisticsTool tabs={3} panes={5} projects={2} />);
     expect(html).toContain("Estimated cost");
@@ -186,9 +197,21 @@ describe("statistics and ports panels", () => {
     expect(html).toContain("Reading transcripts...");
   });
 
-  test("ports warns about network sharing before any server is found", () => {
+  test("ports warns about public sharing before any server is found", () => {
     const html = renderToStaticMarkup(<PortsTool ownerNames={new Map()} />);
-    expect(html).toContain("every device on the network");
-    expect(html).toContain("network you trust");
+    expect(html).toContain("Anyone with a public link");
+    expect(html).toContain("over the internet");
+  });
+
+  test("ports includes only process owners from the visible tab", () => {
+    const ports = [appPort("tab-a-pane-1", 3000), appPort("tab-b-pane-1", 4000)];
+    const visibleOwners = new Map([["tab-a-pane-1", "Project A"]]);
+
+    expect(portsForOwners(ports, visibleOwners).map((port) => port.port)).toEqual([3000]);
+  });
+
+  test("ports labels its scope as the visible tab", () => {
+    const html = renderToStaticMarkup(<PortsTool ownerNames={new Map()} />);
+    expect(html).toContain("This tab&#x27;s servers");
   });
 });

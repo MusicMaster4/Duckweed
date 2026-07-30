@@ -465,11 +465,25 @@
   stroke-width: 1.5;
   stroke-linecap: round;
   stroke-linejoin: round;
+  fill: none;
   transition: transform 120ms ease;
 }
 
+/* Default path points down. Open state flips it up (collapse). */
 .official-chevron.is-open {
   transform: rotate(180deg);
+}
+
+/*
+ * Plan/workflow dock: invert the shared chevron so expanded points down
+ * into the step list and collapsed points up.
+ */
+.official-plan-head .official-chevron {
+  transform: rotate(180deg);
+}
+
+.official-plan-head .official-chevron.is-open {
+  transform: rotate(0deg);
 }
 
 .official-plan-progress {

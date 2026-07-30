@@ -81,6 +81,14 @@ export function hoursUntilSweep(item: ChecklistItem, now: number): number {
   return Math.max(0, Math.floor((item.doneAt + DONE_RETENTION_MS - now) / (60 * 60 * 1000)));
 }
 
+/**
+ * True only on the edge from some open work to none, with items still present.
+ * Mount, tab switch, empty list, and already-clear re-renders all stay false.
+ */
+export function becameAllClear(prevOpen: number, nextOpen: number, total: number): boolean {
+  return prevOpen > 0 && nextOpen === 0 && total > 0;
+}
+
 // ------------------------------------------------------------------- store
 
 let store: Store = { version: 1, lists: {} };

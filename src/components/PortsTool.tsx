@@ -11,6 +11,7 @@ import {
 import { AsciiAmbient } from "./AsciiAmbient";
 
 interface Props {
+  /** Process owners belonging to the visible tab, keyed by terminal id. */
   ownerNames: ReadonlyMap<string, string>;
 }
 
@@ -23,6 +24,14 @@ function binding(port: AppPort): string {
 }
 
 const localUrl = (port: AppPort) => `http://localhost:${port.port}`;
+
+/** Keep the Ports tool scoped to the panes in the visible tab. */
+export function portsForOwners(
+  ports: readonly AppPort[],
+  ownerNames: ReadonlyMap<string, string>,
+): AppPort[] {
+  return ports.filter((port) => ownerNames.has(port.owner_id));
+}
 
 function CopyButton({
   url,
@@ -143,7 +152,11 @@ export function PortsTool({ ownerNames }: Props) {
     }
   }, []);
 
-  const shared = useMemo(() => ports.filter((port) => port.forward).length, [ports]);
+  const scopedPorts = useMemo(() => portsForOwners(ports, ownerNames), [ownerNames, ports]);
+  const shared = useMemo(
+    () => scopedPorts.filter((port) => port.forward).length,
+    [scopedPorts],
+  );
 
   return (
     <section className="ports-tool" aria-label="Application ports">
@@ -151,10 +164,10 @@ export function PortsTool({ ownerNames }: Props) {
         <div>
           <span className="tools-section-title">
             Ports
-            {ports.length > 0 && <em className="ports-count">{ports.length}</em>}
+            {scopedPorts.length > 0 && <em className="ports-count">{scopedPorts.length}</em>}
           </span>
           <span className="tools-section-note">
-            {shared > 0 ? `${shared} shared on your network` : "Local servers"}
+            {shared > 0 ? `${shared} shared publicly` : "This tab's servers"}
           </span>
         </div>
         <button
@@ -180,16 +193,16 @@ export function PortsTool({ ownerNames }: Props) {
           </div>
         )}
 
-        {!loading && ports.length === 0 && (
+        {!loading && scopedPorts.length === 0 && (
           <div className="tools-empty ports-empty">
             <AsciiAmbient surfaceId="ports-empty" scene="sonar" />
-            <strong>Nothing is listening</strong>
-            <p>Start a server in a pane and it appears here.</p>
+            <strong>Nothing is listening in this tab</strong>
+            <p>Start a server in one of this tab's panes and it appears here.</p>
           </div>
         )}
 
         <div className="ports-list">
-          {ports.map((port) => {
+          {scopedPorts.map((port) => {
             const key = `${port.pid}:${port.port}`;
             const owner = ownerNames.get(port.owner_id);
             const isAgent = port.owner_kind === "agent";
@@ -223,7 +236,7 @@ export function PortsTool({ ownerNames }: Props) {
                 {port.forward && (
                   <AddressRow
                     url={port.forward.url}
-                    label="Network"
+                    label="Public"
                     copied={copied === port.forward.id}
                     onCopy={() => void copy(port.forward!.id, port.forward!.url)}
                   />
@@ -247,7 +260,7 @@ export function PortsTool({ ownerNames }: Props) {
                       disabled={isBusy}
                       onClick={() => void run(key, () => portForward(port.pid, port.port))}
                     >
-                      {busy === key ? "Sharing..." : "Share on network"}
+                      {busy === key ? "Creating public link..." : "Share publicly"}
                     </button>
                   )}
                   {!isConfirming ? (
@@ -282,7 +295,8 @@ export function PortsTool({ ownerNames }: Props) {
           <svg viewBox="0 0 16 16" aria-hidden="true">
             <path d="M8 2.5v3M3.5 13.5h9M4 9h8v4.5H4zM8 5.5L4 9M8 5.5L12 9" />
           </svg>
-          Shared addresses reach every device on the network. Only share on a network you trust.
+          Anyone with a public link can access that server over the internet. Stop sharing when
+          access is no longer needed.
         </p>
       </div>
     </section>

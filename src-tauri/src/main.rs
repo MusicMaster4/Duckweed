@@ -211,6 +211,12 @@ async fn read_file(path: String) -> Result<FileContent, String> {
     blocking(move || fs::read_file(&path)).await
 }
 
+/// Read a small local image dropped from the OS into the agent composer.
+#[tauri::command]
+async fn read_dropped_image(path: String) -> Result<Vec<u8>, String> {
+    blocking(move || fs::read_dropped_image(&path)).await
+}
+
 /// Save the popup editor's buffer back to disk.
 #[tauri::command]
 async fn write_file(path: String, content: String) -> Result<(), String> {
@@ -324,9 +330,10 @@ async fn port_close(
     blocking(move || ports::close(pid, port, &ptys, &agents, &ports)).await
 }
 
-/// Proxy one owned local listener through a Duckweed port bound to the LAN.
+/// Expose one owned local HTTP listener through a temporary public tunnel.
 #[tauri::command]
 async fn port_forward(
+    app: AppHandle,
     ptys: State<'_, PtyManager>,
     agents: State<'_, AgentProcManager>,
     ports: State<'_, PortManager>,
@@ -336,7 +343,12 @@ async fn port_forward(
     let ptys = ptys.inner().clone();
     let agents = agents.inner().clone();
     let ports = ports.inner().clone();
-    blocking(move || ports::forward(pid, port, &ptys, &agents, &ports)).await
+    let tools_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?
+        .join("tools");
+    blocking(move || ports::forward(pid, port, &ptys, &agents, &ports, &tools_dir)).await
 }
 
 #[tauri::command]
@@ -732,6 +744,7 @@ fn main() {
             list_dir,
             workspace_paths,
             read_file,
+            read_dropped_image,
             write_file,
             git_branches,
             git_checkout,

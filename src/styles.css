@@ -2240,10 +2240,55 @@ svg.tab-glyph-fill path {
 /* ------------------------------------------------------------- checklist */
 
 .check {
+  position: relative;
+  container-type: size;
   display: flex;
   flex-direction: column;
   min-height: 0;
   flex: 1 1 auto;
+}
+
+/* Full-area all-clear celebration. It uses the same single-color, monospace
+   language as the ambient ASCII scenes and never steals clicks. */
+.check-celebrate-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.check-celebrate-overlay .ascii-ambient-checklist-confetti {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  display: block;
+  color: color-mix(in srgb, var(--accent) 72%, var(--text-dim));
+  pointer-events: none;
+}
+
+.check-celebrate-overlay .ascii-ambient-checklist-confetti pre {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  box-sizing: border-box;
+  padding: 0;
+  /*
+   * Match the 8.5px ambient ASCII glyphs. Row spacing, rather than character
+   * size, stretches the 32-row field from the top to the bottom of the panel.
+   */
+  font-size: 8.5px;
+  line-height: calc(100cqh / 32);
+  letter-spacing: 0;
+  text-align: center;
+  white-space: pre;
+  overflow: hidden;
+  /* Fill the panel edge-to-edge; ambient scenes use a soft mask, this does not. */
+  -webkit-mask-image: none;
+  mask-image: none;
+  opacity: 0.78;
 }
 
 .check-head {
@@ -2400,7 +2445,7 @@ svg.tab-glyph-fill path {
 }
 
 .check-cleared {
-  margin: 2px 0 0;
+  margin: 0;
   padding: 8px 6px;
   color: var(--text-faint);
   font-size: 11.5px;

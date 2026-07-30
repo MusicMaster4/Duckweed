@@ -198,17 +198,20 @@ can query the official usage endpoint with Claude Code's existing OAuth session;
 Codex and Grok use the latest quota snapshots saved by their CLIs. Duckweed does
 not invent limits for agents that do not expose them.
 
-## Local data and network sharing
+## Local data and public sharing
 
 Projects, layouts, settings, agent sessions, and usage indexes stay on your
 computer. Duckweed does not upload repository contents or agent transcripts.
 Provider CLIs may still contact their own services, and Claude quota cards can
 query Claude's official usage endpoint with the local Claude Code session.
 
-The Ports tool's **Share on network** action makes the selected local service
-reachable from other devices on the same network. Do not share unauthenticated
-development servers on public or untrusted networks. Stop sharing from the Ports
-tool when access is no longer needed.
+The Ports tool's **Share publicly** action creates a temporary HTTPS address
+through Cloudflare Quick Tunnels when `cloudflared` is installed. Duckweed falls
+back to an outbound SSH tunnel when needed. Anyone with that address can reach
+the selected local HTTP server over the internet. Public links are intended for
+development and testing, not production. Duckweed shows the link only after an
+end-to-end readiness check reaches its local proxy. It stops the tunnel when you
+stop sharing, close the owning process, or exit the app.
 
 ## Keyboard shortcuts
 

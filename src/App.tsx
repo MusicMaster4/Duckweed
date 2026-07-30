@@ -357,17 +357,16 @@ export default function App() {
   );
   const portOwnerNames = useMemo(() => {
     const names = new Map<string, string>();
-    for (const tab of tabs) {
-      const paneCount = leaves(tab.root).length;
-      leaves(tab.root).forEach((node, index) => {
-        names.set(
-          node.term,
-          paneCount > 1 ? `${tab.title}, pane ${index + 1}` : tab.title,
-        );
-      });
-    }
+    if (!activeTab) return names;
+    const panes = leaves(activeTab.root);
+    panes.forEach((node, index) => {
+      names.set(
+        node.term,
+        panes.length > 1 ? `${activeTab.title}, pane ${index + 1}` : activeTab.title,
+      );
+    });
     return names;
-  }, [tabs]);
+  }, [activeTab]);
   const changes = useGitChanges(project);
 
   const currentTab = useCallback(

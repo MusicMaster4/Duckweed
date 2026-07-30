@@ -7,7 +7,7 @@ import {
 } from "./agent/ascii/animations";
 import type { Painter } from "./agent/ascii/canvas";
 
-const FPS = 12;
+const DEFAULT_FPS = 12;
 /** Ambient surfaces remount often (panel swaps); keep clocks across that. */
 const REGISTRY_LIMIT = 32;
 
@@ -47,15 +47,22 @@ export function AsciiAmbient({
   surfaceId,
   scene,
   className,
+  fps = DEFAULT_FPS,
 }: {
   /** Stable key for this surface so remounts keep the same clock. */
   surfaceId: string;
   scene: AsciiSceneId;
   className?: string;
+  /**
+   * Paint rate. Quiet ambients stay at 12; short celebrations can run higher
+   * so fall motion reads smooth instead of stepped.
+   */
+  fps?: number;
 }) {
   const factory = ASCII_SCENES[scene];
   const { paint, origin } = assignmentFor(surfaceId, scene, factory);
   const [frame, setFrame] = useState(() => paint((performance.now() - origin) / 1000));
+  const frameMs = 1000 / Math.max(1, fps);
 
   useEffect(() => {
     setFrame(paint((performance.now() - origin) / 1000));
@@ -65,13 +72,13 @@ export function AsciiAmbient({
     let last = 0;
     const tick = (now: number) => {
       handle = window.requestAnimationFrame(tick);
-      if (now - last < 1000 / FPS) return;
+      if (now - last < frameMs) return;
       last = now;
       setFrame(paint((now - origin) / 1000));
     };
     handle = window.requestAnimationFrame(tick);
     return () => window.cancelAnimationFrame(handle);
-  }, [paint, origin]);
+  }, [paint, origin, frameMs]);
 
   return (
     <div className={`ascii-ambient${className ? ` ${className}` : ""}`} aria-hidden="true">

@@ -4,6 +4,8 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   activeFileMention,
   clipboardImageFiles,
+  droppedImageFile,
+  droppedImageMimeType,
   formatDroppedPaths,
   imageFileToAttachment,
   insertComposerText,
@@ -389,7 +391,18 @@ export function AgentComposer({ session, active, inputRef, onSubmit, onInterrupt
         }
         setFileDragging(false);
         if (!inside || !payload.paths.length) return;
-        insertText(formatDroppedPaths(payload.paths));
+        const imagePaths = payload.paths.filter((path) => droppedImageMimeType(path));
+        const otherPaths = payload.paths.filter((path) => !droppedImageMimeType(path));
+        if (otherPaths.length) insertText(formatDroppedPaths(otherPaths));
+        if (imagePaths.length) {
+          void Promise.all(imagePaths.map(droppedImageFile))
+            .then(addImageFiles)
+            .catch((error: unknown) => {
+              setAttachmentError(
+                error instanceof Error ? error.message : "Could not attach this image.",
+              );
+            });
+        }
       })
       .then((stop) => {
         if (disposed) stop();
@@ -729,7 +742,7 @@ export function AgentComposer({ session, active, inputRef, onSubmit, onInterrupt
       )}
       {fileDragging && (
         <div className="agent-file-drop-hint" role="status">
-          Drop to insert the full path
+          Drop to attach images or insert paths
         </div>
       )}
       <AgentImageAttachments

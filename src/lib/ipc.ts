@@ -34,7 +34,6 @@ export interface PortForward {
   id: string;
   target_pid: number;
   target_port: number;
-  public_port: number;
   url: string;
 }
 
@@ -60,7 +59,7 @@ export const portsList = () => invoke<PortSnapshot>("ports_list");
 export const portClose = (pid: number, port: number) =>
   invoke<void>("port_close", { pid, port });
 
-/** Expose a local listener through a LAN-bound Duckweed TCP proxy. */
+/** Expose a local HTTP listener through a temporary public tunnel. */
 export const portForward = (pid: number, port: number) =>
   invoke<PortForward>("port_forward", { pid, port });
 
@@ -103,6 +102,10 @@ export const workspacePaths = (path: string) =>
 
 /** Read a file for the project explorer's popup editor. */
 export const readFile = (path: string) => invoke<FileContent>("read_file", { path });
+
+/** Read a size-limited image that arrived through Tauri's native file drop. */
+export const readDroppedImage = (path: string) =>
+  invoke<number[]>("read_dropped_image", { path });
 
 /** Save the popup editor's buffer. */
 export const writeFile = (path: string, content: string) =>

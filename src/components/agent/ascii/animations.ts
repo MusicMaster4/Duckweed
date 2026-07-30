@@ -1,3 +1,4 @@
+import { paintChecklistConfetti } from "../../../lib/checklistConfetti";
 import {
   ASPECT,
   clamp01,
@@ -1414,6 +1415,10 @@ export const ASCII_SCENES = {
   waves: stateless(paintWaves),
   clouds: field(cloudsField),
   clock: stateless(paintClock),
+  /** One-shot celebration when a checklist tab goes fully clear. */
+  fireworks: stateless(paintFireworks),
+  /** Full-area falling confetti for checklist all-clear. */
+  confetti: stateless(paintChecklistConfetti),
 } as const;
 
 export type AsciiSceneId = keyof typeof ASCII_SCENES;

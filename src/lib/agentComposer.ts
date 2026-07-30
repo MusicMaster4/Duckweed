@@ -1,4 +1,4 @@
-import { workspacePaths } from "./ipc";
+import { readDroppedImage, workspacePaths } from "./ipc";
 import type { AgentImageAttachment } from "./agents/types";
 import type { WorkspacePath } from "./types";
 
@@ -31,6 +31,32 @@ function mimeFromFile(file: File): AgentImageAttachment["mimeType"] | null {
   if (extension === "gif") return "image/gif";
   if (extension === "webp") return "image/webp";
   return null;
+}
+
+export function droppedImageMimeType(
+  path: string,
+): AgentImageAttachment["mimeType"] | null {
+  const extension = path.split(".").pop()?.toLowerCase();
+  if (extension === "png") return "image/png";
+  if (extension === "jpg" || extension === "jpeg") return "image/jpeg";
+  if (extension === "gif") return "image/gif";
+  if (extension === "webp") return "image/webp";
+  return null;
+}
+
+/** Turn a native Tauri file-drop path into the same File used by clipboard paste. */
+export async function droppedImageFile(path: string): Promise<File> {
+  const mimeType = droppedImageMimeType(path);
+  if (!mimeType) {
+    throw new Error("Only PNG, JPEG, GIF, and WebP images are supported.");
+  }
+  const bytes = await readDroppedImage(path).catch((error: unknown) => {
+    throw new Error(
+      typeof error === "string" ? error : "Could not read this dropped image.",
+    );
+  });
+  const name = path.split(/[\\/]/).pop() || `dropped-image.${mimeType.split("/")[1]}`;
+  return new File([new Uint8Array(bytes)], name, { type: mimeType });
 }
 
 function readDataUrl(file: File): Promise<string> {

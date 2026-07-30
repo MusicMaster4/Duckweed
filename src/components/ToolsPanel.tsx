@@ -31,6 +31,7 @@ interface Props {
     panes: number;
     projects: number;
   };
+  /** Port-process owners belonging to the visible tab only. */
   ownerNames: ReadonlyMap<string, string>;
   /** Owned by App: the dock unmounts while Settings is up, and the tool the
       user was reading has to still be there when they come back. */
