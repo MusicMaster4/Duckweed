@@ -206,8 +206,8 @@ Provider CLIs may still contact their own services, and Claude quota cards can
 query Claude's official usage endpoint with the local Claude Code session.
 
 The Ports tool's **Share publicly** action creates a temporary HTTPS address
-through Cloudflare Quick Tunnels when `cloudflared` is installed. Duckweed falls
-back to an outbound SSH tunnel when needed. Anyone with that address can reach
+through an outbound SSH tunnel when OpenSSH is installed. Duckweed falls back
+to Cloudflare Quick Tunnels or ngrok when needed. Anyone with that address can reach
 the selected local HTTP server over the internet. Public links are intended for
 development and testing, not production. Duckweed shows the link only after an
 end-to-end readiness check reaches its local proxy. It stops the tunnel when you

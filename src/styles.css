@@ -8091,12 +8091,18 @@ body.is-resizing * {
 
 .agent-workflow-dock .official-plan-head {
   padding-block: 7px 6px;
+  /* Match the step list's stable scrollbar gutter so the count + chevron
+     stay aligned with the list edge when classic scrollbars take layout space. */
+  padding-inline-end: calc(10px + var(--scrollbar-size));
 }
 
 .agent-workflow-dock .official-plan-steps {
   max-height: min(180px, 30vh);
   overflow-y: auto;
   padding-block: 7px 9px;
+  /* Reserve the gutter even before overflow so the count does not jump
+     (and look off-center) the moment the scrollbar appears. */
+  scrollbar-gutter: stable;
 }
 
 .agent-exit-hint {

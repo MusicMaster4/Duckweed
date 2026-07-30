@@ -263,6 +263,13 @@ fn origin_proxy_loop(
     while !stop.load(Ordering::Acquire) {
         match listener.accept() {
             Ok((client, _)) => {
+                // Keep the listener nonblocking so the stop flag is observed,
+                // but wait normally for data on accepted connections. Tunnel
+                // providers can connect a moment before sending the request.
+                if client.set_nonblocking(false).is_err() {
+                    let _ = client.shutdown(Shutdown::Both);
+                    continue;
+                }
                 let Ok(tracked_client) = client.try_clone() else {
                     let _ = client.shutdown(Shutdown::Both);
                     continue;
@@ -457,8 +464,12 @@ fn origin_addresses(address: &str) -> Vec<String> {
         return vec!["127.0.0.1".to_string(), "::1".to_string()];
     }
     match address.parse::<IpAddr>() {
-        Ok(IpAddr::V4(ip)) if ip.is_unspecified() => vec!["127.0.0.1".to_string()],
-        Ok(IpAddr::V6(ip)) if ip.is_unspecified() => vec!["::1".to_string()],
+        Ok(IpAddr::V4(ip)) if ip.is_unspecified() => {
+            vec!["127.0.0.1".to_string(), "::1".to_string()]
+        }
+        Ok(IpAddr::V6(ip)) if ip.is_unspecified() => {
+            vec!["::1".to_string(), "127.0.0.1".to_string()]
+        }
         _ => vec![address.to_string()],
     }
 }
@@ -483,6 +494,16 @@ fn stop_tunnel(record: &ForwardRecord) {
 
 fn start_public_tunnel(proxy_port: u16, tools_dir: &Path) -> Result<(Child, String), String> {
     let mut failures = Vec::new();
+    // localhost.run publishes every lhr.life hostname through a wildcard DNS
+    // record, so phones and ISP resolvers can resolve a new link immediately.
+    // Cloudflare Quick Tunnel hostnames are registered individually and can
+    // remain NXDOMAIN in mobile DNS caches after Duckweed has created them.
+    if executable_on_path("ssh").is_some() {
+        match start_ssh_tunnel(proxy_port, tools_dir) {
+            Ok(tunnel) => return Ok(tunnel),
+            Err(error) => failures.push(format!("SSH: {error}")),
+        }
+    }
     if let Some(cloudflared) = find_tunnel_executable("cloudflared", tools_dir) {
         match start_cloudflare_tunnel(cloudflared, proxy_port) {
             Ok(tunnel) => return Ok(tunnel),
@@ -493,12 +514,6 @@ fn start_public_tunnel(proxy_port: u16, tools_dir: &Path) -> Result<(Child, Stri
         match start_ngrok_tunnel(ngrok, proxy_port) {
             Ok(tunnel) => return Ok(tunnel),
             Err(error) => failures.push(format!("ngrok: {error}")),
-        }
-    }
-    if executable_on_path("ssh").is_some() {
-        match start_ssh_tunnel(proxy_port, tools_dir) {
-            Ok(tunnel) => return Ok(tunnel),
-            Err(error) => failures.push(format!("SSH: {error}")),
         }
     }
     if failures.is_empty() {
@@ -691,6 +706,22 @@ fn lookup_public_dns(host: &str) -> PublicDns {
     }
 }
 
+fn wait_for_public_dns(url: &str) -> Result<(), String> {
+    let host = reqwest::Url::parse(url)
+        .map_err(err)?
+        .host_str()
+        .ok_or_else(|| "the tunnel helper returned an invalid public address".to_string())?
+        .to_string();
+    let deadline = std::time::Instant::now() + Duration::from_secs(8);
+    while std::time::Instant::now() < deadline {
+        if matches!(lookup_public_dns(&host), PublicDns::Addresses(_)) {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(350));
+    }
+    Err("the tunnel provider did not publish its hostname in public DNS".to_string())
+}
+
 fn start_ssh_tunnel(proxy_port: u16, tools_dir: &Path) -> Result<(Child, String), String> {
     let ssh = executable_on_path("ssh").ok_or_else(|| "OpenSSH is not installed".to_string())?;
     std::fs::create_dir_all(tools_dir).map_err(err)?;
@@ -716,10 +747,16 @@ fn start_ssh_tunnel(proxy_port: u16, tools_dir: &Path) -> Result<(Child, String)
         "-R",
         &reverse,
         "nokey@localhost.run",
+        "--",
+        "--no-inject-http-proxy-headers",
     ]);
     let (mut child, lines) = spawn_tunnel_process(command)?;
     match wait_for_tunnel_url(&mut child, lines) {
-        Ok(url) => match wait_for_reachable_public_url(&url) {
+        // localhost.run emits the address only after accepting the reverse
+        // forward. Its edge can close Duckweed's synthetic 204 probe with an
+        // incomplete HTTP message even while normal browser requests work, so
+        // that probe must not tear down an otherwise usable SSH tunnel.
+        Ok(url) => match wait_for_public_dns(&url) {
             Ok(()) => Ok((child, url)),
             Err(error) => {
                 let _ = child.kill();
@@ -1266,8 +1303,8 @@ mod tests {
     #[test]
     fn tunneling_uses_explicit_listener_addresses_and_maps_wildcards() {
         assert_eq!(origin_addresses("192.168.1.20"), vec!["192.168.1.20"]);
-        assert_eq!(origin_addresses("0.0.0.0"), vec!["127.0.0.1"]);
-        assert_eq!(origin_addresses("::"), vec!["::1"]);
+        assert_eq!(origin_addresses("0.0.0.0"), vec!["127.0.0.1", "::1"]);
+        assert_eq!(origin_addresses("::"), vec!["::1", "127.0.0.1"]);
         assert_eq!(origin_addresses("*"), vec!["127.0.0.1", "::1"]);
     }
 
@@ -1398,6 +1435,37 @@ mod tests {
             matches!(accepted, Err(error) if error.kind() == io::ErrorKind::WouldBlock),
             "an empty provider probe reached the project server"
         );
+    }
+
+    #[test]
+    fn origin_proxy_waits_for_a_delayed_tunnel_request() {
+        let origin = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let origin_port = origin.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = origin.accept().unwrap();
+            let mut bytes = [0_u8; 4096];
+            let _ = stream.read(&mut bytes).unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\nConnection: close\r\n\r\ndelayed",
+                )
+                .unwrap();
+        });
+
+        let (proxy, proxy_port) = start_origin_proxy("127.0.0.1", origin_port).unwrap();
+        let mut client = TcpStream::connect(("127.0.0.1", proxy_port)).unwrap();
+        // Reverse-tunnel providers establish the TCP connection before the
+        // HTTP request arrives. This delay used to trigger WouldBlock.
+        std::thread::sleep(Duration::from_millis(180));
+        client
+            .write_all(b"GET / HTTP/1.1\r\nHost: public.example\r\n\r\n")
+            .unwrap();
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+
+        proxy.stop();
+        server.join().unwrap();
+        assert!(response.ends_with("delayed"));
     }
 
     #[test]
