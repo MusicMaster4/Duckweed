@@ -24,6 +24,7 @@ import {
 } from "../../lib/agents/types";
 import * as agents from "../../lib/agents/session";
 import * as terminals from "../../lib/terminals";
+import { cKeyAction } from "../../lib/platform";
 import {
   isCaretOnFirstVisualLine,
   shouldNavigatePromptHistory,
@@ -587,29 +588,40 @@ export function AgentComposer({ session, active, inputRef, onSubmit, onInterrupt
 
     // Ctrl+C with draft text clears the box (shell editor / Warp). Empty
     // Ctrl+C is the custom-UI close gesture handled in App (capture phase).
+    // On macOS Cmd+C only copies; it must not wipe the draft.
     // Escape still stops a runaway turn when the box is empty.
-    if (
-      event.key.toLowerCase() === "c" &&
-      (event.ctrlKey || event.metaKey) &&
-      !event.shiftKey &&
-      !event.altKey
-    ) {
-      if (window.getSelection()?.toString()) return;
+    if (event.key.toLowerCase() === "c") {
       const el = event.currentTarget;
-      if (el.selectionStart !== el.selectionEnd) return;
-      if (value.length > 0) {
-        event.preventDefault();
-        undoClearRef.current = value;
-        leaveHistoryBrowse();
-        change("");
-        placeCursor(0);
+      const fieldSelection =
+        el.selectionStart !== el.selectionEnd
+          ? el.value.slice(el.selectionStart ?? 0, el.selectionEnd ?? 0)
+          : "";
+      const pageSelection = window.getSelection()?.toString() ?? "";
+      const hasCopyable = Boolean(
+        (fieldSelection && /\S/.test(fieldSelection)) ||
+          (pageSelection && /\S/.test(pageSelection)),
+      );
+      const action = cKeyAction(event, hasCopyable);
+      if (action === "copy") {
+        // Field or page selection: let the browser / OS copy path run.
         return;
       }
-      if (working) {
-        event.preventDefault();
-        onInterrupt();
+      if (action === "control") {
+        if (fieldSelection || pageSelection) return;
+        if (value.length > 0) {
+          event.preventDefault();
+          undoClearRef.current = value;
+          leaveHistoryBrowse();
+          change("");
+          placeCursor(0);
+          return;
+        }
+        if (working) {
+          event.preventDefault();
+          onInterrupt();
+        }
+        return;
       }
-      return;
     }
 
     // Ctrl+Z restores a draft just wiped by Ctrl+C (while the box is still empty).

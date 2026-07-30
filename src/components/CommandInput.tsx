@@ -8,6 +8,7 @@ import {
 } from "../lib/autosuggest";
 import * as commandHistory from "../lib/commandHistory";
 import { highlightCommand } from "../lib/commandSyntax";
+import { cKeyAction, isControlChord } from "../lib/platform";
 import * as suggestFeedback from "../lib/suggestFeedback";
 import * as terminals from "../lib/terminals";
 
@@ -340,35 +341,42 @@ export function CommandInput({ termId, active, exited, highlight }: Props) {
       return;
     }
 
-    // Ctrl+C — grid selection copies (select-then-copy). A selection inside
-    // this field (Ctrl+A, drag, etc.) must also copy: without that check the
-    // Warp "clear draft" path wipes the whole buffer. No selection → clear
-    // when there is draft text; empty buffer only interrupts when a command
-    // is running so idle Ctrl+C does not spam `^C` prompts.
-    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "c") {
-      const selected = terminals.selection(termId);
-      if (selected) {
+    // C + modifier: Cmd+C copies on macOS; Ctrl+C clears/interrupts. On
+    // Windows/Linux the same Ctrl+C does both (copy when there is a selection).
+    if (e.key.toLowerCase() === "c") {
+      const el = textareaRef.current;
+      const fieldSelection =
+        el !== null && el.selectionStart !== el.selectionEnd
+          ? el.value.slice(el.selectionStart, el.selectionEnd)
+          : "";
+      const gridSelection = terminals.selection(termId);
+      const copyText = fieldSelection || gridSelection;
+      const action = cKeyAction(e, Boolean(copyText && /\S/.test(copyText)));
+      if (action === "copy") {
+        // Field selection: leave the event alone so the browser copies it.
+        if (fieldSelection) return;
         e.preventDefault();
         e.stopPropagation();
-        void navigator.clipboard.writeText(selected);
+        void navigator.clipboard.writeText(copyText);
         return;
       }
-      // Leave the event alone so the browser copies the field selection.
-      const el = textareaRef.current;
-      if (el && el.selectionStart !== el.selectionEnd) {
+      if (action === "control") {
+        // Leave a field selection alone so Ctrl+C can still copy on Win/Linux
+        // when the platform helper already chose "copy" above; with no
+        // copyable text we clear or interrupt.
+        if (fieldSelection) return;
+        e.preventDefault();
+        e.stopPropagation();
+        if (value.length > 0) {
+          flushUnusedOffers();
+          setValue("");
+          setHistoryIndex(null);
+          draftRef.current = "";
+        } else {
+          void terminals.interrupt(termId);
+        }
         return;
       }
-      e.preventDefault();
-      e.stopPropagation();
-      if (value.length > 0) {
-        flushUnusedOffers();
-        setValue("");
-        setHistoryIndex(null);
-        draftRef.current = "";
-      } else {
-        void terminals.interrupt(termId);
-      }
-      return;
     }
 
     // Ctrl+L — clear scrollback (also common in shells).
@@ -379,8 +387,9 @@ export function CommandInput({ termId, active, exited, highlight }: Props) {
       return;
     }
 
-    // Ctrl+D on empty — EOF / logout signal.
-    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "d") {
+    // Ctrl+D on empty — EOF / logout signal. Physical Control only so Cmd+D
+    // on macOS is not treated as end-of-file.
+    if (isControlChord(e) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "d") {
       if (value.length === 0) {
         e.preventDefault();
         e.stopPropagation();

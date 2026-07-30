@@ -59,6 +59,7 @@ import {
   type LaunchIntent,
   type ShellIntegrationStatus,
 } from "./lib/ipc";
+import { cKeyAction } from "./lib/platform";
 import {
   balance,
   findLeaf,
@@ -1967,13 +1968,12 @@ export default function App() {
         return;
       }
 
-      // Plain Ctrl+C with a grid selection: copy, never interrupt. Without this,
-      // focus-on-xterm after a drag turns Ctrl+C into \x03 and PowerShell paints
-      // a stack of `PS …> ^C` lines under the blocks.
-      if (ctrl && !e.shiftKey && !e.altKey && key === "c") {
-        // A custom surface is still a terminal harness. Empty composer Ctrl+C
-        // exits it (Claude/Grok arm a quick second press first). With draft
-        // text, the field clears instead — same gesture as the shell editor.
+      // C + modifier: copy vs clear/interrupt/close agent UI.
+      // macOS: Cmd+C copies, Ctrl+C is terminal control. Elsewhere Ctrl+C does
+      // both (copy when there is a selection). Without this split, focus-on-
+      // xterm after a drag turns every C-chord into \x03 on Windows, and Cmd+C
+      // would wipe drafts on macOS.
+      if (key === "c" && !e.shiftKey && !e.altKey) {
         const field = isTextField(e.target)
           ? (e.target as HTMLInputElement | HTMLTextAreaElement)
           : null;
@@ -1983,23 +1983,46 @@ export default function App() {
           field.selectionEnd !== null &&
           field.selectionStart !== field.selectionEnd;
         const fieldHasText = field !== null && field.value.length > 0;
-        const pageHasSelection = Boolean(window.getSelection()?.toString());
-        if (
-          activeTerm &&
-          !fieldHasSelection &&
-          !pageHasSelection &&
-          !fieldHasText &&
-          terminals.requestCloseAgentUi(activeTerm)
-        ) {
-          return take();
+        const pageSelection = window.getSelection()?.toString() ?? "";
+        const pageHasSelection = Boolean(pageSelection && /\S/.test(pageSelection));
+        const termSelection = activeTerm ? terminals.selection(activeTerm) : "";
+        const hasCopyable =
+          fieldHasSelection ||
+          pageHasSelection ||
+          Boolean(termSelection && /\S/.test(termSelection));
+        const action = cKeyAction(e, hasCopyable);
+
+        if (action === "copy") {
+          if (fieldHasSelection || pageHasSelection) return;
+          if (activeTerm && termSelection) {
+            void navigator.clipboard.writeText(termSelection);
+            return take();
+          }
+          return;
         }
 
-        if (field) return;
-        if (activeTerm) {
-          const text = terminals.selection(activeTerm);
-          if (text) {
-            void navigator.clipboard.writeText(text);
+        if (action === "control") {
+          // Empty composer Ctrl+C exits the custom agent UI (Claude/Grok arm a
+          // quick second press first). With draft text, the field clears
+          // instead — same gesture as the shell editor.
+          if (
+            activeTerm &&
+            !fieldHasSelection &&
+            !pageHasSelection &&
+            !fieldHasText &&
+            terminals.requestCloseAgentUi(activeTerm)
+          ) {
             return take();
+          }
+          if (field) return;
+          if (activeTerm) {
+            const text = terminals.selection(activeTerm);
+            if (text) {
+              // Non-Apple path already chose "copy" when selection exists; keep
+              // a defensive copy for any remaining selection text.
+              void navigator.clipboard.writeText(text);
+              return take();
+            }
           }
         }
       }
