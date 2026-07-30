@@ -708,11 +708,12 @@ export default function App() {
 
   // Once the daily allowance is spent, keep the underlying terminals mounted
   // and mirror their live work into the lock screen. Entries disappear as
-  // their agents or commands settle.
+  // their agents or commands settle. If the user already asked to continue in
+  // the background, keep probing across the midnight unlock so we can still
+  // exit once everything finishes.
   useEffect(() => {
-    if (!dailyLocked) {
+    if (!dailyLocked && !backgroundExitRequestedRef.current) {
       setLockoutBusy([]);
-      backgroundExitRequestedRef.current = false;
       return;
     }
 
@@ -756,12 +757,13 @@ export default function App() {
   }, [autoApproveLockedRequests, dailyLocked]);
 
   // After the user sends locked work to the background, exit quietly once the
-  // last entry settles. A visible finished lockout remains open for the user.
+  // last entry settles (including if midnight unlocks the app first). A visible
+  // finished lockout remains open for the user.
   useEffect(() => {
-    if (!TAURI_RUNTIME || !dailyLocked || lockoutBusy.length > 0) return;
+    if (!TAURI_RUNTIME || lockoutBusy.length > 0) return;
     if (!backgroundExitRequestedRef.current) return;
     void exit(0);
-  }, [dailyLocked, lockoutBusy.length]);
+  }, [lockoutBusy.length]);
 
   const continueLockedInBackground = useCallback(() => {
     if (!TAURI_RUNTIME) return;

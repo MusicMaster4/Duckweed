@@ -77,7 +77,7 @@ export function TitleBar({
             {/*
               Six-tooth cog: flat tips with a deep root (tip r 6.7 vs root r 4.35)
               so the teeth still read as teeth once the 1.4 stroke is applied at
-              15px — the old shallow-tooth path collapsed into a blob.
+              15px. The old shallow-tooth path collapsed into a blob.
             */}
             <svg viewBox="0 0 16 16" aria-hidden="true">
               <circle cx="8" cy="8" r="2" />
