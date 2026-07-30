@@ -1,6 +1,7 @@
 import { useEffect, useState, useSyncExternalStore } from "react";
 
 import { Tooltip } from "./Tooltip";
+import * as bus from "../lib/bus";
 import {
   BUSY_REASON_LABELS,
   GRACE_CHOICES,
@@ -151,19 +152,28 @@ export function PowerWatchTool() {
                 <ul className="power-busy-list">
                   {state.busy.map((entry) => (
                     <li key={entry.termId}>
-                      <Tooltip title={entry.label} detail={BUSY_REASON_HINTS[entry.reason]}>
-                        <div className="power-busy">
+                      <Tooltip
+                        title={entry.label}
+                        detail={`${BUSY_REASON_HINTS[entry.reason]} Click to show this pane.`}
+                      >
+                        <button
+                          type="button"
+                          className="power-busy"
+                          onClick={() => bus.emit("term:reveal", { termId: entry.termId })}
+                        >
                           <span className={`power-dot is-${entry.reason}`} aria-hidden="true" />
                           <span className="power-busy-label">{entry.label}</span>
                           <span className="power-busy-reason">
                             {BUSY_REASON_LABELS[entry.reason]}
                           </span>
-                        </div>
+                        </button>
                       </Tooltip>
                     </li>
                   ))}
                 </ul>
-                <p className="power-card-note">The clock starts when they all go quiet.</p>
+                <p className="power-card-note">
+                  The clock starts when they all go quiet. Click a row to jump to that pane.
+                </p>
               </>
             )}
           </article>

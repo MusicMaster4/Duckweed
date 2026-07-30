@@ -340,17 +340,26 @@ export function CommandInput({ termId, active, exited, highlight }: Props) {
       return;
     }
 
-    // Ctrl+C — if the grid has a selection, copy it (select-then-copy). Else
-    // clear the editor buffer (Warp). Empty buffer only interrupts when a
-    // command is running; idle Ctrl+C would otherwise spam `^C` prompts.
+    // Ctrl+C — grid selection copies (select-then-copy). A selection inside
+    // this field (Ctrl+A, drag, etc.) must also copy: without that check the
+    // Warp "clear draft" path wipes the whole buffer. No selection → clear
+    // when there is draft text; empty buffer only interrupts when a command
+    // is running so idle Ctrl+C does not spam `^C` prompts.
     if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "c") {
-      e.preventDefault();
-      e.stopPropagation();
       const selected = terminals.selection(termId);
       if (selected) {
+        e.preventDefault();
+        e.stopPropagation();
         void navigator.clipboard.writeText(selected);
         return;
       }
+      // Leave the event alone so the browser copies the field selection.
+      const el = textareaRef.current;
+      if (el && el.selectionStart !== el.selectionEnd) {
+        return;
+      }
+      e.preventDefault();
+      e.stopPropagation();
       if (value.length > 0) {
         flushUnusedOffers();
         setValue("");

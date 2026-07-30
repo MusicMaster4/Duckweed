@@ -362,14 +362,18 @@ export function AssistantMarkdown({ text }: { text: string }) {
       continue;
     }
 
-    if (/^\s*\d+[.)]\s+/.test(line)) {
+    const orderedListItem = /^\s*(\d+)[.)]\s+(.+)$/.exec(line);
+    if (orderedListItem) {
       const entries: string[] = [];
-      while (index < lines.length && /^\s*\d+[.)]\s+/.test(lines[index])) {
-        entries.push(lines[index].replace(/^\s*\d+[.)]\s+/, ""));
+      const start = Number(orderedListItem[1]);
+      while (index < lines.length) {
+        const entry = /^\s*(\d+)[.)]\s+(.+)$/.exec(lines[index]);
+        if (!entry) break;
+        entries.push(entry[2]);
         index += 1;
       }
       blocks.push(
-        <ol key={`ol-${index}`}>
+        <ol key={`ol-${index}`} start={start === 1 ? undefined : start}>
           {entries.map((entry, entryIndex) => (
             <li key={entryIndex}>{inlineMarkdown(entry, `ol-${index}-${entryIndex}`)}</li>
           ))}

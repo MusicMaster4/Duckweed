@@ -134,6 +134,9 @@ describe("power watch panel", () => {
     expect(html).toContain("duckweed · claude");
     expect(html).toContain("needs you");
     expect(html).toContain("Cancel");
+    // Each busy row is a control that jumps the UI to that pane.
+    expect(html).toContain('class="power-busy"');
+    expect(html).toContain("Click a row to jump to that pane");
     // Arming is not offered twice.
     expect(html).not.toContain("Arm sleep");
   });

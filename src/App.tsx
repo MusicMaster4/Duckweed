@@ -705,6 +705,32 @@ export default function App() {
     [probeActivity],
   );
 
+  // Power watch (and anything else that lists panes) can jump the UI to a
+  // terminal by id: switch tab, select the leaf, leave Settings if open.
+  useEffect(
+    () =>
+      bus.on("term:reveal", ({ termId }) => {
+        const tab = tabsRef.current.find((candidate) =>
+          leaves(candidate.root).some((node) => node.term === termId),
+        );
+        if (!tab) return;
+        const leafNode = leaves(tab.root).find((node) => node.term === termId);
+        if (!leafNode) return;
+
+        acknowledgeTerm(termId);
+        setSettingsActive(false);
+        setActiveTabId(tab.id);
+        if (tab.activeLeaf !== leafNode.id) {
+          terminals.clearAllBlockSelections();
+          updateTab(tab.id, (t) => ({ ...t, activeLeaf: leafNode.id }));
+        } else {
+          // Same pane already selected: still put OS focus back on it.
+          terminals.focus(termId);
+        }
+      }),
+    [acknowledgeTerm, updateTab],
+  );
+
   // Once the daily allowance is spent, keep the underlying terminals mounted
   // and mirror their live work into the lock screen. Entries disappear as
   // their agents or commands settle. If the user already asked to continue in

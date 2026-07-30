@@ -191,6 +191,27 @@ describe("official agent presentation", () => {
     expect(html).not.toContain("**important**");
   });
 
+  test("preserves ordered-list numbering across descriptions between items", () => {
+    const html = renderToStaticMarkup(
+      <AssistantMarkdown
+        text={[
+          "1. First feature",
+          "Description of the first feature.",
+          "",
+          "2. Second feature",
+          "Description of the second feature.",
+          "",
+          "3. Third feature",
+          "Description of the third feature.",
+        ].join("\n")}
+      />,
+    );
+
+    expect(html).toContain("<ol><li>First feature</li></ol>");
+    expect(html).toContain('<ol start="2"><li>Second feature</li></ol>');
+    expect(html).toContain('<ol start="3"><li>Third feature</li></ol>');
+  });
+
   test("renders Markdown tables with inline formatting and alignment", () => {
     const html = renderToStaticMarkup(
       <AssistantMarkdown
