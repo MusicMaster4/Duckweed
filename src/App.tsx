@@ -46,6 +46,7 @@ import {
 import { playCompletionSound, preloadCompletionSound } from "./lib/completionSound";
 import * as commandHistory from "./lib/commandHistory";
 import { clearGreetings } from "./lib/greetings";
+import * as suggestFeedback from "./lib/suggestFeedback";
 import {
   frontendReady,
   listShells,
@@ -58,6 +59,7 @@ import {
   type LaunchIntent,
   type ShellIntegrationStatus,
 } from "./lib/ipc";
+import { cKeyAction } from "./lib/platform";
 import {
   balance,
   findLeaf,
@@ -1966,13 +1968,12 @@ export default function App() {
         return;
       }
 
-      // Plain Ctrl+C with a grid selection: copy, never interrupt. Without this,
-      // focus-on-xterm after a drag turns Ctrl+C into \x03 and PowerShell paints
-      // a stack of `PS …> ^C` lines under the blocks.
-      if (ctrl && !e.shiftKey && !e.altKey && key === "c") {
-        // A custom surface is still a terminal harness. Empty composer Ctrl+C
-        // exits it (Claude/Grok arm a quick second press first). With draft
-        // text, the field clears instead — same gesture as the shell editor.
+      // C + modifier: copy vs clear/interrupt/close agent UI.
+      // macOS: Cmd+C copies, Ctrl+C is terminal control. Elsewhere Ctrl+C does
+      // both (copy when there is a selection). Without this split, focus-on-
+      // xterm after a drag turns every C-chord into \x03 on Windows, and Cmd+C
+      // would wipe drafts on macOS.
+      if (key === "c" && !e.shiftKey && !e.altKey) {
         const field = isTextField(e.target)
           ? (e.target as HTMLInputElement | HTMLTextAreaElement)
           : null;
@@ -1982,24 +1983,41 @@ export default function App() {
           field.selectionEnd !== null &&
           field.selectionStart !== field.selectionEnd;
         const fieldHasText = field !== null && field.value.length > 0;
-        const pageHasSelection = Boolean(window.getSelection()?.toString());
-        if (
-          activeTerm &&
-          !fieldHasSelection &&
-          !pageHasSelection &&
-          !fieldHasText &&
-          terminals.requestCloseAgentUi(activeTerm)
-        ) {
-          return take();
-        }
+        const pageSelection = window.getSelection()?.toString() ?? "";
+        const pageHasSelection = Boolean(pageSelection && /\S/.test(pageSelection));
+        const termSelection = activeTerm ? terminals.selection(activeTerm) : "";
+        const hasCopyable =
+          fieldHasSelection ||
+          pageHasSelection ||
+          Boolean(termSelection && /\S/.test(termSelection));
+        const action = cKeyAction(e, hasCopyable);
 
-        if (field) return;
-        if (activeTerm) {
-          const text = terminals.selection(activeTerm);
-          if (text) {
-            void navigator.clipboard.writeText(text);
+        if (action === "copy") {
+          if (fieldHasSelection || pageHasSelection) return;
+          if (activeTerm && termSelection) {
+            void navigator.clipboard.writeText(termSelection);
             return take();
           }
+          return;
+        }
+
+        if (action === "control") {
+          // Empty composer Ctrl+C exits the custom agent UI (Claude/Grok arm a
+          // quick second press first). With draft text, the field clears
+          // instead — same gesture as the shell editor.
+          if (
+            activeTerm &&
+            !fieldHasSelection &&
+            !pageHasSelection &&
+            !fieldHasText &&
+            terminals.requestCloseAgentUi(activeTerm)
+          ) {
+            return take();
+          }
+          // Focused field owns clear/interrupt. With a grid selection, do not
+          // copy or consume: on Apple Ctrl+C is always control (interrupt), and
+          // non-Apple already chose "copy" above when selection was copyable.
+          if (field) return;
         }
       }
 
@@ -2662,7 +2680,12 @@ export default function App() {
                       "Duckweed will forget every command it learned. Ghost suggestions start fresh. This can't be undone.",
                     confirmLabel: "Reset",
                   }).then((ok) => {
-                    if (ok) commandHistory.clear();
+                    if (ok) {
+                      commandHistory.clear();
+                      // Unlearning table is the other half of ghost ranking —
+                      // leave it and suppressed commands stay invisible forever.
+                      suggestFeedback.clear();
+                    }
                     return ok;
                   })
                 }

@@ -137,10 +137,27 @@ describe("AI-written stable changelogs", () => {
 
 describe("the build job", () => {
   const build = release.jobs.build;
+  const validate = release.jobs.validate;
+  const manifest = release.jobs.manifest;
+  const matrix = build.strategy.matrix.include;
 
-  test("builds on Windows", () => {
-    expect(build["runs-on"]).toBe("windows-latest");
-    expect(runSteps(release).some((s) => s.run.includes("tauri build") && s.run.includes("--bundles nsis"))).toBe(true);
+  test("builds each supported native package on the right runner", () => {
+    expect(matrix.map((entry) => entry.platform).sort()).toEqual(["linux", "macos", "windows"]);
+    expect(matrix.find((entry) => entry.platform === "windows")).toMatchObject({
+      runner: "windows-latest",
+      bundles: "nsis",
+    });
+    expect(matrix.find((entry) => entry.platform === "linux")).toMatchObject({
+      runner: "ubuntu-22.04",
+      bundles: "deb,appimage",
+    });
+    expect(matrix.find((entry) => entry.platform === "macos")).toMatchObject({
+      runner: "macos-latest",
+      bundles: "dmg",
+      target_args: "--target universal-apple-darwin",
+    });
+    expect(build["runs-on"]).toContain("matrix.runner");
+    expect(build.strategy["fail-fast"]).toBe(false);
   });
 
   test("stamps the resolved version and channel before building", () => {
@@ -151,29 +168,46 @@ describe("the build job", () => {
     expect(build.steps[apply].run).toContain("--channel");
   });
 
-  test("runs the checks before spending ten minutes on a compile", () => {
-    const checks = build.steps.findIndex((s) => s.run?.includes("bun test"));
-    const compile = build.steps.findIndex((s) => s.run?.includes("tauri build"));
-    expect(checks).toBeGreaterThanOrEqual(0);
-    expect(checks).toBeLessThan(compile);
+  test("validates the frontend and Linux backend before the native build matrix", () => {
+    const validationCommands = runSteps({ jobs: { validate } }).map((step) => step.run);
+    expect(validationCommands.some((run) => run.includes("bun run typecheck") && run.includes("bun test"))).toBe(true);
+    expect(validationCommands.some((run) => run.includes("cargo check --locked"))).toBe(true);
+    expect(build.needs).toContain("validate");
   });
 
-  test("signs the update with the repository's private key", () => {
+  test("signs every updater artifact with the repository's private key", () => {
     const step = build.steps.find((s) => s.run?.includes("tauri build"));
     expect(step.env.TAURI_SIGNING_PRIVATE_KEY).toContain("secrets.TAURI_SIGNING_PRIVATE_KEY");
     expect(step.env.TAURI_SIGNING_PRIVATE_KEY_PASSWORD).toContain("secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD");
   });
 
-  test("uploads the installer and the manifest to the release it belongs to", () => {
-    const step = build.steps.find((s) => s.run?.includes("release upload"));
-    expect(step.run).toContain("bundle/nsis/*");
-    expect(step.run).toContain("latest.json");
-    expect(step.run).toContain("needs.version.outputs.tag");
+  test("macOS defaults to ad-hoc signing and can opt into Developer ID signing and notarization", () => {
+    const signing = build.steps.find((step) => step.run?.includes("APPLE_SIGNING_IDENTITY=-"));
+    const compile = build.steps.find((step) => step.run?.includes("tauri build"));
+    expect(signing.if).toContain("matrix.platform == 'macos'");
+    expect(signing.env.APPLE_CERTIFICATE).toContain("secrets.APPLE_CERTIFICATE");
+    expect(signing.env.CONFIGURED_SIGNING_IDENTITY).toContain("secrets.APPLE_SIGNING_IDENTITY");
+    expect(compile.env.APPLE_ID).toContain("secrets.APPLE_ID");
+    expect(compile.env.APPLE_PASSWORD).toContain("secrets.APPLE_PASSWORD");
+    expect(compile.env.APPLE_TEAM_ID).toContain("secrets.APPLE_TEAM_ID");
+  });
+
+  test("assembles one manifest only after every platform artifact is available", () => {
+    const download = manifest.steps.find((step) => step.uses?.startsWith("actions/download-artifact"));
+    const generate = manifest.steps.find((step) => step.run?.includes("updater-manifest.mjs"));
+    const upload = manifest.steps.find((step) => step.run?.includes("release upload"));
+    expect(download.with.pattern).toBe("duckweed-release-*");
+    expect(download.with["merge-multiple"]).toBe(true);
+    expect(generate.run).toContain("--bundle-dir release-assets");
+    expect(upload.run).toContain("release-assets/*");
+    expect(upload.run).toContain("latest.json");
+    expect(upload.run).toContain("needs.version.outputs.tag");
+    expect(release.jobs.publish.needs).toContain("manifest");
   });
 
   test("a test build publishes nothing", () => {
-    const upload = build.steps.find((s) => s.run?.includes("release upload"));
-    const artifact = build.steps.find((s) => s.uses?.startsWith("actions/upload-artifact"));
+    const upload = manifest.steps.find((s) => s.run?.includes("release upload"));
+    const artifact = manifest.steps.find((s) => s.uses?.startsWith("actions/upload-artifact"));
     expect(upload.if).toContain("publish == 'true'");
     expect(artifact.if).toContain("publish != 'true'");
     expect(release.jobs.publish.if).toContain("publish == 'true'");
@@ -195,6 +229,15 @@ describe("CI workflow", () => {
     const commands = runSteps(ci).map((s) => s.run.trim());
     expect(commands).toContain("bun run typecheck");
     expect(commands).toContain("bun test");
+    expect(commands).toContain("cargo check --locked --manifest-path src-tauri/Cargo.toml");
+  });
+
+  test("compiles the Rust backend on Linux, macOS, and Windows", () => {
+    const rust = ci.jobs.rust;
+    expect(rust.strategy.matrix.os).toEqual(["ubuntu-22.04", "macos-latest", "windows-latest"]);
+    expect(rust.strategy["fail-fast"]).toBe(false);
+    const linuxDeps = rust.steps.find((step) => step.if?.includes("ubuntu-22.04"));
+    expect(linuxDeps.run).toContain("libwebkit2gtk-4.1-dev");
   });
 });
 
@@ -217,7 +260,7 @@ describe("the shipped app configuration", () => {
 
   test("produces the artifacts the updater downloads", () => {
     expect(tauriConfig.bundle.createUpdaterArtifacts).toBe(true);
-    expect(tauriConfig.bundle.targets).toContain("nsis");
+    expect(tauriConfig.bundle.targets).toEqual(expect.arrayContaining(["nsis", "deb", "appimage", "dmg"]));
   });
 
   test("installs per user, so neither installing nor updating asks for admin", () => {

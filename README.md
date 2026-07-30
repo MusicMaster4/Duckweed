@@ -18,7 +18,7 @@ it.
 
 <p>
   <a href="https://github.com/MusicMaster4/Duckweed/releases/latest">
-    <img src="https://img.shields.io/badge/Download-stable-78dc50?style=for-the-badge&logo=windows&logoColor=111511" alt="Download the latest stable release" />
+    <img src="https://img.shields.io/badge/Download-stable-78dc50?style=for-the-badge&logo=github&logoColor=111511" alt="Download the latest stable release" />
   </a>
   &nbsp;
   <a href="https://github.com/MusicMaster4/Duckweed/releases/download/channel-testing/duckweed-beta-setup.exe">
@@ -26,7 +26,7 @@ it.
   </a>
 </p>
 
-<sub>Windows installer · installs without administrator rights · updates from inside the app</sub>
+<sub>Windows x64 · macOS universal · Linux x64 · signed in-app updates</sub>
 
 <br /><br />
 
@@ -74,15 +74,14 @@ GitHub always sends it to the newest stable Duckweed release.
 
 ### Beta
 
-**[Download the newest beta installer](https://github.com/MusicMaster4/Duckweed/releases/download/channel-testing/duckweed-beta-setup.exe)**
+**[Download the newest Windows beta installer](https://github.com/MusicMaster4/Duckweed/releases/download/channel-testing/duckweed-beta-setup.exe)**
 
 Beta builds ship earlier and may be rough around the edges. They follow their own
 update channel, so a beta install receives beta updates and a stable install only
 receives stable ones. Install the other build manually whenever you want to
 switch channels. The beta download URL stays the same while the file behind it is
-replaced on every beta release. You can browse the
-[beta release notes](https://github.com/MusicMaster4/Duckweed/releases?q=prerelease%3Atrue)
-before installing.
+replaced on every beta release. macOS and Linux beta packages are attached to
+each [versioned beta release](https://github.com/MusicMaster4/Duckweed/releases?q=prerelease%3Atrue).
 
 The Windows installer is per-user. It does not ask for administrator access, and
 later updates can be installed from the version chip in the status bar or from
@@ -94,9 +93,31 @@ later updates can be installed from the version chip in the status bar or from
 
 ## Platform support and prerequisites
 
-Official prebuilt releases are currently available for Windows only. Linux and
-macOS users can build Duckweed from source, but those platforms do not yet have
-official installers or the same release testing as Windows.
+Official releases include:
+
+| Platform | Package | Update behavior |
+| --- | --- | --- |
+| Windows x64 | NSIS `.exe` | In-app updater |
+| macOS Intel and Apple Silicon | Universal `.dmg` | In-app updater |
+| Linux x64 | `.AppImage` | In-app updater |
+| Debian and Ubuntu x64 | `.deb` | In-app updater with an authentication prompt |
+
+On macOS, open the DMG and move Duckweed to Applications. Until the optional
+Apple Developer ID and notarization credentials are configured for releases,
+Gatekeeper may require right-clicking Duckweed and choosing **Open** on first
+launch.
+
+On Linux, make the AppImage executable before its first launch:
+
+```bash
+chmod +x Duckweed_*.AppImage
+```
+
+The AppImage updates itself in place. The deb package uses the system package
+installer for updates, so Linux asks for authentication before applying one.
+
+Windows Explorer folder actions and the taskbar completion badge remain
+Windows-only. Their settings stay hidden on macOS and Linux.
 
 Duckweed runs shells and coding-agent CLIs that are already installed on your
 computer. Before launching an agent in Duckweed, install its CLI, sign in or
@@ -242,7 +263,7 @@ Right-click copies a selection. With no selection, it pastes from the clipboard.
 
 You will need [Bun](https://bun.sh/), [Rust](https://www.rust-lang.org/tools/install),
 and the [Tauri 2 prerequisites](https://v2.tauri.app/start/prerequisites/) for
-your operating system. Duckweed's Rust crates require Rust 1.77 or newer.
+your operating system. Duckweed's locked Rust crates require Rust 1.88 or newer.
 
 ```bash
 git clone https://github.com/MusicMaster4/Duckweed.git
@@ -303,9 +324,9 @@ bun test
 cd src-tauri && cargo check
 ```
 
-GitHub CI currently runs the TypeScript check and Bun test suite. Run
-`cargo check` locally before submitting Rust changes; it is not currently part
-of the automated CI workflow.
+GitHub CI runs the TypeScript check, Bun test suite, and `cargo check` on Linux,
+macOS, and Windows. Native release packaging is also performed on the matching
+operating system before a release can be published.
 
 Release builds come from two branches: `main` publishes stable releases and
 `testing` publishes beta releases. The full versioning, signing, and updater

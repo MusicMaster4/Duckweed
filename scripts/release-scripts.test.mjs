@@ -10,7 +10,13 @@ import {
   withTauriConfig,
 } from "./apply-version.mjs";
 import { parseArgs as parseVersionArgs } from "./release-version.mjs";
-import { buildManifest, collectAssets, downloadUrl } from "./updater-manifest.mjs";
+import {
+  REQUIRED_PLATFORMS,
+  buildManifest,
+  collectAssets,
+  downloadUrl,
+  platformsForAsset,
+} from "./updater-manifest.mjs";
 
 const REPO = "MusicMaster4/Duckweed";
 
@@ -145,18 +151,40 @@ describe("release script arguments", () => {
 });
 
 describe("updater manifest", () => {
-  const assets = [{ name: "Duckweed_1.2.3_x64-setup.exe", signature: "SIGNATURE" }];
+  const assetsFor = (version, windowsName = `Duckweed_${version}_x64-setup.exe`) => [
+    { name: windowsName, signature: "WINDOWS_SIGNATURE" },
+    { name: `Duckweed_${version}_amd64.AppImage`, signature: "LINUX_SIGNATURE" },
+    { name: `Duckweed_${version}_amd64.deb`, signature: "DEB_SIGNATURE" },
+    { name: `Duckweed_${version}_universal.app.tar.gz`, signature: "MACOS_SIGNATURE" },
+  ];
+  const assets = assetsFor("1.2.3");
 
-  test("points the Windows target at the signed installer on the release", () => {
+  test("points every official target at its signed artifact on the release", () => {
     const manifest = buildManifest({ version: "1.2.3", repo: REPO, tag: "v1.2.3", notes: "hi", assets });
     expect(manifest.version).toBe("1.2.3");
     expect(manifest.notes).toBe("hi");
     expect(manifest.platforms["windows-x86_64"]).toEqual({
-      signature: "SIGNATURE",
+      signature: "WINDOWS_SIGNATURE",
       url: `https://github.com/${REPO}/releases/download/v1.2.3/Duckweed_1.2.3_x64-setup.exe`,
     });
-    // The updater looks for the installer-specific key first.
+    expect(manifest.platforms["linux-x86_64"]).toEqual({
+      signature: "LINUX_SIGNATURE",
+      url: `https://github.com/${REPO}/releases/download/v1.2.3/Duckweed_1.2.3_amd64.AppImage`,
+    });
+    expect(manifest.platforms["linux-x86_64-appimage"]).toEqual(manifest.platforms["linux-x86_64"]);
+    expect(manifest.platforms["linux-x86_64-deb"]).toEqual({
+      signature: "DEB_SIGNATURE",
+      url: `https://github.com/${REPO}/releases/download/v1.2.3/Duckweed_1.2.3_amd64.deb`,
+    });
+    expect(manifest.platforms["darwin-aarch64"]).toEqual({
+      signature: "MACOS_SIGNATURE",
+      url: `https://github.com/${REPO}/releases/download/v1.2.3/Duckweed_1.2.3_universal.app.tar.gz`,
+    });
+    expect(manifest.platforms["darwin-x86_64"]).toEqual(manifest.platforms["darwin-aarch64"]);
+    expect(manifest.platforms["darwin-aarch64-app"]).toEqual(manifest.platforms["darwin-aarch64"]);
+    expect(manifest.platforms["darwin-x86_64-app"]).toEqual(manifest.platforms["darwin-x86_64"]);
     expect(manifest.platforms["windows-x86_64-nsis"]).toEqual(manifest.platforms["windows-x86_64"]);
+    expect(REQUIRED_PLATFORMS.every((platform) => manifest.platforms[platform])).toBe(true);
     expect(Date.parse(manifest.pub_date)).not.toBeNaN();
   });
 
@@ -165,24 +193,65 @@ describe("updater manifest", () => {
       version: "1.2.3-testing.4",
       repo: REPO,
       tag: "v1.2.3-testing.4",
-      assets: [{ name: "Duckweed_1.2.3-testing.4_x64-setup.exe", signature: "S" }],
+      assets: assetsFor("1.2.3-testing.4"),
     });
     expect(manifest.version).toBe("1.2.3-testing.4");
     expect(manifest.platforms["windows-x86_64"].url).toContain("v1.2.3-testing.4");
+    expect(manifest.platforms["linux-x86_64"].url).toContain("v1.2.3-testing.4");
+    expect(manifest.platforms["darwin-aarch64"].url).toContain("v1.2.3-testing.4");
   });
 
   test("accepts the zipped installer layout too", () => {
     for (const name of ["Duckweed_1.2.3_x64-setup.exe.zip", "Duckweed_1.2.3_x64.nsis.zip"]) {
-      const manifest = buildManifest({ version: "1.2.3", repo: REPO, tag: "v1.2.3", assets: [{ name, signature: "S" }] });
+      const manifest = buildManifest({
+        version: "1.2.3",
+        repo: REPO,
+        tag: "v1.2.3",
+        assets: assetsFor("1.2.3", name),
+      });
       expect(manifest.platforms["windows-x86_64"].url).toContain(name);
     }
   });
 
-  test("a build with no signed installer refuses to publish a manifest", () => {
+  test("recognises universal and architecture-specific native updater artifacts", () => {
+    expect(platformsForAsset("Duckweed_1.2.3_amd64.AppImage")).toEqual([
+      "linux-x86_64",
+      "linux-x86_64-appimage",
+    ]);
+    expect(platformsForAsset("Duckweed_1.2.3_arm64.AppImage")).toEqual([
+      "linux-aarch64",
+      "linux-aarch64-appimage",
+    ]);
+    expect(platformsForAsset("Duckweed_1.2.3_amd64.deb")).toEqual(["linux-x86_64-deb"]);
+    expect(platformsForAsset("Duckweed_1.2.3_universal.app.tar.gz")).toEqual([
+      "darwin-x86_64",
+      "darwin-x86_64-app",
+      "darwin-aarch64",
+      "darwin-aarch64-app",
+    ]);
+    expect(platformsForAsset("Duckweed_1.2.3_aarch64.app.tar.gz")).toEqual([
+      "darwin-aarch64",
+      "darwin-aarch64-app",
+    ]);
+    expect(platformsForAsset("Duckweed_1.2.3_x86_64.app.tar.gz")).toEqual([
+      "darwin-x86_64",
+      "darwin-x86_64-app",
+    ]);
+  });
+
+  test("a partial or ambiguous matrix refuses to publish a manifest", () => {
     expect(() => buildManifest({ version: "1.2.3", repo: REPO, tag: "v1.2.3", assets: [] })).toThrow();
     expect(() =>
       buildManifest({ version: "1.2.3", repo: REPO, tag: "v1.2.3", assets: [{ name: "notes.txt", signature: "S" }] }),
     ).toThrow();
+    expect(() =>
+      buildManifest({
+        version: "1.2.3",
+        repo: REPO,
+        tag: "v1.2.3",
+        assets: [...assets, { ...assets[1], name: "Duckweed_1.2.3_x86_64.AppImage" }],
+      }),
+    ).toThrow(/multiple signed updater artifacts for linux-x86_64/);
   });
 
   test("a version we do not recognise never reaches a manifest", () => {

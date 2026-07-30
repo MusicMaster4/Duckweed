@@ -43,9 +43,12 @@ struct DurableSettings(Mutex<()>);
 
 const COMMAND_HISTORY_KEY: &str = "duckweed:command-history:v1";
 
-const DURABLE_SETTING_KEYS: [&str; 7] = [
+const DURABLE_SETTING_KEYS: [&str; 8] = [
     "duckweed:state:v1",
     "duckweed:usage:v1",
+    // Ghost-text unlearning table — must match frontend DURABLE_KEYS or restore
+    // aborts when seeding WebView feedback into app-data and never reaches history.
+    "duckweed:suggest-feedback:v1",
     "duckweed:checklist:v1",
     "duckweed:agent-preferences:v1",
     "duckweed:layouts:v1",
@@ -662,6 +665,13 @@ fn isolate_dev_webview_profile() {
 }
 
 fn main() {
+    // Packaged Unix GUI apps start outside a login shell. Repair PATH before
+    // shell and agent discovery so Homebrew and user-installed CLIs stay visible.
+    #[cfg(unix)]
+    if let Err(error) = fix_path_env::fix() {
+        eprintln!("duckweed: could not import the login-shell PATH: {error}");
+    }
+
     #[cfg(all(windows, debug_assertions))]
     isolate_dev_webview_profile();
 
