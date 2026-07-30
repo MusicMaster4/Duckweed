@@ -662,6 +662,13 @@ fn isolate_dev_webview_profile() {
 }
 
 fn main() {
+    // Packaged Unix GUI apps start outside a login shell. Repair PATH before
+    // shell and agent discovery so Homebrew and user-installed CLIs stay visible.
+    #[cfg(unix)]
+    if let Err(error) = fix_path_env::fix() {
+        eprintln!("duckweed: could not import the login-shell PATH: {error}");
+    }
+
     #[cfg(all(windows, debug_assertions))]
     isolate_dev_webview_profile();
 
