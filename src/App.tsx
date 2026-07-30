@@ -2014,16 +2014,10 @@ export default function App() {
           ) {
             return take();
           }
+          // Focused field owns clear/interrupt. With a grid selection, do not
+          // copy or consume: on Apple Ctrl+C is always control (interrupt), and
+          // non-Apple already chose "copy" above when selection was copyable.
           if (field) return;
-          if (activeTerm) {
-            const text = terminals.selection(activeTerm);
-            if (text) {
-              // Non-Apple path already chose "copy" when selection exists; keep
-              // a defensive copy for any remaining selection text.
-              void navigator.clipboard.writeText(text);
-              return take();
-            }
-          }
         }
       }
 

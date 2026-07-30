@@ -607,7 +607,9 @@ export function AgentComposer({ session, active, inputRef, onSubmit, onInterrupt
         return;
       }
       if (action === "control") {
-        if (fieldSelection || pageSelection) return;
+        // Only the "copy" branch above leaves selection alone. On Apple Ctrl+C
+        // is never copy, so a selected draft (or page selection) must still
+        // clear/interrupt rather than falling through to the browser.
         if (value.length > 0) {
           event.preventDefault();
           undoClearRef.current = value;

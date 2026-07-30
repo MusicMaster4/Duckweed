@@ -361,10 +361,10 @@ export function CommandInput({ termId, active, exited, highlight }: Props) {
         return;
       }
       if (action === "control") {
-        // Leave a field selection alone so Ctrl+C can still copy on Win/Linux
-        // when the platform helper already chose "copy" above; with no
-        // copyable text we clear or interrupt.
-        if (fieldSelection) return;
+        // Always clear/interrupt on the control path. Field selection is only
+        // preserved in the "copy" branch above (Win/Linux Ctrl+C with text, or
+        // macOS Cmd+C). On Apple, Ctrl+C is never copy, so a selected draft
+        // must still clear rather than falling through to the browser.
         e.preventDefault();
         e.stopPropagation();
         if (value.length > 0) {
