@@ -190,6 +190,16 @@ describe("the build job", () => {
     expect(compile.env.APPLE_ID).toContain("secrets.APPLE_ID");
     expect(compile.env.APPLE_PASSWORD).toContain("secrets.APPLE_PASSWORD");
     expect(compile.env.APPLE_TEAM_ID).toContain("secrets.APPLE_TEAM_ID");
+    // Empty secrets still become env vars; Tauri must not see a partial set.
+    expect(compile.run).toContain("unset APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID");
+    expect(compile.run).toContain("Skipping Apple notarization");
+  });
+
+  test("stages only packaged files so intermediate bundle directories do not break cp", () => {
+    const stage = build.steps.find((step) => step.run?.includes("release-assets"));
+    expect(stage.run).toContain("stage_files");
+    expect(stage.run).toContain('[ -f "$f" ]');
+    expect(stage.run).not.toMatch(/cp "\$BUNDLE_DIR"\/deb\/\* "\$BUNDLE_DIR"\/appimage\/\*/);
   });
 
   test("assembles one manifest only after every platform artifact is available", () => {
