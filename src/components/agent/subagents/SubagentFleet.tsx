@@ -1,6 +1,6 @@
 import type { SubagentSummary } from "../../../lib/agents/subagents";
 import {
-  runningSubagentCount,
+  subagentFleetStatusLabel,
   subagentStatusLabel,
 } from "../../../lib/agents/subagents";
 import type { AgentId } from "../../../lib/agents/types";
@@ -35,7 +35,7 @@ export function SubagentFleet({
   onSelect: (callId: string) => void;
 }) {
   if (!subagents.length) return null;
-  const active = runningSubagentCount(subagents);
+  const fleetStatus = subagentFleetStatusLabel(subagents);
 
   return (
     <section
@@ -64,11 +64,7 @@ export function SubagentFleet({
     >
       <div className="agent-sub-fleet-head">
         <strong>Subagents</strong>
-        <span>
-          {active > 0
-            ? `${active} ${active === 1 ? "subagent" : "subagents"} running`
-            : `${subagents.length} completed`}
-        </span>
+        <span>{fleetStatus}</span>
       </div>
       <div
         className="agent-sub-fleet-list"
@@ -93,8 +89,13 @@ export function SubagentFleet({
             >
               <span className="agent-sub-status-dot" aria-hidden="true" />
               <span className="agent-sub-chip-copy">
-                <strong>{subagent.label}</strong>
-                <span>{subagent.activity}</span>
+                <span className="agent-sub-chip-heading">
+                  <strong>{subagent.label}</strong>
+                  <span className={`agent-sub-chip-status is-${subagent.status}`}>
+                    {status}
+                  </span>
+                </span>
+                <span className="agent-sub-chip-activity">{subagent.activity}</span>
               </span>
             </button>
           );

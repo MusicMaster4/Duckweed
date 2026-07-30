@@ -4,7 +4,9 @@ import type { AgentItem, ToolItem } from "./types";
 import {
   COMPLETED_SUBAGENT_FLEET_TTL_MS,
   runningSubagentCount,
+  subagentFleetStatusLabel,
   subagentFleetIsComplete,
+  subagentStatusCounts,
   subagentsForTurn,
   subagentStatusLabel,
 } from "./subagents";
@@ -101,9 +103,19 @@ describe("subagentsForTurn", () => {
       task("one", "running"),
       task("two", "pending"),
       task("three", "done"),
+      task("four", "error"),
     ]);
 
     expect(runningSubagentCount(subagents)).toBe(2);
+    expect(subagentStatusCounts(subagents)).toEqual({
+      running: 1,
+      pending: 1,
+      done: 1,
+      error: 1,
+    });
+    expect(subagentFleetStatusLabel(subagents)).toBe(
+      "1 running · 1 queued · 1 completed · 1 failed",
+    );
     expect(subagentStatusLabel("error")).toBe("Failed");
   });
 

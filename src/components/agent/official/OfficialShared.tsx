@@ -508,7 +508,7 @@ export function PlanTracker({
           <strong>{running?.text ?? fallbackSummary}</strong>
           {runningSubagents > 0 && (
             <small>
-              {runningSubagents} running{" "}
+              {runningSubagents} active{" "}
               {runningSubagents === 1 ? "subagent" : "subagents"}
             </small>
           )}
