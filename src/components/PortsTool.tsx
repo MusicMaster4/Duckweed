@@ -105,7 +105,10 @@ export function PortsTool({ ownerNames }: Props) {
     try {
       const snapshot = await portsList();
       setPorts(snapshot.ports);
-      setError(null);
+      // Background polling must not erase an action failure before the user
+      // has had a chance to read it. Explicit refreshes still clear stale
+      // errors after a successful scan.
+      if (!quiet) setError(null);
     } catch (reason) {
       setError(String(reason));
     } finally {

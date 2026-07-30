@@ -25,7 +25,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 # Provider-reported quota snapshots use the same official OAuth endpoints as
 # their CLIs. Blocking mode is safe here because usage scans already run on a
 # dedicated blocking worker.
-reqwest = { version = "0.13", default-features = false, features = ["blocking", "json"] }
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls-no-provider"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 # OpenCode moved usage off per-message JSON files into a local SQLite DB.
 # 0.40 pulls libsqlite3-sys that needs unstable cfg_select; 0.32 is solid.

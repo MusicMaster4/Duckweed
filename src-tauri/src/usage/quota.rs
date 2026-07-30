@@ -973,16 +973,30 @@ fn codex_quota(home: &Path, latest_session: Option<&Path>) -> Option<Quota> {
 }
 
 fn grok_quota(home: &Path) -> Option<Quota> {
+    grok_quota_at(home, Utc::now().timestamp_millis())
+}
+
+fn grok_quota_at(home: &Path, now: i64) -> Option<Quota> {
     let value = latest_grok_credit_config(home)?;
     let context = value.get("ctx")?;
     let config = context.get("config")?;
-    let percent = config.get("creditUsagePercent")?.as_f64()?;
+    let reported_percent = config.get("creditUsagePercent")?.as_f64()?;
     let period = config.get("currentPeriod");
     let kind = period
         .and_then(|value| value.get("type"))
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let resets_at = period
+    let period_start = period
+        .and_then(|value| value.get("start"))
+        .and_then(Value::as_str)
+        .and_then(parse_rfc3339_ms)
+        .or_else(|| {
+            config
+                .get("billingPeriodStart")
+                .and_then(Value::as_str)
+                .and_then(parse_rfc3339_ms)
+        });
+    let reported_reset = period
         .and_then(|value| value.get("end"))
         .and_then(Value::as_str)
         .and_then(parse_rfc3339_ms)
@@ -992,6 +1006,29 @@ fn grok_quota(home: &Path) -> Option<Quota> {
                 .and_then(Value::as_str)
                 .and_then(parse_rfc3339_ms)
         });
+    // Prefer the provider's actual boundaries. This matters for monthly
+    // periods, whose length is not always the 30-day display fallback.
+    let window_ms = reported_reset
+        .zip(period_start)
+        .and_then(|(end, start)| (end > start).then_some(end - start))
+        .or_else(|| period_window_ms(kind));
+    let expired = reported_reset.is_some_and(|reset| reset <= now);
+    let resets_at = match (reported_reset, window_ms) {
+        (Some(reset), Some(window)) if expired => {
+            let elapsed_periods = now.saturating_sub(reset) / window + 1;
+            Some(reset.saturating_add(window.saturating_mul(elapsed_periods)))
+        }
+        (reset, _) => reset,
+    };
+    // Usage belongs to a billing period, not to the account forever. Once the
+    // saved period has ended, carrying its percentage into the next one is
+    // strictly wrong. Grok will replace this inferred reset state the next
+    // time it writes a billing snapshot.
+    let percent = if expired && window_ms.is_some() {
+        0.0
+    } else {
+        reported_percent
+    };
 
     Some(Quota {
         agent: "grok".into(),
@@ -1005,7 +1042,10 @@ fn grok_quota(home: &Path) -> Option<Quota> {
             .get("subscriptionTier")
             .and_then(Value::as_str)
             .map(str::to_string),
-        message: None,
+        message: (expired && window_ms.is_some()).then(|| {
+            "Grok has not saved usage for the new period yet. Showing the reset allowance until its next snapshot."
+                .into()
+        }),
         limits: vec![QuotaLimit {
             id: "credits".into(),
             label: period_name(kind).into(),
@@ -1014,7 +1054,7 @@ fn grok_quota(home: &Path) -> Option<Quota> {
             percent,
             unit: "percent".into(),
             resets_at,
-            window_ms: period_window_ms(kind),
+            window_ms,
             forecast: None,
         }],
     })
@@ -1935,15 +1975,43 @@ mod tests {
         let root = std::env::temp_dir().join(format!("duckweed-grok-quota-{}", std::process::id()));
         let dir = root.join(".grok/logs");
         std::fs::create_dir_all(&dir).unwrap();
-        let line = r#"{"ts":"2026-07-26T15:17:55.732Z","msg":"billing: fetched credits config","ctx":{"config":{"creditUsagePercent":14.0,"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","end":"2026-07-30T11:57:58.252814+00:00"}},"subscriptionTier":"SuperGrok"}}"#;
+        let line = r#"{"ts":"2026-07-26T15:17:55.732Z","msg":"billing: fetched credits config","ctx":{"config":{"creditUsagePercent":14.0,"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","start":"2026-07-23T11:57:58.252814+00:00","end":"2026-07-30T11:57:58.252814+00:00"}},"subscriptionTier":"SuperGrok"}}"#;
         std::fs::write(dir.join("unified.jsonl"), format!("{line}\n")).unwrap();
 
-        let quota = reported_for("grok", &root).expect("grok quota");
+        let now = parse_rfc3339_ms("2026-07-29T12:00:00Z").unwrap();
+        let quota = grok_quota_at(&root, now).expect("grok quota");
         assert_eq!(quota.source, "reported");
         assert_eq!(quota.plan.as_deref(), Some("SuperGrok"));
         assert_eq!(quota.limits[0].label, "Weekly credit limit");
         assert!((quota.limits[0].percent - 14.0).abs() < 1e-9);
         assert!(quota.limits[0].resets_at.is_some());
+        assert!(quota.message.is_none());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn grok_expired_snapshot_rolls_into_the_new_period() {
+        let root = std::env::temp_dir().join(format!("duckweed-grok-reset-{}", std::process::id()));
+        let dir = root.join(".grok/logs");
+        std::fs::create_dir_all(&dir).unwrap();
+        let line = r#"{"ts":"2026-07-29T21:10:24.962Z","msg":"billing: fetched credits config","ctx":{"config":{"creditUsagePercent":61.0,"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","start":"2026-07-23T11:57:58.252814+00:00","end":"2026-07-30T11:57:58.252814+00:00"}},"subscriptionTier":"SuperGrok"}}"#;
+        std::fs::write(dir.join("unified.jsonl"), format!("{line}\n")).unwrap();
+
+        let now = parse_rfc3339_ms("2026-07-30T14:00:00Z").unwrap();
+        let quota = grok_quota_at(&root, now).expect("grok quota");
+        let limit = &quota.limits[0];
+
+        assert!((limit.percent - 0.0).abs() < f64::EPSILON);
+        assert_eq!(
+            limit.resets_at,
+            parse_rfc3339_ms("2026-08-06T11:57:58.252814Z")
+        );
+        assert_eq!(limit.window_ms, Some(7 * 24 * 60 * 60 * 1000));
+        assert!(quota
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains("new period")));
 
         let _ = std::fs::remove_dir_all(&root);
     }

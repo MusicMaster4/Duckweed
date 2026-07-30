@@ -483,16 +483,16 @@ fn stop_tunnel(record: &ForwardRecord) {
 
 fn start_public_tunnel(proxy_port: u16, tools_dir: &Path) -> Result<(Child, String), String> {
     let mut failures = Vec::new();
-    if let Some(ngrok) = executable_on_path("ngrok") {
-        match start_ngrok_tunnel(ngrok, proxy_port) {
-            Ok(tunnel) => return Ok(tunnel),
-            Err(error) => failures.push(format!("ngrok: {error}")),
-        }
-    }
-    if let Some(cloudflared) = executable_on_path("cloudflared") {
+    if let Some(cloudflared) = find_tunnel_executable("cloudflared", tools_dir) {
         match start_cloudflare_tunnel(cloudflared, proxy_port) {
             Ok(tunnel) => return Ok(tunnel),
             Err(error) => failures.push(format!("Cloudflare: {error}")),
+        }
+    }
+    if let Some(ngrok) = find_tunnel_executable("ngrok", tools_dir) {
+        match start_ngrok_tunnel(ngrok, proxy_port) {
+            Ok(tunnel) => return Ok(tunnel),
+            Err(error) => failures.push(format!("ngrok: {error}")),
         }
     }
     if executable_on_path("ssh").is_some() {
@@ -539,9 +539,21 @@ fn start_cloudflare_tunnel(
 ) -> Result<(Child, String), String> {
     let origin = format!("http://127.0.0.1:{proxy_port}");
     let mut command = Command::new(cloudflared);
-    command.args(["tunnel", "--no-autoupdate", "--url", &origin]);
+    // HTTP/2 works over TCP 443 and is more reliable on networks that block
+    // the UDP traffic used by QUIC.
+    command.args([
+        "tunnel",
+        "--no-autoupdate",
+        "--protocol",
+        "http2",
+        "--url",
+        &origin,
+    ]);
     let (mut child, lines) = spawn_tunnel_process(command)?;
-    match wait_for_cloudflare_url(&mut child, lines) {
+    // The public URL is followed by an end-to-end HTTP readiness check, so
+    // there is no need to depend on cloudflared's changing connection-log
+    // wording before proceeding.
+    match wait_for_tunnel_url(&mut child, lines) {
         Ok(url) => match wait_for_reachable_public_url(&url) {
             Ok(()) => Ok((child, url)),
             Err(error) => {
@@ -556,52 +568,6 @@ fn start_cloudflare_tunnel(
             Err(error)
         }
     }
-}
-
-fn wait_for_cloudflare_url(
-    child: &mut Child,
-    lines: mpsc::Receiver<String>,
-) -> Result<String, String> {
-    let deadline = std::time::Instant::now() + Duration::from_secs(35);
-    let mut public_url = None;
-    let mut registered = false;
-    let mut recent = Vec::new();
-
-    while std::time::Instant::now() < deadline {
-        match lines.recv_timeout(Duration::from_millis(200)) {
-            Ok(line) => {
-                if public_url.is_none() {
-                    public_url = extract_public_url(&line);
-                }
-                if line
-                    .to_ascii_lowercase()
-                    .contains("registered tunnel connection")
-                {
-                    registered = true;
-                }
-                if recent.len() == 12 {
-                    recent.remove(0);
-                }
-                recent.push(line);
-                if registered {
-                    if let Some(url) = public_url.as_ref() {
-                        return Ok(url.clone());
-                    }
-                }
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => {}
-        }
-
-        if let Some(status) = child.try_wait().map_err(err)? {
-            let detail = recent_helper_error(&recent).unwrap_or_else(|| {
-                "the tunnel helper exited before the connection was ready".to_string()
-            });
-            return Err(format!("public sharing stopped ({status}): {detail}"));
-        }
-    }
-
-    Err("timed out while connecting the public tunnel; check your internet connection".to_string())
 }
 
 fn wait_for_reachable_public_url(url: &str) -> Result<(), String> {
@@ -621,6 +587,9 @@ fn wait_for_reachable_public_url(url: &str) -> Result<(), String> {
                 reqwest::header::USER_AGENT,
                 "Duckweed tunnel readiness check",
             )
+            // Free ngrok endpoints otherwise return their browser interstitial
+            // instead of forwarding this readiness request to Duckweed.
+            .header("ngrok-skip-browser-warning", "duckweed")
             .send()
         {
             Ok(response) if response.status() == reqwest::StatusCode::NO_CONTENT => return Ok(()),
@@ -819,6 +788,69 @@ fn executable_on_path(name: &str) -> Option<PathBuf> {
     std::env::split_paths(&path)
         .flat_map(|dir| names.iter().map(move |candidate| dir.join(candidate)))
         .find(|candidate| candidate.is_file())
+}
+
+fn find_tunnel_executable(name: &str, tools_dir: &Path) -> Option<PathBuf> {
+    let executable_name = if cfg!(windows) {
+        format!("{name}.exe")
+    } else {
+        name.to_string()
+    };
+    let managed = tools_dir.join(&executable_name);
+    if managed.is_file() {
+        return Some(managed);
+    }
+    if let Some(executable) = executable_on_path(name) {
+        return Some(executable);
+    }
+
+    #[cfg(windows)]
+    {
+        if name == "cloudflared" {
+            if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+                let local_app_data = PathBuf::from(local_app_data);
+                let link = local_app_data
+                    .join("Microsoft")
+                    .join("WinGet")
+                    .join("Links")
+                    .join(&executable_name);
+                if link.is_file() {
+                    return Some(link);
+                }
+
+                let packages = local_app_data
+                    .join("Microsoft")
+                    .join("WinGet")
+                    .join("Packages");
+                if let Ok(entries) = std::fs::read_dir(packages) {
+                    for package in entries.flatten() {
+                        if !package
+                            .file_name()
+                            .to_string_lossy()
+                            .starts_with("Cloudflare.cloudflared_")
+                        {
+                            continue;
+                        }
+                        let executable = package.path().join(&executable_name);
+                        if executable.is_file() {
+                            return Some(executable);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"]
+            .into_iter()
+            .map(|directory| Path::new(directory).join(&executable_name))
+            .find(|candidate| candidate.is_file())
+    }
+
+    #[cfg(windows)]
+    None
 }
 
 fn hide_console_if_windows(command: &mut Command) {
@@ -1286,6 +1318,69 @@ mod tests {
             matches!(accepted, Err(error) if error.kind() == io::ErrorKind::WouldBlock),
             "an empty provider probe reached the project server"
         );
+    }
+
+    #[test]
+    #[ignore = "requires cloudflared and internet access"]
+    fn cloudflare_tunnel_is_reachable_end_to_end() {
+        let origin = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let origin_port = origin.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = origin.accept().unwrap();
+            let mut bytes = [0_u8; 4096];
+            let _ = stream.read(&mut bytes).unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 15\r\nConnection: close\r\n\r\nduckweed-public",
+                )
+                .unwrap();
+        });
+
+        let tools = std::env::temp_dir().join("duckweed-missing-tools");
+        let cloudflared =
+            find_tunnel_executable("cloudflared", &tools).expect("cloudflared is installed");
+        let (proxy, proxy_port) = start_origin_proxy("127.0.0.1", origin_port).unwrap();
+        let origin_url = format!("http://127.0.0.1:{proxy_port}");
+        let mut command = Command::new(cloudflared);
+        command.args([
+            "tunnel",
+            "--no-autoupdate",
+            "--protocol",
+            "http2",
+            "--url",
+            &origin_url,
+        ]);
+        let (mut child, lines) = spawn_tunnel_process(command).unwrap();
+        let url = wait_for_tunnel_url(&mut child, lines).unwrap();
+        let readiness_url = format!("{url}{TUNNEL_READY_PATH}");
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(20))
+            .build()
+            .unwrap();
+        let response = match client.get(&readiness_url).send() {
+            Ok(response) => response,
+            Err(error) => {
+                eprintln!("request error: {error:?}");
+                let mut source = std::error::Error::source(&error);
+                while let Some(error) = source {
+                    eprintln!("caused by: {error:?}");
+                    source = error.source();
+                }
+                let _ = child.kill();
+                let _ = child.wait();
+                proxy.stop();
+                panic!("readiness request failed");
+            }
+        };
+        assert_eq!(response.status(), reqwest::StatusCode::NO_CONTENT);
+        let response = reqwest::blocking::get(&url).unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert_eq!(response.text().unwrap(), "duckweed-public");
+
+        let _ = child.kill();
+        let _ = child.wait();
+        proxy.stop();
+        server.join().unwrap();
     }
 
     #[test]
