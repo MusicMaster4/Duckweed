@@ -515,7 +515,14 @@ export function AgentSurface({ termId, active, onClose }: Props) {
         </button>
       </header>
 
-      <div className="agent-scroll" ref={scrollRef}>
+      <div
+        className={`agent-scroll${
+          session.permission && session.permission.kind !== "question"
+            ? " has-permission"
+            : ""
+        }`}
+        ref={scrollRef}
+      >
         <SubagentUiProvider
           selectedCallId={selectedSubagentCallId}
           onSelect={setSelectedSubagentCallId}

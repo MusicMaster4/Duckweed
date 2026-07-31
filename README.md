@@ -339,8 +339,10 @@ agent interfaces, search, Git diffs, local usage analytics, workspace tools
 (files, saved layouts, checklists, statistics, ports, power watch), completion
 signals, Explorer integration, updates, and layout persistence are implemented.
 
-Command blocks currently group commands submitted through Duckweed's composer.
-Grouping raw-mode input the same way still needs OSC 133 shell integration.
+Command blocks group commands submitted through Duckweed's composer and raw
+PowerShell input. Duckweed's OSC 133 shell integration preserves edited command
+text, command boundaries, exit status, and duration for block navigation, copy,
+and re-run.
 
 ## Contributing
 

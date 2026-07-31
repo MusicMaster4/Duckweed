@@ -29,8 +29,8 @@ interface Assignment {
 const assignments = new Map<string, Assignment>();
 
 /**
- * Draws with the usual half-pool cooldown: a freshly assigned animation sits
- * out the next floor(pool / 2) assignments, so terminals opened back to back
+ * Draws with the usual 70% pool cooldown: a freshly assigned animation sits
+ * out the next floor(pool * 0.7) assignments, so terminals opened back to back
  * never start on the same art. The random source is late-bound so tests that
  * stub Math.random can fix the draw.
  */
@@ -57,7 +57,7 @@ function assignmentFor(termId: string): Assignment {
 
 /**
  * Startup art. The animation is drawn from a shared pool (random, with a
- * half-pool cooldown against recent draws) rather than being bound to a
+ * 70% pool cooldown against recent draws) rather than being bound to a
  * provider: the provider only supplies the colour, by way of `--agent-accent`.
  */
 export function AgentAsciiLoader({

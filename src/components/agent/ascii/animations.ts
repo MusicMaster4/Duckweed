@@ -1807,7 +1807,7 @@ export type AsciiSceneId = keyof typeof ASCII_SCENES;
 /**
  * The pool the loader draws from. Nothing here is provider-specific: the
  * first time a terminal shows the loader it draws one (random, behind the
- * shared half-pool cooldown so recent picks sit out), and keeps it for as
+ * shared 70% pool cooldown so recent picks sit out), and keeps it for as
  * long as that terminal lives.
  */
 export const ASCII_ANIMATIONS: readonly PainterFactory[] = [

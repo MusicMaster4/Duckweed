@@ -7079,6 +7079,19 @@ body.is-resizing * {
   padding: 12px 14px 16px;
 }
 
+/* A permission is the only decision that blocks the active turn. Quiet the
+   surrounding transcript just enough to move the eye to the action card. */
+.agent-scroll > :not(.agent-permission) {
+  transition:
+    opacity 160ms ease,
+    filter 160ms ease;
+}
+
+.agent-scroll.has-permission > :not(.agent-permission) {
+  opacity: 0.58;
+  filter: saturate(0.72);
+}
+
 .agent-timeline {
   display: flex;
   flex-direction: column;
@@ -7711,6 +7724,19 @@ body.is-resizing * {
   border: 1px solid rgba(240, 192, 82, 0.4);
   border-radius: 8px;
   background: rgba(240, 192, 82, 0.07);
+  animation: agent-permission-enter 170ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes agent-permission-enter {
+  from {
+    opacity: 0;
+    transform: translateY(3px) scale(0.995);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
 }
 
 .agent-permission-head {
@@ -8462,6 +8488,14 @@ body.is-resizing * {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .agent-permission {
+    animation: none;
+  }
+
+  .agent-scroll > :not(.agent-permission) {
+    transition: none;
+  }
+
   .agent-image-tile.is-entering,
   .agent-image-tile.is-removing {
     animation: none;

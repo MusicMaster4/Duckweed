@@ -1,7 +1,7 @@
 /**
- * Random selection with a half-pool cooldown.
+ * Random selection with a 70% pool cooldown.
  *
- * Once an item is chosen it stays unavailable for floor(n / 2) later picks.
+ * Once an item is chosen it stays unavailable for floor(n * 0.7) later picks.
  * This keeps variety high without turning the order into a predictable shuffle.
  *
  * When a `poolId` is set, the recent-index history is written to localStorage and
@@ -14,7 +14,7 @@ import { saveDurably, type DurableKey } from "./durableStorage";
 export const COOLDOWN_POOLS_KEY = "duckweed:cooldown-pools:v1" as const satisfies DurableKey;
 
 interface PoolRecord {
-  /** Stable keys for the last floor(n / 2) picks, oldest first. */
+  /** Stable keys for the last floor(n * 0.7) picks, oldest first. */
   recent: string[];
 }
 
@@ -154,7 +154,7 @@ export function createCooldownPicker<T>(
   random: () => number = Math.random,
   options: CooldownPickerOptions<T> = {},
 ): () => T {
-  const cooldown = Math.floor(items.length / 2);
+  const cooldown = Math.floor(items.length * 0.7);
   const keyOf = options.keyOf ?? defaultKeyOf;
   const poolId = options.poolId;
 

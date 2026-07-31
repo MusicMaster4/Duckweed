@@ -182,7 +182,10 @@ export function prefetchUsage(
   const pending = pendingScans.get(days);
   if (pending) return pending;
 
-  const task = scanQueue.then(() => usageScan({ days, refresh: false }));
+  // A zero max age is an explicit or scheduled live refresh. Tell the backend
+  // so provider-backed limits can fetch a new reading instead of only
+  // rescanning the same persisted snapshot.
+  const task = scanQueue.then(() => usageScan({ days, refresh: maxAgeMs === 0 }));
   scanQueue = task.then(
     () => undefined,
     () => undefined,

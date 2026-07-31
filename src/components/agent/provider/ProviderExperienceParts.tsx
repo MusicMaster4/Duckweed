@@ -59,6 +59,18 @@ export function Disclosure({
   label,
 }: DisclosureProps) {
   const id = useId();
+  const [present, setPresent] = useState(open);
+
+  useEffect(() => {
+    if (open) {
+      setPresent(true);
+      return;
+    }
+    if (!present) return;
+    const timer = window.setTimeout(() => setPresent(false), 240);
+    return () => window.clearTimeout(timer);
+  }, [open, present]);
+
   return (
     <>
       <button
@@ -71,9 +83,16 @@ export function Disclosure({
       >
         {head}
       </button>
-      <div id={id} className={panelClassName} hidden={!open}>
-        {open ? children : null}
-      </div>
+      {present && (
+        <div
+          id={id}
+          className={`pv-disclosure ${open ? "is-open" : "is-closing"}`}
+        >
+          <div className="pv-disclosure-inner">
+            <div className={panelClassName}>{children}</div>
+          </div>
+        </div>
+      )}
     </>
   );
 }

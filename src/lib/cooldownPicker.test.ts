@@ -38,13 +38,14 @@ afterEach(() => {
 });
 
 describe("createCooldownPicker", () => {
-  test("keeps a selected item out of the next half-pool of picks", () => {
+  test("keeps a selected item out of the next 70% of pool picks", () => {
     const items = Array.from({ length: 10 }, (_, index) => index);
+    // floor(10 * 0.7) = 7 sit-outs
     const pick = createCooldownPicker(items, -1, () => 0);
     const selected = Array.from({ length: 30 }, () => pick());
 
     selected.forEach((item, index) => {
-      const protectedWindow = selected.slice(Math.max(0, index - 5), index);
+      const protectedWindow = selected.slice(Math.max(0, index - 7), index);
       expect(protectedWindow).not.toContain(item);
     });
   });
@@ -62,14 +63,15 @@ describe("createCooldownPicker", () => {
 
   test("persists recent picks so a fresh picker keeps the sit-outs", () => {
     installStorage();
-    const items = ["a", "b", "c", "d", "e", "f", "g", "h"];
+    const items = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"];
     // Always take the first available slot so the sequence is deterministic.
+    // floor(10 * 0.7) = 7 sit-outs
     const first = createCooldownPicker(items, "x", () => 0, {
       poolId: "test-pool",
       keyOf: (item) => item,
     });
-    const drawn = [first(), first(), first(), first()];
-    expect(drawn).toEqual(["a", "b", "c", "d"]);
+    const drawn = [first(), first(), first(), first(), first(), first(), first()];
+    expect(drawn).toEqual(["a", "b", "c", "d", "e", "f", "g"]);
 
     // Simulate an app reload: drop the in-memory store, keep localStorage.
     resetCooldownPoolStoreForTests();
@@ -77,8 +79,8 @@ describe("createCooldownPicker", () => {
       poolId: "test-pool",
       keyOf: (item) => item,
     });
-    // Half of 8 is 4, so a–d must still be blocked and the next pick is e.
-    expect(second()).toBe("e");
+    // 70% of 10 is 7, so a–g must still be blocked and the next pick is h.
+    expect(second()).toBe("h");
 
     const raw = memory.get(COOLDOWN_POOLS_KEY);
     expect(raw).toBeTruthy();
@@ -87,7 +89,15 @@ describe("createCooldownPicker", () => {
       pools: Record<string, { recent: string[] }>;
     };
     expect(parsed.version).toBe(1);
-    expect(parsed.pools["test-pool"]?.recent).toEqual(["b", "c", "d", "e"]);
+    expect(parsed.pools["test-pool"]?.recent).toEqual([
+      "b",
+      "c",
+      "d",
+      "e",
+      "f",
+      "g",
+      "h",
+    ]);
   });
 
   test("drops stored keys that no longer exist in the pool", () => {
