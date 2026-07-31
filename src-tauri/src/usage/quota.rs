@@ -1021,7 +1021,33 @@ pub fn refresh_grok_credit_snapshot(home: &Path) {
         return;
     };
 
-    let mut command = CommandBuilder::new(program);
+    // npm installs `grok` as a `.cmd` shim on Windows. CreateProcess cannot
+    // run those directly, so route them through cmd the same way agent_proc
+    // does for claude/codex/opencode.
+    let mut command = {
+        #[cfg(windows)]
+        {
+            let batch = program
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| {
+                    ext.eq_ignore_ascii_case("cmd") || ext.eq_ignore_ascii_case("bat")
+                });
+            if batch {
+                let mut command = CommandBuilder::new("cmd");
+                command.arg("/d");
+                command.arg("/c");
+                command.arg(&program);
+                command
+            } else {
+                CommandBuilder::new(&program)
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            CommandBuilder::new(&program)
+        }
+    };
     command.arg("dashboard");
     command.cwd(home);
     command.env("TERM", "xterm-256color");

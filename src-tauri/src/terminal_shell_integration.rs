@@ -67,19 +67,43 @@ if [ -z "${__DUCKWEED_SHELL_INTEGRATION_LOADED:-}" ]; then
     __duckweed_running=
     __duckweed_in_prompt=
     __duckweed_status=0
+    # Preserve any DEBUG trap installed by the user's profile. Bash allows only
+    # one handler per signal; overwriting it breaks tools that rely on preexec,
+    # auditing, or their own prompt integration.
+    __duckweed_prev_debug_trap=
+    __duckweed_capture_prev_debug_trap() {
+        local -a terms
+        eval "terms=( $(trap -p DEBUG 2>/dev/null) )"
+        local cmd="${terms[2]:-}"
+        case "$cmd" in
+            ''|*__duckweed_preexec*) ;;
+            *) __duckweed_prev_debug_trap="$cmd" ;;
+        esac
+    }
+    __duckweed_run_prev_debug_trap() {
+        if [ -n "${__duckweed_prev_debug_trap:-}" ]; then
+            eval "$__duckweed_prev_debug_trap"
+        fi
+    }
+    __duckweed_install_debug_trap() {
+        trap '__duckweed_preexec' DEBUG
+    }
 
     __duckweed_preexec() {
         local status=$?
         if [[ "$BASH_COMMAND" == __duckweed_precmd* ]]; then
             __duckweed_status=$status
+            __duckweed_run_prev_debug_trap
             return
         fi
         if [ -n "$__duckweed_in_prompt" ]; then
             __duckweed_in_prompt=
         fi
         if [ -n "$__duckweed_running" ]; then
+            __duckweed_run_prev_debug_trap
             return
         fi
+        # Drop DEBUG while reading history so that builtin does not re-enter.
         trap - DEBUG
         local line encoded
         line="$(HISTTIMEFORMAT= builtin history 1)"
@@ -89,7 +113,8 @@ if [ -z "${__DUCKWEED_SHELL_INTEGRATION_LOADED:-}" ]; then
         encoded="$(printf '%s' "$line" | base64 | tr -d '\r\n')"
         printf '\033]133;C;cmd=%s\007' "$encoded"
         __duckweed_running=1
-        trap '__duckweed_preexec' DEBUG
+        __duckweed_install_debug_trap
+        __duckweed_run_prev_debug_trap
     }
 
     __duckweed_precmd() {
@@ -108,7 +133,8 @@ if [ -z "${__DUCKWEED_SHELL_INTEGRATION_LOADED:-}" ]; then
     else
         PROMPT_COMMAND="__duckweed_precmd${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
     fi
-    trap '__duckweed_preexec' DEBUG
+    __duckweed_capture_prev_debug_trap
+    __duckweed_install_debug_trap
 fi
 "#;
 

@@ -124,22 +124,30 @@ export class BlockTracker {
       this.selectedId = null;
       this.selectOverlay.hidden = true;
     }
+    // Editor submissions open before the PTY write. Bash/zsh preexec (and
+    // often PowerShell) emit OSC 133;C after the command row is committed and
+    // the cursor has advanced. Merge the in-flight block by command text so
+    // the shell confirmation does not create a duplicate on the output row.
+    const last = this.blocks[this.blocks.length - 1];
+    if (last && last.completedAt === null && last.command === command) {
+      last.startedAt = startedAt;
+      return;
+    }
     // A PowerShell prompt can already be wrapped before the command is echoed.
     // A marker at the cursor would then sit on a continuation row, which xterm
     // deletes when the terminal grows wider. Anchor the first physical row of
     // the logical line instead. That row survives both directions of reflow.
     const buffer = this.term.buffer.active;
     const cursorLine = buffer.baseY + buffer.cursorY;
-    const startLine = logicalLineStart(
-      (line) => buffer.getLine(line)?.isWrapped ?? false,
-      cursorLine,
-    );
-    // Editor submissions open before the PTY write. The shell hook reports
-    // that same command on that same row, so merge it rather than duplicating.
-    const last = this.blocks[this.blocks.length - 1];
-    if (last && last.start.line === startLine && last.command === command) {
-      last.startedAt = startedAt;
-      return;
+    const isWrapped = (line: number) => buffer.getLine(line)?.isWrapped ?? false;
+    let startLine = logicalLineStart(isWrapped, cursorLine);
+    // Shell hooks fire after the echoed command + newline, so the cursor sits
+    // on the (still empty) first output row. Step back to the preceding
+    // logical command row; leave the cursor line alone when it still holds
+    // visible text (PowerShell can emit C before advancing).
+    const cursorText = buffer.getLine(cursorLine)?.translateToString(true) ?? "";
+    if (!cursorText.trim() && cursorLine > 0) {
+      startLine = logicalLineStart(isWrapped, cursorLine - 1);
     }
     const start = this.term.registerMarker(startLine - cursorLine);
     if (!start) return;
