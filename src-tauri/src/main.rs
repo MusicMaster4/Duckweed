@@ -461,6 +461,9 @@ async fn usage_scan(
     let (index_path, pricing_path) = usage_paths(&app);
     let state = state.inner().clone();
     blocking(move || {
+        if query.refresh {
+            usage::quota::refresh_grok_credit_snapshot(&home_path());
+        }
         let overrides = pricing::load_overrides(&pricing_path);
         let emit = |done: u32, total: u32| {
             let _ = app.emit("usage:progress", (done, total));

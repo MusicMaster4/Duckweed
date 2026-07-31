@@ -39,6 +39,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
+use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -93,6 +94,12 @@ const MIN_BURN_PER_HOUR: f64 = 0.25;
 /// pace; across a week you do not, and pretending otherwise is what makes a
 /// weekly forecast say "gone by Tuesday 3am".
 const DUTY_MIN_WINDOW_MS: i64 = 24 * 60 * 60 * 1000;
+/// Avoid starting a second short-lived Grok dashboard when the Usage panel
+/// and its refresh timer land on the same fresh provider reading.
+const GROK_REFRESH_TTL_MS: i64 = 15 * 1000;
+/// The dashboard fetches billing during startup, normally in under a second.
+/// Keep the probe bounded so a broken or offline CLI cannot stall Usage.
+const GROK_REFRESH_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// How far back the burn rate reads for a limit with this window length.
 fn lookback_ms(window_ms: Option<i64>) -> i64 {
@@ -976,6 +983,113 @@ fn grok_quota(home: &Path) -> Option<Quota> {
     grok_quota_at(home, Utc::now().timestamp_millis())
 }
 
+/// Ask Grok Build to refresh the billing snapshot that its `/usage` view and
+/// Duckweed both read.
+///
+/// `grok agent stdio`, which powers Duckweed's custom agent UI, stopped
+/// fetching billing data during startup in recent Grok releases. Merely
+/// rescanning `unified.jsonl` therefore keeps returning an old percentage.
+/// The dashboard still performs the official, read-only billing request as it
+/// starts. It requires a terminal, so run it in a private PTY, wait only until
+/// a newer snapshot appears, and always terminate the helper process. No model
+/// prompt is sent and no inference credits are consumed.
+pub fn refresh_grok_credit_snapshot(home: &Path) {
+    let log = home.join(".grok/logs/unified.jsonl");
+    let auth = home.join(".grok/auth.json");
+    if !log.is_file() || !auth.is_file() {
+        return;
+    }
+
+    let before = latest_grok_credit_config(home)
+        .as_ref()
+        .and_then(grok_credit_observed_at);
+    let now = Utc::now().timestamp_millis();
+    if before.is_some_and(|at| now.saturating_sub(at) < GROK_REFRESH_TTL_MS) {
+        return;
+    }
+
+    let Some(program) = crate::agent_proc::resolve_program("grok") else {
+        return;
+    };
+    let pty = native_pty_system();
+    let Ok(pair) = pty.openpty(PtySize {
+        rows: 24,
+        cols: 80,
+        pixel_width: 0,
+        pixel_height: 0,
+    }) else {
+        return;
+    };
+
+    let mut command = CommandBuilder::new(program);
+    command.arg("dashboard");
+    command.cwd(home);
+    command.env("TERM", "xterm-256color");
+    command.env("COLORTERM", "truecolor");
+    command.env("TERM_PROGRAM", "Duckweed");
+
+    let Ok(mut child) = pair.slave.spawn_command(command) else {
+        return;
+    };
+    drop(pair.slave);
+    // Grok asks the terminal for its cursor position before drawing. A real
+    // terminal answers DSR automatically; this private PTY has no emulator,
+    // so answer the query when it arrives. The same thread drains TUI output
+    // so the PTY buffer cannot fill before billing is fetched.
+    if let (Ok(mut reader), Ok(mut writer)) = (
+        pair.master.try_clone_reader(),
+        pair.master.take_writer(),
+    ) {
+        std::thread::spawn(move || {
+            let mut buffer = [0_u8; 4096];
+            let mut suffix = Vec::new();
+            while let Ok(read) = reader.read(&mut buffer) {
+                if read == 0 {
+                    break;
+                }
+                suffix.extend_from_slice(&buffer[..read]);
+                if suffix.windows(4).any(|window| window == b"\x1b[6n") {
+                    let _ = writer.write_all(b"\x1b[1;1R");
+                    let _ = writer.flush();
+                }
+                if suffix.len() > 3 {
+                    suffix.drain(..suffix.len() - 3);
+                }
+            }
+        });
+    }
+
+    let deadline = Instant::now() + GROK_REFRESH_TIMEOUT;
+    let mut exited = false;
+    while Instant::now() < deadline {
+        let refreshed = latest_grok_credit_config(home)
+            .as_ref()
+            .and_then(grok_credit_observed_at)
+            .is_some_and(|at| before.is_none_or(|previous| at > previous));
+        if refreshed {
+            break;
+        }
+        if child.try_wait().ok().flatten().is_some() {
+            exited = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    if !exited {
+        let _ = child.kill();
+    }
+    let _ = child.wait();
+    drop(pair.master);
+}
+
+fn grok_credit_observed_at(value: &Value) -> Option<i64> {
+    value
+        .get("ts")
+        .and_then(Value::as_str)
+        .and_then(parse_rfc3339_ms)
+}
+
 fn grok_quota_at(home: &Path, now: i64) -> Option<Quota> {
     let value = latest_grok_credit_config(home)?;
     let context = value.get("ctx")?;
@@ -1033,10 +1147,7 @@ fn grok_quota_at(home: &Path, now: i64) -> Option<Quota> {
     Some(Quota {
         agent: "grok".into(),
         label: "Grok CLI".into(),
-        observed_at: value
-            .get("ts")
-            .and_then(Value::as_str)
-            .and_then(parse_rfc3339_ms),
+        observed_at: grok_credit_observed_at(&value),
         source: "reported".into(),
         plan: context
             .get("subscriptionTier")
