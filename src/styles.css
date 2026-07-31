@@ -6980,6 +6980,33 @@ body.is-resizing * {
   transition: width 300ms ease;
 }
 
+.agent-usage-compact {
+  display: none;
+  width: 22px;
+  height: 22px;
+  flex: none;
+  place-items: center;
+  border-radius: 5px;
+  color: var(--text-faint);
+  cursor: help;
+}
+
+.agent-usage-compact:hover,
+.agent-usage-compact:focus-visible {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text);
+  outline: none;
+}
+
+.agent-usage-compact svg {
+  width: 13px;
+  height: 13px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.4;
+  stroke-linecap: round;
+}
+
 .agent-goal-indicator {
   display: grid;
   width: 22px;
@@ -8487,6 +8514,10 @@ body.is-resizing * {
   .agent-usage,
   .agent-context {
     display: none;
+  }
+
+  .agent-usage-compact {
+    display: grid;
   }
 
   .agent-composer-row {
