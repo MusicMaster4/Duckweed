@@ -14,6 +14,23 @@
   padding: 8px 2px 24px;
 }
 
+/* New conversational turns arrive with a short, spatially quiet handoff. */
+[data-message-enter] {
+  animation: agent-message-enter 150ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes agent-message-enter {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 .official-user-turn {
   align-self: flex-end;
   display: flex;
@@ -469,6 +486,11 @@
   transition: transform 120ms ease;
 }
 
+.official-tool-head .official-chevron,
+.agent-activity-history.is-tools .official-chevron {
+  transition: transform 220ms cubic-bezier(0.22, 1.35, 0.36, 1);
+}
+
 /* Default path points down. Open state flips it up (collapse). */
 .official-chevron.is-open {
   transform: rotate(180deg);
@@ -740,6 +762,95 @@
   padding: 0 8px 8px;
 }
 
+/* Grid rows animate to intrinsic height, so streamed output does not need a
+   guessed max-height and the card never snaps at the end of the transition. */
+.official-disclosure {
+  display: grid;
+  grid-template-rows: 0fr;
+  visibility: hidden;
+  transition:
+    grid-template-rows 220ms cubic-bezier(0.22, 1.18, 0.36, 1),
+    visibility 0s linear 220ms;
+}
+
+.official-disclosure.is-open {
+  grid-template-rows: 1fr;
+  visibility: visible;
+  animation: official-disclosure-open 240ms cubic-bezier(0.22, 1.18, 0.36, 1);
+  transition:
+    grid-template-rows 240ms cubic-bezier(0.22, 1.18, 0.36, 1),
+    visibility 0s linear 0s;
+}
+
+.official-disclosure.is-closing {
+  visibility: visible;
+  animation: official-disclosure-close 240ms cubic-bezier(0.64, 0, 0.78, 0) both;
+}
+
+.official-disclosure-inner {
+  min-height: 0;
+  overflow: hidden;
+  opacity: 0;
+  transform: translateY(-3px);
+  transition:
+    opacity 120ms ease,
+    transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.official-disclosure.is-open > .official-disclosure-inner {
+  opacity: 1;
+  transform: translateY(0);
+  animation: official-disclosure-content-in 180ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.official-disclosure.is-closing > .official-disclosure-inner {
+  animation: official-disclosure-content-out 160ms ease both;
+}
+
+@keyframes official-disclosure-open {
+  from {
+    grid-template-rows: 0fr;
+  }
+
+  to {
+    grid-template-rows: 1fr;
+  }
+}
+
+@keyframes official-disclosure-close {
+  from {
+    grid-template-rows: 1fr;
+  }
+
+  to {
+    grid-template-rows: 0fr;
+  }
+}
+
+@keyframes official-disclosure-content-in {
+  from {
+    opacity: 0;
+    transform: translateY(-3px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes official-disclosure-content-out {
+  from {
+    opacity: 1;
+    transform: translateY(0);
+  }
+
+  to {
+    opacity: 0;
+    transform: translateY(-3px);
+  }
+}
+
 .official-command,
 .official-output {
   overflow: auto;
@@ -920,6 +1031,30 @@ strong.agent-activity-history-summary {
 
 .agent-activity-history.is-active .agent-activity-history-summary {
   color: var(--text-faint);
+}
+
+/* Same 1.4 second sweep used by the OpenAI loading label, scoped to the
+   temporary line before the first reasoning trace arrives. */
+.agent-thinking-shimmer {
+  display: inline-block;
+  color: color-mix(in srgb, var(--activity-accent) 46%, var(--text-faint));
+  background: currentColor
+    -webkit-gradient(
+      linear,
+      100% 0,
+      0 0,
+      from(currentColor),
+      color-stop(0.4, rgba(0, 0, 0, 0.58)),
+      color-stop(0.6, rgba(0, 0, 0, 0.58)),
+      to(currentColor)
+    );
+  background-position: -100% 0;
+  background-repeat: no-repeat;
+  background-size: 50% 200%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: official-chatgpt-loading-shimmer 1400ms ease 0s infinite;
 }
 
 .agent-activity-history-status {
@@ -2316,6 +2451,10 @@ button.chatgpt-thinking-row.is-selected {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  [data-message-enter],
+  .agent-thinking-shimmer,
+  .official-disclosure,
+  .official-disclosure-inner,
   .official-stream-caret,
   .official-plan-running-arrow,
   .official-tool-spinner,
@@ -2325,6 +2464,12 @@ button.chatgpt-thinking-row.is-selected {
   .claude-shimmer,
   .agent-activity-pulse.is-active > span {
     animation: none;
+  }
+
+  .agent-thinking-shimmer {
+    color: var(--text-faint);
+    background: none;
+    -webkit-text-fill-color: currentColor;
   }
 
   .chatgpt-shimmer,
@@ -2339,6 +2484,8 @@ button.chatgpt-thinking-row.is-selected {
   }
 
   .official-chevron,
+  .official-disclosure,
+  .official-disclosure-inner,
   .official-plan-progress span,
   .grok-loader-slot,
   .grok-hover-chevron,

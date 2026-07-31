@@ -53,7 +53,7 @@ const DURABLE_SETTING_KEYS: [&str; 9] = [
     "duckweed:agent-preferences:v1",
     "duckweed:layouts:v1",
     "duckweed:wellbeing:v1",
-    // Half-pool cooldown history (greetings, ASCII, preparing, pulse patterns).
+    // 70% pool cooldown history (greetings, ASCII, preparing, pulse patterns).
     "duckweed:cooldown-pools:v1",
     COMMAND_HISTORY_KEY,
 ];

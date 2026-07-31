@@ -73,7 +73,7 @@ describe("agent startup animation", () => {
   });
 
   /**
-   * Assignments go through the shared half-pool cooldown picker, so terminals
+   * Assignments go through the shared 70% pool cooldown picker, so terminals
    * opened back to back must land on different animations.
    */
   test("terminals opened back to back get different animations", () => {

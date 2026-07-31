@@ -119,7 +119,7 @@ const pickPreparingMessage = createCooldownPicker(
   },
 );
 
-/** Shared across panes, matching the greeting half-pool cooldown. */
+/** Shared across panes, matching the greeting 70% pool cooldown. */
 export function nextPreparingMessage(): string {
   return pickPreparingMessage();
 }

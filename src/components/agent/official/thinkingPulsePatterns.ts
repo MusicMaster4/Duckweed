@@ -292,7 +292,7 @@ const pickPattern = createCooldownPicker(
   { poolId: "thinking-pulse-patterns" },
 );
 
-/** Shared across panes, matching the greeting selector's half-pool cooldown. */
+/** Shared across panes, matching the greeting selector's 70% pool cooldown. */
 export function nextThinkingPulsePattern(): ThinkingPulsePattern {
   return pickPattern();
 }

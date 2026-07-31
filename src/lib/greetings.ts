@@ -1,4 +1,4 @@
-import { createCooldownPicker as createHalfCooldownPicker } from "./cooldownPicker";
+import { createCooldownPicker as createPoolCooldownPicker } from "./cooldownPicker";
 
 /**
  * Lines for the empty-pane state.
@@ -1032,6 +1032,19 @@ const GREETINGS: readonly string[] = [
   "Scope creep, but make it autonomous.",
   "Is Notion a database, or a lifestyle?",
   "The rewrite rewrote the rewrite.",
+  // --- New Zeland dreams, Brazil, and ducks ---
+  "Those mountains in New Zeland look beautiful.",
+  "I dream about quiet lakes in New Zeland.",
+  "Booking that New Zeland ticket in my head again.",
+  "New Zeland sunsets live rent free up here.",
+  "One day I'll code from a cabin in New Zeland.",
+  "I keep saving for New Zeland, and tokens.",
+  "Come to Brazil, the vibes already shipped.",
+  "Brazil energy only in this pane, honestly.",
+  "Come to Brazil, bring your agents too.",
+  "The duck is packing for New Zeland too.",
+  "This duck wants a pond in New Zeland.",
+  "Come to Brazil, said the duck, cryptically.",
 ];
 
 /**
@@ -1527,16 +1540,16 @@ const UNCLAIMED: readonly string[] = [
 ];
 
 /**
- * Pick from a phrase list with a half-pool cooldown.
+ * Pick from a phrase list with a 70% pool cooldown.
  *
  * Pure random repeats the same joke too often. Instead, once a line is chosen it
- * is blocked until half the list has been drawn (floor(n / 2) later picks). With
- * 10 phrases that is a 5-round sit-out; available pool stays at least ~50%.
+ * is blocked until 70% of the list has been drawn (floor(n * 0.7) later picks).
+ * With 10 phrases that is a 7-round sit-out; available pool stays at least ~30%.
  * State is module-level so new panes share the same anti-repeat history, and the
  * recent keys ride durable storage so an app update does not reset the sit-outs.
  */
 function createCooldownPicker(phrases: readonly string[], poolId: string): () => string {
-  return createHalfCooldownPicker(phrases, "", Math.random, {
+  return createPoolCooldownPicker(phrases, "", Math.random, {
     poolId,
     // Content keys survive list reorders; a removed joke simply drops out.
     keyOf: (phrase) => phrase,
@@ -1546,12 +1559,12 @@ function createCooldownPicker(phrases: readonly string[], poolId: string): () =>
 const pickGreeting = createCooldownPicker(GREETINGS, "greetings");
 const pickUnclaimed = createCooldownPicker(UNCLAIMED, "unclaimed");
 
-/** One greeting, random among phrases not on half-pool cooldown. */
+/** One greeting, random among phrases not on 70% pool cooldown. */
 export function randomGreeting(): string {
   return pickGreeting();
 }
 
-/** One unclaimed-tab line, random among phrases not on half-pool cooldown. */
+/** One unclaimed-tab line, random among phrases not on 70% pool cooldown. */
 export function randomUnclaimedGreeting(): string {
   return pickUnclaimed();
 }

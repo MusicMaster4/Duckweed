@@ -23,7 +23,7 @@ describe("preparingMessages", () => {
       expect(PREPARING_MESSAGES).toContain(line);
       seen.add(line);
     }
-    // Half-pool cooldown should force real variety across many picks.
+    // 70% pool cooldown should force real variety across many picks.
     expect(seen.size).toBeGreaterThan(20);
   });
 
