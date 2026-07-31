@@ -551,7 +551,7 @@ export function PlanTracker({
       <div className="official-plan-progress" aria-hidden="true">
         <span style={{ width: `${progress}%` }} />
       </div>
-      {open && (
+      <AnimatedDisclosure open={open}>
         <ol className="official-plan-steps">
           {item.steps.map((step, index) => (
             <li
@@ -574,7 +574,7 @@ export function PlanTracker({
             </li>
           ))}
         </ol>
-      )}
+      </AnimatedDisclosure>
     </section>
   );
 }
