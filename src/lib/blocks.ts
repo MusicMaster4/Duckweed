@@ -30,6 +30,10 @@ export interface CommandBlock {
   cmdEl: HTMLDivElement | null;
   /** Lazily mounted full-width hairline above the block. */
   sepEl: HTMLDivElement | null;
+  /** Exact lifecycle timing when supplied by OSC 133 shell integration. */
+  startedAt: number;
+  completedAt: number | null;
+  exitCode: number | null;
 }
 
 export class BlockTracker {
@@ -108,7 +112,7 @@ export class BlockTracker {
   }
 
   /** Open a block for a submitted command at the current logical prompt line. */
-  open(command: string): void {
+  open(command: string, startedAt = Date.now()): void {
     // No editorMode guard: submits only ever come from the composer, and a
     // busy→idle race (the native busy poll lags a ^C) must not drop the block
     // — that left the raw `PS path> cmd` echo uncovered for good. Command
@@ -130,6 +134,13 @@ export class BlockTracker {
       (line) => buffer.getLine(line)?.isWrapped ?? false,
       cursorLine,
     );
+    // Editor submissions open before the PTY write. The shell hook reports
+    // that same command on that same row, so merge it rather than duplicating.
+    const last = this.blocks[this.blocks.length - 1];
+    if (last && last.start.line === startLine && last.command === command) {
+      last.startedAt = startedAt;
+      return;
+    }
     const start = this.term.registerMarker(startLine - cursorLine);
     if (!start) return;
 
@@ -139,10 +150,28 @@ export class BlockTracker {
       start,
       cmdEl: null,
       sepEl: null,
+      startedAt,
+      completedAt: null,
+      exitCode: null,
     };
 
     this.blocks.push(block);
     this.scheduleLayout();
+  }
+
+  /** Seal the newest command with the status reported by OSC 133;D. */
+  complete(exitCode: number | null, completedAt = Date.now()): void {
+    this.prune();
+    const block = this.blocks[this.blocks.length - 1];
+    if (!block || block.completedAt !== null) return;
+    block.completedAt = completedAt;
+    block.exitCode = exitCode;
+    this.scheduleLayout();
+  }
+
+  selectedCommand(): string | null {
+    if (this.selectedId === null) return null;
+    return this.blocks.find((block) => block.id === this.selectedId)?.command ?? null;
   }
 
   /** Drop every block (clear screen, dispose session). */

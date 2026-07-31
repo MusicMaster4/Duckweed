@@ -22,6 +22,7 @@ import {
   type FrameWrite,
 } from "./frames";
 import { createHighlighter, type Highlighter } from "./highlight";
+import { parseOsc133 } from "./osc133";
 import {
   agentUnwatch,
   agentWatch,
@@ -1225,14 +1226,9 @@ function create(id: string, opts: TerminalStartOptions): Session {
       return false;
     }
 
-    // Editor mode and the custom agent UI both own typing through a DOM
-    // composer. Raw agent UI still needs the same redirect: the grid is
-    // covered and onData discards its output, so a key that stays on xterm
-    // is a key that vanishes.
-    if (!session.editorMode && !session.agentUi) return true;
-
-    // Keyboard block navigation while focus sits on the grid (after a click
-    // select). Ctrl+Up always selects the latest block; plain Up/Down walk.
+    // Keyboard block navigation while focus sits on the grid after a click.
+    // OSC 133 makes the same controls available in raw mode. Ctrl+Up selects
+    // the latest block and plain Up/Down walk through the list.
     // Skipped under the agent surface — there is no block chrome to walk.
     if (!session.agentUi) {
       if (event.key === "ArrowUp" && ctrl && !event.shiftKey && !event.altKey) {
@@ -1241,6 +1237,11 @@ function create(id: string, opts: TerminalStartOptions): Session {
         return false;
       }
       if (session.blocks.hasNavSelection()) {
+        if (event.key === "Enter" && !ctrl && !event.shiftKey && !event.altKey) {
+          event.preventDefault();
+          rerunSelectedBlock(session.id);
+          return false;
+        }
         if (event.key === "ArrowUp" && !ctrl && !event.shiftKey && !event.altKey) {
           event.preventDefault();
           session.blocks.navigate("prev");
@@ -1411,6 +1412,32 @@ function create(id: string, opts: TerminalStartOptions): Session {
       return true;
     }
     return false;
+  });
+
+  // Duckweed's PowerShell hook emits OSC 133 around the prompt and command.
+  // This observes the final PSReadLine buffer, so raw-mode edits and builtins
+  // get the same deterministic blocks and timings as composer submissions.
+  term.parser.registerOscHandler(133, (payload) => {
+    const event = parseOsc133(payload);
+    if (!event) return false;
+    if (event.kind === "command-start") {
+      const command = event.command?.replace(/\r\n/g, "\n").replace(/\r/g, "\n") ?? null;
+      const startedAt = Date.now();
+      if (command?.trim()) {
+        session.blocks.open(command, startedAt);
+        commandHistory.record(command, session.cwd || null);
+        recordLocalHistory(session, command);
+        markRan(session);
+      }
+      session.processStartedAt = startedAt;
+      session.lastSubmitAt = startedAt;
+      notifySession(id);
+    } else if (event.kind === "command-end") {
+      session.blocks.complete(event.exitCode, Date.now());
+      session.completionStartedAt = session.processStartedAt;
+      notifySession(id);
+    }
+    return true;
   });
 
   // Warp's CLI-agent integrations use OSC 777 with a structured JSON body.
@@ -2179,6 +2206,16 @@ export function selectPrevBlock(id: string): boolean {
 /** Down while a block is selected — move to a newer block. */
 export function selectNextBlock(id: string): boolean {
   return sessions.get(id)?.blocks.navigate("next") ?? false;
+}
+
+/** Re-run the selected block's original command. */
+export function rerunSelectedBlock(id: string): boolean {
+  const session = sessions.get(id);
+  const command = session?.blocks.selectedCommand();
+  if (!session || !command) return false;
+  session.blocks.clearSelection();
+  submitCommand(id, command);
+  return true;
 }
 
 export function paste(id: string, text: string): void {

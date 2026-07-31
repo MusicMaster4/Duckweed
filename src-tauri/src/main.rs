@@ -14,6 +14,7 @@ mod project;
 mod pty;
 mod shell_integration;
 mod shells;
+mod terminal_shell_integration;
 mod usage;
 mod watch;
 

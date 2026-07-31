@@ -284,8 +284,26 @@ pub fn spawn(
         .map_err(err)?;
 
     let mut cmd = CommandBuilder::new(&shell.program);
-    for arg in &shell.args {
-        cmd.arg(arg);
+    let executable = std::path::Path::new(&shell.program)
+        .file_stem()
+        .map(|name| name.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    let is_bash = executable == "bash";
+    let is_zsh = executable == "zsh";
+    let bash_hook = is_bash
+        .then(|| crate::terminal_shell_integration::bash_hook(app).ok())
+        .flatten();
+    if let Some(path) = &bash_hook {
+        // --rcfile is the only reliable interactive Bash startup hook. Our
+        // file first sources the normal login profile, then installs OSC 133.
+        cmd.arg("--noprofile");
+        cmd.arg("--rcfile");
+        cmd.arg(path.to_string_lossy().as_ref());
+        cmd.arg("-i");
+    } else {
+        for arg in &shell.args {
+            cmd.arg(arg);
+        }
     }
 
     // Prefer the project directory; fall back to the user's home so we never
@@ -309,9 +327,37 @@ pub fn spawn(
     for (key, value) in crate::agent_activity::terminal_env(app, &id) {
         cmd.env(key, value);
     }
+    let requested_zdotdir = env
+        .as_ref()
+        .and_then(|values| values.get("ZDOTDIR"))
+        .filter(|value| !value.is_empty())
+        .cloned()
+        .or_else(|| std::env::var("ZDOTDIR").ok().filter(|value| !value.is_empty()));
     if let Some(env) = env {
         for (k, v) in env {
             cmd.env(k, v);
+        }
+    }
+    // Apply integration variables last so a pane-specific environment cannot
+    // accidentally point startup at an unrelated script or ZDOTDIR.
+    if matches!(shell.id.as_str(), "pwsh" | "powershell") {
+        if let Ok(path) = crate::terminal_shell_integration::powershell_hook(app) {
+            cmd.env(
+                "DUCKWEED_SHELL_INTEGRATION",
+                path.to_string_lossy().as_ref(),
+            );
+            cmd.arg("-NoExit");
+            cmd.arg("-Command");
+            cmd.arg(". $env:DUCKWEED_SHELL_INTEGRATION");
+        }
+    } else if is_zsh {
+        if let Ok(path) = crate::terminal_shell_integration::zsh_zdotdir(app) {
+            let original = requested_zdotdir
+                .or_else(|| home_dir().map(|value| value.to_string_lossy().to_string()))
+                .unwrap_or_else(|| resolved_cwd.clone());
+            cmd.env("DUCKWEED_ORIGINAL_ZDOTDIR", original);
+            cmd.env("DUCKWEED_ZDOTDIR", path.to_string_lossy().as_ref());
+            cmd.env("ZDOTDIR", path.to_string_lossy().as_ref());
         }
     }
 

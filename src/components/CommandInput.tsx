@@ -236,6 +236,12 @@ export function CommandInput({ termId, active, exited, highlight }: Props) {
     }
 
     if (terminals.hasBlockNavSelection(termId)) {
+      if (e.key === "Enter" && !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey) {
+        e.preventDefault();
+        e.stopPropagation();
+        terminals.rerunSelectedBlock(termId);
+        return;
+      }
       if (e.key === "ArrowUp" && !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey) {
         e.preventDefault();
         e.stopPropagation();
