@@ -14,8 +14,8 @@ import { nextBlockSelection, type BlockNavAction } from "./blockNav";
  * `PS path> cmd` echo never bleeds through). Prompt-cover and selection chrome
  * are editor-only — they paint free-floating rows and flicker on TUI footers.
  *
- * Overlays are plain DOM (not xterm decorations) so they stay visible under the
- * WebGL renderer and resize with the pane the same way the visual cursor does.
+ * Overlays are plain DOM (not xterm decorations) so they resize with the pane
+ * the same way the visual cursor does.
  */
 
 export interface CommandBlock {

@@ -3,7 +3,6 @@ import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebLinksAddon } from "@xterm/addon-web-links";
-import { WebglAddon } from "@xterm/addon-webgl";
 import { Channel } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
@@ -97,7 +96,6 @@ interface Session extends TermMeta {
   term: Terminal;
   fit: FitAddon;
   search: SearchAddon;
-  webgl: WebglAddon | null;
   /** The element xterm renders into; it is moved between panes, never recreated. */
   host: HTMLDivElement;
   container: HTMLElement | null;
@@ -347,7 +345,7 @@ function applyMetrics(): void {
     try {
       term.clearTextureAtlas();
     } catch {
-      // DOM renderer has no atlas.
+      // The DOM renderer has no texture atlas.
     }
     term.refresh(0, term.rows - 1);
   }
@@ -1059,7 +1057,6 @@ function create(id: string, opts: TerminalStartOptions): Session {
     term,
     fit,
     search,
-    webgl: null,
     host,
     container: null,
     observer: null,
@@ -1559,17 +1556,11 @@ export function attach(
     session.container = container;
   }
 
-  // Background tabs keep their buffer but release renderer/overlay work. Load
-  // WebGL again before paint when the pane becomes visible.
-  if (!session.webgl) {
-    try {
-      session.webgl = new WebglAddon();
-      session.term.loadAddon(session.webgl);
-    } catch {
-      session.webgl = null;
-      // WebGL is optional; xterm's DOM renderer is the fallback.
-    }
-  }
+  // Keep xterm on its built-in DOM renderer. The WebGL addon repeatedly
+  // loses and rebuilds its context in some Windows WebView2 environments,
+  // especially while a PTY redraws or the pane is refitted. That presents as
+  // the whole terminal rapidly flashing. The DOM renderer is stable across
+  // pane moves and still handles normal terminal output efficiently.
   session.blocks.setActive(true);
   session.observer?.disconnect();
   const observer = new ResizeObserver(() => refit(id));
@@ -1588,8 +1579,6 @@ export function detach(id: string): void {
   session.observer = null;
   session.container = null;
   session.blocks.setActive(false);
-  session.webgl?.dispose();
-  session.webgl = null;
   hideVisualCursor(session);
   limbo().appendChild(session.host);
 }
