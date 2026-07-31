@@ -4,50 +4,6 @@ use std::path::PathBuf;
 
 use tauri::{AppHandle, Manager};
 
-const POWERSHELL_HOOK: &str = r#"
-if (-not $global:__duckweedShellIntegrationLoaded) {
-    $global:__duckweedShellIntegrationLoaded = $true
-    $global:__duckweedCommandRunning = $false
-    $global:__duckweedOriginalPrompt = $function:prompt
-    $global:__duckweedEsc = [char]27
-    $global:__duckweedBel = [char]7
-
-    function global:__duckweedCommandStart([string]$line) {
-        $__duckweedBytes = [Text.Encoding]::UTF8.GetBytes($line)
-        $__duckweedCommand = [Convert]::ToBase64String($__duckweedBytes)
-        [Console]::Write("$global:__duckweedEsc]133;C;cmd=$__duckweedCommand$global:__duckweedBel")
-        $global:__duckweedCommandRunning = $true
-    }
-
-    function global:prompt {
-        $__duckweedSucceeded = $?
-        $__duckweedNativeExitCode = $global:LASTEXITCODE
-        $__duckweedPrefix = ''
-        if ($global:__duckweedCommandRunning) {
-            $__duckweedExitCode = if ($__duckweedSucceeded) { 0 } elseif ($__duckweedNativeExitCode -is [int] -and $__duckweedNativeExitCode -ne 0) { $__duckweedNativeExitCode } else { 1 }
-            $__duckweedPrefix = "$global:__duckweedEsc]133;D;$__duckweedExitCode$global:__duckweedBel"
-            $global:__duckweedCommandRunning = $false
-        }
-        $__duckweedPromptText = [string](& $global:__duckweedOriginalPrompt)
-        "$__duckweedPrefix$global:__duckweedEsc]133;A$global:__duckweedBel$__duckweedPromptText$global:__duckweedEsc]133;B$global:__duckweedBel"
-    }
-
-    try {
-        $global:__duckweedOriginalHistoryHandler = (Get-PSReadLineOption).AddToHistoryHandler
-        Set-PSReadLineOption -AddToHistoryHandler {
-            param([string]$line)
-            __duckweedCommandStart $line
-            if ($null -ne $global:__duckweedOriginalHistoryHandler) {
-                return [bool](& $global:__duckweedOriginalHistoryHandler $line)
-            }
-            return $true
-        }
-    } catch {
-        # An unusually old host can lack PSReadLine. Prompt markers still work.
-    }
-}
-"#;
-
 const BASH_HOOK: &str = r#"
 if [ -z "${__DUCKWEED_SHELL_INTEGRATION_LOADED:-}" ]; then
     __DUCKWEED_SHELL_INTEGRATION_LOADED=1
@@ -195,20 +151,6 @@ if [ -z "${__DUCKWEED_SHELL_INTEGRATION_LOADED:-}" ]; then
 fi
 "#;
 
-/// Materialize the hook in Duckweed's private cache and return its path.
-pub fn powershell_hook(app: &AppHandle) -> Result<PathBuf, String> {
-    let dir = app
-        .path()
-        .app_cache_dir()
-        .map_err(|error| error.to_string())?;
-    std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
-    let path = dir.join("shell-integration.ps1");
-    if std::fs::read_to_string(&path).ok().as_deref() != Some(POWERSHELL_HOOK) {
-        std::fs::write(&path, POWERSHELL_HOOK).map_err(|error| error.to_string())?;
-    }
-    Ok(path)
-}
-
 pub fn bash_hook(app: &AppHandle) -> Result<PathBuf, String> {
     write_cached(app, "shell-integration.bash", BASH_HOOK)
 }
@@ -249,16 +191,7 @@ fn write_if_changed(path: &std::path::Path, contents: &str) -> Result<(), String
 
 #[cfg(test)]
 mod tests {
-    use super::{BASH_HOOK, POWERSHELL_HOOK, ZSH_RC};
-
-    #[test]
-    fn powershell_hook_emits_the_full_osc_133_lifecycle() {
-        for marker in ["133;A", "133;B", "133;C;cmd=", "133;D;"] {
-            assert!(POWERSHELL_HOOK.contains(marker), "missing {marker}");
-        }
-        assert!(POWERSHELL_HOOK.contains("AddToHistoryHandler"));
-        assert!(POWERSHELL_HOOK.contains("OriginalPrompt"));
-    }
+    use super::{BASH_HOOK, ZSH_RC};
 
     #[test]
     fn unix_hooks_emit_commands_prompts_status_and_preserve_user_startup() {
@@ -333,42 +266,4 @@ mod tests {
         assert!(stdout.contains("duckweed-test"), "stdout: {stdout:?}");
     }
 
-    #[cfg(windows)]
-    #[test]
-    fn installed_powershell_executes_the_hook_and_emits_markers() {
-        use std::process::Command;
-
-        let Some(program) = crate::shells::find_in_path("pwsh")
-            .or_else(|| crate::shells::find_in_path("powershell"))
-        else {
-            return;
-        };
-        let path =
-            std::env::temp_dir().join(format!("duckweed-osc133-test-{}.ps1", std::process::id()));
-        std::fs::write(&path, POWERSHELL_HOOK).unwrap();
-        let quoted = path.to_string_lossy().replace('\'', "''");
-        let command = format!(
-            ". '{quoted}'; \
-             __duckweedCommandStart \"Write-Output 'ok'\"; \
-             cmd /c exit 7; [Console]::Write((prompt))"
-        );
-        let output = Command::new(program)
-            .args(["-NoLogo", "-NoProfile", "-Command", &command])
-            .output()
-            .unwrap();
-        let _ = std::fs::remove_file(path);
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(
-            stdout.contains("\x1b]133;C;cmd=V3JpdGUtT3V0cHV0ICdvayc="),
-            "stdout: {stdout:?}"
-        );
-        assert!(stdout.contains("\x1b]133;D;7\x07"));
-        assert!(stdout.contains("\x1b]133;A\x07"));
-        assert!(stdout.contains("\x1b]133;B\x07"));
-    }
 }

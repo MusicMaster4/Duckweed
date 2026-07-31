@@ -340,17 +340,13 @@ pub fn spawn(
     }
     // Apply integration variables last so a pane-specific environment cannot
     // accidentally point startup at an unrelated script or ZDOTDIR.
-    if matches!(shell.id.as_str(), "pwsh" | "powershell") {
-        if let Ok(path) = crate::terminal_shell_integration::powershell_hook(app) {
-            cmd.env(
-                "DUCKWEED_SHELL_INTEGRATION",
-                path.to_string_lossy().as_ref(),
-            );
-            cmd.arg("-NoExit");
-            cmd.arg("-Command");
-            cmd.arg(". $env:DUCKWEED_SHELL_INTEGRATION");
-        }
-    } else if is_zsh {
+    //
+    // PowerShell deliberately starts with its normal arguments. Injecting a
+    // prompt/PSReadLine hook here can make ConPTY continuously repaint the
+    // shared history buffer while the terminal is idle. Besides flashing old
+    // commands, that feedback loop consumes CPU and grows the WebView until it
+    // becomes unresponsive. Editor-mode command blocks do not need the hook.
+    if is_zsh {
         if let Ok(path) = crate::terminal_shell_integration::zsh_zdotdir(app) {
             let original = requested_zdotdir
                 .or_else(|| home_dir().map(|value| value.to_string_lossy().to_string()))
