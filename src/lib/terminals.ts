@@ -10,6 +10,7 @@ import { agentHasUnfinishedWork } from "./agents/activity";
 import { parseAgentLaunch } from "./agents/launch";
 import * as agentSessions from "./agents/session";
 import type { AgentId } from "./agents/types";
+import { canNavigateBlocks } from "./blockNav";
 import { BlockTracker } from "./blocks";
 import * as commandHistory from "./commandHistory";
 import { createCursorSettler, type CursorSettler } from "./cursor";
@@ -179,6 +180,14 @@ interface Session extends TermMeta {
     /** Raw shell text echoed before Enter was intercepted. */
     rawLaunchText: string | null;
   } | null;
+}
+
+function canSessionNavigateBlocks(session: Session): boolean {
+  return canNavigateBlocks({
+    busy: session.busy,
+    exited: session.exited,
+    hasAgentUi: session.agentUi !== null,
+  });
 }
 
 /** Focus handlers for the per-pane command editor (Warp-style input). */
@@ -1227,7 +1236,7 @@ function create(id: string, opts: TerminalStartOptions): Session {
     // OSC 133 makes the same controls available in raw mode. Ctrl+Up selects
     // the latest block and plain Up/Down walk through the list.
     // Skipped under the agent surface — there is no block chrome to walk.
-    if (!session.agentUi) {
+    if (canSessionNavigateBlocks(session)) {
       if (event.key === "ArrowUp" && ctrl && !event.shiftKey && !event.altKey) {
         event.preventDefault();
         session.blocks.navigate("selectLast");
@@ -2147,7 +2156,8 @@ export function selection(id: string): string {
 
 /** Keyboard block nav: true when a block is currently selected in this pane. */
 export function hasBlockNavSelection(id: string): boolean {
-  return sessions.get(id)?.blocks.hasNavSelection() ?? false;
+  const session = sessions.get(id);
+  return !!session && canSessionNavigateBlocks(session) && session.blocks.hasNavSelection();
 }
 
 export function clearBlockSelection(id: string): void {
@@ -2180,24 +2190,27 @@ export function clearOtherBlockSelections(exceptId: string): void {
 
 /** Ctrl+Up — select the most recent block (and scroll it into view). */
 export function selectLastBlock(id: string): boolean {
-  return sessions.get(id)?.blocks.navigate("selectLast") ?? false;
+  const session = sessions.get(id);
+  return !!session && canSessionNavigateBlocks(session) && session.blocks.navigate("selectLast");
 }
 
 /** Up while a block is selected — move to an older block. */
 export function selectPrevBlock(id: string): boolean {
-  return sessions.get(id)?.blocks.navigate("prev") ?? false;
+  const session = sessions.get(id);
+  return !!session && canSessionNavigateBlocks(session) && session.blocks.navigate("prev");
 }
 
 /** Down while a block is selected — move to a newer block. */
 export function selectNextBlock(id: string): boolean {
-  return sessions.get(id)?.blocks.navigate("next") ?? false;
+  const session = sessions.get(id);
+  return !!session && canSessionNavigateBlocks(session) && session.blocks.navigate("next");
 }
 
 /** Re-run the selected block's original command. */
 export function rerunSelectedBlock(id: string): boolean {
   const session = sessions.get(id);
   const command = session?.blocks.selectedCommand();
-  if (!session || !command) return false;
+  if (!session || !canSessionNavigateBlocks(session) || !command) return false;
   session.blocks.clearSelection();
   submitCommand(id, command);
   return true;

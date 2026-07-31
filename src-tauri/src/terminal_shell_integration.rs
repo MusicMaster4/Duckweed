@@ -53,7 +53,8 @@ if [ -z "${__DUCKWEED_SHELL_INTEGRATION_LOADED:-}" ]; then
             return
         fi
         if [ -n "$__duckweed_in_prompt" ]; then
-            __duckweed_in_prompt=
+            __duckweed_run_prev_debug_trap
+            return
         fi
         if [ -n "$__duckweed_running" ]; then
             __duckweed_run_prev_debug_trap
@@ -82,12 +83,16 @@ if [ -z "${__DUCKWEED_SHELL_INTEGRATION_LOADED:-}" ]; then
         printf '\033]133;A\007'
     }
 
+    __duckweed_prompt_done() {
+        __duckweed_in_prompt=
+    }
+
     shopt -s extglob
     PS1="${PS1}\\[\033]133;B\007\\]"
     if declare -p PROMPT_COMMAND 2>/dev/null | grep -q '^declare -a'; then
-        PROMPT_COMMAND=(__duckweed_precmd "${PROMPT_COMMAND[@]}")
+        PROMPT_COMMAND=(__duckweed_precmd "${PROMPT_COMMAND[@]}" __duckweed_prompt_done)
     else
-        PROMPT_COMMAND="__duckweed_precmd${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
+        PROMPT_COMMAND="__duckweed_precmd${PROMPT_COMMAND:+;$PROMPT_COMMAND};__duckweed_prompt_done"
     fi
     __duckweed_capture_prev_debug_trap
     __duckweed_install_debug_trap
@@ -232,6 +237,11 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let hook = root.join("integration.bash");
         std::fs::write(&hook, BASH_HOOK).unwrap();
+        std::fs::write(
+            root.join(".bash_profile"),
+            "PROMPT_COMMAND='printf prompt-hook >/dev/null'\n",
+        )
+        .unwrap();
         let mut child = Command::new(program)
             .args(["--noprofile", "--rcfile"])
             .arg(&hook)
@@ -261,6 +271,10 @@ mod tests {
         assert!(
             stdout.contains("\x1b]133;C;cmd=cHJpbnRmICdkdWNrd2VlZC10ZXN0Jw=="),
             "stdout: {stdout:?}"
+        );
+        assert!(
+            !stdout.contains("\x1b]133;C;cmd=cHJpbnRmIHByb21wdC1ob29rID4vZGV2L251bGw="),
+            "prompt hook was classified as a command: {stdout:?}"
         );
         assert!(stdout.contains("\x1b]133;D;0\x07"), "stdout: {stdout:?}");
         assert!(stdout.contains("duckweed-test"), "stdout: {stdout:?}");

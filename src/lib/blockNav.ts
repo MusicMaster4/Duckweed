@@ -8,6 +8,17 @@
 
 export type BlockNavAction = "selectLast" | "prev" | "next";
 
+export interface BlockNavigationState {
+  busy: boolean;
+  exited: boolean;
+  hasAgentUi: boolean;
+}
+
+/** Block navigation is safe only while the shell owns an idle PTY. */
+export function canNavigateBlocks(state: BlockNavigationState): boolean {
+  return !state.busy && !state.exited && !state.hasAgentUi;
+}
+
 /**
  * Compute the block id to select after a navigation action.
  * Empty list → null (no-op). No selection + prev/next → last (start at newest).
