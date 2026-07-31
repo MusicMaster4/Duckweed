@@ -481,24 +481,17 @@ export function TabStrip({
               ) : (
                 <>
                   {tab.pinned && <PinIcon />}
-                  <button
-                    type="button"
+                  <span
                     className="tab-folder"
                     title={
                       tab.project
-                        ? `${tab.project.path} — click for tab menu`
-                        : "This tab has no folder — click for tab menu"
+                        ? tab.project.path
+                        : "This tab has no folder"
                     }
-                    onPointerDown={(e) => e.stopPropagation()}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onSelect(tab.id);
-                      const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-                      openContextAt(tab.id, rect.left, rect.bottom + 6);
-                    }}
+                    aria-hidden="true"
                   >
                     <TabGlyph iconId={tab.icon} />
-                  </button>
+                  </span>
                   <span className="tab-title">{tab.title}</span>
                   {count > 1 && <span className="tab-count">{count}</span>}
                   <button

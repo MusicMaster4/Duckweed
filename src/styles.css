@@ -525,11 +525,6 @@ body.is-dragging-tab .tab.is-reordering,
   color: rgba(255, 255, 255, 0.82);
 }
 
-.tab.is-colored .tab-folder:hover {
-  background: rgba(0, 0, 0, 0.16);
-  color: #fff;
-}
-
 /* Filled pushpin — opt out of the global stroke-only svg rule. */
 .tab-pin {
   width: 12px;
@@ -587,11 +582,6 @@ svg.tab-glyph-fill,
 svg.tab-glyph-fill path {
   fill: currentColor;
   stroke: none;
-}
-
-.tab-folder:hover {
-  background: var(--hover);
-  color: var(--text);
 }
 
 .tab.is-drop {
