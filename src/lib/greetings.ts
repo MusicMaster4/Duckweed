@@ -1532,14 +1532,19 @@ const UNCLAIMED: readonly string[] = [
  * Pure random repeats the same joke too often. Instead, once a line is chosen it
  * is blocked until half the list has been drawn (floor(n / 2) later picks). With
  * 10 phrases that is a 5-round sit-out; available pool stays at least ~50%.
- * State is module-level so new panes share the same anti-repeat history.
+ * State is module-level so new panes share the same anti-repeat history, and the
+ * recent keys ride durable storage so an app update does not reset the sit-outs.
  */
-function createCooldownPicker(phrases: readonly string[]): () => string {
-  return createHalfCooldownPicker(phrases, "");
+function createCooldownPicker(phrases: readonly string[], poolId: string): () => string {
+  return createHalfCooldownPicker(phrases, "", Math.random, {
+    poolId,
+    // Content keys survive list reorders; a removed joke simply drops out.
+    keyOf: (phrase) => phrase,
+  });
 }
 
-const pickGreeting = createCooldownPicker(GREETINGS);
-const pickUnclaimed = createCooldownPicker(UNCLAIMED);
+const pickGreeting = createCooldownPicker(GREETINGS, "greetings");
+const pickUnclaimed = createCooldownPicker(UNCLAIMED, "unclaimed");
 
 /** One greeting, random among phrases not on half-pool cooldown. */
 export function randomGreeting(): string {

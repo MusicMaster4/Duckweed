@@ -62,6 +62,11 @@ export const PREPARING_MESSAGES: readonly string[] = [
 const pickPreparingMessage = createCooldownPicker(
   PREPARING_MESSAGES,
   PREPARING_MESSAGES[0]!,
+  Math.random,
+  {
+    poolId: "preparing-messages",
+    keyOf: (message) => message,
+  },
 );
 
 /** Shared across panes, matching the greeting half-pool cooldown. */

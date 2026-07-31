@@ -34,8 +34,11 @@ const assignments = new Map<string, Assignment>();
  * never start on the same art. The random source is late-bound so tests that
  * stub Math.random can fix the draw.
  */
-const pickAnimation = createCooldownPicker(ASCII_ANIMATIONS, ASCII_ANIMATIONS[0]!, () =>
-  Math.random(),
+const pickAnimation = createCooldownPicker(
+  ASCII_ANIMATIONS,
+  ASCII_ANIMATIONS[0]!,
+  () => Math.random(),
+  { poolId: "ascii-animations" },
 );
 
 function assignmentFor(termId: string): Assignment {

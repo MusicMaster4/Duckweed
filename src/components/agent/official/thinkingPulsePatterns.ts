@@ -288,6 +288,8 @@ export const THINKING_PULSE_PATTERNS: readonly ThinkingPulsePattern[] =
 const pickPattern = createCooldownPicker(
   THINKING_PULSE_PATTERNS,
   THINKING_PULSE_PATTERNS[0]!,
+  Math.random,
+  { poolId: "thinking-pulse-patterns" },
 );
 
 /** Shared across panes, matching the greeting selector's half-pool cooldown. */
