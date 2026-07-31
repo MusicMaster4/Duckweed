@@ -1190,11 +1190,53 @@ fn latest_codex_rate_limits(
 /// its unified shell log.
 fn latest_grok_credit_config(home: &Path) -> Option<Value> {
     let path = home.join(".grok/logs/unified.jsonl");
-    read_tail(&path, 1024 * 1024)?
-        .lines()
-        .rev()
-        .filter(|line| line.contains("billing: fetched credits config"))
-        .find_map(|line| serde_json::from_str(line).ok())
+    latest_json_line_containing(&path, b"billing: fetched credits config")
+}
+
+/// Search a growing JSONL file from newest to oldest without assuming the
+/// wanted event is still inside a fixed-size tail. Grok can write megabytes of
+/// unrelated diagnostics after its last billing refresh, which used to make a
+/// valid credit snapshot disappear from Usage once it fell beyond 1 MiB.
+///
+/// Reading backwards keeps memory bounded while still finding the newest
+/// matching event regardless of how large the log becomes.
+fn latest_json_line_containing(path: &Path, needle: &[u8]) -> Option<Value> {
+    const CHUNK_BYTES: usize = 256 * 1024;
+
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut end = file.metadata().ok()?.len();
+    let mut suffix = Vec::new();
+
+    while end > 0 {
+        let start = end.saturating_sub(CHUNK_BYTES as u64);
+        let mut data = vec![0; (end - start) as usize];
+        file.seek(SeekFrom::Start(start)).ok()?;
+        file.read_exact(&mut data).ok()?;
+        data.extend_from_slice(&suffix);
+
+        let scan_from = if start == 0 {
+            0
+        } else if let Some(newline) = data.iter().position(|byte| *byte == b'\n') {
+            newline + 1
+        } else {
+            suffix = data;
+            end = start;
+            continue;
+        };
+
+        for line in data[scan_from..].split(|byte| *byte == b'\n').rev() {
+            if line.windows(needle.len()).any(|window| window == needle) {
+                if let Ok(value) = serde_json::from_slice(line) {
+                    return Some(value);
+                }
+            }
+        }
+
+        suffix = data[..scan_from.saturating_sub(1)].to_vec();
+        end = start;
+    }
+
+    None
 }
 
 #[cfg(test)]
@@ -1986,6 +2028,33 @@ mod tests {
         assert!((quota.limits[0].percent - 14.0).abs() < 1e-9);
         assert!(quota.limits[0].resets_at.is_some());
         assert!(quota.message.is_none());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn grok_credit_snapshot_survives_large_newer_log_tail() {
+        let root =
+            std::env::temp_dir().join(format!("duckweed-grok-large-tail-{}", std::process::id()));
+        let dir = root.join(".grok/logs");
+        std::fs::create_dir_all(&dir).unwrap();
+        let snapshot = r#"{"ts":"2026-07-30T14:07:38.871Z","msg":"billing: fetched credits config","ctx":{"config":{"creditUsagePercent":5.0,"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","start":"2026-07-30T11:57:58.252814+00:00","end":"2026-08-06T11:57:58.252814+00:00"}},"subscriptionTier":"SuperGrok"}}"#;
+        let noise = format!(
+            "{{\"msg\":\"diagnostic\",\"padding\":\"{}\"}}\n",
+            "x".repeat(1024)
+        );
+        let mut log = std::fs::File::create(dir.join("unified.jsonl")).unwrap();
+        writeln!(log, "{snapshot}").unwrap();
+        for _ in 0..1200 {
+            log.write_all(noise.as_bytes()).unwrap();
+        }
+        drop(log);
+
+        let now = parse_rfc3339_ms("2026-07-31T12:00:00Z").unwrap();
+        let quota = grok_quota_at(&root, now).expect("snapshot before a tail larger than 1 MiB");
+
+        assert_eq!(quota.plan.as_deref(), Some("SuperGrok"));
+        assert!((quota.limits[0].percent - 5.0).abs() < f64::EPSILON);
 
         let _ = std::fs::remove_dir_all(&root);
     }
