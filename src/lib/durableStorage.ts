@@ -18,6 +18,8 @@ export const DURABLE_KEYS = [
   "duckweed:agent-preferences:v1",
   // Named pane arrangements and their optional startup commands.
   "duckweed:layouts:v1",
+  // User-authored prompt templates shared by every terminal and agent.
+  "duckweed:prompt-templates:v1",
   // Focused time, daily limit, and the local day it belongs to.
   "duckweed:wellbeing:v1",
   // 70% pool cooldown history for greetings, ASCII loaders, preparing lines,

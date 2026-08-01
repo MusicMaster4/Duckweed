@@ -105,6 +105,8 @@ describe("subagent UI", () => {
       <SubagentInspector
         agent="claude"
         subagent={subagent}
+        canMessage={false}
+        onMessage={async () => false}
         onClose={() => {}}
         onShowInTimeline={() => {}}
       />,
@@ -115,7 +117,7 @@ describe("subagent UI", () => {
     expect(html).toContain("Explore");
     expect(html).toContain("Find the fixture that breaks the parser.");
     expect(html).toContain("Reading parser fixtures");
-    expect(html).toContain("Nested activity");
+    expect(html).toContain("Conversation");
     expect(html).toContain("The legacy fixture is the likely failure.");
     expect(html).toContain("Inspect nested dependency");
     expect(html).toContain(

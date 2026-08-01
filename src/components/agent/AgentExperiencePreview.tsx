@@ -415,6 +415,8 @@ export function AgentExperiencePreview() {
           <SubagentInspector
             agent={agent}
             subagent={selectedSubagent}
+            canMessage={false}
+            onMessage={async () => false}
             onClose={() => setSelectedSubagentCallId(null)}
             onShowInTimeline={(callId) => {
               const target = Array.from(

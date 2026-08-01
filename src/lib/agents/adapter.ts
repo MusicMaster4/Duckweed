@@ -45,6 +45,12 @@ export interface AgentAdapter {
    * in its queue.
    */
   steer?: (prompt: AgentPrompt, ctx: AdapterContext) => Promise<boolean> | boolean;
+  /** Send a message directly to a provider-owned child thread. */
+  promptSubagent?: (
+    threadId: string,
+    prompt: AgentPrompt,
+    ctx: AdapterContext,
+  ) => Promise<boolean> | boolean;
   /**
    * The user submitted text starting with `/`. Returning `"handled"` means
    * the adapter ran the command itself (an RPC, a local answer); `"prompt"`

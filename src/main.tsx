@@ -1,5 +1,6 @@
 import { createRoot } from "react-dom/client";
 
+import { NativeTitleTooltips } from "./components/Tooltip";
 import { restoreDurableStorage } from "./lib/durableStorage";
 import "@xterm/xterm/css/xterm.css";
 import "./styles.css";
@@ -17,7 +18,12 @@ async function start() {
     );
     const container = document.getElementById("root");
     if (!container) throw new Error("missing #root");
-    createRoot(container).render(<AgentExperiencePreview />);
+    createRoot(container).render(
+      <>
+        <AgentExperiencePreview />
+        <NativeTitleTooltips />
+      </>,
+    );
     return;
   }
 
@@ -33,7 +39,12 @@ async function start() {
 
   // Deliberately not wrapped in StrictMode: its double-mount would spawn two
   // shells per pane in development.
-  createRoot(container).render(<App />);
+  createRoot(container).render(
+    <>
+      <App />
+      <NativeTitleTooltips />
+    </>,
+  );
 }
 
 void start();
