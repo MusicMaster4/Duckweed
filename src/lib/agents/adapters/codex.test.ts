@@ -631,6 +631,84 @@ describe("codex adapter", () => {
     });
   });
 
+  test("starts a direct follow-up turn in a completed child thread", async () => {
+    const h = harness();
+    await h.handshake();
+    h.notify("item/completed", {
+      threadId: "thread_1",
+      item: {
+        id: "sub-direct",
+        type: "collabAgentToolCall",
+        tool: "spawnAgent",
+        status: "completed",
+        receiverThreadIds: ["thread_child_direct"],
+        prompt: "Inspect the parser",
+        agentsStates: { thread_child_direct: { status: "completed" } },
+      },
+    });
+
+    const pending = h.adapter.promptSubagent?.(
+      "thread_child_direct",
+      { text: "Now check the serializer", images: [] },
+      h.ctx,
+    );
+    const call = h.sent.at(-1) as { id: number; method: string; params: unknown };
+    expect(call).toMatchObject({
+      method: "turn/start",
+      params: {
+        threadId: "thread_child_direct",
+        input: [{ type: "text", text: "Now check the serializer" }],
+      },
+    });
+    h.feed({ jsonrpc: "2.0", id: call.id, result: { turn: { id: "direct-turn" } } });
+    expect(await pending).toBe(true);
+    expect(h.state().items[0]).toMatchObject({
+      subagent: {
+        items: expect.arrayContaining([
+          expect.objectContaining({ kind: "user", text: "Now check the serializer" }),
+        ]),
+      },
+    });
+  });
+
+  test("steers a child turn that is already running", async () => {
+    const h = harness();
+    await h.handshake();
+    h.notify("item/started", {
+      threadId: "thread_1",
+      item: {
+        id: "sub-steer",
+        type: "collabAgentToolCall",
+        tool: "spawnAgent",
+        status: "inProgress",
+        receiverThreadIds: ["thread_child_steer"],
+        prompt: "Inspect the parser",
+        agentsStates: { thread_child_steer: { status: "running" } },
+      },
+    });
+    h.notify("turn/started", {
+      threadId: "thread_child_steer",
+      turn: { id: "child-active-turn" },
+    });
+
+    const pending = h.adapter.promptSubagent?.(
+      "thread_child_steer",
+      { text: "Focus on Windows paths", images: [] },
+      h.ctx,
+    );
+    const call = h.sent.at(-1) as { id: number; method: string; params: unknown };
+    expect(call).toMatchObject({
+      method: "turn/steer",
+      params: {
+        threadId: "thread_child_steer",
+        expectedTurnId: "child-active-turn",
+        input: [{ type: "text", text: "Focus on Windows paths" }],
+      },
+    });
+    h.feed({ jsonrpc: "2.0", id: call.id, result: {} });
+    expect(await pending).toBe(true);
+  });
+
   test("keeps collaboration control operations out of the subagent fleet", async () => {
     const h = harness();
     await h.handshake();

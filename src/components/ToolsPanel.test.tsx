@@ -6,10 +6,12 @@ import { LayoutsTool } from "./LayoutsTool";
 import { PortsTool, portsForOwners } from "./PortsTool";
 import type { AppPort } from "../lib/ipc";
 import { PowerWatchTool } from "./PowerWatchTool";
+import { PromptsTool } from "./PromptsTool";
 import { StatisticsTool } from "./StatisticsTool";
 import * as checklist from "../lib/checklist";
 import * as layouts from "../lib/layouts";
 import * as powerWatch from "../lib/powerWatch";
+import * as promptTemplates from "../lib/promptTemplates";
 
 const DAY = 24 * 60 * 60 * 1000;
 
@@ -17,6 +19,32 @@ afterEach(() => {
   checklist.resetForTests();
   layouts.resetLayoutsForTests();
   powerWatch.resetForTests();
+  promptTemplates.resetPromptTemplatesForTests();
+});
+
+describe("prompts panel", () => {
+  test("makes pointer drag the primary terminal insertion action", () => {
+    promptTemplates.savePromptTemplate({
+      title: "Review implementation",
+      content: "Review this implementation for correctness and missing tests.",
+    });
+    const html = renderToStaticMarkup(<PromptsTool />);
+    expect(html).toContain("Shared across every agent");
+    expect(html).toContain("Review implementation");
+    expect(html).toContain("Copy");
+    expect(html).not.toContain("Use template");
+    expect(html).toContain("Drag to terminal");
+    expect(html).toContain("Drag Review implementation to a terminal");
+    expect(html).not.toContain('draggable="true"');
+    expect(html).toContain("data-prompt-template");
+  });
+
+  test("explains how to create the first reusable prompt", () => {
+    const html = renderToStaticMarkup(<PromptsTool />);
+    expect(html).toContain("No prompt templates yet");
+    expect(html).toContain("Create template");
+    expect(html).toContain("ascii-ambient-prompts");
+  });
 });
 
 describe("checklist panel", () => {

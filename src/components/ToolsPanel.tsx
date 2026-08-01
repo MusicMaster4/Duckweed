@@ -4,6 +4,7 @@ import { ChecklistTool } from "./ChecklistTool";
 import { LayoutsTool } from "./LayoutsTool";
 import { PortsTool } from "./PortsTool";
 import { PowerWatchTool } from "./PowerWatchTool";
+import { PromptsTool } from "./PromptsTool";
 import { ProjectExplorer } from "./ProjectExplorer";
 import { StatisticsTool } from "./StatisticsTool";
 import { Tooltip } from "./Tooltip";
@@ -42,7 +43,14 @@ interface Props {
 export const TOOLS_MIN_WIDTH = 190;
 export const TOOLS_MAX_WIDTH = 560;
 
-export type SectionId = "files" | "layouts" | "checklist" | "statistics" | "ports" | "power";
+export type SectionId =
+  | "files"
+  | "layouts"
+  | "prompts"
+  | "checklist"
+  | "statistics"
+  | "ports"
+  | "power";
 
 /**
  * The picker at the top of the panel: every tool the dock holds, named, in one
@@ -79,6 +87,16 @@ const SECTIONS: { id: SectionId; label: string; icon: ReactNode }[] = [
         <path d="M2.5 4.5l1.5 1.5 2.5-3" />
         <path d="M2.5 11l1.5 1.5 2.5-3" />
         <path d="M8.5 4.5h5M8.5 11h5" />
+      </svg>
+    ),
+  },
+  {
+    id: "prompts",
+    label: "Prompts",
+    icon: (
+      <svg viewBox="0 0 16 16" aria-hidden="true">
+        <path d="M3 2.5h10v8H7l-3.5 3v-3H3z" />
+        <path d="M5.5 5.5h5M5.5 7.8h3.5" />
       </svg>
     ),
   },
@@ -244,6 +262,7 @@ export function ToolsPanel({
           />
         )}
         {section === "checklist" && <ChecklistTool scope={tabId} scopeLabel={tabTitle} />}
+        {section === "prompts" && <PromptsTool />}
         {section === "statistics" && <StatisticsTool {...stats} />}
         {section === "ports" && <PortsTool ownerNames={ownerNames} />}
         {section === "power" && <PowerWatchTool />}

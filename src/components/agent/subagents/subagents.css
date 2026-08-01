@@ -438,6 +438,89 @@
   line-height: 1.45;
 }
 
+.agent-sub-message-form {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: 5px;
+  padding: 9px 10px;
+  border-top: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg-pane) 96%, var(--agent-sub-accent) 4%);
+}
+
+.agent-sub-message-form > label {
+  color: var(--agent-sub-accent);
+  font-size: 8.5px;
+  font-weight: 650;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+}
+
+.agent-sub-message-form > div {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+}
+
+.agent-sub-message-form textarea {
+  min-width: 0;
+  min-height: 44px;
+  max-height: 110px;
+  flex: 1;
+  resize: vertical;
+  padding: 7px 8px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  color: var(--text);
+  background: var(--bg-elevated);
+  font-family: var(--font-sans);
+  font-size: 10.5px;
+  line-height: 1.4;
+}
+
+.agent-sub-message-form textarea:focus {
+  border-color: color-mix(in srgb, var(--agent-sub-accent) 58%, var(--border));
+}
+
+.agent-sub-message-form textarea:disabled {
+  opacity: 0.55;
+}
+
+.agent-sub-message-form button {
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid color-mix(in srgb, var(--agent-sub-accent) 42%, var(--border));
+  border-radius: 6px;
+  color: var(--agent-sub-accent);
+  background: color-mix(in srgb, var(--agent-sub-accent) 9%, var(--bg-elevated));
+  font-size: 9.5px;
+  font-weight: 600;
+}
+
+.agent-sub-message-form button:not(:disabled):hover {
+  border-color: color-mix(in srgb, var(--agent-sub-accent) 65%, var(--border));
+  color: var(--text);
+}
+
+.agent-sub-message-form button:disabled {
+  cursor: default;
+  opacity: 0.42;
+}
+
+.agent-sub-message-form > p,
+.agent-sub-message-form > small {
+  margin: 0;
+  font-size: 8.5px;
+}
+
+.agent-sub-message-form > p {
+  color: var(--rose);
+}
+
+.agent-sub-message-form > small {
+  color: var(--text-faint);
+}
+
 .agent-sub-inspector-actions {
   display: flex;
   gap: 6px;

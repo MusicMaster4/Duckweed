@@ -676,6 +676,16 @@ export function AgentSurface({ termId, active, onClose }: Props) {
         <SubagentInspector
           agent={session.agent}
           subagent={selectedSubagent}
+          canMessage={
+            Boolean(selectedSubagent.threadId) &&
+            agents.canPromptSubagent(termId) &&
+            (selectedSubagent.status === "running" || selectedSubagent.status === "done")
+          }
+          onMessage={(text) =>
+            selectedSubagent.threadId
+              ? agents.promptSubagent(termId, selectedSubagent.threadId, text)
+              : Promise.resolve(false)
+          }
           onClose={closeSubagentInspector}
           onShowInTimeline={showSubagentInTimeline}
         />
