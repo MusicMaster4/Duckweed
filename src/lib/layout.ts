@@ -117,6 +117,33 @@ export function removeLeaf(root: LayoutNode, leafId: string): LayoutNode | null 
   return result === undefined ? root : result;
 }
 
+/** Remove the cell containing a leaf from a specific split after its close animation. */
+export function removeLeafFromSplit(
+  root: LayoutNode,
+  leafId: string,
+  ownerSplitId: string,
+): LayoutNode | null {
+  if (root.kind === "leaf") return root.id === leafId ? null : root;
+  if (root.id === ownerSplitId) {
+    const index = root.children.findIndex((child) => findLeaf(child, leafId));
+    if (index < 0) return root;
+    const children = root.children.filter((_, childIndex) => childIndex !== index);
+    if (children.length === 0) return null;
+    if (children.length === 1) return children[0];
+    const sizes = root.sizes.filter((_, childIndex) => childIndex !== index);
+    return { ...root, children, sizes: normalize(sizes) };
+  }
+  for (let index = 0; index < root.children.length; index += 1) {
+    if (!findLeaf(root.children[index], leafId)) continue;
+    const child = removeLeafFromSplit(root.children[index], leafId, ownerSplitId);
+    if (!child) return root;
+    const children = [...root.children];
+    children[index] = child;
+    return { ...root, children };
+  }
+  return root;
+}
+
 /** Exchange the terminals of two leaves — a "move pane here" gesture. */
 export function swapLeaves(root: LayoutNode, aId: string, bId: string): LayoutNode {
   const a = findLeaf(root, aId);

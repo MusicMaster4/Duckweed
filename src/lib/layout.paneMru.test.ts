@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 
-import { preferredLeaf, touchPaneMru } from "./layout";
+import { preferredLeaf, removeLeafFromSplit, touchPaneMru } from "./layout";
 import type { LayoutNode } from "./types";
 
 function leaf(id: string): LayoutNode {
@@ -43,5 +43,38 @@ describe("touchPaneMru", () => {
   it("drops leaves that no longer exist in the tree", () => {
     const root = row(leaf("a"), leaf("c"));
     expect(touchPaneMru(["b", "a", "c"], "c", root)).toEqual(["c", "a"]);
+  });
+});
+
+describe("removeLeafFromSplit", () => {
+  it("collapses a two-pane owner to its surviving child", () => {
+    const left = leaf("left");
+    const right = leaf("right");
+    const root = row(left, right);
+
+    expect(removeLeafFromSplit(root, "left", "split")).toEqual(right);
+  });
+
+  it("only removes from the specified owner split", () => {
+    const nested: LayoutNode = {
+      kind: "split",
+      id: "nested",
+      dir: "col",
+      children: [leaf("top"), leaf("bottom")],
+      sizes: [0.5, 0.5],
+    };
+    const right = leaf("right");
+    const root: LayoutNode = {
+      kind: "split",
+      id: "root",
+      dir: "row",
+      children: [nested, right],
+      sizes: [0.5, 0.5],
+    };
+
+    expect(removeLeafFromSplit(root, "top", "nested")).toEqual({
+      ...root,
+      children: [leaf("bottom"), right],
+    });
   });
 });

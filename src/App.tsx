@@ -75,6 +75,7 @@ import {
   nextLeaf,
   preferredLeaf,
   removeLeaf,
+  removeLeafFromSplit,
   setSizes,
   swapLeaves,
   touchPaneMru,
@@ -103,7 +104,7 @@ import {
 } from "./lib/tabReorder";
 import * as terminals from "./lib/terminals";
 import { loadSettings as loadUsageSettings, prefetchUsage } from "./lib/usage";
-import type { LayoutNode, LeafNode, ProjectInfo, ShellInfo, SplitNode, Tab } from "./lib/types";
+import type { LeafNode, ProjectInfo, ShellInfo, SplitNode, Tab } from "./lib/types";
 
 interface SpawnOpts {
   cwd: string | null;
@@ -139,36 +140,6 @@ function findLeafOwner(
     return { split: root, index, cellId: root.children[index].id };
   }
   return null;
-}
-
-function removeLeafKeepingOwner(
-  root: LayoutNode,
-  leafId: string,
-  ownerSplitId: string,
-): LayoutNode | null {
-  if (root.kind === "leaf") return root.id === leafId ? null : root;
-  if (root.id === ownerSplitId) {
-    const index = root.children.findIndex((child) => findLeaf(child, leafId));
-    if (index < 0) return root;
-    const children = root.children.filter((_, childIndex) => childIndex !== index);
-    if (children.length === 0) return null;
-    const keptSizes = root.sizes.filter((_, childIndex) => childIndex !== index);
-    const total = keptSizes.reduce((sum, size) => sum + size, 0);
-    return {
-      ...root,
-      children,
-      sizes: keptSizes.map((size) => (total > 0 ? size / total : 1 / keptSizes.length)),
-    };
-  }
-  for (let index = 0; index < root.children.length; index += 1) {
-    if (!findLeaf(root.children[index], leafId)) continue;
-    const child = removeLeafKeepingOwner(root.children[index], leafId, ownerSplitId);
-    if (!child) return root;
-    const children = [...root.children];
-    children[index] = child;
-    return { ...root, children };
-  }
-  return root;
 }
 
 async function confirmUpdateWithRunningProcesses(): Promise<boolean> {
@@ -1364,7 +1335,7 @@ export default function App() {
           if (!latest) return null;
           const latestNode = findLeaf(latest.root, leafId);
           if (!latestNode || latestNode.term !== nodeNow.term) return null;
-          const latestRoot = removeLeafKeepingOwner(latest.root, leafId, owner.split.id);
+          const latestRoot = removeLeafFromSplit(latest.root, leafId, owner.split.id);
           if (!latestRoot || findLeaf(latestRoot, leafId)) return null;
           const mru = paneMruRef.current.get(latest.id) ?? [latest.activeLeaf];
           const fallback = preferredLeaf(latestRoot, mru) ?? leaves(latestRoot)[0].id;
