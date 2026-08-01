@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Quick start
+    url: https://github.com/MusicMaster4/Duckweed/blob/main/docs/quickstart.md
+    about: Install Duckweed and build a first multi-pane workspace.
+  - name: Troubleshooting
+    url: https://github.com/MusicMaster4/Duckweed/blob/main/docs/troubleshooting.md
+    about: Check common platform, shell, agent, and update issues.

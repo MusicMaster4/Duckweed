@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 820" role="img" aria-labelledby="title desc">
+  <title id="title">Duckweed workspace overview</title>
+  <desc id="desc">A dark desktop window with three panes for a shell, a coding agent, and tests, plus a Git status bar.</desc>
+  <rect width="1400" height="820" rx="24" fill="#0b0f0d"/>
+  <rect x="18" y="18" width="1364" height="784" rx="18" fill="#111714" stroke="#2b3a31" stroke-width="2"/>
+  <rect x="18" y="18" width="1364" height="58" rx="18" fill="#171f1a"/>
+  <circle cx="52" cy="47" r="7" fill="#db7367"/>
+  <circle cx="78" cy="47" r="7" fill="#d5b45b"/>
+  <circle cx="104" cy="47" r="7" fill="#78dc50"/>
+  <rect x="152" y="31" width="238" height="31" rx="8" fill="#2b352c"/>
+  <text x="174" y="52" fill="#e7eee8" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="17">duckweed  ·  my-project</text>
+  <text x="1288" y="52" fill="#94a399" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="17">⌘  ⌕  ⚙</text>
+
+  <rect x="34" y="94" width="610" height="646" rx="12" fill="#0d120f" stroke="#314338" stroke-width="2"/>
+  <rect x="34" y="94" width="610" height="44" rx="12" fill="#78dc50"/>
+  <text x="56" y="122" fill="#102015" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="18" font-weight="700">shell  ·  main</text>
+  <text x="56" y="184" fill="#d2ddd4" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="19">$ git status</text>
+  <text x="56" y="220" fill="#a9b8ad" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="18">On branch main</text>
+  <text x="56" y="252" fill="#a9b8ad" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="18">working tree clean</text>
+  <text x="56" y="308" fill="#d2ddd4" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="19">$ bun test</text>
+  <text x="56" y="344" fill="#78dc50" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="18">✓ tests passed</text>
+  <text x="56" y="706" fill="#7f9384" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="17">run a command</text>
+
+  <rect x="662" y="94" width="704" height="308" rx="12" fill="#0d120f" stroke="#314338" stroke-width="2"/>
+  <rect x="662" y="94" width="704" height="44" rx="12" fill="#26372a"/>
+  <text x="684" y="122" fill="#d9e7db" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="18" font-weight="700">agent  ·  coding task</text>
+  <circle cx="1306" cy="116" r="8" fill="#78dc50"/>
+  <text x="702" y="186" fill="#8edb73" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="19">assistant</text>
+  <text x="702" y="224" fill="#d2ddd4" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="18">Inspecting the change and running tests...</text>
+  <rect x="702" y="254" width="578" height="2" fill="#304236"/>
+  <text x="702" y="294" fill="#9eafa2" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="17">tools  ·  plan  ·  permissions  ·  diff</text>
+  <text x="702" y="352" fill="#7f9384" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="17">write a follow-up...</text>
+
+  <rect x="662" y="418" width="704" height="322" rx="12" fill="#0d120f" stroke="#314338" stroke-width="2"/>
+  <rect x="662" y="418" width="704" height="44" rx="12" fill="#1d2920"/>
+  <text x="684" y="446" fill="#d9e7db" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="18" font-weight="700">tests  ·  output</text>
+  <text x="702" y="504" fill="#78dc50" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="19">✓ typecheck</text>
+  <text x="702" y="540" fill="#78dc50" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="19">✓ unit tests</text>
+  <text x="702" y="576" fill="#a9b8ad" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="18">Watching for the next command...</text>
+  <text x="702" y="704" fill="#7f9384" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="17">split, resize, drag, or zoom panes</text>
+
+  <rect x="34" y="758" width="1332" height="26" rx="6" fill="#172019"/>
+  <text x="54" y="777" fill="#a9b8ad" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="15">my-project  ·  main  ·  0 changed files</text>
+  <text x="1134" y="777" fill="#78dc50" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="15">3 panes  ·  1 tab</text>
+</svg>

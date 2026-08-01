@@ -1,0 +1,73 @@
+name: Bug report
+description: Report a reproducible problem with Duckweed
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a problem. Please redact secrets,
+        access tokens, private paths, and private repository contents.
+  - type: input
+    id: version
+    attributes:
+      label: Duckweed version
+      description: For example, 1.0.12 or the commit you built.
+      placeholder: 1.0.12
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Windows x64
+        - macOS Intel
+        - macOS Apple Silicon
+        - Linux x64 AppImage
+        - Debian or Ubuntu package
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: shell
+    attributes:
+      label: Shell
+      description: Include the shell and version when known.
+      placeholder: PowerShell 7.5
+    validations:
+      required: true
+  - type: input
+    id: agent
+    attributes:
+      label: Agent CLI
+      description: Leave blank if this is unrelated to an agent.
+      placeholder: Codex CLI 0.x
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: List the smallest sequence that shows the problem.
+      placeholder: |
+        1. Open...
+        2. Press...
+        3. Run...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected and actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Redacted output or screenshots
+      render: shell
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues and removed secrets from this report.
+          required: true
