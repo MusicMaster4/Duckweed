@@ -30,6 +30,7 @@ import * as bus from "./lib/bus";
 import * as checklist from "./lib/checklist";
 import * as powerWatch from "./lib/powerWatch";
 import type { BusyEntry } from "./lib/powerWatch";
+import { agentHasUnfinishedWork } from "./lib/agents/activity";
 import * as agentSessions from "./lib/agents/session";
 import { handleUnattendedPermission } from "./lib/agents/autoApproval";
 import {
@@ -599,7 +600,7 @@ export default function App() {
       const next = new Set(
         termIds.filter((termId) => {
           const agent = agentSessions.get(termId);
-          if (agent) return agent.status === "starting" || agent.status === "working";
+          if (agent) return agentHasUnfinishedWork(agent.status);
           return terminals.hasPendingAgentTurn(termId);
         }),
       );
