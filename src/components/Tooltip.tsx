@@ -16,6 +16,42 @@ const OFFSET = 8;
 const MARGIN = 8;
 const DELAY_MS = 320;
 
+interface TipContent {
+  title: string;
+  detail?: string;
+  shortcut?: string;
+}
+
+function splitNativeTitle(value: string): TipContent {
+  const [firstLine, ...detailLines] = value.split("\n");
+  const shortcutMatch = firstLine.match(/^(.*?)\s+\(([^()]*(?:Ctrl|Alt|Shift|Cmd|Enter|Esc|F\d)[^()]*)\)$/i);
+  const detail = detailLines.join(" ").trim() || undefined;
+
+  if (!shortcutMatch) return { title: firstLine, detail };
+  return {
+    title: shortcutMatch[1],
+    detail,
+    shortcut: shortcutMatch[2],
+  };
+}
+
+function TipBubble({ content, at, bubble }: {
+  content: TipContent;
+  at: { x: number; y: number };
+  bubble: React.RefObject<HTMLDivElement>;
+}) {
+  return createPortal(
+    <div ref={bubble} className="tip" style={{ left: at.x, top: at.y }} role="tooltip">
+      <div className="tip-title">
+        <span>{content.title}</span>
+        {content.shortcut && <kbd>{content.shortcut}</kbd>}
+      </div>
+      {content.detail && <p className="tip-detail">{content.detail}</p>}
+    </div>,
+    document.body,
+  );
+}
+
 /**
  * A tooltip that belongs to this app rather than to the OS.
  *
@@ -111,16 +147,120 @@ export function Tooltip({ title, detail, shortcut, children }: Props) {
       </span>
 
       {at &&
-        createPortal(
-          <div ref={bubble} className="tip" style={{ left: at.x, top: at.y }} role="tooltip">
-            <div className="tip-title">
-              <span>{title}</span>
-              {shortcut && <kbd>{shortcut}</kbd>}
-            </div>
-            {detail && <p className="tip-detail">{detail}</p>}
-          </div>,
-          document.body,
-        )}
+        <TipBubble content={{ title, detail, shortcut }} at={at} bubble={bubble} />}
     </>
   );
+}
+
+/**
+ * Replaces every remaining HTML `title` tooltip with the app tooltip.
+ *
+ * Keeping this at the application root covers controls, truncated paths and
+ * dynamically rendered agent surfaces without adding wrappers that can alter
+ * their layout. The native attribute is restored as soon as the pointer or
+ * keyboard focus leaves the trigger.
+ */
+export function NativeTitleTooltips() {
+  const [content, setContent] = useState<TipContent | null>(null);
+  const [at, setAt] = useState<{ x: number; y: number } | null>(null);
+  const active = useRef<{ node: HTMLElement; title: string } | null>(null);
+  const bubble = useRef<HTMLDivElement>(null);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const restoreTitle = useCallback(() => {
+    const current = active.current;
+    if (current?.node.isConnected && !current.node.hasAttribute("title")) {
+      current.node.setAttribute("title", current.title);
+    }
+    active.current = null;
+  }, []);
+
+  const hide = useCallback(() => {
+    if (timer.current !== null) clearTimeout(timer.current);
+    timer.current = null;
+    restoreTitle();
+    setAt(null);
+    setContent(null);
+  }, [restoreTitle]);
+
+  const show = useCallback((node: HTMLElement, immediate: boolean) => {
+    const title = node.getAttribute("title");
+    if (!title) return;
+
+    if (timer.current !== null) clearTimeout(timer.current);
+    restoreTitle();
+    active.current = { node, title };
+    node.removeAttribute("title");
+
+    const open = () => {
+      const rect = node.getBoundingClientRect();
+      setContent(splitNativeTitle(title));
+      setAt({ x: rect.left + rect.width / 2, y: rect.bottom + OFFSET });
+      timer.current = null;
+    };
+
+    if (immediate) open();
+    else timer.current = setTimeout(open, DELAY_MS);
+  }, [restoreTitle]);
+
+  useEffect(() => {
+    const titledElement = (target: EventTarget | null) =>
+      target instanceof Element ? target.closest<HTMLElement>("[title]") : null;
+
+    const onPointerOver = (event: PointerEvent) => {
+      if (active.current?.node.contains(event.target as Node)) return;
+      const node = titledElement(event.target);
+      if (node) show(node, false);
+    };
+    const onPointerOut = (event: PointerEvent) => {
+      const node = active.current?.node;
+      if (!node || (event.relatedTarget instanceof Node && node.contains(event.relatedTarget))) return;
+      hide();
+    };
+    const onFocusIn = (event: FocusEvent) => {
+      const node = titledElement(event.target);
+      if (node) show(node, true);
+    };
+    const onFocusOut = (event: FocusEvent) => {
+      const node = active.current?.node;
+      if (!node || (event.relatedTarget instanceof Node && node.contains(event.relatedTarget))) return;
+      hide();
+    };
+
+    document.addEventListener("pointerover", onPointerOver);
+    document.addEventListener("pointerout", onPointerOut);
+    document.addEventListener("pointerdown", hide);
+    document.addEventListener("focusin", onFocusIn);
+    document.addEventListener("focusout", onFocusOut);
+    window.addEventListener("scroll", hide, true);
+    window.addEventListener("resize", hide);
+    window.addEventListener("blur", hide);
+    return () => {
+      document.removeEventListener("pointerover", onPointerOver);
+      document.removeEventListener("pointerout", onPointerOut);
+      document.removeEventListener("pointerdown", hide);
+      document.removeEventListener("focusin", onFocusIn);
+      document.removeEventListener("focusout", onFocusOut);
+      window.removeEventListener("scroll", hide, true);
+      window.removeEventListener("resize", hide);
+      window.removeEventListener("blur", hide);
+      hide();
+    };
+  }, [hide, show]);
+
+  useEffect(() => {
+    const node = bubble.current;
+    if (!at || !node) return;
+    const rect = node.getBoundingClientRect();
+    const overflowRight = rect.right - (window.innerWidth - MARGIN);
+    const overflowLeft = MARGIN - rect.left;
+    if (overflowRight > 0) node.style.transform = `translateX(${-overflowRight}px)`;
+    else if (overflowLeft > 0) node.style.transform = `translateX(${overflowLeft}px)`;
+    if (rect.bottom > window.innerHeight - MARGIN) {
+      const top = active.current?.node.getBoundingClientRect().top ?? 0;
+      node.style.top = `${top - rect.height - OFFSET}px`;
+    }
+  }, [at]);
+
+  return content && at ? <TipBubble content={content} at={at} bubble={bubble} /> : null;
 }
