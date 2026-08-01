@@ -30,6 +30,7 @@ import * as bus from "./lib/bus";
 import * as checklist from "./lib/checklist";
 import * as powerWatch from "./lib/powerWatch";
 import type { BusyEntry } from "./lib/powerWatch";
+import { agentHasUnfinishedWork } from "./lib/agents/activity";
 import * as agentSessions from "./lib/agents/session";
 import { handleUnattendedPermission } from "./lib/agents/autoApproval";
 import {
@@ -301,6 +302,9 @@ export default function App() {
   const [unreadTermIds, setUnreadTermIds] = useState<Set<string>>(() => new Set());
   const [completionFlashes, setCompletionFlashes] = useState<Map<string, CompletionFlash>>(
     () => new Map(),
+  );
+  const [workingAgentTermIds, setWorkingAgentTermIds] = useState<Set<string>>(
+    () => new Set(),
   );
   const unreadTermIdsRef = useRef(unreadTermIds);
   unreadTermIdsRef.current = unreadTermIds;
@@ -586,6 +590,43 @@ export default function App() {
     [tabs],
   );
   const termIdsKey = termIds.join("\0");
+
+  // Agent sessions can stay open after a turn finishes, so the tab activity
+  // indicator follows outstanding work rather than the lifetime of the CLI.
+  // Structured sessions announce their status directly; raw terminal agents
+  // use the turn credits maintained by the terminal registry.
+  useEffect(() => {
+    const syncWorkingAgents = () => {
+      const next = new Set(
+        termIds.filter((termId) => {
+          const agent = agentSessions.get(termId);
+          if (agent) return agentHasUnfinishedWork(agent.status);
+          return terminals.hasPendingAgentTurn(termId);
+        }),
+      );
+      setWorkingAgentTermIds((previous) => {
+        if (
+          previous.size === next.size &&
+          [...previous].every((termId) => next.has(termId))
+        ) {
+          return previous;
+        }
+        return next;
+      });
+    };
+
+    syncWorkingAgents();
+    const unsubscribeAgents = agentSessions.subscribeAll(syncWorkingAgents);
+    const unsubscribeTerms = termIds.map((termId) =>
+      terminals.subscribeSession(termId, syncWorkingAgents),
+    );
+    return () => {
+      unsubscribeAgents();
+      for (const unsubscribe of unsubscribeTerms) unsubscribe();
+    };
+    // Tab metadata changes must not rebuild activity subscriptions.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [termIdsKey]);
 
   // Background tabs remain subscribed to the app-wide PTY busy monitor so a
   // running -> idle transition can leave a durable "not reviewed yet" marker.
@@ -2395,6 +2436,17 @@ export default function App() {
     () => Object.fromEntries(tabs.map((t) => [t.id, leaves(t.root).length])),
     [tabs],
   );
+  const workingAgentTabIds = useMemo(
+    () =>
+      new Set(
+        tabs
+          .filter((tab) =>
+            leaves(tab.root).some((node) => workingAgentTermIds.has(node.term)),
+          )
+          .map((tab) => tab.id),
+      ),
+    [tabs, workingAgentTermIds],
+  );
   const unreadCounts = useMemo(
     () =>
       Object.fromEntries(
@@ -2566,6 +2618,7 @@ export default function App() {
           tabs={tabs}
           activeTabId={activeTabId}
           paneCounts={paneCounts}
+          workingTabIds={workingAgentTabIds}
           unreadCounts={unreadCounts}
           completionReviewFlashes={completionReviewFlashes}
           completionHighlights={completionHighlights}

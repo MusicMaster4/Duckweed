@@ -425,6 +425,46 @@ button.chip:hover {
   opacity: 1;
 }
 
+/* A moving highlight crosses tabs whose agent is actively handling a turn.
+   It is an overlay, so custom tab colours remain intact underneath it. */
+.tab-work-shimmer {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 1;
+}
+
+.tab-work-shimmer::before {
+  content: "";
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  left: -90px;
+  width: 72px;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(255, 255, 255, 0.04) 25%,
+    rgba(255, 255, 255, 0.18) 50%,
+    rgba(255, 255, 255, 0.04) 75%,
+    transparent 100%
+  );
+  transform: translateX(0);
+  animation: tab-work-shimmer 1800ms ease-in-out infinite;
+}
+
+@keyframes tab-work-shimmer {
+  from {
+    transform: translateX(0);
+  }
+
+  to {
+    transform: translateX(420px);
+  }
+}
+
 .tab-completion-review {
   position: absolute;
   inset: 0;
@@ -444,6 +484,14 @@ button.chip:hover {
 
   100% {
     opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tab-work-shimmer::before {
+    animation: none;
+    left: 42%;
+    opacity: 0.45;
   }
 }
 

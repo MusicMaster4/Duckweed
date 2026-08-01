@@ -501,6 +501,7 @@ function creditAgentTurn(session: Session, prompt: string | null = null): void {
   // A queued prompt has not started yet. Only the oldest outstanding turn owns
   // the live clock; completion advances it when the agent hands control back.
   if (session.agentTurns.length === 1) session.processStartedAt = startedAt;
+  notifySession(session.id);
 }
 
 /**
@@ -531,6 +532,7 @@ function markAgentComplete(session: Session, trusted = false): void {
         session.agentTurns[0] = { ...session.agentTurns[0], startedAt: now };
         session.processStartedAt = now;
       }
+      notifySession(session.id);
       return;
     }
   }
