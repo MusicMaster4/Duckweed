@@ -4,12 +4,12 @@
 
 # Duckweed
 
-### A local terminal workspace for vibe coding
+### A cross-platform local terminal workspace for vibe coding
 
 Open a folder and start working. Duckweed keeps real shells, coding agents, Git
-context, diffs, tabs, and panes in one place. There is no Duckweed account to
-create, no cloud workspace to set up, and nothing to sync before your first
-command.
+context, diffs, tabs, and panes in one place across Windows, macOS, and Linux.
+There is no Duckweed account to create, no cloud workspace to set up, and
+nothing to sync before your first command.
 
 Launch several coding agents side by side in the same window. Duckweed gives
 each one a dedicated interface for conversations, tool calls, plans,
