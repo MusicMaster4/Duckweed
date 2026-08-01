@@ -33,6 +33,8 @@ interface Props {
   tabs: Tab[];
   activeTabId: string;
   paneCounts: Record<string, number>;
+  /** Tabs containing at least one agent with an active turn. */
+  workingTabIds: ReadonlySet<string>;
   unreadCounts: Record<string, number>;
   /** One-shot review outline keyed by the tab that owns the completed pane. */
   completionReviewFlashes: Record<string, number>;
@@ -125,6 +127,7 @@ export function TabStrip({
   tabs,
   activeTabId,
   paneCounts,
+  workingTabIds,
   unreadCounts,
   completionReviewFlashes,
   completionHighlights,
@@ -399,6 +402,7 @@ export function TabStrip({
           const showUnread = completionHighlights && unread > 0;
           const reviewFlashKey = completionHighlights ? completionReviewFlashes[tab.id] : undefined;
           const isActive = tab.id === activeTabId && !settingsActive;
+          const isWorking = workingTabIds.has(tab.id);
           const accent = tabColorHex(tab.color);
           return (
             <div
@@ -410,8 +414,8 @@ export function TabStrip({
               aria-selected={isActive}
               aria-label={
                 showUnread
-                  ? `${tab.title}, ${unread} finished terminal${unread === 1 ? "" : "s"} not reviewed`
-                  : tab.title
+                  ? `${tab.title}${isWorking ? ", agent working" : ""}, ${unread} finished terminal${unread === 1 ? "" : "s"} not reviewed`
+                  : `${tab.title}${isWorking ? ", agent working" : ""}`
               }
               tabIndex={isActive ? 0 : -1}
               className={[
@@ -421,6 +425,7 @@ export function TabStrip({
                 tab.project ? "" : "is-unclaimed",
                 tab.pinned ? "is-pinned" : "",
                 accent ? "is-colored" : "",
+                isWorking ? "is-agent-working" : "",
                 showUnread ? "is-unread" : "",
                 dragTabId === tab.id ? "is-reordering" : "",
               ]
@@ -455,6 +460,7 @@ export function TabStrip({
                 openContextAt(tab.id, e.clientX, e.clientY);
               }}
             >
+              {isWorking && <span className="tab-work-shimmer" aria-hidden="true" />}
               {reviewFlashKey !== undefined && (
                 <span
                   key={reviewFlashKey}
