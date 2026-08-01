@@ -307,7 +307,7 @@ function paintBarberPole(t: number): string {
 
 /* -- Oscilloscope: a swept waveform over a faint baseline ----------------- */
 
-/* Phase rates used to be 5 / 3.2 rad/s — the trace thrashed hard enough at
+/* Phase rates used to be 5 / 3.2 rad/s; the trace thrashed hard enough at
    loader FPS to strobe. Keep the dual-tone shape, just sweep it gently. */
 const OSCILLOSCOPE_CARRIER = 1.35;
 const OSCILLOSCOPE_MOD = 0.85;

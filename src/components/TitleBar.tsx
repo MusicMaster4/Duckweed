@@ -85,7 +85,13 @@ export function TitleBar({
             </svg>
           </button>
         )}
-        <button type="button" className="win-btn" title="Minimize" onClick={() => void win().minimize()}>
+        <button
+          type="button"
+          className="win-btn"
+          title="Minimize"
+          aria-label="Minimize"
+          onClick={() => void win().minimize()}
+        >
           <svg viewBox="0 0 12 12" aria-hidden="true">
             <line x1="2.5" y1="6" x2="9.5" y2="6" />
           </svg>
@@ -94,6 +100,7 @@ export function TitleBar({
           type="button"
           className="win-btn"
           title={maximized ? "Restore" : "Maximize"}
+          aria-label={maximized ? "Restore" : "Maximize"}
           onClick={() => void win().toggleMaximize()}
         >
           <svg viewBox="0 0 12 12" aria-hidden="true">
@@ -112,7 +119,13 @@ export function TitleBar({
             )}
           </svg>
         </button>
-        <button type="button" className="win-btn win-close" title="Close" onClick={() => void win().close()}>
+        <button
+          type="button"
+          className="win-btn win-close"
+          title="Close"
+          aria-label="Close"
+          onClick={() => void win().close()}
+        >
           <svg viewBox="0 0 12 12" aria-hidden="true">
             <line x1="3" y1="3" x2="9" y2="9" />
             <line x1="9" y1="3" x2="3" y2="9" />

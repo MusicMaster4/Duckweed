@@ -163,14 +163,21 @@ export function Tooltip({ title, detail, shortcut, children }: Props) {
 export function NativeTitleTooltips() {
   const [content, setContent] = useState<TipContent | null>(null);
   const [at, setAt] = useState<{ x: number; y: number } | null>(null);
-  const active = useRef<{ node: HTMLElement; title: string } | null>(null);
+  const active = useRef<{
+    node: HTMLElement;
+    title: string;
+    addedAriaLabel: boolean;
+  } | null>(null);
   const bubble = useRef<HTMLDivElement>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const restoreTitle = useCallback(() => {
     const current = active.current;
-    if (current?.node.isConnected && !current.node.hasAttribute("title")) {
-      current.node.setAttribute("title", current.title);
+    if (current?.node.isConnected) {
+      if (!current.node.hasAttribute("title")) {
+        current.node.setAttribute("title", current.title);
+      }
+      if (current.addedAriaLabel) current.node.removeAttribute("aria-label");
     }
     active.current = null;
   }, []);
@@ -189,7 +196,15 @@ export function NativeTitleTooltips() {
 
     if (timer.current !== null) clearTimeout(timer.current);
     restoreTitle();
-    active.current = { node, title };
+    const hasAccessibleName =
+      node.hasAttribute("aria-label") ||
+      node.hasAttribute("aria-labelledby") ||
+      Boolean(node.textContent?.trim()) ||
+      (node instanceof HTMLImageElement && Boolean(node.alt)) ||
+      ("labels" in node && Boolean((node as HTMLInputElement).labels?.length));
+    const addedAriaLabel = !hasAccessibleName;
+    if (addedAriaLabel) node.setAttribute("aria-label", splitNativeTitle(title).title);
+    active.current = { node, title, addedAriaLabel };
     node.removeAttribute("title");
 
     const open = () => {

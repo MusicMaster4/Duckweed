@@ -2,6 +2,8 @@ import { afterEach, describe, expect, test } from "bun:test";
 
 import {
   getPromptTemplates,
+  MAX_CONTENT_LENGTH,
+  MAX_TEMPLATES,
   removePromptTemplate,
   resetPromptTemplatesForTests,
   savePromptTemplate,
@@ -43,5 +45,25 @@ describe("prompt templates", () => {
   test("rejects blank names or prompt bodies", () => {
     expect(savePromptTemplate({ title: "", content: "Prompt" })).toBeNull();
     expect(savePromptTemplate({ title: "Name", content: "  " })).toBeNull();
+  });
+
+  test("rejects oversized prompts instead of truncating them", () => {
+    const content = "x".repeat(MAX_CONTENT_LENGTH + 1);
+    expect(savePromptTemplate({ title: "Long prompt", content })).toBeNull();
+    expect(getPromptTemplates()).toEqual([]);
+  });
+
+  test("refuses new templates at the limit without evicting saved ones", () => {
+    const existing = Array.from({ length: MAX_TEMPLATES }, (_, index) => ({
+      id: `template-${index}`,
+      title: `Template ${index}`,
+      content: `Prompt ${index}`,
+      createdAt: index,
+      updatedAt: index,
+    }));
+    resetPromptTemplatesForTests(existing);
+
+    expect(savePromptTemplate({ title: "One too many", content: "Keep everything" })).toBeNull();
+    expect(getPromptTemplates()).toEqual(existing);
   });
 });

@@ -353,9 +353,29 @@ export function createCodexAdapter(): AgentAdapter {
     const record = asRecord(value);
     const raw = asString(record?.type) ?? asString(value);
     if (raw === "idle") return "idle";
-    if (raw === "active" || raw === "running") return "working";
+    if (raw === "active" || raw === "running" || raw === "inProgress") return "working";
     if (raw === "error" || raw === "failed") return "error";
     return null;
+  }
+
+  function hydratedTurnId(thread: Record<string, unknown>): string | null {
+    const explicit =
+      asString(thread.currentTurnId) ??
+      asString(thread.activeTurnId) ??
+      asString(asRecord(thread.activeTurn)?.id);
+    if (explicit) return explicit;
+
+    const turns = asArray(thread.turns)
+      .map((turn) => asRecord(turn))
+      .filter((turn): turn is Record<string, unknown> => turn !== null);
+    for (let index = turns.length - 1; index >= 0; index -= 1) {
+      if (threadStatus(turns[index].status) === "working") {
+        return asString(turns[index].id);
+      }
+    }
+    return threadStatus(thread.status) === "working"
+      ? asString(turns.at(-1)?.id)
+      : null;
   }
 
   function hydrateChild(childThreadId: string, ctx: AdapterContext): void {
@@ -369,6 +389,12 @@ export function createCodexAdapter(): AgentAdapter {
           asString(thread.agentNickname) ?? asString(thread.nickname) ?? child.label;
         child.role = asString(thread.agentRole) ?? asString(thread.role) ?? child.role;
         child.model = asString(thread.model) ?? child.model;
+        const status = threadStatus(thread.status) ?? "idle";
+        if (status === "working") {
+          child.currentTurnId ??= hydratedTurnId(thread);
+        } else {
+          child.currentTurnId = null;
+        }
 
         const nested = childContext(childThreadId, ctx);
         emitChild(childThreadId, { type: "transcript" }, ctx);
@@ -396,7 +422,7 @@ export function createCodexAdapter(): AgentAdapter {
           childThreadId,
           {
             type: "status",
-            status: threadStatus(thread.status) ?? "idle",
+            status,
           },
           ctx,
         );

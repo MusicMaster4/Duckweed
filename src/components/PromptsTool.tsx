@@ -4,6 +4,8 @@ import { createPortal } from "react-dom";
 import { AsciiAmbient } from "./AsciiAmbient";
 import {
   getPromptTemplates,
+  MAX_CONTENT_LENGTH,
+  MAX_TEMPLATES,
   removePromptTemplate,
   savePromptTemplate,
   searchPromptTemplates,
@@ -88,6 +90,7 @@ export function PromptsTool() {
     void templates;
     return searchPromptTemplates(query);
   }, [query, templates]);
+  const atTemplateLimit = templates.length >= MAX_TEMPLATES;
 
   useEffect(() => {
     if (!copiedId) return;
@@ -149,11 +152,17 @@ export function PromptsTool() {
       <header className="prompts-head">
         <div>
           <span className="tools-section-title">Prompt templates</span>
-          <span className="tools-section-note">Shared across every agent</span>
+          <span className="tools-section-note">
+            {atTemplateLimit
+              ? `${MAX_TEMPLATES} template limit reached`
+              : "Shared across every agent"}
+          </span>
         </div>
         <button
           type="button"
           className="prompts-create"
+          disabled={atTemplateLimit}
+          title={atTemplateLimit ? `Template limit reached (${MAX_TEMPLATES})` : undefined}
           onClick={() => setEditor({ title: "", content: "" })}
         >
           <svg viewBox="0 0 16 16" aria-hidden="true">
@@ -287,7 +296,12 @@ export function PromptsTool() {
                 onChange={(event) => setEditor({ ...editor, content: event.currentTarget.value })}
                 placeholder="Write the prompt exactly as it should appear in the terminal..."
                 rows={12}
+                maxLength={MAX_CONTENT_LENGTH}
+                aria-describedby="prompt-template-character-count"
               />
+              <span id="prompt-template-character-count" className="prompt-editor-count">
+                {editor.content.length.toLocaleString()} / {MAX_CONTENT_LENGTH.toLocaleString()}
+              </span>
             </label>
             <footer>
               {editor.id ? (

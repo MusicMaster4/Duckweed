@@ -1,9 +1,9 @@
 import { saveDurably } from "./durableStorage";
 
 export const PROMPT_TEMPLATES_KEY = "duckweed:prompt-templates:v1";
-const MAX_TEMPLATES = 200;
-const MAX_TITLE_LENGTH = 80;
-const MAX_CONTENT_LENGTH = 20_000;
+export const MAX_TEMPLATES = 200;
+export const MAX_TITLE_LENGTH = 80;
+export const MAX_CONTENT_LENGTH = 20_000;
 
 export interface PromptTemplate {
   id: string;
@@ -101,11 +101,19 @@ export function savePromptTemplate(
   draft: PromptTemplateDraft,
   id?: string,
 ): PromptTemplate | null {
-  const title = draft.title.trim().slice(0, MAX_TITLE_LENGTH);
-  const content = draft.content.trim().slice(0, MAX_CONTENT_LENGTH);
-  if (!title || !content) return null;
+  const title = draft.title.trim();
+  const content = draft.content.trim();
+  if (
+    !title ||
+    !content ||
+    title.length > MAX_TITLE_LENGTH ||
+    content.length > MAX_CONTENT_LENGTH
+  ) {
+    return null;
+  }
   const now = Date.now();
   const existing = id ? templates.find((entry) => entry.id === id) : undefined;
+  if (!existing && templates.length >= MAX_TEMPLATES) return null;
   const saved: PromptTemplate = {
     id: existing?.id ?? makeId(),
     title,
@@ -115,7 +123,7 @@ export function savePromptTemplate(
   };
   templates = existing
     ? templates.map((entry) => (entry.id === existing.id ? saved : entry))
-    : [saved, ...templates].slice(0, MAX_TEMPLATES);
+    : [saved, ...templates];
   write();
   return saved;
 }

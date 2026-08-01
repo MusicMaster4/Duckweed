@@ -1710,6 +1710,11 @@ svg.tab-glyph-fill path {
   background: rgba(123, 224, 90, 0.2);
 }
 
+.prompts-create:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
 .prompts-create svg,
 .prompts-empty-create svg {
   width: 12px;
@@ -2003,6 +2008,14 @@ svg.tab-glyph-fill path {
 
 .prompt-editor-content {
   flex: 1;
+}
+
+.prompt-editor-content .prompt-editor-count {
+  align-self: flex-end;
+  color: var(--text-faint);
+  font-size: 9px;
+  letter-spacing: normal;
+  text-transform: none;
 }
 
 .prompt-editor > footer {
