@@ -1365,7 +1365,7 @@ export default function App() {
           const latestNode = findLeaf(latest.root, leafId);
           if (!latestNode || latestNode.term !== nodeNow.term) return null;
           const latestRoot = removeLeafKeepingOwner(latest.root, leafId, owner.split.id);
-          if (!latestRoot) return null;
+          if (!latestRoot || findLeaf(latestRoot, leafId)) return null;
           const mru = paneMruRef.current.get(latest.id) ?? [latest.activeLeaf];
           const fallback = preferredLeaf(latestRoot, mru) ?? leaves(latestRoot)[0].id;
           updateTab(latest.id, (t) => ({
