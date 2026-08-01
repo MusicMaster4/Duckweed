@@ -70,19 +70,29 @@ function NestedSubagentItem({
 export function SubagentInspector({
   agent,
   subagent,
+  canMessage,
+  onMessage,
   onClose,
   onShowInTimeline,
 }: {
   agent: AgentId;
   subagent: SubagentSummary;
+  canMessage: boolean;
+  onMessage: (text: string) => Promise<boolean>;
   onClose: () => void;
   onShowInTimeline: (callId: string) => void;
 }) {
   const [copied, setCopied] = useState(false);
+  const [message, setMessage] = useState("");
+  const [sending, setSending] = useState(false);
+  const [deliveryError, setDeliveryError] = useState<string | null>(null);
   const status = subagentStatusLabel(subagent.status);
 
   useEffect(() => {
     setCopied(false);
+    setMessage("");
+    setSending(false);
+    setDeliveryError(null);
   }, [subagent.callId]);
 
   useEffect(() => {
@@ -165,10 +175,10 @@ export function SubagentInspector({
           </div>
         </section>
 
-        {subagent.items.length > 0 && (
-          <section className="agent-sub-inspector-section">
-            <h3>Nested activity</h3>
-            <div className="agent-sub-nested-timeline">
+        <section className="agent-sub-inspector-section">
+          <h3>Conversation</h3>
+          {subagent.items.length > 0 ? (
+            <div className="agent-sub-nested-timeline" aria-live="polite">
               {subagent.items.map((item) => (
                 <NestedSubagentItem
                   key={`${item.kind}-${item.id}`}
@@ -177,8 +187,14 @@ export function SubagentInspector({
                 />
               ))}
             </div>
-          </section>
-        )}
+          ) : (
+            <p className="agent-sub-empty-output">
+              {subagent.status === "running" || subagent.status === "pending"
+                ? "Waiting for the first message from this subagent."
+                : "This provider did not expose a child transcript."}
+            </p>
+          )}
+        </section>
 
         <section className="agent-sub-inspector-section">
           <h3>{subagent.output ? "Output" : "Report"}</h3>
@@ -204,12 +220,62 @@ export function SubagentInspector({
           </section>
         )}
 
-        {subagent.items.length === 0 && (
+        {subagent.items.length === 0 && !subagent.threadId && (
           <p className="agent-sub-fidelity">
             This agent only reports a summary for delegated work.
           </p>
         )}
       </div>
+
+      {subagent.threadId && (
+        <form
+          className="agent-sub-message-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            const text = message.trim();
+            if (!text || sending || !canMessage) return;
+            setSending(true);
+            setDeliveryError(null);
+            void onMessage(text).then((sent) => {
+              setSending(false);
+              if (sent) {
+                setMessage("");
+              } else {
+                setDeliveryError("The subagent is not accepting messages right now.");
+              }
+            });
+          }}
+        >
+          <label htmlFor={`subagent-message-${subagent.callId}`}>Message this subagent</label>
+          <div>
+            <textarea
+              id={`subagent-message-${subagent.callId}`}
+              value={message}
+              onChange={(event) => {
+                setMessage(event.currentTarget.value);
+                setDeliveryError(null);
+              }}
+              onKeyDown={(event) => {
+                if (event.key !== "Enter" || event.shiftKey) return;
+                event.preventDefault();
+                event.currentTarget.form?.requestSubmit();
+              }}
+              rows={2}
+              disabled={!canMessage || sending}
+              placeholder={
+                canMessage
+                  ? "Ask a follow-up or redirect this subagent..."
+                  : "This subagent is not ready for direct messages"
+              }
+            />
+            <button type="submit" disabled={!canMessage || sending || !message.trim()}>
+              {sending ? "Sending" : "Send"}
+            </button>
+          </div>
+          {deliveryError && <p role="alert">{deliveryError}</p>}
+          <small>Enter to send, Shift+Enter for a new line</small>
+        </form>
+      )}
 
       <footer className="agent-sub-inspector-actions">
         <button

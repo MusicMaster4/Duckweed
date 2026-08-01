@@ -145,6 +145,16 @@ export const TerminalPane = memo(function TerminalPane({
     [node.id],
   );
 
+  useEffect(
+    () =>
+      bus.on("term:insert-prompt", ({ termId, text }) => {
+        if (termId !== node.term) return;
+        terminals.paste(node.term, text);
+        terminals.focus(node.term);
+      }),
+    [node.term],
+  );
+
   // The grid owns the keyboard when the app is set to raw input, while a child
   // process is running, or once the shell is gone.
   const busy = meta?.busy ?? false;
@@ -209,6 +219,7 @@ export const TerminalPane = memo(function TerminalPane({
       // ones against a divider stay square so the outline meets it flush.
       style={{ "--pane-radius": edgeRadius(edges) } as React.CSSProperties}
       data-pane-id={node.id}
+      data-term-id={node.term}
       onPointerDownCapture={onActivate}
       // A wheel gesture means the user is inspecting this pane. Keep this
       // separate from activation so scrolling an inactive split does not move

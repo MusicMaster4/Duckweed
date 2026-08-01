@@ -4,6 +4,8 @@ type Events = {
   "pane:search": { leafId: string };
   /** Switch to the tab that owns this terminal and select its pane. */
   "term:reveal": { termId: string };
+  /** Insert prompt-template text into one exact terminal or agent composer. */
+  "term:insert-prompt": { termId: string; text: string };
 };
 
 type Handler<K extends keyof Events> = (payload: Events[K]) => void;

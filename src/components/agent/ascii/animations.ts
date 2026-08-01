@@ -49,11 +49,15 @@ function paintBraid(t: number): string {
 
 /* -- Helix: a double helix with rungs between the strands ----------------- */
 
+/* Keep spin gentle: the depth-driven shade + rung thrash strobes hard at the
+   old 2.3 rad/s rate, which reads almost epileptic at loader FPS. */
+const HELIX_SPIN = 0.7;
+
 function paintHelix(t: number): string {
   return paintPlotted((plot) => {
     for (let rung = 0; rung < 9; rung += 1) {
       const u = -ASPECT + (rung / 8) * ASPECT * 2;
-      const angle = u * 2.1 - t * 2.3;
+      const angle = u * 2.1 - t * HELIX_SPIN;
       const top = Math.sin(angle) * 0.74;
       const bottom = -top;
       for (let step = 0; step <= 10; step += 1) {
@@ -62,7 +66,7 @@ function paintHelix(t: number): string {
     }
     for (let sample = 0; sample <= 170; sample += 1) {
       const u = (sample / 170) * ASPECT * 2 - ASPECT;
-      const angle = u * 2.1 - t * 2.3;
+      const angle = u * 2.1 - t * HELIX_SPIN;
       const depth = (Math.cos(angle) + 1) / 2;
       plot(u, Math.sin(angle) * 0.74, 0.25 + 0.75 * depth);
       plot(u, -Math.sin(angle) * 0.74, 0.25 + 0.75 * (1 - depth));
@@ -303,6 +307,11 @@ function paintBarberPole(t: number): string {
 
 /* -- Oscilloscope: a swept waveform over a faint baseline ----------------- */
 
+/* Phase rates used to be 5 / 3.2 rad/s; the trace thrashed hard enough at
+   loader FPS to strobe. Keep the dual-tone shape, just sweep it gently. */
+const OSCILLOSCOPE_CARRIER = 1.35;
+const OSCILLOSCOPE_MOD = 0.85;
+
 function paintOscilloscope(t: number): string {
   return paintPlotted((plot) => {
     for (let step = 0; step <= 60; step += 1) {
@@ -312,8 +321,14 @@ function paintOscilloscope(t: number): string {
       const u = (step / 220) * ASPECT * 2 - ASPECT;
       const x = u / ASPECT;
       const envelope = Math.exp(-x * x * 0.55);
-      const wave = Math.sin(x * 7 - t * 5) * 0.58 + Math.sin(x * 11.5 + t * 3.2) * 0.26;
-      plot(u, wave * envelope, 0.35 + 0.65 * Math.abs(Math.cos(x * 7 - t * 5)));
+      const wave =
+        Math.sin(x * 7 - t * OSCILLOSCOPE_CARRIER) * 0.58 +
+        Math.sin(x * 11.5 + t * OSCILLOSCOPE_MOD) * 0.26;
+      plot(
+        u,
+        wave * envelope,
+        0.35 + 0.65 * Math.abs(Math.cos(x * 7 - t * OSCILLOSCOPE_CARRIER)),
+      );
     }
   });
 }

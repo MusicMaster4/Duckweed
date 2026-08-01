@@ -44,7 +44,7 @@ struct DurableSettings(Mutex<()>);
 
 const COMMAND_HISTORY_KEY: &str = "duckweed:command-history:v1";
 
-const DURABLE_SETTING_KEYS: [&str; 9] = [
+const DURABLE_SETTING_KEYS: [&str; 10] = [
     "duckweed:state:v1",
     "duckweed:usage:v1",
     // Ghost-text unlearning table — must match frontend DURABLE_KEYS or restore
@@ -53,6 +53,7 @@ const DURABLE_SETTING_KEYS: [&str; 9] = [
     "duckweed:checklist:v1",
     "duckweed:agent-preferences:v1",
     "duckweed:layouts:v1",
+    "duckweed:prompt-templates:v1",
     "duckweed:wellbeing:v1",
     // 70% pool cooldown history (greetings, ASCII, preparing, pulse patterns).
     "duckweed:cooldown-pools:v1",

@@ -825,6 +825,32 @@ export function canSteer(termId: string): boolean {
   return Boolean(session && !session.disposed && session.adapter.steer);
 }
 
+/** Whether this provider exposes addressable child threads. */
+export function canPromptSubagent(termId: string): boolean {
+  const session = sessions.get(termId);
+  return Boolean(session && !session.disposed && session.adapter.promptSubagent);
+}
+
+/** Deliver text to one child without adding it to the parent conversation. */
+export async function promptSubagent(
+  termId: string,
+  threadId: string,
+  text: string,
+): Promise<boolean> {
+  const session = sessions.get(termId);
+  const clean = text.trim();
+  if (!session || session.disposed || !clean || !session.adapter.promptSubagent) return false;
+  try {
+    return await session.adapter.promptSubagent(
+      threadId,
+      { text: clean, images: [] },
+      session.context,
+    );
+  } catch {
+    return false;
+  }
+}
+
 /** Remove one waiting follow-up without affecting the turn in flight. */
 export function cancelQueued(termId: string, id: string): void {
   const session = sessions.get(termId);

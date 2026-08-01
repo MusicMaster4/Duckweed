@@ -181,6 +181,7 @@ interface ChildThread {
   model: string | null;
   prompt: string | null;
   activity: string | null;
+  currentTurnId: string | null;
   state: AgentSessionState;
 }
 
@@ -265,6 +266,7 @@ export function createCodexAdapter(): AgentAdapter {
       model: null,
       prompt: null,
       activity: null,
+      currentTurnId: null,
       state: newChildState(childThreadId),
     };
     children.set(childThreadId, child);
@@ -351,9 +353,29 @@ export function createCodexAdapter(): AgentAdapter {
     const record = asRecord(value);
     const raw = asString(record?.type) ?? asString(value);
     if (raw === "idle") return "idle";
-    if (raw === "active" || raw === "running") return "working";
+    if (raw === "active" || raw === "running" || raw === "inProgress") return "working";
     if (raw === "error" || raw === "failed") return "error";
     return null;
+  }
+
+  function hydratedTurnId(thread: Record<string, unknown>): string | null {
+    const explicit =
+      asString(thread.currentTurnId) ??
+      asString(thread.activeTurnId) ??
+      asString(asRecord(thread.activeTurn)?.id);
+    if (explicit) return explicit;
+
+    const turns = asArray(thread.turns)
+      .map((turn) => asRecord(turn))
+      .filter((turn): turn is Record<string, unknown> => turn !== null);
+    for (let index = turns.length - 1; index >= 0; index -= 1) {
+      if (threadStatus(turns[index].status) === "working") {
+        return asString(turns[index].id);
+      }
+    }
+    return threadStatus(thread.status) === "working"
+      ? asString(turns.at(-1)?.id)
+      : null;
   }
 
   function hydrateChild(childThreadId: string, ctx: AdapterContext): void {
@@ -367,6 +389,12 @@ export function createCodexAdapter(): AgentAdapter {
           asString(thread.agentNickname) ?? asString(thread.nickname) ?? child.label;
         child.role = asString(thread.agentRole) ?? asString(thread.role) ?? child.role;
         child.model = asString(thread.model) ?? child.model;
+        const status = threadStatus(thread.status) ?? "idle";
+        if (status === "working") {
+          child.currentTurnId ??= hydratedTurnId(thread);
+        } else {
+          child.currentTurnId = null;
+        }
 
         const nested = childContext(childThreadId, ctx);
         emitChild(childThreadId, { type: "transcript" }, ctx);
@@ -375,7 +403,18 @@ export function createCodexAdapter(): AgentAdapter {
           if (!turn) continue;
           for (const rawItem of asArray(turn.items)) {
             const item = asRecord(rawItem);
-            if (!item || asString(item.type) === "userMessage") continue;
+            if (!item) continue;
+            if (asString(item.type) === "userMessage") {
+              const text = asArray(item.content)
+                .map((entry) => asRecord(entry))
+                .filter((entry): entry is Record<string, unknown> => entry !== null)
+                .filter((entry) => asString(entry.type) === "text")
+                .map((entry) => asString(entry.text) ?? "")
+                .filter(Boolean)
+                .join("\n");
+              if (text) nested.emit({ type: "user", text });
+              continue;
+            }
             handleItem(item, true, nested);
           }
         }
@@ -383,7 +422,7 @@ export function createCodexAdapter(): AgentAdapter {
           childThreadId,
           {
             type: "status",
-            status: threadStatus(thread.status) ?? "idle",
+            status,
           },
           ctx,
         );
@@ -951,11 +990,15 @@ export function createCodexAdapter(): AgentAdapter {
         syncChild(childThreadId, ctx);
         return;
       }
-      case "turn/started":
-        childFor(childThreadId).activity = null;
+      case "turn/started": {
+        const child = childFor(childThreadId);
+        child.activity = null;
+        child.currentTurnId = asString(asRecord(params.turn)?.id);
         emitChild(childThreadId, { type: "status", status: "working" }, ctx);
         return;
+      }
       case "turn/completed": {
+        childFor(childThreadId).currentTurnId = null;
         const turn = asRecord(params.turn);
         const error = asRecord(turn?.error);
         if (error) {
@@ -977,6 +1020,9 @@ export function createCodexAdapter(): AgentAdapter {
       case "thread/status/changed": {
         const status = threadStatus(params.status);
         if (status === "working") childFor(childThreadId).activity = null;
+        if (status === "idle" || status === "error") {
+          childFor(childThreadId).currentTurnId = null;
+        }
         if (status) emitChild(childThreadId, { type: "status", status }, ctx);
         if (status === "idle" || status === "error") hydrateChild(childThreadId, ctx);
         return;
@@ -1415,6 +1461,48 @@ export function createCodexAdapter(): AgentAdapter {
         ctx.emit({ type: "user", text: prompt.text, images: prompt.images });
         return true;
       } catch {
+        return false;
+      }
+    },
+
+    promptSubagent: async (childThreadId, prompt, ctx) => {
+      const child = children.get(childThreadId);
+      if (!child || !prompt.text.trim()) return false;
+      const input = [{ type: "text", text: prompt.text.trim() }];
+      try {
+        if (
+          (child.state.status === "working" || child.state.status === "waiting") &&
+          child.currentTurnId
+        ) {
+          await request(ctx, "turn/steer", {
+            threadId: childThreadId,
+            expectedTurnId: child.currentTurnId,
+            input,
+          });
+        } else if (child.state.status === "idle") {
+          hydratedChildren.delete(childThreadId);
+          await request(ctx, "turn/start", {
+            threadId: childThreadId,
+            input,
+            ...turnAccessParams(currentAccess),
+            ...(child.model ? { model: child.model } : {}),
+            ...(currentEffort ? { effort: currentEffort } : {}),
+          });
+        } else {
+          return false;
+        }
+        emitChild(childThreadId, { type: "user", text: prompt.text.trim() }, ctx);
+        return true;
+      } catch {
+        emitChild(
+          childThreadId,
+          {
+            type: "notice",
+            tone: "error",
+            text: "The message could not be delivered to this subagent.",
+          },
+          ctx,
+        );
         return false;
       }
     },
