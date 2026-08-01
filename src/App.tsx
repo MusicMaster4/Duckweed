@@ -103,7 +103,7 @@ import {
 } from "./lib/tabReorder";
 import * as terminals from "./lib/terminals";
 import { loadSettings as loadUsageSettings, prefetchUsage } from "./lib/usage";
-import type { LeafNode, ProjectInfo, ShellInfo, SplitNode, Tab } from "./lib/types";
+import type { LayoutNode, LeafNode, ProjectInfo, ShellInfo, SplitNode, Tab } from "./lib/types";
 
 interface SpawnOpts {
   cwd: string | null;
@@ -129,15 +129,46 @@ function findSplit(root: Tab["root"], splitId: string): SplitNode | null {
 function findLeafOwner(
   root: Tab["root"],
   leafId: string,
-): { split: SplitNode; index: number } | null {
+): { split: SplitNode; index: number; cellId: string } | null {
   if (root.kind === "leaf") return null;
-  const index = root.children.findIndex((child) => child.id === leafId);
-  if (index >= 0) return { split: root, index };
-  for (const child of root.children) {
-    const found = findLeafOwner(child, leafId);
-    if (found) return found;
+  const index = root.children.findIndex((child) => findLeaf(child, leafId));
+  if (index < 0) return null;
+  const found = findLeafOwner(root.children[index], leafId);
+  if (found) return found;
+  if (root.children.length > 1) {
+    return { split: root, index, cellId: root.children[index].id };
   }
   return null;
+}
+
+function removeLeafKeepingOwner(
+  root: LayoutNode,
+  leafId: string,
+  ownerSplitId: string,
+): LayoutNode | null {
+  if (root.kind === "leaf") return root.id === leafId ? null : root;
+  if (root.id === ownerSplitId) {
+    const index = root.children.findIndex((child) => findLeaf(child, leafId));
+    if (index < 0) return root;
+    const children = root.children.filter((_, childIndex) => childIndex !== index);
+    if (children.length === 0) return null;
+    const keptSizes = root.sizes.filter((_, childIndex) => childIndex !== index);
+    const total = keptSizes.reduce((sum, size) => sum + size, 0);
+    return {
+      ...root,
+      children,
+      sizes: keptSizes.map((size) => (total > 0 ? size / total : 1 / keptSizes.length)),
+    };
+  }
+  for (let index = 0; index < root.children.length; index += 1) {
+    if (!findLeaf(root.children[index], leafId)) continue;
+    const child = removeLeafKeepingOwner(root.children[index], leafId, ownerSplitId);
+    if (!child) return root;
+    const children = [...root.children];
+    children[index] = child;
+    return { ...root, children };
+  }
+  return root;
 }
 
 async function confirmUpdateWithRunningProcesses(): Promise<boolean> {
@@ -912,11 +943,13 @@ export default function App() {
       plan: Omit<PaneLayoutMotion, "token" | "stage">,
       update: () => void,
       finish?: () => string | null,
+      onMotionStart?: () => void,
     ) => {
       if (paneMotionRef.current) return false;
       if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
-        if (plan.phase === "entering") update();
-        else {
+        update();
+        onMotionStart?.();
+        if (plan.phase === "leaving") {
           let term: string | null = null;
           flushSync(() => {
             term = finish?.() ?? null;
@@ -933,7 +966,7 @@ export default function App() {
 
       flushSync(() => {
         setPaneMotion(motion);
-        if (plan.phase === "entering") update();
+        update();
       });
 
       paneMotionFrames.current[0] = requestAnimationFrame(() => {
@@ -941,7 +974,10 @@ export default function App() {
           if (paneMotionRef.current?.token !== token) return;
           const next = { ...motion, stage: "to" as const };
           paneMotionRef.current = next;
-          setPaneMotion(next);
+          flushSync(() => {
+            setPaneMotion(next);
+            onMotionStart?.();
+          });
           paneMotionTimer.current = window.setTimeout(
             () => finishPaneMotion(token),
             PANE_MOTION_MS + 80,
@@ -1235,6 +1271,7 @@ export default function App() {
           tabId: tab.id,
           splitId: owner.split.id,
           leafId: node.id,
+          cellId: owner.cellId,
           termId: node.term,
           phase: "entering",
           fromSizes,
@@ -1305,11 +1342,14 @@ export default function App() {
       const toSizes = owner.split.sizes.map((size, index) =>
         index === owner.index ? 0 : size / remainingShare,
       );
+      const openingMru = paneMruRef.current.get(tabNow.id) ?? [tabNow.activeLeaf];
+      const openingFallback = preferredLeaf(nextRoot, openingMru) ?? leaves(nextRoot)[0].id;
       runPaneTransition(
         {
           tabId: tabNow.id,
           splitId: owner.split.id,
           leafId,
+          cellId: owner.cellId,
           termId: nodeNow.term,
           phase: "leaving",
           fromSizes: owner.split.sizes,
@@ -1324,7 +1364,7 @@ export default function App() {
           if (!latest) return null;
           const latestNode = findLeaf(latest.root, leafId);
           if (!latestNode || latestNode.term !== nodeNow.term) return null;
-          const latestRoot = removeLeaf(latest.root, leafId);
+          const latestRoot = removeLeafKeepingOwner(latest.root, leafId, owner.split.id);
           if (!latestRoot) return null;
           const mru = paneMruRef.current.get(latest.id) ?? [latest.activeLeaf];
           const fallback = preferredLeaf(latestRoot, mru) ?? leaves(latestRoot)[0].id;
@@ -1336,6 +1376,13 @@ export default function App() {
           }));
           return latestNode.term;
         },
+        () =>
+          updateTab(tabNow.id, (current) => ({
+            ...current,
+            activeLeaf:
+              current.activeLeaf === leafId ? openingFallback : current.activeLeaf,
+            zoomedLeaf: current.zoomedLeaf === leafId ? null : current.zoomedLeaf,
+          })),
       );
     },
     [createTerm, currentTab, releaseTerm, runPaneTransition, updateTab],

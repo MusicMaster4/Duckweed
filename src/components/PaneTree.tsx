@@ -50,6 +50,7 @@ export interface PaneLayoutMotion {
   tabId: string;
   splitId: string;
   leafId: string;
+  cellId: string;
   termId: string;
   phase: "entering" | "leaving";
   stage: "from" | "to";
@@ -85,6 +86,11 @@ export const PaneTree = memo(function PaneTree({
         key={node.id}
         node={node}
         active={shared.activeLeaf === node.id}
+        activating={
+          shared.paneMotion?.phase === "entering" &&
+          shared.paneMotion.stage === "to" &&
+          shared.paneMotion.leafId === node.id
+        }
         zoomed={shared.zoomedLeaf === node.id}
         dropZone={dropZoneFor(shared.drag, node.id)}
         isSource={shared.drag?.leafId === node.id}
@@ -164,7 +170,7 @@ const SplitView = memo(function SplitView({
               onTransitionEnd={(event) => {
                 if (
                   motion?.stage === "to" &&
-                  child.id === motion.leafId &&
+                  child.id === motion.cellId &&
                   event.target === event.currentTarget &&
                   event.propertyName === "flex-basis"
                 ) {

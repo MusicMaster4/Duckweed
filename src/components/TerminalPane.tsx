@@ -18,6 +18,8 @@ type TitleMenu = { x: number; y: number };
 interface Props {
   node: LeafNode;
   active: boolean;
+  /** Newly mounted active pane whose header should fade into the selected state. */
+  activating?: boolean;
   zoomed: boolean;
   /** Highlight shown while a pane is being dragged over this one. */
   dropZone: DropZone | null;
@@ -52,6 +54,7 @@ function basename(path: string): string {
 export const TerminalPane = memo(function TerminalPane({
   node,
   active,
+  activating = false,
   zoomed,
   dropZone,
   isSource,
@@ -207,6 +210,7 @@ export const TerminalPane = memo(function TerminalPane({
       className={[
         "pane",
         active ? "is-active" : "",
+        activating ? "is-activating" : "",
         isSource ? "is-source" : "",
         meta?.exited ? "is-exited" : "",
         effectiveRaw ? "is-raw" : "is-editor",
