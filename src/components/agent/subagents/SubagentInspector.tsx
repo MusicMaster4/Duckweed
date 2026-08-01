@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import {
   subagentStatusLabel,
@@ -86,9 +86,11 @@ export function SubagentInspector({
   const [message, setMessage] = useState("");
   const [sending, setSending] = useState(false);
   const [deliveryError, setDeliveryError] = useState<string | null>(null);
+  const selectionVersion = useRef(0);
   const status = subagentStatusLabel(subagent.status);
 
   useEffect(() => {
+    selectionVersion.current += 1;
     setCopied(false);
     setMessage("");
     setSending(false);
@@ -234,9 +236,14 @@ export function SubagentInspector({
             event.preventDefault();
             const text = message.trim();
             if (!text || sending || !canMessage) return;
+            const requestVersion = selectionVersion.current;
             setSending(true);
             setDeliveryError(null);
             void onMessage(text).then((sent) => {
+              // This component is reused when inspecting a different
+              // subagent. A previous subagent's delayed response must not
+              // clear or overwrite the newly selected one's draft.
+              if (selectionVersion.current !== requestVersion) return;
               setSending(false);
               if (sent) {
                 setMessage("");

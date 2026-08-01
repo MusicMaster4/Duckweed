@@ -22,6 +22,21 @@ interface TipContent {
   shortcut?: string;
 }
 
+function clampTipHorizontally(node: HTMLDivElement, rect: DOMRect) {
+  const overflowRight = rect.right - (window.innerWidth - MARGIN);
+  const overflowLeft = MARGIN - rect.left;
+
+  // Tips are centered on their trigger by default. Keep that -50% translation
+  // when applying the viewport correction instead of replacing it.
+  if (overflowRight > 0) {
+    node.style.transform = `translateX(calc(-50% - ${overflowRight}px))`;
+  } else if (overflowLeft > 0) {
+    node.style.transform = `translateX(calc(-50% + ${overflowLeft}px))`;
+  } else {
+    node.style.transform = "translateX(-50%)";
+  }
+}
+
 function splitNativeTitle(value: string): TipContent {
   const [firstLine, ...detailLines] = value.split("\n");
   const shortcutMatch = firstLine.match(/^(.*?)\s+\(([^()]*(?:Ctrl|Alt|Shift|Cmd|Enter|Esc|F\d)[^()]*)\)$/i);
@@ -119,10 +134,7 @@ export function Tooltip({ title, detail, shortcut, children }: Props) {
     const node = bubble.current;
     if (!at || !node) return;
     const rect = node.getBoundingClientRect();
-    const overflowRight = rect.right - (window.innerWidth - MARGIN);
-    const overflowLeft = MARGIN - rect.left;
-    if (overflowRight > 0) node.style.transform = `translateX(${-overflowRight}px)`;
-    else if (overflowLeft > 0) node.style.transform = `translateX(${overflowLeft}px)`;
+    clampTipHorizontally(node, rect);
     // Flip above the trigger when there is no room below it.
     if (rect.bottom > window.innerHeight - MARGIN) {
       const top = triggerRect()?.top ?? 0;
@@ -267,10 +279,7 @@ export function NativeTitleTooltips() {
     const node = bubble.current;
     if (!at || !node) return;
     const rect = node.getBoundingClientRect();
-    const overflowRight = rect.right - (window.innerWidth - MARGIN);
-    const overflowLeft = MARGIN - rect.left;
-    if (overflowRight > 0) node.style.transform = `translateX(${-overflowRight}px)`;
-    else if (overflowLeft > 0) node.style.transform = `translateX(${overflowLeft}px)`;
+    clampTipHorizontally(node, rect);
     if (rect.bottom > window.innerHeight - MARGIN) {
       const top = active.current?.node.getBoundingClientRect().top ?? 0;
       node.style.top = `${top - rect.height - OFFSET}px`;
