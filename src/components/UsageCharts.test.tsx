@@ -16,8 +16,8 @@ describe("quota meter severity", () => {
     expect(meterClass(10)).toBe("is-warning");
   });
 
-  test("is yellow below 35 percent remaining", () => {
-    expect(meterClass(34)).toBe("is-warning");
-    expect(meterClass(35)).toBe("is-ok");
+  test("is yellow below 30 percent remaining", () => {
+    expect(meterClass(29)).toBe("is-warning");
+    expect(meterClass(30)).toBe("is-ok");
   });
 });
