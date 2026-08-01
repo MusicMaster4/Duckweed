@@ -1443,6 +1443,34 @@ svg.tab-glyph-fill path {
   overflow: hidden;
 }
 
+.tools-motion {
+  display: flex;
+  flex: 0 0 auto;
+  width: 0;
+  min-width: 0;
+  min-height: 0;
+  opacity: 0;
+  overflow: hidden;
+  pointer-events: none;
+  transition:
+    width 140ms cubic-bezier(0.4, 0, 1, 1),
+    opacity 100ms ease-out;
+}
+
+.tools-motion.is-open {
+  width: var(--tools-width);
+  opacity: 1;
+  pointer-events: auto;
+  animation: tools-panel-open 140ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+@keyframes tools-panel-open {
+  from {
+    width: 0;
+    opacity: 0;
+  }
+}
+
 .tools {
   position: relative;
   display: flex;
@@ -3755,6 +3783,30 @@ body.is-dragging-prompt * {
   min-height: 0;
   background: var(--bg-pane);
   overflow: hidden;
+}
+
+.split.is-layout-animating > .split-cell {
+  transition: flex-basis 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.split.is-layout-animating > .divider {
+  pointer-events: none;
+}
+
+.split.is-layout-animating > .divider[style] {
+  transition: flex-basis 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tools-motion,
+  .tools-motion.is-open {
+    animation: none;
+    transition: none;
+  }
+
+  .split.is-layout-animating > .split-cell {
+    transition: none;
+  }
 }
 
 /*

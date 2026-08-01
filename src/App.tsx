@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { flushSync } from "react-dom";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { exit } from "@tauri-apps/plugin-process";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -7,7 +8,11 @@ import { listen } from "@tauri-apps/api/event";
 import { ChangesPanel } from "./components/ChangesPanel";
 import { CommandPalette, type PaletteAction } from "./components/CommandPalette";
 import { FileEditor } from "./components/FileEditor";
-import { PaneTree, type PaneTreeShared } from "./components/PaneTree";
+import {
+  PaneTree,
+  type PaneLayoutMotion,
+  type PaneTreeShared,
+} from "./components/PaneTree";
 import { PowerWatchBanner } from "./components/PowerWatchBanner";
 import { StatusBar } from "./components/StatusBar";
 import { TabStrip } from "./components/TabStrip";
@@ -98,7 +103,7 @@ import {
 } from "./lib/tabReorder";
 import * as terminals from "./lib/terminals";
 import { loadSettings as loadUsageSettings, prefetchUsage } from "./lib/usage";
-import type { LeafNode, ProjectInfo, ShellInfo, Tab } from "./lib/types";
+import type { LeafNode, ProjectInfo, ShellInfo, SplitNode, Tab } from "./lib/types";
 
 interface SpawnOpts {
   cwd: string | null;
@@ -107,7 +112,33 @@ interface SpawnOpts {
 }
 
 const DEFAULT_FONT_SIZE = 13.5;
+const QUICK_MOTION_MS = 140;
+const PANE_MOTION_MS = 180;
 const TAURI_RUNTIME = "__TAURI_INTERNALS__" in window;
+
+function findSplit(root: Tab["root"], splitId: string): SplitNode | null {
+  if (root.kind === "leaf") return null;
+  if (root.id === splitId) return root;
+  for (const child of root.children) {
+    const found = findSplit(child, splitId);
+    if (found) return found;
+  }
+  return null;
+}
+
+function findLeafOwner(
+  root: Tab["root"],
+  leafId: string,
+): { split: SplitNode; index: number } | null {
+  if (root.kind === "leaf") return null;
+  const index = root.children.findIndex((child) => child.id === leafId);
+  if (index >= 0) return { split: root, index };
+  for (const child of root.children) {
+    const found = findLeafOwner(child, leafId);
+    if (found) return found;
+  }
+  return null;
+}
 
 async function confirmUpdateWithRunningProcesses(): Promise<boolean> {
   const hasRunningProcesses = await terminals.anyHasCloseBlockingWork(
@@ -296,6 +327,13 @@ export default function App() {
   const [settingsTabIndex, setSettingsTabIndex] = useState(0);
   const [changesOpen, setChangesOpen] = useState(false);
   const [toolsOpen, setToolsOpen] = useState(initial.toolsOpen);
+  const [toolsMounted, setToolsMounted] = useState(initial.toolsOpen);
+  const [paneMotion, setPaneMotion] = useState<PaneLayoutMotion | null>(null);
+  const paneMotionRef = useRef<PaneLayoutMotion | null>(null);
+  const paneMotionFinishRef = useRef<(() => string | null) | null>(null);
+  const paneTransitionSequence = useRef(0);
+  const paneMotionFrames = useRef<[number, number]>([0, 0]);
+  const paneMotionTimer = useRef(0);
   /** Kept here because the dock unmounts while Settings is up: the tool the
       user left open has to be the one waiting when they switch back. */
   const [toolsSection, setToolsSection] = useState<ToolsSectionId>("files");
@@ -847,6 +885,74 @@ export default function App() {
     window.close();
   }, []);
 
+  const finishPaneMotion = useCallback(
+    (token: number) => {
+      const motion = paneMotionRef.current;
+      if (!motion || motion.token !== token || motion.stage !== "to") return;
+
+      cancelAnimationFrame(paneMotionFrames.current[0]);
+      cancelAnimationFrame(paneMotionFrames.current[1]);
+      window.clearTimeout(paneMotionTimer.current);
+      const finish = paneMotionFinishRef.current;
+      paneMotionRef.current = null;
+      paneMotionFinishRef.current = null;
+
+      let termToRelease: string | null = null;
+      flushSync(() => {
+        if (motion.phase === "leaving" && finish) termToRelease = finish();
+        setPaneMotion(null);
+      });
+      if (termToRelease) releaseTerm(termToRelease);
+    },
+    [releaseTerm],
+  );
+
+  const runPaneTransition = useCallback(
+    (
+      plan: Omit<PaneLayoutMotion, "token" | "stage">,
+      update: () => void,
+      finish?: () => string | null,
+    ) => {
+      if (paneMotionRef.current) return false;
+      if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+        if (plan.phase === "entering") update();
+        else {
+          let term: string | null = null;
+          flushSync(() => {
+            term = finish?.() ?? null;
+          });
+          if (term) releaseTerm(term);
+        }
+        return true;
+      }
+
+      const token = ++paneTransitionSequence.current;
+      const motion: PaneLayoutMotion = { ...plan, token, stage: "from" };
+      paneMotionRef.current = motion;
+      paneMotionFinishRef.current = finish ?? null;
+
+      flushSync(() => {
+        setPaneMotion(motion);
+        if (plan.phase === "entering") update();
+      });
+
+      paneMotionFrames.current[0] = requestAnimationFrame(() => {
+        paneMotionFrames.current[1] = requestAnimationFrame(() => {
+          if (paneMotionRef.current?.token !== token) return;
+          const next = { ...motion, stage: "to" as const };
+          paneMotionRef.current = next;
+          setPaneMotion(next);
+          paneMotionTimer.current = window.setTimeout(
+            () => finishPaneMotion(token),
+            PANE_MOTION_MS + 80,
+          );
+        });
+      });
+      return true;
+    },
+    [finishPaneMotion, releaseTerm],
+  );
+
   // ---------------------------------------------------------------- tabs
 
   // Like Warp's default new-tab action, this opens a fresh shell in the
@@ -1107,22 +1213,52 @@ export default function App() {
   const splitPane = useCallback(
     (leafId: string, zone: "left" | "right" | "top" | "bottom") => {
       const tab = currentTab();
-      if (!tab) return;
+      if (!tab || paneMotionRef.current) return;
       const node = leaf(createTerm());
-      updateTab(tab.id, (t) => ({
-        ...t,
-        root: insertBeside(t.root, leafId, node, zone),
-        activeLeaf: node.id,
-        zoomedLeaf: null,
-      }));
+      const nextRoot = insertBeside(tab.root, leafId, node, zone);
+      const owner = findLeafOwner(nextRoot, node.id);
+      if (!owner) {
+        releaseTerm(node.term);
+        return;
+      }
+      const previousSplit = findSplit(tab.root, owner.split.id);
+      const fromSizes = owner.split.children.map((child) => {
+        if (child.id === node.id) return 0;
+        if (!previousSplit) return 1;
+        const previousIndex = previousSplit.children.findIndex(
+          (candidate) => candidate.id === child.id,
+        );
+        return previousIndex >= 0 ? (previousSplit.sizes[previousIndex] ?? 0) : 0;
+      });
+      runPaneTransition(
+        {
+          tabId: tab.id,
+          splitId: owner.split.id,
+          leafId: node.id,
+          termId: node.term,
+          phase: "entering",
+          fromSizes,
+          toSizes: owner.split.sizes,
+          dividerIndex: owner.index === 0 ? 0 : owner.index - 1,
+          fromDividerPx: 0,
+          toDividerPx: 3,
+        },
+        () =>
+          updateTab(tab.id, (t) => ({
+            ...t,
+            root: nextRoot,
+            activeLeaf: node.id,
+            zoomedLeaf: null,
+          })),
+      );
     },
-    [createTerm, currentTab, updateTab],
+    [createTerm, currentTab, releaseTerm, runPaneTransition, updateTab],
   );
 
   const closePane = useCallback(
     async (leafId: string) => {
       const tab = currentTab();
-      if (!tab) return;
+      if (!tab || paneMotionRef.current) return;
       const node = findLeaf(tab.root, leafId);
       if (!node) return;
 
@@ -1144,6 +1280,7 @@ export default function App() {
       if (!tabNow || tabNow.id !== tab.id) return;
       const nodeNow = findLeaf(tabNow.root, leafId);
       if (!nodeNow) return;
+
       const nextRoot = removeLeaf(tabNow.root, leafId);
 
       if (!nextRoot) {
@@ -1161,17 +1298,47 @@ export default function App() {
         return;
       }
 
-      releaseTerm(nodeNow.term);
-      const mru = paneMruRef.current.get(tabNow.id) ?? [tabNow.activeLeaf];
-      const fallback = preferredLeaf(nextRoot, mru) ?? leaves(nextRoot)[0].id;
-      updateTab(tabNow.id, (t) => ({
-        ...t,
-        root: nextRoot,
-        activeLeaf: findLeaf(nextRoot, t.activeLeaf) ? t.activeLeaf : fallback,
-        zoomedLeaf: t.zoomedLeaf === leafId ? null : t.zoomedLeaf,
-      }));
+      const owner = findLeafOwner(tabNow.root, leafId);
+      if (!owner) return;
+      const removedShare = owner.split.sizes[owner.index] ?? 0;
+      const remainingShare = Math.max(0.0001, 1 - removedShare);
+      const toSizes = owner.split.sizes.map((size, index) =>
+        index === owner.index ? 0 : size / remainingShare,
+      );
+      runPaneTransition(
+        {
+          tabId: tabNow.id,
+          splitId: owner.split.id,
+          leafId,
+          termId: nodeNow.term,
+          phase: "leaving",
+          fromSizes: owner.split.sizes,
+          toSizes,
+          dividerIndex: owner.index === 0 ? 0 : owner.index - 1,
+          fromDividerPx: 3,
+          toDividerPx: 0,
+        },
+        () => undefined,
+        () => {
+          const latest = tabsRef.current.find((candidate) => candidate.id === tabNow.id);
+          if (!latest) return null;
+          const latestNode = findLeaf(latest.root, leafId);
+          if (!latestNode || latestNode.term !== nodeNow.term) return null;
+          const latestRoot = removeLeaf(latest.root, leafId);
+          if (!latestRoot) return null;
+          const mru = paneMruRef.current.get(latest.id) ?? [latest.activeLeaf];
+          const fallback = preferredLeaf(latestRoot, mru) ?? leaves(latestRoot)[0].id;
+          updateTab(latest.id, (t) => ({
+            ...t,
+            root: latestRoot,
+            activeLeaf: findLeaf(latestRoot, t.activeLeaf) ? t.activeLeaf : fallback,
+            zoomedLeaf: t.zoomedLeaf === leafId ? null : t.zoomedLeaf,
+          }));
+          return latestNode.term;
+        },
+      );
     },
-    [createTerm, currentTab, releaseTerm, updateTab],
+    [createTerm, currentTab, releaseTerm, runPaneTransition, updateTab],
   );
 
   const activatePane = useCallback(
@@ -1874,6 +2041,20 @@ export default function App() {
 
   // --------------------------------------------------------- tools panel
 
+  const toolsVisible = toolsOpen && !settingsActive;
+
+  useEffect(() => {
+    if (toolsVisible) {
+      setToolsMounted(true);
+      return;
+    }
+    const delay = window.matchMedia("(prefers-reduced-motion: reduce)").matches
+      ? 0
+      : QUICK_MOTION_MS;
+    const timer = window.setTimeout(() => setToolsMounted(false), delay);
+    return () => window.clearTimeout(timer);
+  }, [toolsVisible]);
+
   /** Hand a path from the explorer to the prompt of the focused pane. */
   const insertPath = useCallback(
     (path: string) => {
@@ -2543,6 +2724,7 @@ export default function App() {
       // Tracking still runs; the setting only hides the rose chrome.
       unreadTerms: completionHighlights ? unreadTermIds : NO_UNREAD_TERMS,
       completionFlashes: completionHighlights ? completionFlashes : NO_COMPLETION_FLASHES,
+      paneMotion,
       project,
       recents,
       onBrowseProject: browseActiveProject,
@@ -2550,6 +2732,7 @@ export default function App() {
       zoomedLeaf: activeTab?.zoomedLeaf ?? null,
       onActivate: activatePane,
       onReview: acknowledgeTerm,
+      onPaneMotionEnd: finishPaneMotion,
       onSplit: splitAt,
       onClose: closePaneById,
       onToggleZoom: toggleZoom,
@@ -2564,6 +2747,8 @@ export default function App() {
       browseActiveProject,
       closePaneById,
       completionFlashes,
+      finishPaneMotion,
+      paneMotion,
       completionHighlights,
       drag,
       highlight,
@@ -2645,25 +2830,31 @@ export default function App() {
       {/* The dock shares the row with the grid rather than covering it, so a
           folder can be read while a command is still running. */}
       <div className="workbench">
-        {toolsOpen && !settingsActive && (
-          <ToolsPanel
-            project={project}
-            tabId={activeTab?.id ?? null}
-            tabTitle={activeTab?.title ?? ""}
-            width={toolsWidth}
-            onWidth={setToolsWidth}
-            onClose={() => setToolsOpen(false)}
-            onInsertPath={insertPath}
-            onOpenFolder={cdActivePane}
-            onBrowseProject={browseActiveProject}
-            onOpenFile={(path) => void openExplorerFile(path)}
-            getCurrentLayoutDraft={getCurrentLayoutDraft}
-            onOpenLayout={openLayoutTemplate}
-            stats={toolStats}
-            ownerNames={portOwnerNames}
-            section={toolsSection}
-            onSection={setToolsSection}
-          />
+        {toolsMounted && (
+          <div
+            className={`tools-motion${toolsVisible ? " is-open" : ""}`}
+            style={{ "--tools-width": `${toolsWidth}px` } as CSSProperties}
+            aria-hidden={!toolsVisible}
+          >
+            <ToolsPanel
+              project={project}
+              tabId={activeTab?.id ?? null}
+              tabTitle={activeTab?.title ?? ""}
+              width={toolsWidth}
+              onWidth={setToolsWidth}
+              onClose={() => setToolsOpen(false)}
+              onInsertPath={insertPath}
+              onOpenFolder={cdActivePane}
+              onBrowseProject={browseActiveProject}
+              onOpenFile={(path) => void openExplorerFile(path)}
+              getCurrentLayoutDraft={getCurrentLayoutDraft}
+              onOpenLayout={openLayoutTemplate}
+              stats={toolStats}
+              ownerNames={portOwnerNames}
+              section={toolsSection}
+              onSection={setToolsSection}
+            />
+          </div>
         )}
 
         <main className="workspace">
