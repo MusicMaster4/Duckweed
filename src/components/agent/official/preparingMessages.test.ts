@@ -7,8 +7,8 @@ import {
 } from "./preparingMessages";
 
 describe("preparingMessages", () => {
-  test("the pool has fifty short lines", () => {
-    expect(PREPARING_MESSAGES).toHaveLength(50);
+  test("the pool has one hundred short lines", () => {
+    expect(PREPARING_MESSAGES).toHaveLength(100);
     for (const line of PREPARING_MESSAGES) {
       expect(line.length).toBeGreaterThan(0);
       expect(line.length).toBeLessThanOrEqual(24);
@@ -23,7 +23,7 @@ describe("preparingMessages", () => {
       expect(PREPARING_MESSAGES).toContain(line);
       seen.add(line);
     }
-    // Half-pool cooldown should force real variety across many picks.
+    // 70% pool cooldown should force real variety across many picks.
     expect(seen.size).toBeGreaterThan(20);
   });
 

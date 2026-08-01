@@ -222,6 +222,112 @@ describe("BlockTracker reflow boundaries", () => {
   });
 });
 
+describe("BlockTracker.open OSC 133 anchoring", () => {
+  type Row = { text: string; isWrapped?: boolean };
+
+  function openableTracker(rows: Record<number, Row>, cursorLine: number) {
+    const markers: { line: number; isDisposed: boolean }[] = [];
+    const term = {
+      buffer: {
+        active: {
+          type: "normal" as const,
+          baseY: 0,
+          cursorY: cursorLine,
+          length: cursorLine + 1,
+          getLine(y: number) {
+            const row = rows[y];
+            if (!row) return undefined;
+            return {
+              isWrapped: row.isWrapped ?? false,
+              translateToString: () => row.text,
+            };
+          },
+        },
+      },
+      registerMarker(offset: number) {
+        const line = cursorLine + offset;
+        const m = { line, isDisposed: false };
+        markers.push(m);
+        return m;
+      },
+    };
+    const tracker = Object.create(BlockTracker.prototype) as BlockTracker;
+    Object.assign(tracker as object, {
+      term,
+      blocks: [],
+      nextId: 1,
+      selectedId: null,
+      selectOverlay: { hidden: true },
+      visibleBlocks: new Set(),
+      prune() {
+        // no-op for these unit tests
+      },
+      scheduleLayout() {
+        // no-op for these unit tests
+      },
+    });
+    return { tracker, markers, term };
+  }
+
+  test("anchors bash/zsh post-echo OSC C to the preceding command row", () => {
+    // After Enter, the command is on row 2 and the cursor sits on the empty
+    // first output row when preexec emits OSC 133;C.
+    const rows: Record<number, Row> = {
+      2: { text: "user@host:~/proj$ ls -la" },
+      3: { text: "" },
+    };
+    const { tracker, markers } = openableTracker(rows, 3);
+    tracker.open("ls -la", 1000);
+
+    expect(markers).toHaveLength(1);
+    expect(markers[0].line).toBe(2);
+    expect((tracker as unknown as { blocks: CommandBlock[] }).blocks).toHaveLength(1);
+    expect((tracker as unknown as { blocks: CommandBlock[] }).blocks[0].command).toBe("ls -la");
+  });
+
+  test("keeps the cursor row when it still holds the command echo", () => {
+    // PowerShell can emit C while the cursor is still on the prompt+command line.
+    const rows: Record<number, Row> = {
+      4: { text: "PS H:\\proj> Get-ChildItem" },
+    };
+    const { tracker, markers } = openableTracker(rows, 4);
+    tracker.open("Get-ChildItem", 1000);
+
+    expect(markers).toHaveLength(1);
+    expect(markers[0].line).toBe(4);
+  });
+
+  test("merges shell confirmation into a composer-opened block", () => {
+    const rows: Record<number, Row> = {
+      5: { text: "user@host:~/proj$ cargo build" },
+      6: { text: "" },
+    };
+    const { tracker, markers } = openableTracker(rows, 6);
+    const existing = {
+      id: 1,
+      command: "cargo build",
+      start: { line: 5, isDisposed: false },
+      cmdEl: null,
+      sepEl: null,
+      startedAt: 900,
+      completedAt: null,
+      exitCode: null,
+    };
+    (tracker as unknown as { blocks: CommandBlock[]; nextId: number }).blocks = [
+      existing as unknown as CommandBlock,
+    ];
+    (tracker as unknown as { nextId: number }).nextId = 2;
+
+    tracker.open("cargo build", 1200);
+
+    expect(markers).toHaveLength(0);
+    const blocks = (tracker as unknown as { blocks: CommandBlock[] }).blocks;
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0].startedAt).toBe(1200);
+    expect(blocks[0].start.line).toBe(5);
+  });
+});
+
 describe("resolveBlockEnd", () => {
   test("uses the next block start after a narrower reflow inserts rows", () => {
     // The old end marker stayed at 8, but the wrapped output now reaches 11.

@@ -101,6 +101,31 @@ export function Chevron({ open }: { open: boolean }) {
   );
 }
 
+const DISCLOSURE_EXIT_MS = 240;
+
+function AnimatedDisclosure({ open, children }: { open: boolean; children: ReactNode }) {
+  const [present, setPresent] = useState(open);
+
+  useEffect(() => {
+    if (open) {
+      setPresent(true);
+      return;
+    }
+    if (!present) return;
+    const timer = window.setTimeout(() => setPresent(false), DISCLOSURE_EXIT_MS);
+    return () => window.clearTimeout(timer);
+  }, [open, present]);
+
+  if (!present) return null;
+  return (
+    <div
+      className={`official-disclosure ${open ? "is-open" : "is-closing"}`}
+    >
+      <div className="official-disclosure-inner">{children}</div>
+    </div>
+  );
+}
+
 function ToolErrorMark() {
   return (
     <span className="official-tool-error" aria-hidden="true">
@@ -430,7 +455,10 @@ export function MessageItem({
 }) {
   if (item.kind === "user") {
     return (
-      <div className={`official-user-turn${className ? ` ${className}` : ""}`}>
+      <div
+        className={`official-user-turn${className ? ` ${className}` : ""}`}
+        data-message-enter
+      >
         <article className={`official-user official-user--${variant}`}>
           <AgentImageAttachments images={item.images ?? []} />
           {item.text && <p>{item.text}</p>}
@@ -446,6 +474,7 @@ export function MessageItem({
         className={`official-answer official-answer--${variant}${
           streaming ? " is-streaming" : ""
         }${className ? ` ${className}` : ""}`}
+        data-message-enter
       >
         <AssistantMarkdown text={item.text} />
         {streaming && <span className="official-stream-caret" aria-hidden="true" />}
@@ -456,6 +485,7 @@ export function MessageItem({
     return (
       <div
         className={`official-notice is-${item.tone}${className ? ` ${className}` : ""}`}
+        data-message-enter
       >
         {item.text}
       </div>
@@ -521,7 +551,7 @@ export function PlanTracker({
       <div className="official-plan-progress" aria-hidden="true">
         <span style={{ width: `${progress}%` }} />
       </div>
-      {open && (
+      <AnimatedDisclosure open={open}>
         <ol className="official-plan-steps">
           {item.steps.map((step, index) => (
             <li
@@ -544,7 +574,7 @@ export function PlanTracker({
             </li>
           ))}
         </ol>
-      )}
+      </AnimatedDisclosure>
     </section>
   );
 }
@@ -637,7 +667,7 @@ export function ToolActivity({
         </span>
         {expandable && expandsHere && <Chevron open={open} />}
       </button>
-      {open && expandsHere && (
+      <AnimatedDisclosure open={open && expandsHere}>
         <div className="official-tool-body">
           {item.command && (
             <pre className="official-command">
@@ -650,7 +680,7 @@ export function ToolActivity({
           ))}
           {hasOutput && <pre className="official-output">{item.output}</pre>}
         </div>
-      )}
+      </AnimatedDisclosure>
     </section>
   );
 }
@@ -771,7 +801,9 @@ function ThinkingHistory({
         <ActivityPulse active={active} clusterId={clusterId} />
         <span className="agent-activity-history-label">Thinking</span>
         {!latest && thoughts.length === 0 && (
-          <span className="agent-activity-history-summary">{preparingMessage}</span>
+          <span className="agent-activity-history-summary agent-thinking-shimmer">
+            {preparingMessage}
+          </span>
         )}
         {expandable && <Chevron open={open} />}
       </button>
@@ -783,7 +815,7 @@ function ThinkingHistory({
           <AssistantMarkdown text={latest.text} />
         </div>
       )}
-      {open && (
+      <AnimatedDisclosure open={open}>
         <ol
           id={panelId}
           className="agent-thinking-history-list"
@@ -801,7 +833,7 @@ function ThinkingHistory({
             </li>
           ))}
         </ol>
-      )}
+      </AnimatedDisclosure>
     </section>
   );
 }
@@ -880,7 +912,7 @@ function ToolHistory({
           ))}
         </div>
       )}
-      {open && (
+      <AnimatedDisclosure open={open}>
         <div
           id={panelId}
           className="agent-tool-history-list"
@@ -893,7 +925,7 @@ function ToolHistory({
             </div>
           ))}
         </div>
-      )}
+      </AnimatedDisclosure>
     </section>
   );
 }

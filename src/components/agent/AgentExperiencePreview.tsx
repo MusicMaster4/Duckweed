@@ -11,6 +11,7 @@ import { AgentComposer } from "./AgentComposer";
 import { AgentGoalIndicator } from "./AgentGoalIndicator";
 import { AgentProviderIcon } from "./AgentProviderIcon";
 import { AgentTimeline } from "./AgentTimeline";
+import { Tooltip } from "../Tooltip";
 import { PlanTracker, type OfficialVariant } from "./official/OfficialShared";
 import { SubagentFleet } from "./subagents/SubagentFleet";
 import { SubagentInspector } from "./subagents/SubagentInspector";
@@ -352,6 +353,17 @@ export function AgentExperiencePreview() {
           </span>
           <span className="agent-head-spacer" />
           <span className="agent-usage">12.4k in · 2.1k out</span>
+          <Tooltip title="Session usage" detail="12.4k input · 2.1k output">
+            <span
+              className="agent-usage-compact"
+              tabIndex={0}
+              aria-label="Session usage: 12.4k input · 2.1k output"
+            >
+              <svg viewBox="0 0 14 14" aria-hidden="true">
+                <path d="M2.5 11.5V8.5M7 11.5V5.5M11.5 11.5V2.5" />
+              </svg>
+            </span>
+          </Tooltip>
           <AgentGoalIndicator goal={session.goal} />
         </header>
         <div className="agent-scroll">

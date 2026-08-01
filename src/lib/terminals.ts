@@ -3,7 +3,6 @@ import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebLinksAddon } from "@xterm/addon-web-links";
-import { WebglAddon } from "@xterm/addon-webgl";
 import { Channel } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
@@ -11,6 +10,7 @@ import { agentHasUnfinishedWork } from "./agents/activity";
 import { parseAgentLaunch } from "./agents/launch";
 import * as agentSessions from "./agents/session";
 import type { AgentId } from "./agents/types";
+import { canNavigateBlocks } from "./blockNav";
 import { BlockTracker } from "./blocks";
 import * as commandHistory from "./commandHistory";
 import { createCursorSettler, type CursorSettler } from "./cursor";
@@ -22,6 +22,7 @@ import {
   type FrameWrite,
 } from "./frames";
 import { createHighlighter, type Highlighter } from "./highlight";
+import { parseOsc133 } from "./osc133";
 import {
   agentUnwatch,
   agentWatch,
@@ -96,7 +97,6 @@ interface Session extends TermMeta {
   term: Terminal;
   fit: FitAddon;
   search: SearchAddon;
-  webgl: WebglAddon | null;
   /** The element xterm renders into; it is moved between panes, never recreated. */
   host: HTMLDivElement;
   container: HTMLElement | null;
@@ -180,6 +180,14 @@ interface Session extends TermMeta {
     /** Raw shell text echoed before Enter was intercepted. */
     rawLaunchText: string | null;
   } | null;
+}
+
+function canSessionNavigateBlocks(session: Session): boolean {
+  return canNavigateBlocks({
+    busy: session.busy,
+    exited: session.exited,
+    hasAgentUi: session.agentUi !== null,
+  });
 }
 
 /** Focus handlers for the per-pane command editor (Warp-style input). */
@@ -346,7 +354,7 @@ function applyMetrics(): void {
     try {
       term.clearTextureAtlas();
     } catch {
-      // DOM renderer has no atlas.
+      // The DOM renderer has no texture atlas.
     }
     term.refresh(0, term.rows - 1);
   }
@@ -1058,7 +1066,6 @@ function create(id: string, opts: TerminalStartOptions): Session {
     term,
     fit,
     search,
-    webgl: null,
     host,
     container: null,
     observer: null,
@@ -1225,22 +1232,22 @@ function create(id: string, opts: TerminalStartOptions): Session {
       return false;
     }
 
-    // Editor mode and the custom agent UI both own typing through a DOM
-    // composer. Raw agent UI still needs the same redirect: the grid is
-    // covered and onData discards its output, so a key that stays on xterm
-    // is a key that vanishes.
-    if (!session.editorMode && !session.agentUi) return true;
-
-    // Keyboard block navigation while focus sits on the grid (after a click
-    // select). Ctrl+Up always selects the latest block; plain Up/Down walk.
+    // Keyboard block navigation while focus sits on the grid after a click.
+    // OSC 133 makes the same controls available in raw mode. Ctrl+Up selects
+    // the latest block and plain Up/Down walk through the list.
     // Skipped under the agent surface — there is no block chrome to walk.
-    if (!session.agentUi) {
+    if (canSessionNavigateBlocks(session)) {
       if (event.key === "ArrowUp" && ctrl && !event.shiftKey && !event.altKey) {
         event.preventDefault();
         session.blocks.navigate("selectLast");
         return false;
       }
       if (session.blocks.hasNavSelection()) {
+        if (event.key === "Enter" && !ctrl && !event.shiftKey && !event.altKey) {
+          event.preventDefault();
+          rerunSelectedBlock(session.id);
+          return false;
+        }
         if (event.key === "ArrowUp" && !ctrl && !event.shiftKey && !event.altKey) {
           event.preventDefault();
           session.blocks.navigate("prev");
@@ -1380,10 +1387,6 @@ function create(id: string, opts: TerminalStartOptions): Session {
     // when the resize did not originate in refit().
     session.blocks.scheduleLayout();
     if (session.spawned) void ptyResize(id, cols, rows);
-    // Any resize can reflow scrollback before the next PTY write. Reposition
-    // block chrome from the reflowed logical anchors on the next frame even
-    // when the resize did not come through FitAddon/refit.
-    session.blocks.scheduleLayout();
     notifySession(id);
   });
 
@@ -1411,6 +1414,32 @@ function create(id: string, opts: TerminalStartOptions): Session {
       return true;
     }
     return false;
+  });
+
+  // Duckweed's PowerShell hook emits OSC 133 around the prompt and command.
+  // This observes the final PSReadLine buffer, so raw-mode edits and builtins
+  // get the same deterministic blocks and timings as composer submissions.
+  term.parser.registerOscHandler(133, (payload) => {
+    const event = parseOsc133(payload);
+    if (!event) return false;
+    if (event.kind === "command-start") {
+      const command = event.command?.replace(/\r\n/g, "\n").replace(/\r/g, "\n") ?? null;
+      const startedAt = Date.now();
+      if (command?.trim()) {
+        session.blocks.open(command, startedAt);
+        commandHistory.record(command, session.cwd || null);
+        recordLocalHistory(session, command);
+        markRan(session);
+      }
+      session.processStartedAt = startedAt;
+      session.lastSubmitAt = startedAt;
+      notifySession(id);
+    } else if (event.kind === "command-end") {
+      session.blocks.complete(event.exitCode, Date.now());
+      session.completionStartedAt = session.processStartedAt;
+      notifySession(id);
+    }
+    return true;
   });
 
   // Warp's CLI-agent integrations use OSC 777 with a structured JSON body.
@@ -1532,17 +1561,11 @@ export function attach(
     session.container = container;
   }
 
-  // Background tabs keep their buffer but release renderer/overlay work. Load
-  // WebGL again before paint when the pane becomes visible.
-  if (!session.webgl) {
-    try {
-      session.webgl = new WebglAddon();
-      session.term.loadAddon(session.webgl);
-    } catch {
-      session.webgl = null;
-      // WebGL is optional; xterm's DOM renderer is the fallback.
-    }
-  }
+  // Keep xterm on its built-in DOM renderer. The WebGL addon repeatedly
+  // loses and rebuilds its context in some Windows WebView2 environments,
+  // especially while a PTY redraws or the pane is refitted. That presents as
+  // the whole terminal rapidly flashing. The DOM renderer is stable across
+  // pane moves and still handles normal terminal output efficiently.
   session.blocks.setActive(true);
   session.observer?.disconnect();
   const observer = new ResizeObserver(() => refit(id));
@@ -1561,8 +1584,6 @@ export function detach(id: string): void {
   session.observer = null;
   session.container = null;
   session.blocks.setActive(false);
-  session.webgl?.dispose();
-  session.webgl = null;
   hideVisualCursor(session);
   limbo().appendChild(session.host);
 }
@@ -2135,7 +2156,8 @@ export function selection(id: string): string {
 
 /** Keyboard block nav: true when a block is currently selected in this pane. */
 export function hasBlockNavSelection(id: string): boolean {
-  return sessions.get(id)?.blocks.hasNavSelection() ?? false;
+  const session = sessions.get(id);
+  return !!session && canSessionNavigateBlocks(session) && session.blocks.hasNavSelection();
 }
 
 export function clearBlockSelection(id: string): void {
@@ -2168,17 +2190,30 @@ export function clearOtherBlockSelections(exceptId: string): void {
 
 /** Ctrl+Up — select the most recent block (and scroll it into view). */
 export function selectLastBlock(id: string): boolean {
-  return sessions.get(id)?.blocks.navigate("selectLast") ?? false;
+  const session = sessions.get(id);
+  return !!session && canSessionNavigateBlocks(session) && session.blocks.navigate("selectLast");
 }
 
 /** Up while a block is selected — move to an older block. */
 export function selectPrevBlock(id: string): boolean {
-  return sessions.get(id)?.blocks.navigate("prev") ?? false;
+  const session = sessions.get(id);
+  return !!session && canSessionNavigateBlocks(session) && session.blocks.navigate("prev");
 }
 
 /** Down while a block is selected — move to a newer block. */
 export function selectNextBlock(id: string): boolean {
-  return sessions.get(id)?.blocks.navigate("next") ?? false;
+  const session = sessions.get(id);
+  return !!session && canSessionNavigateBlocks(session) && session.blocks.navigate("next");
+}
+
+/** Re-run the selected block's original command. */
+export function rerunSelectedBlock(id: string): boolean {
+  const session = sessions.get(id);
+  const command = session?.blocks.selectedCommand();
+  if (!session || !canSessionNavigateBlocks(session) || !command) return false;
+  session.blocks.clearSelection();
+  submitCommand(id, command);
+  return true;
 }
 
 export function paste(id: string, text: string): void {

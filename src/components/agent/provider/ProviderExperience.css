@@ -336,6 +336,95 @@
 
 /* ── Task tracker ── */
 
+/* Shared disclosure motion for Cursor and OpenCode tool output. The provider
+   panel remains mounted so both open and close can animate smoothly. */
+.pv-disclosure {
+  display: grid;
+  grid-template-rows: 0fr;
+  visibility: hidden;
+  transition:
+    grid-template-rows 220ms cubic-bezier(0.22, 1.18, 0.36, 1),
+    visibility 0s linear 220ms;
+}
+
+.pv-disclosure.is-open {
+  grid-template-rows: 1fr;
+  visibility: visible;
+  animation: pv-disclosure-open 240ms cubic-bezier(0.22, 1.18, 0.36, 1);
+  transition:
+    grid-template-rows 240ms cubic-bezier(0.22, 1.18, 0.36, 1),
+    visibility 0s linear 0s;
+}
+
+.pv-disclosure.is-closing {
+  visibility: visible;
+  animation: pv-disclosure-close 240ms cubic-bezier(0.64, 0, 0.78, 0) both;
+}
+
+.pv-disclosure-inner {
+  min-height: 0;
+  overflow: hidden;
+  opacity: 0;
+  transform: translateY(-3px);
+  transition:
+    opacity 120ms ease,
+    transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.pv-disclosure.is-open > .pv-disclosure-inner {
+  opacity: 1;
+  transform: translateY(0);
+  animation: pv-disclosure-content-in 180ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.pv-disclosure.is-closing > .pv-disclosure-inner {
+  animation: pv-disclosure-content-out 160ms ease both;
+}
+
+@keyframes pv-disclosure-open {
+  from {
+    grid-template-rows: 0fr;
+  }
+
+  to {
+    grid-template-rows: 1fr;
+  }
+}
+
+@keyframes pv-disclosure-close {
+  from {
+    grid-template-rows: 1fr;
+  }
+
+  to {
+    grid-template-rows: 0fr;
+  }
+}
+
+@keyframes pv-disclosure-content-in {
+  from {
+    opacity: 0;
+    transform: translateY(-3px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes pv-disclosure-content-out {
+  from {
+    opacity: 1;
+    transform: translateY(0);
+  }
+
+  to {
+    opacity: 0;
+    transform: translateY(-3px);
+  }
+}
+
 .cx-track {
   display: flex;
   align-items: center;
@@ -2195,6 +2284,12 @@ button.oc-sub-head:hover {
     animation: none;
     opacity: 0.55;
     transform: none;
+  }
+
+  .pv-disclosure,
+  .pv-disclosure-inner {
+    animation: none;
+    transition: none;
   }
 }
 

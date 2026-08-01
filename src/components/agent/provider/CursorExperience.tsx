@@ -306,7 +306,12 @@ const CursorNode = memo(function CursorNode({
   const elapsed = live && now > 0 ? formatElapsed(now - item.at) : null;
 
   return (
-    <li className={`cx-node is-${item.kind}`} data-mark={markFor(item)} data-live={live || undefined}>
+    <li
+      className={`cx-node is-${item.kind}`}
+      data-message-enter={item.kind === "user" || item.kind === "assistant" || undefined}
+      data-mark={markFor(item)}
+      data-live={live || undefined}
+    >
       <span className="cx-mark" aria-hidden="true" />
       <div className="cx-body">
         {item.kind === "user" && (

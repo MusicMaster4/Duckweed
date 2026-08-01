@@ -30,6 +30,7 @@ import {
 } from "../../lib/agentWorkflow";
 import { workStatusLabel } from "../../lib/agentWorkDuration";
 import { confirmCloseRunning } from "../../lib/confirmClose";
+import { Tooltip } from "../Tooltip";
 import { AgentComposer } from "./AgentComposer";
 import { AgentGoalIndicator } from "./AgentGoalIndicator";
 import { AgentImageAttachments } from "./AgentImageAttachments";
@@ -329,6 +330,16 @@ export function AgentSurface({ termId, active, onClose }: Props) {
     ? session.items.filter((item) => item.kind !== "plan")
     : session.items;
   const tokens = usage.inputTokens + usage.outputTokens;
+  const usageDetail = [
+    `${formatTokens(usage.inputTokens)} input`,
+    `${formatTokens(usage.outputTokens)} output`,
+    usage.contextUsed !== null
+      ? `${Math.round(usage.contextUsed * 100)}% context`
+      : null,
+    usage.costUsd !== null ? `$${usage.costUsd.toFixed(2)}` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
   const ended = session.status === "exited" || session.status === "error";
   const resumable = canResume(session.agent);
   const resumeBlocked = session.status === "working" || session.status === "waiting";
@@ -454,6 +465,19 @@ export function AgentSurface({ termId, active, onClose }: Props) {
             />
           </span>
         )}
+        {(tokens > 0 || usage.contextUsed !== null) && (
+          <Tooltip title="Session usage" detail={usageDetail}>
+            <span
+              className="agent-usage-compact"
+              tabIndex={0}
+              aria-label={`Session usage: ${usageDetail}`}
+            >
+              <svg viewBox="0 0 14 14" aria-hidden="true">
+                <path d="M2.5 11.5V8.5M7 11.5V5.5M11.5 11.5V2.5" />
+              </svg>
+            </span>
+          </Tooltip>
+        )}
         <AgentGoalIndicator goal={session.goal} />
         {/* Keep history discoverable on every resumable provider. Mid-turn it
             stays visible but disabled because swapping sessions would strand
@@ -491,7 +515,14 @@ export function AgentSurface({ termId, active, onClose }: Props) {
         </button>
       </header>
 
-      <div className="agent-scroll" ref={scrollRef}>
+      <div
+        className={`agent-scroll${
+          session.permission && session.permission.kind !== "question"
+            ? " has-permission"
+            : ""
+        }`}
+        ref={scrollRef}
+      >
         <SubagentUiProvider
           selectedCallId={selectedSubagentCallId}
           onSelect={setSelectedSubagentCallId}

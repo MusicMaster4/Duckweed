@@ -14,6 +14,7 @@ mod project;
 mod pty;
 mod shell_integration;
 mod shells;
+mod terminal_shell_integration;
 mod usage;
 mod watch;
 
@@ -43,7 +44,7 @@ struct DurableSettings(Mutex<()>);
 
 const COMMAND_HISTORY_KEY: &str = "duckweed:command-history:v1";
 
-const DURABLE_SETTING_KEYS: [&str; 8] = [
+const DURABLE_SETTING_KEYS: [&str; 9] = [
     "duckweed:state:v1",
     "duckweed:usage:v1",
     // Ghost-text unlearning table — must match frontend DURABLE_KEYS or restore
@@ -53,6 +54,8 @@ const DURABLE_SETTING_KEYS: [&str; 8] = [
     "duckweed:agent-preferences:v1",
     "duckweed:layouts:v1",
     "duckweed:wellbeing:v1",
+    // 70% pool cooldown history (greetings, ASCII, preparing, pulse patterns).
+    "duckweed:cooldown-pools:v1",
     COMMAND_HISTORY_KEY,
 ];
 
@@ -459,6 +462,9 @@ async fn usage_scan(
     let (index_path, pricing_path) = usage_paths(&app);
     let state = state.inner().clone();
     blocking(move || {
+        if query.refresh {
+            usage::quota::refresh_grok_credit_snapshot(&home_path());
+        }
         let overrides = pricing::load_overrides(&pricing_path);
         let emit = |done: u32, total: u32| {
             let _ = app.emit("usage:progress", (done, total));

@@ -1223,6 +1223,387 @@ const petalsField: Field = (u, v, t) => {
 };
 
 /* ========================================================================
+   Extra collection: small scenes with their own motion language.
+   ===================================================================== */
+
+type Plot = (u: number, v: number, weight: number) => void;
+
+function plotSegment(
+  plot: Plot,
+  fromU: number,
+  fromV: number,
+  toU: number,
+  toV: number,
+  weight: number,
+  samples = 24,
+): void {
+  for (let step = 0; step <= samples; step += 1) {
+    const f = step / samples;
+    plot(fromU + (toU - fromU) * f, fromV + (toV - fromV) * f, weight);
+  }
+}
+
+/* -- Lightning: a restless fork crossing the whole field ---------------- */
+
+function paintLightning(t: number): string {
+  return paintPlotted((plot) => {
+    const drift = Math.sin(t * 2.7) * 0.28;
+    let previousU = -ASPECT;
+    let previousV = -0.55 + drift;
+    for (let joint = 1; joint <= 8; joint += 1) {
+      const nextU = -ASPECT + (joint / 8) * ASPECT * 2;
+      const nextV =
+        (joint === 8 ? 0.45 : (hash(joint * 9.7 + t * 1.9) - 0.5) * 1.25) + drift * 0.3;
+      plotSegment(plot, previousU, previousV, nextU, nextV, 0.95, 12);
+      if (joint === 3 || joint === 6) {
+        const forkV = nextV + (hash(joint + t) - 0.5) * 0.9;
+        plotSegment(plot, nextU, nextV, nextU + 0.45, forkV, 0.42, 9);
+      }
+      previousU = nextU;
+      previousV = nextV;
+    }
+  });
+}
+
+/* -- Fountain: bright droplets following looping parabolas -------------- */
+
+function paintFountain(t: number): string {
+  return paintPlotted((plot) => {
+    plotSegment(plot, -0.48, 0.82, 0.48, 0.82, 0.5, 30);
+    for (let drop = 0; drop < 17; drop += 1) {
+      const age = (t * 0.58 + drop / 17) % 1;
+      const direction = drop % 2 === 0 ? 1 : -1;
+      const u = direction * age * (0.3 + hash(drop) * 1.2);
+      const v = 0.74 - age * (2.4 - age * 2.2);
+      plot(u, v, 0.35 + 0.65 * (1 - age));
+    }
+  });
+}
+
+/* -- Heartbeat: an ECG trace travelling through a monitor --------------- */
+
+function paintHeartbeat(t: number): string {
+  return paintPlotted((plot) => {
+    const scroll = (t * 1.25) % 1;
+    for (let sample = 0; sample <= 190; sample += 1) {
+      const u = (sample / 190) * ASPECT * 2 - ASPECT;
+      const phase = (((u / ASPECT + 1) / 2 + scroll) % 1) * 8;
+      let v = 0;
+      if (phase > 2.25 && phase < 2.55) v = -(phase - 2.25) * 1.2;
+      else if (phase < 2.85 && phase >= 2.55) v = -0.36 + (phase - 2.55) * 4.1;
+      else if (phase < 3.12 && phase >= 2.85) v = 0.87 - (phase - 2.85) * 4.7;
+      else if (phase < 3.55 && phase >= 3.12) v = -0.4 + (phase - 3.12) * 0.95;
+      plot(u, v, 0.42 + 0.58 * (sample / 190));
+    }
+  });
+}
+
+/* -- Infinity: two light packets chase around a lemniscate -------------- */
+
+function paintInfinity(t: number): string {
+  return paintPlotted((plot) => {
+    for (let sample = 0; sample <= 220; sample += 1) {
+      const angle = (sample / 220) * TAU;
+      const u = Math.sin(angle) * 1.35;
+      const v = Math.sin(angle * 2) * 0.62;
+      const chase = 0.5 + 0.5 * Math.cos(angle * 2 - t * 3.2);
+      plot(u, v, 0.18 + 0.82 * Math.pow(chase, 5));
+    }
+  });
+}
+
+/* -- Jellyfish: a breathing bell with drifting tentacles ---------------- */
+
+function paintJellyfish(t: number): string {
+  return paintPlotted((plot) => {
+    const breathe = 0.88 + Math.sin(t * 2.1) * 0.12;
+    for (let sample = 0; sample <= 100; sample += 1) {
+      const angle = Math.PI + (sample / 100) * Math.PI;
+      plot(Math.cos(angle) * 0.95 * breathe, -0.2 + Math.sin(angle) * 0.68, 0.85);
+    }
+    plotSegment(plot, -0.95 * breathe, -0.2, 0.95 * breathe, -0.2, 0.35, 36);
+    for (let strand = -3; strand <= 3; strand += 1) {
+      for (let sample = 0; sample <= 38; sample += 1) {
+        const f = sample / 38;
+        const u = strand * 0.23 + Math.sin(f * 5 + t * 2 + strand) * 0.09;
+        plot(u, -0.15 + f * 1.02, 0.7 * (1 - f * 0.55));
+      }
+    }
+  });
+}
+
+/* -- Butterfly: mirrored wings flap around a quiet body ----------------- */
+
+function paintButterfly(t: number): string {
+  return paintPlotted((plot) => {
+    const flap = 0.68 + Math.abs(Math.sin(t * 2.4)) * 0.5;
+    for (const side of [-1, 1]) {
+      for (let sample = 0; sample <= 120; sample += 1) {
+        const angle = (sample / 120) * TAU;
+        const lobe = 0.42 + 0.25 * Math.cos(angle * 2);
+        const u = side * (0.18 + Math.abs(Math.cos(angle)) * lobe * flap);
+        const v = Math.sin(angle) * (0.78 - 0.16 * Math.cos(angle));
+        plot(u, v, 0.42 + 0.45 * Math.abs(Math.sin(angle)));
+      }
+    }
+    plotSegment(plot, 0, -0.58, 0, 0.65, 0.9, 28);
+  });
+}
+
+/* -- Magnetic field: flux lines bend between two moving poles ----------- */
+
+function paintMagneticField(t: number): string {
+  return paintPlotted((plot) => {
+    const wobble = Math.sin(t * 1.4) * 0.12;
+    for (const arc of [-0.72, -0.44, -0.2, 0.2, 0.44, 0.72]) {
+      for (let sample = 0; sample <= 70; sample += 1) {
+        const f = sample / 70;
+        const u = -1.18 + f * 2.36;
+        const v = arc * Math.sin(f * Math.PI) + wobble * Math.cos(f * TAU);
+        const pulse = 0.55 + 0.45 * Math.cos(f * 12 - t * 3);
+        plot(u, v, 0.22 + 0.68 * pulse);
+      }
+    }
+    plot(-1.2, wobble, 1);
+    plot(1.2, -wobble, 1);
+  });
+}
+
+/* -- Satellite: a moon circles a slowly rotating ringed planet ---------- */
+
+function paintSatellite(t: number): string {
+  return paintPlotted((plot) => {
+    for (let sample = 0; sample <= 90; sample += 1) {
+      const angle = (sample / 90) * TAU;
+      plot(Math.cos(angle) * 0.5, Math.sin(angle) * 0.5, 0.72);
+      plot(Math.cos(angle) * 1.35, Math.sin(angle) * 0.66, 0.24);
+    }
+    const moonAngle = t * 1.7;
+    const moonU = Math.cos(moonAngle) * 1.35;
+    const moonV = Math.sin(moonAngle) * 0.66;
+    plot(moonU, moonV, 1);
+    plot(moonU + 0.08, moonV, 0.65);
+    plotSegment(plot, -0.43, Math.sin(t) * 0.1, 0.43, -Math.sin(t) * 0.1, 0.34, 18);
+  });
+}
+
+/* -- Mountain range: layered peaks slide at different speeds ------------ */
+
+function paintMountainRange(t: number): string {
+  return paintPlotted((plot) => {
+    for (let layer = 0; layer < 3; layer += 1) {
+      const base = 0.72 - layer * 0.28;
+      const speed = t * (0.16 + layer * 0.08);
+      let previousU = -ASPECT;
+      let previousV = base;
+      for (let point = 1; point <= 18; point += 1) {
+        const u = -ASPECT + (point / 18) * ASPECT * 2;
+        const ridge = Math.abs(Math.sin(point * (1.1 + layer * 0.19) + speed));
+        const v = base - ridge * (0.44 + layer * 0.1);
+        plotSegment(plot, previousU, previousV, u, v, 0.35 + layer * 0.23, 6);
+        previousU = u;
+        previousV = v;
+      }
+    }
+  });
+}
+
+/* -- Circuit pulse: energy routes through an angular circuit board ------ */
+
+function paintCircuitPulse(t: number): string {
+  return paintGrid((x, y) => {
+    const path = (x + Math.floor(y / 2) * 5) % W;
+    const wire = y % 3 === 1 && x % 6 < 5;
+    const via = x % 6 === 0 && y > 0 && y < H - 1;
+    if (!wire && !via) return 0;
+    const head = (t * 10) % W;
+    const distance = (path - head + W) % W;
+    return distance < 2 ? 1 : distance < 6 ? 0.65 - distance * 0.07 : 0.16;
+  });
+}
+
+/* -- Chaser grid: a bright cell snakes across a field of quiet nodes ----- */
+
+function paintChaserGrid(t: number): string {
+  const columns = 14;
+  const rows = 5;
+  const head = Math.floor(t * 11) % (columns * rows);
+  return paintGrid((x, y) => {
+    if (x % 2 !== 0 || y % 2 !== 0) return 0;
+    const column = Math.floor(x / 2);
+    const row = Math.floor(y / 2);
+    const order = row % 2 === 0 ? row * columns + column : row * columns + columns - 1 - column;
+    const trail = (head - order + columns * rows) % (columns * rows);
+    return trail === 0 ? 1 : trail < 7 ? 0.75 - trail * 0.08 : 0.12;
+  });
+}
+
+/* -- Prism: a beam splits into a moving fan after crossing a triangle ---- */
+
+function paintPrism(t: number): string {
+  return paintPlotted((plot) => {
+    const corners = [
+      [-0.38, 0.58],
+      [0, -0.58],
+      [0.38, 0.58],
+    ] as const;
+    for (let edge = 0; edge < 3; edge += 1) {
+      const from = corners[edge];
+      const to = corners[(edge + 1) % 3];
+      plotSegment(plot, from[0], from[1], to[0], to[1], 0.72, 20);
+    }
+    const entryV = Math.sin(t * 1.6) * 0.34;
+    plotSegment(plot, -ASPECT, entryV, -0.25, entryV * 0.35, 0.65, 34);
+    for (let ray = -2; ray <= 2; ray += 1) {
+      plotSegment(plot, 0.25, entryV * 0.2, ASPECT, entryV + ray * 0.24, 0.48 + ray * 0.08, 34);
+    }
+  });
+}
+
+/* -- Meteor shower: diagonal streaks wrap cleanly around the canvas ------ */
+
+function paintMeteorShower(t: number): string {
+  return paintPlotted((plot) => {
+    for (let meteor = 0; meteor < 12; meteor += 1) {
+      const travel = (t * (0.36 + hash(meteor) * 0.35) + hash(meteor + 20)) % 1;
+      const u = ASPECT + 0.6 - travel * (ASPECT * 2 + 1.2);
+      const v = -0.95 + hash(meteor + 40) * 1.9 + travel * 0.55;
+      plotSegment(plot, u, v, u + 0.34, v - 0.2, 0.45 + hash(meteor + 60) * 0.5, 10);
+    }
+  });
+}
+
+/* -- Fan: offset blades fold open and closed around a pinned center ------ */
+
+function paintFan(t: number): string {
+  return paintPlotted((plot) => {
+    const spread = 0.45 + Math.abs(Math.sin(t * 1.45)) * 0.7;
+    for (let blade = -4; blade <= 4; blade += 1) {
+      const angle = -Math.PI / 2 + blade * 0.16 * spread;
+      const endU = Math.cos(angle) * 1.35;
+      const endV = Math.sin(angle) * 0.86 + 0.72;
+      plotSegment(plot, 0, 0.72, endU, endV, 0.34 + (blade + 4) * 0.07, 28);
+    }
+    plot(0, 0.72, 1);
+  });
+}
+
+/* -- Scanlines: two sweeping bands reveal a fine interference texture ---- */
+
+const scanlinesField: Field = (u, v, t) => {
+  const horizontal = Math.exp(-Math.pow((v - Math.sin(t * 1.9) * 0.72) / 0.13, 2));
+  const vertical = Math.exp(-Math.pow((u - Math.cos(t * 1.35) * ASPECT * 0.78) / 0.16, 2));
+  const texture = 0.5 + 0.5 * Math.sin(u * 13 + v * 7 - t * 3);
+  return Math.max(horizontal, vertical) * (0.45 + texture * 0.55);
+};
+
+/* -- Eclipse: a dark travelling disc cuts through a bright corona -------- */
+
+const eclipseField: Field = (u, v, t) => {
+  const centerU = Math.sin(t * 0.85) * 0.58;
+  const distance = Math.hypot(u - centerU, v * 1.05);
+  const corona = Math.exp(-Math.pow((distance - 0.55) / 0.13, 2));
+  const flare = Math.pow(0.5 + 0.5 * Math.sin(Math.atan2(v, u - centerU) * 9 - t * 2.2), 6);
+  return corona * (0.55 + flare * 0.45);
+};
+
+/* -- Honeycomb: a hexagonal lattice rolls under a soft wave ------------- */
+
+const honeycombField: Field = (u, v, t) => {
+  const x = u * 4.2 + t * 0.75;
+  const y = v * 4.8;
+  const a = Math.abs(Math.sin(x));
+  const b = Math.abs(Math.sin(x * 0.5 + y * 0.86));
+  const c = Math.abs(Math.sin(x * 0.5 - y * 0.86));
+  const edge = 1 - Math.min(a, b, c);
+  return Math.pow(edge, 7) * (0.55 + 0.45 * Math.sin(v * 3 - t) ** 2);
+};
+
+/* -- Barcode: uneven columns scan sideways with a travelling highlight --- */
+
+const barcodeField: Field = (u, v, t) => {
+  const column = Math.floor(((u / ASPECT + 1) / 2) * W);
+  const stripe = hash(column * 3.7) > 0.48 ? 1 : 0.16;
+  const scanner = Math.exp(-Math.pow((u - Math.sin(t * 1.7) * ASPECT * 0.9) / 0.2, 2));
+  const clipped = Math.abs(v) < 0.76 - hash(column + 90) * 0.3 ? 1 : 0;
+  return clipped * stripe * (0.28 + scanner * 0.72);
+};
+
+/* -- Caustics: watery ridges drift and cross like light on a pool -------- */
+
+const causticsField: Field = (u, v, t) => {
+  const first = Math.abs(Math.sin(u * 5.4 + Math.sin(v * 3.1 - t) * 2.1 + t * 1.4));
+  const second = Math.abs(Math.sin(v * 6.2 + Math.sin(u * 2.7 + t * 0.8) * 1.8 - t));
+  return Math.pow(1 - Math.min(first, second), 4.5);
+};
+
+/* -- Shockwave: a compressed front expands from alternating corners ------ */
+
+const shockwaveField: Field = (u, v, t) => {
+  const cycle = (t * 0.58) % 1;
+  const originU = Math.floor(t * 0.58) % 2 === 0 ? -ASPECT : ASPECT;
+  const originV = Math.floor(t * 0.58) % 3 === 0 ? -1 : 1;
+  const radius = cycle * 4.1;
+  const distance = Math.hypot(u - originU, v - originV);
+  return Math.exp(-Math.pow((distance - radius) / 0.13, 2)) * (1 - cycle * 0.35);
+};
+
+/* -- Curtain: vertical strands sway with delayed, layered motion --------- */
+
+const curtainField: Field = (u, v, t) => {
+  const strand = Math.pow(0.5 + 0.5 * Math.cos(u * 16), 10);
+  const fold = 0.5 + 0.5 * Math.sin(v * 3.4 + Math.sin(u * 2.2 - t * 1.3) * 2.4 + t);
+  const hem = Math.exp(-Math.pow((v - Math.sin(u * 2.1 - t) * 0.42) / 0.12, 2));
+  return Math.max(strand * fold * 0.62, hem * 0.8);
+};
+
+/* -- Lattice: a perspective floor rolls toward a low horizon ------------ */
+
+const latticeField: Field = (u, v, t) => {
+  const depth = clamp01((v + 1) / 2);
+  const perspectiveX = Math.abs(Math.sin((u / (0.18 + depth)) * 1.25));
+  const perspectiveY = Math.abs(Math.sin(7 / (depth + 0.13) - t * 3.2));
+  const line = 1 - Math.min(perspectiveX, perspectiveY);
+  return Math.pow(line, 8) * depth;
+};
+
+/* -- Quasar: a hot core throws a twisting horizontal jet ---------------- */
+
+const quasarField: Field = (u, v, t) => {
+  const core = Math.exp(-(u * u + v * v) / 0.045);
+  const jetCenter = Math.sin(u * 5 - t * 2) * 0.12;
+  const jet = Math.exp(-Math.pow((v - jetCenter) / (0.08 + Math.abs(u) * 0.025), 2));
+  const fade = Math.exp(-Math.abs(u) * 0.85);
+  return Math.max(core, jet * fade * (0.5 + 0.5 * Math.cos(u * 13 - t * 4)));
+};
+
+/* -- Mandala: nested angular petals rotate in opposite directions -------- */
+
+const mandalaField: Field = (u, v, t) => {
+  const x = u / 1.25;
+  const radius = Math.hypot(x, v);
+  const angle = Math.atan2(v, x);
+  const petals = Math.cos(angle * 8 + t) * 0.12 + Math.cos(angle * 4 - t * 0.7) * 0.09;
+  const rings = 0.5 + 0.5 * Math.cos((radius + petals) * 18 - t * 1.5);
+  return Math.pow(rings, 6) * clamp01(1.25 - radius);
+};
+
+/* -- Dunes: soft ridges migrate at separate depths ---------------------- */
+
+const dunesField: Field = (u, v, t) => {
+  let value = 0;
+  for (let layer = 0; layer < 4; layer += 1) {
+    const ridge =
+      0.68 -
+      layer * 0.34 +
+      Math.sin(u * (1.6 + layer * 0.32) + t * (0.35 + layer * 0.12)) * 0.16;
+    const line = Math.exp(-Math.pow((v - ridge) / (0.07 + layer * 0.015), 2));
+    value = Math.max(value, line * (0.35 + layer * 0.17));
+  }
+  return value;
+};
+
+/* ========================================================================
    Simulations: state that advances a generation at a time.
    ===================================================================== */
 
@@ -1426,7 +1807,7 @@ export type AsciiSceneId = keyof typeof ASCII_SCENES;
 /**
  * The pool the loader draws from. Nothing here is provider-specific: the
  * first time a terminal shows the loader it draws one (random, behind the
- * shared half-pool cooldown so recent picks sit out), and keeps it for as
+ * shared 70% pool cooldown so recent picks sit out), and keeps it for as
  * long as that terminal lives.
  */
 export const ASCII_ANIMATIONS: readonly PainterFactory[] = [
@@ -1493,6 +1874,31 @@ export const ASCII_ANIMATIONS: readonly PainterFactory[] = [
   stateless(paintSpirograph),
   stateless(paintWindmill),
   stateless(paintHourglass),
+  stateless(paintLightning),
+  stateless(paintFountain),
+  stateless(paintHeartbeat),
+  stateless(paintInfinity),
+  stateless(paintJellyfish),
+  stateless(paintButterfly),
+  stateless(paintMagneticField),
+  stateless(paintSatellite),
+  stateless(paintMountainRange),
+  stateless(paintCircuitPulse),
+  stateless(paintChaserGrid),
+  stateless(paintPrism),
+  stateless(paintMeteorShower),
+  stateless(paintFan),
+  field(scanlinesField),
+  field(eclipseField),
+  field(honeycombField),
+  field(barcodeField),
+  field(causticsField),
+  field(shockwaveField),
+  field(curtainField),
+  field(latticeField),
+  field(quasarField),
+  field(mandalaField),
+  field(dunesField),
   /* A simulation like Rule 30 above: each surface needs its own instance. */
   createLangtonPainter,
 ];

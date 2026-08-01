@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { nextBlockSelection, selectionIndex } from "./blockNav";
+import { canNavigateBlocks, nextBlockSelection, selectionIndex } from "./blockNav";
 
 describe("block navigation helpers", () => {
   const ids = [1, 2, 3, 4];
@@ -45,5 +45,12 @@ describe("block navigation helpers", () => {
     expect(selectionIndex(ids, 3)).toBe(2);
     expect(selectionIndex(ids, null)).toBe(-1);
     expect(selectionIndex(ids, 99)).toBe(-1);
+  });
+
+  test("navigation is limited to an idle shell", () => {
+    expect(canNavigateBlocks({ busy: false, exited: false, hasAgentUi: false })).toBe(true);
+    expect(canNavigateBlocks({ busy: true, exited: false, hasAgentUi: false })).toBe(false);
+    expect(canNavigateBlocks({ busy: false, exited: true, hasAgentUi: false })).toBe(false);
+    expect(canNavigateBlocks({ busy: false, exited: false, hasAgentUi: true })).toBe(false);
   });
 });

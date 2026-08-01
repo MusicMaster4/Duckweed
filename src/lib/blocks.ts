@@ -14,8 +14,8 @@ import { nextBlockSelection, type BlockNavAction } from "./blockNav";
  * `PS path> cmd` echo never bleeds through). Prompt-cover and selection chrome
  * are editor-only — they paint free-floating rows and flicker on TUI footers.
  *
- * Overlays are plain DOM (not xterm decorations) so they stay visible under the
- * WebGL renderer and resize with the pane the same way the visual cursor does.
+ * Overlays are plain DOM (not xterm decorations) so they resize with the pane
+ * the same way the visual cursor does.
  */
 
 export interface CommandBlock {
@@ -30,6 +30,10 @@ export interface CommandBlock {
   cmdEl: HTMLDivElement | null;
   /** Lazily mounted full-width hairline above the block. */
   sepEl: HTMLDivElement | null;
+  /** Exact lifecycle timing when supplied by OSC 133 shell integration. */
+  startedAt: number;
+  completedAt: number | null;
+  exitCode: number | null;
 }
 
 export class BlockTracker {
@@ -108,7 +112,7 @@ export class BlockTracker {
   }
 
   /** Open a block for a submitted command at the current logical prompt line. */
-  open(command: string): void {
+  open(command: string, startedAt = Date.now()): void {
     // No editorMode guard: submits only ever come from the composer, and a
     // busy→idle race (the native busy poll lags a ^C) must not drop the block
     // — that left the raw `PS path> cmd` echo uncovered for good. Command
@@ -120,16 +124,31 @@ export class BlockTracker {
       this.selectedId = null;
       this.selectOverlay.hidden = true;
     }
+    // Editor submissions open before the PTY write. Bash/zsh preexec (and
+    // often PowerShell) emit OSC 133;C after the command row is committed and
+    // the cursor has advanced. Merge the in-flight block by command text so
+    // the shell confirmation does not create a duplicate on the output row.
+    const last = this.blocks[this.blocks.length - 1];
+    if (last && last.completedAt === null && last.command === command) {
+      last.startedAt = startedAt;
+      return;
+    }
     // A PowerShell prompt can already be wrapped before the command is echoed.
     // A marker at the cursor would then sit on a continuation row, which xterm
     // deletes when the terminal grows wider. Anchor the first physical row of
     // the logical line instead. That row survives both directions of reflow.
     const buffer = this.term.buffer.active;
     const cursorLine = buffer.baseY + buffer.cursorY;
-    const startLine = logicalLineStart(
-      (line) => buffer.getLine(line)?.isWrapped ?? false,
-      cursorLine,
-    );
+    const isWrapped = (line: number) => buffer.getLine(line)?.isWrapped ?? false;
+    let startLine = logicalLineStart(isWrapped, cursorLine);
+    // Shell hooks fire after the echoed command + newline, so the cursor sits
+    // on the (still empty) first output row. Step back to the preceding
+    // logical command row; leave the cursor line alone when it still holds
+    // visible text (PowerShell can emit C before advancing).
+    const cursorText = buffer.getLine(cursorLine)?.translateToString(true) ?? "";
+    if (!cursorText.trim() && cursorLine > 0) {
+      startLine = logicalLineStart(isWrapped, cursorLine - 1);
+    }
     const start = this.term.registerMarker(startLine - cursorLine);
     if (!start) return;
 
@@ -139,10 +158,28 @@ export class BlockTracker {
       start,
       cmdEl: null,
       sepEl: null,
+      startedAt,
+      completedAt: null,
+      exitCode: null,
     };
 
     this.blocks.push(block);
     this.scheduleLayout();
+  }
+
+  /** Seal the newest command with the status reported by OSC 133;D. */
+  complete(exitCode: number | null, completedAt = Date.now()): void {
+    this.prune();
+    const block = this.blocks[this.blocks.length - 1];
+    if (!block || block.completedAt !== null) return;
+    block.completedAt = completedAt;
+    block.exitCode = exitCode;
+    this.scheduleLayout();
+  }
+
+  selectedCommand(): string | null {
+    if (this.selectedId === null) return null;
+    return this.blocks.find((block) => block.id === this.selectedId)?.command ?? null;
   }
 
   /** Drop every block (clear screen, dispose session). */

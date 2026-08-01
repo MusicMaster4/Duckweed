@@ -20,6 +20,10 @@ export const DURABLE_KEYS = [
   "duckweed:layouts:v1",
   // Focused time, daily limit, and the local day it belongs to.
   "duckweed:wellbeing:v1",
+  // 70% pool cooldown history for greetings, ASCII loaders, preparing lines,
+  // and thinking-pulse patterns. Survives updates so the same joke is not
+  // drawn again the moment the WebView reloads.
+  "duckweed:cooldown-pools:v1",
   COMMAND_HISTORY_KEY,
 ] as const;
 

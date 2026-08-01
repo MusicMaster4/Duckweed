@@ -355,7 +355,7 @@ function OpenCodeItem({
       // pattern as the official user turns. Keeping both in `.oc-mod-body`
       // previously painted the icon inside the bubble.
       return (
-        <div className="oc-user-turn">
+        <div className="oc-user-turn" data-message-enter>
           <div className="oc-user-bubble">
             <AgentImageAttachments images={item.images ?? []} />
             {item.text && <p className="oc-said">{item.text}</p>}
@@ -369,6 +369,7 @@ function OpenCodeItem({
           className={`oc-prose${showStreaming ? " is-streaming" : ""}${
             continued ? " is-interim-update" : ""
           }`}
+          data-message-enter
         >
           <AssistantMarkdown text={item.text} />
         </div>
