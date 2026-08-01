@@ -38,15 +38,20 @@ function PromptCard({
   copied: boolean;
   onCopied: () => void;
   onEdit: () => void;
-  onDragStart: (event: React.PointerEvent<HTMLButtonElement>) => void;
-  onDragMove: (event: React.PointerEvent<HTMLButtonElement>) => void;
-  onDragEnd: (event: React.PointerEvent<HTMLButtonElement>) => void;
-  onDragCancel: (event: React.PointerEvent<HTMLButtonElement>) => void;
+  onDragStart: (event: React.PointerEvent<HTMLElement>) => void;
+  onDragMove: (event: React.PointerEvent<HTMLElement>) => void;
+  onDragEnd: (event: React.PointerEvent<HTMLElement>) => void;
+  onDragCancel: (event: React.PointerEvent<HTMLElement>) => void;
 }) {
   return (
     <article
       className="prompt-template-card"
       data-prompt-template
+      title="Drag this card into a terminal"
+      onPointerDown={onDragStart}
+      onPointerMove={onDragMove}
+      onPointerUp={onDragEnd}
+      onPointerCancel={onDragCancel}
     >
       <header>
         <strong>{template.title}</strong>
@@ -56,26 +61,6 @@ function PromptCard({
       </header>
       <p>{template.content}</p>
       <footer>
-        <button
-          type="button"
-          className="prompt-template-drag"
-          aria-label={`Drag ${template.title} to a terminal`}
-          title="Hold and drag into a terminal"
-          onPointerDown={onDragStart}
-          onPointerMove={onDragMove}
-          onPointerUp={onDragEnd}
-          onPointerCancel={onDragCancel}
-        >
-          <svg viewBox="0 0 12 12" aria-hidden="true">
-            <circle cx="3" cy="3" r=".6" />
-            <circle cx="3" cy="6" r=".6" />
-            <circle cx="3" cy="9" r=".6" />
-            <circle cx="7" cy="3" r=".6" />
-            <circle cx="7" cy="6" r=".6" />
-            <circle cx="7" cy="9" r=".6" />
-          </svg>
-          Drag to terminal
-        </button>
         <button
           type="button"
           onClick={() => {
@@ -213,6 +198,7 @@ export function PromptsTool() {
               }
               onDragStart={(event) => {
                 if (event.button !== 0) return;
+                if ((event.target as Element).closest("button")) return;
                 event.preventDefault();
                 event.currentTarget.setPointerCapture(event.pointerId);
                 const next = {

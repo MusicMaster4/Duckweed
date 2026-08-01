@@ -23,7 +23,7 @@ afterEach(() => {
 });
 
 describe("prompts panel", () => {
-  test("makes pointer drag the primary terminal insertion action", () => {
+  test("makes the whole card the terminal drag surface", () => {
     promptTemplates.savePromptTemplate({
       title: "Review implementation",
       content: "Review this implementation for correctness and missing tests.",
@@ -33,8 +33,8 @@ describe("prompts panel", () => {
     expect(html).toContain("Review implementation");
     expect(html).toContain("Copy");
     expect(html).not.toContain("Use template");
-    expect(html).toContain("Drag to terminal");
-    expect(html).toContain("Drag Review implementation to a terminal");
+    expect(html).not.toContain("Drag to terminal");
+    expect(html).toContain("Drag this card into a terminal");
     expect(html).not.toContain('draggable="true"');
     expect(html).toContain("data-prompt-template");
   });

@@ -1417,8 +1417,9 @@ svg.tab-glyph-fill path {
   align-items: center;
   gap: 2px;
   flex: none;
-  min-height: 60px;
-  padding: 4px;
+  min-height: 69px;
+  /* Carry the picker through the full terminal + custom-agent header stack. */
+  padding: 5px 4px;
   border-bottom: 1px solid var(--border);
 }
 
@@ -1436,17 +1437,17 @@ svg.tab-glyph-fill path {
   justify-content: center;
   gap: 3px;
   width: 100%;
-  height: 25px;
+  height: 27px;
   min-width: 0;
-  padding: 0 3px;
+  padding: 0 2px;
   border-radius: 6px;
   color: var(--text-faint);
-  font-size: 10px;
+  font-size: 10.5px;
 }
 
 .tools-tab svg {
-  width: 11px;
-  height: 11px;
+  width: 12px;
+  height: 12px;
   flex: none;
 }
 
@@ -1498,14 +1499,14 @@ svg.tab-glyph-fill path {
   display: grid;
   place-items: center;
   width: 100%;
-  height: 25px;
+  height: 27px;
   border-radius: 6px;
   color: var(--text-faint);
 }
 
 .tools-hide svg {
-  width: 14px;
-  height: 14px;
+  width: 15px;
+  height: 15px;
 }
 
 .tools-hide:hover {
@@ -1784,7 +1785,9 @@ svg.tab-glyph-fill path {
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--bg-pane);
-  cursor: default;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
 }
 
 .prompt-template-card:hover {
@@ -1830,47 +1833,12 @@ svg.tab-glyph-fill path {
   white-space: pre-wrap;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 5;
-  user-select: text;
+  user-select: none;
 }
 
 .prompt-template-card footer {
   justify-content: flex-end;
   padding-top: 1px;
-}
-
-.prompt-template-card footer .prompt-template-drag {
-  display: flex;
-  min-width: 0;
-  align-items: center;
-  gap: 3px;
-  margin-right: auto;
-  color: var(--text-faint);
-  font-size: 8.5px;
-  white-space: nowrap;
-  touch-action: none;
-  padding: 3px 4px;
-  border: 0;
-  color: var(--text-faint);
-  background: transparent;
-  cursor: grab;
-}
-
-.prompt-template-card footer .prompt-template-drag:hover {
-  border: 0;
-  color: var(--text);
-  background: var(--hover);
-}
-
-.prompt-template-card footer .prompt-template-drag:active {
-  cursor: grabbing;
-}
-
-.prompt-template-drag svg {
-  width: 10px;
-  height: 10px;
-  flex: none;
-  fill: currentColor;
-  stroke: none;
 }
 
 .prompt-template-card footer button {
@@ -1879,6 +1847,9 @@ svg.tab-glyph-fill path {
   border-radius: 6px;
   color: var(--text-dim);
   font-size: 9.5px;
+  cursor: pointer;
+  touch-action: auto;
+  user-select: none;
 }
 
 .prompt-template-card footer button:hover {
@@ -2006,6 +1977,8 @@ svg.tab-glyph-fill path {
   color: var(--text);
   background: var(--bg-pane);
   font-size: 11.5px;
+  outline: none;
+  box-shadow: none;
 }
 
 .prompt-editor input {
@@ -2023,7 +1996,9 @@ svg.tab-glyph-fill path {
 
 .prompt-editor input:focus,
 .prompt-editor textarea:focus {
-  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  border-color: var(--accent-line);
+  outline: none;
+  box-shadow: none;
 }
 
 .prompt-editor-content {
