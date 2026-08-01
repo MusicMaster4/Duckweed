@@ -27,6 +27,8 @@ export interface PaneTreeShared {
   unreadTerms: ReadonlySet<string>;
   /** One-shot animation pulse for a completion in the currently focused pane. */
   completionFlashes: ReadonlyMap<string, CompletionFlash>;
+  /** Exact live layout interpolation for one owning split. */
+  paneMotion: PaneLayoutMotion | null;
   /** Folder of the tab being rendered; the empty pane offers to pick one. */
   project: ProjectInfo | null;
   recents: string[];
@@ -35,11 +37,28 @@ export interface PaneTreeShared {
   zoomedLeaf: string | null;
   onActivate: (leafId: string) => void;
   onReview: (termId: string) => void;
+  onPaneMotionEnd: (token: number) => void;
   onSplit: (leafId: string, zone: "right" | "bottom") => void;
   onClose: (leafId: string) => void;
   onToggleZoom: (leafId: string) => void;
   onStartDrag: (e: React.PointerEvent, node: LeafNode) => void;
   onResize: (splitId: string, sizes: number[]) => void;
+}
+
+export interface PaneLayoutMotion {
+  token: number;
+  tabId: string;
+  splitId: string;
+  leafId: string;
+  cellId: string;
+  termId: string;
+  phase: "entering" | "leaving";
+  stage: "from" | "to";
+  fromSizes: number[];
+  toSizes: number[];
+  dividerIndex: number;
+  fromDividerPx: number;
+  toDividerPx: number;
 }
 
 function dropZoneFor(drag: DragState | null, leafId: string): DropZone | null {
@@ -67,6 +86,11 @@ export const PaneTree = memo(function PaneTree({
         key={node.id}
         node={node}
         active={shared.activeLeaf === node.id}
+        activating={
+          shared.paneMotion?.phase === "entering" &&
+          shared.paneMotion.stage === "to" &&
+          shared.paneMotion.leafId === node.id
+        }
         zoomed={shared.zoomedLeaf === node.id}
         dropZone={dropZoneFor(shared.drag, node.id)}
         isSource={shared.drag?.leafId === node.id}
@@ -102,17 +126,32 @@ const SplitView = memo(function SplitView({
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const count = node.children.length;
+  const motion = shared.paneMotion?.splitId === node.id ? shared.paneMotion : null;
+  const displayedSizes = motion
+    ? motion.stage === "from"
+      ? motion.fromSizes
+      : motion.toSizes
+    : node.sizes;
+  const movingDividerPx = motion
+    ? motion.stage === "from"
+      ? motion.fromDividerPx
+      : motion.toDividerPx
+    : DIVIDER;
+  const totalDividerPx = Math.max(0, count - 2) * DIVIDER + movingDividerPx;
 
   // Cells are sized by an explicit basis with grow/shrink disabled, so a pane's
-  // width never depends on what the terminal inside it is printing. Each cell
-  // gives up its share of the dividers so the children always total exactly 100%.
-  const gapShare = ((count - 1) * DIVIDER) / count;
+  // width never depends on what the terminal inside it is printing. Divider
+  // space is distributed proportionally so a zero-size animated cell is exact.
 
   return (
-    <div className={`split split-${node.dir}`} ref={containerRef} data-split-id={node.id}>
+    <div
+      className={`split split-${node.dir}${motion ? " is-layout-animating" : ""}`}
+      ref={containerRef}
+      data-split-id={node.id}
+    >
       {node.children.map((child, index) => {
-        const fraction = node.sizes[index] ?? 1 / count;
-        const basis = `calc(${(fraction * 100).toFixed(4)}% - ${gapShare.toFixed(3)}px)`;
+        const fraction = displayedSizes[index] ?? node.sizes[index] ?? 1 / count;
+        const basis = `calc(${(fraction * 100).toFixed(4)}% - ${(fraction * totalDividerPx).toFixed(3)}px)`;
         return (
           <Fragment key={child.id}>
             {index > 0 && (
@@ -122,9 +161,23 @@ const SplitView = memo(function SplitView({
                 containerRef={containerRef}
                 sizes={node.sizes}
                 onResize={(sizes) => shared.onResize(node.id, sizes)}
+                motionBasis={motion && index - 1 === motion.dividerIndex ? movingDividerPx : null}
               />
             )}
-            <div className="split-cell" style={{ flexBasis: basis }}>
+            <div
+              className="split-cell"
+              style={{ flexBasis: basis }}
+              onTransitionEnd={(event) => {
+                if (
+                  motion?.stage === "to" &&
+                  child.id === motion.cellId &&
+                  event.target === event.currentTarget &&
+                  event.propertyName === "flex-basis"
+                ) {
+                  shared.onPaneMotionEnd(motion.token);
+                }
+              }}
+            >
               <PaneTree node={child} shared={shared} edges={edgesForChild(edges, node.dir, index, count)} />
             </div>
           </Fragment>
@@ -140,9 +193,10 @@ interface DividerProps {
   containerRef: React.RefObject<HTMLDivElement>;
   sizes: number[];
   onResize: (sizes: number[]) => void;
+  motionBasis: number | null;
 }
 
-function Divider({ dir, index, containerRef, sizes, onResize }: DividerProps) {
+function Divider({ dir, index, containerRef, sizes, onResize, motionBasis }: DividerProps) {
   const drag = useRef<{ origin: number; total: number; base: number[]; next: number[] } | null>(null);
   const previewFrame = useRef(0);
   // Keeps the line lit for the whole drag, including once the pointer has run
@@ -157,7 +211,11 @@ function Divider({ dir, index, containerRef, sizes, onResize }: DividerProps) {
     drag.current = {
       origin: dir === "row" ? e.clientX : e.clientY,
       // Fractions are of the container box, dividers included — see gapShare.
-      total: Math.max(1, dir === "row" ? container.clientWidth : container.clientHeight),
+      total: Math.max(
+        1,
+        (dir === "row" ? container.clientWidth : container.clientHeight) -
+          (sizes.length - 1) * DIVIDER,
+      ),
       base: [...sizes],
       next: [...sizes],
     };
@@ -197,17 +255,19 @@ function Divider({ dir, index, containerRef, sizes, onResize }: DividerProps) {
       (element): element is HTMLElement =>
         element instanceof HTMLElement && element.classList.contains("split-cell"),
     );
-    const gapShare = ((next.length - 1) * DIVIDER) / next.length;
+    const dividerTotal = (next.length - 1) * DIVIDER;
     for (const at of [index, index + 1]) {
       const cell = cells[at];
       if (!cell) continue;
-      cell.style.flexBasis = `calc(${((next[at] ?? 0) * 100).toFixed(4)}% - ${gapShare.toFixed(3)}px)`;
+      const fraction = next[at] ?? 0;
+      cell.style.flexBasis = `calc(${(fraction * 100).toFixed(4)}% - ${(fraction * dividerTotal).toFixed(3)}px)`;
     }
   };
 
   return (
     <div
       className={`divider divider-${dir}${dragging ? " is-dragging" : ""}`}
+      style={motionBasis === null ? undefined : { flexBasis: `${motionBasis}px` }}
       role="separator"
       aria-orientation={dir === "row" ? "vertical" : "horizontal"}
       onPointerDown={onPointerDown}

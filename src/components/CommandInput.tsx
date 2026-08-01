@@ -44,6 +44,7 @@ export function CommandInput({ termId, active, exited, highlight }: Props) {
   const draftRef = useRef("");
   const valueRef = useRef(value);
   valueRef.current = value;
+  const editorRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   /**
    * Ghosts shown during this draft. Accept (Tab / → / Ctrl+F / Ctrl+→) marks
@@ -97,6 +98,11 @@ export function CommandInput({ termId, active, exited, highlight }: Props) {
   const resize = useCallback(() => {
     const el = textareaRef.current;
     if (!el) return;
+    if (el.clientWidth <= 0) return;
+    if (valueRef.current.length === 0) {
+      el.style.height = "22px";
+      return;
+    }
     el.style.height = "0px";
     el.style.height = `${Math.min(160, Math.max(22, el.scrollHeight))}px`;
   }, []);
@@ -104,6 +110,24 @@ export function CommandInput({ termId, active, exited, highlight }: Props) {
   useLayoutEffect(() => {
     resize();
   }, [value, resize]);
+
+  // A split is born at zero width and grows through the live layout animation.
+  // Measuring only on mount makes the one-line placeholder wrap into a 160px
+  // textarea and leaves that stale height behind. Re-measure whenever the
+  // editor's width changes so the composer follows the real pane geometry.
+  useLayoutEffect(() => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    let previousWidth = -1;
+    const observer = new ResizeObserver(([entry]) => {
+      const width = Math.round(entry.contentRect.width * 10) / 10;
+      if (width === previousWidth) return;
+      previousWidth = width;
+      resize();
+    });
+    observer.observe(editor);
+    return () => observer.disconnect();
+  }, [resize]);
 
   // Font size is applied via CSS variables from terminals.setFontSize; remeasure
   // the textarea so a larger/smaller face does not leave a stale height.
@@ -445,7 +469,7 @@ export function CommandInput({ termId, active, exited, highlight }: Props) {
         terminals.dismissBlockSelection(termId);
       }}
     >
-      <div className="command-input-editor">
+      <div ref={editorRef} className="command-input-editor">
         {showMirror && (
           <div className="command-input-mirror" aria-hidden="true">
             {highlighted.map((token, index) => (

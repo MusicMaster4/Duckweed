@@ -403,6 +403,7 @@ export function TabStrip({
           const reviewFlashKey = completionHighlights ? completionReviewFlashes[tab.id] : undefined;
           const isActive = tab.id === activeTabId && !settingsActive;
           const isWorking = workingTabIds.has(tab.id);
+          const showWorkShimmer = isWorking && !isActive;
           const accent = tabColorHex(tab.color);
           return (
             <div
@@ -460,7 +461,7 @@ export function TabStrip({
                 openContextAt(tab.id, e.clientX, e.clientY);
               }}
             >
-              {isWorking && <span className="tab-work-shimmer" aria-hidden="true" />}
+              {showWorkShimmer && <span className="tab-work-shimmer" aria-hidden="true" />}
               {reviewFlashKey !== undefined && (
                 <span
                   key={reviewFlashKey}

@@ -56,12 +56,19 @@ function render(workingTabIds: ReadonlySet<string>): string {
 }
 
 describe("TabStrip agent activity", () => {
-  test("renders the shimmer only on tabs with active agent work", () => {
+  test("does not render the shimmer on the focused tab", () => {
     const html = render(new Set(["tab-working"]));
 
-    expect(html.match(/tab-work-shimmer/g)).toHaveLength(1);
+    expect(html).not.toContain("tab-work-shimmer");
     expect(html).toContain("tab is-active is-unclaimed is-agent-working");
     expect(html).toContain('aria-label="Duckweed, agent working"');
+  });
+
+  test("renders the shimmer when working tab is in the background", () => {
+    const html = render(new Set(["tab-idle"]));
+
+    expect(html.match(/tab-work-shimmer/g)).toHaveLength(1);
+    expect(html).toContain('aria-label="VPS, agent working"');
   });
 
   test("does not render a shimmer when every agent is idle", () => {
