@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { leaves } from "./layout";
+import { leaves, swapLeaves } from "./layout";
 import type { LayoutNode, Tab } from "./types";
 import {
   groupZoomRail,
@@ -184,6 +184,16 @@ describe("fullscreen rail reordering", () => {
     expect(leaves(moved).map((node) => [node.term, node.pinned === true])).toEqual([
       ["b", false],
       ["c", false],
+      ["a", true],
+    ]);
+  });
+
+  test("a pin rides along when panes are swapped through the grid", () => {
+    const pinned = toggleLeafPin(row("a", "b"), "leaf-a");
+    const moved = swapLeaves(pinned, "leaf-a", "leaf-b");
+
+    expect(leaves(moved).map((node) => [node.term, node.pinned === true])).toEqual([
+      ["b", false],
       ["a", true],
     ]);
   });

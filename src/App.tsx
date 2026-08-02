@@ -812,9 +812,14 @@ export default function App() {
         acknowledgeTerm(termId);
         setSettingsActive(false);
         setActiveTabId(tab.id);
-        if (tab.activeLeaf !== leafNode.id) {
-          terminals.clearAllBlockSelections();
-          updateTab(tab.id, (t) => ({ ...t, activeLeaf: leafNode.id }));
+        const zoomedLeaf = tab.zoomedLeaf === null ? null : leafNode.id;
+        if (tab.activeLeaf !== leafNode.id || tab.zoomedLeaf !== zoomedLeaf) {
+          if (tab.activeLeaf !== leafNode.id) terminals.clearAllBlockSelections();
+          updateTab(tab.id, (t) => ({
+            ...t,
+            activeLeaf: leafNode.id,
+            zoomedLeaf,
+          }));
         } else {
           // Same pane already selected: still put OS focus back on it.
           terminals.focus(termId);
@@ -1408,11 +1413,12 @@ export default function App() {
       const node = findLeaf(tab.root, leafId);
       if (!node) return;
       acknowledgeTerm(node.term);
-      if (tab.activeLeaf === leafId) return;
+      const zoomedLeaf = tab.zoomedLeaf === null ? null : leafId;
+      if (tab.activeLeaf === leafId && tab.zoomedLeaf === zoomedLeaf) return;
       // Leaving a pane (or tab leaf) drops its chunk selection — only one
       // terminal may own a selected block, and clicking another pane clears it.
-      terminals.clearAllBlockSelections();
-      updateTab(tab.id, (t) => ({ ...t, activeLeaf: leafId }));
+      if (tab.activeLeaf !== leafId) terminals.clearAllBlockSelections();
+      updateTab(tab.id, (t) => ({ ...t, activeLeaf: leafId, zoomedLeaf }));
     },
     [acknowledgeTerm, currentTab, updateTab],
   );
@@ -1486,18 +1492,9 @@ export default function App() {
       if (!tab) return;
       const next = nextLeaf(tab.root, tab.activeLeaf, step);
       if (!next || next === tab.activeLeaf) return;
-      // While one pane owns the window, cycling moves the window with the
-      // focus — the rail is showing where it is going.
-      if (tab.zoomedLeaf) {
-        const node = findLeaf(tab.root, next);
-        if (node) acknowledgeTerm(node.term);
-        terminals.clearAllBlockSelections();
-        updateTab(tab.id, (t) => ({ ...t, activeLeaf: next, zoomedLeaf: next }));
-        return;
-      }
       activatePane(next);
     },
-    [acknowledgeTerm, activatePane, currentTab, updateTab],
+    [activatePane, currentTab],
   );
 
   // ---------------------------------------------------------- drag & drop
@@ -1508,7 +1505,9 @@ export default function App() {
       const source = prev.find((t) => findLeaf(t.root, drag.leafId));
       if (!source || source.id === targetTabId) return;
 
-      const moved = leaf(drag.term);
+      const sourceLeaf = findLeaf(source.root, drag.leafId);
+      if (!sourceLeaf) return;
+      const moved = { ...leaf(drag.term), pinned: sourceLeaf.pinned };
       const restRoot = removeLeaf(source.root, drag.leafId);
 
       let next = prev.map((t) => {
@@ -1602,9 +1601,11 @@ export default function App() {
 
       const zone = target.zone;
       updateTab(tab.id, (t) => {
+        const sourceLeaf = findLeaf(t.root, drag.leafId);
+        if (!sourceLeaf) return t;
         const base = removeLeaf(t.root, drag.leafId);
         if (!base || !findLeaf(base, target.paneId)) return t;
-        const moved = leaf(drag.term);
+        const moved = { ...leaf(drag.term), pinned: sourceLeaf.pinned };
         return {
           ...t,
           root: insertBeside(base, target.paneId, moved, zone),
