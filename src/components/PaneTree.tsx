@@ -158,6 +158,10 @@ const SplitView = memo(function SplitView({
           <Fragment key={child.id}>
             {index > 0 && (
               <Divider
+                // A child can move from index 1 to 0 when its neighbour closes.
+                // Explicit sibling keys keep its cell mounted as the divider
+                // before it disappears.
+                key="divider"
                 dir={node.dir}
                 index={index - 1}
                 containerRef={containerRef}
@@ -167,6 +171,7 @@ const SplitView = memo(function SplitView({
               />
             )}
             <div
+              key="cell"
               className="split-cell"
               style={{ flexBasis: basis }}
               onTransitionEnd={(event) => {
