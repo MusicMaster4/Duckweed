@@ -30,6 +30,40 @@ export interface ZoomRailGroup {
 }
 
 /**
+ * Preview one terminal in a different rail slot without changing the layout.
+ * Both ids refer to the committed list, so the target remains stable while the
+ * preview itself moves cards around on screen.
+ */
+export function previewZoomRailOrder(
+  entries: readonly ZoomRailEntry[],
+  leafId: string,
+  targetLeafId: string,
+): readonly ZoomRailEntry[] {
+  const from = entries.findIndex((entry) => entry.leafId === leafId);
+  const to = entries.findIndex((entry) => entry.leafId === targetLeafId);
+  if (from < 0 || to < 0 || from === to) return entries;
+
+  const next = [...entries];
+  const [carried] = next.splice(from, 1);
+  next.splice(to, 0, carried);
+  return next;
+}
+
+/** Nearest fixed visual slot for a pointer, clamped at both list ends. */
+export function nearestZoomRailSlot(centers: readonly number[], clientY: number): number {
+  if (centers.length === 0) return -1;
+  let target = 0;
+  let distance = Math.abs(clientY - centers[0]);
+  for (let index = 1; index < centers.length; index += 1) {
+    const nextDistance = Math.abs(clientY - centers[index]);
+    if (nextDistance >= distance) continue;
+    target = index;
+    distance = nextDistance;
+  }
+  return target;
+}
+
+/**
  * Every open terminal, tabs in strip order. The list never re-sorts itself
  * around whichever tab is on screen: the switcher is a map of the window, and
  * a map that rearranges itself as you look at it is no map. Moving a tab in

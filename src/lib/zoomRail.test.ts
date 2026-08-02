@@ -5,6 +5,8 @@ import type { LayoutNode, Tab } from "./types";
 import {
   groupZoomRail,
   moveTerminalToSlot,
+  nearestZoomRailSlot,
+  previewZoomRailOrder,
   stepRailIndex,
   toggleLeafPin,
   zoomRailEntries,
@@ -112,6 +114,46 @@ describe("fullscreen rail reordering", () => {
     children: terms.map((term) => ({ kind: "leaf", id: `leaf-${term}`, term })),
   });
   const order = (root: LayoutNode) => leaves(root).map((node) => node.term);
+
+  test("previews the exact committed slot in both directions", () => {
+    const entries = zoomRailEntries(
+      [{ ...tabs[1], root: row("a", "b", "c", "d") }],
+      "tab-duckweed",
+    );
+    const ids = (list: readonly { leafId: string }[]) => list.map((entry) => entry.leafId);
+
+    expect(ids(previewZoomRailOrder(entries, "leaf-a", "leaf-c"))).toEqual([
+      "leaf-b",
+      "leaf-c",
+      "leaf-a",
+      "leaf-d",
+    ]);
+    expect(ids(previewZoomRailOrder(entries, "leaf-d", "leaf-a"))).toEqual([
+      "leaf-d",
+      "leaf-a",
+      "leaf-b",
+      "leaf-c",
+    ]);
+  });
+
+  test("tracks every downward slot and clamps beyond the list", () => {
+    const centers = [100, 160, 220, 280];
+
+    expect(nearestZoomRailSlot(centers, 100)).toBe(0);
+    expect(nearestZoomRailSlot(centers, 175)).toBe(1);
+    expect(nearestZoomRailSlot(centers, 225)).toBe(2);
+    expect(nearestZoomRailSlot(centers, 400)).toBe(3);
+  });
+
+  test("tracks upward slots and clamps above the list", () => {
+    const centers = [100, 160, 220, 280];
+
+    expect(nearestZoomRailSlot(centers, 265)).toBe(3);
+    expect(nearestZoomRailSlot(centers, 205)).toBe(2);
+    expect(nearestZoomRailSlot(centers, 145)).toBe(1);
+    expect(nearestZoomRailSlot(centers, 0)).toBe(0);
+    expect(nearestZoomRailSlot([], 100)).toBe(-1);
+  });
 
   test("dropping a terminal further down settles it in that slot", () => {
     const moved = moveTerminalToSlot(row("a", "b", "c", "d"), "leaf-a", "leaf-c");

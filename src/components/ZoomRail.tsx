@@ -1,10 +1,20 @@
-import { memo, useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+} from "react";
 
 import * as agentSessions from "../lib/agents/session";
 import type { AgentSessionState } from "../lib/agents/types";
 import * as terminals from "../lib/terminals";
 import {
   groupZoomRail,
+  nearestZoomRailSlot,
+  previewZoomRailOrder,
   stepRailIndex,
   zoomRailShimmers,
   zoomRailStatus,
@@ -33,10 +43,11 @@ interface RailDrag {
   leafId: string;
   tabId: string;
   pinned: boolean;
-  /** Where the card would go, or null while the pointer is over an invalid drop. */
-  overLeafId: string | null;
-  /** Insertion side of `overLeafId`, so the line reads like a text caret. */
-  after: boolean;
+  pointerId: number;
+  /** Fixed visual slot centers, captured before the preview starts moving. */
+  slotCenters: number[];
+  /** The committed slot currently occupied by the preview placeholder. */
+  targetLeafId: string;
 }
 
 function basename(path: string): string {
@@ -54,6 +65,80 @@ function dropTargets(entries: readonly ZoomRailEntry[], drag: RailDrag): ZoomRai
   return entries.filter(
     (entry) => entry.tabId === drag.tabId && entry.pinned === drag.pinned,
   );
+}
+
+/**
+ * Cards travel to their new slot instead of appearing in it. Every reorder in
+ * this list — a drop, a pin, a pane closing — moves rows the user was reading,
+ * so each one is measured before and after the change and played back as a
+ * short slide from where it used to be (FLIP).
+ */
+function useRailGlide(listRef: React.RefObject<HTMLDivElement>, orderKey: string): void {
+  const previous = useRef(new Map<string, number>());
+  const generation = useRef(0);
+
+  useLayoutEffect(() => {
+    const list = listRef.current;
+    if (!list) return;
+    const items = [...list.querySelectorAll<HTMLElement>(".zoom-rail-item")];
+    const next = new Map<string, number>();
+    const moving: HTMLElement[] = [];
+    const glide = ++generation.current;
+    const still = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+    for (const item of items) {
+      // Terminal identity, not layout-leaf identity. A drop changes which leaf
+      // owns a terminal, but the same card is already sitting in its final
+      // visual position and must not animate a second time.
+      const id = item.dataset.termId;
+      if (!id) continue;
+      // `offsetTop`, not the client rect: the rect includes the very transform
+      // this hook applies, so measuring it would feed each glide back into the
+      // next one and the rows would drift.
+      const top = item.offsetTop;
+      next.set(id, top);
+      const was = previous.current.get(id);
+      // New rows have their own entrance; rows that did not move need nothing,
+      // beyond dropping an offset left behind by a glide that never started.
+      if (still || was === undefined || Math.abs(was - top) < 1) {
+        if (item.style.transform) {
+          item.style.transition = "";
+          item.style.transform = "";
+        }
+        continue;
+      }
+      item.classList.remove("is-gliding");
+      item.style.transition = "none";
+      item.style.transform = `translateY(${was - top}px)`;
+      moving.push(item);
+    }
+
+    previous.current = next;
+    if (moving.length > 0) {
+      // Commit every inverse transform before releasing the rows. Without this
+      // layout read, Chromium can merge both writes into one paint and flash
+      // the card at its destination instead of animating from its old slot.
+      void list.offsetHeight;
+      for (const item of moving) {
+        item.classList.add("is-gliding");
+        item.style.transition = "transform 200ms cubic-bezier(0.2, 0.8, 0.2, 1)";
+        item.style.transform = "translateY(0)";
+        const finish = (event?: TransitionEvent) => {
+          if (event && event.propertyName !== "transform") return;
+          // A later reorder owns the element now. Its cleanup will remove its
+          // own styles when it settles.
+          if (generation.current !== glide) return;
+          item.classList.remove("is-gliding");
+          item.style.transition = "";
+          item.style.transform = "";
+          item.removeEventListener("transitionend", finish);
+        };
+        item.addEventListener("transitionend", finish);
+        // Hidden elements do not reliably emit transitionend.
+        window.setTimeout(() => finish(), 240);
+      }
+    }
+  }, [listRef, orderKey]);
 }
 
 /**
@@ -77,57 +162,120 @@ export const ZoomRail = memo(function ZoomRail({
 }: Props) {
   const listRef = useRef<HTMLDivElement>(null);
   const [drag, setDrag] = useState<RailDrag | null>(null);
-  const groups = groupZoomRail(entries);
+  const dragRef = useRef<RailDrag | null>(null);
+  const order = drag
+    ? previewZoomRailOrder(entries, drag.leafId, drag.targetLeafId)
+    : entries;
+  const groups = groupZoomRail(order);
   // A lone tab needs no heading — its name is already in the strip above.
   const showTabNames = groups.length > 1;
 
+  useRailGlide(listRef, order.map((entry) => entry.termId).join("\u001f"));
+
   /**
    * Which card the pointer is asking for. Measuring the live rectangles keeps
-   * the gesture honest while rows are still fanning in, and the midpoint rule
-   * makes the drop land where the caret is drawn.
+   * the gesture honest while rows are gliding, and the midpoint rule means a
+   * card only changes places once the pointer is really past its neighbour.
    */
   const resolveTarget = (drag: RailDrag, clientY: number): RailDrag => {
-    const list = listRef.current;
-    if (!list) return drag;
     const candidates = dropTargets(entries, drag);
-    const carried = candidates.findIndex((entry) => entry.leafId === drag.leafId);
-    let over = -1;
-    for (let index = 0; index < candidates.length; index += 1) {
-      const element = list.querySelector<HTMLElement>(
-        `[data-leaf-id="${candidates[index].leafId}"]`,
-      );
-      if (!element) continue;
-      const rect = element.getBoundingClientRect();
-      // Above the first card and below the last one both clamp to the end the
-      // pointer is nearest, so a drag never dies just past the list.
-      if (over < 0 || clientY >= rect.top) over = index;
-    }
-    if (over < 0 || over === carried) return { ...drag, overLeafId: null, after: false };
-    // Landing on a card means taking its slot: dragging down settles after it,
-    // dragging up settles before it. The caret is drawn on that same side.
-    return { ...drag, overLeafId: candidates[over].leafId, after: over > carried };
+    if (drag.slotCenters.length !== candidates.length || candidates.length === 0) return drag;
+
+    // These centers were captured before any card moved. The FLIP animation can
+    // therefore never push the pointer back into an earlier slot on the way
+    // down, which used to make downward drops appear to ignore the release.
+    const targetIndex = nearestZoomRailSlot(drag.slotCenters, clientY);
+    return { ...drag, targetLeafId: candidates[targetIndex]?.leafId ?? drag.targetLeafId };
   };
 
   // Held stable per entry list so a card only re-renders when its own terminal
   // changes, not on every pointer move of a drag.
   const onItemDragMove = useCallback(
     (clientY: number) => {
-      setDrag((current) => (current ? resolveTarget(current, clientY) : current));
+      const current = dragRef.current;
+      if (!current) return;
+      // Pointer-up is a native window event and can happen before React flushes
+      // a queued state update. Keep the authoritative drag ref synchronous so
+      // release always commits the slot currently shown on screen.
+      const next = resolveTarget(current, clientY);
+      dragRef.current = next;
+      setDrag(next);
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [entries],
   );
 
-  const onItemDragEnd = useCallback(() => {
-    setDrag((current) => {
-      if (current?.overLeafId) {
-        const moved = entries.find((entry) => entry.leafId === current.leafId);
-        const target = entries.find((entry) => entry.leafId === current.overLeafId);
-        if (moved && target) onReorder(moved, target);
-      }
-      return null;
-    });
+  const onItemDragStart = useCallback((next: RailDrag) => {
+    const candidates = dropTargets(entries, next);
+    const ids = new Set(candidates.map((entry) => entry.leafId));
+    const slotCenters = listRef.current
+      ? [...listRef.current.querySelectorAll<HTMLElement>(".zoom-rail-item")]
+          .filter((element) => ids.has(element.dataset.leafId ?? ""))
+          .map((element) => {
+            const rect = element.getBoundingClientRect();
+            return { top: rect.top, center: rect.top + rect.height / 2 };
+          })
+          .sort((a, b) => a.top - b.top)
+          .map((slot) => slot.center)
+      : [];
+    const started = { ...next, slotCenters };
+    dragRef.current = started;
+    setDrag(started);
+  }, [entries]);
+
+  const finishDrag = useCallback((commit: boolean) => {
+    const current = dragRef.current;
+    if (!current) return;
+    // Clear synchronously so window and React pointer-up handlers cannot commit
+    // the same gesture twice.
+    dragRef.current = null;
+    setDrag(null);
+    if (!commit || current.targetLeafId === current.leafId) return;
+    const moved = entries.find((entry) => entry.leafId === current.leafId);
+    const target = entries.find((entry) => entry.leafId === current.targetLeafId);
+    if (moved && target) onReorder(moved, target);
   }, [entries, onReorder]);
+
+  // The whole window is in the gesture while a card is being carried, the same
+  // way it is while a pane is dragged across the grid.
+  const carrying = drag !== null;
+  useEffect(() => {
+    if (!carrying) return;
+    document.body.classList.add("is-dragging-rail");
+    const pointerMove = (event: PointerEvent) => {
+      if (event.pointerId === dragRef.current?.pointerId) {
+        onItemDragMove(event.clientY);
+      }
+    };
+    const pointerUp = (event: PointerEvent) => {
+      if (event.pointerId === dragRef.current?.pointerId) finishDrag(true);
+    };
+    const pointerCancel = (event: PointerEvent) => {
+      if (event.pointerId === dragRef.current?.pointerId) finishDrag(false);
+    };
+    const keyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") finishDrag(false);
+    };
+    const blur = () => finishDrag(false);
+    const visibilityChange = () => {
+      if (document.visibilityState === "hidden") finishDrag(false);
+    };
+    window.addEventListener("pointermove", pointerMove, true);
+    window.addEventListener("pointerup", pointerUp, true);
+    window.addEventListener("pointercancel", pointerCancel, true);
+    window.addEventListener("blur", blur);
+    window.addEventListener("keydown", keyDown, true);
+    document.addEventListener("visibilitychange", visibilityChange);
+    return () => {
+      document.body.classList.remove("is-dragging-rail");
+      window.removeEventListener("pointermove", pointerMove, true);
+      window.removeEventListener("pointerup", pointerUp, true);
+      window.removeEventListener("pointercancel", pointerCancel, true);
+      window.removeEventListener("blur", blur);
+      window.removeEventListener("keydown", keyDown, true);
+      document.removeEventListener("visibilitychange", visibilityChange);
+    };
+  }, [carrying, finishDrag, onItemDragMove]);
 
   /** Arrow keys walk the whole list, tab groups included. */
   const onKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
@@ -184,7 +332,7 @@ export const ZoomRail = memo(function ZoomRail({
         aria-label="Open terminals"
         onKeyDown={onKeyDown}
       >
-        {groups.map((group, groupIndex) => (
+        {groups.map((group) => (
           <div
             className={`zoom-rail-group${group.current ? " is-current" : ""}`}
             key={group.tabId}
@@ -198,25 +346,23 @@ export const ZoomRail = memo(function ZoomRail({
                 {group.current && <span className="zoom-rail-group-note">on screen</span>}
               </div>
             )}
-            {group.entries.map((entry, index) => (
+            {group.entries.map((entry) => (
               <ZoomRailItem
-                key={entry.leafId}
+                // A terminal moves between layout leaves when it is reordered.
+                // Keying by the session keeps its card, subscriptions, and
+                // visual identity intact through the final drop.
+                key={entry.termId}
                 entry={entry}
                 selected={entry.leafId === zoomedLeaf}
                 working={workingTerms.has(entry.termId)}
                 unread={unreadTerms.has(entry.termId)}
-                // Rows fan in one after another; the offset counts across groups
-                // so a second tab's terminals do not restart the stagger.
-                order={groupIndex + index}
                 dragging={drag?.leafId === entry.leafId}
-                dropSide={
-                  drag?.overLeafId === entry.leafId ? (drag.after ? "after" : "before") : null
-                }
                 onSelect={onSelect}
                 onTogglePin={onTogglePin}
-                onDragStart={setDrag}
+                onDragStart={onItemDragStart}
                 onDragMove={onItemDragMove}
-                onDragEnd={onItemDragEnd}
+                onDragEnd={() => finishDrag(true)}
+                onDragCancel={() => finishDrag(false)}
               />
             ))}
           </div>
@@ -229,6 +375,7 @@ export const ZoomRail = memo(function ZoomRail({
         <kbd>]</kbd>
         <span>next terminal</span>
       </footer>
+
     </aside>
   );
 });
@@ -238,15 +385,14 @@ interface ItemProps {
   selected: boolean;
   working: boolean;
   unread: boolean;
-  order: number;
+  /** This card is the one being carried; it stands in for where it will land. */
   dragging: boolean;
-  /** Which edge of this card the caret sits on while something is dragged. */
-  dropSide: "before" | "after" | null;
   onSelect: (entry: ZoomRailEntry) => void;
   onTogglePin: (entry: ZoomRailEntry) => void;
   onDragStart: (drag: RailDrag) => void;
   onDragMove: (clientY: number) => void;
   onDragEnd: () => void;
+  onDragCancel: () => void;
 }
 
 /** Travel before a press counts as a drag rather than a click, in px. */
@@ -257,14 +403,13 @@ const ZoomRailItem = memo(function ZoomRailItem({
   selected,
   working,
   unread,
-  order,
   dragging,
-  dropSide,
   onSelect,
   onTogglePin,
   onDragStart,
   onDragMove,
   onDragEnd,
+  onDragCancel,
 }: ItemProps) {
   const [meta, setMeta] = useState(() => terminals.getMeta(entry.termId));
   const [agent, setAgent] = useState<AgentSessionState | null>(() =>
@@ -301,36 +446,54 @@ const ZoomRailItem = memo(function ZoomRailItem({
   // A press that travelled is a reorder, not a selection. The flag outlives the
   // pointer sequence just long enough for the click that follows it.
   const moved = useRef(false);
-  const origin = useRef(0);
+  const origin = useRef({ x: 0, y: 0 });
+  const activePointer = useRef<number | null>(null);
+  const endedNormally = useRef(false);
 
   const onPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
     if (event.button !== 0) return;
     if (event.target instanceof Element && event.target.closest(".zoom-rail-pin")) return;
     moved.current = false;
-    origin.current = event.clientY;
+    endedNormally.current = false;
+    activePointer.current = event.pointerId;
+    origin.current = { x: event.clientX, y: event.clientY };
     event.currentTarget.setPointerCapture(event.pointerId);
   };
 
   const onPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
-    if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
+    if (activePointer.current !== event.pointerId) return;
     if (!moved.current) {
-      if (Math.abs(event.clientY - origin.current) < DRAG_SLOP) return;
+      const travelled = Math.hypot(
+        event.clientX - origin.current.x,
+        event.clientY - origin.current.y,
+      );
+      if (travelled < DRAG_SLOP) return;
       moved.current = true;
+      // Hand the gesture over to the window listeners before the first preview
+      // lands. React re-inserts this card's DOM node whenever the preview puts
+      // it in a *later* slot, and a re-inserted node loses its pointer capture
+      // straight away — which is why a downward drag used to snap back after a
+      // single step while an upward one, where React moves the other cards
+      // instead, ran to the end.
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }
       onDragStart({
         leafId: entry.leafId,
         tabId: entry.tabId,
         pinned: entry.pinned,
-        overLeafId: null,
-        after: false,
+        pointerId: event.pointerId,
+        slotCenters: [],
+        targetLeafId: entry.leafId,
       });
     }
     onDragMove(event.clientY);
   };
 
   const endPointer = (event: React.PointerEvent<HTMLDivElement>) => {
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-      event.currentTarget.releasePointerCapture(event.pointerId);
-    }
+    if (activePointer.current !== event.pointerId) return;
+    endedNormally.current = true;
+    activePointer.current = null;
     if (moved.current) onDragEnd();
   };
 
@@ -349,21 +512,33 @@ const ZoomRailItem = memo(function ZoomRailItem({
         unread ? "is-unread" : "",
         entry.pinned ? "is-pinned" : "",
         dragging ? "is-dragging" : "",
-        dropSide ? `is-drop-${dropSide}` : "",
       ]
         .filter(Boolean)
         .join(" ")}
       style={
         {
-          "--rail-order": order,
           ...(entry.tabColor ? { "--tab-color": entry.tabColor } : null),
         } as CSSProperties
       }
       data-leaf-id={entry.leafId}
+      data-term-id={entry.termId}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={endPointer}
-      onPointerCancel={endPointer}
+      onPointerCancel={(event) => {
+        if (activePointer.current !== event.pointerId) return;
+        endedNormally.current = true;
+        activePointer.current = null;
+        if (moved.current) onDragCancel();
+      }}
+      onLostPointerCapture={(event) => {
+        if (activePointer.current !== event.pointerId || endedNormally.current) return;
+        // A live drag no longer needs the capture: pointer moves, release and
+        // cancellation all arrive on the window while it runs. Only a press
+        // that never became a drag is dropped here.
+        if (moved.current) return;
+        activePointer.current = null;
+      }}
       onClick={() => {
         if (moved.current) {
           moved.current = false;
@@ -409,14 +584,12 @@ const ZoomRailItem = memo(function ZoomRailItem({
 
       <span className="zoom-rail-name">{title}</span>
 
-      <span className="zoom-rail-line zoom-rail-line-foot">
-        {/* A pane that has run nothing says nothing here — the empty half of
-            the line is quieter than a sentence explaining it. */}
-        {detail && <span className="zoom-rail-detail">{detail}</span>}
-        <span className="zoom-rail-seat" aria-hidden="true">
-          {entry.position}
+      {/* A pane that has run nothing says nothing here. */}
+      {detail && (
+        <span className="zoom-rail-line zoom-rail-line-foot">
+          <span className="zoom-rail-detail">{detail}</span>
         </span>
-      </span>
+      )}
     </div>
   );
 });
