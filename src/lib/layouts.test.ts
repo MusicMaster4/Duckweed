@@ -62,6 +62,21 @@ describe("layout templates", () => {
     expect(updated).toMatchObject({ kind: "split", dir: "row", sizes: [0.3, 0.7] });
   });
 
+  test("omits a runtime-only one-pane wrapper when capturing", () => {
+    const live: LayoutNode = {
+      kind: "split",
+      id: "retained",
+      dir: "row",
+      sizes: [1],
+      children: [{ kind: "leaf", id: "only", term: "one" }],
+    };
+
+    expect(captureLayout(live, () => "codex")).toEqual({
+      kind: "leaf",
+      command: "codex",
+    });
+  });
+
   test("instantiates every template leaf with a fresh terminal", () => {
     let index = 0;
     const live = instantiateLayout(gridTemplate(["codex", "claude"]), (command) => ({

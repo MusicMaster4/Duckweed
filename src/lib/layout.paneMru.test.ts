@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 
-import { preferredLeaf, removeLeafFromSplit, touchPaneMru } from "./layout";
+import { insertBeside, preferredLeaf, removeLeafFromSplit, touchPaneMru } from "./layout";
 import type { LayoutNode } from "./types";
 
 function leaf(id: string): LayoutNode {
@@ -47,12 +47,16 @@ describe("touchPaneMru", () => {
 });
 
 describe("removeLeafFromSplit", () => {
-  it("collapses a two-pane owner to its surviving child", () => {
+  it("keeps a two-pane owner around its surviving child", () => {
     const left = leaf("left");
     const right = leaf("right");
     const root = row(left, right);
 
-    expect(removeLeafFromSplit(root, "left", "split")).toEqual(right);
+    expect(removeLeafFromSplit(root, "left", "split")).toEqual({
+      ...root,
+      children: [right],
+      sizes: [1],
+    });
   });
 
   it("only removes from the specified owner split", () => {
@@ -74,7 +78,33 @@ describe("removeLeafFromSplit", () => {
 
     expect(removeLeafFromSplit(root, "top", "nested")).toEqual({
       ...root,
-      children: [leaf("bottom"), right],
+      children: [
+        {
+          ...nested,
+          children: [leaf("bottom")],
+          sizes: [1],
+        },
+        right,
+      ],
+    });
+  });
+
+  it("reuses a retained one-pane owner for a split on either axis", () => {
+    const existing = leaf("existing");
+    const retained: LayoutNode = {
+      kind: "split",
+      id: "retained",
+      dir: "row",
+      children: [existing],
+      sizes: [1],
+    };
+    const incoming = leaf("incoming");
+
+    expect(insertBeside(retained, "existing", incoming, "bottom")).toEqual({
+      ...retained,
+      dir: "col",
+      children: [existing, incoming],
+      sizes: [0.5, 0.5],
     });
   });
 });

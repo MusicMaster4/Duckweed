@@ -61,16 +61,22 @@ export function insertBeside(
       };
     }
 
-    // If the target is a direct child of a split already running along the
-    // requested axis, add a sibling instead of nesting another split.
+    // Add a sibling directly when the parent already uses this axis. A
+    // retained one-child parent can safely adopt either axis, which preserves
+    // the existing pane's component identity when a new split opens.
     const idx = node.children.findIndex((c) => c.id === targetId);
-    if (idx >= 0 && node.dir === dir) {
+    if (idx >= 0 && (node.dir === dir || node.children.length === 1)) {
       const at = before ? idx : idx + 1;
       const children = [...node.children];
       children.splice(at, 0, incoming);
       // Siblings of one split stay evenly sized when a pane joins them — that is
       // what makes three panes read as clean thirds instead of 1/2 + 1/4 + 1/4.
-      return { ...node, children, sizes: children.map(() => 1 / children.length) };
+      return {
+        ...node,
+        dir,
+        children,
+        sizes: children.map(() => 1 / children.length),
+      };
     }
 
     for (let i = 0; i < node.children.length; i++) {
@@ -129,7 +135,9 @@ export function removeLeafFromSplit(
     if (index < 0) return root;
     const children = root.children.filter((_, childIndex) => childIndex !== index);
     if (children.length === 0) return null;
-    if (children.length === 1) return children[0];
+    // Retain the owner around a lone survivor. Collapsing it changes the
+    // pane's React parent and remounts its welcome, composer, and xterm host.
+    if (children.length === 1) return { ...root, children, sizes: [1] };
     const sizes = root.sizes.filter((_, childIndex) => childIndex !== index);
     return { ...root, children, sizes: normalize(sizes) };
   }

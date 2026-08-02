@@ -111,6 +111,9 @@ export function captureLayout(
   commandFor: (term: string) => string,
 ): LayoutTemplateNode {
   if (node.kind === "leaf") return leaf(commandFor(node.term));
+  // Runtime can retain a one-child split to preserve component identity.
+  // Templates only store meaningful structural splits.
+  if (node.children.length === 1) return captureLayout(node.children[0], commandFor);
   return {
     kind: "split",
     dir: node.dir,

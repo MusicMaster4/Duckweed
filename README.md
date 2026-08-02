@@ -30,13 +30,14 @@ it.
 
 <br /><br />
 
-<a href="docs/images/duckweed-overview.svg">
-  <img src="docs/images/duckweed-overview.svg" alt="Illustration of a Duckweed workspace with a shell, coding agent, and test panes" width="100%" />
+<a href="docs/images/duckweed-welcome.png">
+  <img src="docs/images/duckweed-welcome.png" alt="Duckweed ready to open a local project" width="100%" />
 </a>
 
 <br /><br />
 
 <a href="#download">Download</a> ·
+<a href="#screenshots">Screenshots</a> ·
 <a href="#what-it-does">What it does</a> ·
 <a href="#agent-usage">Agent usage</a> ·
 <a href="#keyboard-shortcuts">Shortcuts</a> ·
@@ -44,6 +45,46 @@ it.
 <a href="#contributing">Contributing</a>
 
 </div>
+
+## Screenshots
+
+These images were captured from the running app with built-in demo content. No
+accounts, credentials, personal paths, or private project data are shown.
+
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <a href="docs/images/duckweed-command-palette.png">
+        <img src="docs/images/duckweed-command-palette.png" alt="Duckweed command palette with project, pane, and view actions" width="100%" />
+      </a>
+      <br />
+      <sub><strong>Command palette.</strong> Project, pane, terminal, and view actions stay one shortcut away.</sub>
+    </td>
+    <td width="50%" valign="top">
+      <a href="docs/images/duckweed-settings.png">
+        <img src="docs/images/duckweed-settings.png" alt="Duckweed settings showing terminal and agent preferences" width="100%" />
+      </a>
+      <br />
+      <sub><strong>Local settings.</strong> Tune the terminal, agent experience, completion signals, and workspace behavior.</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <a href="docs/images/duckweed-agent-codex.png">
+        <img src="docs/images/duckweed-agent-codex.png" alt="Duckweed Codex interface with reasoning, file changes, subagents, and task progress" width="100%" />
+      </a>
+      <br />
+      <sub><strong>Codex interface.</strong> Follow reasoning, diffs, delegated subagents, and plan progress in one timeline.</sub>
+    </td>
+    <td width="50%" valign="top">
+      <a href="docs/images/duckweed-agent-claude.png">
+        <img src="docs/images/duckweed-agent-claude.png" alt="Duckweed Claude Code interface with response, subagents, and task progress" width="100%" />
+      </a>
+      <br />
+      <sub><strong>Claude Code interface.</strong> The same focused workspace adapts to each provider's identity and capabilities.</sub>
+    </td>
+  </tr>
+</table>
 
 ## Why Duckweed exists
 
