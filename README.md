@@ -170,15 +170,18 @@ API credentials.
 - **Shell discovery.** Duckweed finds PowerShell, `cmd`, Git Bash, WSL, Nushell,
   Bash, Zsh, and Fish when they are installed.
 - **Workspace tools.** A dockable panel (`Ctrl+Shift+X`) with a project file
-  browser, saved pane layouts, a persistent per-tab checklist, session
-  statistics, a listening-port list with copy, forward, and close actions, and a
-  power watch that sleeps or shuts down the machine after all panes finish.
+  browser, saved pane layouts, reusable prompt templates, a persistent per-tab
+  checklist, session statistics, a listening-port list with copy, forward, and
+  close actions, and a power watch that sleeps or shuts down the machine after
+  all panes finish. Prompt templates can be searched, copied, or dragged into
+  any terminal or agent composer.
 - **Explorer integration.** Per-user context-menu entries open a folder in a new
   Duckweed tab or window straight from Windows Explorer, without administrator
   rights. Both entries can be toggled in the settings.
 - **Completion signals.** Finished agent turns and commands can play a
   completion sound, highlight the pane, and outline the taskbar icon so you
-  notice from another window.
+  notice from another window. Tabs also show when an agent is still working in
+  the background.
 - **Local persistence.** Pane arrangements come back after a restart without
   pretending the old processes are still alive.
 
@@ -202,6 +205,11 @@ choice, by pressing its number, or by writing an answer of your own. The compose
 commands, workspace file mentions, queued follow-ups, and image attachments
 where the provider accepts them. Model and reasoning controls appear when the
 agent protocol exposes those choices.
+
+In Codex sessions, delegated subagents appear as a live fleet above the
+conversation. Open one to inspect its status, prompt, child conversation, tool
+activity, plan, output, and file changes. When the child thread accepts input,
+you can send it a follow-up or redirect it without leaving the parent session.
 
 Supported custom interfaces currently include:
 
@@ -360,8 +368,9 @@ setup is documented in [docs/releases.md](docs/releases.md).
 
 Duckweed is an active project. Projects, tabs, panes, real shells, custom coding
 agent interfaces, search, Git diffs, local usage analytics, workspace tools
-(files, saved layouts, checklists, statistics, ports, power watch), completion
-signals, Explorer integration, updates, and layout persistence are implemented.
+(files, saved layouts, prompt templates, checklists, statistics, ports, power
+watch), completion signals, Explorer integration, updates, and layout
+persistence are implemented.
 
 Command blocks group commands submitted through Duckweed's composer and raw
 PowerShell input. Duckweed's OSC 133 shell integration preserves edited command

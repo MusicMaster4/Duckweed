@@ -157,7 +157,6 @@ export function ToolsPanel({
 }: Props) {
   const [dragging, setDragging] = useState(false);
   const start = useRef({ x: 0, width });
-  const asideRef = useRef<HTMLElement>(null);
   const liveWidth = useRef(width);
   if (!dragging) liveWidth.current = width;
 
@@ -187,9 +186,9 @@ export function ToolsPanel({
       if (!e.currentTarget.hasPointerCapture(e.pointerId)) return;
       const next = start.current.width + (e.clientX - start.current.x);
       liveWidth.current = Math.min(TOOLS_MAX_WIDTH, Math.max(TOOLS_MIN_WIDTH, Math.round(next)));
-      if (asideRef.current) asideRef.current.style.width = `${liveWidth.current}px`;
+      onWidth(liveWidth.current);
     },
-    [],
+    [onWidth],
   );
 
   const onResizeUp = useCallback(
@@ -219,7 +218,7 @@ export function ToolsPanel({
   };
 
   return (
-    <aside ref={asideRef} className="tools" style={{ width }}>
+    <aside className="tools" style={{ width }}>
       <header className="tools-rail">
         <div className="tools-picker" role="tablist" aria-label="Tools">
           {SECTIONS.map((entry) => (

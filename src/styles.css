@@ -1464,6 +1464,10 @@ svg.tab-glyph-fill path {
   animation: tools-panel-open 140ms cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
+.tools-motion:has(.tools-resize.is-dragging) {
+  transition: none;
+}
+
 @keyframes tools-panel-open {
   from {
     width: 0;
