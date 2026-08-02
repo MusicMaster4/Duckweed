@@ -89,7 +89,15 @@ function isLayout(node: unknown): node is LayoutNode {
 
 /** Rebuild a saved tree with fresh pane and terminal ids. */
 export function rehydrate(node: LayoutNode): LayoutNode {
-  if (node.kind === "leaf") return { kind: "leaf", id: uid("p"), term: newTermId() };
+  if (node.kind === "leaf") {
+    // Shells do not survive a restart, but where the user filed them does.
+    return {
+      kind: "leaf",
+      id: uid("p"),
+      term: newTermId(),
+      pinned: node.pinned === true ? true : undefined,
+    };
+  }
   const children = node.children.map(rehydrate);
   const sizes =
     Array.isArray(node.sizes) && node.sizes.length === children.length

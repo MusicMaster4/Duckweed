@@ -1444,6 +1444,12 @@ svg.tab-glyph-fill path {
 }
 
 .tools-motion {
+  /* The dock never takes more than its share of a small window: below roughly
+     650px the saved width stops applying and the panel narrows with the frame,
+     so the grid — and the fullscreen switcher opposite it — keep real room.
+     The panel inside is sized from the same value, so it stays a fixed slab
+     that slides out from under the clip instead of reflowing as it opens. */
+  --tools-fit: min(var(--tools-width), 40vw);
   display: flex;
   flex: 0 0 auto;
   width: 0;
@@ -1458,7 +1464,7 @@ svg.tab-glyph-fill path {
 }
 
 .tools-motion.is-open {
-  width: var(--tools-width);
+  width: var(--tools-fit);
   opacity: 1;
   pointer-events: auto;
   animation: tools-panel-open 140ms cubic-bezier(0.2, 0.8, 0.2, 1);
@@ -1480,6 +1486,7 @@ svg.tab-glyph-fill path {
   display: flex;
   flex-direction: column;
   flex: none;
+  width: var(--tools-fit);
   min-width: 0;
   min-height: 0;
   border-right: 1px solid var(--border);
@@ -1592,6 +1599,16 @@ svg.tab-glyph-fill path {
 .tools-hide:hover {
   background: var(--hover);
   color: var(--text);
+}
+
+/* Extra width belongs to every tool, not only to the last column. Past the
+   point where four equal columns still hold the longest label, the picker
+   switches to an even grid — otherwise stretching the dock inflates Prompts
+   and the close button while the other six chips stay put. */
+@container (min-width: 270px) {
+  .tools-rail {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
 }
 
 /* At the panel's minimum width, icons preserve all eight targets without
@@ -10297,7 +10314,11 @@ body.is-resizing * {
  * row instead of covering the terminal that just took the window.
  */
 .zoom-rail-motion {
-  --zoom-rail-width: 282px;
+  /* Fullscreen must never be the thing that leaves no terminal: on a narrow
+     window the switcher gives its width back rather than splitting the frame
+     with the tool dock. Both docks clamped, a 620px window still keeps around
+     190px of grid between them. */
+  --zoom-rail-width: min(282px, 30vw);
   display: flex;
   flex: 0 0 auto;
   width: 0;
@@ -10464,7 +10485,10 @@ body.is-resizing * {
   background: color-mix(in srgb, #fff 3.5%, var(--bg));
   color: var(--text-dim);
   text-align: left;
-  overflow: hidden;
+  cursor: pointer;
+  user-select: none;
+  /* The drop caret sits just outside the card, so this box cannot clip it. */
+  overflow: visible;
   animation: zoom-rail-row-in 180ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
   animation-delay: calc(var(--rail-order, 0) * 22ms);
   transition:
@@ -10523,6 +10547,83 @@ body.is-resizing * {
 .zoom-rail-item.is-unread {
   border-color: var(--rose);
   box-shadow: inset 0 0 0 1px var(--rose);
+}
+
+/* Dragging a card to reorder it. The card it will land on grows a caret on the
+   side it settles, so the drop is readable before the pointer is let go. */
+.zoom-rail-item.is-dragging {
+  cursor: grabbing;
+  opacity: 0.55;
+  animation: none;
+}
+
+.zoom-rail-item.is-drop-before::before,
+.zoom-rail-item.is-drop-after::before {
+  content: "";
+  position: absolute;
+  left: 6px;
+  right: 6px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--accent);
+  pointer-events: none;
+  z-index: 2;
+}
+
+.zoom-rail-item.is-drop-before::before {
+  top: -4px;
+}
+
+.zoom-rail-item.is-drop-after::before {
+  bottom: -4px;
+}
+
+/* Keeps a terminal at the top of its tab. Quiet until hovered, then it is the
+   only control on the card that is not "switch to this one". */
+.zoom-rail-pin {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 17px;
+  height: 17px;
+  margin-right: -2px;
+  border-radius: 5px;
+  color: var(--text-faint);
+  opacity: 0;
+  transition:
+    opacity 120ms ease,
+    background 120ms ease,
+    color 120ms ease;
+}
+
+.zoom-rail-pin svg {
+  width: 11px;
+  height: 11px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.zoom-rail-item:hover .zoom-rail-pin,
+.zoom-rail-item:focus-within .zoom-rail-pin,
+.zoom-rail-item.is-pinned .zoom-rail-pin {
+  opacity: 1;
+}
+
+.zoom-rail-pin:hover {
+  background: rgba(255, 255, 255, 0.09);
+  color: var(--text);
+}
+
+.zoom-rail-item.is-pinned .zoom-rail-pin {
+  color: var(--accent);
+}
+
+.zoom-rail-item.is-pinned.is-colored .zoom-rail-pin,
+.zoom-rail-item.is-pinned.is-selected .zoom-rail-pin {
+  color: currentColor;
 }
 
 .zoom-rail-line {

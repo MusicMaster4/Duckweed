@@ -6,6 +6,8 @@ export interface LeafNode {
   id: string;
   /** Key into the terminal registry. */
   term: string;
+  /** Held at the top of the fullscreen switcher; does not change the layout. */
+  pinned?: boolean;
 }
 
 /** A row or column of children, sized by fractions that sum to 1. */

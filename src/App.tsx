@@ -90,7 +90,12 @@ import {
   type LayoutTemplate,
 } from "./lib/layouts";
 import { tabColorHex } from "./lib/tabColors";
-import { zoomRailEntries, type ZoomRailEntry } from "./lib/zoomRail";
+import {
+  moveTerminalToSlot,
+  toggleLeafPin,
+  zoomRailEntries,
+  type ZoomRailEntry,
+} from "./lib/zoomRail";
 import { toggleFullscreen } from "./lib/window";
 import { DEFAULT_TOOLS_WIDTH, load, pushRecent, rehydrate, save } from "./lib/persist";
 import {
@@ -1227,6 +1232,21 @@ export default function App() {
       if (!tab || paneMotionRef.current) return;
       const node = leaf(createTerm());
       const nextRoot = insertBeside(tab.root, leafId, node, zone);
+
+      // Fullscreen is a mode, not a one-off: splitting inside it opens the new
+      // terminal fullscreen too, and the switcher on the right is where the
+      // pane it was split from went. Only the user leaves fullscreen. The
+      // split animation is skipped because the split itself is not on screen.
+      if (tab.zoomedLeaf) {
+        updateTab(tab.id, (t) => ({
+          ...t,
+          root: nextRoot,
+          activeLeaf: node.id,
+          zoomedLeaf: node.id,
+        }));
+        return;
+      }
+
       const owner = findLeafOwner(nextRoot, node.id);
       if (!owner) {
         releaseTerm(node.term);
@@ -1305,7 +1325,25 @@ export default function App() {
           ...t,
           root: { ...nodeNow, term: replacementTerm },
           activeLeaf: nodeNow.id,
-          zoomedLeaf: null,
+          // The fresh shell takes the window over, the same way the mode
+          // survives every other close.
+          zoomedLeaf: t.zoomedLeaf === null ? null : nodeNow.id,
+        }));
+        return;
+      }
+
+      // In fullscreen the closing pane's siblings are not on screen, so there
+      // is no cell to animate away: hand the window straight to the terminal
+      // that comes next and stay in the mode.
+      if (tabNow.zoomedLeaf) {
+        const mru = paneMruRef.current.get(tabNow.id) ?? [tabNow.activeLeaf];
+        const survivor = preferredLeaf(nextRoot, mru) ?? leaves(nextRoot)[0].id;
+        releaseTerm(nodeNow.term);
+        updateTab(tabNow.id, (t) => ({
+          ...t,
+          root: nextRoot,
+          activeLeaf: findLeaf(nextRoot, t.activeLeaf) ? t.activeLeaf : survivor,
+          zoomedLeaf: t.zoomedLeaf === leafId ? survivor : t.zoomedLeaf,
         }));
         return;
       }
@@ -2133,6 +2171,40 @@ export default function App() {
       }));
     },
     [acknowledgeTerm, selectTab, updateTab],
+  );
+
+  /**
+   * Drop a terminal into another slot of its own tab. The terminals move
+   * between the panes the layout already has, so the geometry the user set up
+   * survives the reorder — and the window follows the terminal it was showing,
+   * not the slot that terminal used to sit in.
+   */
+  const reorderZoomTarget = useCallback(
+    (moved: ZoomRailEntry, target: ZoomRailEntry) => {
+      if (moved.tabId !== target.tabId || moved.leafId === target.leafId) return;
+      updateTab(moved.tabId, (tab) => {
+        const root = moveTerminalToSlot(tab.root, moved.leafId, target.leafId);
+        if (root === tab.root) return tab;
+        const follow = (leafId: string): string => {
+          const term = findLeaf(tab.root, leafId)?.term;
+          return leaves(root).find((node) => node.term === term)?.id ?? leafId;
+        };
+        return {
+          ...tab,
+          root,
+          activeLeaf: follow(tab.activeLeaf),
+          zoomedLeaf: tab.zoomedLeaf === null ? null : follow(tab.zoomedLeaf),
+        };
+      });
+    },
+    [updateTab],
+  );
+
+  const toggleZoomTargetPin = useCallback(
+    (entry: ZoomRailEntry) => {
+      updateTab(entry.tabId, (tab) => ({ ...tab, root: toggleLeafPin(tab.root, entry.leafId) }));
+    },
+    [updateTab],
   );
 
   const exitZoom = useCallback(() => {
@@ -3051,6 +3123,8 @@ export default function App() {
               workingTerms={workingAgentTermIds}
               unreadTerms={completionHighlights ? unreadTermIds : NO_UNREAD_TERMS}
               onSelect={selectZoomTarget}
+              onReorder={reorderZoomTarget}
+              onTogglePin={toggleZoomTargetPin}
               onExit={exitZoom}
             />
           </div>

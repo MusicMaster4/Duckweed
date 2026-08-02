@@ -218,7 +218,9 @@ export function ToolsPanel({
   };
 
   return (
-    <aside className="tools" style={{ width }}>
+    // Width comes from `--tools-width` on the motion wrapper, clamped there so
+    // the dock cannot take over a small window. `width` still drives the drag.
+    <aside className="tools">
       <header className="tools-rail">
         <div className="tools-picker" role="tablist" aria-label="Tools">
           {SECTIONS.map((entry) => (

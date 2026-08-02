@@ -1,9 +1,12 @@
 import { describe, expect, test } from "bun:test";
 
-import type { Tab } from "./types";
+import { leaves } from "./layout";
+import type { LayoutNode, Tab } from "./types";
 import {
   groupZoomRail,
+  moveTerminalToSlot,
   stepRailIndex,
+  toggleLeafPin,
   zoomRailEntries,
   zoomRailShimmers,
   zoomRailStatus,
@@ -39,26 +42,46 @@ const tabs: Tab[] = [
 ];
 
 describe("fullscreen rail entries", () => {
-  test("leads with the visible tab so the zoomed pane's siblings come first", () => {
+  test("keeps tabs in strip order, whichever one is on screen", () => {
+    const asListed = zoomRailEntries(tabs, "tab-vps").map((entry) => entry.leafId);
+
+    // Selecting a terminal in the second tab must not hoist that tab: the
+    // switcher is a map of the window, and the map does not move.
+    expect(zoomRailEntries(tabs, "tab-duckweed").map((entry) => entry.leafId)).toEqual(asListed);
+    expect(asListed).toEqual(["leaf-vps", "leaf-agent", "leaf-shell"]);
+  });
+
+  test("marks the tab on screen without moving it", () => {
     const entries = zoomRailEntries(tabs, "tab-duckweed");
 
-    expect(entries.map((entry) => entry.leafId)).toEqual([
-      "leaf-agent",
-      "leaf-shell",
-      "leaf-vps",
-    ]);
-    expect(entries.map((entry) => entry.current)).toEqual([true, true, false]);
+    expect(entries.map((entry) => entry.current)).toEqual([false, true, true]);
   });
 
   test("numbers panes inside their own tab, in layout order", () => {
     const entries = zoomRailEntries(tabs, "tab-duckweed");
 
-    expect(entries.map((entry) => entry.position)).toEqual([1, 2, 1]);
+    expect(entries.map((entry) => entry.position)).toEqual([1, 1, 2]);
     expect(entries.map((entry) => entry.termId)).toEqual([
+      "term-vps",
       "term-agent",
       "term-shell",
-      "term-vps",
     ]);
+  });
+
+  test("a pinned terminal holds the top of its own tab", () => {
+    const pinned = tabs.map((tab) =>
+      tab.id === "tab-duckweed" ? { ...tab, root: toggleLeafPin(tab.root, "leaf-shell") } : tab,
+    );
+    const entries = zoomRailEntries(pinned, "tab-duckweed");
+
+    expect(entries.map((entry) => entry.leafId)).toEqual([
+      "leaf-vps",
+      "leaf-shell",
+      "leaf-agent",
+    ]);
+    // The seat still names the slot the terminal occupies, not its row.
+    expect(entries.map((entry) => entry.position)).toEqual([1, 2, 1]);
+    expect(entries.map((entry) => entry.pinned)).toEqual([false, true, false]);
   });
 
   test("resolves the tab accent through the caller, not the stored id", () => {
@@ -73,10 +96,69 @@ describe("fullscreen rail entries", () => {
   test("groups consecutive panes under their tab", () => {
     const groups = groupZoomRail(zoomRailEntries(tabs, "tab-duckweed"));
 
-    expect(groups.map((group) => group.tabTitle)).toEqual(["Duckweed", "VPS"]);
-    expect(groups[0].entries).toHaveLength(2);
-    expect(groups[0].current).toBe(true);
-    expect(groups[1].current).toBe(false);
+    expect(groups.map((group) => group.tabTitle)).toEqual(["VPS", "Duckweed"]);
+    expect(groups[1].entries).toHaveLength(2);
+    expect(groups[1].current).toBe(true);
+    expect(groups[0].current).toBe(false);
+  });
+});
+
+describe("fullscreen rail reordering", () => {
+  const row = (...terms: string[]): LayoutNode => ({
+    kind: "split",
+    id: "split",
+    dir: "row",
+    sizes: terms.map(() => 1 / terms.length),
+    children: terms.map((term) => ({ kind: "leaf", id: `leaf-${term}`, term })),
+  });
+  const order = (root: LayoutNode) => leaves(root).map((node) => node.term);
+
+  test("dropping a terminal further down settles it in that slot", () => {
+    const moved = moveTerminalToSlot(row("a", "b", "c", "d"), "leaf-a", "leaf-c");
+
+    expect(order(moved)).toEqual(["b", "c", "a", "d"]);
+  });
+
+  test("dropping one further up settles it before the card it landed on", () => {
+    const moved = moveTerminalToSlot(row("a", "b", "c", "d"), "leaf-d", "leaf-b");
+
+    expect(order(moved)).toEqual(["a", "d", "b", "c"]);
+  });
+
+  test("the layout keeps its shape: only the terminals travel", () => {
+    const before = row("a", "b", "c");
+    const moved = moveTerminalToSlot(before, "leaf-c", "leaf-a");
+
+    expect(leaves(moved).map((node) => node.id)).toEqual(leaves(before).map((node) => node.id));
+    expect(moved.kind === "split" && moved.sizes).toEqual(
+      before.kind === "split" ? before.sizes : [],
+    );
+  });
+
+  test("a pin rides along with the terminal it was put on", () => {
+    const pinned = toggleLeafPin(row("a", "b", "c"), "leaf-a");
+    const moved = moveTerminalToSlot(pinned, "leaf-a", "leaf-c");
+
+    expect(leaves(moved).map((node) => [node.term, node.pinned === true])).toEqual([
+      ["b", false],
+      ["c", false],
+      ["a", true],
+    ]);
+  });
+
+  test("dropping a card on itself, or on a pane that is gone, changes nothing", () => {
+    const before = row("a", "b");
+
+    expect(moveTerminalToSlot(before, "leaf-a", "leaf-a")).toBe(before);
+    expect(moveTerminalToSlot(before, "leaf-a", "leaf-gone")).toBe(before);
+  });
+
+  test("pinning toggles, and leaves every other pane alone", () => {
+    const once = toggleLeafPin(row("a", "b"), "leaf-b");
+    expect(leaves(once).map((node) => node.pinned === true)).toEqual([false, true]);
+
+    const twice = toggleLeafPin(once, "leaf-b");
+    expect(leaves(twice).map((node) => node.pinned === true)).toEqual([false, false]);
   });
 });
 
