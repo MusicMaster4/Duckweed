@@ -152,7 +152,7 @@ export function removeLeafFromSplit(
   return root;
 }
 
-/** Exchange the terminals of two leaves — a "move pane here" gesture. */
+/** Exchange the terminal state of two leaves, preserving each terminal's pin. */
 export function swapLeaves(root: LayoutNode, aId: string, bId: string): LayoutNode {
   const a = findLeaf(root, aId);
   const b = findLeaf(root, bId);
@@ -160,8 +160,8 @@ export function swapLeaves(root: LayoutNode, aId: string, bId: string): LayoutNo
 
   const walk = (node: LayoutNode): LayoutNode => {
     if (node.kind === "leaf") {
-      if (node.id === aId) return { ...node, term: b.term };
-      if (node.id === bId) return { ...node, term: a.term };
+      if (node.id === aId) return { ...node, term: b.term, pinned: b.pinned };
+      if (node.id === bId) return { ...node, term: a.term, pinned: a.pinned };
       return node;
     }
     return { ...node, children: node.children.map(walk) };
