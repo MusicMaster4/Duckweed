@@ -24,6 +24,7 @@ import {
   TOOLS_MIN_WIDTH,
   type SectionId as ToolsSectionId,
 } from "./components/ToolsPanel";
+import { ZoomRail } from "./components/ZoomRail";
 import { ConfirmCloseDialog } from "./components/ConfirmCloseDialog";
 import { DailyLimitLockout } from "./components/DailyLimitLockout";
 import { UpdateDialog } from "./components/UpdateDialog";
@@ -89,6 +90,12 @@ import {
   type LayoutTemplate,
 } from "./lib/layouts";
 import { tabColorHex } from "./lib/tabColors";
+import {
+  moveTerminalToSlot,
+  toggleLeafPin,
+  zoomRailEntries,
+  type ZoomRailEntry,
+} from "./lib/zoomRail";
 import { toggleFullscreen } from "./lib/window";
 import { DEFAULT_TOOLS_WIDTH, load, pushRecent, rehydrate, save } from "./lib/persist";
 import {
@@ -330,6 +337,8 @@ export default function App() {
   const [changesOpen, setChangesOpen] = useState(false);
   const [toolsOpen, setToolsOpen] = useState(initial.toolsOpen);
   const [toolsMounted, setToolsMounted] = useState(initial.toolsOpen);
+  /** Keeps the fullscreen switcher on screen while it slides shut. */
+  const [zoomRailMounted, setZoomRailMounted] = useState(false);
   const [paneMotion, setPaneMotion] = useState<PaneLayoutMotion | null>(null);
   const paneMotionRef = useRef<PaneLayoutMotion | null>(null);
   const paneMotionFinishRef = useRef<(() => string | null) | null>(null);
@@ -1223,6 +1232,21 @@ export default function App() {
       if (!tab || paneMotionRef.current) return;
       const node = leaf(createTerm());
       const nextRoot = insertBeside(tab.root, leafId, node, zone);
+
+      // Fullscreen is a mode, not a one-off: splitting inside it opens the new
+      // terminal fullscreen too, and the switcher on the right is where the
+      // pane it was split from went. Only the user leaves fullscreen. The
+      // split animation is skipped because the split itself is not on screen.
+      if (tab.zoomedLeaf) {
+        updateTab(tab.id, (t) => ({
+          ...t,
+          root: nextRoot,
+          activeLeaf: node.id,
+          zoomedLeaf: node.id,
+        }));
+        return;
+      }
+
       const owner = findLeafOwner(nextRoot, node.id);
       if (!owner) {
         releaseTerm(node.term);
@@ -1301,7 +1325,25 @@ export default function App() {
           ...t,
           root: { ...nodeNow, term: replacementTerm },
           activeLeaf: nodeNow.id,
-          zoomedLeaf: null,
+          // The fresh shell takes the window over, the same way the mode
+          // survives every other close.
+          zoomedLeaf: t.zoomedLeaf === null ? null : nodeNow.id,
+        }));
+        return;
+      }
+
+      // In fullscreen the closing pane's siblings are not on screen, so there
+      // is no cell to animate away: hand the window straight to the terminal
+      // that comes next and stay in the mode.
+      if (tabNow.zoomedLeaf) {
+        const mru = paneMruRef.current.get(tabNow.id) ?? [tabNow.activeLeaf];
+        const survivor = preferredLeaf(nextRoot, mru) ?? leaves(nextRoot)[0].id;
+        releaseTerm(nodeNow.term);
+        updateTab(tabNow.id, (t) => ({
+          ...t,
+          root: nextRoot,
+          activeLeaf: findLeaf(nextRoot, t.activeLeaf) ? t.activeLeaf : survivor,
+          zoomedLeaf: t.zoomedLeaf === leafId ? survivor : t.zoomedLeaf,
         }));
         return;
       }
@@ -1443,9 +1485,19 @@ export default function App() {
       const tab = currentTab();
       if (!tab) return;
       const next = nextLeaf(tab.root, tab.activeLeaf, step);
-      if (next && next !== tab.activeLeaf) activatePane(next);
+      if (!next || next === tab.activeLeaf) return;
+      // While one pane owns the window, cycling moves the window with the
+      // focus — the rail is showing where it is going.
+      if (tab.zoomedLeaf) {
+        const node = findLeaf(tab.root, next);
+        if (node) acknowledgeTerm(node.term);
+        terminals.clearAllBlockSelections();
+        updateTab(tab.id, (t) => ({ ...t, activeLeaf: next, zoomedLeaf: next }));
+        return;
+      }
+      activatePane(next);
     },
-    [activatePane, currentTab],
+    [acknowledgeTerm, activatePane, currentTab, updateTab],
   );
 
   // ---------------------------------------------------------- drag & drop
@@ -2072,6 +2124,94 @@ export default function App() {
     const timer = window.setTimeout(() => setToolsMounted(false), delay);
     return () => window.clearTimeout(timer);
   }, [toolsVisible]);
+
+  // ---------------------------------------------------- fullscreen switcher
+
+  /**
+   * A zoomed pane hides its siblings, so the rail on the right becomes the only
+   * way to see — and reach — the terminals that are still running. It carries
+   * every tab's panes, not just the visible tab's: switching to another tab's
+   * terminal takes its tab with it.
+   */
+  const zoomedLeafId = activeTab?.zoomedLeaf ?? null;
+  const zoomRailVisible = zoomedLeafId !== null && !settingsActive && !dailyLocked;
+
+  useEffect(() => {
+    if (zoomRailVisible) {
+      setZoomRailMounted(true);
+      return;
+    }
+    const delay = window.matchMedia("(prefers-reduced-motion: reduce)").matches
+      ? 0
+      : QUICK_MOTION_MS;
+    const timer = window.setTimeout(() => setZoomRailMounted(false), delay);
+    return () => window.clearTimeout(timer);
+  }, [zoomRailVisible]);
+
+  const railEntries = useMemo(
+    () =>
+      zoomRailMounted ? zoomRailEntries(tabs, activeTabId, (tab) => tabColorHex(tab.color)) : [],
+    [activeTabId, tabs, zoomRailMounted],
+  );
+
+  /** Hand the window to another terminal, bringing its tab along when needed. */
+  const selectZoomTarget = useCallback(
+    (entry: ZoomRailEntry) => {
+      const target = tabsRef.current.find((tab) => tab.id === entry.tabId);
+      if (!target || !findLeaf(target.root, entry.leafId)) return;
+      // Only one terminal may own a block selection, and this click moves the
+      // keyboard elsewhere. Switching tabs already clears it.
+      if (target.id !== activeTabIdRef.current) selectTab(target.id);
+      else if (target.activeLeaf !== entry.leafId) terminals.clearAllBlockSelections();
+      acknowledgeTerm(entry.termId);
+      updateTab(target.id, (tab) => ({
+        ...tab,
+        activeLeaf: entry.leafId,
+        zoomedLeaf: entry.leafId,
+      }));
+    },
+    [acknowledgeTerm, selectTab, updateTab],
+  );
+
+  /**
+   * Drop a terminal into another slot of its own tab. The terminals move
+   * between the panes the layout already has, so the geometry the user set up
+   * survives the reorder — and the window follows the terminal it was showing,
+   * not the slot that terminal used to sit in.
+   */
+  const reorderZoomTarget = useCallback(
+    (moved: ZoomRailEntry, target: ZoomRailEntry) => {
+      if (moved.tabId !== target.tabId || moved.leafId === target.leafId) return;
+      updateTab(moved.tabId, (tab) => {
+        const root = moveTerminalToSlot(tab.root, moved.leafId, target.leafId);
+        if (root === tab.root) return tab;
+        const follow = (leafId: string): string => {
+          const term = findLeaf(tab.root, leafId)?.term;
+          return leaves(root).find((node) => node.term === term)?.id ?? leafId;
+        };
+        return {
+          ...tab,
+          root,
+          activeLeaf: follow(tab.activeLeaf),
+          zoomedLeaf: tab.zoomedLeaf === null ? null : follow(tab.zoomedLeaf),
+        };
+      });
+    },
+    [updateTab],
+  );
+
+  const toggleZoomTargetPin = useCallback(
+    (entry: ZoomRailEntry) => {
+      updateTab(entry.tabId, (tab) => ({ ...tab, root: toggleLeafPin(tab.root, entry.leafId) }));
+    },
+    [updateTab],
+  );
+
+  const exitZoom = useCallback(() => {
+    const tab = currentTab();
+    if (!tab?.zoomedLeaf) return;
+    updateTab(tab.id, (current) => ({ ...current, zoomedLeaf: null }));
+  }, [currentTab, updateTab]);
 
   /** Hand a path from the explorer to the prompt of the focused pane. */
   const insertPath = useCallback(
@@ -2969,6 +3109,26 @@ export default function App() {
               <PaneTree node={activeTab.root} shared={shared} />
             ) : null)}
         </main>
+
+        {/* The switcher only exists while a pane is zoomed: it stands in for the
+            splits that fullscreen just hid. */}
+        {zoomRailMounted && (
+          <div
+            className={`zoom-rail-motion${zoomRailVisible ? " is-open" : ""}`}
+            aria-hidden={!zoomRailVisible}
+          >
+            <ZoomRail
+              entries={railEntries}
+              zoomedLeaf={zoomedLeafId}
+              workingTerms={workingAgentTermIds}
+              unreadTerms={completionHighlights ? unreadTermIds : NO_UNREAD_TERMS}
+              onSelect={selectZoomTarget}
+              onReorder={reorderZoomTarget}
+              onTogglePin={toggleZoomTargetPin}
+              onExit={exitZoom}
+            />
+          </div>
+        )}
       </div>
 
       <StatusBar
