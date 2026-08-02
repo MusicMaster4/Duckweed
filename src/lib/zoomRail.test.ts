@@ -265,6 +265,13 @@ describe("fullscreen rail status", () => {
     expect(zoomRailShimmers(zoomRailStatus({ ...resting, busy: true }))).toBe(false);
     expect(zoomRailShimmers(zoomRailStatus(resting))).toBe(false);
   });
+
+  test("does not shimmer when the working terminal is selected", () => {
+    const working = zoomRailStatus({ ...resting, working: true });
+
+    expect(zoomRailShimmers(working, true)).toBe(false);
+    expect(zoomRailShimmers(working, false)).toBe(true);
+  });
 });
 
 describe("fullscreen rail keyboard travel", () => {

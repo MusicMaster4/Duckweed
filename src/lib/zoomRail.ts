@@ -198,8 +198,11 @@ export function zoomRailStatus(input: {
  * not watching, which is exactly what the rail is for while one pane owns the
  * whole window.
  */
-export function zoomRailShimmers(status: ZoomRailStatus | null): boolean {
-  return status?.tone === "working" || status?.tone === "waiting";
+export function zoomRailShimmers(
+  status: ZoomRailStatus | null,
+  selected = false,
+): boolean {
+  return !selected && (status?.tone === "working" || status?.tone === "waiting");
 }
 
 /** Wrap-around neighbour in the rail, for arrow-key travel through the list. */

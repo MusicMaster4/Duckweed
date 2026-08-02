@@ -552,7 +552,9 @@ const ZoomRailItem = memo(function ZoomRailItem({
         onSelect(entry);
       }}
     >
-      {zoomRailShimmers(status) && <span className="zoom-rail-shimmer" aria-hidden="true" />}
+      {zoomRailShimmers(status, selected) && (
+        <span className="zoom-rail-shimmer" aria-hidden="true" />
+      )}
 
       <span className="zoom-rail-line zoom-rail-line-head">
         <span className="zoom-rail-mark" aria-hidden="true">
