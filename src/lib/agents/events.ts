@@ -49,7 +49,13 @@ export type AgentEvent =
   /** Set, update, finish, or clear the provider's long-running objective. */
   | { type: "goal"; goal: AgentGoal | null }
   /** The user's own message, echoed into the transcript. */
-  | { type: "user"; text: string; images?: AgentImageAttachment[] }
+  | {
+      type: "user";
+      text: string;
+      images?: AgentImageAttachment[];
+      /** This message steered the active turn instead of starting a new one. */
+      sameTurn?: boolean;
+    }
   | { type: "assistant-delta"; id: string; text: string }
   /**
    * The provider's settled copy of an assistant block. Replacing the partial
@@ -346,6 +352,7 @@ export function applyEvent(state: AgentSessionState, event: AgentEvent): AgentSe
             at: Date.now(),
             text: event.text,
             images: event.images ? [...event.images] : [],
+            sameTurn: event.sameTurn,
           },
         ],
       };

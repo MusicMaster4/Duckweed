@@ -178,6 +178,8 @@ export interface UserItem extends ItemBase {
   kind: "user";
   text: string;
   images?: AgentImageAttachment[];
+  /** True when this message guided the turn already in flight. */
+  sameTurn?: boolean;
 }
 
 /** Prose the agent wrote. */

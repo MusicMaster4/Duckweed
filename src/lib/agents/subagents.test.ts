@@ -119,7 +119,7 @@ describe("subagentsForTurn", () => {
     expect(subagentStatusLabel("error")).toBe("Failed");
   });
 
-  test("keeps unfinished children visible across same-turn steering", () => {
+  test("keeps the current fleet visible across same-turn steering", () => {
     const items: AgentItem[] = [
       { kind: "user", id: "user-1", at: 1, text: "Inspect in parallel" },
       task("running-before-steer", "running"),
@@ -129,12 +129,14 @@ describe("subagentsForTurn", () => {
         id: "steer-1",
         at: 4,
         text: "Also check the Windows path",
+        sameTurn: true,
       },
       task("started-after-steer", "pending"),
     ];
 
     expect(subagentsForTurn(items).map((subagent) => subagent.callId)).toEqual([
       "running-before-steer",
+      "completed-before-steer",
       "started-after-steer",
     ]);
   });

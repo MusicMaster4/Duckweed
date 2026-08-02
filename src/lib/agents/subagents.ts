@@ -108,7 +108,8 @@ function summaryFor(item: ToolItem): SubagentSummary {
 export function subagentsForTurn(items: AgentItem[]): SubagentSummary[] {
   let turnStart = -1;
   for (let index = items.length - 1; index >= 0; index -= 1) {
-    if (items[index].kind === "user") {
+    const item = items[index];
+    if (item.kind === "user" && !item.sameTurn) {
       turnStart = index;
       break;
     }

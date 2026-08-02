@@ -1624,7 +1624,12 @@ export function createClaudeAdapter(): AgentAdapter {
     // written during that time is applied to the active conversation at the
     // next safe processing boundary, which is Claude Code's steering path.
     steer: (prompt, ctx) => {
-      ctx.emit({ type: "user", text: prompt.text, images: prompt.images });
+      ctx.emit({
+        type: "user",
+        text: prompt.text,
+        images: prompt.images,
+        sameTurn: true,
+      });
       sendUserMessage(prompt, ctx);
       return true;
     },

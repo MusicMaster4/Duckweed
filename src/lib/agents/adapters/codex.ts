@@ -1458,7 +1458,12 @@ export function createCodexAdapter(): AgentAdapter {
             })),
           ],
         });
-        ctx.emit({ type: "user", text: prompt.text, images: prompt.images });
+        ctx.emit({
+          type: "user",
+          text: prompt.text,
+          images: prompt.images,
+          sameTurn: true,
+        });
         return true;
       } catch {
         return false;
