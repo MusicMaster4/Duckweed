@@ -1,0 +1,34 @@
+name: Feature request
+description: Suggest a focused improvement to Duckweed
+title: "[Feature]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A clear problem statement helps more than a list of implementation ideas.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+      description: Tell us what you are trying to do and where the current workflow breaks down.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like to happen?
+      description: Describe the smallest useful behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What do you use today?
+      description: Include workarounds or other tools you considered.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues for a similar request.
+          required: true

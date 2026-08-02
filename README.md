@@ -104,6 +104,24 @@ service. It runs the shells and CLIs already installed on your computer. Layouts
 and settings are saved locally, and agent usage is calculated from the local
 session files those tools already keep.
 
+## Try it in five minutes
+
+1. [Download the latest stable release](https://github.com/MusicMaster4/Duckweed/releases/latest).
+2. Open the folder for the project you are working on.
+3. Press `Ctrl+Shift+D` or `Ctrl+Shift+E` to make a second pane.
+4. Keep a normal shell in one pane, launch your coding agent in another, and
+   run tests in a third when you need it.
+5. Use `Ctrl+Shift+G` to review the uncommitted diff before you commit.
+
+Duckweed does not install coding agents, create provider accounts, or provide
+API credentials. Install and sign in to the CLIs you already use first, then
+confirm each one works in a regular terminal. The [quick start](docs/quickstart.md)
+has platform notes and a first-workspace walkthrough.
+
+Duckweed is a good fit when you want several local shells or agent interfaces
+visible at once. If you only need one fast terminal, or already have a layout
+you love in tmux, Ghostty, or WezTerm, keep using that.
+
 ## Download
 
 ### Stable
@@ -131,6 +149,12 @@ later updates can be installed from the version chip in the status bar or from
 > Windows SmartScreen may warn on the first install because the installer is not
 > yet code-signed. Duckweed's built-in updater still verifies every update with
 > the project's update signature.
+
+If the first launch does not go smoothly, start with
+[troubleshooting](docs/troubleshooting.md). For a reproducible bug, the
+[bug-report form](https://github.com/MusicMaster4/Duckweed/issues/new?template=bug_report.yml)
+asks for the small amount of platform and shell information that makes a fix
+possible.
 
 ## Platform support and prerequisites
 
