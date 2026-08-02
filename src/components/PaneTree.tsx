@@ -137,7 +137,9 @@ const SplitView = memo(function SplitView({
       ? motion.fromDividerPx
       : motion.toDividerPx
     : DIVIDER;
-  const totalDividerPx = Math.max(0, count - 2) * DIVIDER + movingDividerPx;
+  const totalDividerPx = motion
+    ? Math.max(0, count - 2) * DIVIDER + movingDividerPx
+    : Math.max(0, count - 1) * DIVIDER;
 
   // Cells are sized by an explicit basis with grow/shrink disabled, so a pane's
   // width never depends on what the terminal inside it is printing. Divider
