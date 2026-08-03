@@ -111,12 +111,25 @@ import {
 } from "./lib/tabReorder";
 import * as terminals from "./lib/terminals";
 import { loadSettings as loadUsageSettings, prefetchUsage } from "./lib/usage";
-import type { LeafNode, ProjectInfo, ShellInfo, SplitNode, Tab } from "./lib/types";
+import type {
+  EditorReveal,
+  LeafNode,
+  ProjectInfo,
+  ProjectSearchTarget,
+  ShellInfo,
+  SplitNode,
+  Tab,
+} from "./lib/types";
 
 interface SpawnOpts {
   cwd: string | null;
   shell: string | null;
   command: string | null;
+}
+
+interface OpenFileState {
+  path: string;
+  reveal: EditorReveal | null;
 }
 
 const DEFAULT_FONT_SIZE = 13.5;
@@ -366,7 +379,7 @@ export default function App() {
    * Popup file editor path. Held here (not inside the tools panel) so Ctrl+Tab,
    * hiding the explorer, or opening settings cannot unmount a dirty buffer.
    */
-  const [openFile, setOpenFile] = useState<string | null>(null);
+  const [openFile, setOpenFile] = useState<OpenFileState | null>(null);
   const updater = useUpdater({ beforeInstall: confirmUpdateWithRunningProcesses });
 
   // Handlers read state through refs so keyboard shortcuts and pointer drags
@@ -410,6 +423,15 @@ export default function App() {
     }),
     [tabs],
   );
+  const searchProjects = useMemo<ProjectSearchTarget[]>(() => {
+    const unique = new Map<string, ProjectSearchTarget>();
+    for (const tab of tabs) {
+      if (tab.project && !unique.has(tab.project.path)) {
+        unique.set(tab.project.path, { path: tab.project.path, name: tab.project.name });
+      }
+    }
+    return [...unique.values()];
+  }, [tabs]);
   const portOwnerNames = useMemo(() => {
     const names = new Map<string, string>();
     if (!activeTab) return names;
@@ -2238,8 +2260,15 @@ export default function App() {
 
   /** Open a path in the popup editor; confirm first if another dirty buffer is open. */
   const openExplorerFile = useCallback(
-    async (path: string) => {
-      if (openFile === path) return;
+    async (path: string, reveal: EditorReveal | null = null, projectPath?: string) => {
+      const targetTab = projectPath
+        ? tabsRef.current.find((tab) => tab.project?.path === projectPath) ?? null
+        : null;
+      if (openFile?.path === path) {
+        setOpenFile({ path, reveal });
+        if (targetTab && targetTab.id !== activeTabIdRef.current) selectTab(targetTab.id);
+        return;
+      }
       if (openFile && editorDirtyRef.current) {
         const ok = await confirmCloseRunning({
           title: "Unsaved changes",
@@ -2248,9 +2277,10 @@ export default function App() {
         });
         if (!ok) return;
       }
-      setOpenFile(path);
+      setOpenFile({ path, reveal });
+      if (targetTab && targetTab.id !== activeTabIdRef.current) selectTab(targetTab.id);
     },
-    [openFile],
+    [openFile, selectTab],
   );
 
   // ----------------------------------------------------------- shortcuts
@@ -3006,6 +3036,10 @@ export default function App() {
               onOpenFolder={cdActivePane}
               onBrowseProject={browseActiveProject}
               onOpenFile={(path) => void openExplorerFile(path)}
+              searchProjects={searchProjects}
+              onOpenSearchResult={(projectPath, path, reveal) =>
+                void openExplorerFile(path, reveal, projectPath)
+              }
               getCurrentLayoutDraft={getCurrentLayoutDraft}
               onOpenLayout={openLayoutTemplate}
               stats={toolStats}
@@ -3182,8 +3216,9 @@ export default function App() {
 
       {openFile && (
         <FileEditor
-          key={openFile}
-          path={openFile}
+          key={openFile.path}
+          path={openFile.path}
+          reveal={openFile.reveal}
           onClose={() => setOpenFile(null)}
           onDirtyChange={(dirty) => {
             editorDirtyRef.current = dirty;

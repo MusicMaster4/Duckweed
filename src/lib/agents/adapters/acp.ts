@@ -1074,6 +1074,29 @@ export function createAcpAdapter(): AgentAdapter {
 
     command: handleCommand,
 
+    configure: async (kind, value, ctx) => {
+      if (kind === "model") {
+        const match = resolveModel(value);
+        if (match === "ambiguous") throw new Error(`"${value}" matches more than one model.`);
+        if (match === null && availableModels.length) {
+          throw new Error(`Unknown model "${value}".`);
+        }
+        const modelId = match === null ? value : match.id;
+        await setModel(modelId, ctx);
+        ctx.emit({ type: "notice", tone: "info", text: `Model set to ${modelId}.` });
+        return true;
+      }
+
+      const efforts = availableModels.find((model) => model.id === currentModelId)?.efforts ?? [];
+      const level = value.toLowerCase();
+      if (efforts.length && !efforts.includes(level)) {
+        throw new Error(`${currentModelId ?? "This model"} does not take "${value}" effort.`);
+      }
+      await setEffort(level, ctx);
+      ctx.emit({ type: "notice", tone: "info", text: `Effort set to ${level}.` });
+      return true;
+    },
+
     /**
      * ACP's own resume: the agent adopts the stored session and replays it as
      * `session/update` notifications, which the handler above turns into the

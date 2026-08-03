@@ -8,6 +8,8 @@ import type {
   FileContent,
   FileDiff,
   ProjectInfo,
+  ProjectSearchResponse,
+  ProjectSearchTarget,
   ShellInfo,
   WorkspacePath,
 } from "./types";
@@ -99,6 +101,17 @@ export const listDir = (path: string) => invoke<DirEntry[]>("list_dir", { path }
 /** Bounded project file index for agent `@` completion. */
 export const workspacePaths = (path: string) =>
   invoke<WorkspacePath[]>("workspace_paths", { path });
+
+/** Parallel, gitignore-aware literal search across open projects. */
+export const projectSearch = (
+  projects: ProjectSearchTarget[],
+  query: string,
+  generation: number,
+) => invoke<ProjectSearchResponse>("project_search", { projects, query, generation });
+
+/** Stop an older native walk when the query is cleared or replaced. */
+export const cancelProjectSearch = (generation: number) =>
+  invoke<void>("project_search_cancel", { generation });
 
 /** Read a file for the project explorer's popup editor. */
 export const readFile = (path: string) => invoke<FileContent>("read_file", { path });

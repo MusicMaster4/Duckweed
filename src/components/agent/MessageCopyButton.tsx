@@ -1,32 +1,10 @@
 import { useEffect, useState } from "react";
 
+import { writeClipboardText } from "../../lib/clipboard";
 import "./MessageCopyButton.css";
 
 interface MessageCopyButtonProps {
   text: string;
-}
-
-async function writeText(text: string): Promise<boolean> {
-  try {
-    await navigator.clipboard.writeText(text);
-    return true;
-  } catch {
-    // Some embedded webviews expose the Clipboard API but reject the write.
-  }
-
-  const textarea = document.createElement("textarea");
-  textarea.value = text;
-  textarea.setAttribute("readonly", "");
-  textarea.style.position = "fixed";
-  textarea.style.opacity = "0";
-  document.body.appendChild(textarea);
-  textarea.select();
-
-  try {
-    return document.execCommand("copy");
-  } finally {
-    textarea.remove();
-  }
 }
 
 export function MessageCopyButton({ text }: MessageCopyButtonProps) {
@@ -39,7 +17,7 @@ export function MessageCopyButton({ text }: MessageCopyButtonProps) {
   }, [copied]);
 
   const copy = async () => {
-    if (await writeText(text)) {
+    if (await writeClipboardText(text)) {
       setCopied(true);
     } else {
       setCopied(false);

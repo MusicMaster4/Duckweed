@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { confirmCloseRunning } from "../lib/confirmClose";
 import { highlightCode, langFromPath } from "../lib/codeSyntax";
 import { readFile, writeFile } from "../lib/ipc";
+import type { EditorReveal } from "../lib/types";
 
 interface Props {
   /** Absolute path of the file to open. */
@@ -10,6 +11,8 @@ interface Props {
   onClose: () => void;
   /** Lets the explorer know whether a switch would discard edits. */
   onDirtyChange?: (dirty: boolean) => void;
+  /** Select and center a search occurrence after the file is loaded. */
+  reveal?: EditorReveal | null;
 }
 
 type Load =
@@ -35,7 +38,7 @@ function formatBytes(n: number): string {
  * A painted mirror under a transparent textarea carries syntax colours; the
  * textarea keeps native editing, selection, and the caret.
  */
-export function FileEditor({ path, onClose, onDirtyChange }: Props) {
+export function FileEditor({ path, onClose, onDirtyChange, reveal = null }: Props) {
   const [load, setLoad] = useState<Load>({ kind: "loading" });
   const [draft, setDraft] = useState("");
   const [saved, setSaved] = useState("");
@@ -136,6 +139,35 @@ export function FileEditor({ path, onClose, onDirtyChange }: Props) {
     const id = window.setTimeout(() => textareaRef.current?.focus(), 0);
     return () => window.clearTimeout(id);
   }, [load, path]);
+
+  useEffect(() => {
+    if (!reveal || load.kind !== "ready" || load.binary || load.tooLarge) return;
+    const id = window.setTimeout(() => {
+      const textarea = textareaRef.current;
+      if (!textarea) return;
+      const content = textarea.value;
+
+      let lineStart = 0;
+      for (let line = 1; line < reveal.line; line++) {
+        const newline = content.indexOf("\n", lineStart);
+        if (newline < 0) break;
+        lineStart = newline + 1;
+      }
+      const lineEnd = content.indexOf("\n", lineStart);
+      const contentEnd = lineEnd < 0 ? content.length : lineEnd;
+      const start = Math.min(contentEnd, lineStart + reveal.column);
+      const end = Math.min(contentEnd, start + reveal.matchLength);
+      textarea.focus();
+      textarea.setSelectionRange(start, end);
+      textarea.scrollTop = Math.max(0, (reveal.line - 1) * 18 - textarea.clientHeight / 2 + 9);
+      if (gutterRef.current) gutterRef.current.scrollTop = textarea.scrollTop;
+      if (mirrorRef.current) {
+        mirrorRef.current.scrollTop = textarea.scrollTop;
+        mirrorRef.current.scrollLeft = textarea.scrollLeft;
+      }
+    }, 0);
+    return () => window.clearTimeout(id);
+  }, [load, path, reveal]);
 
   const lang = useMemo(() => langFromPath(path), [path]);
 

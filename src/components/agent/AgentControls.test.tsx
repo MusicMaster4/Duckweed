@@ -49,3 +49,27 @@ describe("agent access control", () => {
     expect(html).toBe("");
   });
 });
+
+describe("next-message agent controls", () => {
+  test("shows a staged model without replacing the active model", () => {
+    const staged = session("opencode");
+    staged.model = "opencode/big-pickle";
+    staged.nextModel = "opencode/claude-sonnet-4-5";
+    staged.models = [
+      { id: "opencode/big-pickle", label: "Big Pickle", efforts: [] },
+      {
+        id: "opencode/claude-sonnet-4-5",
+        label: "Claude Sonnet 4.5",
+        efforts: ["high", "medium"],
+      },
+    ];
+
+    const html = renderToStaticMarkup(
+      <AgentControls session={staged} onSelect={() => {}} />,
+    );
+
+    expect(html).toContain("Claude Sonnet 4.5");
+    expect(html).toContain("Model for next message");
+    expect(html).toContain(">Next<");
+  });
+});

@@ -83,6 +83,40 @@ export interface FileContent {
   size: number;
 }
 
+/** A project included in the explorer's cross-project text search. */
+export interface ProjectSearchTarget {
+  path: string;
+  name: string;
+}
+
+/** One literal text occurrence returned by the native project search. */
+export interface ProjectSearchMatch {
+  project_path: string;
+  project_name: string;
+  path: string;
+  relative: string;
+  line: number;
+  /** UTF-16 offsets line up with textarea selectionStart/selectionEnd. */
+  column: number;
+  /** UTF-16 offset of the match within the bounded line preview. */
+  preview_column: number;
+  match_length: number;
+  line_text: string;
+}
+
+export interface ProjectSearchResponse {
+  matches: ProjectSearchMatch[];
+  files_scanned: number;
+  truncated: boolean;
+  cancelled: boolean;
+}
+
+export interface EditorReveal {
+  line: number;
+  column: number;
+  matchLength: number;
+}
+
 export interface Branches {
   /** Branch HEAD points at, or null on a detached HEAD. */
   current: string | null;

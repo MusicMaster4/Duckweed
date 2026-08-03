@@ -34,6 +34,22 @@ describe("agent workflow dock", () => {
     );
   });
 
+  test("keeps the active plan docked after same-turn steering", () => {
+    const items: AgentItem[] = [
+      { kind: "user", id: "user-1", at: 1, text: "Build the feature" },
+      completedPlan,
+      {
+        kind: "user",
+        id: "steer-1",
+        at: 3,
+        text: "Also verify the local server",
+        sameTurn: true,
+      },
+    ];
+
+    expect(latestWorkflow(items)?.id).toBe(completedPlan.id);
+  });
+
   test("starts the expiry window only after every task is done and the agent is idle", () => {
     expect(workflowIsComplete(completedPlan, "idle")).toBe(true);
     expect(workflowIsComplete(completedPlan, "working")).toBe(false);

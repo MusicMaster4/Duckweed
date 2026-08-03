@@ -97,6 +97,13 @@ interface Session {
   userInitiatedTurn: boolean;
   /** A picker command is negotiating with the CLI without becoming a chat turn. */
   configuring: boolean;
+  /** Tracks whether a provider-native config turn such as Claude `/effort` worked. */
+  configurationTurn: {
+    kind: "model" | "effort";
+    value: string;
+    succeeded: boolean;
+    resolve: (succeeded: boolean) => void;
+  } | null;
   /** Increments whenever real user work starts, invalidating late picker notices. */
   interactionEpoch: number;
   /** Claude/Grok mirror their TUI's two-press exit gesture. */
@@ -358,7 +365,7 @@ function contextWithoutUserEcho(session: Session): AdapterContext {
   };
 }
 
-function dispatch(session: Session, prompt: AgentPrompt, echoUser = true): void {
+function dispatchNow(session: Session, prompt: AgentPrompt, echoUser = true): void {
   // Whatever the last turn's ending was, this one is the user's own request.
   session.interrupted = false;
   const context = echoUser ? session.context : contextWithoutUserEcho(session);
@@ -387,6 +394,116 @@ function dispatch(session: Session, prompt: AgentPrompt, echoUser = true): void 
   session.adapter.prompt(prompt, context);
 }
 
+function hasNextConfiguration(session: Session): boolean {
+  return Boolean(session.state.nextModel || session.state.nextEffort);
+}
+
+async function applyConfigurationValue(
+  session: Session,
+  kind: "model" | "effort",
+  value: string,
+): Promise<void> {
+  const context = contextWithoutUserEcho(session);
+  if (session.adapter.configure) {
+    const accepted = await session.adapter.configure(kind, value, context);
+    if (accepted) return;
+  }
+
+  const command = `/${kind} ${value}`;
+  const handled = session.adapter.command?.(command, context);
+  if (handled === "handled") {
+    const applied = kind === "model" ? session.state.model : session.state.effort;
+    if (applied === value) return;
+    throw new Error(`${session.state.label} could not change ${kind} to ${value}.`);
+  }
+  if (handled !== "prompt") {
+    throw new Error(`${session.state.label} does not support changing ${kind} here.`);
+  }
+
+  const succeeded = await new Promise<boolean>((resolve) => {
+    session.configurationTurn = { kind, value, succeeded: false, resolve };
+    session.adapter.prompt({ text: command, images: [] }, context);
+  });
+  if (!succeeded) {
+    throw new Error(`${session.state.label} could not change ${kind} to ${value}.`);
+  }
+}
+
+/** Apply staged picker choices, then start the message that owns them. */
+function dispatch(session: Session, prompt: AgentPrompt, echoUser = true): void {
+  if (!hasNextConfiguration(session)) {
+    dispatchNow(session, prompt, echoUser);
+    return;
+  }
+
+  const model = session.state.nextModel ?? null;
+  const effort = session.state.nextEffort ?? null;
+  const previousModel = session.state.model;
+  const previousEffort = session.state.effort;
+  session.state = {
+    ...session.state,
+    nextModel: null,
+    nextEffort: null,
+  };
+  session.configuring = true;
+  notify(session);
+
+  void (async () => {
+    let failedKind: "model" | "effort" | null = null;
+    for (const [kind, value] of [
+      ["model", model],
+      ["effort", effort],
+    ] as const) {
+      if (!value || session.disposed) continue;
+      try {
+        await applyConfigurationValue(session, kind, value);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        emit(session, {
+          type: "notice",
+          tone: "error",
+          text: message || `${session.state.label} could not change ${kind}.`,
+        });
+        failedKind = kind;
+        // An effort chosen from the staged model's catalog may not be valid on
+        // the old model. Keep the prompt safe instead of applying half of a
+        // configuration pair after the model switch was refused.
+        break;
+      }
+    }
+
+    if (session.disposed) return;
+    session.configuring = false;
+    session.configurationTurn = null;
+    if (session.state.status === "exited" || session.state.status === "error") {
+      notify(session);
+      return;
+    }
+    if (failedKind) {
+      // Preserve both the message and every setting that was not applied. A
+      // native config command may have updated the header optimistically, so
+      // restore the last confirmed value as well as restaging the requested one.
+      session.state = {
+        ...session.state,
+        model: failedKind === "model" ? previousModel : session.state.model,
+        effort: previousEffort,
+        nextModel:
+          failedKind === "model" ? session.state.nextModel ?? model : session.state.nextModel,
+        nextEffort: effort ? session.state.nextEffort ?? effort : session.state.nextEffort,
+      };
+      rememberPreferences(session.launch, {
+        model: session.state.model,
+        effort: session.state.effort,
+      });
+      queuePrompt(session, prompt, !echoUser);
+      notify(session);
+      return;
+    }
+    dispatchNow(session, prompt, echoUser);
+    notify(session);
+  })();
+}
+
 function emit(session: Session, event: AgentEvent): void {
   if (session.disposed) return;
 
@@ -398,17 +515,26 @@ function emit(session: Session, event: AgentEvent): void {
     if (event.type === "user") return;
     if (event.type === "status" && event.status === "working") return;
     if (event.type === "notice") event = { ...event, transient: true };
+    if (event.type === "session" && session.configurationTurn) {
+      const pending = session.configurationTurn;
+      const applied = pending.kind === "model" ? event.model : event.effort;
+      if (applied === pending.value) pending.succeeded = true;
+    }
     if (event.type === "turn-end") {
-      session.configuring = false;
-      const queued = session.queued.shift();
-      if (queued) {
-        if (!queued.echoed) {
-          session.state = applyEvent(session.state, { type: "unqueue", id: queued.id });
-        }
-        dispatch(session, queued.prompt, !queued.echoed);
-      }
+      const pending = session.configurationTurn;
+      session.configurationTurn = null;
+      pending?.resolve(pending.succeeded);
       notify(session);
       return;
+    }
+    if (
+      event.type === "status" &&
+      (event.status === "exited" || event.status === "error") &&
+      session.configurationTurn
+    ) {
+      const pending = session.configurationTurn;
+      session.configurationTurn = null;
+      pending.resolve(false);
     }
   }
 
@@ -571,6 +697,7 @@ export async function start(
     interrupted: false,
     userInitiatedTurn: false,
     configuring: false,
+    configurationTurn: null,
     interactionEpoch: 0,
     exitArmedUntil: 0,
     disposed: false,
@@ -807,7 +934,7 @@ export function submit(
           ? "steer"
           : "queue"
         : followupMode;
-    if (requestedMode === "steer") {
+    if (requestedMode === "steer" && !hasNextConfiguration(session)) {
       steerPrompt(session, prompt);
       return;
     }
@@ -882,6 +1009,7 @@ export function editLastQueued(termId: string): AgentPrompt | null {
 export function sendQueuedNow(termId: string, id: string): void {
   const session = sessions.get(termId);
   if (!session || session.disposed || !session.adapter.steer) return;
+  if (session.configuring || hasNextConfiguration(session)) return;
   if (session.state.status !== "working" && session.state.status !== "waiting") return;
   const index = session.queued.findIndex((queued) => queued.id === id && !queued.echoed);
   if (index < 0) return;
@@ -901,32 +1029,17 @@ export function configure(
 ): void {
   const session = sessions.get(termId);
   if (!session || session.disposed || !value.trim()) return;
-  if (session.state.status !== "idle") {
-    emit(session, {
-      type: "notice",
-      tone: "error",
-      text: `Wait for the current ${session.state.label} turn to finish before changing ${kind}.`,
-    });
-    return;
-  }
-
-  const epoch = session.interactionEpoch;
-  const baseContext = contextWithoutUserEcho(session);
-  const context: AdapterContext = {
-    ...baseContext,
-    emit: (event) => {
-      // An ACP setter may resolve after the user has already started real
-      // work. Its stale confirmation must not materialize inside that turn.
-      if (event.type === "notice") {
-        if (session.interactionEpoch !== epoch) return;
-        baseContext.emit({ ...event, transient: true });
-        return;
-      }
-      baseContext.emit(event);
-    },
-  };
 
   if (kind === "access") {
+    if (session.state.status !== "idle" || session.configuring) {
+      emit(session, {
+        type: "notice",
+        tone: "error",
+        text: `Wait for the current ${session.state.label} turn to finish before changing access.`,
+      });
+      return;
+    }
+    const context = contextWithoutUserEcho(session);
     const mode = value.trim() as AgentAccessMode;
     if (!["default", "read-only", "workspace", "full-access"].includes(mode)) return;
     const configured = session.adapter.configureAccess?.(mode, context);
@@ -950,18 +1063,20 @@ export function configure(
     return;
   }
 
-  const command = `/${kind} ${value.trim()}`;
-  const handled = session.adapter.command?.(command, context);
-  if (handled === "prompt") {
-    session.configuring = true;
-    session.adapter.prompt({ text: command, images: [] }, context);
-  } else if (handled !== "handled") {
-    emit(session, {
-      type: "notice",
-      tone: "error",
-      text: `${session.state.label} does not support changing ${kind} here.`,
-    });
+  const clean = value.trim();
+  if (kind === "model") {
+    session.state = {
+      ...session.state,
+      nextModel: clean === session.state.model ? null : clean,
+      nextEffort: null,
+    };
+  } else {
+    session.state = {
+      ...session.state,
+      nextEffort: clean === session.state.effort ? null : clean,
+    };
   }
+  notify(session);
 }
 
 /**

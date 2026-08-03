@@ -5,8 +5,9 @@ export const COMPLETED_WORKFLOW_TTL_MS = 30_000;
 /** The newest provider plan in the current user turn is the workflow dock. */
 export function latestWorkflow(items: AgentItem[]): PlanItem | null {
   for (let index = items.length - 1; index >= 0; index -= 1) {
-    if (items[index].kind === "plan") return items[index] as PlanItem;
-    if (items[index].kind === "user") return null;
+    const item = items[index];
+    if (item.kind === "plan") return item;
+    if (item.kind === "user" && !item.sameTurn) return null;
   }
   return null;
 }
