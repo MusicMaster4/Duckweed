@@ -820,6 +820,44 @@ describe("acp adapter", () => {
     expect(h.state().model).toBe("opencode/claude-haiku-4-5");
   });
 
+  test("waits for OpenCode to accept a staged model before configuration resolves", async () => {
+    const h = harness({ agent: "opencode" });
+    await h.handshake(
+      {},
+      {
+        configOptions: [
+          {
+            id: "model",
+            category: "model",
+            currentValue: "opencode/big-pickle",
+            options: [
+              { value: "opencode/big-pickle", name: "Big Pickle" },
+              { value: "opencode/claude-haiku-4-5", name: "Claude Haiku 4.5" },
+            ],
+          },
+        ],
+      },
+    );
+
+    let settled = false;
+    const changing = Promise.resolve(
+      h.adapter.configure?.("model", "opencode/claude-haiku-4-5", h.ctx),
+    ).then((accepted) => {
+      settled = true;
+      return accepted;
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    expect(h.sent.at(-1)).toMatchObject({
+      method: "session/set_config_option",
+      params: { value: "opencode/claude-haiku-4-5" },
+    });
+
+    h.feed({ jsonrpc: "2.0", id: 3, result: {} });
+    expect(await changing).toBe(true);
+    expect(h.state().model).toBe("opencode/claude-haiku-4-5");
+  });
+
   test("rejects an unknown model with what is actually available", async () => {
     const h = harness();
     await h.handshake({ _meta: { modelState: GROK_MODEL_STATE } });

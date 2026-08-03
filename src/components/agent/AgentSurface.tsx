@@ -8,6 +8,7 @@ import {
 } from "react";
 
 import { agentHasUnfinishedWork } from "../../lib/agents/activity";
+import { conversationText } from "../../lib/agents/conversation";
 import { canResume } from "../../lib/agents/history";
 import * as agents from "../../lib/agents/session";
 import { isNewChatCommand } from "../../lib/agents/slashCatalog";
@@ -30,6 +31,7 @@ import {
 } from "../../lib/agentWorkflow";
 import { workStatusLabel } from "../../lib/agentWorkDuration";
 import { confirmCloseRunning } from "../../lib/confirmClose";
+import { writeClipboardText } from "../../lib/clipboard";
 import { Tooltip } from "../Tooltip";
 import { AgentComposer } from "./AgentComposer";
 import { AgentGoalIndicator } from "./AgentGoalIndicator";
@@ -130,8 +132,11 @@ export function AgentSurface({ termId, active, onClose }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const surfaceRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
+  const conversationMenuRef = useRef<HTMLDivElement>(null);
   /** Open with the text typed after `/resume`, so it doubles as a filter. */
   const [resumeQuery, setResumeQuery] = useState<string | null>(null);
+  const [conversationMenuOpen, setConversationMenuOpen] = useState(false);
+  const [conversationCopied, setConversationCopied] = useState(false);
   // Following the stream is the default, but scrolling up to read something is
   // a deliberate act — new output must not yank the view back down.
   const pinnedRef = useRef(true);
@@ -165,6 +170,32 @@ export function AgentSurface({ termId, active, onClose }: Props) {
     setSelectedSubagentCallId(null);
     window.requestAnimationFrame(() => composerRef.current?.focus());
   }, []);
+
+  useEffect(() => {
+    if (!conversationMenuOpen) return;
+    const closeOnPointer = (event: PointerEvent) => {
+      if (!conversationMenuRef.current?.contains(event.target as Node)) {
+        setConversationMenuOpen(false);
+      }
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      setConversationMenuOpen(false);
+    };
+    window.addEventListener("pointerdown", closeOnPointer);
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      window.removeEventListener("pointerdown", closeOnPointer);
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [conversationMenuOpen]);
+
+  useEffect(() => {
+    if (!conversationCopied) return;
+    const timer = window.setTimeout(() => setConversationCopied(false), 1_600);
+    return () => window.clearTimeout(timer);
+  }, [conversationCopied]);
 
   useEffect(() => {
     if (!active || !selectedSubagentCallId) return;
@@ -343,6 +374,12 @@ export function AgentSurface({ termId, active, onClose }: Props) {
   const ended = session.status === "exited" || session.status === "error";
   const resumable = canResume(session.agent);
   const resumeBlocked = session.status === "working" || session.status === "waiting";
+  const transcript = conversationText(session.items, session.label);
+
+  const copyConversation = async () => {
+    if (!transcript) return;
+    setConversationCopied(await writeClipboardText(transcript));
+  };
 
   /** Warn only while closing would interrupt an unfinished turn. */
   const requestClose = () => {
@@ -479,21 +516,15 @@ export function AgentSurface({ termId, active, onClose }: Props) {
           </Tooltip>
         )}
         <AgentGoalIndicator goal={session.goal} />
-        {/* Keep history discoverable on every resumable provider. Mid-turn it
-            stays visible but disabled because swapping sessions would strand
-            the work currently in flight. */}
-        {resumable && !ended && (
+        <div className="agent-conversation-menu" ref={conversationMenuRef}>
           <button
             type="button"
             className="agent-head-btn is-quiet"
-            onClick={() => setResumeQuery("")}
-            disabled={resumeBlocked}
-            title={
-              resumeBlocked
-                ? "Finish or stop the current turn before resuming another session"
-                : `Resume a past ${session.label} session (/resume)`
-            }
-            aria-label="Resume a past session"
+            onClick={() => setConversationMenuOpen((open) => !open)}
+            title="Conversation actions"
+            aria-label="Conversation actions"
+            aria-haspopup="menu"
+            aria-expanded={conversationMenuOpen}
           >
             <svg viewBox="0 0 14 14" aria-hidden="true">
               <path d="M2 7a5 5 0 1 0 1.6-3.7" fill="none" />
@@ -501,7 +532,51 @@ export function AgentSurface({ termId, active, onClose }: Props) {
               <path d="M7 4.4V7l1.9 1.1" fill="none" />
             </svg>
           </button>
-        )}
+          {conversationMenuOpen && (
+            <div className="agent-conversation-popover" role="menu">
+              {resumable && !ended && (
+                <button
+                  type="button"
+                  role="menuitem"
+                  disabled={resumeBlocked}
+                  title={
+                    resumeBlocked
+                      ? "Finish or stop the current turn before resuming another session"
+                      : undefined
+                  }
+                  onClick={() => {
+                    setConversationMenuOpen(false);
+                    setResumeQuery("");
+                  }}
+                >
+                  <svg viewBox="0 0 14 14" aria-hidden="true">
+                    <path d="M2 7a5 5 0 1 0 1.6-3.7" />
+                    <path d="M2 1.8V4.4H4.6" />
+                  </svg>
+                  <span>Resume past conversation</span>
+                </button>
+              )}
+              <button
+                type="button"
+                role="menuitem"
+                disabled={!transcript}
+                onClick={() => void copyConversation()}
+              >
+                {conversationCopied ? (
+                  <svg viewBox="0 0 14 14" aria-hidden="true">
+                    <path d="M2.5 7.5l2.7 2.7 6-6" />
+                  </svg>
+                ) : (
+                  <svg viewBox="0 0 14 14" aria-hidden="true">
+                    <rect x="5" y="5" width="7" height="7" rx="1.2" />
+                    <path d="M9 5V3.2A1.2 1.2 0 0 0 7.8 2H3.2A1.2 1.2 0 0 0 2 3.2v4.6A1.2 1.2 0 0 0 3.2 9H5" />
+                  </svg>
+                )}
+                <span>{conversationCopied ? "Conversation copied" : "Copy entire conversation"}</span>
+              </button>
+            </div>
+          )}
+        </div>
         <button
           type="button"
           className="agent-head-btn"

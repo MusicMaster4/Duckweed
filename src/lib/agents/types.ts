@@ -379,6 +379,10 @@ export interface AgentSessionState {
   model: string | null;
   /** Reasoning effort in effect, when the agent exposes one. */
   effort: string | null;
+  /** Model selected for the next user message but not applied to an active turn. */
+  nextModel?: string | null;
+  /** Reasoning effort selected for the next user message. */
+  nextEffort?: string | null;
   /**
    * Access override selected in Duckweed. Missing means `default` for older
    * persisted/test state; live sessions always initialize this field.

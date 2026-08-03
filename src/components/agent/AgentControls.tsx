@@ -46,7 +46,9 @@ export function AgentControls({ session, onSelect, placement = "composer" }: Pro
   const searchRef = useRef<HTMLInputElement>(null);
 
   const models = session.models;
-  const efforts = effortsFor(session);
+  const selectedModel = session.nextModel ?? session.model;
+  const selectedEffort = session.nextEffort ?? session.effort;
+  const efforts = effortsFor({ model: selectedModel, models });
   const accessChoices = useMemo(() => accessChoicesFor(session.agent), [session.agent]);
   const canPickModel = models.length > 0;
   const canPickEffort = efforts.length > 0;
@@ -60,7 +62,7 @@ export function AgentControls({ session, onSelect, placement = "composer" }: Pro
         id: model.id,
         label: model.label || shortModelLabel(model.id),
         detail: model.id !== model.label ? model.id : null,
-        current: isCurrentModel(session.model, model),
+        current: isCurrentModel(selectedModel, model),
       }));
     }
     if (menu === "effort") {
@@ -68,7 +70,7 @@ export function AgentControls({ session, onSelect, placement = "composer" }: Pro
         id: effort,
         label: formatEffortLabel(effort),
         detail: null,
-        current: session.effort === effort,
+        current: selectedEffort === effort,
       }));
     }
     if (menu === "access") {
@@ -86,8 +88,8 @@ export function AgentControls({ session, onSelect, placement = "composer" }: Pro
     models,
     efforts,
     accessChoices,
-    session.model,
-    session.effort,
+    selectedModel,
+    selectedEffort,
     session.accessMode,
   ]);
 
@@ -169,13 +171,13 @@ export function AgentControls({ session, onSelect, placement = "composer" }: Pro
     }
   };
 
-  const modelLabel = session.model
-    ? displayModelLabel(session.model, models)
+  const modelLabel = selectedModel
+    ? displayModelLabel(selectedModel, models)
     : canPickModel
       ? "Model"
       : null;
-  const effortLabel = session.effort
-    ? formatEffortLabel(session.effort)
+  const effortLabel = selectedEffort
+    ? formatEffortLabel(selectedEffort)
     : canPickEffort
       ? "Effort"
       : null;
@@ -202,9 +204,16 @@ export function AgentControls({ session, onSelect, placement = "composer" }: Pro
         <ControlTrigger
           kind="model"
           label={modelLabel}
-          title={session.model ? `Model: ${session.model}` : "Choose a model"}
+          title={
+            session.nextModel
+              ? `Model for next message: ${session.nextModel}`
+              : session.model
+                ? `Model: ${session.model}`
+                : "Choose a model"
+          }
           open={menu === "model"}
           interactive={canPickModel && !ended}
+          pending={Boolean(session.nextModel)}
           onToggle={() => setMenu((current) => (current === "model" ? null : "model"))}
         />
       )}
@@ -212,9 +221,16 @@ export function AgentControls({ session, onSelect, placement = "composer" }: Pro
         <ControlTrigger
           kind="effort"
           label={effortLabel}
-          title={session.effort ? `Effort: ${session.effort}` : "Choose reasoning effort"}
+          title={
+            session.nextEffort
+              ? `Reasoning for next message: ${session.nextEffort}`
+              : session.effort
+                ? `Effort: ${session.effort}`
+                : "Choose reasoning effort"
+          }
           open={menu === "effort"}
           interactive={canPickEffort && !ended}
+          pending={Boolean(session.nextEffort)}
           onToggle={() => setMenu((current) => (current === "effort" ? null : "effort"))}
         />
       )}
@@ -229,6 +245,7 @@ export function AgentControls({ session, onSelect, placement = "composer" }: Pro
           }
           open={menu === "access"}
           interactive={!ended}
+          pending={false}
           onToggle={() => setMenu((current) => (current === "access" ? null : "access"))}
         />
       )}
@@ -305,6 +322,7 @@ function ControlTrigger({
   title,
   open,
   interactive,
+  pending,
   onToggle,
 }: {
   kind: "model" | "effort" | "access";
@@ -312,6 +330,7 @@ function ControlTrigger({
   title: string;
   open: boolean;
   interactive: boolean;
+  pending: boolean;
   onToggle: () => void;
 }) {
   if (!interactive) {
@@ -331,6 +350,7 @@ function ControlTrigger({
       onClick={onToggle}
     >
       <span className="agent-control-chip-label">{label}</span>
+      {pending && <span className="agent-control-next">Next</span>}
       <svg className="agent-control-chevron" viewBox="0 0 10 6" aria-hidden="true">
         <path
           d="M1 1l4 4 4-4"

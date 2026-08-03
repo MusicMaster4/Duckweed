@@ -1299,6 +1299,29 @@ export const meta = {
     });
   });
 
+  test("waits for a staged model control response", async () => {
+    const h = harness();
+    let settled = false;
+    const changing = Promise.resolve(h.adapter.configure?.("model", "opus", h.ctx)).then(
+      (accepted) => {
+        settled = true;
+        return accepted;
+      },
+    );
+
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    expect(h.sent[0]).toMatchObject({
+      type: "control_request",
+      request: { subtype: "set_model", model: "opus" },
+    });
+
+    const requestId = (h.sent[0] as { request_id: string }).request_id;
+    h.feed({ type: "control_response", response: { subtype: "success", request_id: requestId } });
+    expect(await changing).toBe(true);
+    expect(h.state().model).toBe("opus");
+  });
+
   test("changes permission mode through Claude's control protocol", () => {
     const h = harness();
     expect(h.adapter.configureAccess?.("full-access", h.ctx)).toBe(true);

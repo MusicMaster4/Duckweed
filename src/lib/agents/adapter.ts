@@ -59,6 +59,17 @@ export interface AgentAdapter {
    */
   command?: (text: string, ctx: AdapterContext) => "handled" | "prompt";
   /**
+   * Apply model or reasoning configuration and resolve only after the provider
+   * has accepted it. Sessions use this before dispatching the next message so
+   * an active turn is never changed underneath itself. Return false to use the
+   * provider's native slash-command fallback for that setting.
+   */
+  configure?: (
+    kind: "model" | "effort",
+    value: string,
+    ctx: AdapterContext,
+  ) => Promise<boolean> | boolean;
+  /**
    * Whether a local command may bypass the follow-up queue while a turn is
    * running. This is reserved for control-plane operations such as Codex
    * `/goal pause`: queueing the command would make it impossible to stop the

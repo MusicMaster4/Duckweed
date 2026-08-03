@@ -7385,6 +7385,18 @@ body.is-resizing * {
   font-size: 11px;
 }
 
+.agent-control-next {
+  flex: none;
+  padding: 2px 4px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--text-faint);
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
 .agent-control-chip:not(.is-static):hover,
 .agent-control-chip.is-open {
   background: rgba(255, 255, 255, 0.06);
@@ -7687,6 +7699,59 @@ body.is-resizing * {
   stroke: currentColor;
   stroke-width: 1.5;
   stroke-linecap: round;
+}
+
+.agent-conversation-menu {
+  position: relative;
+  flex: none;
+}
+
+.agent-conversation-popover {
+  position: absolute;
+  top: calc(100% + 5px);
+  right: 0;
+  z-index: 35;
+  width: max-content;
+  min-width: 214px;
+  padding: 4px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--bg-elevated);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.45);
+}
+
+.agent-conversation-popover button {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  min-height: 30px;
+  padding: 6px 8px;
+  border-radius: 5px;
+  color: var(--text-muted);
+  font-size: 11.5px;
+  text-align: left;
+}
+
+.agent-conversation-popover button:hover:not(:disabled) {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.agent-conversation-popover button:disabled {
+  cursor: default;
+  opacity: 0.38;
+}
+
+.agent-conversation-popover svg {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.35;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .agent-scroll {

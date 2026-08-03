@@ -523,7 +523,15 @@ export function createClaudeAdapter(): AgentAdapter {
     }
   >();
   /** Our outbound `set_model` requests, keyed by the id we gave them. */
-  const pendingModelChanges = new Map<string, string>();
+  const pendingModelChanges = new Map<
+    string,
+    {
+      model: string;
+      announce: boolean;
+      resolve?: () => void;
+      reject?: (error: Error) => void;
+    }
+  >();
   /** Our outbound `set_permission_mode` requests, keyed by request id. */
   const pendingAccessChanges = new Map<
     string,
@@ -1347,18 +1355,26 @@ export function createClaudeAdapter(): AgentAdapter {
     const response = asRecord(frame.response);
     const requestId = asString(response?.request_id);
     if (!requestId) return;
-    const model = pendingModelChanges.get(requestId);
-    if (model !== undefined) {
+    const modelChange = pendingModelChanges.get(requestId);
+    if (modelChange !== undefined) {
       pendingModelChanges.delete(requestId);
       if (asString(response?.subtype) === "success") {
-        ctx.emit({ type: "session", model });
-        ctx.emit({ type: "notice", tone: "info", text: `Model set to ${model}.` });
+        ctx.emit({ type: "session", model: modelChange.model });
+        if (modelChange.announce) {
+          ctx.emit({
+            type: "notice",
+            tone: "info",
+            text: `Model set to ${modelChange.model}.`,
+          });
+        }
+        modelChange.resolve?.();
       } else {
-        ctx.emit({
-          type: "notice",
-          tone: "error",
-          text: asString(response?.error) ?? `Claude refused model "${model}".`,
-        });
+        const message =
+          asString(response?.error) ?? `Claude refused model "${modelChange.model}".`;
+        if (modelChange.announce) {
+          ctx.emit({ type: "notice", tone: "error", text: message });
+        }
+        modelChange.reject?.(new Error(message));
       }
       return;
     }
@@ -1458,7 +1474,7 @@ export function createClaudeAdapter(): AgentAdapter {
       // sentence names a display label, not the id we were given.
       controlSeq += 1;
       const requestId = `dw-model-${controlSeq}`;
-      pendingModelChanges.set(requestId, arg);
+      pendingModelChanges.set(requestId, { model: arg, announce: true });
       ctx.emit({ type: "user", text });
       ctx.send({
         type: "control_request",
@@ -1635,6 +1651,28 @@ export function createClaudeAdapter(): AgentAdapter {
     },
 
     command: handleCommand,
+
+    configure: (kind, value, ctx) => {
+      if (kind !== "model") return false;
+      return new Promise<boolean>((resolve, reject) => {
+        controlSeq += 1;
+        const requestId = `dw-model-${controlSeq}`;
+        pendingModelChanges.set(requestId, {
+          model: value,
+          announce: false,
+          resolve: () => resolve(true),
+          reject,
+        });
+        ctx.send({
+          type: "control_request",
+          request_id: requestId,
+          request: { subtype: "set_model", model: value },
+        });
+      }).then((accepted) => {
+        ctx.emit({ type: "notice", tone: "info", text: `Model set to ${value}.` });
+        return accepted;
+      });
+    },
 
     configureAccess: (mode, ctx) => {
       setAccessMode(mode, ctx, true);
