@@ -305,34 +305,6 @@ function paintBarberPole(t: number): string {
   });
 }
 
-/* -- Oscilloscope: a swept waveform over a faint baseline ----------------- */
-
-/* Phase rates used to be 5 / 3.2 rad/s; the trace thrashed hard enough at
-   loader FPS to strobe. Keep the dual-tone shape, just sweep it gently. */
-const OSCILLOSCOPE_CARRIER = 1.35;
-const OSCILLOSCOPE_MOD = 0.85;
-
-function paintOscilloscope(t: number): string {
-  return paintPlotted((plot) => {
-    for (let step = 0; step <= 60; step += 1) {
-      plot((step / 60) * ASPECT * 2 - ASPECT, 0, 0.07);
-    }
-    for (let step = 0; step <= 220; step += 1) {
-      const u = (step / 220) * ASPECT * 2 - ASPECT;
-      const x = u / ASPECT;
-      const envelope = Math.exp(-x * x * 0.55);
-      const wave =
-        Math.sin(x * 7 - t * OSCILLOSCOPE_CARRIER) * 0.58 +
-        Math.sin(x * 11.5 + t * OSCILLOSCOPE_MOD) * 0.26;
-      plot(
-        u,
-        wave * envelope,
-        0.35 + 0.65 * Math.abs(Math.cos(x * 7 - t * OSCILLOSCOPE_CARRIER)),
-      );
-    }
-  });
-}
-
 /* -- Lissajous: a comet head dragging a figure behind it ------------------ */
 
 function paintLissajous(t: number): string {
@@ -1869,7 +1841,6 @@ export const ASCII_ANIMATIONS: readonly PainterFactory[] = [
   field(interferenceField),
   stateless(paintFlowField),
   stateless(paintStarPoly),
-  stateless(paintOscilloscope),
   stateless(paintTetrahedron),
   field(checkerField),
   stateless(paintGalaxy),
