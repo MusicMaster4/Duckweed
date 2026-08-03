@@ -5,11 +5,16 @@
 //! editor's sidebar does. File open goes through the same surface so the
 //! explorer can show a file in a popup without shelling out.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
+use ignore::{DirEntry as WalkEntry, WalkBuilder, WalkState};
+use regex::RegexBuilder;
+use serde::Deserialize;
 use serde::Serialize;
 
 /// Soft cap for the in-app file viewer. Past this the UI still reports size
@@ -38,6 +43,229 @@ pub struct WorkspacePath {
 
 /// Enough for very large repositories while keeping one IPC payload bounded.
 const MAX_WORKSPACE_PATHS: usize = 50_000;
+
+/// Hard bounds keep a broad query from flooding the webview or reading a
+/// generated multi-megabyte artifact into memory.
+const MAX_SEARCH_RESULTS: usize = 10_000;
+const MAX_SEARCH_FILE_BYTES: u64 = 8 * 1024 * 1024;
+
+#[derive(Deserialize, Clone, Debug)]
+pub struct SearchProject {
+    pub path: String,
+    pub name: String,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct SearchMatch {
+    pub project_path: String,
+    pub project_name: String,
+    pub path: String,
+    pub relative: String,
+    /// One-based line number for display and editor navigation.
+    pub line: usize,
+    /// Zero-based UTF-16 column, matching textarea selection semantics.
+    pub column: usize,
+    pub match_length: usize,
+    pub line_text: String,
+}
+
+#[derive(Serialize, Clone, Debug)]
+pub struct SearchResponse {
+    pub matches: Vec<SearchMatch>,
+    pub files_scanned: usize,
+    pub truncated: bool,
+    pub cancelled: bool,
+}
+
+/// Newer searches supersede older walks. `fetch_max` is important because an
+/// older IPC task may reach the blocking pool after the request that replaced it.
+#[derive(Default, Clone)]
+pub struct SearchGeneration(Arc<AtomicU64>);
+
+impl SearchGeneration {
+    pub fn cancel_before(&self, generation: u64) {
+        self.0.fetch_max(generation, Ordering::Relaxed);
+    }
+
+    fn is_current(&self, generation: u64) -> bool {
+        self.0.load(Ordering::Relaxed) == generation
+    }
+}
+
+fn searchable_entry(entry: &WalkEntry) -> bool {
+    let Some(kind) = entry.file_type() else {
+        return false;
+    };
+    kind.is_file()
+}
+
+/// Search literal text across every open project using parallel, gitignore-aware
+/// directory walks. Results carry UTF-16 columns so the browser can select the
+/// exact match without rescanning every preceding character in the file.
+pub fn search_projects(
+    projects: Vec<SearchProject>,
+    query: String,
+    generation: u64,
+    current: Arc<SearchGeneration>,
+) -> Result<SearchResponse, String> {
+    current.cancel_before(generation);
+    let query = query.trim().to_string();
+    if query.is_empty() {
+        return Ok(SearchResponse {
+            matches: Vec::new(),
+            files_scanned: 0,
+            truncated: false,
+            cancelled: false,
+        });
+    }
+
+    let matcher = Arc::new(
+        RegexBuilder::new(&regex::escape(&query))
+            .case_insensitive(true)
+            .unicode(true)
+            .build()
+            .map_err(|error| format!("invalid search: {error}"))?,
+    );
+    let matches = Arc::new(Mutex::new(Vec::<SearchMatch>::new()));
+    let files_scanned = Arc::new(AtomicU64::new(0));
+    let truncated = Arc::new(AtomicU64::new(0));
+
+    // Duplicate folders can be open in multiple tabs. Search each on-disk root
+    // once, preferring the first visible name supplied by the frontend.
+    let mut unique = HashMap::<String, String>::new();
+    for project in projects {
+        unique.entry(project.path).or_insert(project.name);
+    }
+
+    for (project_path, project_name) in unique {
+        if !current.is_current(generation) || truncated.load(Ordering::Relaxed) != 0 {
+            break;
+        }
+        let root = Path::new(&project_path);
+        if !root.is_dir() {
+            continue;
+        }
+
+        let mut builder = WalkBuilder::new(root);
+        builder
+            .hidden(false)
+            .follow_links(false)
+            .git_ignore(true)
+            .git_global(true)
+            .git_exclude(true)
+            .filter_entry(|entry| {
+                if entry.depth() == 0 {
+                    return true;
+                }
+                let name = entry.file_name().to_string_lossy();
+                !SKIP_WORKSPACE_DIRS
+                    .iter()
+                    .any(|skipped| name.eq_ignore_ascii_case(skipped))
+            });
+
+        let root = root.to_path_buf();
+        let project_path_for_match = project_path.clone();
+        let project_name_for_match = project_name.clone();
+        let matcher_for_walk = matcher.clone();
+        let matches_for_walk = matches.clone();
+        let files_for_walk = files_scanned.clone();
+        let truncated_for_walk = truncated.clone();
+        let current_for_walk = current.clone();
+
+        builder.build_parallel().run(|| {
+            let root = root.clone();
+            let project_path = project_path_for_match.clone();
+            let project_name = project_name_for_match.clone();
+            let matcher = matcher_for_walk.clone();
+            let matches = matches_for_walk.clone();
+            let files_scanned = files_for_walk.clone();
+            let truncated = truncated_for_walk.clone();
+            let current = current_for_walk.clone();
+
+            Box::new(move |entry| {
+                if !current.is_current(generation) || truncated.load(Ordering::Relaxed) != 0 {
+                    return WalkState::Quit;
+                }
+                let Ok(entry) = entry else {
+                    return WalkState::Continue;
+                };
+                if !searchable_entry(&entry) {
+                    return WalkState::Continue;
+                }
+                let Ok(meta) = entry.metadata() else {
+                    return WalkState::Continue;
+                };
+                if meta.len() > MAX_SEARCH_FILE_BYTES {
+                    return WalkState::Continue;
+                }
+                let Ok(bytes) = std::fs::read(entry.path()) else {
+                    return WalkState::Continue;
+                };
+                if bytes.contains(&0) {
+                    return WalkState::Continue;
+                }
+                let Ok(text) = String::from_utf8(bytes) else {
+                    return WalkState::Continue;
+                };
+                files_scanned.fetch_add(1, Ordering::Relaxed);
+
+                let relative = entry
+                    .path()
+                    .strip_prefix(&root)
+                    .unwrap_or(entry.path())
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                let path = entry.path().to_string_lossy().to_string();
+                for (line_index, line_with_newline) in text.split_inclusive('\n').enumerate() {
+                    let line_text = line_with_newline.trim_end_matches(['\r', '\n']);
+                    for found in matcher.find_iter(line_text) {
+                        let column = line_text[..found.start()].encode_utf16().count();
+                        let mut guard = matches
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        if guard.len() >= MAX_SEARCH_RESULTS {
+                            truncated.store(1, Ordering::Relaxed);
+                            return WalkState::Quit;
+                        }
+                        guard.push(SearchMatch {
+                            project_path: project_path.clone(),
+                            project_name: project_name.clone(),
+                            path: path.clone(),
+                            relative: relative.clone(),
+                            line: line_index + 1,
+                            column,
+                            match_length: line_text[found.start()..found.end()]
+                                .encode_utf16()
+                                .count(),
+                            line_text: line_text.to_string(),
+                        });
+                    }
+                }
+                WalkState::Continue
+            })
+        });
+    }
+
+    let cancelled = !current.is_current(generation);
+    let mut found = matches
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+    found.sort_by(|a, b| {
+        a.project_name
+            .to_lowercase()
+            .cmp(&b.project_name.to_lowercase())
+            .then_with(|| a.relative.to_lowercase().cmp(&b.relative.to_lowercase()))
+            .then_with(|| a.line.cmp(&b.line))
+            .then_with(|| a.column.cmp(&b.column))
+    });
+    Ok(SearchResponse {
+        matches: found,
+        files_scanned: files_scanned.load(Ordering::Relaxed) as usize,
+        truncated: truncated.load(Ordering::Relaxed) != 0,
+        cancelled,
+    })
+}
 
 /// Generated dependency trees are neither useful mention targets nor safe to walk.
 const SKIP_WORKSPACE_DIRS: [&str; 10] = [
@@ -312,6 +540,41 @@ mod tests {
         assert!(indexed
             .iter()
             .all(|entry| Path::new(&entry.path).is_absolute()));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn project_search_finds_literal_text_and_reports_utf16_positions() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("duckweed-project-search-{unique}"));
+        let src = root.join("src");
+        let dependencies = root.join("node_modules").join("package");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dependencies).unwrap();
+        std::fs::write(src.join("app.ts"), "first\n😀 Needle here\n").unwrap();
+        std::fs::write(dependencies.join("index.js"), "needle").unwrap();
+
+        let current = Arc::new(SearchGeneration::default());
+        let response = search_projects(
+            vec![SearchProject {
+                path: root.to_string_lossy().to_string(),
+                name: "Test app".into(),
+            }],
+            "needle".into(),
+            1,
+            current,
+        )
+        .unwrap();
+
+        assert!(!response.cancelled);
+        assert_eq!(response.matches.len(), 1);
+        assert_eq!(response.matches[0].relative, "src/app.ts");
+        assert_eq!(response.matches[0].line, 2);
+        assert_eq!(response.matches[0].column, 3);
 
         std::fs::remove_dir_all(root).unwrap();
     }

@@ -1,7 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { listDir } from "../lib/ipc";
-import type { DirEntry, ProjectInfo } from "../lib/types";
+import { cancelProjectSearch, listDir, projectSearch } from "../lib/ipc";
+import type {
+  DirEntry,
+  EditorReveal,
+  ProjectInfo,
+  ProjectSearchMatch,
+  ProjectSearchResponse,
+  ProjectSearchTarget,
+} from "../lib/types";
 import { AsciiAmbient } from "./AsciiAmbient";
 
 interface Props {
@@ -17,6 +24,9 @@ interface Props {
    * and hiding the tools rail cannot silently discard a dirty buffer.
    */
   onOpenFile: (path: string) => void;
+  /** Every distinct app currently represented by an open tab. */
+  searchProjects: ProjectSearchTarget[];
+  onOpenSearchResult: (projectPath: string, path: string, reveal: EditorReveal) => void;
 }
 
 /** A level that has been asked for: its entries, or why they never arrived. */
@@ -25,6 +35,29 @@ type Load = { entries: DirEntry[] } | { error: string };
 type Row =
   | { kind: "entry"; key: string; depth: number; entry: DirEntry }
   | { kind: "note"; key: string; depth: number; text: string; error?: boolean };
+
+type SearchState =
+  | { kind: "idle" }
+  | { kind: "searching" }
+  | { kind: "ready"; response: ProjectSearchResponse }
+  | { kind: "error"; message: string };
+
+interface SearchFileGroup {
+  path: string;
+  relative: string;
+  matches: ProjectSearchMatch[];
+}
+
+interface SearchProjectGroup {
+  path: string;
+  name: string;
+  files: SearchFileGroup[];
+  matchCount: number;
+}
+
+// Millisecond time plus a local suffix stays monotonic across explorer remounts
+// and safely below JavaScript's exact-integer limit for many decades.
+let searchGeneration = Date.now() * 1000;
 
 const Chevron = ({ open }: { open: boolean }) => (
   <svg viewBox="0 0 16 16" aria-hidden="true" className={`tree-chevron ${open ? "is-open" : ""}`}>
@@ -63,6 +96,8 @@ export function ProjectExplorer({
   onOpenFolder,
   onBrowseProject,
   onOpenFile,
+  searchProjects,
+  onOpenSearchResult,
 }: Props) {
   const root = project?.path ?? null;
 
@@ -71,6 +106,10 @@ export function ProjectExplorer({
   const [selected, setSelected] = useState<string | null>(null);
   /** Levels being read right now, so the fetch effect never asks twice. */
   const inflight = useRef(new Set<string>());
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [search, setSearch] = useState<SearchState>({ kind: "idle" });
 
   // A different project is a different tree; nothing about the old one survives.
   // The popup editor is lifted out of this tree so a tab switch cannot wipe a
@@ -140,6 +179,84 @@ export function ProjectExplorer({
     return out;
   }, [cache, expanded, root]);
 
+  useEffect(() => {
+    if (!searchOpen) return;
+    const id = window.setTimeout(() => searchInputRef.current?.focus(), 0);
+    return () => window.clearTimeout(id);
+  }, [searchOpen]);
+
+  useEffect(() => {
+    if (!searchOpen) return;
+    const generation = ++searchGeneration;
+    void cancelProjectSearch(generation).catch(() => undefined);
+    const trimmed = query.trim();
+    if (!trimmed) {
+      setSearch({ kind: "idle" });
+      return;
+    }
+    if (searchProjects.length === 0) {
+      setSearch({ kind: "ready", response: { matches: [], files_scanned: 0, truncated: false, cancelled: false } });
+      return;
+    }
+
+    setSearch({ kind: "searching" });
+    let disposed = false;
+    const timer = window.setTimeout(() => {
+      projectSearch(searchProjects, trimmed, generation)
+        .then((response) => {
+          if (!disposed && !response.cancelled) setSearch({ kind: "ready", response });
+        })
+        .catch((error: unknown) => {
+          if (!disposed) setSearch({ kind: "error", message: String(error) });
+        });
+    }, 160);
+    return () => {
+      disposed = true;
+      window.clearTimeout(timer);
+    };
+  }, [query, searchOpen, searchProjects]);
+
+  const searchGroups = useMemo<SearchProjectGroup[]>(() => {
+    if (search.kind !== "ready") return [];
+    const projects = new Map<string, SearchProjectGroup>();
+    const files = new Map<string, SearchFileGroup>();
+    for (const match of search.response.matches) {
+      let projectGroup = projects.get(match.project_path);
+      if (!projectGroup) {
+        projectGroup = {
+          path: match.project_path,
+          name: match.project_name,
+          files: [],
+          matchCount: 0,
+        };
+        projects.set(match.project_path, projectGroup);
+      }
+      projectGroup.matchCount++;
+      const fileKey = `${match.project_path}\0${match.path}`;
+      let fileGroup = files.get(fileKey);
+      if (!fileGroup) {
+        fileGroup = { path: match.path, relative: match.relative, matches: [] };
+        files.set(fileKey, fileGroup);
+        projectGroup.files.push(fileGroup);
+      }
+      fileGroup.matches.push(match);
+    }
+    return [...projects.values()];
+  }, [search]);
+
+  const renderMatchPreview = (match: ProjectSearchMatch) => {
+    const before = match.line_text.slice(0, match.column);
+    const found = match.line_text.slice(match.column, match.column + match.match_length);
+    const after = match.line_text.slice(match.column + match.match_length);
+    return (
+      <span className="project-search-preview">
+        {before}
+        <mark>{found}</mark>
+        {after}
+      </span>
+    );
+  };
+
   if (!project || !root) {
     return (
       <div className="tools-empty tools-empty-ambient">
@@ -158,11 +275,115 @@ export function ProjectExplorer({
     <>
       <div className="tools-section-head">
         <span className="tools-section-title">Project explorer</span>
-        <button type="button" className="tools-btn" title="Re-read the folder" onClick={refresh}>
-          refresh
+        <span className="project-explorer-actions" />
+        <button
+          type="button"
+          className={`project-search-toggle ${searchOpen ? "is-active" : ""}`}
+          title="Search text across open apps"
+          aria-label="Search text across open apps"
+          aria-pressed={searchOpen}
+          onClick={() => setSearchOpen((open) => !open)}
+        >
+          <svg viewBox="0 0 16 16" aria-hidden="true">
+            <circle cx="7" cy="7" r="4.25" />
+            <path d="M10.2 10.2L14 14" />
+          </svg>
         </button>
+        {!searchOpen && (
+          <button type="button" className="tools-btn" title="Re-read the folder" onClick={refresh}>
+            refresh
+          </button>
+        )}
       </div>
 
+      {searchOpen ? (
+        <div className="project-search">
+          <div className="project-search-field">
+            <svg viewBox="0 0 16 16" aria-hidden="true">
+              <circle cx="7" cy="7" r="4.25" />
+              <path d="M10.2 10.2L14 14" />
+            </svg>
+            <input
+              ref={searchInputRef}
+              type="text"
+              value={query}
+              spellCheck={false}
+              placeholder="Search text across open apps"
+              aria-label="Search text across open apps"
+              onChange={(event) => setQuery(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") {
+                  event.stopPropagation();
+                  if (query) setQuery("");
+                  else setSearchOpen(false);
+                }
+              }}
+            />
+            {query && (
+              <button type="button" title="Clear search" aria-label="Clear search" onClick={() => setQuery("")}>
+                ×
+              </button>
+            )}
+          </div>
+
+          <div className="project-search-summary" aria-live="polite">
+            {search.kind === "idle" && `${searchProjects.length} open app${searchProjects.length === 1 ? "" : "s"}`}
+            {search.kind === "searching" && "Searching…"}
+            {search.kind === "error" && <span className="is-error">Search failed</span>}
+            {search.kind === "ready" && (
+              <>
+                {search.response.matches.length} result{search.response.matches.length === 1 ? "" : "s"} in {searchGroups.reduce((count, group) => count + group.files.length, 0)} file{searchGroups.reduce((count, group) => count + group.files.length, 0) === 1 ? "" : "s"}
+                {search.response.truncated ? " (first 10,000)" : ""}
+              </>
+            )}
+          </div>
+
+          {search.kind === "error" && <div className="tree-note is-error">{search.message}</div>}
+          {search.kind === "ready" && search.response.matches.length === 0 && (
+            <div className="project-search-empty">No matches in open apps.</div>
+          )}
+          {search.kind === "ready" && search.response.matches.length > 0 && (
+            <div className="project-search-results">
+              {searchGroups.map((projectGroup) => (
+                <section key={projectGroup.path} className="project-search-app">
+                  <div className="project-search-app-head" title={projectGroup.path}>
+                    <FolderIcon open />
+                    <span>{projectGroup.name}</span>
+                    <small>{projectGroup.matchCount}</small>
+                  </div>
+                  {projectGroup.files.map((fileGroup) => (
+                    <div key={fileGroup.path} className="project-search-file">
+                      <div className="project-search-file-head" title={fileGroup.path}>
+                        <FileIcon />
+                        <span>{fileGroup.relative}</span>
+                        <small>{fileGroup.matches.length}</small>
+                      </div>
+                      {fileGroup.matches.map((match, index) => (
+                        <button
+                          key={`${match.line}:${match.column}:${index}`}
+                          type="button"
+                          className="project-search-match"
+                          title={`${match.path}:${match.line}:${match.column + 1}`}
+                          onClick={() =>
+                            onOpenSearchResult(match.project_path, match.path, {
+                              line: match.line,
+                              column: match.column,
+                              matchLength: match.match_length,
+                            })
+                          }
+                        >
+                          <span className="project-search-line">{match.line}</span>
+                          {renderMatchPreview(match)}
+                        </button>
+                      ))}
+                    </div>
+                  ))}
+                </section>
+              ))}
+            </div>
+          )}
+        </div>
+      ) : (
       <div className="tree" role="tree">
         <button
           type="button"
@@ -236,6 +457,7 @@ export function ProjectExplorer({
             ),
           )}
       </div>
+      )}
     </>
   );
 }

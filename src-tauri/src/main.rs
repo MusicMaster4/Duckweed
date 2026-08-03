@@ -29,7 +29,7 @@ use agent_proc::{
     AgentAvailability, AgentFrame, AgentProcManager, AgentSpawnOptions, AgentStarted,
 };
 use agent_sessions::{AgentSessionSummary, AgentTranscriptItem};
-use fs::{DirEntry, FileContent, WorkspacePath};
+use fs::{DirEntry, FileContent, SearchGeneration, SearchProject, SearchResponse, WorkspacePath};
 use git::{Branches, Diff, DiffStats, FileDiff};
 use launch::{LaunchIntent, PendingLaunch};
 use ports::{ForwardInfo, PortManager, PortSnapshot};
@@ -642,6 +642,26 @@ fn workspace_paths(path: String) -> Result<Vec<WorkspacePath>, String> {
     fs::workspace_paths(&path)
 }
 
+#[tauri::command]
+async fn project_search(
+    manager: State<'_, SearchGeneration>,
+    projects: Vec<SearchProject>,
+    query: String,
+    generation: u64,
+) -> Result<SearchResponse, String> {
+    let current = manager.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        fs::search_projects(projects, query, generation, std::sync::Arc::new(current))
+    })
+    .await
+    .map_err(|error| format!("search task failed: {error}"))?
+}
+
+#[tauri::command]
+fn project_search_cancel(manager: State<'_, SearchGeneration>, generation: u64) {
+    manager.cancel_before(generation);
+}
+
 #[cfg(not(debug_assertions))]
 fn focus_main_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
@@ -734,6 +754,7 @@ fn main() {
         .manage(ProjectWatchManager::default())
         .manage(UsageState::default())
         .manage(DurableSettings::default())
+        .manage(SearchGeneration::default())
         .manage(PendingLaunch(Mutex::new(startup_intent)))
         .setup(|app| {
             if let (Some(window), Some(icon)) = (
@@ -760,6 +781,8 @@ fn main() {
             project_info,
             list_dir,
             workspace_paths,
+            project_search,
+            project_search_cancel,
             read_file,
             read_dropped_image,
             write_file,

@@ -11,7 +11,7 @@ import { Tooltip } from "./Tooltip";
 import * as checklist from "../lib/checklist";
 import type { LayoutDraft, LayoutTemplate } from "../lib/layouts";
 import * as powerWatch from "../lib/powerWatch";
-import type { ProjectInfo } from "../lib/types";
+import type { EditorReveal, ProjectInfo, ProjectSearchTarget } from "../lib/types";
 
 interface Props {
   project: ProjectInfo | null;
@@ -25,6 +25,8 @@ interface Props {
   onOpenFolder: (path: string) => void;
   onBrowseProject: () => void;
   onOpenFile: (path: string) => void;
+  searchProjects: ProjectSearchTarget[];
+  onOpenSearchResult: (projectPath: string, path: string, reveal: EditorReveal) => void;
   getCurrentLayoutDraft: () => LayoutDraft | null;
   onOpenLayout: (layout: LayoutTemplate) => void;
   stats: {
@@ -148,6 +150,8 @@ export function ToolsPanel({
   onOpenFolder,
   onBrowseProject,
   onOpenFile,
+  searchProjects,
+  onOpenSearchResult,
   getCurrentLayoutDraft,
   onOpenLayout,
   stats,
@@ -262,6 +266,8 @@ export function ToolsPanel({
             onOpenFolder={onOpenFolder}
             onBrowseProject={onBrowseProject}
             onOpenFile={onOpenFile}
+            searchProjects={searchProjects}
+            onOpenSearchResult={onOpenSearchResult}
           />
         )}
         {section === "checklist" && <ChecklistTool scope={tabId} scopeLabel={tabTitle} />}
