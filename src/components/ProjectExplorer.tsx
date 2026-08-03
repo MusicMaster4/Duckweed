@@ -245,9 +245,12 @@ export function ProjectExplorer({
   }, [search]);
 
   const renderMatchPreview = (match: ProjectSearchMatch) => {
-    const before = match.line_text.slice(0, match.column);
-    const found = match.line_text.slice(match.column, match.column + match.match_length);
-    const after = match.line_text.slice(match.column + match.match_length);
+    const before = match.line_text.slice(0, match.preview_column);
+    const found = match.line_text.slice(
+      match.preview_column,
+      match.preview_column + match.match_length,
+    );
+    const after = match.line_text.slice(match.preview_column + match.match_length);
     return (
       <span className="project-search-preview">
         {before}
@@ -257,19 +260,7 @@ export function ProjectExplorer({
     );
   };
 
-  if (!project || !root) {
-    return (
-      <div className="tools-empty tools-empty-ambient">
-        <AsciiAmbient surfaceId="project-no-folder" scene="network" />
-        <p>This tab has no folder yet.</p>
-        <button type="button" className="tools-btn" onClick={onBrowseProject}>
-          Open a folder…
-        </button>
-      </div>
-    );
-  }
-
-  const rootOpen = expanded.has(root);
+  const rootOpen = root ? expanded.has(root) : false;
 
   return (
     <>
@@ -289,7 +280,7 @@ export function ProjectExplorer({
             <path d="M10.2 10.2L14 14" />
           </svg>
         </button>
-        {!searchOpen && (
+        {!searchOpen && root && (
           <button type="button" className="tools-btn" title="Re-read the folder" onClick={refresh}>
             refresh
           </button>
@@ -382,6 +373,14 @@ export function ProjectExplorer({
               ))}
             </div>
           )}
+        </div>
+      ) : !project || !root ? (
+        <div className="tools-empty tools-empty-ambient">
+          <AsciiAmbient surfaceId="project-no-folder" scene="network" />
+          <p>This tab has no folder yet.</p>
+          <button type="button" className="tools-btn" onClick={onBrowseProject}>
+            Open a folder…
+          </button>
         </div>
       ) : (
       <div className="tree" role="tree">

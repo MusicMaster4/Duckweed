@@ -48,6 +48,8 @@ const MAX_WORKSPACE_PATHS: usize = 50_000;
 /// generated multi-megabyte artifact into memory.
 const MAX_SEARCH_RESULTS: usize = 10_000;
 const MAX_SEARCH_FILE_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_SEARCH_PREVIEW_CONTEXT_CHARS: usize = 120;
+const SEARCH_PREVIEW_ELLIPSIS: &str = "...";
 
 #[derive(Deserialize, Clone, Debug)]
 pub struct SearchProject {
@@ -65,7 +67,10 @@ pub struct SearchMatch {
     pub line: usize,
     /// Zero-based UTF-16 column, matching textarea selection semantics.
     pub column: usize,
+    /// Zero-based UTF-16 column within the bounded `line_text` preview.
+    pub preview_column: usize,
     pub match_length: usize,
+    /// Bounded source-line preview around the match.
     pub line_text: String,
 }
 
@@ -97,6 +102,52 @@ fn searchable_entry(entry: &WalkEntry) -> bool {
         return false;
     };
     kind.is_file()
+}
+
+/// Keep search result previews small even when one source line is enormous.
+/// The match itself stays intact so the browser can highlight it and use its
+/// UTF-16 length for editor navigation.
+fn bounded_search_preview(line: &str, start: usize, end: usize) -> (String, usize, usize) {
+    let prefix_start = line[..start]
+        .char_indices()
+        .rev()
+        .nth(MAX_SEARCH_PREVIEW_CONTEXT_CHARS.saturating_sub(1))
+        .map(|(index, _)| index)
+        .unwrap_or(0);
+    let suffix_end = line[end..]
+        .char_indices()
+        .nth(MAX_SEARCH_PREVIEW_CONTEXT_CHARS)
+        .map(|(index, _)| end + index)
+        .unwrap_or(line.len());
+    let has_prefix = prefix_start > 0;
+    let has_suffix = suffix_end < line.len();
+
+    let mut preview = String::with_capacity(
+        line[prefix_start..suffix_end].len()
+            + if has_prefix {
+                SEARCH_PREVIEW_ELLIPSIS.len()
+            } else {
+                0
+            }
+            + if has_suffix {
+                SEARCH_PREVIEW_ELLIPSIS.len()
+            } else {
+                0
+            },
+    );
+    if has_prefix {
+        preview.push_str(SEARCH_PREVIEW_ELLIPSIS);
+    }
+    preview.push_str(&line[prefix_start..start]);
+    let column = preview.encode_utf16().count();
+    preview.push_str(&line[start..end]);
+    let match_length = line[start..end].encode_utf16().count();
+    preview.push_str(&line[end..suffix_end]);
+    if has_suffix {
+        preview.push_str(SEARCH_PREVIEW_ELLIPSIS);
+    }
+
+    (preview, column, match_length)
 }
 
 /// Search literal text across every open project using parallel, gitignore-aware
@@ -220,6 +271,8 @@ pub fn search_projects(
                     let line_text = line_with_newline.trim_end_matches(['\r', '\n']);
                     for found in matcher.find_iter(line_text) {
                         let column = line_text[..found.start()].encode_utf16().count();
+                        let (preview, preview_column, match_length) =
+                            bounded_search_preview(line_text, found.start(), found.end());
                         let mut guard = matches
                             .lock()
                             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -234,10 +287,9 @@ pub fn search_projects(
                             relative: relative.clone(),
                             line: line_index + 1,
                             column,
-                            match_length: line_text[found.start()..found.end()]
-                                .encode_utf16()
-                                .count(),
-                            line_text: line_text.to_string(),
+                            preview_column,
+                            match_length,
+                            line_text: preview,
                         });
                     }
                 }
@@ -575,7 +627,36 @@ mod tests {
         assert_eq!(response.matches[0].relative, "src/app.ts");
         assert_eq!(response.matches[0].line, 2);
         assert_eq!(response.matches[0].column, 3);
+        assert_eq!(response.matches[0].preview_column, 3);
 
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn search_preview_bounds_context_while_preserving_the_match_offset() {
+        let prefix = "x".repeat(MAX_SEARCH_PREVIEW_CONTEXT_CHARS + 20);
+        let suffix = "z".repeat(MAX_SEARCH_PREVIEW_CONTEXT_CHARS + 20);
+        let line = format!("{prefix}needle{suffix}");
+        let start = prefix.len();
+        let (preview, preview_column, match_length) =
+            bounded_search_preview(&line, start, start + "needle".len());
+
+        assert_eq!(
+            preview,
+            format!(
+                "...{}needle{}...",
+                "x".repeat(MAX_SEARCH_PREVIEW_CONTEXT_CHARS),
+                "z".repeat(MAX_SEARCH_PREVIEW_CONTEXT_CHARS),
+            )
+        );
+        assert_eq!(
+            preview_column,
+            SEARCH_PREVIEW_ELLIPSIS.len() + MAX_SEARCH_PREVIEW_CONTEXT_CHARS
+        );
+        assert_eq!(match_length, "needle".encode_utf16().count());
+        assert_eq!(
+            line[..start].encode_utf16().count(),
+            MAX_SEARCH_PREVIEW_CONTEXT_CHARS + 20
+        );
     }
 }

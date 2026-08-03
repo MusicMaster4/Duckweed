@@ -527,9 +527,7 @@ export function AgentSurface({ termId, active, onClose }: Props) {
             aria-expanded={conversationMenuOpen}
           >
             <svg viewBox="0 0 14 14" aria-hidden="true">
-              <path d="M2 7a5 5 0 1 0 1.6-3.7" fill="none" />
-              <path d="M2 1.8V4.4H4.6" fill="none" />
-              <path d="M7 4.4V7l1.9 1.1" fill="none" />
+              <path d="M8 1.5 3.5 7.8h3L6 12.5l4.5-6.3h-3z" />
             </svg>
           </button>
           {conversationMenuOpen && (

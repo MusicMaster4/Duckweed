@@ -98,6 +98,8 @@ export interface ProjectSearchMatch {
   line: number;
   /** UTF-16 offsets line up with textarea selectionStart/selectionEnd. */
   column: number;
+  /** UTF-16 offset of the match within the bounded line preview. */
+  preview_column: number;
   match_length: number;
   line_text: string;
 }

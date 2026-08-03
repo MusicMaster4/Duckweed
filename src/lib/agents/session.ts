@@ -1068,6 +1068,7 @@ export function configure(
     session.state = {
       ...session.state,
       nextModel: clean === session.state.model ? null : clean,
+      nextEffort: null,
     };
   } else {
     session.state = {
