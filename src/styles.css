@@ -6381,6 +6381,10 @@ body.is-resizing * {
   min-height: 0;
   display: flex;
   background: var(--bg-pane);
+  /* One integer line box shared by the gutter, the mirror and the textarea.
+     A fractional value rounds differently inside a textarea than in a div, so
+     the numbers slowly drift away from the lines they belong to. */
+  --file-editor-line: 18px;
   /* Code is the exception to the app-wide selection ban. */
   user-select: text;
 }
@@ -6388,18 +6392,22 @@ body.is-resizing * {
 .file-editor-gutter {
   flex: none;
   overflow: hidden;
-  padding: 10px 0 10px 10px;
+  /* Breathing room on both sides: right-aligned numbers used to sit glued to
+     the divider with all the slack piled up on the left. The bottom slack is
+     scroll range, not space: the textarea can scroll one scrollbar-height
+     further than its own text, and the numbers have to follow it there. */
+  padding: 10px 10px 26px 12px;
   border-right: 1px solid var(--border);
   color: var(--text-faint);
   font-family: var(--font-mono);
   font-size: 12px;
-  line-height: 1.55;
+  line-height: var(--file-editor-line);
   text-align: right;
   white-space: pre;
   user-select: none;
   font-variant-numeric: tabular-nums;
-  /* Wide enough for ~4 digits; long files just keep padding. */
-  min-width: 3.2em;
+  /* Snug on short files; the column grows on its own past two digits. */
+  min-width: 36px;
 }
 
 /* Stack: painted mirror under a transparent textarea (same idea as the
@@ -6421,7 +6429,7 @@ body.is-resizing * {
   border: 0;
   font-family: var(--font-mono);
   font-size: 12px;
-  line-height: 1.55;
+  line-height: var(--file-editor-line);
   letter-spacing: normal;
   tab-size: 4;
   white-space: pre;
@@ -6432,9 +6440,14 @@ body.is-resizing * {
 .file-editor-mirror {
   pointer-events: none;
   color: var(--text);
-  /* Keep the same overflow metrics as the textarea so glyphs stay aligned;
-     the textarea sits on top and owns interaction. */
-  overflow: auto;
+  /* Scroll lives on the textarea and is mirrored here by hand. Letting the
+     mirror scroll on its own would paint a second pair of scrollbars over the
+     code and eat layout width the textarea does not lose. */
+  overflow: hidden;
+  /* Same trailing slack as the gutter, on both axes: the textarea's scrollbars
+     shrink its client box, so it reaches offsets the mirror otherwise clamps. */
+  padding-right: 28px;
+  padding-bottom: 26px;
 }
 
 .file-editor-textarea {
