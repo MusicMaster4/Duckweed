@@ -1009,7 +1009,10 @@ export function editLastQueued(termId: string): AgentPrompt | null {
 export function sendQueuedNow(termId: string, id: string): void {
   const session = sessions.get(termId);
   if (!session || session.disposed || !session.adapter.steer) return;
-  if (session.configuring || hasNextConfiguration(session)) return;
+  // A staged model or effort belongs to the next turn. Sending a queued
+  // follow-up now steers the turn already in flight, so it must keep using
+  // that turn's active settings and leave the staged choices untouched.
+  if (session.configuring) return;
   if (session.state.status !== "working" && session.state.status !== "waiting") return;
   const index = session.queued.findIndex((queued) => queued.id === id && !queued.echoed);
   if (index < 0) return;
