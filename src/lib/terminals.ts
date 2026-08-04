@@ -805,9 +805,23 @@ function ensureAgentUiListener(): void {
     // the job that just finished, not how long the pane has been open.
     session.processStartedAt = Date.now();
   });
+  const offAuth = agentSessions.subscribeAuthRequest(({ termId, action, command }) => {
+    const session = sessions.get(termId);
+    if (!session?.agentUi || session.exited) return;
+    closeAgentUi(termId);
+    session.term.write(
+      `\r\n\x1b[38;5;244m${
+        action === "login"
+          ? "Sign in to continue in the Custom Agent UI."
+          : "Signing out with the agent CLI."
+      }\x1b[0m\r\n`,
+    );
+    submitCommand(termId, command);
+  });
   agentUiUnsubscribe = () => {
     offEnd();
     offStart();
+    offAuth();
   };
 }
 

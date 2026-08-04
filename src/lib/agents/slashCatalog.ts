@@ -9,6 +9,10 @@ const LOCAL_COMMANDS = [
     name: "/usage",
     description: "Show token, cost, and context usage reported for this session",
   },
+  {
+    name: "/logout",
+    description: "Sign out with this agent's native CLI",
+  },
 ] as const;
 
 /**

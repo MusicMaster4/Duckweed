@@ -31,6 +31,15 @@ Duckweed does not install agent CLIs for you.
 The original terminal interface remains available even when a custom interface
 is enabled.
 
+## An agent needs sign-in
+
+When a custom agent interface detects that its CLI is not signed in, Duckweed
+returns that pane to the terminal and starts the CLI's native login flow. Finish
+the browser or device-code steps there, then run the agent command again.
+
+Use `/logout` in any supported custom agent interface to return to the terminal
+and run that CLI's native logout command.
+
 ## A pane has no useful output
 
 Check that the shell works outside Duckweed and that the project folder still

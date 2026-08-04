@@ -9,6 +9,11 @@ import {
   type AgentFrame,
 } from "../ipc";
 import type { AdapterContext, AgentAdapter } from "./adapter";
+import {
+  isAuthenticationFailure,
+  nativeAuthCommand,
+  type AgentAuthAction,
+} from "./auth";
 import { createAcpAdapter } from "./adapters/acp";
 import { createClaudeAdapter } from "./adapters/claude";
 import { createCodexAdapter } from "./adapters/codex";
@@ -108,6 +113,8 @@ interface Session {
   interactionEpoch: number;
   /** Claude/Grok mirror their TUI's two-press exit gesture. */
   exitArmedUntil: number;
+  /** Prevent late protocol frames from requesting the same native handoff. */
+  authHandoff: boolean;
   disposed: boolean;
 }
 
@@ -139,6 +146,13 @@ const paneListeners = new Map<string, Set<() => void>>();
 const globalListeners = new Set<() => void>();
 const turnEndListeners = new Set<(termId: string) => void>();
 const turnStartListeners = new Set<(termId: string) => void>();
+export interface AgentAuthRequest {
+  termId: string;
+  agent: AgentId;
+  action: AgentAuthAction;
+  command: string;
+}
+const authRequestListeners = new Set<(request: AgentAuthRequest) => void>();
 
 /**
  * "This pane finished a turn, or is now blocked on the user."
@@ -163,6 +177,27 @@ export function subscribeTurnEnd(callback: (termId: string) => void): () => void
 export function subscribeTurnStart(callback: (termId: string) => void): () => void {
   turnStartListeners.add(callback);
   return () => turnStartListeners.delete(callback);
+}
+
+/** Ask the terminal owner to replace the headless process with native auth. */
+export function subscribeAuthRequest(
+  callback: (request: AgentAuthRequest) => void,
+): () => void {
+  authRequestListeners.add(callback);
+  return () => authRequestListeners.delete(callback);
+}
+
+function handoffToNativeAuth(session: Session, action: AgentAuthAction): boolean {
+  if (session.authHandoff || authRequestListeners.size === 0) return false;
+  session.authHandoff = true;
+  const request: AgentAuthRequest = {
+    termId: session.termId,
+    agent: session.state.agent,
+    action,
+    command: nativeAuthCommand(session.state.agent, action),
+  };
+  for (const listener of [...authRequestListeners]) listener(request);
+  return true;
 }
 
 function announceTurnEnd(session: Session): void {
@@ -507,6 +542,16 @@ function dispatch(session: Session, prompt: AgentPrompt, echoUser = true): void 
 function emit(session: Session, event: AgentEvent): void {
   if (session.disposed) return;
 
+  // Browser and device authentication cannot finish over these headless
+  // streams. Reveal the PTY and launch the provider's own flow instead.
+  const authError =
+    event.type === "status" && event.status === "error"
+      ? event.error
+      : event.type === "notice" && event.tone === "error"
+        ? event.text
+        : null;
+  if (isAuthenticationFailure(authError) && handoffToNativeAuth(session, "login")) return;
+
   // Claude applies /effort as a tiny protocol turn. Keep that implementation
   // detail out of the UI: no red Stop flicker, no working badge, and no
   // completion sound. A prompt submitted meanwhile waits a few milliseconds
@@ -630,10 +675,11 @@ function handleFrame(session: Session, frame: AgentFrame): void {
       if (session.stderr.length > 50) session.stderr.shift();
       return;
     case "exit": {
+      const detail = session.stderr.slice(-6).join("\n").trim();
+      if (isAuthenticationFailure(detail) && handoffToNativeAuth(session, "login")) return;
       const ready = session.state.status !== "starting" && session.state.status !== "error";
       if (!ready) {
         // Never got going: the stderr tail is the only explanation there is.
-        const detail = session.stderr.slice(-6).join("\n").trim();
         emit(session, {
           type: "status",
           status: "error",
@@ -700,6 +746,7 @@ export async function start(
     configurationTurn: null,
     interactionEpoch: 0,
     exitArmedUntil: 0,
+    authHandoff: false,
     disposed: false,
     state: {
       termId,
@@ -895,6 +942,10 @@ export function submit(
   if (session.state.status === "exited" || session.state.status === "error") return;
   // Record before usage/queue/steer paths so ↑ can recall it like a shell command.
   recordPromptHistory(session, trimmed);
+  if (images.length === 0 && /^\/logout$/i.test(trimmed)) {
+    handoffToNativeAuth(session, "logout");
+    return;
+  }
   if (images.length === 0 && /^\/usage$/i.test(trimmed)) {
     emit(session, {
       type: "notice",

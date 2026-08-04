@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
+import { AGENT_IDS } from "./catalog";
 import { canResume } from "./history";
 import {
   fallbackCommands,
@@ -15,6 +16,14 @@ describe("slashCatalog", () => {
   test("every agent has at least /model in its fallback commands", () => {
     for (const agent of ["claude", "codex", "grok", "opencode", "cursor"] as const) {
       expect(fallbackCommands(agent).some((command) => command.name === "/model")).toBe(true);
+    }
+  });
+
+  test("every agent exposes native logout", () => {
+    for (const agent of AGENT_IDS) {
+      const names = fallbackCommands(agent).map((command) => command.name);
+      expect(names).toContain("/logout");
+      expect(names).not.toContain("/login");
     }
   });
 
