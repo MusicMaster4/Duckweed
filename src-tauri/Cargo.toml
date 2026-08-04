@@ -21,6 +21,13 @@ ignore = "0.4"
 regex = "1"
 portable-pty = "0.9"
 notify = "6.1"
+# Completion cues play from this process. WebView audio works, but on Windows
+# the session belongs to the shared msedgewebview2.exe runtime, so the volume
+# mixer would file Duckweed's sounds under "Microsoft Edge WebView2".
+rodio = { version = "0.22", default-features = false, features = [
+    "playback",
+    "vorbis",
+] }
 # Usage buckets are keyed to local calendar days, which is the one date
 # calculation not worth hand-rolling (DST, offsets, leap years).
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }

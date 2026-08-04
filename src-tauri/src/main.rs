@@ -14,6 +14,7 @@ mod project;
 mod pty;
 mod shell_integration;
 mod shells;
+mod sound;
 mod terminal_shell_integration;
 mod usage;
 mod watch;
@@ -36,6 +37,7 @@ use ports::{ForwardInfo, PortManager, PortSnapshot};
 use project::ProjectInfo;
 use pty::{PtyManager, SpawnResult};
 use shells::ShellInfo;
+use sound::SoundPlayer;
 use usage::{pricing, Query, Snapshot, UsageState};
 use watch::ProjectWatchManager;
 
@@ -525,6 +527,18 @@ async fn power_action(action: String) -> Result<(), String> {
     blocking(move || power::run(action)).await
 }
 
+/// Play one completion cue from this process.
+///
+/// Playing it in the WebView instead would file the sound under "Microsoft Edge
+/// WebView2" in the Windows volume mixer, because that runtime process owns any
+/// audio the WebView starts. Errors are the frontend's cue to fall back to its
+/// own player, so a machine this cannot open a device on still gets sound.
+#[tauri::command]
+async fn play_completion_sound(player: State<'_, SoundPlayer>) -> Result<(), String> {
+    let player = player.inner().clone();
+    blocking(move || player.play()).await
+}
+
 /// Validate and hand `url` to the OS default handler.
 fn open_external_url(url: &str) -> Result<(), String> {
     let url = url.trim();
@@ -755,6 +769,7 @@ fn main() {
         .manage(UsageState::default())
         .manage(DurableSettings::default())
         .manage(SearchGeneration::default())
+        .manage(SoundPlayer::default())
         .manage(PendingLaunch(Mutex::new(startup_intent)))
         .setup(|app| {
             if let (Some(window), Some(icon)) = (
@@ -812,6 +827,7 @@ fn main() {
             agent_proc_stop,
             frontend_ready,
             open_url,
+            play_completion_sound,
             power_action,
             take_launch_intent,
             shell_integration_status,

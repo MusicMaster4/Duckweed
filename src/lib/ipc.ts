@@ -24,6 +24,12 @@ export const frontendReady = () => invoke<void>("frontend_ready");
 export const openUrl = (url: string) => invoke<void>("open_url", { url });
 
 /**
+ * Play one completion cue from the app process instead of the WebView, so the
+ * Windows volume mixer lists it as Duckweed. Resolves when the cue starts.
+ */
+export const playCompletionCue = () => invoke<void>("play_completion_sound");
+
+/**
  * Suspend or shut the machine down, for the power watch.
  *
  * A sleep only resolves once the machine wakes up again — the caller should

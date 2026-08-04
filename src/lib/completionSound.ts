@@ -1,3 +1,5 @@
+import { playCompletionCue } from "./ipc";
+
 const COMPLETION_SOUND_URLS = [
   new URL("../../assets/completion_sound_A.ogg", import.meta.url).href,
   new URL("../../assets/completion_sound_C.ogg", import.meta.url).href,
@@ -13,6 +15,8 @@ const HAVE_CURRENT_DATA = 2;
 
 let audioPlayers: HTMLAudioElement[] | null = null;
 let activePlayer: HTMLAudioElement | null = null;
+/** Cleared for the session once the native player reports it cannot play. */
+let nativePlayerUsable = true;
 /** True after a successful play (or silent unlock) under a user gesture. */
 let unlocked = false;
 let unlockBound = false;
@@ -139,8 +143,35 @@ function attemptPlay(player: HTMLAudioElement, generation: number): void {
     });
 }
 
+/**
+ * Whether the cue should come from the app process rather than the WebView.
+ *
+ * WebView audio belongs to the shared WebView2 runtime on Windows, so the
+ * volume mixer files these cues under "Microsoft Edge WebView2" with Edge's
+ * icon. The native player owns its audio session, so the mixer shows Duckweed.
+ */
+function nativePlayerAvailable(): boolean {
+  return (
+    nativePlayerUsable &&
+    typeof window !== "undefined" &&
+    "__TAURI_INTERNALS__" in window
+  );
+}
+
+/** Play one cue in the WebView, the fallback for browsers and dead devices. */
+function playInWebView(): void {
+  bindGestureUnlock();
+  const player = randomCompletionAudio();
+  if (!player) return;
+  const generation = ++playGeneration;
+  attemptPlay(player, generation);
+}
+
 /** Decode the short effects ahead of the first process completion when possible. */
 export function preloadCompletionSound(): void {
+  // The native player reads the cues straight out of the binary, so there is
+  // nothing to warm up until the WebView has to take over.
+  if (nativePlayerAvailable()) return;
   bindGestureUnlock();
   for (const player of completionAudios()) {
     try {
@@ -152,13 +183,19 @@ export function preloadCompletionSound(): void {
 }
 
 /**
- * Signal a completion once with a randomly selected cue. Rewinding the active
- * player coalesces simultaneous completions instead of stacking several copies.
+ * Signal a completion once with a randomly selected cue. Simultaneous
+ * completions restart the cue instead of stacking several copies.
  */
 export function playCompletionSound(): void {
-  bindGestureUnlock();
-  const player = randomCompletionAudio();
-  if (!player) return;
-  const generation = ++playGeneration;
-  attemptPlay(player, generation);
+  if (nativePlayerAvailable()) {
+    void playCompletionCue().catch(() => {
+      // No output device the app process can open, or an older build without
+      // the command. Hand the rest of the session to the WebView so
+      // completions stay audible even with the wrong name in the mixer.
+      nativePlayerUsable = false;
+      playInWebView();
+    });
+    return;
+  }
+  playInWebView();
 }

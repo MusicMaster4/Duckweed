@@ -41,6 +41,37 @@ afterAll(() => {
   else (globalThis as { Audio?: unknown }).Audio = originalAudio;
 });
 
+/** A stand-in for the Tauri IPC bridge `invoke()` talks to. */
+function fakeTauriRuntime(invoke: (command: string) => Promise<unknown>) {
+  const calls: string[] = [];
+  (globalThis as { window?: unknown }).window = {
+    __TAURI_INTERNALS__: {
+      invoke: (command: string) => {
+        calls.push(command);
+        return invoke(command);
+      },
+    },
+    // The WebView fallback binds gesture listeners before it plays.
+    addEventListener() {},
+    removeEventListener() {},
+    setTimeout: globalThis.setTimeout.bind(globalThis),
+  };
+  return calls;
+}
+
+function clearTauriRuntime() {
+  delete (globalThis as { window?: unknown }).window;
+}
+
+function totalPlays(): number {
+  return players.reduce((total, player) => total + player.plays, 0);
+}
+
+/** Let the invoke promise and its handlers settle. */
+function flush(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
 describe("completion sound", () => {
   test("preloads every cue and randomly chooses one for each completion", async () => {
     const originalRandom = Math.random;
@@ -72,6 +103,49 @@ describe("completion sound", () => {
       expect(players[5].currentTime).toBe(0);
     } finally {
       Math.random = originalRandom;
+    }
+  });
+
+  test("plays through the app process when the native player answers", async () => {
+    const sound = await import("./completionSound");
+    const calls = fakeTauriRuntime(() => Promise.resolve(null));
+
+    try {
+      const playsBefore = totalPlays();
+      // Nothing to warm up: the native player reads the cues from the binary.
+      sound.preloadCompletionSound();
+      sound.playCompletionSound();
+      await flush();
+
+      expect(calls).toEqual(["play_completion_sound"]);
+      expect(players.every((player) => player.loads === 1)).toBe(true);
+      // The WebView stays silent, so no msedgewebview2 audio session appears.
+      expect(totalPlays()).toBe(playsBefore);
+    } finally {
+      clearTauriRuntime();
+    }
+  });
+
+  // Runs last: the fallback is sticky for the rest of the session.
+  test("falls back to the WebView when the app process cannot play", async () => {
+    const sound = await import("./completionSound");
+    const calls = fakeTauriRuntime(() => Promise.reject(new Error("no output")));
+
+    try {
+      const playsBefore = totalPlays();
+      sound.playCompletionSound();
+      await flush();
+
+      expect(calls).toEqual(["play_completion_sound"]);
+      expect(totalPlays()).toBe(playsBefore + 1);
+
+      // Later completions go straight to the WebView instead of retrying.
+      sound.playCompletionSound();
+      await flush();
+      expect(calls).toHaveLength(1);
+      expect(totalPlays()).toBe(playsBefore + 2);
+    } finally {
+      clearTauriRuntime();
     }
   });
 });
