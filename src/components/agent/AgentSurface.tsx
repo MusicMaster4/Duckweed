@@ -521,7 +521,7 @@ export function AgentSurface({ termId, active, onClose }: Props) {
             type="button"
             className="agent-head-btn is-quiet"
             onClick={() => setConversationMenuOpen((open) => !open)}
-            title="Conversation actions"
+            title={conversationMenuOpen ? undefined : "Conversation actions"}
             aria-label="Conversation actions"
             aria-haspopup="menu"
             aria-expanded={conversationMenuOpen}
