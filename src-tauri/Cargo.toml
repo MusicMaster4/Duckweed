@@ -32,6 +32,8 @@ rodio = { version = "0.22", default-features = false, features = [
 # Usage buckets are keyed to local calendar days, which is the one date
 # calculation not worth hand-rolling (DST, offsets, leap years).
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+# Discord Rich Presence is sent directly to the locally running Discord client.
+discord-rich-presence = "1.1"
 # Provider-reported quota snapshots use the same official OAuth endpoints as
 # their CLIs. Blocking mode is safe here because usage scans already run on a
 # dedicated blocking worker.
