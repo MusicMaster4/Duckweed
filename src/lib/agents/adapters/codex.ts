@@ -8,6 +8,7 @@ import {
   type AdapterContext,
   type AgentAdapter,
 } from "../adapter";
+import { isAuthenticationFailure } from "../auth";
 import { applyEvent, type AgentEvent } from "../events";
 import type { AgentLaunch } from "../launch";
 import {
@@ -174,6 +175,8 @@ interface Pending {
   reject: (error: Record<string, unknown>) => void;
 }
 
+type RequestKey = string | number;
+
 interface ChildThread {
   callId: string | null;
   label: string | null;
@@ -199,7 +202,7 @@ function readFileChanges(raw: unknown): AgentFileChange[] {
 
 export function createCodexAdapter(): AgentAdapter {
   let nextId = 1;
-  const pending = new Map<number, Pending>();
+  const pending = new Map<RequestKey, Pending>();
   let threadId: string | null = null;
   let currentTurnId: string | null = null;
   /**
@@ -438,7 +441,15 @@ export function createCodexAdapter(): AgentAdapter {
     method: string,
     params: unknown,
   ): Promise<Record<string, unknown>> {
-    const id = nextId++;
+    return requestWithId(ctx, nextId++, method, params);
+  }
+
+  function requestWithId(
+    ctx: AdapterContext,
+    id: RequestKey,
+    method: string,
+    params: unknown,
+  ): Promise<Record<string, unknown>> {
     return new Promise((resolve, reject) => {
       pending.set(id, { resolve, reject });
       ctx.send({ jsonrpc: "2.0", id, method, params });
@@ -455,6 +466,29 @@ export function createCodexAdapter(): AgentAdapter {
         clientInfo: { name: "duckweed", title: "Duckweed", version: "0.1.0" },
       });
       notify(ctx, "initialized", {});
+
+      // thread/start succeeds without credentials. The first turn then
+      // retries a 401 several times, which used to leave the UI working
+      // forever. account/read detects that state before opening the thread.
+      try {
+        const account = await requestWithId(
+          ctx,
+          "duckweed-account-read",
+          "account/read",
+          { refreshToken: false },
+        );
+        if (account.requiresOpenaiAuth === true && account.account == null) {
+          ctx.emit({
+            type: "status",
+            status: "error",
+            error: "Codex is not signed in.",
+          });
+          return;
+        }
+      } catch {
+        // Older app-server builds do not expose account/read. Continue and
+        // catch any auth failure from the provider's normal error stream.
+      }
 
       currentModel = ctx.launch.model;
       currentEffort = ctx.launch.effort;
@@ -1368,7 +1402,11 @@ export function createCodexAdapter(): AgentAdapter {
       if (!frame) return;
 
       if (frame.id !== undefined && frame.method === undefined) {
-        const id = typeof frame.id === "number" ? frame.id : Number(frame.id);
+        const id =
+          typeof frame.id === "number" || typeof frame.id === "string"
+            ? frame.id
+            : null;
+        if (id === null) return;
         const waiting = pending.get(id);
         if (!waiting) return;
         pending.delete(id);
@@ -1381,6 +1419,25 @@ export function createCodexAdapter(): AgentAdapter {
       const method = asString(frame.method);
       if (!method) return;
       const params = asRecord(frame.params) ?? {};
+
+      // A missing or expired credential is reported as a retrying `error`
+      // notification after turn/start has already succeeded. Treat it as a
+      // terminal auth failure immediately instead of leaving the turn active
+      // through every reconnect attempt.
+      if (method === "error") {
+        const error = asRecord(params.error);
+        const detail = [asString(error?.message), asString(error?.additionalDetails)]
+          .filter((part): part is string => Boolean(part))
+          .join("\n");
+        if (isAuthenticationFailure(detail)) {
+          ctx.emit({
+            type: "status",
+            status: "error",
+            error: detail || "Codex authentication failed.",
+          });
+        }
+        return;
+      }
 
       if (frame.id !== undefined) {
         const id = frame.id as string | number;

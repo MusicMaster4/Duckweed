@@ -4,6 +4,7 @@
 mod agent_activity;
 mod agent_proc;
 mod agent_sessions;
+mod discord_presence;
 mod fs;
 mod git;
 mod launch;
@@ -30,6 +31,7 @@ use agent_proc::{
     AgentAvailability, AgentFrame, AgentProcManager, AgentSpawnOptions, AgentStarted,
 };
 use agent_sessions::{AgentSessionSummary, AgentTranscriptItem};
+use discord_presence::DiscordPresence;
 use fs::{DirEntry, FileContent, SearchGeneration, SearchProject, SearchResponse, WorkspacePath};
 use git::{Branches, Diff, DiffStats, FileDiff};
 use launch::{LaunchIntent, PendingLaunch};
@@ -751,6 +753,7 @@ fn main() {
     };
 
     builder
+        .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -768,6 +771,7 @@ fn main() {
         .manage(ProjectWatchManager::default())
         .manage(UsageState::default())
         .manage(DurableSettings::default())
+        .manage(DiscordPresence::start())
         .manage(SearchGeneration::default())
         .manage(SoundPlayer::default())
         .manage(PendingLaunch(Mutex::new(startup_intent)))
@@ -850,6 +854,9 @@ fn main() {
                 }
                 if let Some(manager) = window.app_handle().try_state::<PortManager>() {
                     manager.stop_all();
+                }
+                if let Some(presence) = window.app_handle().try_state::<DiscordPresence>() {
+                    presence.stop();
                 }
             }
         })

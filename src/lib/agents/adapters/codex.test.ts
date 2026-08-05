@@ -74,6 +74,13 @@ function harness(overrides: Partial<AgentLaunch> = {}) {
     await Promise.resolve();
     feed({
       jsonrpc: "2.0",
+      id: "duckweed-account-read",
+      result: { account: { type: "chatgpt", email: null }, requiresOpenaiAuth: true },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    feed({
+      jsonrpc: "2.0",
       id: 2,
       result: {
         thread: { id: "thread_1", sessionId: "sess_1" },
@@ -136,11 +143,54 @@ describe("codex adapter", () => {
     // No override: app-server inherits the same config as the normal TUI.
     expect(h.sent[2]).toEqual({
       jsonrpc: "2.0",
+      id: "duckweed-account-read",
+      method: "account/read",
+      params: { refreshToken: false },
+    });
+    expect(h.sent[3]).toEqual({
+      jsonrpc: "2.0",
       id: 2,
       method: "thread/start",
       params: { cwd: "H:/project" },
     });
     expect(h.state()).toMatchObject({ status: "idle", sessionId: "sess_1" });
+  });
+
+  test("stops before opening a thread when Codex requires a login", async () => {
+    const h = harness();
+    h.adapter.start(h.ctx);
+    await Promise.resolve();
+    h.feed({ jsonrpc: "2.0", id: 1, result: {} });
+    await Promise.resolve();
+    await Promise.resolve();
+    h.feed({
+      jsonrpc: "2.0",
+      id: "duckweed-account-read",
+      result: { account: null, requiresOpenaiAuth: true },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(h.state()).toMatchObject({ status: "error", error: "Codex is not signed in." });
+    expect(h.sent.some((message) => message.method === "thread/start")).toBe(false);
+  });
+
+  test("turns a retrying 401 notification into a terminal auth error", async () => {
+    const h = harness();
+    await h.handshake();
+    h.adapter.prompt({ text: "hello", images: [] }, h.ctx);
+    h.notify("error", {
+      error: {
+        message: "Reconnecting... 2/5",
+        additionalDetails: "401 Unauthorized: Missing bearer authentication",
+      },
+      willRetry: true,
+    });
+
+    expect(h.state()).toMatchObject({
+      status: "error",
+      error: expect.stringContaining("401 Unauthorized"),
+    });
   });
 
   test("reads the model and effort the thread actually started with", async () => {
@@ -162,7 +212,7 @@ describe("codex adapter", () => {
   test("passes a requested model into the thread", async () => {
     const h = harness({ model: "gpt-5.6" });
     await h.handshake({ model: "gpt-5.6" });
-    expect(h.sent[2]).toMatchObject({ params: { model: "gpt-5.6" } });
+    expect(h.sent[3]).toMatchObject({ params: { model: "gpt-5.6" } });
     expect(h.state().model).toBe("gpt-5.6");
   });
 
