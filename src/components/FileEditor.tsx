@@ -25,6 +25,22 @@ function splitPath(path: string): [string, string] {
   return cut < 0 ? ["", path] : [path.slice(0, cut + 1), path.slice(cut + 1)];
 }
 
+/**
+ * Drop the CR of Windows line endings.
+ *
+ * The mirror paints the file as a run of `<span>`s, and a token boundary can
+ * fall between the CR and the LF of the same break — a Markdown heading, a
+ * list bullet or a fence closes its span on the CR and the LF opens the next
+ * one. CSS collapses CRLF into a single break only inside one text node, so a
+ * split pair lays out as two breaks and the file grows a blank line that is
+ * not in it. The textarea never sees this: its value is already LF-only, which
+ * is also why the gutter (counted off the raw text) kept its numbering while
+ * the painted lines drifted below it.
+ */
+function normalizeEol(text: string): string {
+  return text.replace(/\r\n?/g, "\n");
+}
+
 function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
@@ -50,6 +66,8 @@ export function FileEditor({ path, onClose, onDirtyChange, reveal = null }: Prop
   const mirrorRef = useRef<HTMLDivElement>(null);
   /** Latest draft/saved for async close checks without rebinding Escape. */
   const dirtyRef = useRef(false);
+  /** Line ending the file arrived with, put back on save. */
+  const eolRef = useRef<"\n" | "\r\n">("\n");
 
   const dirty = load.kind === "ready" && !load.binary && !load.tooLarge && draft !== saved;
   dirtyRef.current = dirty;
@@ -66,15 +84,17 @@ export function FileEditor({ path, onClose, onDirtyChange, reveal = null }: Prop
     readFile(path)
       .then((file) => {
         if (cancelled) return;
+        eolRef.current = file.content.includes("\r\n") ? "\r\n" : "\n";
+        const content = normalizeEol(file.content);
         setLoad({
           kind: "ready",
-          content: file.content,
+          content,
           binary: file.binary,
           tooLarge: file.too_large,
           size: file.size,
         });
-        setDraft(file.content);
-        setSaved(file.content);
+        setDraft(content);
+        setSaved(content);
       })
       .catch((error: unknown) => {
         if (!cancelled) setLoad({ kind: "error", message: String(error) });
@@ -104,7 +124,9 @@ export function FileEditor({ path, onClose, onDirtyChange, reveal = null }: Prop
     setSaving(true);
     setSaveError(null);
     try {
-      await writeFile(path, draft);
+      // The buffer is LF-only; a file that came in with CRLF goes back out
+      // with CRLF instead of quietly rewriting every line of it.
+      await writeFile(path, eolRef.current === "\r\n" ? draft.replace(/\n/g, "\r\n") : draft);
       setSaved(draft);
       setSavedFlash(true);
       window.setTimeout(() => setSavedFlash(false), 1200);
@@ -118,6 +140,14 @@ export function FileEditor({ path, onClose, onDirtyChange, reveal = null }: Prop
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        void requestClose();
+        return;
+      }
+      // Ctrl+W closes the popup. Closing a pane stays on Ctrl+Shift+W, so the
+      // shift check keeps the two apart while the file is open.
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "w") {
         e.preventDefault();
         e.stopPropagation();
         void requestClose();
@@ -252,7 +282,7 @@ export function FileEditor({ path, onClose, onDirtyChange, reveal = null }: Prop
           <button
             type="button"
             className="changes-btn"
-            title="Close (Esc)"
+            title="Close (Esc or Ctrl+W)"
             onClick={() => void requestClose()}
           >
             ✕
