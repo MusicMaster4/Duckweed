@@ -7,7 +7,7 @@ use discord_rich_presence::{activity, DiscordIpc, DiscordIpcClient};
 
 const APPLICATION_ID: &str = "1534568909473186025";
 const LARGE_IMAGE: &str =
-    "https://raw.githubusercontent.com/MusicMaster4/Duckweed/main/assets/icon.png";
+    "https://raw.githubusercontent.com/MusicMaster4/Duckweed/main/src-tauri/icons/icon.png?presence=duck-v1";
 const RETRY_INTERVAL: Duration = Duration::from_secs(15);
 const STOP_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
