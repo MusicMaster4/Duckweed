@@ -19,6 +19,7 @@
     "core:window:allow-set-title",
     "core:window:allow-set-overlay-icon",
     "core:webview:allow-internal-toggle-devtools",
+    "clipboard-manager:allow-write-image",
     "dialog:allow-open",
     "dialog:allow-message",
     "updater:default",

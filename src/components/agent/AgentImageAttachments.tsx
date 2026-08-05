@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 import type { AgentImageAttachment } from "../../lib/agents/types";
+import { writeClipboardImage } from "../../lib/clipboard";
 
 interface Props {
   images: AgentImageAttachment[];
@@ -11,6 +12,12 @@ interface Props {
 
 const IMAGE_REMOVE_FALLBACK_MS = 220;
 
+interface ImageContextMenu {
+  x: number;
+  y: number;
+  copyFailed: boolean;
+}
+
 /** Shared thumbnail strip and full-size viewer for drafts and sent messages. */
 export function AgentImageAttachments({
   images,
@@ -18,9 +25,11 @@ export function AgentImageAttachments({
   variant = "message",
 }: Props) {
   const [openId, setOpenId] = useState<string | null>(null);
+  const [contextMenu, setContextMenu] = useState<ImageContextMenu | null>(null);
   const [removingIds, setRemovingIds] = useState<Set<string>>(() => new Set());
   const [enteringIds, setEnteringIds] = useState<Set<string>>(() => new Set());
   const removalTimers = useRef<Map<string, number>>(new Map());
+  const contextMenuRef = useRef<HTMLDivElement>(null);
   /**
    * Attachment ids already painted in this mount. Seeded on the first layout so
    * remounts (inactive tabs unmount their panes) do not replay paste-in for
@@ -64,11 +73,24 @@ export function AgentImageAttachments({
   useEffect(() => {
     if (!open) return;
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setOpenId(null);
+      if (event.key !== "Escape") return;
+      if (contextMenu) setContextMenu(null);
+      else setOpenId(null);
     };
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [open]);
+  }, [contextMenu, open]);
+
+  useLayoutEffect(() => {
+    const menu = contextMenuRef.current;
+    if (!menu || !contextMenu) return;
+    const rect = menu.getBoundingClientRect();
+    const left = Math.min(contextMenu.x, window.innerWidth - rect.width - 8);
+    const top = Math.min(contextMenu.y, window.innerHeight - rect.height - 8);
+    menu.style.left = `${Math.max(8, left)}px`;
+    menu.style.top = `${Math.max(8, top)}px`;
+    menu.querySelector<HTMLButtonElement>("button")?.focus();
+  }, [contextMenu]);
 
   const finishEnter = (id: string) => {
     setEnteringIds((current) => {
@@ -134,7 +156,10 @@ export function AgentImageAttachments({
               <button
                 type="button"
                 className="agent-image-preview"
-                onClick={() => setOpenId(image.id)}
+                onClick={() => {
+                  setContextMenu(null);
+                  setOpenId(image.id);
+                }}
                 title={`View ${image.name}`}
                 aria-label={`View ${image.name} full size`}
               >
@@ -166,13 +191,19 @@ export function AgentImageAttachments({
             aria-modal="true"
             aria-label={`Image preview: ${open.name}`}
             onMouseDown={(event) => {
-              if (event.target === event.currentTarget) setOpenId(null);
+              if (event.target === event.currentTarget) {
+                setContextMenu(null);
+                setOpenId(null);
+              }
             }}
           >
             <button
               type="button"
               className="agent-image-lightbox-close"
-              onClick={() => setOpenId(null)}
+              onClick={() => {
+                setContextMenu(null);
+                setOpenId(null);
+              }}
               aria-label="Close image preview"
               title="Close image preview (Esc)"
             >
@@ -181,9 +212,48 @@ export function AgentImageAttachments({
               </svg>
             </button>
             <figure>
-              <img src={open.dataUrl} alt={open.name} />
+              <img
+                src={open.dataUrl}
+                alt={open.name}
+                onContextMenu={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  setContextMenu({ x: event.clientX, y: event.clientY, copyFailed: false });
+                }}
+              />
               <figcaption>{open.name}</figcaption>
             </figure>
+            {contextMenu && (
+              <>
+                <div
+                  className="agent-image-context-backdrop"
+                  onPointerDown={() => setContextMenu(null)}
+                />
+                <div
+                  ref={contextMenuRef}
+                  className="menu agent-image-context-menu"
+                  role="menu"
+                  style={{ left: contextMenu.x, top: contextMenu.y }}
+                  aria-label="Image actions"
+                >
+                  <button
+                    type="button"
+                    className="menu-item menu-item-row"
+                    role="menuitem"
+                    onClick={() => {
+                      void writeClipboardImage(open.dataUrl).then((copied) => {
+                        if (copied) setContextMenu(null);
+                        else setContextMenu((current) =>
+                          current ? { ...current, copyFailed: true } : current,
+                        );
+                      });
+                    }}
+                  >
+                    <span>{contextMenu.copyFailed ? "Could not copy image" : "Copy image"}</span>
+                  </button>
+                </div>
+              </>
+            )}
           </div>,
           document.body,
         )}

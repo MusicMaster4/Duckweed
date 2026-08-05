@@ -9374,6 +9374,18 @@ body.is-resizing * {
   background: rgba(42, 45, 42, 0.98);
 }
 
+.agent-image-context-backdrop {
+  position: fixed;
+  z-index: 1001;
+  inset: 0;
+}
+
+.agent-image-context-menu {
+  z-index: 1002;
+  min-width: 170px;
+  max-width: 240px;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .agent-permission {
     animation: none;
