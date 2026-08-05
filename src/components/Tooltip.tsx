@@ -235,9 +235,18 @@ export function NativeTitleTooltips() {
       target instanceof Element ? target.closest<HTMLElement>("[title]") : null;
 
     const onPointerOver = (event: PointerEvent) => {
-      if (active.current?.node.contains(event.target as Node)) return;
       const node = titledElement(event.target);
-      if (node) show(node, false);
+      // A titled control may live inside another titled surface, as the pane
+      // buttons do inside the draggable pane header. Prefer that more specific
+      // target before treating the event as movement within the active one.
+      // Once a title is active its attribute is temporarily removed, so the
+      // containment check still keeps movement into its own SVG children from
+      // closing or restarting the tooltip.
+      if (node && node !== active.current?.node) {
+        show(node, false);
+      } else if (active.current?.node.contains(event.target as Node)) {
+        return;
+      }
     };
     const onPointerOut = (event: PointerEvent) => {
       const node = active.current?.node;
