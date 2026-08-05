@@ -4332,7 +4332,7 @@ body.is-dragging-prompt * {
   overflow: hidden;
 }
 
-/* Brief chip at the cursor after right-click copy in the terminal. */
+/* Brief chip at the cursor after right-click copy in a terminal or agent UI. */
 .copy-toast {
   position: fixed;
   z-index: 10000;

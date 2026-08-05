@@ -405,6 +405,7 @@ export const TerminalPane = memo(function TerminalPane({
           termId={node.term}
           active={active && !searching}
           onClose={() => terminals.closeAgentUi(node.term)}
+          onSelectionCopied={showCopyToast}
         />
       )}
 
