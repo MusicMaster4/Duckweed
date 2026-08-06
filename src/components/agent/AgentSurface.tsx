@@ -377,9 +377,8 @@ export function AgentSurface({ termId, active, onClose, onSelectionCopied }: Pro
   const ended = session.status === "exited" || session.status === "error";
   const resumable = canResume(session.agent);
   const resumeBlocked = session.status === "working" || session.status === "waiting";
-  const transcript = conversationText(session.items, session.label);
-
   const copyConversation = async () => {
+    const transcript = conversationText(session.items, session.label);
     if (!transcript) return;
     setConversationCopied(await writeClipboardText(transcript));
   };
@@ -571,7 +570,7 @@ export function AgentSurface({ termId, active, onClose, onSelectionCopied }: Pro
               <button
                 type="button"
                 role="menuitem"
-                disabled={!transcript}
+                disabled={session.items.length === 0}
                 onClick={() => void copyConversation()}
               >
                 {conversationCopied ? (
