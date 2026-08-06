@@ -41,6 +41,7 @@ import { AgentProviderIcon } from "./AgentProviderIcon";
 import { AgentQuestion } from "./AgentQuestion";
 import { AgentSessions } from "./AgentSessions";
 import { AgentTimeline } from "./AgentTimeline";
+import { copySelectedTextFromContextMenu } from "./selectionCopy";
 import { PlanTracker, type OfficialVariant } from "./official/OfficialShared";
 import { SubagentFleet } from "./subagents/SubagentFleet";
 import { SubagentInspector } from "./subagents/SubagentInspector";
@@ -53,6 +54,8 @@ interface Props {
   active: boolean;
   /** Close the agent and hand the pane back to its shell. */
   onClose: () => void;
+  /** Show copy feedback at the pointer after a right-click selection copy. */
+  onSelectionCopied: (x: number, y: number) => void;
 }
 
 function formatTokens(count: number): string {
@@ -123,7 +126,7 @@ export function agentTimelineRevision(items: AgentSessionState["items"]): number
  * the agent this renders is a separate headless process speaking a structured
  * protocol, which is the only reason any of this content exists to draw.
  */
-export function AgentSurface({ termId, active, onClose }: Props) {
+export function AgentSurface({ termId, active, onClose, onSelectionCopied }: Props) {
   const session = useSyncExternalStore(
     useCallback((callback) => agents.subscribe(termId, callback), [termId]),
     useCallback(() => agents.get(termId), [termId]),
@@ -374,9 +377,8 @@ export function AgentSurface({ termId, active, onClose }: Props) {
   const ended = session.status === "exited" || session.status === "error";
   const resumable = canResume(session.agent);
   const resumeBlocked = session.status === "working" || session.status === "waiting";
-  const transcript = conversationText(session.items, session.label);
-
   const copyConversation = async () => {
+    const transcript = conversationText(session.items, session.label);
     if (!transcript) return;
     setConversationCopied(await writeClipboardText(transcript));
   };
@@ -469,6 +471,16 @@ export function AgentSurface({ termId, active, onClose }: Props) {
     composerRef.current?.focus();
   };
 
+  /** Match the terminal convention: right-clicking while text is selected copies it. */
+  const copySelectedText = (event: React.MouseEvent<HTMLDivElement>) => {
+    const { clientX, clientY } = event;
+    const copy = copySelectedTextFromContextMenu(event);
+    if (!copy) return;
+    void copy.then((copied) => {
+      if (copied) onSelectionCopied(clientX, clientY);
+    });
+  };
+
   return (
     <div
       ref={surfaceRef}
@@ -477,6 +489,7 @@ export function AgentSurface({ termId, active, onClose }: Props) {
       data-agent={session.agent}
       data-program={session.program}
       onMouseUp={focusComposer}
+      onContextMenu={copySelectedText}
     >
       <header className="agent-head">
         <span className="agent-badge" aria-hidden="true">
@@ -557,7 +570,7 @@ export function AgentSurface({ termId, active, onClose }: Props) {
               <button
                 type="button"
                 role="menuitem"
-                disabled={!transcript}
+                disabled={session.items.length === 0}
                 onClick={() => void copyConversation()}
               >
                 {conversationCopied ? (

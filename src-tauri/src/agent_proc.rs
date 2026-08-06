@@ -88,6 +88,11 @@ impl AgentProcManager {
         self.inner.processes.lock().unwrap().get(id).cloned()
     }
 
+    /// Number of coding-agent sessions currently owned by the custom UI.
+    pub fn open_count(&self) -> usize {
+        self.inner.processes.lock().unwrap().len()
+    }
+
     /// Append one protocol line to the agent's stdin.
     ///
     /// The newline is added here so callers cannot half-frame a message: every

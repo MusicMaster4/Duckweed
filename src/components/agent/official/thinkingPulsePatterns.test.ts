@@ -15,18 +15,18 @@ describe("thinking pulse patterns", () => {
       rotatedSuffix.test(pattern.id),
     );
 
-    expect(originals).toHaveLength(163);
-    expect(rotations).toHaveLength(413);
-    expect(THINKING_PULSE_PATTERNS).toHaveLength(576);
+    expect(originals).toHaveLength(313);
+    expect(rotations).toHaveLength(823);
+    expect(THINKING_PULSE_PATTERNS).toHaveLength(1136);
     expect(
       rotations.filter((pattern) => pattern.id.endsWith("-rotated-90")),
-    ).toHaveLength(147);
+    ).toHaveLength(287);
     expect(
       rotations.filter((pattern) => pattern.id.endsWith("-rotated-180")),
-    ).toHaveLength(133);
+    ).toHaveLength(268);
     expect(
       rotations.filter((pattern) => pattern.id.endsWith("-rotated-270")),
-    ).toHaveLength(133);
+    ).toHaveLength(268);
 
     const rotateClockwise = (steps: readonly number[]) =>
       steps.map((_, target) => {
@@ -75,6 +75,123 @@ describe("thinking pulse patterns", () => {
     }
   });
 
+  test("includes all 50 new matrix formation profiles", () => {
+    const formations = [
+      "radial-burst",
+      "radial-collapse",
+      "corner-pinwheel",
+      "edge-pinwheel",
+      "double-helix",
+      "cross-stitch",
+      "corner-cascade",
+      "center-switchback",
+      "orbit-hop",
+      "woven-diamond",
+    ];
+    const profiles = ["quick", "soft", "bright", "trailing", "elastic"];
+    const ids = new Set(THINKING_PULSE_PATTERNS.map((pattern) => pattern.id));
+
+    for (const formation of formations) {
+      for (const profile of profiles) {
+        expect(ids.has(`${formation}-${profile}`)).toBe(true);
+      }
+    }
+  });
+
+  test("includes the extra 50 matrix formation profiles", () => {
+    const formations = [
+      "tide-fold",
+      "corner-braid",
+      "spiral-tri",
+      "zigzag-weave",
+      "star-sweep",
+      "ladder-climb",
+      "diamond-cascade",
+      "twin-comet",
+      "petal-open",
+      "lattice-hop",
+    ];
+    const profiles = ["glint", "heavy", "falling", "stepped", "circling"];
+    const ids = new Set(THINKING_PULSE_PATTERNS.map((pattern) => pattern.id));
+
+    for (const formation of formations) {
+      for (const profile of profiles) {
+        expect(ids.has(`${formation}-${profile}`)).toBe(true);
+      }
+    }
+  });
+
+  /**
+   * The extra bank's motions exist nowhere else, which is what keeps its 50
+   * signatures from colliding with the earlier catalog. Guard that property.
+   */
+  test("includes the third 50 matrix formation profiles", () => {
+    const formations = [
+      "pulse-gate",
+      "tilt-sweep",
+      "chevron-run",
+      "quarter-turn",
+      "twin-arc",
+      "scatter-hop",
+      "fold-in",
+      "rung-climb",
+      "swirl-out",
+      "beacon-sweep",
+    ];
+    const profiles = ["tremor", "snap", "polish", "rolling", "rising"];
+    const ids = new Set(THINKING_PULSE_PATTERNS.map((pattern) => pattern.id));
+
+    for (const formation of formations) {
+      for (const profile of profiles) {
+        expect(ids.has(`${formation}-${profile}`)).toBe(true);
+      }
+    }
+  });
+
+  test("each late bank's motions are exclusive to it", () => {
+    const banks = [
+      {
+        motions: new Set(["shimmer", "throb", "cascade", "stutter", "orbit"]),
+        formations: [
+          "tide-fold",
+          "corner-braid",
+          "spiral-tri",
+          "zigzag-weave",
+          "star-sweep",
+          "ladder-climb",
+          "diamond-cascade",
+          "twin-comet",
+          "petal-open",
+          "lattice-hop",
+        ],
+      },
+      {
+        motions: new Set(["quiver", "pop", "gleam", "tumble", "surge"]),
+        formations: [
+          "pulse-gate",
+          "tilt-sweep",
+          "chevron-run",
+          "quarter-turn",
+          "twin-arc",
+          "scatter-hop",
+          "fold-in",
+          "rung-climb",
+          "swirl-out",
+          "beacon-sweep",
+        ],
+      },
+    ];
+
+    for (const bank of banks) {
+      for (const pattern of THINKING_PULSE_PATTERNS) {
+        if (!bank.motions.has(pattern.motion)) continue;
+        expect(
+          bank.formations.some((formation) => pattern.id.startsWith(`${formation}-`)),
+        ).toBe(true);
+      }
+    }
+  });
+
   test("no two patterns are the same animation", () => {
     // Ids key the pool; identical timing signatures would read as a repeat on
     // screen even with distinct ids.
@@ -115,6 +232,16 @@ describe("thinking pulse patterns", () => {
         "echo",
         "triplet",
         "bloom",
+        "shimmer",
+        "throb",
+        "cascade",
+        "stutter",
+        "orbit",
+        "quiver",
+        "pop",
+        "gleam",
+        "tumble",
+        "surge",
       ]),
     );
   });

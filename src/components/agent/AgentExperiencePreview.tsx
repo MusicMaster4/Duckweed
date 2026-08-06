@@ -11,6 +11,7 @@ import { AgentComposer } from "./AgentComposer";
 import { AgentGoalIndicator } from "./AgentGoalIndicator";
 import { AgentProviderIcon } from "./AgentProviderIcon";
 import { AgentTimeline } from "./AgentTimeline";
+import { copySelectedTextFromContextMenu } from "./selectionCopy";
 import { Tooltip } from "../Tooltip";
 import { PlanTracker, type OfficialVariant } from "./official/OfficialShared";
 import { SubagentFleet } from "./subagents/SubagentFleet";
@@ -341,6 +342,9 @@ export function AgentExperiencePreview() {
         className="agent-preview-surface"
         style={{ ["--agent-accent" as string]: provider.accent }}
         data-agent={provider.id}
+        onContextMenu={(event) => {
+          void copySelectedTextFromContextMenu(event);
+        }}
       >
         <header className="agent-head">
           <span className="agent-badge">
