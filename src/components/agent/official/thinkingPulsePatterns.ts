@@ -220,6 +220,45 @@ const ACCENTS: ReadonlyArray<
   ["corner-beat", [0, 4, 1, 5, 6, 7, 2, 8, 3], "bloom"],
 ];
 
+/**
+ * Ten new timing formations paired with five distinct animation profiles.
+ * Keeping the formations and profiles separate makes the 50 authored patterns
+ * easy to audit while still giving each one a unique motion and cadence.
+ */
+const MATRIX_FORMATIONS: ReadonlyArray<readonly [string, readonly number[]]> = [
+  ["radial-burst", [4, 2, 4, 2, 0, 2, 4, 2, 4]],
+  ["radial-collapse", [0, 2, 0, 2, 4, 2, 0, 2, 0]],
+  ["corner-pinwheel", [0, 3, 1, 7, 8, 4, 2, 6, 5]],
+  ["edge-pinwheel", [3, 0, 4, 7, 8, 1, 6, 5, 2]],
+  ["double-helix", [0, 4, 8, 6, 2, 1, 5, 7, 3]],
+  ["cross-stitch", [0, 5, 2, 7, 4, 1, 6, 3, 8]],
+  ["corner-cascade", [0, 1, 3, 2, 4, 6, 5, 7, 8]],
+  ["center-switchback", [5, 1, 6, 3, 0, 7, 4, 2, 8]],
+  ["orbit-hop", [0, 3, 6, 7, 4, 1, 2, 5, 8]],
+  ["woven-diamond", [2, 0, 4, 6, 1, 8, 5, 3, 7]],
+];
+
+const MATRIX_PROFILES: ReadonlyArray<
+  readonly [string, ThinkingPulseMotion, number, number]
+> = [
+  ["quick", "chase", 1680, 54],
+  ["soft", "breathe", 1810, 71],
+  ["bright", "spark", 1940, 63],
+  ["trailing", "echo", 2070, 82],
+  ["elastic", "bloom", 2200, 76],
+];
+
+const MATRIX_PULSE_PATTERNS: readonly ThinkingPulsePattern[] =
+  MATRIX_FORMATIONS.flatMap(([formationId, steps], formationIndex) =>
+    MATRIX_PROFILES.map(([profileId, motion, durationMs, stepMs], profileIndex) => ({
+      id: `${formationId}-${profileId}`,
+      steps,
+      motion,
+      durationMs: durationMs + formationIndex * 17 + profileIndex,
+      stepMs: stepMs + formationIndex * 3,
+    })),
+  );
+
 const BASE_PATTERNS: readonly BasePattern[] = [
   ...PATHS.map(([id, sequence]) => ({ id, steps: stepsFromSequence(sequence) })),
   ...WAVES.map(([id, steps]) => ({ id, steps })),
@@ -245,7 +284,8 @@ const MOTIONS: readonly ThinkingPulseMotion[] = [
  * For the base pool, motion, duration, and cadence step through cycles of 11,
  * 7, and 6, so the three only realign after 462 entries. That keeps each
  * pattern's timing signature unique for any pool this side of that bound.
- * Accents carry their own motion and differ from everything else by steps.
+ * Accents carry their own motion, while the matrix formations use a separate
+ * timing range so their signatures cannot overlap the earlier catalog.
  */
 const ORIGINAL_PULSE_PATTERNS: readonly ThinkingPulsePattern[] = [
   ...BASE_PATTERNS.flatMap((base, index) => {
@@ -275,6 +315,7 @@ const ORIGINAL_PULSE_PATTERNS: readonly ThinkingPulsePattern[] = [
     durationMs: 920 + (index % 8) * 90,
     stepMs: 48 + (index % 5) * 16,
   })),
+  ...MATRIX_PULSE_PATTERNS,
 ];
 
 /**

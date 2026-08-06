@@ -15,18 +15,18 @@ describe("thinking pulse patterns", () => {
       rotatedSuffix.test(pattern.id),
     );
 
-    expect(originals).toHaveLength(163);
-    expect(rotations).toHaveLength(413);
-    expect(THINKING_PULSE_PATTERNS).toHaveLength(576);
+    expect(originals).toHaveLength(213);
+    expect(rotations).toHaveLength(533);
+    expect(THINKING_PULSE_PATTERNS).toHaveLength(746);
     expect(
       rotations.filter((pattern) => pattern.id.endsWith("-rotated-90")),
-    ).toHaveLength(147);
+    ).toHaveLength(187);
     expect(
       rotations.filter((pattern) => pattern.id.endsWith("-rotated-180")),
-    ).toHaveLength(133);
+    ).toHaveLength(173);
     expect(
       rotations.filter((pattern) => pattern.id.endsWith("-rotated-270")),
-    ).toHaveLength(133);
+    ).toHaveLength(173);
 
     const rotateClockwise = (steps: readonly number[]) =>
       steps.map((_, target) => {
@@ -72,6 +72,29 @@ describe("thinking pulse patterns", () => {
       }
 
       expect(rotation).toEqual({ ...original, id: rotation.id, steps });
+    }
+  });
+
+  test("includes all 50 new matrix formation profiles", () => {
+    const formations = [
+      "radial-burst",
+      "radial-collapse",
+      "corner-pinwheel",
+      "edge-pinwheel",
+      "double-helix",
+      "cross-stitch",
+      "corner-cascade",
+      "center-switchback",
+      "orbit-hop",
+      "woven-diamond",
+    ];
+    const profiles = ["quick", "soft", "bright", "trailing", "elastic"];
+    const ids = new Set(THINKING_PULSE_PATTERNS.map((pattern) => pattern.id));
+
+    for (const formation of formations) {
+      for (const profile of profiles) {
+        expect(ids.has(`${formation}-${profile}`)).toBe(true);
+      }
     }
   });
 

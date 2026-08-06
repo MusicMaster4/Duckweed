@@ -5,8 +5,8 @@ import { AgentAsciiLoader } from "./AgentAsciiLoader";
 import { ASCII_ANIMATIONS } from "./ascii/animations";
 
 describe("agent startup animation", () => {
-  test("includes the 25-scene expansion with distinct motion signatures", () => {
-    expect(ASCII_ANIMATIONS).toHaveLength(83);
+  test("includes the second 50-scene collection with distinct motion signatures", () => {
+    expect(ASCII_ANIMATIONS).toHaveLength(133);
 
     const signatures = ASCII_ANIMATIONS.map((create) => {
       const paint = create();
