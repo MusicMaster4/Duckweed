@@ -1192,6 +1192,31 @@ strong.agent-activity-history-summary {
   animation-timing-function: linear;
 }
 
+.agent-activity-pulse.is-active[data-motion="quiver"] > span {
+  animation-name: agent-activity-quiver;
+  animation-timing-function: ease-in-out;
+}
+
+.agent-activity-pulse.is-active[data-motion="pop"] > span {
+  animation-name: agent-activity-pop;
+  animation-timing-function: cubic-bezier(0.2, 1.6, 0.4, 1);
+}
+
+.agent-activity-pulse.is-active[data-motion="gleam"] > span {
+  animation-name: agent-activity-gleam;
+  animation-timing-function: cubic-bezier(0.55, 0, 0.45, 1);
+}
+
+.agent-activity-pulse.is-active[data-motion="tumble"] > span {
+  animation-name: agent-activity-tumble;
+  animation-timing-function: cubic-bezier(0.5, 0.05, 0.5, 0.95);
+}
+
+.agent-activity-pulse.is-active[data-motion="surge"] > span {
+  animation-name: agent-activity-surge;
+  animation-timing-function: cubic-bezier(0.7, 0, 0.2, 1);
+}
+
 /* Cells a pattern leaves dark on purpose; kept dimmer than the resting glow. */
 .agent-activity-pulse.is-active > span.is-idle {
   animation: none;
@@ -1582,6 +1607,107 @@ strong.agent-activity-history-summary {
   75% {
     opacity: 0.52;
     transform: translate(-1.2px, 0) scale(0.92);
+  }
+}
+
+/* A nervous tremble: three small shakes off the resting spot, no scale change
+   worth speaking of, so the whole matrix reads as unsettled rather than lit. */
+@keyframes agent-activity-quiver {
+  0%,
+  100% {
+    opacity: 0.3;
+    transform: translateX(-0.6px) scale(0.92);
+  }
+
+  20% {
+    opacity: 0.82;
+    transform: translateX(0.6px) scale(0.98);
+  }
+
+  45% {
+    opacity: 0.5;
+    transform: translateX(-0.5px) scale(0.94);
+  }
+
+  70% {
+    opacity: 0.9;
+    transform: translateX(0.4px) scale(1);
+  }
+}
+
+/* Hard snap out to full size, then a long slack rest. */
+@keyframes agent-activity-pop {
+  0% {
+    opacity: 0.16;
+    transform: scale(0.6);
+  }
+
+  14% {
+    opacity: 1;
+    transform: scale(1.22);
+  }
+
+  30% {
+    opacity: 0.62;
+    transform: scale(0.94);
+  }
+
+  60%,
+  100% {
+    opacity: 0.2;
+    transform: scale(0.78);
+  }
+}
+
+/* A slow polish: brightness rises and falls once, over most of the cycle. */
+@keyframes agent-activity-gleam {
+  0%,
+  100% {
+    opacity: 0.22;
+    transform: scale(0.88);
+  }
+
+  50% {
+    opacity: 0.96;
+    transform: scale(1.08);
+  }
+}
+
+/* Rolls across its own spot, leaning one way then the other as it brightens. */
+@keyframes agent-activity-tumble {
+  0%,
+  100% {
+    opacity: 0.24;
+    transform: translate(-1px, 0.6px) scale(0.84);
+  }
+
+  35% {
+    opacity: 0.88;
+    transform: translate(0, -0.6px) scale(1.08);
+  }
+
+  65% {
+    opacity: 0.66;
+    transform: translate(1px, 0.6px) scale(0.96);
+  }
+}
+
+/* Pushes up from below and holds at the top before dropping back. */
+@keyframes agent-activity-surge {
+  0% {
+    opacity: 0.18;
+    transform: translateY(1.4px) scale(0.72);
+  }
+
+  40%,
+  62% {
+    opacity: 1;
+    transform: translateY(-1px) scale(1.14);
+  }
+
+  100% {
+    opacity: 0.18;
+    transform: translateY(1.4px) scale(0.72);
   }
 }
 

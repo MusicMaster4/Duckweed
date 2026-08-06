@@ -727,6 +727,7 @@ fn main() {
         | tauri_plugin_window_state::StateFlags::FULLSCREEN;
 
     let builder = tauri::Builder::default();
+    let agent_processes = AgentProcManager::default();
 
     // Single-instance is release-only and must register first so a second
     // Explorer click hands its argv to the running app. Debug/dev builds skip
@@ -766,12 +767,12 @@ fn main() {
         )
         .manage(PtyManager::default())
         .manage(AgentActivityManager::default())
-        .manage(AgentProcManager::default())
+        .manage(agent_processes.clone())
         .manage(PortManager::default())
         .manage(ProjectWatchManager::default())
         .manage(UsageState::default())
         .manage(DurableSettings::default())
-        .manage(DiscordPresence::start())
+        .manage(DiscordPresence::start(agent_processes))
         .manage(SearchGeneration::default())
         .manage(SoundPlayer::default())
         .manage(PendingLaunch(Mutex::new(startup_intent)))

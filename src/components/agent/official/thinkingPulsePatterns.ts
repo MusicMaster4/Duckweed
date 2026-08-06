@@ -19,7 +19,12 @@ export type ThinkingPulseMotion =
   | "throb"
   | "cascade"
   | "stutter"
-  | "orbit";
+  | "orbit"
+  | "quiver"
+  | "pop"
+  | "gleam"
+  | "tumble"
+  | "surge";
 
 export interface ThinkingPulsePattern {
   id: string;
@@ -307,6 +312,48 @@ const EXTRA_MATRIX_PULSE_PATTERNS: readonly ThinkingPulsePattern[] =
     ),
   );
 
+/**
+ * A third bank of ten formations with five more motions of its own. The same
+ * trick as the bank above keeps its 50 signatures clear of everything else:
+ * the motions exist nowhere but here. The cadences it adds are a nervous
+ * tremble, a hard snap, a slow polish, a rolling lean, and a rising push.
+ */
+const THIRD_MATRIX_FORMATIONS: ReadonlyArray<readonly [string, readonly number[]]> = [
+  ["pulse-gate", [0, 2, 0, 4, 6, 4, 0, 2, 0]],
+  ["tilt-sweep", [0, 2, 4, 1, 3, 5, 2, 4, 6]],
+  ["chevron-run", [0, 3, 0, 1, 4, 1, 2, 5, 2]],
+  ["quarter-turn", [3, 6, 7, 0, 8, 4, 2, 1, 5]],
+  ["twin-arc", [2, 0, 2, 4, 1, 4, 6, 3, 6]],
+  ["scatter-hop", [5, 0, 7, 2, 4, 6, 1, 8, 3]],
+  ["fold-in", [0, 4, 1, 5, 8, 6, 2, 7, 3]],
+  ["rung-climb", [6, 7, 8, 3, 5, 4, 0, 2, 1]],
+  ["swirl-out", [4, 5, 6, 3, 0, 7, 2, 1, 8]],
+  ["beacon-sweep", [0, 1, 0, 3, 2, 3, 4, 5, 4]],
+];
+
+const THIRD_MATRIX_PROFILES: ReadonlyArray<
+  readonly [string, ThinkingPulseMotion, number, number]
+> = [
+  ["tremor", "quiver", 3080, 58],
+  ["snap", "pop", 3220, 66],
+  ["polish", "gleam", 3360, 79],
+  ["rolling", "tumble", 3500, 44],
+  ["rising", "surge", 3640, 85],
+];
+
+const THIRD_MATRIX_PULSE_PATTERNS: readonly ThinkingPulsePattern[] =
+  THIRD_MATRIX_FORMATIONS.flatMap(([formationId, steps], formationIndex) =>
+    THIRD_MATRIX_PROFILES.map(
+      ([profileId, motion, durationMs, stepMs], profileIndex) => ({
+        id: `${formationId}-${profileId}`,
+        steps,
+        motion,
+        durationMs: durationMs + formationIndex * 23 + profileIndex * 3,
+        stepMs: stepMs + formationIndex * 5,
+      }),
+    ),
+  );
+
 const BASE_PATTERNS: readonly BasePattern[] = [
   ...PATHS.map(([id, sequence]) => ({ id, steps: stepsFromSequence(sequence) })),
   ...WAVES.map(([id, steps]) => ({ id, steps })),
@@ -334,7 +381,8 @@ const MOTIONS: readonly ThinkingPulseMotion[] = [
  * pattern's timing signature unique for any pool this side of that bound.
  * Accents carry their own motion, while the matrix formations use a separate
  * timing range so their signatures cannot overlap the earlier catalog. The
- * extra bank is safe by construction: its five motions appear nowhere else.
+ * extra and third banks are safe by construction: each carries five motions
+ * that appear nowhere else.
  */
 const ORIGINAL_PULSE_PATTERNS: readonly ThinkingPulsePattern[] = [
   ...BASE_PATTERNS.flatMap((base, index) => {
@@ -366,6 +414,7 @@ const ORIGINAL_PULSE_PATTERNS: readonly ThinkingPulsePattern[] = [
   })),
   ...MATRIX_PULSE_PATTERNS,
   ...EXTRA_MATRIX_PULSE_PATTERNS,
+  ...THIRD_MATRIX_PULSE_PATTERNS,
 ];
 
 /**

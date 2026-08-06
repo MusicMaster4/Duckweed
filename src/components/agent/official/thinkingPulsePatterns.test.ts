@@ -15,18 +15,18 @@ describe("thinking pulse patterns", () => {
       rotatedSuffix.test(pattern.id),
     );
 
-    expect(originals).toHaveLength(263);
-    expect(rotations).toHaveLength(683);
-    expect(THINKING_PULSE_PATTERNS).toHaveLength(946);
+    expect(originals).toHaveLength(313);
+    expect(rotations).toHaveLength(823);
+    expect(THINKING_PULSE_PATTERNS).toHaveLength(1136);
     expect(
       rotations.filter((pattern) => pattern.id.endsWith("-rotated-90")),
-    ).toHaveLength(237);
+    ).toHaveLength(287);
     expect(
       rotations.filter((pattern) => pattern.id.endsWith("-rotated-180")),
-    ).toHaveLength(223);
+    ).toHaveLength(268);
     expect(
       rotations.filter((pattern) => pattern.id.endsWith("-rotated-270")),
-    ).toHaveLength(223);
+    ).toHaveLength(268);
 
     const rotateClockwise = (steps: readonly number[]) =>
       steps.map((_, target) => {
@@ -125,32 +125,70 @@ describe("thinking pulse patterns", () => {
    * The extra bank's motions exist nowhere else, which is what keeps its 50
    * signatures from colliding with the earlier catalog. Guard that property.
    */
-  test("the extra bank's motions are exclusive to it", () => {
-    const extraMotions = new Set([
-      "shimmer",
-      "throb",
-      "cascade",
-      "stutter",
-      "orbit",
-    ]);
-    const extraFormations = [
-      "tide-fold",
-      "corner-braid",
-      "spiral-tri",
-      "zigzag-weave",
-      "star-sweep",
-      "ladder-climb",
-      "diamond-cascade",
-      "twin-comet",
-      "petal-open",
-      "lattice-hop",
+  test("includes the third 50 matrix formation profiles", () => {
+    const formations = [
+      "pulse-gate",
+      "tilt-sweep",
+      "chevron-run",
+      "quarter-turn",
+      "twin-arc",
+      "scatter-hop",
+      "fold-in",
+      "rung-climb",
+      "swirl-out",
+      "beacon-sweep",
+    ];
+    const profiles = ["tremor", "snap", "polish", "rolling", "rising"];
+    const ids = new Set(THINKING_PULSE_PATTERNS.map((pattern) => pattern.id));
+
+    for (const formation of formations) {
+      for (const profile of profiles) {
+        expect(ids.has(`${formation}-${profile}`)).toBe(true);
+      }
+    }
+  });
+
+  test("each late bank's motions are exclusive to it", () => {
+    const banks = [
+      {
+        motions: new Set(["shimmer", "throb", "cascade", "stutter", "orbit"]),
+        formations: [
+          "tide-fold",
+          "corner-braid",
+          "spiral-tri",
+          "zigzag-weave",
+          "star-sweep",
+          "ladder-climb",
+          "diamond-cascade",
+          "twin-comet",
+          "petal-open",
+          "lattice-hop",
+        ],
+      },
+      {
+        motions: new Set(["quiver", "pop", "gleam", "tumble", "surge"]),
+        formations: [
+          "pulse-gate",
+          "tilt-sweep",
+          "chevron-run",
+          "quarter-turn",
+          "twin-arc",
+          "scatter-hop",
+          "fold-in",
+          "rung-climb",
+          "swirl-out",
+          "beacon-sweep",
+        ],
+      },
     ];
 
-    for (const pattern of THINKING_PULSE_PATTERNS) {
-      if (!extraMotions.has(pattern.motion)) continue;
-      expect(
-        extraFormations.some((formation) => pattern.id.startsWith(`${formation}-`)),
-      ).toBe(true);
+    for (const bank of banks) {
+      for (const pattern of THINKING_PULSE_PATTERNS) {
+        if (!bank.motions.has(pattern.motion)) continue;
+        expect(
+          bank.formations.some((formation) => pattern.id.startsWith(`${formation}-`)),
+        ).toBe(true);
+      }
     }
   });
 
@@ -199,6 +237,11 @@ describe("thinking pulse patterns", () => {
         "cascade",
         "stutter",
         "orbit",
+        "quiver",
+        "pop",
+        "gleam",
+        "tumble",
+        "surge",
       ]),
     );
   });
