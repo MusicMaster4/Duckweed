@@ -15,18 +15,18 @@ describe("thinking pulse patterns", () => {
       rotatedSuffix.test(pattern.id),
     );
 
-    expect(originals).toHaveLength(213);
-    expect(rotations).toHaveLength(533);
-    expect(THINKING_PULSE_PATTERNS).toHaveLength(746);
+    expect(originals).toHaveLength(263);
+    expect(rotations).toHaveLength(683);
+    expect(THINKING_PULSE_PATTERNS).toHaveLength(946);
     expect(
       rotations.filter((pattern) => pattern.id.endsWith("-rotated-90")),
-    ).toHaveLength(187);
+    ).toHaveLength(237);
     expect(
       rotations.filter((pattern) => pattern.id.endsWith("-rotated-180")),
-    ).toHaveLength(173);
+    ).toHaveLength(223);
     expect(
       rotations.filter((pattern) => pattern.id.endsWith("-rotated-270")),
-    ).toHaveLength(173);
+    ).toHaveLength(223);
 
     const rotateClockwise = (steps: readonly number[]) =>
       steps.map((_, target) => {
@@ -98,6 +98,62 @@ describe("thinking pulse patterns", () => {
     }
   });
 
+  test("includes the extra 50 matrix formation profiles", () => {
+    const formations = [
+      "tide-fold",
+      "corner-braid",
+      "spiral-tri",
+      "zigzag-weave",
+      "star-sweep",
+      "ladder-climb",
+      "diamond-cascade",
+      "twin-comet",
+      "petal-open",
+      "lattice-hop",
+    ];
+    const profiles = ["glint", "heavy", "falling", "stepped", "circling"];
+    const ids = new Set(THINKING_PULSE_PATTERNS.map((pattern) => pattern.id));
+
+    for (const formation of formations) {
+      for (const profile of profiles) {
+        expect(ids.has(`${formation}-${profile}`)).toBe(true);
+      }
+    }
+  });
+
+  /**
+   * The extra bank's motions exist nowhere else, which is what keeps its 50
+   * signatures from colliding with the earlier catalog. Guard that property.
+   */
+  test("the extra bank's motions are exclusive to it", () => {
+    const extraMotions = new Set([
+      "shimmer",
+      "throb",
+      "cascade",
+      "stutter",
+      "orbit",
+    ]);
+    const extraFormations = [
+      "tide-fold",
+      "corner-braid",
+      "spiral-tri",
+      "zigzag-weave",
+      "star-sweep",
+      "ladder-climb",
+      "diamond-cascade",
+      "twin-comet",
+      "petal-open",
+      "lattice-hop",
+    ];
+
+    for (const pattern of THINKING_PULSE_PATTERNS) {
+      if (!extraMotions.has(pattern.motion)) continue;
+      expect(
+        extraFormations.some((formation) => pattern.id.startsWith(`${formation}-`)),
+      ).toBe(true);
+    }
+  });
+
   test("no two patterns are the same animation", () => {
     // Ids key the pool; identical timing signatures would read as a repeat on
     // screen even with distinct ids.
@@ -138,6 +194,11 @@ describe("thinking pulse patterns", () => {
         "echo",
         "triplet",
         "bloom",
+        "shimmer",
+        "throb",
+        "cascade",
+        "stutter",
+        "orbit",
       ]),
     );
   });

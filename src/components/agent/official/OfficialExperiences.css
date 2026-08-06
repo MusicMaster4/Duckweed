@@ -1167,6 +1167,31 @@ strong.agent-activity-history-summary {
   animation-timing-function: cubic-bezier(0.3, 1.35, 0.5, 1);
 }
 
+.agent-activity-pulse.is-active[data-motion="shimmer"] > span {
+  animation-name: agent-activity-shimmer;
+  animation-timing-function: ease-in-out;
+}
+
+.agent-activity-pulse.is-active[data-motion="throb"] > span {
+  animation-name: agent-activity-throb;
+  animation-timing-function: cubic-bezier(0.45, 0, 0.15, 1);
+}
+
+.agent-activity-pulse.is-active[data-motion="cascade"] > span {
+  animation-name: agent-activity-cascade;
+  animation-timing-function: linear;
+}
+
+.agent-activity-pulse.is-active[data-motion="stutter"] > span {
+  animation-name: agent-activity-stutter;
+  animation-timing-function: steps(3, jump-none);
+}
+
+.agent-activity-pulse.is-active[data-motion="orbit"] > span {
+  animation-name: agent-activity-orbit;
+  animation-timing-function: linear;
+}
+
 /* Cells a pattern leaves dark on purpose; kept dimmer than the resting glow. */
 .agent-activity-pulse.is-active > span.is-idle {
   animation: none;
@@ -1445,6 +1470,118 @@ strong.agent-activity-history-summary {
   68% {
     opacity: 0.28;
     transform: scale(0.76);
+  }
+}
+
+/* Two quick glints close together, barely leaving the resting size. Reads as a
+   surface catching the light rather than a dot switching on. */
+@keyframes agent-activity-shimmer {
+  0%,
+  100% {
+    opacity: 0.24;
+    transform: scale(0.86);
+  }
+
+  18% {
+    opacity: 0.92;
+    transform: scale(1.04);
+  }
+
+  30% {
+    opacity: 0.36;
+    transform: scale(0.9);
+  }
+
+  42% {
+    opacity: 0.78;
+    transform: scale(1);
+  }
+
+  58% {
+    opacity: 0.26;
+    transform: scale(0.86);
+  }
+}
+
+/* One heavy swell that holds at the top before letting go. */
+@keyframes agent-activity-throb {
+  0%,
+  100% {
+    opacity: 0.18;
+    transform: scale(0.7);
+  }
+
+  34%,
+  50% {
+    opacity: 1;
+    transform: scale(1.2);
+  }
+
+  74% {
+    opacity: 0.34;
+    transform: scale(0.88);
+  }
+}
+
+/* Snaps on, then falls away over most of the cycle: a trailing drip. */
+@keyframes agent-activity-cascade {
+  0%,
+  100% {
+    opacity: 0.14;
+    transform: scale(0.66) translateY(-1px);
+  }
+
+  10% {
+    opacity: 1;
+    transform: scale(1.12) translateY(-1px);
+  }
+
+  72% {
+    opacity: 0.2;
+    transform: scale(0.72) translateY(1px);
+  }
+}
+
+/* Climbs in discrete jumps, thanks to the stepped timing function. */
+@keyframes agent-activity-stutter {
+  0% {
+    opacity: 0.2;
+    transform: scale(0.74);
+  }
+
+  60% {
+    opacity: 1;
+    transform: scale(1.16);
+  }
+
+  61%,
+  100% {
+    opacity: 0.2;
+    transform: scale(0.74);
+  }
+}
+
+/* A small circle traced around the cell's resting spot, brightest at the top. */
+@keyframes agent-activity-orbit {
+  0%,
+  100% {
+    opacity: 0.3;
+    transform: translate(0, -1.2px) scale(1.02);
+  }
+
+  25% {
+    opacity: 0.86;
+    transform: translate(1.2px, 0) scale(0.92);
+  }
+
+  50% {
+    opacity: 0.98;
+    transform: translate(0, 1.2px) scale(1.06);
+  }
+
+  75% {
+    opacity: 0.52;
+    transform: translate(-1.2px, 0) scale(0.92);
   }
 }
 
