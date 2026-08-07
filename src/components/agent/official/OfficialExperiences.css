@@ -1242,6 +1242,31 @@ strong.agent-activity-history-summary {
   animation-timing-function: ease-out;
 }
 
+.agent-activity-pulse.is-active[data-motion="crackle"] > span {
+  animation-name: agent-activity-crackle;
+  animation-timing-function: steps(4, jump-none);
+}
+
+.agent-activity-pulse.is-active[data-motion="undertow"] > span {
+  animation-name: agent-activity-undertow;
+  animation-timing-function: cubic-bezier(0.3, 0, 0.7, 1);
+}
+
+.agent-activity-pulse.is-active[data-motion="beacon"] > span {
+  animation-name: agent-activity-beacon;
+  animation-timing-function: cubic-bezier(0.25, 0.1, 0.25, 1);
+}
+
+.agent-activity-pulse.is-active[data-motion="swing"] > span {
+  animation-name: agent-activity-swing;
+  animation-timing-function: cubic-bezier(0.36, 0, 0.64, 1);
+}
+
+.agent-activity-pulse.is-active[data-motion="sprout"] > span {
+  animation-name: agent-activity-sprout;
+  animation-timing-function: cubic-bezier(0.34, 1.3, 0.64, 1);
+}
+
 /* Cells a pattern leaves dark on purpose; kept dimmer than the resting glow. */
 .agent-activity-pulse.is-active > span.is-idle {
   animation: none;
@@ -1832,6 +1857,120 @@ strong.agent-activity-history-summary {
   100% {
     opacity: 0.16;
     transform: scale(1.5);
+  }
+}
+
+/* Three unevenly spaced hits, hard on and hard off, like a bad contact. */
+@keyframes agent-activity-crackle {
+  0%,
+  100% {
+    opacity: 0.18;
+    transform: scale(0.82);
+  }
+
+  12%,
+  20% {
+    opacity: 1;
+    transform: scale(1.12);
+  }
+
+  38%,
+  44% {
+    opacity: 0.86;
+    transform: scale(1.02);
+  }
+
+  66%,
+  76% {
+    opacity: 0.96;
+    transform: scale(1.08);
+  }
+}
+
+/* Dragged out to one side, held against the pull, then hauled back. */
+@keyframes agent-activity-undertow {
+  0%,
+  100% {
+    opacity: 0.3;
+    transform: translateX(0) scale(0.88);
+  }
+
+  30%,
+  55% {
+    opacity: 0.92;
+    transform: translateX(1.5px) scale(1.06);
+  }
+
+  80% {
+    opacity: 0.5;
+    transform: translateX(-0.9px) scale(0.94);
+  }
+}
+
+/* One slow sweep up to full, a moment held, then a long dark gap. */
+@keyframes agent-activity-beacon {
+  0% {
+    opacity: 0.12;
+    transform: scale(0.74);
+  }
+
+  35%,
+  46% {
+    opacity: 1;
+    transform: scale(1.18);
+  }
+
+  70%,
+  100% {
+    opacity: 0.12;
+    transform: scale(0.74);
+  }
+}
+
+/* Crosses its own cell and comes back, brightest at the two far ends. */
+@keyframes agent-activity-swing {
+  0%,
+  100% {
+    opacity: 0.9;
+    transform: translateX(-1.4px) scale(1);
+  }
+
+  25% {
+    opacity: 0.3;
+    transform: translateX(0) scale(0.84);
+  }
+
+  50% {
+    opacity: 0.9;
+    transform: translateX(1.4px) scale(1);
+  }
+
+  75% {
+    opacity: 0.3;
+    transform: translateX(0) scale(0.84);
+  }
+}
+
+/* Springs up out of nothing, overshoots a little, then settles back down. */
+@keyframes agent-activity-sprout {
+  0% {
+    opacity: 0.1;
+    transform: translateY(1.2px) scale(0.5);
+  }
+
+  40% {
+    opacity: 1;
+    transform: translateY(-0.6px) scale(1.16);
+  }
+
+  62% {
+    opacity: 0.78;
+    transform: translateY(0) scale(0.98);
+  }
+
+  100% {
+    opacity: 0.2;
+    transform: translateY(0.8px) scale(0.72);
   }
 }
 

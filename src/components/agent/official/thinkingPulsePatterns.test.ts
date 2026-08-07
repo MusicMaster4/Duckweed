@@ -15,18 +15,18 @@ describe("thinking pulse patterns", () => {
       rotatedSuffix.test(pattern.id),
     );
 
-    expect(originals).toHaveLength(363);
-    expect(rotations).toHaveLength(963);
-    expect(THINKING_PULSE_PATTERNS).toHaveLength(1326);
+    expect(originals).toHaveLength(413);
+    expect(rotations).toHaveLength(1113);
+    expect(THINKING_PULSE_PATTERNS).toHaveLength(1526);
     expect(
       rotations.filter((pattern) => pattern.id.endsWith("-rotated-90")),
-    ).toHaveLength(337);
+    ).toHaveLength(387);
     expect(
       rotations.filter((pattern) => pattern.id.endsWith("-rotated-180")),
-    ).toHaveLength(313);
+    ).toHaveLength(363);
     expect(
       rotations.filter((pattern) => pattern.id.endsWith("-rotated-270")),
-    ).toHaveLength(313);
+    ).toHaveLength(363);
 
     const rotateClockwise = (steps: readonly number[]) =>
       steps.map((_, target) => {
@@ -171,6 +171,62 @@ describe("thinking pulse patterns", () => {
     }
   });
 
+  test("includes the fifth 50 matrix formation profiles", () => {
+    const formations = [
+      "tide-race",
+      "anchor-drop",
+      "reef-fan",
+      "net-haul",
+      "gull-turn",
+      "mast-climb",
+      "keel-roll",
+      "harbour-sweep",
+      "lantern-swing",
+      "undercurrent",
+    ];
+    const profiles = ["crackling", "dragging", "beaming", "swinging", "sprouting"];
+    const ids = new Set(THINKING_PULSE_PATTERNS.map((pattern) => pattern.id));
+
+    for (const formation of formations) {
+      for (const profile of profiles) {
+        expect(ids.has(`${formation}-${profile}`)).toBe(true);
+      }
+    }
+  });
+
+  /**
+   * Each formation in the fifth bank is a permutation of 0 through 8, which is
+   * what guarantees all three of its quarter-turns are distinct animations.
+   */
+  test("every fifth bank formation gives three distinct rotations", () => {
+    const formations = [
+      "tide-race",
+      "anchor-drop",
+      "reef-fan",
+      "net-haul",
+      "gull-turn",
+      "mast-climb",
+      "keel-roll",
+      "harbour-sweep",
+      "lantern-swing",
+      "undercurrent",
+    ];
+
+    for (const formation of formations) {
+      const family = THINKING_PULSE_PATTERNS.filter((pattern) =>
+        pattern.id.startsWith(`${formation}-`),
+      );
+      /* Five profiles, each with an original and three rotations. */
+      expect(family).toHaveLength(20);
+      expect(new Set(family.map((pattern) => JSON.stringify(pattern.steps))).size).toBe(4);
+      for (const pattern of family) {
+        expect([...pattern.steps].sort((a, b) => a - b)).toEqual([
+          0, 1, 2, 3, 4, 5, 6, 7, 8,
+        ]);
+      }
+    }
+  });
+
   test("each late bank's motions are exclusive to it", () => {
     const banks = [
       {
@@ -216,6 +272,21 @@ describe("thinking pulse patterns", () => {
           "cross-fade",
           "corner-drift",
           "pivot-swing",
+        ],
+      },
+      {
+        motions: new Set(["crackle", "undertow", "beacon", "swing", "sprout"]),
+        formations: [
+          "tide-race",
+          "anchor-drop",
+          "reef-fan",
+          "net-haul",
+          "gull-turn",
+          "mast-climb",
+          "keel-roll",
+          "harbour-sweep",
+          "lantern-swing",
+          "undercurrent",
         ],
       },
     ];
@@ -285,6 +356,11 @@ describe("thinking pulse patterns", () => {
         "sink",
         "skid",
         "halo",
+        "crackle",
+        "undertow",
+        "beacon",
+        "swing",
+        "sprout",
       ]),
     );
   });
