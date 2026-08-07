@@ -34,7 +34,12 @@ export type ThinkingPulseMotion =
   | "undertow"
   | "beacon"
   | "swing"
-  | "sprout";
+  | "sprout"
+  | "lamp"
+  | "wink"
+  | "ember"
+  | "morse"
+  | "fade";
 
 export interface ThinkingPulsePattern {
   id: string;
@@ -449,6 +454,49 @@ const FIFTH_MATRIX_PULSE_PATTERNS: readonly ThinkingPulsePattern[] =
     })),
   );
 
+/**
+ * A sixth bank of ten formations, again with five motions of its own. Unlike
+ * every bank above it, none of these motions move a cell: they only take it
+ * from dark to lit and back, so the matrix stays still and reads as a grid of
+ * lamps rather than a grid in motion. The moves it adds are a soft lamp, a
+ * wink, an ember that flares and decays, a stepped signal, and a long fade.
+ * Each formation is a permutation of 0 through 8, so all three quarter-turns
+ * of it stay distinct animations.
+ */
+const SIXTH_MATRIX_FORMATIONS: ReadonlyArray<readonly [string, readonly number[]]> = [
+  ["window-lights", [0, 4, 8, 5, 1, 6, 3, 7, 2]],
+  ["street-lamps", [6, 2, 7, 0, 5, 3, 8, 1, 4]],
+  ["marquee-blink", [1, 3, 5, 7, 0, 2, 4, 6, 8]],
+  ["signal-box", [4, 7, 1, 8, 3, 0, 5, 2, 6]],
+  ["porch-light", [3, 5, 0, 6, 8, 2, 1, 4, 7]],
+  ["circuit-test", [7, 0, 6, 2, 4, 8, 5, 3, 1]],
+  ["switch-board", [5, 1, 3, 4, 7, 6, 0, 8, 2]],
+  ["relay-click", [2, 8, 4, 3, 6, 1, 7, 0, 5]],
+  ["filament-warm", [8, 3, 1, 5, 2, 7, 6, 4, 0]],
+  ["dial-glow", [1, 6, 2, 0, 7, 4, 8, 5, 3]],
+];
+
+const SIXTH_MATRIX_PROFILES: ReadonlyArray<
+  readonly [string, ThinkingPulseMotion, number]
+> = [
+  ["lamping", "lamp", 58],
+  ["winking", "wink", 50],
+  ["smouldering", "ember", 66],
+  ["signalling", "morse", 47],
+  ["dimming", "fade", 71],
+];
+
+const SIXTH_MATRIX_PULSE_PATTERNS: readonly ThinkingPulsePattern[] =
+  SIXTH_MATRIX_FORMATIONS.flatMap(([formationId, steps], formationIndex) =>
+    SIXTH_MATRIX_PROFILES.map(([profileId, motion, stepMs]) => ({
+      id: `${formationId}-${profileId}`,
+      steps,
+      motion,
+      durationMs: PULSE_DURATION_MS,
+      stepMs: stepMs + formationIndex,
+    })),
+  );
+
 const BASE_PATTERNS: readonly BasePattern[] = [
   ...PATHS.map(([id, sequence]) => ({ id, steps: stepsFromSequence(sequence) })),
   ...WAVES.map(([id, steps]) => ({ id, steps })),
@@ -510,6 +558,7 @@ const ORIGINAL_PULSE_PATTERNS: readonly ThinkingPulsePattern[] = [
   ...THIRD_MATRIX_PULSE_PATTERNS,
   ...FOURTH_MATRIX_PULSE_PATTERNS,
   ...FIFTH_MATRIX_PULSE_PATTERNS,
+  ...SIXTH_MATRIX_PULSE_PATTERNS,
 ];
 
 /**

@@ -15,18 +15,18 @@ describe("thinking pulse patterns", () => {
       rotatedSuffix.test(pattern.id),
     );
 
-    expect(originals).toHaveLength(413);
-    expect(rotations).toHaveLength(1113);
-    expect(THINKING_PULSE_PATTERNS).toHaveLength(1526);
+    expect(originals).toHaveLength(463);
+    expect(rotations).toHaveLength(1263);
+    expect(THINKING_PULSE_PATTERNS).toHaveLength(1726);
     expect(
       rotations.filter((pattern) => pattern.id.endsWith("-rotated-90")),
-    ).toHaveLength(387);
+    ).toHaveLength(437);
     expect(
       rotations.filter((pattern) => pattern.id.endsWith("-rotated-180")),
-    ).toHaveLength(363);
+    ).toHaveLength(413);
     expect(
       rotations.filter((pattern) => pattern.id.endsWith("-rotated-270")),
-    ).toHaveLength(363);
+    ).toHaveLength(413);
 
     const rotateClockwise = (steps: readonly number[]) =>
       steps.map((_, target) => {
@@ -227,6 +227,46 @@ describe("thinking pulse patterns", () => {
     }
   });
 
+  test("includes the sixth 50 matrix formation profiles", () => {
+    const formations = [
+      "window-lights",
+      "street-lamps",
+      "marquee-blink",
+      "signal-box",
+      "porch-light",
+      "circuit-test",
+      "switch-board",
+      "relay-click",
+      "filament-warm",
+      "dial-glow",
+    ];
+    const profiles = ["lamping", "winking", "smouldering", "signalling", "dimming"];
+    const ids = new Set(THINKING_PULSE_PATTERNS.map((pattern) => pattern.id));
+
+    for (const formation of formations) {
+      for (const profile of profiles) {
+        expect(ids.has(`${formation}-${profile}`)).toBe(true);
+      }
+    }
+  });
+
+  /**
+   * The sixth bank is the still one: its cells light and go dark where they
+   * are. A transform in any of its keyframes would put the grid back in
+   * motion, so guard the stylesheet as well as the pool.
+   */
+  test("the sixth bank's motions never move a cell", async () => {
+    const css = await Bun.file(`${import.meta.dir}/OfficialExperiences.css`).text();
+
+    for (const motion of ["lamp", "wink", "ember", "morse", "fade"]) {
+      const block = css.match(
+        new RegExp(`@keyframes agent-activity-${motion}\\s*\\{[\\s\\S]*?\\n\\}`),
+      );
+      expect(block).not.toBeNull();
+      expect(block![0]).not.toContain("transform");
+    }
+  });
+
   test("each late bank's motions are exclusive to it", () => {
     const banks = [
       {
@@ -287,6 +327,21 @@ describe("thinking pulse patterns", () => {
           "harbour-sweep",
           "lantern-swing",
           "undercurrent",
+        ],
+      },
+      {
+        motions: new Set(["lamp", "wink", "ember", "morse", "fade"]),
+        formations: [
+          "window-lights",
+          "street-lamps",
+          "marquee-blink",
+          "signal-box",
+          "porch-light",
+          "circuit-test",
+          "switch-board",
+          "relay-click",
+          "filament-warm",
+          "dial-glow",
         ],
       },
     ];
@@ -361,6 +416,11 @@ describe("thinking pulse patterns", () => {
         "beacon",
         "swing",
         "sprout",
+        "lamp",
+        "wink",
+        "ember",
+        "morse",
+        "fade",
       ]),
     );
   });
