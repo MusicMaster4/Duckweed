@@ -15,18 +15,18 @@ describe("thinking pulse patterns", () => {
       rotatedSuffix.test(pattern.id),
     );
 
-    expect(originals).toHaveLength(313);
-    expect(rotations).toHaveLength(823);
-    expect(THINKING_PULSE_PATTERNS).toHaveLength(1136);
+    expect(originals).toHaveLength(363);
+    expect(rotations).toHaveLength(963);
+    expect(THINKING_PULSE_PATTERNS).toHaveLength(1326);
     expect(
       rotations.filter((pattern) => pattern.id.endsWith("-rotated-90")),
-    ).toHaveLength(287);
+    ).toHaveLength(337);
     expect(
       rotations.filter((pattern) => pattern.id.endsWith("-rotated-180")),
-    ).toHaveLength(268);
+    ).toHaveLength(313);
     expect(
       rotations.filter((pattern) => pattern.id.endsWith("-rotated-270")),
-    ).toHaveLength(268);
+    ).toHaveLength(313);
 
     const rotateClockwise = (steps: readonly number[]) =>
       steps.map((_, target) => {
@@ -148,6 +148,29 @@ describe("thinking pulse patterns", () => {
     }
   });
 
+  test("includes the fourth 50 matrix formation profiles", () => {
+    const formations = [
+      "arrow-north",
+      "arrow-east",
+      "comb-teeth",
+      "nested-square",
+      "clover-turn",
+      "step-ladder",
+      "wave-crest",
+      "cross-fade",
+      "corner-drift",
+      "pivot-swing",
+    ];
+    const profiles = ["wobbling", "flaring", "sinking", "skidding", "haloing"];
+    const ids = new Set(THINKING_PULSE_PATTERNS.map((pattern) => pattern.id));
+
+    for (const formation of formations) {
+      for (const profile of profiles) {
+        expect(ids.has(`${formation}-${profile}`)).toBe(true);
+      }
+    }
+  });
+
   test("each late bank's motions are exclusive to it", () => {
     const banks = [
       {
@@ -178,6 +201,21 @@ describe("thinking pulse patterns", () => {
           "rung-climb",
           "swirl-out",
           "beacon-sweep",
+        ],
+      },
+      {
+        motions: new Set(["wobble", "flare", "sink", "skid", "halo"]),
+        formations: [
+          "arrow-north",
+          "arrow-east",
+          "comb-teeth",
+          "nested-square",
+          "clover-turn",
+          "step-ladder",
+          "wave-crest",
+          "cross-fade",
+          "corner-drift",
+          "pivot-swing",
         ],
       },
     ];
@@ -242,6 +280,11 @@ describe("thinking pulse patterns", () => {
         "gleam",
         "tumble",
         "surge",
+        "wobble",
+        "flare",
+        "sink",
+        "skid",
+        "halo",
       ]),
     );
   });
