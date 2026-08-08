@@ -11,8 +11,8 @@
 //! answer it at all.
 //!
 //! Only enough of each record is read to fill a picker row: an id to resume, a
-//! title, and when it was last touched. Transcripts run to megabytes, so the
-//! head of a file is read and the rest is skipped.
+//! title, and when it was last touched. Codex rollouts are streamed until their
+//! first real prompt because resumed conversations can put it deep in the file.
 
 use std::collections::HashMap;
 use std::fs::{self, File};
@@ -23,12 +23,16 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 use serde_json::Value;
 
-/// Rows returned to the picker. More than this is scrolling, not choosing.
-const MAX_RESULTS: usize = 40;
-/// Transcripts to open per agent before giving up — a hard ceiling on the cost
-/// of a listing, since Codex partitions by date rather than by project and a
-/// busy month is thousands of files.
-const MAX_SCANNED: usize = 600;
+/// Rows returned to the picker. The picker has a search box, so this bounds the
+/// payload rather than what a person can choose from: a folder worked in for a
+/// month has hundreds of past conversations, and cutting the searchable source
+/// to what fits on screen makes every row outside that window unfindable.
+const MAX_RESULTS: usize = 400;
+/// Rollouts opened per Codex listing. This caps a walk over a store that is
+/// partitioned by date rather than by project, so one folder's history is
+/// scattered across all of it. Only the first line of each file is read during
+/// that walk, which is what makes a walk this wide affordable.
+const MAX_SCANNED: usize = 20_000;
 /// Bytes read from the head of a transcript while looking for its first prompt.
 /// Codex prepends its whole system prompt, which is ~40 KB on its own.
 const HEAD_BYTES: u64 = 256 * 1024;
@@ -133,10 +137,17 @@ fn same_path(left: &str, right: &str) -> bool {
     #[cfg(windows)]
     {
         let normalize = |value: &str| {
-            value
+            let normalized = value
                 .replace('/', "\\")
                 .trim_end_matches('\\')
-                .to_lowercase()
+                .to_lowercase();
+            if let Some(rest) = normalized.strip_prefix(r"\\?\unc\") {
+                format!(r"\\{rest}")
+            } else if let Some(rest) = normalized.strip_prefix(r"\\?\") {
+                rest.to_string()
+            } else {
+                normalized
+            }
         };
         normalize(left) == normalize(right)
     }
@@ -540,6 +551,94 @@ fn claude_sessions(home: &Path, cwd: &Path) -> Vec<AgentSessionSummary> {
 
 // ---------------------------------------------------------------------- Codex
 
+/// The newest versioned state database used by the installed Codex CLI.
+fn codex_state_database(home: &Path) -> Option<PathBuf> {
+    fs::read_dir(home.join(".codex"))
+        .ok()?
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            let name = path.file_name()?.to_str()?;
+            let version = name
+                .strip_prefix("state_")?
+                .strip_suffix(".sqlite")?
+                .parse::<u32>()
+                .ok()?;
+            Some((version, path))
+        })
+        .max_by_key(|(version, _)| *version)
+        .map(|(_, path)| path)
+}
+
+/// Current Codex versions keep the resume picker's canonical rows in SQLite.
+/// Reading this first avoids racing a newly created rollout and uses the same
+/// title and recency values as `codex resume`.
+fn codex_database_sessions(home: &Path, cwd: &Path) -> Option<Vec<AgentSessionSummary>> {
+    use rusqlite::{Connection, OpenFlags};
+
+    let database = codex_state_database(home)?;
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let connection = Connection::open_with_flags(database, flags).ok()?;
+    let mut statement = connection
+        .prepare(
+            "SELECT id, rollout_path, created_at, updated_at, cwd, title, model, \
+                    created_at_ms, updated_at_ms, recency_at_ms, preview, \
+                    first_user_message, name \
+             FROM threads \
+             WHERE archived = 0 \
+             ORDER BY COALESCE(NULLIF(recency_at_ms, 0), \
+                               NULLIF(updated_at_ms, 0), updated_at * 1000) DESC",
+        )
+        .ok()?;
+    let mut rows = statement.query([]).ok()?;
+    let cwd_text = cwd.to_string_lossy().to_string();
+    let mut found = Vec::new();
+
+    while let Some(row) = rows.next().ok()? {
+        let session_cwd = row.get::<_, String>(4).ok()?;
+        if !same_path(&session_cwd, &cwd_text) {
+            continue;
+        }
+
+        let title = [
+            row.get::<_, Option<String>>(12).ok()?.unwrap_or_default(),
+            row.get::<_, String>(5).ok()?,
+            row.get::<_, String>(11).ok()?,
+            row.get::<_, String>(10).ok()?,
+        ]
+        .into_iter()
+        .find(|value| !value.trim().is_empty())
+        .map(|value| clean_title(&value))
+        .unwrap_or_else(|| "Untitled session".to_string());
+        let created_seconds = row.get::<_, i64>(2).ok()?;
+        let updated_seconds = row.get::<_, i64>(3).ok()?;
+        let created_millis = row.get::<_, Option<i64>>(7).ok()?.unwrap_or(0);
+        let updated_millis = row.get::<_, Option<i64>>(8).ok()?.unwrap_or(0);
+        let recency_millis = row.get::<_, Option<i64>>(9).ok()?.unwrap_or(0);
+
+        found.push(AgentSessionSummary {
+            id: row.get(0).ok()?,
+            title,
+            updated_at: [recency_millis, updated_millis, updated_seconds * 1000]
+                .into_iter()
+                .find(|stamp| *stamp > 0)
+                .unwrap_or(0),
+            created_at: if created_millis > 0 {
+                created_millis
+            } else {
+                created_seconds * 1000
+            },
+            model: row.get::<_, Option<String>>(6).ok()?.unwrap_or_default(),
+            path: row.get(1).ok()?,
+            ..Default::default()
+        });
+        if found.len() >= MAX_RESULTS {
+            break;
+        }
+    }
+    Some(found)
+}
+
 /// Thread names Codex keeps in one flat index, keyed by thread id.
 fn codex_thread_names(home: &Path) -> HashMap<String, String> {
     let mut names = HashMap::new();
@@ -604,7 +703,7 @@ fn codex_rollouts(root: &Path) -> Vec<PathBuf> {
 
 /// Codex rollouts: the first line is a `session_meta` naming the working
 /// directory, so the scan can reject a file after one line.
-fn codex_sessions(home: &Path, cwd: &Path) -> Vec<AgentSessionSummary> {
+fn codex_rollout_sessions(home: &Path, cwd: &Path) -> Vec<AgentSessionSummary> {
     let names = codex_thread_names(home);
     let cwd_text = cwd.to_string_lossy().to_string();
     let mut found = Vec::new();
@@ -613,13 +712,13 @@ fn codex_sessions(home: &Path, cwd: &Path) -> Vec<AgentSessionSummary> {
         if found.len() >= MAX_RESULTS {
             break;
         }
-        let Some(head) = read_head(&path) else {
+        let Ok(file) = File::open(&path) else {
             continue;
         };
-        let mut lines = head.lines();
+        let mut lines = BufReader::new(file).lines().map_while(Result::ok);
         let Some(meta) = lines
             .next()
-            .and_then(|line| serde_json::from_str::<Value>(line).ok())
+            .and_then(|line| serde_json::from_str::<Value>(&line).ok())
         else {
             continue;
         };
@@ -658,8 +757,12 @@ fn codex_sessions(home: &Path, cwd: &Path) -> Vec<AgentSessionSummary> {
         };
 
         if summary.title.is_empty() {
+            let mut fallback_title = String::new();
+            // Continued rollouts can replay a large prior conversation before
+            // their first real prompt. Scan complete JSONL records instead of
+            // cutting the title search at a byte boundary.
             for line in lines {
-                let Ok(record) = serde_json::from_str::<Value>(line) else {
+                let Ok(record) = serde_json::from_str::<Value>(&line) else {
                     continue;
                 };
                 // Codex records a turn as `response_item` / `event_msg` with a
@@ -668,6 +771,19 @@ fn codex_sessions(home: &Path, cwd: &Path) -> Vec<AgentSessionSummary> {
                 let is_user = payload.get("type").and_then(Value::as_str) == Some("user_message")
                     || payload.get("role").and_then(Value::as_str) == Some("user");
                 if !is_user {
+                    let is_assistant = payload.get("type").and_then(Value::as_str)
+                        == Some("agent_message")
+                        || payload.get("role").and_then(Value::as_str) == Some("assistant");
+                    if is_assistant && fallback_title.is_empty() {
+                        let text = payload
+                            .get("message")
+                            .or_else(|| payload.get("content"))
+                            .map(message_text)
+                            .unwrap_or_default();
+                        if !text.trim().is_empty() {
+                            fallback_title = clean_title(&text);
+                        }
+                    }
                     continue;
                 }
                 let text = payload
@@ -681,13 +797,20 @@ fn codex_sessions(home: &Path, cwd: &Path) -> Vec<AgentSessionSummary> {
                 summary.title = clean_title(&text);
                 break;
             }
+            if summary.title.is_empty() {
+                summary.title = fallback_title;
+            }
         }
         if summary.title.is_empty() {
-            continue;
+            summary.title = "Untitled session".to_string();
         }
         found.push(summary);
     }
     found
+}
+
+fn codex_sessions(home: &Path, cwd: &Path) -> Vec<AgentSessionSummary> {
+    codex_database_sessions(home, cwd).unwrap_or_else(|| codex_rollout_sessions(home, cwd))
 }
 
 // ----------------------------------------------------------------------- Grok
@@ -1006,6 +1129,14 @@ mod tests {
             r"H:\Python\Slop\duckweed\",
             r"H:\Python\Slop\duckweed"
         ));
+        assert!(same_path(
+            r"\\?\H:\Python\Slop\duckweed",
+            r"H:\Python\Slop\duckweed"
+        ));
+        assert!(same_path(
+            r"\\?\UNC\server\share\project",
+            r"\\server\share\project"
+        ));
         assert!(!same_path("", ""));
         assert!(!same_path(r"H:\Python", r"H:\Python\Slop"));
     }
@@ -1158,6 +1289,169 @@ mod tests {
         assert_eq!(found[0].id, "mine");
         // The index's thread name wins over the raw first prompt.
         assert_eq!(found[0].title, "Resume picker");
+    }
+
+    #[test]
+    fn codex_listing_uses_the_live_state_database_for_new_sessions() {
+        use rusqlite::{params, Connection};
+
+        let home = temp_dir("codex-state-database");
+        let cwd = Path::new(r"H:\Python\Slop\duckweed");
+        let database = home.join(".codex/state_5.sqlite");
+        fs::create_dir_all(database.parent().unwrap()).unwrap();
+        let connection = Connection::open(&database).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE threads (
+                    id TEXT PRIMARY KEY,
+                    rollout_path TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    cwd TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    model TEXT,
+                    created_at_ms INTEGER,
+                    updated_at_ms INTEGER,
+                    recency_at_ms INTEGER,
+                    preview TEXT NOT NULL DEFAULT '',
+                    first_user_message TEXT NOT NULL DEFAULT '',
+                    name TEXT,
+                    archived INTEGER NOT NULL DEFAULT 0
+                );",
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO threads (
+                    id, rollout_path, created_at, updated_at, cwd, title, model,
+                    created_at_ms, updated_at_ms, recency_at_ms, archived
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 0)",
+                params![
+                    "today",
+                    r"C:\Users\test\.codex\sessions\today.jsonl",
+                    100_i64,
+                    200_i64,
+                    r"\\?\H:\Python\Slop\duckweed",
+                    "Available immediately",
+                    "gpt-5.6",
+                    100_001_i64,
+                    200_001_i64,
+                    200_002_i64,
+                ],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO threads (
+                    id, rollout_path, created_at, updated_at, cwd, title, archived
+                 ) VALUES ('other', 'other.jsonl', 100, 200, 'C:\\elsewhere', 'Other', 0)",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+
+        let found = codex_sessions(&home, cwd);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id, "today");
+        assert_eq!(found[0].title, "Available immediately");
+        assert_eq!(found[0].updated_at, 200_002);
+        assert_eq!(found[0].created_at, 100_001);
+        assert_eq!(found[0].model, "gpt-5.6");
+    }
+
+    #[test]
+    fn codex_listing_returns_more_than_the_previous_forty_row_window() {
+        let home = temp_dir("codex-many-results");
+        let cwd = Path::new(r"H:\Python\Slop\duckweed");
+        let day = home.join(".codex/sessions/2026/07/26");
+
+        for index in 0..45 {
+            let contents = format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"session-{index}\",\"cwd\":\"H:\\\\Python\\\\Slop\\\\duckweed\"}}}}\n\
+                 {{\"payload\":{{\"type\":\"user_message\",\"message\":\"Prompt {index}\"}}}}\n"
+            );
+            write(
+                &day.join(format!("rollout-2026-07-26T20-00-{index:02}-session.jsonl")),
+                &contents,
+            );
+        }
+
+        let found = codex_sessions(&home, cwd);
+        assert_eq!(found.len(), 45);
+        assert!(found.iter().any(|session| session.id == "session-44"));
+    }
+
+    #[test]
+    fn codex_listing_finds_a_prompt_past_the_previous_head_limit() {
+        let home = temp_dir("codex-deep-prompt");
+        let cwd = Path::new(r"H:\Python\Slop\duckweed");
+        let path = home
+            .join(".codex/sessions/2026/07/26")
+            .join("rollout-2026-07-26T20-00-00-deep.jsonl");
+        let padding = "x".repeat(HEAD_BYTES as usize + 1_024);
+        let contents = [
+            serde_json::json!({
+                "type": "session_meta",
+                "payload": { "id": "deep", "cwd": r"H:\Python\Slop\duckweed" }
+            })
+            .to_string(),
+            serde_json::json!({
+                "type": "response_item",
+                "payload": { "type": "message", "role": "developer", "content": padding }
+            })
+            .to_string(),
+            serde_json::json!({
+                "type": "response_item",
+                "payload": { "type": "message", "role": "user", "content": "Recover this old session" }
+            })
+            .to_string(),
+        ]
+        .join("\n");
+        write(&path, &contents);
+
+        let found = codex_sessions(&home, cwd);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].title, "Recover this old session");
+    }
+
+    #[test]
+    fn codex_listing_keeps_sessions_without_a_normal_user_prompt() {
+        let home = temp_dir("codex-title-fallback");
+        let cwd = Path::new(r"H:\Python\Slop\duckweed");
+        let day = home.join(".codex/sessions/2026/07/26");
+        write(
+            &day.join("rollout-2026-07-26T20-00-01-agent.jsonl"),
+            concat!(
+                r#"{"type":"session_meta","payload":{"id":"agent-only","cwd":"H:\\Python\\Slop\\duckweed"}}"#,
+                "\n",
+                r#"{"payload":{"type":"agent_message","message":"Inspect the history parser"}}"#,
+                "\n",
+            ),
+        );
+        write(
+            &day.join("rollout-2026-07-26T20-00-00-empty.jsonl"),
+            concat!(
+                r#"{"type":"session_meta","payload":{"id":"empty","cwd":"H:\\Python\\Slop\\duckweed"}}"#,
+                "\n",
+            ),
+        );
+
+        let found = codex_sessions(&home, cwd);
+        assert_eq!(found.len(), 2);
+        assert_eq!(
+            found
+                .iter()
+                .find(|session| session.id == "agent-only")
+                .map(|session| session.title.as_str()),
+            Some("Inspect the history parser")
+        );
+        assert_eq!(
+            found
+                .iter()
+                .find(|session| session.id == "empty")
+                .map(|session| session.title.as_str()),
+            Some("Untitled session")
+        );
     }
 
     #[test]

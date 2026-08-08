@@ -1607,6 +1607,8 @@ export function createCodexAdapter(): AgentAdapter {
           const thread = asRecord(result.thread) ?? result;
           threadId = asString(thread.id) ?? sessionId;
           replayThread(thread, ctx);
+          const hydratedStatus = threadStatus(thread.status);
+          currentTurnId = hydratedStatus === "working" ? hydratedTurnId(thread) : null;
           // `thread/start` reports the model beside the thread, `thread/resume`
           // inside it; neither is guaranteed, so take whichever is there.
           const model = asString(result.model) ?? asString(thread.model);
@@ -1628,7 +1630,13 @@ export function createCodexAdapter(): AgentAdapter {
             .catch(() => {
               // Older app-server builds can resume threads without goal support.
             });
-          ctx.emit({ type: "status", status: "idle" });
+          // A thread can still own a live background turn when it is resumed.
+          // Preserve that turn id so follow-ups steer the resumed work instead
+          // of being rejected and queued against the temporary blank thread.
+          ctx.emit({
+            type: "status",
+            status: currentTurnId || hydratedStatus === "working" ? "working" : "idle",
+          });
           return true;
         })
         .catch((error: unknown) => {

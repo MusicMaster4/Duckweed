@@ -723,6 +723,21 @@ export async function start(
   const definition = AGENTS[launch.agent];
   const adapter = createAdapter(launch.agent);
   const presentation = agentPresentation(launch.agent, launch.program);
+
+  // Resolve "continue the latest conversation" before starting the protocol.
+  // Codex opens a blank thread during its handshake. Looking up the latest
+  // session after that point can select the thread we just created instead of
+  // the conversation the user meant to continue. It can also let an opening
+  // prompt start on the blank thread before a late resume swaps `threadId`
+  // underneath the active turn.
+  const startupResume: { id: string; title: string } | null = launch.resumeId
+    ? { id: launch.resumeId, title: "" }
+    : null;
+  const startupResumeLookup =
+    adapter.resume && launch.resume && !startupResume
+      ? latestSession(launch.agent, cwd)
+      : null;
+
   // Claudex injects a default model when none was typed; surface that before
   // the first turn so the header/picker match the process that actually runs.
   const seedModel =
@@ -738,7 +753,7 @@ export async function start(
     draft: "",
     draftImages: [],
     promptHistory: [],
-    pendingResume: null,
+    pendingResume: startupResume,
     notifyHandle: null,
     interrupted: false,
     userInitiatedTurn: false,
@@ -830,6 +845,18 @@ export async function start(
     return null;
   }
 
+  // The process can start in parallel with the durable-history read, but the
+  // handshake must wait. This keeps the pane reserved in `sessions` while the
+  // lookup runs and still guarantees Codex has not created its blank thread.
+  if (startupResumeLookup) {
+    const found = await startupResumeLookup;
+    if (session.disposed || sessions.get(termId) !== session) {
+      await agentProcStop(termId).catch(() => {});
+      return null;
+    }
+    if (found) session.pendingResume = { id: found.id, title: found.title };
+  }
+
   adapter.start(session.context);
 
   // Claude only reports model/effort on the first turn's system/init. Until
@@ -854,26 +881,6 @@ export async function start(
         ...(nextEffort ? { effort: nextEffort } : {}),
       });
     });
-  }
-
-  // `--continue` / `--resume <id>` for the agents that resume over their
-  // protocol. Claude took the same request as a launch flag above, so it is
-  // already resuming and must not be asked twice.
-  if (adapter.resume && (launch.resumeId || launch.resume)) {
-    if (launch.resumeId) {
-      session.pendingResume = { id: launch.resumeId, title: "" };
-    } else {
-      void latestSession(launch.agent, cwd).then((found) => {
-        if (session.disposed || !found) return;
-        // The handshake may already be done; `pendingResume` is only read on
-        // the transition into idle, so a late answer applies itself.
-        if (session.state.status === "starting") {
-          session.pendingResume = { id: found.id, title: found.title };
-        } else {
-          void applyResume(session, found.id, found.title);
-        }
-      });
-    }
   }
 
   if (launch.prompt) submit(termId, launch.prompt);
