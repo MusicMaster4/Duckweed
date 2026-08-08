@@ -65,7 +65,7 @@ interface BasePattern {
  * formation, its motion, and the stagger between cells, never how fast it runs,
  * so nothing reads slower than the pane next to it.
  */
-const PULSE_DURATION_MS = 1000;
+const PULSE_DURATION_MS = 1400;
 
 function stepsFromSequence(sequence: readonly number[]): number[] {
   const steps = Array.from({ length: 9 }, () => 0);
