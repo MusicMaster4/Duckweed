@@ -1079,15 +1079,32 @@ strong.agent-activity-history-summary {
   grid-template-columns: repeat(3, 2.5px);
   grid-template-rows: repeat(3, 2.5px);
   place-content: center;
+  /* Cells that size up past their track stay centred on it. */
+  place-items: center;
   gap: 1.5px;
 }
 
 .agent-activity-pulse > span {
-  width: 2.5px;
-  height: 2.5px;
+  width: var(--pulse-cell, 2.5px);
+  height: var(--pulse-cell, 2.5px);
   border-radius: 50%;
   background: var(--activity-accent);
   opacity: 0.28;
+}
+
+/**
+ * The still motions never scale, so their cells would hold the resting size
+ * for the whole cycle while every other matrix opens well past it, which
+ * reads as a grid of smaller squares. Size the cell itself up to the lit
+ * size of the catalog instead: that keeps the bank still, which is the whole
+ * point of it, without leaving it looking undersized next to the others.
+ */
+.agent-activity-pulse[data-motion="lamp"],
+.agent-activity-pulse[data-motion="wink"],
+.agent-activity-pulse[data-motion="ember"],
+.agent-activity-pulse[data-motion="morse"],
+.agent-activity-pulse[data-motion="fade"] {
+  --pulse-cell: 2.9px;
 }
 
 .agent-activity-pulse.is-active > span {
@@ -1294,6 +1311,31 @@ strong.agent-activity-history-summary {
 .agent-activity-pulse.is-active[data-motion="fade"] > span {
   animation-name: agent-activity-fade;
   animation-timing-function: ease-in-out;
+}
+
+.agent-activity-pulse.is-active[data-motion="bob"] > span {
+  animation-name: agent-activity-bob;
+  animation-timing-function: ease-in-out;
+}
+
+.agent-activity-pulse.is-active[data-motion="squash"] > span {
+  animation-name: agent-activity-squash;
+  animation-timing-function: cubic-bezier(0.34, 1.4, 0.5, 1);
+}
+
+.agent-activity-pulse.is-active[data-motion="glide"] > span {
+  animation-name: agent-activity-glide;
+  animation-timing-function: cubic-bezier(0.4, 0, 0.6, 1);
+}
+
+.agent-activity-pulse.is-active[data-motion="bounce"] > span {
+  animation-name: agent-activity-bounce;
+  animation-timing-function: cubic-bezier(0.3, 0.9, 0.4, 1);
+}
+
+.agent-activity-pulse.is-active[data-motion="facet"] > span {
+  animation-name: agent-activity-facet;
+  animation-timing-function: cubic-bezier(0.5, 0, 0.2, 1);
 }
 
 /* Cells a pattern leaves dark on purpose; kept dimmer than the resting glow. */
@@ -1689,28 +1731,29 @@ strong.agent-activity-history-summary {
   }
 }
 
-/* A nervous tremble: three small shakes off the resting spot, no scale change
-   worth speaking of, so the whole matrix reads as unsettled rather than lit. */
+/* A nervous tremble: three small shakes off the resting spot. The scale barely
+   moves, so the matrix reads as unsettled rather than lit, but the shakes ride
+   on top of full size instead of under it. */
 @keyframes agent-activity-quiver {
   0%,
   100% {
     opacity: 0.3;
-    transform: translateX(-0.6px) scale(0.92);
+    transform: translateX(-0.6px) scale(0.94);
   }
 
   20% {
     opacity: 0.82;
-    transform: translateX(0.6px) scale(0.98);
+    transform: translateX(0.6px) scale(1.04);
   }
 
   45% {
     opacity: 0.5;
-    transform: translateX(-0.5px) scale(0.94);
+    transform: translateX(-0.5px) scale(0.98);
   }
 
   70% {
     opacity: 0.9;
-    transform: translateX(0.4px) scale(1);
+    transform: translateX(0.4px) scale(1.08);
   }
 }
 
@@ -1790,7 +1833,8 @@ strong.agent-activity-history-summary {
   }
 }
 
-/* A loose wobble: the cell rolls around its own centre, never quite settling. */
+/* A loose wobble: the cell rolls around its own centre, never quite settling.
+   The brightest frame is also the widest, so the lit cell matches the catalog. */
 @keyframes agent-activity-wobble {
   0%,
   100% {
@@ -1800,17 +1844,17 @@ strong.agent-activity-history-summary {
 
   30% {
     opacity: 0.84;
-    transform: translate(0.7px, 0.3px) scale(1.04);
+    transform: translate(0.7px, 0.3px) scale(1.06);
   }
 
   60% {
     opacity: 0.94;
-    transform: translate(0.2px, -0.7px) scale(0.98);
+    transform: translate(0.2px, -0.7px) scale(1.1);
   }
 
   80% {
     opacity: 0.44;
-    transform: translate(-0.6px, -0.2px) scale(1.02);
+    transform: translate(-0.6px, -0.2px) scale(0.98);
   }
 }
 
@@ -1871,16 +1915,17 @@ strong.agent-activity-history-summary {
   }
 }
 
-/* Swells past its own edge and fades there, leaving a ring behind it. */
+/* Swells past its own edge and fades there, leaving a ring behind it. The lit
+   core starts at full size: swelling from under it read as a shrunken cell. */
 @keyframes agent-activity-halo {
   0% {
     opacity: 0.9;
-    transform: scale(0.72);
+    transform: scale(1.04);
   }
 
   45% {
     opacity: 0.55;
-    transform: scale(1.24);
+    transform: scale(1.28);
   }
 
   100% {
@@ -1956,27 +2001,28 @@ strong.agent-activity-history-summary {
   }
 }
 
-/* Crosses its own cell and comes back, brightest at the two far ends. */
+/* Crosses its own cell and comes back, brightest and widest at the two far
+   ends, dimmer and tighter as it passes through the middle. */
 @keyframes agent-activity-swing {
   0%,
   100% {
     opacity: 0.9;
-    transform: translateX(-1.4px) scale(1);
+    transform: translateX(-1.4px) scale(1.08);
   }
 
   25% {
     opacity: 0.3;
-    transform: translateX(0) scale(0.84);
+    transform: translateX(0) scale(0.88);
   }
 
   50% {
     opacity: 0.9;
-    transform: translateX(1.4px) scale(1);
+    transform: translateX(1.4px) scale(1.08);
   }
 
   75% {
     opacity: 0.3;
-    transform: translateX(0) scale(0.84);
+    transform: translateX(0) scale(0.88);
   }
 }
 
@@ -2109,6 +2155,108 @@ strong.agent-activity-history-summary {
 
   50% {
     opacity: 0.88;
+  }
+}
+
+/* Bob: floats up and rides there a moment before sinking back down. */
+@keyframes agent-activity-bob {
+  0%,
+  100% {
+    opacity: 0.24;
+    transform: translateY(1.3px) scale(0.88);
+  }
+
+  45% {
+    opacity: 0.95;
+    transform: translateY(-1.3px) scale(1.1);
+  }
+
+  72% {
+    opacity: 0.5;
+    transform: translateY(-0.2px) scale(1);
+  }
+}
+
+/* Squash: flattens, then stretches tall, keeping roughly its own area. */
+@keyframes agent-activity-squash {
+  0%,
+  100% {
+    opacity: 0.26;
+    transform: scale(1.24, 0.72);
+  }
+
+  30% {
+    opacity: 0.92;
+    transform: scale(0.82, 1.3);
+  }
+
+  62% {
+    opacity: 0.58;
+    transform: scale(1.12, 0.9);
+  }
+}
+
+/* Glide: crosses its own cell corner to corner, brightest halfway over. */
+@keyframes agent-activity-glide {
+  0% {
+    opacity: 0.18;
+    transform: translate(-1.3px, 1.1px) scale(0.8);
+  }
+
+  50% {
+    opacity: 1;
+    transform: translate(0.2px, -0.2px) scale(1.12);
+  }
+
+  100% {
+    opacity: 0.18;
+    transform: translate(1.3px, -1.1px) scale(0.8);
+  }
+}
+
+/* Bounce: drops in, squashes on the landing, and rebounds twice. */
+@keyframes agent-activity-bounce {
+  0%,
+  100% {
+    opacity: 0.2;
+    transform: translateY(-1.5px) scale(0.86);
+  }
+
+  38% {
+    opacity: 1;
+    transform: translateY(1px) scale(1.24, 0.86);
+  }
+
+  54% {
+    opacity: 0.8;
+    transform: translateY(-0.6px) scale(0.94, 1.14);
+  }
+
+  78% {
+    opacity: 0.45;
+    transform: translateY(0.55px) scale(1.06, 0.94);
+  }
+}
+
+/* Facet: the cell squares off as it lights, then rounds back to a dot. */
+@keyframes agent-activity-facet {
+  0%,
+  100% {
+    opacity: 0.24;
+    border-radius: 50%;
+    transform: scale(0.84);
+  }
+
+  40% {
+    opacity: 0.96;
+    border-radius: 14%;
+    transform: scale(1.16);
+  }
+
+  72% {
+    opacity: 0.55;
+    border-radius: 34%;
+    transform: scale(1);
   }
 }
 
@@ -3116,6 +3264,12 @@ button.chatgpt-thinking-row.is-selected {
   .claude-shimmer,
   .agent-activity-pulse.is-active > span {
     animation: none;
+  }
+
+  /* With every matrix held still, no bank opens past its resting size, so the
+     still bank has nothing left to make up for. */
+  .agent-activity-pulse {
+    --pulse-cell: 2.5px;
   }
 
   .agent-thinking-shimmer {
