@@ -1157,6 +1157,68 @@ describe("codex adapter", () => {
     });
   });
 
+  test("reattaches to an active turn when a background thread is resumed", async () => {
+    const h = harness();
+    await h.handshake();
+
+    const resumed = h.adapter.resume?.("thread_background", h.ctx);
+    const call = h.sent.find((message) => message.method === "thread/resume") as { id: number };
+    h.feed({
+      jsonrpc: "2.0",
+      id: call.id,
+      result: {
+        thread: {
+          id: "thread_background",
+          sessionId: "sess_background",
+          status: { type: "active" },
+          turns: [
+            {
+              id: "turn_background",
+              status: "inProgress",
+              items: [
+                {
+                  type: "userMessage",
+                  id: "user-background",
+                  content: [{ type: "text", text: "Finish the long-running goal" }],
+                },
+                {
+                  type: "agentMessage",
+                  id: "update-background",
+                  text: "Still working on it.",
+                },
+              ],
+            },
+          ],
+        },
+      },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(await resumed).toBe(true);
+    expect(h.state()).toMatchObject({
+      sessionId: "sess_background",
+      status: "working",
+    });
+    expect(h.state().items).toEqual([
+      expect.objectContaining({ kind: "user", text: "Finish the long-running goal" }),
+      expect.objectContaining({ kind: "assistant", text: "Still working on it." }),
+    ]);
+
+    const steered = h.adapter.steer?.({ text: "continue", images: [] }, h.ctx);
+    const steer = h.sent.at(-1) as { id: number };
+    expect(steer).toMatchObject({
+      method: "turn/steer",
+      params: {
+        threadId: "thread_background",
+        expectedTurnId: "turn_background",
+      },
+    });
+    h.feed({ jsonrpc: "2.0", id: steer.id, result: {} });
+    await Promise.resolve();
+    expect(await steered).toBe(true);
+  });
+
   test("says so when a thread cannot be resumed", async () => {
     const h = harness();
     await h.handshake();

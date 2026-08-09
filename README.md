@@ -38,6 +38,7 @@ it.
 
 <a href="#download">Download</a> ·
 <a href="#screenshots">Screenshots</a> ·
+<a href="#workspace-tools">Workspace tools</a> ·
 <a href="#what-it-does">What it does</a> ·
 <a href="#agent-usage">Agent usage</a> ·
 <a href="#keyboard-shortcuts">Shortcuts</a> ·
@@ -85,6 +86,108 @@ accounts, credentials, personal paths, or private project data are shown.
     </td>
   </tr>
 </table>
+
+## Workspace tools
+
+Coding agents do not work in isolation. You still need to remember the finish
+line, reuse good instructions, keep servers within reach, and decide what should
+happen when a long-running job finishes. Duckweed keeps that surrounding work
+inside a dock that shares the window with your terminals and agents. Open it
+with `Ctrl+Shift+X`, switch tools without covering your panes, and resize it to
+fit the task.
+
+The captures below use only built-in demo content. The project is intentionally
+unattached, every prompt and checklist item is fictional, and the port IDs and
+addresses are synthetic. No account, local path, repository content, credential,
+or real public tunnel appears in these images.
+
+### Turn a working setup into a reusable layout
+
+Save the current pane arrangement or design a layout from scratch. A layout can
+open plain shells, start a command in each pane, launch a group of Codex or
+Claude agents, or mix them in the same grid. You can keep up to 16 panes in one
+template and optionally make a saved layout the default for restored tabs.
+
+<a href="docs/images/duckweed-tools-layouts.png">
+  <img src="docs/images/duckweed-tools-layouts.png" alt="Duckweed workspace tools showing saved three-pane and four-pane layouts with startup commands" width="100%" />
+</a>
+
+<sub><strong>Saved layouts.</strong> Recreate the workspace and its startup commands instead of rebuilding the same split every session.</sub>
+
+### Keep the instructions and the finish line close
+
+Prompt templates hold the instructions worth using again. Search them, copy
+them, or drag a card directly into any terminal or agent composer. Templates are
+shared across the app, so a good review or release prompt is available wherever
+you need it.
+
+The checklist is deliberately scoped to one tab. Write down what that workspace
+must accomplish, check off completed work, and keep the remaining count visible
+even while another tool is open. Finished items stay visible for a day before
+they clear themselves, and every list survives restarts and updates.
+
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <a href="docs/images/duckweed-tools-prompts.png">
+        <img src="docs/images/duckweed-tools-prompts.png" alt="Duckweed prompt template library with reusable review, release, and debugging prompts" width="100%" />
+      </a>
+      <br />
+      <sub><strong>Reusable prompts.</strong> Save once, then copy or drag a prompt into any shell or agent.</sub>
+    </td>
+    <td width="50%" valign="top">
+      <a href="docs/images/duckweed-tools-checklist.png">
+        <img src="docs/images/duckweed-tools-checklist.png" alt="Duckweed per-tab checklist with active and completed development tasks" width="100%" />
+      </a>
+      <br />
+      <sub><strong>Per-tab checklist.</strong> Keep the acceptance criteria beside the work and see progress at a glance.</sub>
+    </td>
+  </tr>
+</table>
+
+### Turn a local server into a shareable preview
+
+The Ports tool finds listening servers started by panes and agents in the
+current tab. Open or copy a local address, stop the owning process, or create a
+temporary public HTTPS link without leaving Duckweed. Shared servers remain
+clearly marked, and their tunnels stop when you stop sharing, close the process,
+or exit the app.
+
+<a href="docs/images/duckweed-tools-ports.png">
+  <img src="docs/images/duckweed-tools-ports.png" alt="Duckweed Ports tool showing a local development server and a second server with a synthetic public preview link" width="100%" />
+</a>
+
+<sub><strong>Local and public addresses.</strong> See which pane owns a server, copy its URL, and control sharing from the same workspace.</sub>
+
+> A public link lets anyone who has it reach that development server. Treat it
+> as temporary access, do not expose secrets or production data, and stop
+> sharing when the review is over.
+
+### Let the agents finish, then power down
+
+Power watch is built for long tests, builds, and unattended agent runs. Choose
+sleep or shutdown, select how long every pane must remain quiet, and arm the
+watch. Duckweed monitors all panes in all tabs, waits through the cooldown, and
+gives you a visible countdown with time to cancel before the operating system
+action runs. Restarting Duckweed always leaves the machine alone.
+
+<a href="docs/images/duckweed-tools-power.png">
+  <img src="docs/images/duckweed-tools-power.png" alt="Duckweed Power watch configured to shut down after every pane has been quiet for two minutes" width="100%" />
+</a>
+
+<sub><strong>Power watch.</strong> Start the long job, arm a cooldown, and walk away without leaving the computer running all night.</sub>
+
+### Everything in the dock
+
+| Tool | What it keeps within reach |
+| --- | --- |
+| **Files** | Browse the current project, search across open projects, open files in the built-in editor, and insert paths into a terminal or agent. |
+| **Layouts** | Save pane arrangements with optional startup commands and reopen them for another task. |
+| **Checklist** | Maintain a persistent task list for each tab, including progress and recently finished items. |
+| **Prompts** | Search, edit, copy, and drag reusable instructions into any shell or agent composer. |
+| **Statistics** | Follow session uptime, estimated agent cost, tokens, request counts, workspace size, listening ports, and saved commands. |
+| **Ports** | Inspect local servers, copy or open addresses, share a temporary public preview, and stop sharing or close the process. |
+| **Power** | Sleep or shut down the computer after every pane has stayed idle for the selected cooldown. |
 
 ## Why Duckweed exists
 
@@ -210,12 +313,10 @@ API credentials.
   highlight paths, URLs, flags, hashes, diffs, warnings, and errors.
 - **Shell discovery.** Duckweed finds PowerShell, `cmd`, Git Bash, WSL, Nushell,
   Bash, Zsh, and Fish when they are installed.
-- **Workspace tools.** A dockable panel (`Ctrl+Shift+X`) with a project file
-  browser, saved pane layouts, reusable prompt templates, a persistent per-tab
-  checklist, session statistics, a listening-port list with copy, forward, and
-  close actions, and a power watch that sleeps or shuts down the machine after
-  all panes finish. Prompt templates can be searched, copied, or dragged into
-  any terminal or agent composer.
+- **Workspace tools.** A resizable dock (`Ctrl+Shift+X`) for files, saved pane
+  layouts, reusable prompts, per-tab checklists, session statistics, local and
+  shared ports, and automatic sleep or shutdown. See every tool in
+  [Workspace tools](#workspace-tools).
 - **Explorer integration.** Per-user context-menu entries open a folder in a new
   Duckweed tab or window straight from Windows Explorer, without administrator
   rights. Both entries can be toggled in the settings.

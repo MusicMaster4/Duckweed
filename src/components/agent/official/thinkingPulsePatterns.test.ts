@@ -15,18 +15,18 @@ describe("thinking pulse patterns", () => {
       rotatedSuffix.test(pattern.id),
     );
 
-    expect(originals).toHaveLength(313);
-    expect(rotations).toHaveLength(823);
-    expect(THINKING_PULSE_PATTERNS).toHaveLength(1136);
+    expect(originals).toHaveLength(563);
+    expect(rotations).toHaveLength(1563);
+    expect(THINKING_PULSE_PATTERNS).toHaveLength(2126);
     expect(
       rotations.filter((pattern) => pattern.id.endsWith("-rotated-90")),
-    ).toHaveLength(287);
+    ).toHaveLength(537);
     expect(
       rotations.filter((pattern) => pattern.id.endsWith("-rotated-180")),
-    ).toHaveLength(268);
+    ).toHaveLength(513);
     expect(
       rotations.filter((pattern) => pattern.id.endsWith("-rotated-270")),
-    ).toHaveLength(268);
+    ).toHaveLength(513);
 
     const rotateClockwise = (steps: readonly number[]) =>
       steps.map((_, target) => {
@@ -148,6 +148,295 @@ describe("thinking pulse patterns", () => {
     }
   });
 
+  test("includes the fourth 50 matrix formation profiles", () => {
+    const formations = [
+      "arrow-north",
+      "arrow-east",
+      "comb-teeth",
+      "nested-square",
+      "clover-turn",
+      "step-ladder",
+      "wave-crest",
+      "cross-fade",
+      "corner-drift",
+      "pivot-swing",
+    ];
+    const profiles = ["wobbling", "flaring", "sinking", "skidding", "haloing"];
+    const ids = new Set(THINKING_PULSE_PATTERNS.map((pattern) => pattern.id));
+
+    for (const formation of formations) {
+      for (const profile of profiles) {
+        expect(ids.has(`${formation}-${profile}`)).toBe(true);
+      }
+    }
+  });
+
+  test("includes the fifth 50 matrix formation profiles", () => {
+    const formations = [
+      "tide-race",
+      "anchor-drop",
+      "reef-fan",
+      "net-haul",
+      "gull-turn",
+      "mast-climb",
+      "keel-roll",
+      "harbour-sweep",
+      "lantern-swing",
+      "undercurrent",
+    ];
+    const profiles = ["crackling", "dragging", "beaming", "swinging", "sprouting"];
+    const ids = new Set(THINKING_PULSE_PATTERNS.map((pattern) => pattern.id));
+
+    for (const formation of formations) {
+      for (const profile of profiles) {
+        expect(ids.has(`${formation}-${profile}`)).toBe(true);
+      }
+    }
+  });
+
+  /**
+   * Each formation in the fifth bank is a permutation of 0 through 8, which is
+   * what guarantees all three of its quarter-turns are distinct animations.
+   */
+  test("every fifth bank formation gives three distinct rotations", () => {
+    const formations = [
+      "tide-race",
+      "anchor-drop",
+      "reef-fan",
+      "net-haul",
+      "gull-turn",
+      "mast-climb",
+      "keel-roll",
+      "harbour-sweep",
+      "lantern-swing",
+      "undercurrent",
+    ];
+
+    for (const formation of formations) {
+      const family = THINKING_PULSE_PATTERNS.filter((pattern) =>
+        pattern.id.startsWith(`${formation}-`),
+      );
+      /* Five profiles, each with an original and three rotations. */
+      expect(family).toHaveLength(20);
+      expect(new Set(family.map((pattern) => JSON.stringify(pattern.steps))).size).toBe(4);
+      for (const pattern of family) {
+        expect([...pattern.steps].sort((a, b) => a - b)).toEqual([
+          0, 1, 2, 3, 4, 5, 6, 7, 8,
+        ]);
+      }
+    }
+  });
+
+  test("includes the sixth 50 matrix formation profiles", () => {
+    const formations = [
+      "window-lights",
+      "street-lamps",
+      "marquee-blink",
+      "signal-box",
+      "porch-light",
+      "circuit-test",
+      "switch-board",
+      "relay-click",
+      "filament-warm",
+      "dial-glow",
+    ];
+    const profiles = ["lamping", "winking", "smouldering", "signalling", "dimming"];
+    const ids = new Set(THINKING_PULSE_PATTERNS.map((pattern) => pattern.id));
+
+    for (const formation of formations) {
+      for (const profile of profiles) {
+        expect(ids.has(`${formation}-${profile}`)).toBe(true);
+      }
+    }
+  });
+
+  test("includes the seventh 50 matrix formation profiles", () => {
+    const formations = [
+      "cog-turn",
+      "escapement",
+      "ratchet-step",
+      "flywheel",
+      "piston-run",
+      "cam-lobe",
+      "spindle-wind",
+      "governor-swing",
+      "chain-drive",
+      "bellows-fold",
+    ];
+    const profiles = ["bobbing", "squashing", "gliding", "bouncing", "faceting"];
+    const ids = new Set(THINKING_PULSE_PATTERNS.map((pattern) => pattern.id));
+
+    for (const formation of formations) {
+      for (const profile of profiles) {
+        expect(ids.has(`${formation}-${profile}`)).toBe(true);
+      }
+    }
+  });
+
+  /**
+   * Same guarantee the fifth bank carries: a formation that uses every step
+   * exactly once cannot match any of its own quarter-turns.
+   */
+  test("every seventh bank formation gives three distinct rotations", () => {
+    const formations = [
+      "cog-turn",
+      "escapement",
+      "ratchet-step",
+      "flywheel",
+      "piston-run",
+      "cam-lobe",
+      "spindle-wind",
+      "governor-swing",
+      "chain-drive",
+      "bellows-fold",
+    ];
+
+    for (const formation of formations) {
+      const family = THINKING_PULSE_PATTERNS.filter((pattern) =>
+        pattern.id.startsWith(`${formation}-`),
+      );
+      /* Five profiles, each with an original and three rotations. */
+      expect(family).toHaveLength(20);
+      expect(new Set(family.map((pattern) => JSON.stringify(pattern.steps))).size).toBe(4);
+      for (const pattern of family) {
+        expect([...pattern.steps].sort((a, b) => a - b)).toEqual([
+          0, 1, 2, 3, 4, 5, 6, 7, 8,
+        ]);
+      }
+    }
+  });
+
+  test("includes the eighth 50 matrix formation profiles", () => {
+    const formations = [
+      "shuttle-pass",
+      "heddle-lift",
+      "reed-beat",
+      "treadle-fall",
+      "bobbin-wind",
+      "selvedge-turn",
+      "twill-climb",
+      "warp-cross",
+      "damask-fold",
+      "carder-comb",
+    ];
+    const profiles = ["turning", "vaulting", "peeling", "chiming", "fluttering"];
+    const ids = new Set(THINKING_PULSE_PATTERNS.map((pattern) => pattern.id));
+
+    for (const formation of formations) {
+      for (const profile of profiles) {
+        expect(ids.has(`${formation}-${profile}`)).toBe(true);
+      }
+    }
+  });
+
+  /**
+   * Same guarantee the fifth and seventh banks carry: a formation that uses
+   * every step exactly once cannot match any of its own quarter-turns.
+   */
+  test("every eighth bank formation gives three distinct rotations", () => {
+    const formations = [
+      "shuttle-pass",
+      "heddle-lift",
+      "reed-beat",
+      "treadle-fall",
+      "bobbin-wind",
+      "selvedge-turn",
+      "twill-climb",
+      "warp-cross",
+      "damask-fold",
+      "carder-comb",
+    ];
+
+    for (const formation of formations) {
+      const family = THINKING_PULSE_PATTERNS.filter((pattern) =>
+        pattern.id.startsWith(`${formation}-`),
+      );
+      /* Five profiles, each with an original and three rotations. */
+      expect(family).toHaveLength(20);
+      expect(new Set(family.map((pattern) => JSON.stringify(pattern.steps))).size).toBe(4);
+      for (const pattern of family) {
+        expect([...pattern.steps].sort((a, b) => a - b)).toEqual([
+          0, 1, 2, 3, 4, 5, 6, 7, 8,
+        ]);
+      }
+    }
+  });
+
+  /**
+   * The sixth bank is the still one: its cells light and go dark where they
+   * are. A transform in any of its keyframes would put the grid back in
+   * motion, so guard the stylesheet as well as the pool.
+   */
+  test("the sixth bank's motions never move a cell", async () => {
+    const css = await Bun.file(`${import.meta.dir}/OfficialExperiences.css`).text();
+
+    for (const motion of ["lamp", "wink", "ember", "morse", "fade"]) {
+      const block = css.match(
+        new RegExp(`@keyframes agent-activity-${motion}\\s*\\{[\\s\\S]*?\\n\\}`),
+      );
+      expect(block).not.toBeNull();
+      expect(block![0]).not.toContain("transform");
+    }
+  });
+
+  /**
+   * Because the still bank cannot scale, a resting-size cell is the only size
+   * it ever shows, which reads as a smaller grid beside a matrix that opens to
+   * 1.1 and past it. The stylesheet compensates with a wider cell; if that
+   * rule goes, the bank silently looks undersized again.
+   */
+  test("the still bank's cells are sized up to make up for not scaling", async () => {
+    const css = await Bun.file(`${import.meta.dir}/OfficialExperiences.css`).text();
+    const rule = css.match(
+      /((?:\.agent-activity-pulse\[data-motion="(?:lamp|wink|ember|morse|fade)"\],?\s*)+)\{([^}]*)\}/,
+    );
+
+    expect(rule).not.toBeNull();
+    for (const motion of ["lamp", "wink", "ember", "morse", "fade"]) {
+      expect(rule![1]).toContain(`[data-motion="${motion}"]`);
+    }
+    expect(Number(rule![2]!.match(/--pulse-cell:\s*([\d.]+)px/)?.[1])).toBeGreaterThan(2.5);
+    /* The cell has to read that variable, or the override is dead weight. */
+    expect(css).toContain("width: var(--pulse-cell");
+    expect(css).toContain("height: var(--pulse-cell");
+  });
+
+  /**
+   * A cell reads at whatever size it holds when it is brightest, so a motion
+   * whose lit frame scales under 1 renders a matrix of visibly smaller dots
+   * than the pane next to it. Full size is the floor; growing past it is fine.
+   */
+  test("no motion lights a cell below its resting size", async () => {
+    const css = await Bun.file(`${import.meta.dir}/OfficialExperiences.css`).text();
+    const motions = new Set(THINKING_PULSE_PATTERNS.map((pattern) => pattern.motion));
+    const undersized: string[] = [];
+
+    for (const motion of motions) {
+      const block = css.match(
+        new RegExp(`@keyframes agent-activity-${motion}\\s*\\{[\\s\\S]*?\\n\\}`),
+      )![0];
+      const frames = [...block.matchAll(/\{([^}]*)\}/g)].map((frame) => {
+        /* No scale in the frame means the cell sits at its resting size. A
+           two-axis scale is read as the size of the ellipse it draws, so a
+           squash that keeps its area counts as full size. */
+        const axes = (frame[1]!.match(/scale\(([\d.,\s]+)\)/)?.[1] ?? "1")
+          .split(",")
+          .map((axis) => Number(axis));
+        return {
+          opacity: Number(frame[1]!.match(/opacity:\s*([\d.]+)/)?.[1] ?? 1),
+          scale: Math.sqrt(axes[0]! * (axes[1] ?? axes[0]!)),
+        };
+      });
+      const brightest = frames.reduce((peak, frame) =>
+        frame.opacity > peak.opacity ? frame : peak,
+      );
+
+      if (brightest.scale < 1) undersized.push(`${motion} (${brightest.scale})`);
+    }
+
+    expect(undersized).toEqual([]);
+  });
+
   test("each late bank's motions are exclusive to it", () => {
     const banks = [
       {
@@ -178,6 +467,81 @@ describe("thinking pulse patterns", () => {
           "rung-climb",
           "swirl-out",
           "beacon-sweep",
+        ],
+      },
+      {
+        motions: new Set(["wobble", "flare", "sink", "skid", "halo"]),
+        formations: [
+          "arrow-north",
+          "arrow-east",
+          "comb-teeth",
+          "nested-square",
+          "clover-turn",
+          "step-ladder",
+          "wave-crest",
+          "cross-fade",
+          "corner-drift",
+          "pivot-swing",
+        ],
+      },
+      {
+        motions: new Set(["crackle", "undertow", "beacon", "swing", "sprout"]),
+        formations: [
+          "tide-race",
+          "anchor-drop",
+          "reef-fan",
+          "net-haul",
+          "gull-turn",
+          "mast-climb",
+          "keel-roll",
+          "harbour-sweep",
+          "lantern-swing",
+          "undercurrent",
+        ],
+      },
+      {
+        motions: new Set(["lamp", "wink", "ember", "morse", "fade"]),
+        formations: [
+          "window-lights",
+          "street-lamps",
+          "marquee-blink",
+          "signal-box",
+          "porch-light",
+          "circuit-test",
+          "switch-board",
+          "relay-click",
+          "filament-warm",
+          "dial-glow",
+        ],
+      },
+      {
+        motions: new Set(["bob", "squash", "glide", "bounce", "facet"]),
+        formations: [
+          "cog-turn",
+          "escapement",
+          "ratchet-step",
+          "flywheel",
+          "piston-run",
+          "cam-lobe",
+          "spindle-wind",
+          "governor-swing",
+          "chain-drive",
+          "bellows-fold",
+        ],
+      },
+      {
+        motions: new Set(["spin", "vault", "peel", "chime", "flutter"]),
+        formations: [
+          "shuttle-pass",
+          "heddle-lift",
+          "reed-beat",
+          "treadle-fall",
+          "bobbin-wind",
+          "selvedge-turn",
+          "twill-climb",
+          "warp-cross",
+          "damask-fold",
+          "carder-comb",
         ],
       },
     ];
@@ -242,6 +606,31 @@ describe("thinking pulse patterns", () => {
         "gleam",
         "tumble",
         "surge",
+        "wobble",
+        "flare",
+        "sink",
+        "skid",
+        "halo",
+        "crackle",
+        "undertow",
+        "beacon",
+        "swing",
+        "sprout",
+        "lamp",
+        "wink",
+        "ember",
+        "morse",
+        "fade",
+        "bob",
+        "squash",
+        "glide",
+        "bounce",
+        "facet",
+        "spin",
+        "vault",
+        "peel",
+        "chime",
+        "flutter",
       ]),
     );
   });
