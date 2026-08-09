@@ -49,7 +49,12 @@ export type ThinkingPulseMotion =
   | "vault"
   | "peel"
   | "chime"
-  | "flutter";
+  | "flutter"
+  | "coil"
+  | "dart"
+  | "plume"
+  | "teeter"
+  | "drip";
 
 export interface ThinkingPulsePattern {
   id: string;
@@ -593,6 +598,49 @@ const EIGHTH_MATRIX_PULSE_PATTERNS: readonly ThinkingPulsePattern[] =
     })),
   );
 
+/**
+ * A ninth bank of ten formations with five motions of its own, built to the
+ * same rules as the banks above: exclusive motions keep its 50 signatures clear
+ * of the rest of the catalog, and every formation is a permutation of 0 through
+ * 8 so all three quarter-turns stay distinct animations. The moves it adds are
+ * a wind up and spring open, a dart across the cell, a rise that spreads out, a
+ * rock from edge to edge, and a drop hanging and letting go. Cadence matches
+ * the rest of the catalog: one cycle length, staggers in the same band.
+ */
+const NINTH_MATRIX_FORMATIONS: ReadonlyArray<readonly [string, readonly number[]]> = [
+  ["furrow-turn", [0, 5, 6, 1, 4, 7, 2, 3, 8]],
+  ["seed-drill", [3, 0, 4, 8, 1, 5, 7, 6, 2]],
+  ["vine-climb", [8, 5, 2, 6, 4, 1, 7, 3, 0]],
+  ["blossom-set", [4, 1, 7, 2, 0, 8, 6, 3, 5]],
+  ["graft-join", [1, 6, 3, 8, 2, 0, 5, 7, 4]],
+  ["trellis-weave", [2, 7, 5, 0, 3, 8, 4, 1, 6]],
+  ["sap-rise", [6, 2, 8, 4, 7, 1, 3, 0, 5]],
+  ["orchard-row", [5, 8, 1, 3, 6, 2, 0, 4, 7]],
+  ["windfall-drop", [7, 4, 0, 5, 8, 3, 1, 2, 6]],
+  ["hedge-clip", [3, 1, 8, 6, 5, 4, 2, 0, 7]],
+];
+
+const NINTH_MATRIX_PROFILES: ReadonlyArray<
+  readonly [string, ThinkingPulseMotion, number]
+> = [
+  ["winding", "coil", 56],
+  ["darting", "dart", 48],
+  ["pluming", "plume", 73],
+  ["teetering", "teeter", 62],
+  ["dripping", "drip", 67],
+];
+
+const NINTH_MATRIX_PULSE_PATTERNS: readonly ThinkingPulsePattern[] =
+  NINTH_MATRIX_FORMATIONS.flatMap(([formationId, steps], formationIndex) =>
+    NINTH_MATRIX_PROFILES.map(([profileId, motion, stepMs]) => ({
+      id: `${formationId}-${profileId}`,
+      steps,
+      motion,
+      durationMs: PULSE_DURATION_MS,
+      stepMs: stepMs + formationIndex,
+    })),
+  );
+
 const BASE_PATTERNS: readonly BasePattern[] = [
   ...PATHS.map(([id, sequence]) => ({ id, steps: stepsFromSequence(sequence) })),
   ...WAVES.map(([id, steps]) => ({ id, steps })),
@@ -657,6 +705,7 @@ const ORIGINAL_PULSE_PATTERNS: readonly ThinkingPulsePattern[] = [
   ...SIXTH_MATRIX_PULSE_PATTERNS,
   ...SEVENTH_MATRIX_PULSE_PATTERNS,
   ...EIGHTH_MATRIX_PULSE_PATTERNS,
+  ...NINTH_MATRIX_PULSE_PATTERNS,
 ];
 
 /**

@@ -15,18 +15,18 @@ describe("thinking pulse patterns", () => {
       rotatedSuffix.test(pattern.id),
     );
 
-    expect(originals).toHaveLength(563);
-    expect(rotations).toHaveLength(1563);
-    expect(THINKING_PULSE_PATTERNS).toHaveLength(2126);
+    expect(originals).toHaveLength(613);
+    expect(rotations).toHaveLength(1713);
+    expect(THINKING_PULSE_PATTERNS).toHaveLength(2326);
     expect(
       rotations.filter((pattern) => pattern.id.endsWith("-rotated-90")),
-    ).toHaveLength(537);
+    ).toHaveLength(587);
     expect(
       rotations.filter((pattern) => pattern.id.endsWith("-rotated-180")),
-    ).toHaveLength(513);
+    ).toHaveLength(563);
     expect(
       rotations.filter((pattern) => pattern.id.endsWith("-rotated-270")),
-    ).toHaveLength(513);
+    ).toHaveLength(563);
 
     const rotateClockwise = (steps: readonly number[]) =>
       steps.map((_, target) => {
@@ -362,6 +362,62 @@ describe("thinking pulse patterns", () => {
     }
   });
 
+  test("includes the ninth 50 matrix formation profiles", () => {
+    const formations = [
+      "furrow-turn",
+      "seed-drill",
+      "vine-climb",
+      "blossom-set",
+      "graft-join",
+      "trellis-weave",
+      "sap-rise",
+      "orchard-row",
+      "windfall-drop",
+      "hedge-clip",
+    ];
+    const profiles = ["winding", "darting", "pluming", "teetering", "dripping"];
+    const ids = new Set(THINKING_PULSE_PATTERNS.map((pattern) => pattern.id));
+
+    for (const formation of formations) {
+      for (const profile of profiles) {
+        expect(ids.has(`${formation}-${profile}`)).toBe(true);
+      }
+    }
+  });
+
+  /**
+   * Same guarantee the fifth, seventh and eighth banks carry: a formation that
+   * uses every step exactly once cannot match any of its own quarter-turns.
+   */
+  test("every ninth bank formation gives three distinct rotations", () => {
+    const formations = [
+      "furrow-turn",
+      "seed-drill",
+      "vine-climb",
+      "blossom-set",
+      "graft-join",
+      "trellis-weave",
+      "sap-rise",
+      "orchard-row",
+      "windfall-drop",
+      "hedge-clip",
+    ];
+
+    for (const formation of formations) {
+      const family = THINKING_PULSE_PATTERNS.filter((pattern) =>
+        pattern.id.startsWith(`${formation}-`),
+      );
+      /* Five profiles, each with an original and three rotations. */
+      expect(family).toHaveLength(20);
+      expect(new Set(family.map((pattern) => JSON.stringify(pattern.steps))).size).toBe(4);
+      for (const pattern of family) {
+        expect([...pattern.steps].sort((a, b) => a - b)).toEqual([
+          0, 1, 2, 3, 4, 5, 6, 7, 8,
+        ]);
+      }
+    }
+  });
+
   /**
    * The sixth bank is the still one: its cells light and go dark where they
    * are. A transform in any of its keyframes would put the grid back in
@@ -544,6 +600,21 @@ describe("thinking pulse patterns", () => {
           "carder-comb",
         ],
       },
+      {
+        motions: new Set(["coil", "dart", "plume", "teeter", "drip"]),
+        formations: [
+          "furrow-turn",
+          "seed-drill",
+          "vine-climb",
+          "blossom-set",
+          "graft-join",
+          "trellis-weave",
+          "sap-rise",
+          "orchard-row",
+          "windfall-drop",
+          "hedge-clip",
+        ],
+      },
     ];
 
     for (const bank of banks) {
@@ -631,6 +702,11 @@ describe("thinking pulse patterns", () => {
         "peel",
         "chime",
         "flutter",
+        "coil",
+        "dart",
+        "plume",
+        "teeter",
+        "drip",
       ]),
     );
   });

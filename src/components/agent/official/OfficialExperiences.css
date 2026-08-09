@@ -1363,6 +1363,31 @@ strong.agent-activity-history-summary {
   animation-timing-function: ease-in-out;
 }
 
+.agent-activity-pulse.is-active[data-motion="coil"] > span {
+  animation-name: agent-activity-coil;
+  animation-timing-function: cubic-bezier(0.36, 1.4, 0.5, 1);
+}
+
+.agent-activity-pulse.is-active[data-motion="dart"] > span {
+  animation-name: agent-activity-dart;
+  animation-timing-function: cubic-bezier(0.9, 0, 0.1, 1);
+}
+
+.agent-activity-pulse.is-active[data-motion="plume"] > span {
+  animation-name: agent-activity-plume;
+  animation-timing-function: cubic-bezier(0.22, 0.8, 0.3, 1);
+}
+
+.agent-activity-pulse.is-active[data-motion="teeter"] > span {
+  animation-name: agent-activity-teeter;
+  animation-timing-function: cubic-bezier(0.45, 0, 0.55, 1);
+}
+
+.agent-activity-pulse.is-active[data-motion="drip"] > span {
+  animation-name: agent-activity-drip;
+  animation-timing-function: cubic-bezier(0.5, 0, 0.3, 1);
+}
+
 /* Cells a pattern leaves dark on purpose; kept dimmer than the resting glow. */
 .agent-activity-pulse.is-active > span.is-idle {
   animation: none;
@@ -2401,6 +2426,105 @@ strong.agent-activity-history-summary {
   80% {
     opacity: 0.5;
     transform: scale(1.08, 0.78);
+  }
+}
+
+/* Coil: wound narrow and tall, then let go so it springs out wide. */
+@keyframes agent-activity-coil {
+  0%,
+  100% {
+    opacity: 0.24;
+    transform: scale(0.72, 1.18);
+  }
+
+  38% {
+    opacity: 0.98;
+    transform: scale(1.3, 0.92);
+  }
+
+  66% {
+    opacity: 0.5;
+    transform: scale(0.94, 1.08);
+  }
+}
+
+/* Dart: a shot across the cell that stops dead in the middle of the run. */
+@keyframes agent-activity-dart {
+  0% {
+    opacity: 0.2;
+    transform: translate(-1.8px, 0) scale(0.8, 0.94);
+  }
+
+  30% {
+    opacity: 1;
+    transform: translate(0.6px, 0) scale(1.24, 0.98);
+  }
+
+  46% {
+    opacity: 0.7;
+    transform: translate(0, 0) scale(1.02, 1.06);
+  }
+
+  100% {
+    opacity: 0.18;
+    transform: translate(1.8px, 0) scale(0.82, 0.92);
+  }
+}
+
+/* Plume: lifts off the baseline, then flattens out and thins as it goes. */
+@keyframes agent-activity-plume {
+  0%,
+  100% {
+    opacity: 0.22;
+    transform: translateY(1.3px) scale(0.8, 0.86);
+  }
+
+  34% {
+    opacity: 1;
+    transform: translateY(-0.2px) scale(1.06, 1.14);
+  }
+
+  72% {
+    opacity: 0.42;
+    transform: translateY(-1.4px) scale(1.42, 0.78);
+  }
+}
+
+/* Teeter: rocks from one edge to the other instead of scaling in place. */
+@keyframes agent-activity-teeter {
+  0%,
+  100% {
+    opacity: 0.24;
+    transform: translate(-1.1px, 0.5px) rotate(-24deg) scale(1.16, 0.7);
+  }
+
+  32% {
+    opacity: 0.96;
+    transform: translate(0.4px, -0.4px) rotate(18deg) scale(1.4, 0.82);
+  }
+
+  66% {
+    opacity: 0.54;
+    transform: translate(1.1px, 0.5px) rotate(-6deg) scale(1.2, 0.86);
+  }
+}
+
+/* Drip: gathers, necks down into a drop, and falls away from the cell. */
+@keyframes agent-activity-drip {
+  0%,
+  100% {
+    opacity: 0.22;
+    transform: translateY(-1.2px) scale(1.08, 0.76);
+  }
+
+  36% {
+    opacity: 1;
+    transform: translateY(-0.2px) scale(0.82, 1.44);
+  }
+
+  70% {
+    opacity: 0.52;
+    transform: translateY(1.4px) scale(1.12, 0.9);
   }
 }
 
