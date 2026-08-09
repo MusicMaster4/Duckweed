@@ -41,19 +41,19 @@ export type ThinkingPulseMotion =
   | "morse"
   | "fade"
   | "bob"
-  | "squash"
+  | "jolt"
   | "glide"
   | "bounce"
-  | "facet"
-  | "spin"
+  | "zigzag"
+  | "spiral"
   | "vault"
-  | "peel"
+  | "flip"
   | "chime"
   | "flutter"
-  | "coil"
+  | "recoil"
   | "dart"
-  | "plume"
-  | "teeter"
+  | "waft"
+  | "ratchet"
   | "drip";
 
 export interface ThinkingPulsePattern {
@@ -517,9 +517,9 @@ const SIXTH_MATRIX_PULSE_PATTERNS: readonly ThinkingPulsePattern[] =
  * the banks above: exclusive motions keep its 50 signatures clear of the rest
  * of the catalog, and every formation is a permutation of 0 through 8 so all
  * three quarter-turns stay distinct animations. The moves it adds are a float
- * up and down, a squash and stretch, a diagonal glide, a landing bounce, and
- * a cell that squares off into a facet as it lights. Cadence matches the rest
- * of the catalog: one cycle length, staggers in the same band.
+ * up and down, a shove that drifts back, a diagonal glide, a landing bounce,
+ * and a three-hop zigzag across the cell. Cadence matches the rest of the
+ * catalog: one cycle length, staggers in the same band.
  */
 const SEVENTH_MATRIX_FORMATIONS: ReadonlyArray<readonly [string, readonly number[]]> = [
   ["cog-turn", [2, 5, 8, 1, 4, 7, 0, 3, 6]],
@@ -538,10 +538,10 @@ const SEVENTH_MATRIX_PROFILES: ReadonlyArray<
   readonly [string, ThinkingPulseMotion, number]
 > = [
   ["bobbing", "bob", 46],
-  ["squashing", "squash", 63],
+  ["jolting", "jolt", 63],
   ["gliding", "glide", 55],
   ["bouncing", "bounce", 69],
-  ["faceting", "facet", 51],
+  ["zigzagging", "zigzag", 51],
 ];
 
 const SEVENTH_MATRIX_PULSE_PATTERNS: readonly ThinkingPulsePattern[] =
@@ -560,9 +560,9 @@ const SEVENTH_MATRIX_PULSE_PATTERNS: readonly ThinkingPulsePattern[] =
  * same rules as the banks above: exclusive motions keep its 50 signatures clear
  * of the rest of the catalog, and every formation is a permutation of 0 through
  * 8 so all three quarter-turns stay distinct animations. The moves it adds are
- * a turn on the spot, an arc up and over, a tip onto one edge, a struck note
- * ringing out, and a wingbeat. Cadence matches the rest of the catalog: one
- * cycle length, staggers in the same band.
+ * an outward spiral, an arc up and over, a turn edge-on and back, a struck
+ * note ringing out, and a wingbeat. Cadence matches the rest of the catalog:
+ * one cycle length, staggers in the same band.
  */
 const EIGHTH_MATRIX_FORMATIONS: ReadonlyArray<readonly [string, readonly number[]]> = [
   ["shuttle-pass", [0, 3, 6, 7, 8, 5, 4, 1, 2]],
@@ -580,9 +580,9 @@ const EIGHTH_MATRIX_FORMATIONS: ReadonlyArray<readonly [string, readonly number[
 const EIGHTH_MATRIX_PROFILES: ReadonlyArray<
   readonly [string, ThinkingPulseMotion, number]
 > = [
-  ["turning", "spin", 47],
+  ["spiralling", "spiral", 47],
   ["vaulting", "vault", 59],
-  ["peeling", "peel", 65],
+  ["flipping", "flip", 65],
   ["chiming", "chime", 53],
   ["fluttering", "flutter", 44],
 ];
@@ -603,8 +603,8 @@ const EIGHTH_MATRIX_PULSE_PATTERNS: readonly ThinkingPulsePattern[] =
  * same rules as the banks above: exclusive motions keep its 50 signatures clear
  * of the rest of the catalog, and every formation is a permutation of 0 through
  * 8 so all three quarter-turns stay distinct animations. The moves it adds are
- * a wind up and spring open, a dart across the cell, a rise that spreads out, a
- * rock from edge to edge, and a drop hanging and letting go. Cadence matches
+ * a slow wind up and snap open, a dart across the cell, a rise that drifts off,
+ * a climb in even steps, and a drop hanging and letting go. Cadence matches
  * the rest of the catalog: one cycle length, staggers in the same band.
  */
 const NINTH_MATRIX_FORMATIONS: ReadonlyArray<readonly [string, readonly number[]]> = [
@@ -623,10 +623,10 @@ const NINTH_MATRIX_FORMATIONS: ReadonlyArray<readonly [string, readonly number[]
 const NINTH_MATRIX_PROFILES: ReadonlyArray<
   readonly [string, ThinkingPulseMotion, number]
 > = [
-  ["winding", "coil", 56],
+  ["winding", "recoil", 56],
   ["darting", "dart", 48],
-  ["pluming", "plume", 73],
-  ["teetering", "teeter", 62],
+  ["wafting", "waft", 73],
+  ["ratcheting", "ratchet", 62],
   ["dripping", "drip", 67],
 ];
 

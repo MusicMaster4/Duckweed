@@ -3905,6 +3905,18 @@ body.is-dragging-prompt * {
   overflow: hidden;
 }
 
+/* Without a custom window colour there is no tint to show through, so the gutter
+   only frames the same background twice: drop it and let the layout run edge to
+   edge. The titlebar and status bar rules already close the top and bottom. */
+.app:not(.has-tab-color) .workspace {
+  padding: 0;
+}
+
+.app:not(.has-tab-color) .workspace > *:not(.booting) {
+  border: 0;
+  border-radius: 0;
+}
+
 .workspace > .booting {
   flex: 1 1 auto;
   min-width: 0;
@@ -4007,6 +4019,11 @@ body.is-dragging-prompt * {
   min-height: 0;
   background: var(--bg-pane);
   overflow: hidden;
+}
+
+/* No frame, no inner curve: edge panes are clipped square along the window. */
+.app:not(.has-tab-color) .pane {
+  --pane-edge-radius: 0px;
 }
 
 .split.is-layout-animating > .split-cell {
