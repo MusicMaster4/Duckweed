@@ -10624,6 +10624,1670 @@ function paintRopeFerry(t: number): string {
   });
 }
 
+/* ========================================================================
+   The ninth collection: fields from small living things, then a
+   glassworks, a foundry, a dairy, a vineyard, and a night market. Same
+   contract as everything above: a pure painter over the shared grid.
+   ===================================================================== */
+
+/* -- Pond skater: dimples riding on the surface film ---------------------- */
+
+const pondSkaterField: Field = (u, v, t) => {
+  let surface = 0.08 + fbm(u * 1.1 + t * 0.12, v * 1.4, 2) * 0.16;
+  for (let skater = 0; skater < 3; skater += 1) {
+    const period = 1.6 + hash(skater * 4.1) * 1.1;
+    const phase = ((t + hash(skater) * period) % period) / period;
+    /* A stroke, then a long glide: the pond is never all motion at once. */
+    const glide = phase < 0.25 ? phase * 4 : 1;
+    const su = -1.3 + hash(skater * 2.3) * 0.5 + glide * 1.8;
+    const sv = -0.58 + skater * 0.56;
+    for (let leg = 0; leg < 4; leg += 1) {
+      const spread = leg < 2 ? -0.3 : 0.3;
+      const reach = (leg % 2 === 0 ? -1 : 1) * (0.22 + (1 - glide) * 0.18);
+      /* Each foot dents the film without breaking through it. */
+      const dip = clamp01(1 - Math.hypot((u - su - reach) * 3.2, (v - sv - spread) * 3.6));
+      surface = Math.max(surface, dip * 0.8);
+    }
+    const ring = clamp01(1 - Math.abs(Math.hypot(u - su, (v - sv) * 1.4) - phase * 1.5) * 5);
+    surface = Math.max(surface, ring * (1 - phase) * 0.5);
+  }
+  return clamp01(surface);
+};
+
+/* -- Dew web: beads gathering on a web and running down it ---------------- */
+
+const dewWebField: Field = (u, v, t) => {
+  const sway = Math.sin(t * 0.8) * 0.14;
+  const su = u * 0.62 - sway * (1 - Math.abs(v));
+  const radius = Math.hypot(su, v);
+  if (radius > 1.05) return 0.04;
+  const angle = Math.atan2(v, su);
+  /* Six radials with one spiral wound across them: any more and the web
+     turns back into noise at this size. */
+  const spoke = clamp01(1 - Math.abs(Math.sin(angle * 3)) * 8) * clamp01((1.05 - radius) * 3);
+  const turn = (angle / TAU + 0.5 + radius * 1.6) % 1;
+  const spiral =
+    clamp01(1 - Math.abs(turn - 0.5) * 16) * clamp01((1.05 - radius) * 2.6) * clamp01(radius * 5);
+  let bead = 0;
+  for (let drop = 0; drop < 5; drop += 1) {
+    /* A bead gathers on a radial, then lets go and slides out along it. */
+    const life = (t * 0.5 + hash(drop)) % 1;
+    const along = 0.2 + life * 0.8;
+    const arm = Math.floor(hash(drop * 3.7) * 6) * (Math.PI / 3);
+    bead = Math.max(
+      bead,
+      clamp01(1 - Math.hypot((su - Math.cos(arm) * along) * 5, (v - Math.sin(arm) * along) * 5)) *
+        (0.5 + life * 0.5),
+    );
+  }
+  return clamp01(0.05 + spoke * 0.45 + spiral * 0.55 + bead * 0.95);
+};
+
+/* -- Spore print: spores letting go of the gills and drifting ------------- */
+
+const sporePrintField: Field = (u, v, t) => {
+  const cap = clamp01(1 - Math.hypot(u * 0.75, (v + 0.72) * 2.6)) * 0.7;
+  /* Gills are a fixed comb under the cap; the fall below them is not. */
+  const gill = v > -0.78 && v < -0.5 ? clamp01(1 - Math.abs(Math.sin(u * 9)) * 3) * 0.55 : 0;
+  const column = Math.floor((u + ASPECT) * 4.2);
+  const drift = Math.sin(t * 0.6 + column) * 0.18;
+  const fall = ((t * 0.5 + hash(column)) % 1) * 1.9;
+  const dust =
+    clamp01(1 - Math.abs(v + 0.5 - fall) * 2.4) *
+    clamp01(1 - Math.abs(u - (column / 4.2 - ASPECT) - drift) * 5) *
+    clamp01((v + 0.45) * 3);
+  /* What lands stays: the print builds up as an even band on the paper. */
+  const paper = clamp01((v - 0.72) * 5) * (0.3 + clamp01(1 - Math.abs(u) * 0.8) * 0.5);
+  return clamp01(0.06 + cap + gill + dust * 0.8 + paper);
+};
+
+/* -- Moss cushion: cushions taking up water and swelling ------------------ */
+
+const mossCushionField: Field = (u, v, t) => {
+  /* A wet front crosses the stone, and each cushion opens as it arrives. */
+  const front = -ASPECT - 0.4 + ((t * 0.9) % (ASPECT * 2 + 1.6));
+  let moss = 0.07 + fbm(u * 2.4, v * 2.4, 2) * 0.14;
+  for (let cushion = 0; cushion < 7; cushion += 1) {
+    const cu = -1.4 + hash(cushion * 2.9) * 2.8;
+    const cv = -0.7 + hash(cushion * 5.1) * 1.4;
+    const wet = clamp01((front - cu) * 1.4) * clamp01(1 - (front - cu - 1.6) * 0.9);
+    /* Even between soakings a cushion is never quite still: it works its
+       leaves in and out as it holds on to what water it has. */
+    const breath = Math.sin(t * 0.8 + cushion * 1.7) * 0.05;
+    const size = 0.3 + hash(cushion) * 0.22 + wet * 0.16 + breath;
+    const body = clamp01(1 - Math.hypot((u - cu) / size, (v - cv) / (size * 0.8)));
+    const nap = 0.55 + fbm(u * 7 + cushion, v * 7, 2) * 0.6;
+    moss = Math.max(moss, Math.pow(body, 0.7) * nap * (0.4 + wet * 0.6));
+  }
+  return clamp01(moss);
+};
+
+/* -- Lichen crust: colonies creeping outward over rock -------------------- */
+
+const lichenCrustField: Field = (u, v, t) => {
+  const rock = 0.08 + fbm(u * 3.2, v * 3.2, 2) * 0.1;
+  let crust = 0;
+  for (let colony = 0; colony < 5; colony += 1) {
+    const cu = -1.35 + hash(colony * 3.3) * 2.7;
+    const cv = -0.75 + hash(colony * 7.7) * 1.5;
+    /* Growth is slow and only outward, so the rim is the living edge. */
+    const grown = 0.2 + ((t * 0.09 + hash(colony) * 0.55) % 0.55);
+    const ragged = grown * (0.7 + fbm(Math.atan2(v - cv, u - cu) * 2 + colony, 0.5, 2) * 0.6);
+    const radius = Math.hypot((u - cu) * 0.85, v - cv);
+    if (radius > ragged) continue;
+    const rim = clamp01(1 - (ragged - radius) * 6);
+    const inner = 0.14 + fbm(u * 5 + colony * 2, v * 5, 2) * 0.24;
+    crust = Math.max(crust, inner + rim * 0.45);
+  }
+  /* Bare rock between the colonies, never rock plus colony: a crust sits on
+     the stone rather than adding to it. */
+  return clamp01(Math.max(rock, crust));
+};
+
+/* -- Root hair: a tip pushing down and putting out hairs ------------------ */
+
+const rootHairField: Field = (u, v, t) => {
+  const soil = 0.07 + hash2(Math.floor(u * 6), Math.floor(v * 6)) * 0.14;
+  let root = 0;
+  for (let strand = 0; strand < 3; strand += 1) {
+    const base = -1.05 + strand * 1.05;
+    /* The tip advances, then the hairs behind it catch up and fill in. */
+    const tip = -0.9 + ((t * 0.32 + hash(strand) * 1.9) % 1.9);
+    const lean = Math.sin(v * 2.2 + strand * 2.1) * 0.22;
+    const axis = base + lean;
+    if (v > tip) continue;
+    const shaft = clamp01(1 - Math.abs(u - axis) * 7) * 0.8;
+    const age = clamp01((tip - v) * 1.2);
+    /* Hairs are short, dense, and only on the older stretch of the root. */
+    const hair =
+      clamp01(1 - (Math.abs(u - axis) - 0.06) * 3.6) *
+      Math.abs(Math.sin((v - tip) * 26 + u * 4)) *
+      age *
+      0.55;
+    const cap = clamp01(1 - Math.hypot((u - axis) * 5, (v - tip) * 5)) * 0.9;
+    root = Math.max(root, Math.max(shaft, Math.max(hair, cap)));
+  }
+  return clamp01(soil + root);
+};
+
+/* -- Barnacle cirri: feeding fans sweeping the water ---------------------- */
+
+const barnacleCirriField: Field = (u, v, t) => {
+  const water = 0.07 + fbm(u * 1.6 - t * 0.4, v * 1.6, 2) * 0.14;
+  let shell = 0;
+  for (let animal = 0; animal < 4; animal += 1) {
+    const cu = -1.25 + animal * 0.85;
+    const size = 0.16 + hash(animal * 2.7) * 0.08;
+    /* A cone widening towards the rock, with the aperture at its top. */
+    const width = size * clamp01((v - 0.34) * 2.2);
+    const cone = width > 0.01 ? clamp01(1 - Math.abs(u - cu) / width) * 0.6 : 0;
+    const beat = (t * (1.4 + hash(animal) * 0.9) + hash(animal * 5.5)) % 1;
+    const out = beat < 0.45 ? Math.sin((beat / 0.45) * Math.PI) : 0;
+    /* The fan opens above the aperture, combs the water, and folds away. */
+    const reach = 0.12 + out * 0.42;
+    const rays = Math.abs(Math.sin(Math.atan2(0.34 - v, u - cu) * 4));
+    const fan =
+      v < 0.34
+        ? clamp01(1 - Math.abs(Math.hypot((u - cu) * 0.9, v - 0.34) - reach) * 5) *
+          out *
+          (0.35 + rays * 0.65)
+        : 0;
+    shell = Math.max(shell, Math.max(cone, fan * 0.95));
+  }
+  return clamp01(water + shell);
+};
+
+/* -- Glow worm: threads hung in the dark, lights running along the roof --- */
+
+const glowWormField: Field = (u, v, t) => {
+  let cave = 0.04 + clamp01((-0.66 - v) * 2.4) * 0.16;
+  for (let worm = 0; worm < 7; worm += 1) {
+    const cu = -ASPECT + 0.4 + (worm / 6) * (ASPECT * 2 - 0.8);
+    const head = -0.74 + hash(worm * 3.1) * 0.24;
+    const drop = 0.7 + hash(worm * 5.7) * 0.9;
+    const swayed = cu + Math.sin(t * 0.5 + worm) * 0.09 * clamp01((v - head) * 1.2);
+    /* Lights come on in a slow wave down the roof, not all together. */
+    const lit = Math.pow(clamp01(Math.sin(t * 0.9 - worm * 0.8) * 0.5 + 0.5), 1.6);
+    /* A snare shows by the beads strung along it, not by the line itself. */
+    const along =
+      clamp01(1 - Math.abs(u - swayed) * 7) *
+      clamp01((v - head) * 3) *
+      clamp01((head + drop - v) * 3);
+    const beads = 0.35 + Math.pow(Math.abs(Math.sin((v - head) * 15 + worm)), 4) * 0.65;
+    const glow = clamp01(1 - Math.hypot((u - swayed) * 2.4, (v - head) * 3.2)) * (0.12 + lit * 0.5);
+    const body = clamp01(1 - Math.hypot((u - swayed) * 6, (v - head) * 7)) * (0.3 + lit * 0.7);
+    cave = Math.max(cave, Math.max(along * beads * (0.35 + lit * 0.5), Math.max(glow, body)));
+  }
+  return clamp01(cave);
+};
+
+/* -- Cicada chorus: one side calling and the other answering -------------- */
+
+const cicadaChorusField: Field = (u, v, t) => {
+  const cycle = (t * 0.32) % 2;
+  /* One tree leads for a cycle, then the far tree takes it up. */
+  const lead = cycle < 1 ? -1 : 1;
+  const strength = Math.sin((cycle % 1) * Math.PI);
+  const source = lead * 1.4;
+  const distance = Math.hypot((u - source) * 0.8, v * 0.8);
+  const wave = Math.sin(distance * 5 - t * 9);
+  const call = Math.pow(clamp01(wave * 0.5 + 0.5), 2) * clamp01(1 - distance * 0.45) * strength;
+  /* The insects themselves are a fixed scatter along the branches. */
+  const branch = clamp01(1 - Math.abs(v + 0.55 - Math.sin(u * 1.1) * 0.25) * 4) * 0.35;
+  const body = clamp01(1 - Math.abs(Math.sin(u * 7)) * 5) * branch * (0.5 + strength * 0.5);
+  return clamp01(0.06 + branch * 0.5 + call * 0.8 + body);
+};
+
+/* -- Bee swarm: a knot of bees drifting with a core that holds ------------ */
+
+const beeSwarmField: Field = (u, v, t) => {
+  const cu = Math.sin(t * 0.35) * 0.8;
+  const cv = Math.sin(t * 0.5 + 1.1) * 0.35;
+  const radius = Math.hypot((u - cu) * 0.8, v - cv);
+  /* Density falls off from the cluster, so the swarm reads as one body. */
+  const cluster = Math.pow(clamp01(1 - radius * 1.1), 1.6);
+  /* Individuals are the grain: fast, and only visible where the swarm is.
+     Kept under full brightness so the cluster still reads as one body. */
+  const churn = hash2(Math.floor(u * 9 + t * 5), Math.floor(v * 9 - t * 3));
+  const bees = churn > 1 - cluster * 0.8 ? 0.42 + churn * 0.3 : 0;
+  /* A few scouts break away and circle back on their own. */
+  let scout = 0;
+  for (let flier = 0; flier < 4; flier += 1) {
+    const a = t * (1.6 + hash(flier) * 1.4) + flier * 1.7;
+    scout = Math.max(
+      scout,
+      clamp01(1 - Math.hypot((u - cu - Math.cos(a) * 1.2) * 4, (v - cv - Math.sin(a) * 0.6) * 4)) * 0.7,
+    );
+  }
+  return clamp01(0.05 + cluster * 0.32 + bees + scout);
+};
+
+/* -- Snail trail: fresh slime shining and older slime drying out ---------- */
+
+const snailTrailField: Field = (u, v, t) => {
+  const stone = 0.08 + fbm(u * 2.8, v * 2.8, 2) * 0.1;
+  const travel = (t * 0.28) % 1;
+  const path = (x: number) => Math.sin(x * 1.6 + 0.6) * 0.42;
+  const head = -ASPECT - 0.3 + travel * (ASPECT * 2 + 0.6);
+  const onPath = clamp01(1 - Math.abs(v - path(u)) * 4.5);
+  /* Everything behind the animal is trail, and it dulls as it dries. */
+  const age = clamp01((head - u) / 2.4);
+  const trail = u < head ? onPath * (0.65 - age * 0.42) * (0.7 + Math.sin(u * 12) * 0.3) : 0;
+  const body =
+    clamp01(1 - Math.hypot((u - head) * 2.6, (v - path(head)) * 3.4)) * 0.85;
+  const shell = clamp01(1 - Math.abs(Math.hypot((u - head + 0.16) * 3.4, (v - path(head) + 0.1) * 3.4) - 0.4) * 3.4) * 0.9;
+  const horns = clamp01(1 - Math.hypot((u - head - 0.26) * 6, (v - path(head) + 0.16) * 6)) * 0.7;
+  return clamp01(stone + trail + body + shell + horns);
+};
+
+/* -- Wing scale: overlapping scales catching the light as a wing tilts ----- */
+
+const wingScaleField: Field = (u, v, t) => {
+  const tilt = Math.sin(t * 0.9);
+  /* Rows are offset like roof tiles, which is what makes it read as scales.
+     Any finer than this and the tiling comes out as static. */
+  const row = Math.floor((v + 1) * 2);
+  const offset = (row % 2) * 0.5;
+  const cell = (u + ASPECT) * 1.8 + offset;
+  const column = Math.floor(cell);
+  const within = cell - column;
+  const shape = clamp01(1 - Math.abs(within - 0.5) * 2) * clamp01(1 - Math.abs((v + 1) * 2 - row - 0.5) * 1.6);
+  /* Each scale answers the tilt from its own angle, so the flash sweeps. */
+  const facing = Math.cos((column - row * 0.4) * 0.5 - tilt * 2.4);
+  const flash = Math.pow(clamp01(facing), 4);
+  const vein = clamp01(1 - Math.abs(v - Math.sin(u * 0.9) * 0.4) * 8) * 0.4;
+  return clamp01(0.07 + shape * (0.18 + flash * 0.8) + vein);
+};
+
+/* -- Krill swarm: a layer rising at dusk and sinking again ---------------- */
+
+const krillSwarmField: Field = (u, v, t) => {
+  const depth = -0.15 + Math.sin(t * 0.4) * 0.62;
+  const thickness = 0.24 + Math.abs(Math.sin(t * 0.4)) * 0.14;
+  const layer = clamp01(1 - Math.abs(v - depth) / thickness);
+  /* The swarm is dense enough to read as a solid band, with a ragged top. */
+  const ragged = fbm(u * 2.2 + t * 0.5, v * 3, 2);
+  const band = Math.pow(layer, 0.8) * (0.45 + ragged * 0.55);
+  const grain = hash2(Math.floor(u * 11 - t * 4), Math.floor(v * 11)) > 0.55 ? 0.35 : 0;
+  const light = clamp01((0.2 - v) * 0.5) * 0.14;
+  return clamp01(0.05 + light + band * (0.75 + grain));
+};
+
+/* -- Tadpole shoal: a shoal turning as one in a shallow pool -------------- */
+
+const tadpoleShoalField: Field = (u, v, t) => {
+  const cycle = (t * 0.42) % 2;
+  /* The whole shoal commits to one end, waits, then swings to the other. */
+  const swing = cycle < 1 ? cycle : 2 - cycle;
+  const eased = swing * swing * (3 - 2 * swing);
+  const cu = -0.95 + eased * 1.9;
+  const heading = cycle < 1 ? 1 : -1;
+  let shoal = 0;
+  for (let fish = 0; fish < 10; fish += 1) {
+    const su = cu + (hash(fish * 2.1) - 0.5) * 1.1;
+    const sv = -0.45 + hash(fish * 6.3) * 0.9;
+    const wag = Math.sin(t * 7 + fish * 1.4) * 0.06;
+    const head = clamp01(1 - Math.hypot((u - su) * 5, (v - sv) * 6));
+    const tail =
+      clamp01(1 - Math.hypot((u - su + heading * 0.2) * 4.5, (v - sv - wag) * 7)) * 0.6;
+    shoal = Math.max(shoal, Math.max(head * 0.95, tail));
+  }
+  const silt = 0.07 + fbm(u * 2 + t * 0.15, v * 2, 2) * 0.13;
+  return clamp01(silt + shoal);
+};
+
+/* -- Ant raft: a floating raft of ants churning at its edge ---------------- */
+
+const antRaftField: Field = (u, v, t) => {
+  const drift = Math.sin(t * 0.3) * 0.5;
+  const radius = Math.hypot((u - drift) * 0.75, v);
+  const edge = 0.72 + Math.sin(Math.atan2(v, (u - drift) * 0.75) * 5 + t * 0.9) * 0.07;
+  const water = 0.07 + Math.abs(Math.sin(v * 7 - t * 2.4)) * 0.12;
+  if (radius > edge) {
+    /* A few swimmers work their way back to the raft rather than drifting off. */
+    const stray = hash2(Math.floor(u * 8 - t * 2), Math.floor(v * 8)) > 0.94 ? 0.5 : 0;
+    return clamp01(water + stray * clamp01(1 - (radius - edge) * 2));
+  }
+  /* Inside the raft the bodies hardly move; the rim never stops rotating. */
+  const churn = clamp01((radius - edge + 0.28) * 4);
+  const body = hash2(Math.floor(u * 12 + churn * t * 6), Math.floor(v * 12)) > 0.42 ? 0.85 : 0.35;
+  return clamp01(0.2 + body * (0.6 + churn * 0.4));
+};
+
+/* -- Glass blower: a gather turning on the pipe and blown out -------------- */
+
+function paintGlassBlower(t: number): string {
+  return paintPlotted((plot) => {
+    const cycle = (t * 0.3) % 2;
+    /* Blow, then turn and let it settle, then blow again. */
+    const blow = cycle < 1 ? Math.sin(cycle * Math.PI) : 0;
+    const size = 0.32 + blow * 0.3 + (cycle < 1 ? 0 : 0.14);
+    const spin = t * 2.2;
+    for (let x = 0; x <= 16; x += 1) plot(-1.5 + (x / 16) * 0.95, 0.1, 0.55);
+    /* The gather sags away from the pipe as it turns, never a clean sphere. */
+    for (let step = 0; step <= 34; step += 1) {
+      const a = (step / 34) * TAU;
+      const sag = 0.08 * Math.sin(a) * Math.sin(a);
+      plot(
+        -0.15 + Math.cos(a) * size * 1.15,
+        0.1 + Math.sin(a) * size + sag,
+        0.45 + Math.pow(clamp01(Math.cos(a - spin) * 0.5 + 0.5), 3) * 0.55,
+      );
+    }
+    for (let step = 0; step <= 10; step += 1) {
+      const a = (step / 10) * TAU;
+      plot(-0.15 + Math.cos(a) * size * 0.5, 0.1 + Math.sin(a) * size * 0.42, 0.9 - blow * 0.3);
+    }
+    /* Breath goes down the pipe only while he is actually blowing. */
+    if (blow > 0.05) {
+      for (let puff = 0; puff < 5; puff += 1) {
+        const along = ((t * 3 + puff * 0.2) % 1);
+        plot(-1.45 + along * 1.2, 0.1, blow * (1 - along) * 0.9);
+      }
+    }
+    for (let y = 0; y <= 5; y += 1) plot(1.35, 0.9 - (y / 5) * 0.5, 0.5);
+  });
+}
+
+/* -- Float glass: a ribbon drawn out thin over the tin bath --------------- */
+
+function paintFloatGlass(t: number): string {
+  return paintPlotted((plot) => {
+    for (let x = 0; x <= 60; x += 1) {
+      const f = x / 60;
+      const u = -ASPECT + f * ASPECT * 2;
+      /* The ribbon narrows as the rollers pull it along and it cools. */
+      const half = 0.5 - f * 0.28;
+      const wobble = Math.sin(f * 7 - t * 3) * 0.05 * (1 - f);
+      plot(u, -half + wobble, 0.4 + (1 - f) * 0.5);
+      plot(u, half - wobble, 0.4 + (1 - f) * 0.5);
+      /* Heat still in the glass shows as a glow that fades downstream. */
+      plot(u, wobble * 0.4, clamp01(0.85 - f * 0.8));
+    }
+    for (let roller = 0; roller < 5; roller += 1) {
+      const ru = -1.3 + roller * 0.7;
+      const a = t * 3.4 + roller;
+      for (let side = -1; side <= 1; side += 2) {
+        for (let step = 0; step <= 8; step += 1) {
+          const ra = (step / 8) * TAU;
+          plot(ru + Math.cos(ra) * 0.14, side * 0.62 + Math.sin(ra) * 0.12, 0.5);
+        }
+        plot(ru + Math.cos(a) * 0.1, side * 0.62 + Math.sin(a) * 0.09, 0.95);
+      }
+    }
+  });
+}
+
+/* -- Annealing lehr: panes creeping through a cooling tunnel -------------- */
+
+function paintAnnealingLehr(t: number): string {
+  return paintPlotted((plot) => {
+    for (let x = 0; x <= 30; x += 1) {
+      plot(-ASPECT + (x / 30) * ASPECT * 2, -0.85, 0.45);
+      plot(-ASPECT + (x / 30) * ASPECT * 2, 0.85, 0.45);
+    }
+    const run = ASPECT * 2 + 1.2;
+    for (let pane = 0; pane < 4; pane += 1) {
+      const u = -ASPECT - 0.6 + ((t * 0.55 + pane * (run / 4)) % run);
+      /* A pane enters glowing and leaves cold, which is the whole job. */
+      const heat = clamp01(1 - (u + ASPECT + 0.6) / run * 1.15);
+      for (let step = 0; step <= 12; step += 1) {
+        const f = step / 12;
+        plot(u - 0.3 + f * 0.6, -0.45, 0.3 + heat * 0.7);
+        plot(u - 0.3 + f * 0.6, 0.35, 0.3 + heat * 0.7);
+      }
+      for (let step = 0; step <= 8; step += 1) {
+        const f = step / 8;
+        plot(u - 0.3, -0.45 + f * 0.8, 0.3 + heat * 0.7);
+        plot(u + 0.3, -0.45 + f * 0.8, 0.3 + heat * 0.7);
+      }
+      plot(u, -0.05, 0.15 + heat * 0.85);
+    }
+    for (let roller = 0; roller <= 9; roller += 1) {
+      const ru = -1.5 + roller * 0.34;
+      plot(ru, 0.62 + Math.sin(t * 4 + roller) * 0.05, 0.6);
+    }
+  });
+}
+
+/* -- Glass cane: a rod drawn out and twisted between two hands ------------ */
+
+function paintGlassCane(t: number): string {
+  return paintPlotted((plot) => {
+    const cycle = (t * 0.26) % 1;
+    /* Pull it out, let it go slack, pull again: the stripes tighten each time. */
+    const pull = Math.sin(cycle * Math.PI);
+    const reach = 0.7 + pull * 0.85;
+    const thickness = 0.24 - pull * 0.15;
+    for (let x = 0; x <= 48; x += 1) {
+      const f = x / 48;
+      const u = -reach + f * reach * 2;
+      const taper = thickness * (0.55 + Math.sin(f * Math.PI) * 0.45);
+      plot(u, -taper, 0.5);
+      plot(u, taper, 0.5);
+      /* Two stripes wound round the rod: their pitch is the twist. */
+      for (let stripe = 0; stripe < 2; stripe += 1) {
+        const a = f * (7 + pull * 9) - t * 3 + stripe * Math.PI;
+        plot(u, Math.sin(a) * taper * 0.8, 0.35 + Math.pow(clamp01(Math.cos(a)), 2) * 0.65);
+      }
+    }
+    for (const side of [-1, 1] as const) {
+      for (let y = 0; y <= 6; y += 1) plot(side * (reach + 0.16), -0.3 + (y / 6) * 0.6, 0.7);
+      for (let x = 0; x <= 4; x += 1) plot(side * (reach + 0.16) + side * (x / 4) * 0.24, 0, 0.75);
+    }
+  });
+}
+
+/* -- Bottle mould: the mould closing, the blow, and the bottle out -------- */
+
+function paintBottleMould(t: number): string {
+  return paintPlotted((plot) => {
+    const cycle = (t * 0.35) % 4;
+    /* Four beats: close, blow, open, eject. */
+    const shut = cycle < 1 ? cycle : cycle < 2.4 ? 1 : cycle < 3 ? 1 - (cycle - 2.4) / 0.6 : 0;
+    const blown = clamp01((cycle - 1) * 2.5);
+    const gap = 0.72 - shut * 0.44;
+    for (const side of [-1, 1] as const) {
+      for (let y = 0; y <= 14; y += 1) {
+        plot(side * gap, -0.8 + (y / 14) * 1.6, 0.6);
+        plot(side * (gap + 0.24), -0.8 + (y / 14) * 1.6, 0.45);
+      }
+      for (let x = 0; x <= 4; x += 1) {
+        plot(side * (gap + (x / 4) * 0.24), -0.8, 0.5);
+        plot(side * (gap + (x / 4) * 0.24), 0.8, 0.5);
+      }
+    }
+    const lift = cycle > 3 ? (cycle - 3) * 1.4 : 0;
+    const width = 0.16 + blown * 0.32 * shut;
+    for (let y = 0; y <= 16; y += 1) {
+      const f = y / 16;
+      const cv = 0.7 - f * 1.3 - lift;
+      /* Shoulder in at the top: without it the blank never becomes a bottle. */
+      const w = f > 0.75 ? width * (1 - (f - 0.75) * 3.2) : width;
+      plot(-w, cv, 0.55 + blown * 0.4);
+      plot(w, cv, 0.55 + blown * 0.4);
+    }
+    for (let x = 0; x <= 5; x += 1) plot(-0.1 + (x / 5) * 0.2, -0.62 - lift, 0.9);
+    if (cycle > 1 && cycle < 2.4) {
+      for (let puff = 0; puff < 4; puff += 1) {
+        const along = (t * 4 + puff * 0.25) % 1;
+        plot(0, -0.95 + along * 0.3, (1 - along) * 0.9);
+      }
+    }
+  });
+}
+
+/* -- Marver: rolling a gather flat on the steel table --------------------- */
+
+function paintGlassMarver(t: number): string {
+  return paintPlotted((plot) => {
+    const cycle = (t * 0.5) % 2;
+    const stroke = cycle < 1 ? cycle : 2 - cycle;
+    const eased = stroke * stroke * (3 - 2 * stroke);
+    const cu = -1.05 + eased * 2.1;
+    /* Each pass across the steel takes a little more of the roundness out. */
+    const flat = 0.2 + Math.abs(Math.sin(t * 0.5)) * 0.3;
+    for (let x = 0; x <= 34; x += 1) plot(-ASPECT + (x / 34) * ASPECT * 2, 0.62, 0.5);
+    for (let step = 0; step <= 30; step += 1) {
+      const a = (step / 30) * TAU;
+      plot(
+        cu + Math.cos(a) * (0.34 + flat * 0.16),
+        0.34 + Math.sin(a) * 0.34 * (1 - flat),
+        0.55 + Math.pow(clamp01(Math.sin(a + t * 4)), 2) * 0.45,
+      );
+    }
+    for (let step = 0; step <= 12; step += 1) {
+      const a = (step / 12) * TAU;
+      plot(cu + Math.cos(a) * 0.14, 0.34 + Math.sin(a) * 0.13 * (1 - flat), 1);
+    }
+    for (let x = 0; x <= 14; x += 1) plot(cu - (x / 14) * 1.3, 0.34 - (x / 14) * 0.5, 0.5);
+    /* Heat comes off the steel where the gather has just been. */
+    for (let wisp = 0; wisp < 4; wisp += 1) {
+      const life = (t * 1.4 + hash(wisp)) % 1;
+      plot(cu - 0.4 + hash(wisp * 3.1) * 0.8, 0.6 - life * 0.5, (1 - life) * 0.4);
+    }
+  });
+}
+
+/* -- Glass shears: trimming the lip while the piece keeps turning --------- */
+
+function paintGlassShears(t: number): string {
+  return paintPlotted((plot) => {
+    const spin = t * 1.8;
+    const bite = Math.pow(clamp01(Math.sin(t * 1.2)), 3);
+    for (let step = 0; step <= 30; step += 1) {
+      const a = (step / 30) * TAU;
+      /* The piece is a cup: bright rim, dimmer wall, turning the whole time. */
+      plot(Math.cos(a) * 0.62, 0.15 + Math.sin(a) * 0.2, 0.5 + Math.pow(clamp01(Math.cos(a - spin) * 0.5 + 0.5), 2) * 0.5);
+    }
+    for (let step = 0; step <= 20; step += 1) {
+      const f = step / 20;
+      plot(-0.62 + f * 0.1, 0.15 + f * 0.6, 0.45);
+      plot(0.62 - f * 0.1, 0.15 + f * 0.6, 0.45);
+    }
+    for (let x = 0; x <= 10; x += 1) plot(-0.5 + (x / 10) * 1, 0.78, 0.55);
+    const open = 0.34 - bite * 0.3;
+    for (const side of [-1, 1] as const) {
+      for (let step = 0; step <= 14; step += 1) {
+        const f = step / 14;
+        plot(-0.05 + f * 0.75, -0.62 + side * open * (1 - f) + f * 0.62, 0.7);
+      }
+    }
+    /* The trimmed ring drops away once the blades have gone right through. */
+    if (bite > 0.9) {
+      const drop = ((t * 2) % 1);
+      for (let step = 0; step <= 10; step += 1) {
+        const a = (step / 10) * Math.PI;
+        plot(Math.cos(a) * 0.34, 0.35 + drop * 0.6 + Math.sin(a) * 0.06, (1 - drop) * 0.8);
+      }
+    }
+  });
+}
+
+/* -- Crucible: a melt tipped out and the pot swinging back ---------------- */
+
+function paintCrucible(t: number): string {
+  return paintPlotted((plot) => {
+    const cycle = (t * 0.28) % 2;
+    /* Tip over, hold at the pour, come back upright. */
+    const tip = cycle < 0.7 ? cycle / 0.7 : cycle < 1.3 ? 1 : clamp01(1 - (cycle - 1.3) / 0.7);
+    const angle = tip * 1.1;
+    const cos = Math.cos(angle);
+    const sin = Math.sin(angle);
+    const rim = (x: number, y: number) => [x * cos - y * sin, x * sin + y * cos] as const;
+    for (let step = 0; step <= 26; step += 1) {
+      const f = step / 26;
+      const [x, y] = rim(-0.5 + f, -0.4);
+      plot(x - 0.3, y + 0.1, 0.6);
+      const [bx, by] = rim(-0.4 + f * 0.8, 0.42);
+      plot(bx - 0.3, by + 0.1, 0.6);
+    }
+    for (let step = 0; step <= 12; step += 1) {
+      const f = step / 12;
+      for (const side of [-1, 1] as const) {
+        const [x, y] = rim(side * (0.5 - f * 0.1), -0.4 + f * 0.82);
+        plot(x - 0.3, y + 0.1, 0.55);
+      }
+    }
+    /* The melt keeps its own level however far the pot is tipped. */
+    for (let x = 0; x <= 16; x += 1) {
+      const f = x / 16;
+      const [mx, my] = rim(-0.45 + f * 0.9, -0.22 + tip * 0.5);
+      plot(mx - 0.3, my + 0.1 + Math.sin(f * 6 + t * 5) * 0.03, 0.9);
+    }
+    if (tip > 0.6) {
+      const [lx, ly] = rim(0.5, -0.4);
+      for (let drop = 0; drop <= 14; drop += 1) {
+        const f = drop / 14;
+        plot(lx - 0.3 + f * 0.3, ly + 0.1 + f * (0.85 - ly), 1 - f * 0.3);
+      }
+      for (let x = 0; x <= 8; x += 1) plot(0.5 + (x / 8) * 0.5, 0.88, 0.85);
+    }
+  });
+}
+
+/* -- Ladle pour: a ladle running the line and filling each mould ---------- */
+
+function paintLadlePour(t: number): string {
+  return paintPlotted((plot) => {
+    const stride = 1.6;
+    const cycle = (t * 0.42) % stride;
+    const station = Math.floor((t * 0.42) / stride) % 4;
+    const travel = clamp01(cycle / 0.7);
+    const pouring = cycle > 0.8 && cycle < 1.4;
+    const from = -1.2 + ((station + 3) % 4) * 0.8;
+    const to = -1.2 + station * 0.8;
+    const cu = from + (to - from) * (travel * travel * (3 - 2 * travel));
+    for (let x = 0; x <= 34; x += 1) plot(-ASPECT + (x / 34) * ASPECT * 2, -0.88, 0.4);
+    for (let y = 0; y <= 6; y += 1) plot(cu, -0.85 + (y / 6) * 0.4, 0.5);
+    for (let step = 0; step <= 18; step += 1) {
+      const a = Math.PI * (step / 18);
+      plot(cu + Math.cos(a) * 0.3, -0.4 + Math.sin(a) * 0.26, 0.7);
+    }
+    for (let x = 0; x <= 8; x += 1) plot(cu - 0.3 + (x / 8) * 0.6, -0.4, 0.85);
+    if (pouring) {
+      for (let step = 0; step <= 16; step += 1) {
+        const f = step / 16;
+        plot(cu + 0.3 + f * 0.1, -0.34 + f * 0.86, 1 - f * 0.25);
+      }
+    }
+    /* Moulds already filled keep their heat and dim from the far end back. */
+    for (let mould = 0; mould < 4; mould += 1) {
+      const mu = -1.2 + mould * 0.8 + 0.34;
+      const filled = mould <= station;
+      const heat = filled ? clamp01(1 - (station - mould) * 0.3) : 0;
+      for (let x = 0; x <= 8; x += 1) plot(mu - 0.28 + (x / 8) * 0.56, 0.82, 0.5);
+      for (let y = 0; y <= 5; y += 1) {
+        plot(mu - 0.28, 0.5 + (y / 5) * 0.32, 0.5);
+        plot(mu + 0.28, 0.5 + (y / 5) * 0.32, 0.5);
+      }
+      for (let x = 0; x <= 6; x += 1) plot(mu - 0.22 + (x / 6) * 0.44, 0.62, 0.15 + heat * 0.85);
+    }
+  });
+}
+
+/* -- Sand mould: ramming the sand and drawing the pattern out ------------- */
+
+function paintSandMould(t: number): string {
+  return paintPlotted((plot) => {
+    const cycle = (t * 0.32) % 3;
+    /* Ram it down three times, then lift the pattern clear of the box. */
+    const ramming = cycle < 2;
+    const beat = (cycle % 0.66) / 0.66;
+    const ram = ramming ? Math.abs(Math.sin(beat * Math.PI)) : 0;
+    const lift = cycle > 2 ? (cycle - 2) * 1.3 : 0;
+    for (let x = 0; x <= 24; x += 1) {
+      plot(-1.1 + (x / 24) * 2.2, 0.86, 0.55);
+      plot(-1.1 + (x / 24) * 2.2, -0.02, 0.35);
+    }
+    for (let y = 0; y <= 8; y += 1) {
+      plot(-1.1, -0.02 + (y / 8) * 0.88, 0.55);
+      plot(1.1, -0.02 + (y / 8) * 0.88, 0.55);
+    }
+    /* The packed sand settles a little further with every blow. */
+    const packed = 0.06 + clamp01(cycle / 2) * 0.14;
+    for (let x = 0; x <= 22; x += 1) {
+      const u = -1.05 + (x / 22) * 2.1;
+      plot(u, packed + Math.sin(u * 7 + t) * 0.02 + ram * 0.03, 0.45);
+    }
+    for (let x = 0; x <= 10; x += 1) plot(-0.5 + (x / 10) * 1, 0.2 - lift, 0.7);
+    for (let y = 0; y <= 5; y += 1) {
+      plot(-0.5, 0.2 - lift + (y / 5) * 0.3, 0.7);
+      plot(0.5, 0.2 - lift + (y / 5) * 0.3, 0.7);
+    }
+    if (ramming) {
+      const head = -0.72 + ram * 0.5;
+      for (let y = 0; y <= 7; y += 1) plot(0.1, -0.92 + (y / 7) * (head + 0.92), 0.6);
+      for (let x = 0; x <= 6; x += 1) plot(-0.08 + (x / 6) * 0.36, head, 0.95);
+      if (ram > 0.9) {
+        for (let puff = 0; puff < 3; puff += 1) {
+          plot(0.1 + (hash(puff) - 0.5) * 0.6, head - 0.12 - hash(puff * 3.1) * 0.2, 0.5);
+        }
+      }
+    }
+  });
+}
+
+/* -- Ingot roll: a bloom squeezed thinner and longer each pass ------------ */
+
+function paintIngotRoll(t: number): string {
+  return paintPlotted((plot) => {
+    const passes = 3;
+    const cycle = (t * 0.36) % passes;
+    const pass = Math.floor(cycle);
+    const along = cycle - pass;
+    /* Every pass through the stand takes another bite out of the thickness. */
+    const before = 0.42 - pass * 0.1;
+    const after = before - 0.1;
+    const direction = pass % 2 === 0 ? 1 : -1;
+    const nose = direction * (-1.5 + along * 3);
+    for (const side of [-1, 1] as const) {
+      const a = t * 5 * direction;
+      for (let step = 0; step <= 12; step += 1) {
+        const ra = (step / 12) * TAU;
+        plot(Math.cos(ra) * 0.26, side * (before + 0.3) + Math.sin(ra) * 0.22, 0.5);
+      }
+      plot(Math.cos(a) * 0.2, side * (before + 0.3) + Math.sin(a) * 0.16, 0.95);
+    }
+    for (let x = 0; x <= 46; x += 1) {
+      const u = -ASPECT + (x / 46) * ASPECT * 2;
+      const rolled = direction > 0 ? u < nose && u > nose - 2.2 : u > nose && u < nose + 2.2;
+      if (!rolled) continue;
+      /* Past the rolls the bar is thin; ahead of them it is still the bloom. */
+      const squeezed = direction > 0 ? u < 0 : u > 0;
+      const half = squeezed ? after : before;
+      const heat = 0.55 + Math.abs(Math.sin(u * 3 - t * 4)) * 0.45;
+      plot(u, -half, heat);
+      plot(u, half, heat);
+      plot(u, 0, heat * 0.85);
+    }
+  });
+}
+
+/* -- Quench bath: hot steel dropped in and the bath boiling over it ------- */
+
+function paintQuenchBath(t: number): string {
+  return paintPlotted((plot) => {
+    const cycle = (t * 0.3) % 2;
+    /* Down, held under while it boils, then back up cold. */
+    const down = cycle < 0.5 ? cycle * 2 : cycle < 1.4 ? 1 : clamp01(1 - (cycle - 1.4) * 1.7);
+    const depth = -0.7 + down * 1.1;
+    const submerged = down > 0.6;
+    const heat = clamp01(1 - Math.max(0, cycle - 0.5) * 0.9);
+    for (let x = 0; x <= 30; x += 1) {
+      const u = -1.3 + (x / 30) * 2.6;
+      plot(u, 0.18 + Math.sin(u * 5 + t * 6) * 0.04 * (submerged ? 2.5 : 1), 0.5);
+    }
+    for (let y = 0; y <= 8; y += 1) {
+      plot(-1.3, 0.18 + (y / 8) * 0.72, 0.5);
+      plot(1.3, 0.18 + (y / 8) * 0.72, 0.5);
+    }
+    for (let x = 0; x <= 24; x += 1) plot(-1.3 + (x / 24) * 2.6, 0.9, 0.5);
+    for (let y = 0; y <= 5; y += 1) plot(0, -0.95 + (y / 5) * (depth + 0.95), 0.45);
+    for (let step = 0; step <= 10; step += 1) {
+      const f = step / 10;
+      plot(-0.24 + f * 0.48, depth, 0.25 + heat * 0.75);
+      plot(-0.24 + f * 0.48, depth + 0.24, 0.25 + heat * 0.75);
+    }
+    if (submerged) {
+      /* The bath boils hardest right at the steel and calms further out. */
+      for (let bubble = 0; bubble < 14; bubble += 1) {
+        const bu = (hash(bubble * 2.3) - 0.5) * 1.6;
+        const rise = (t * 1.6 + hash(bubble)) % 1;
+        const near = clamp01(1 - Math.abs(bu) * 1.2);
+        plot(bu, depth + 0.2 - rise * (depth + 0.05), (0.3 + near * 0.7) * (1 - rise * 0.4));
+      }
+      for (let steam = 0; steam < 5; steam += 1) {
+        const life = (t * 0.9 + hash(steam * 5.1)) % 1;
+        plot((hash(steam) - 0.5) * 1.4, 0.14 - life * 0.9, (1 - life) * 0.55);
+      }
+    }
+  });
+}
+
+/* -- Power hammer: a bar beaten flatter under a treadle hammer ------------ */
+
+function paintPowerHammer(t: number): string {
+  return paintPlotted((plot) => {
+    const beat = (t * 2.4) % 1;
+    /* Fast down, slow back up: the recoil is what makes it read as a hammer. */
+    const fall = beat < 0.28 ? Math.pow(beat / 0.28, 2) : 1 - (beat - 0.28) / 0.72;
+    const head = -0.72 + fall * 0.62;
+    const struck = beat < 0.34;
+    /* The bar spreads a little further with each blow, and creeps left. */
+    const worked = ((t * 0.24) % 1);
+    const spread = 0.16 + worked * 0.24;
+    for (let x = 0; x <= 24; x += 1) plot(-1.35 + (x / 24) * 2.7, 0.62, 0.55);
+    for (let y = 0; y <= 5; y += 1) {
+      plot(-0.55, 0.62 + (y / 5) * 0.3, 0.45);
+      plot(0.55, 0.62 + (y / 5) * 0.3, 0.45);
+    }
+    for (let x = 0; x <= 20; x += 1) {
+      const u = -1.2 + (x / 20) * 2;
+      const under = clamp01(1 - Math.abs(u + 0.3 - worked * 0.6) * 1.6);
+      const half = 0.06 + under * spread * 0.5;
+      const heat = clamp01(0.9 - Math.abs(u) * 0.5);
+      plot(u, 0.5 - half, 0.3 + heat * 0.7);
+      plot(u, 0.5 + half, 0.3 + heat * 0.7);
+    }
+    for (let y = 0; y <= 6; y += 1) plot(-0.3 + worked * 0.6, -0.95 + (y / 6) * (head + 0.95), 0.5);
+    for (let x = 0; x <= 8; x += 1) {
+      const u = -0.3 + worked * 0.6 - 0.22 + (x / 8) * 0.44;
+      plot(u, head, 0.9);
+      plot(u, head - 0.24, 0.7);
+    }
+    if (struck) {
+      for (let spark = 0; spark < 7; spark += 1) {
+        const a = Math.PI + hash(spark) * Math.PI;
+        const reach = (0.2 + hash(spark * 3.3) * 0.5) * (1 - beat / 0.34);
+        plot(-0.3 + worked * 0.6 + Math.cos(a) * reach * 2, 0.5 + Math.sin(a) * reach, 0.95);
+      }
+    }
+  });
+}
+
+/* -- Wire draw: wire pulled through a die and wound onto a block ---------- */
+
+function paintWireDraw(t: number): string {
+  return paintPlotted((plot) => {
+    const pull = t * 1.4;
+    for (let x = 0; x <= 40; x += 1) {
+      const f = x / 40;
+      const u = -ASPECT + f * (ASPECT + 0.2);
+      /* Thick on the way in, thin on the way out: the die is the pinch. */
+      plot(u, -0.06 + Math.sin(u * 3 + pull * 3) * 0.02, 0.55);
+      plot(u, 0.06 + Math.sin(u * 3 + pull * 3) * 0.02, 0.55);
+    }
+    for (let y = 0; y <= 8; y += 1) {
+      const f = y / 8;
+      plot(0.2, -0.45 + f * 0.9, 0.75);
+      plot(0.34, -0.45 + f * 0.9, 0.75);
+      plot(0.27, -0.45 + f * 0.9, f > 0.4 && f < 0.6 ? 0 : 0.6);
+    }
+    for (let x = 0; x <= 20; x += 1) {
+      const u = 0.34 + (x / 20) * 0.7;
+      plot(u, 0.01, 0.85);
+    }
+    /* The wire comes off the die and stacks up in turns on the block. */
+    for (let turn = 0; turn < 7; turn += 1) {
+      const a = pull * 2 + turn * 0.9;
+      const level = 0.42 - turn * 0.12;
+      for (let step = 0; step <= 16; step += 1) {
+        const ra = (step / 16) * TAU;
+        plot(1.12 + Math.cos(ra) * 0.42, level * 0.5 + Math.sin(ra) * 0.3, 0.4);
+      }
+      plot(1.12 + Math.cos(a) * 0.42, level * 0.5 + Math.sin(a) * 0.3, 0.95);
+    }
+    for (let step = 0; step <= 12; step += 1) {
+      const f = step / 12;
+      plot(-1.5, -0.5 + f, 0.5);
+    }
+  });
+}
+
+/* -- Milk churn: a rocking churn with the butter finally breaking ---------- */
+
+function paintMilkChurn(t: number): string {
+  return paintPlotted((plot) => {
+    const rock = Math.sin(t * 2.2);
+    /* Cream for most of the cycle, then it breaks and the grains gather. */
+    const worked = (t * 0.14) % 1;
+    const broken = clamp01((worked - 0.62) * 4);
+    const tilt = rock * 0.16;
+    for (let y = 0; y <= 12; y += 1) {
+      const f = y / 12;
+      plot(-0.85 - tilt * f, 0.8 - f * 1.4, 0.6);
+      plot(0.85 - tilt * f, 0.8 - f * 1.4, 0.6);
+    }
+    for (let x = 0; x <= 14; x += 1) {
+      plot(-0.85 + (x / 14) * 1.7, 0.8, 0.6);
+      plot(-0.85 - tilt + (x / 14) * 1.7, -0.6, 0.6);
+    }
+    /* The cream keeps a level surface, so the slope tracks the rocking. */
+    for (let x = 0; x <= 18; x += 1) {
+      const f = x / 18;
+      const u = -0.8 + f * 1.6;
+      plot(u, 0.1 + rock * 0.18 * (f - 0.5) * 2 + Math.sin(f * 8 + t * 6) * 0.03, 0.8);
+    }
+    for (let grain = 0; grain < 9; grain += 1) {
+      const gu = (hash(grain * 2.7) - 0.5) * 1.4;
+      const gv = 0.24 + hash(grain * 5.3) * 0.4;
+      const gathered = broken * 0.4;
+      plot(gu * (1 - gathered), gv + rock * 0.05, broken * 0.95);
+    }
+    for (let x = 0; x <= 5; x += 1) plot(0.85 - tilt + (x / 5) * 0.4, -0.4, 0.7);
+  });
+}
+
+/* -- Cheese press: the screw coming down and the whey running out ---------- */
+
+function paintCheesePress(t: number): string {
+  return paintPlotted((plot) => {
+    const cycle = (t * 0.18) % 1;
+    /* One long press: the screw turns steadily and the curd gives slowly. */
+    const pressed = cycle;
+    const turn = t * 3;
+    for (let y = 0; y <= 14; y += 1) {
+      const f = y / 14;
+      plot(-1.2, -0.9 + f * 1.8, 0.5);
+      plot(1.2, -0.9 + f * 1.8, 0.5);
+    }
+    for (let x = 0; x <= 22; x += 1) plot(-1.2 + (x / 22) * 2.4, -0.9, 0.5);
+    for (let y = 0; y <= 8; y += 1) {
+      const f = y / 8;
+      /* The thread on the screw is what shows that it is actually turning. */
+      plot(Math.sin(turn + f * 6) * 0.1, -0.85 + f * (0.55 + pressed * 0.3), 0.75);
+    }
+    const platen = -0.3 + pressed * 0.32;
+    for (let x = 0; x <= 12; x += 1) plot(-0.62 + (x / 12) * 1.24, platen, 0.85);
+    const height = 0.5 - pressed * 0.2;
+    for (let x = 0; x <= 12; x += 1) {
+      const u = -0.62 + (x / 12) * 1.24;
+      plot(u, platen + 0.06, 0.6);
+      plot(u, platen + height, 0.6);
+    }
+    for (let y = 0; y <= 6; y += 1) {
+      const f = y / 6;
+      plot(-0.62, platen + 0.06 + f * (height - 0.06), 0.6);
+      plot(0.62, platen + 0.06 + f * (height - 0.06), 0.6);
+    }
+    /* Whey runs faster the harder it is pressed, and pools in the tray. */
+    for (let drop = 0; drop < 6; drop += 1) {
+      const life = (t * (0.9 + pressed * 1.6) + hash(drop)) % 1;
+      const du = -0.55 + hash(drop * 3.7) * 1.1;
+      plot(du, platen + height + life * (0.85 - platen - height), (1 - life * 0.4) * 0.8);
+    }
+    for (let x = 0; x <= 20; x += 1) plot(-1.1 + (x / 20) * 2.2, 0.88 - pressed * 0.04, 0.65);
+  });
+}
+
+/* -- Cream separator: a bowl running up to speed and splitting the milk ---- */
+
+function paintCreamSeparator(t: number): string {
+  return paintPlotted((plot) => {
+    const speed = clamp01(((t * 0.2) % 1) * 3);
+    const spin = t * (1 + speed * 9);
+    for (let step = 0; step <= 28; step += 1) {
+      const a = (step / 28) * TAU;
+      plot(Math.cos(a) * 0.62, -0.1 + Math.sin(a) * 0.44, 0.5);
+    }
+    /* Discs inside the bowl: they blur into one band as it comes up to speed. */
+    for (let disc = 0; disc < 5; disc += 1) {
+      const f = disc / 4;
+      const level = -0.42 + f * 0.62;
+      for (let x = 0; x <= 10; x += 1) {
+        const u = -0.5 + (x / 10) * 1;
+        plot(u, level + Math.sin(spin + disc) * 0.02 * (1 - speed), 0.35 + speed * 0.35);
+      }
+    }
+    for (let y = 0; y <= 6; y += 1) plot(0, -0.95 + (y / 6) * 0.5, 0.5);
+    for (let x = 0; x <= 6; x += 1) plot(-0.24 + (x / 6) * 0.48, -0.95, 0.6);
+    /* Two spouts, and only the light stream climbs to the upper one. */
+    for (let x = 0; x <= 10; x += 1) {
+      plot(0.62 + (x / 10) * 0.5, -0.32, 0.55);
+      plot(-0.62 - (x / 10) * 0.5, 0.16, 0.55);
+    }
+    for (let drop = 0; drop < 5; drop += 1) {
+      const life = (t * 1.8 + hash(drop)) % 1;
+      plot(1.12, -0.3 + life * 0.9, speed * (1 - life * 0.3) * 0.95);
+      plot(-1.12, 0.18 + life * 0.7, speed * (1 - life * 0.3) * 0.8);
+    }
+    plot(0, -0.1, 0.4 + speed * 0.6);
+  });
+}
+
+/* -- Egg grader: eggs rolling along and dropping by size ------------------ */
+
+function paintEggGrader(t: number): string {
+  return paintPlotted((plot) => {
+    const run = ASPECT * 2 + 1;
+    for (let x = 0; x <= 34; x += 1) plot(-ASPECT + (x / 34) * ASPECT * 2, -0.1, 0.45);
+    /* Three chutes, each with a wider gap than the last. */
+    for (let chute = 0; chute < 3; chute += 1) {
+      const cu = -0.75 + chute * 0.75;
+      for (let y = 0; y <= 7; y += 1) {
+        plot(cu - 0.22, -0.05 + (y / 7) * 0.85, 0.4);
+        plot(cu + 0.22, -0.05 + (y / 7) * 0.85, 0.4);
+      }
+    }
+    for (let egg = 0; egg < 5; egg += 1) {
+      const size = 0.5 + hash(egg * 3.1) * 0.5;
+      const along = (t * 0.5 + egg / 5) % 1;
+      const u = -ASPECT - 0.4 + along * run;
+      /* The egg falls at the first gap wide enough to take it. */
+      const gate = size < 0.7 ? -0.75 : size < 0.85 ? 0 : 0.75;
+      const dropping = u > gate;
+      const fall = dropping ? clamp01((u - gate) * 1.6) : 0;
+      const eu = dropping ? gate : u;
+      const ev = -0.2 - size * 0.1 + fall * fall * 1.1;
+      for (let step = 0; step <= 12; step += 1) {
+        const a = (step / 12) * TAU;
+        plot(eu + Math.cos(a) * 0.16 * size, ev + Math.sin(a) * 0.13 * size, 0.75);
+      }
+      plot(eu, ev, 0.35);
+    }
+    for (let roller = 0; roller <= 10; roller += 1) {
+      plot(-1.5 + roller * 0.3, -0.02 + Math.sin(t * 5 + roller) * 0.04, 0.6);
+    }
+  });
+}
+
+/* -- Hay baler: a swathe taken in and bales dropped behind ---------------- */
+
+function paintHayBaler(t: number): string {
+  return paintPlotted((plot) => {
+    const roll = t * 3;
+    const cycle = (t * 0.3) % 1;
+    /* The chamber fills, then the tailgate opens and the bale rolls out. */
+    const full = clamp01(cycle * 1.6);
+    const dumping = cycle > 0.78;
+    const gate = dumping ? (cycle - 0.78) * 4 : 0;
+    for (let x = 0; x <= 30; x += 1) plot(-ASPECT + (x / 30) * ASPECT * 2, 0.88, 0.4);
+    for (let step = 0; step <= 26; step += 1) {
+      const a = (step / 26) * TAU;
+      const open = a > Math.PI * 0.2 && a < Math.PI * 1.1 ? gate * 0.5 : 0;
+      plot(-0.1 + Math.cos(a) * (0.58 + open), 0.2 + Math.sin(a) * 0.5, 0.5);
+    }
+    for (let ring = 1; ring <= 3; ring += 1) {
+      const radius = (ring / 3) * 0.46 * full;
+      for (let step = 0; step <= 18; step += 1) {
+        const a = (step / 18) * TAU + roll;
+        plot(-0.1 + Math.cos(a) * radius * 1.15, 0.24 + Math.sin(a) * radius, 0.4 + full * 0.5);
+      }
+    }
+    /* The pickup keeps sweeping the ground up into the throat. */
+    for (let tine = 0; tine < 5; tine += 1) {
+      const a = roll * 0.8 + (tine / 5) * TAU;
+      plot(-0.85 + Math.cos(a) * 0.2, 0.66 + Math.sin(a) * 0.16, 0.85);
+    }
+    for (let wisp = 0; wisp < 4; wisp += 1) {
+      const life = (t * 1.2 + hash(wisp)) % 1;
+      plot(-1.3 + life * 0.5, 0.8 - life * 0.14, (1 - life) * 0.6);
+    }
+    if (dumping) {
+      for (let step = 0; step <= 16; step += 1) {
+        const a = (step / 16) * TAU + roll;
+        plot(0.6 + gate * 0.6 + Math.cos(a) * 0.5, 0.52 + Math.sin(a) * 0.42, 0.6);
+      }
+    }
+  });
+}
+
+/* -- Sheep shears: the clipper stroking and the fleece peeling back ------- */
+
+function paintSheepShears(t: number): string {
+  return paintPlotted((plot) => {
+    const cycle = (t * 0.2) % 1;
+    /* Long strokes down the flank; the fleece opens behind each one. */
+    const stroke = (t * 0.8) % 1;
+    const cu = -0.95 + stroke * 1.5;
+    const cleared = cycle;
+    for (let step = 0; step <= 40; step += 1) {
+      const a = (step / 40) * TAU;
+      plot(Math.cos(a) * 1.1, 0.15 + Math.sin(a) * 0.62, 0.4);
+    }
+    for (let tuft = 0; tuft < 26; tuft += 1) {
+      const tu = -1.05 + (tuft / 25) * 2.1;
+      if (tu < -1 + cleared * 2) continue;
+      const height = 0.42 - Math.abs(tu) * 0.14;
+      for (let step = 0; step <= 5; step += 1) {
+        const f = step / 5;
+        plot(tu + Math.sin(f * 5 + tuft) * 0.05, -0.3 - f * height * 0.5, 0.5 + f * 0.35);
+      }
+    }
+    /* The cut fleece stays in one piece and folds off to the near side. */
+    for (let step = 0; step <= 22; step += 1) {
+      const f = step / 22;
+      const fu = -1.05 + f * (cleared * 2);
+      plot(fu, 0.72 + Math.sin(f * 6 + t) * 0.07, 0.7);
+      plot(fu, 0.88, 0.45);
+    }
+    for (let y = 0; y <= 5; y += 1) plot(cu + 0.28, -0.85 + (y / 5) * 0.5, 0.55);
+    const chatter = Math.sin(t * 26) * 0.03;
+    for (let x = 0; x <= 8; x += 1) {
+      plot(cu - 0.16 + (x / 8) * 0.32, -0.34 + chatter, 0.9);
+      plot(cu - 0.16 + (x / 8) * 0.32, -0.26 - chatter, 0.75);
+    }
+  });
+}
+
+/* -- Honey extractor: frames spun and honey thrown to the wall ------------ */
+
+function paintHoneyExtractor(t: number): string {
+  return paintPlotted((plot) => {
+    const cycle = (t * 0.12) % 1;
+    /* Wind it up, let it run, and it coasts down as the frames empty. */
+    const rate = clamp01(cycle * 5) - clamp01((cycle - 0.7) * 3);
+    const spin = t * (1.5 + rate * 12);
+    for (let step = 0; step <= 30; step += 1) {
+      const a = (step / 30) * TAU;
+      plot(Math.cos(a) * 1.15, Math.sin(a) * 0.8, 0.5);
+    }
+    for (let frame = 0; frame < 4; frame += 1) {
+      const a = spin + (frame / 4) * TAU;
+      const cos = Math.cos(a);
+      const sin = Math.sin(a);
+      /* A frame edge-on all but disappears, which is what sells the spin. */
+      const face = Math.abs(cos);
+      for (let step = 0; step <= 10; step += 1) {
+        const f = (step / 10) * 2 - 1;
+        plot(cos * f * 0.8 - sin * 0.02, sin * f * 0.56, 0.3 + face * 0.6);
+      }
+    }
+    for (let fling = 0; fling < 8; fling += 1) {
+      const a = spin * 0.6 + fling * 0.9;
+      const out = 0.5 + ((t * 2 + hash(fling)) % 1) * 0.7;
+      plot(Math.cos(a) * out * 1.15, Math.sin(a) * out * 0.8, rate * 0.9);
+    }
+    /* What has been flung off runs down the wall and out of the tap. */
+    const pooled = clamp01(cycle * 1.4);
+    for (let x = 0; x <= 18; x += 1) {
+      const u = -0.9 + (x / 18) * 1.8;
+      plot(u, 0.74 - pooled * 0.1, 0.75);
+    }
+    if (cycle > 0.75) {
+      const flow = (t * 1.6) % 1;
+      plot(1.2, 0.6 + flow * 0.35, (1 - flow) * 0.9);
+    }
+  });
+}
+
+/* -- Grape press: the basket screwed down and the juice running out ------- */
+
+function paintGrapePress(t: number): string {
+  return paintPlotted((plot) => {
+    const cycle = (t * 0.22) % 1;
+    const turn = t * 2.6;
+    /* The cake compacts fast at first, then gives up very little. */
+    const pressed = Math.pow(cycle, 0.6);
+    for (let step = 0; step <= 24; step += 1) {
+      const a = Math.PI * (step / 24);
+      plot(Math.cos(a) * 0.9, 0.72 - Math.sin(a) * 0.05, 0.5);
+    }
+    for (let stave = 0; stave <= 10; stave += 1) {
+      const u = -0.9 + (stave / 10) * 1.8;
+      for (let y = 0; y <= 8; y += 1) plot(u, -0.1 + (y / 8) * 0.82, stave % 2 === 0 ? 0.55 : 0.3);
+    }
+    for (let x = 0; x <= 18; x += 1) {
+      plot(-0.9 + (x / 18) * 1.8, 0.16, 0.5);
+      plot(-0.9 + (x / 18) * 1.8, 0.62, 0.5);
+    }
+    const platen = -0.2 + pressed * 0.5;
+    for (let x = 0; x <= 16; x += 1) plot(-0.82 + (x / 16) * 1.64, platen, 0.85);
+    for (let y = 0; y <= 10; y += 1) {
+      const f = y / 10;
+      plot(Math.sin(turn + f * 7) * 0.09, -0.92 + f * (platen + 0.92), 0.7);
+    }
+    for (let arm = 0; arm < 2; arm += 1) {
+      const a = turn + arm * Math.PI;
+      for (let step = 0; step <= 6; step += 1) {
+        const f = (step / 6) * 0.55;
+        plot(Math.cos(a) * f, -0.92 + Math.sin(a) * f * 0.4, 0.75);
+      }
+    }
+    /* Juice runs while it is being pressed and slows as the cake gives out. */
+    for (let run = 0; run < 6; run += 1) {
+      const life = (t * (1.4 - pressed * 0.7) + hash(run)) % 1;
+      const ru = -0.85 + hash(run * 3.3) * 1.7;
+      plot(ru, 0.6 + life * 0.3, (1 - pressed * 0.5) * (1 - life * 0.3) * 0.85);
+    }
+    for (let x = 0; x <= 22; x += 1) plot(-1.15 + (x / 22) * 2.3, 0.92, 0.6);
+  });
+}
+
+/* -- Barrel roll: a barrel run down the stillage on its rims -------------- */
+
+function paintBarrelRoll(t: number): string {
+  return paintPlotted((plot) => {
+    const run = (t * 0.34) % 1;
+    const cu = -1.45 + run * 2.9;
+    /* Rolling, so the hoops turn at the rate the barrel actually travels. */
+    const roll = -run * 8.5;
+    for (let x = 0; x <= 34; x += 1) plot(-ASPECT + (x / 34) * ASPECT * 2, 0.72, 0.45);
+    for (let step = 0; step <= 26; step += 1) {
+      const a = (step / 26) * TAU;
+      /* A barrel is fattest at its middle: the belly makes the silhouette. */
+      const belly = 1 + Math.abs(Math.cos(a)) * 0.12;
+      plot(cu + Math.cos(a) * 0.5 * belly, 0.3 + Math.sin(a) * 0.4 * belly, 0.55);
+    }
+    for (let hoop = -1; hoop <= 1; hoop += 1) {
+      for (let step = 0; step <= 14; step += 1) {
+        const a = (step / 14) * TAU + roll;
+        plot(cu + hoop * 0.24 + Math.cos(a) * 0.12, 0.3 + Math.sin(a) * 0.42, 0.85);
+      }
+    }
+    for (let stave = 0; stave < 5; stave += 1) {
+      const a = roll + (stave / 5) * TAU;
+      for (let x = 0; x <= 6; x += 1) {
+        plot(cu - 0.4 + (x / 6) * 0.8, 0.3 + Math.sin(a) * 0.4, 0.3 + Math.pow(clamp01(Math.cos(a)), 2) * 0.5);
+      }
+    }
+    for (let dust = 0; dust < 4; dust += 1) {
+      const life = (t * 2 + hash(dust)) % 1;
+      plot(cu - 0.5 - life * 0.4, 0.7 - life * 0.1, (1 - life) * 0.5);
+    }
+  });
+}
+
+/* -- Corker: a lever driving a cork down into the neck -------------------- */
+
+function paintCorker(t: number): string {
+  return paintPlotted((plot) => {
+    const cycle = (t * 0.5) % 2;
+    /* Lever down, cork in, lever back up and a fresh bottle slides in. */
+    const drive = cycle < 0.8 ? cycle / 0.8 : cycle < 1.2 ? 1 : clamp01(1 - (cycle - 1.2) / 0.8);
+    const slide = cycle > 1.6 ? (cycle - 1.6) / 0.4 : 0;
+    const bu = slide * 0.9;
+    for (let y = 0; y <= 10; y += 1) {
+      const f = y / 10;
+      plot(-0.42 + bu, 0.9 - f * 0.7, 0.6);
+      plot(0.42 + bu, 0.9 - f * 0.7, 0.6);
+    }
+    for (let step = 0; step <= 8; step += 1) {
+      const f = step / 8;
+      plot(-0.42 + bu + f * 0.28, 0.2 - f * 0.32, 0.6);
+      plot(0.42 + bu - f * 0.28, 0.2 - f * 0.32, 0.6);
+    }
+    for (let y = 0; y <= 6; y += 1) {
+      const f = y / 6;
+      plot(-0.14 + bu, -0.12 - f * 0.3, 0.6);
+      plot(0.14 + bu, -0.12 - f * 0.3, 0.6);
+    }
+    /* The cork goes from above the neck to flush with it, and stays. */
+    const cork = -0.62 + drive * 0.38;
+    for (let x = 0; x <= 5; x += 1) {
+      const u = -0.11 + bu + (x / 5) * 0.22;
+      plot(u, cork, 0.9);
+      plot(u, cork + 0.14, 0.9);
+    }
+    const ram = -1 + drive * 0.34;
+    for (let y = 0; y <= 4; y += 1) plot(bu, ram - (y / 4) * 0.3, 0.7);
+    for (let step = 0; step <= 12; step += 1) {
+      const f = step / 12;
+      plot(bu + f * 1.2, ram - 0.3 - f * (0.5 - drive * 0.75), 0.65);
+    }
+    for (let x = 0; x <= 26; x += 1) plot(-ASPECT + (x / 26) * ASPECT * 2, 0.94, 0.4);
+  });
+}
+
+/* -- Bottling line: bottles filling one after another under the taps ------ */
+
+function paintBottlingLine(t: number): string {
+  return paintPlotted((plot) => {
+    const stride = 1.4;
+    const cycle = (t * 0.55) % stride;
+    /* Index along, fill, index along: the line stops for every fill. */
+    const shift = clamp01(cycle / 0.45);
+    const eased = shift * shift * (3 - 2 * shift);
+    const filling = cycle > 0.5;
+    const fill = filling ? clamp01((cycle - 0.5) / 0.8) : 0;
+    for (let x = 0; x <= 34; x += 1) plot(-ASPECT + (x / 34) * ASPECT * 2, 0.88, 0.45);
+    for (let tap = 0; tap < 3; tap += 1) {
+      const tu = -0.7 + tap * 0.7;
+      for (let y = 0; y <= 4; y += 1) plot(tu, -0.95 + (y / 4) * 0.3, 0.55);
+      for (let x = 0; x <= 4; x += 1) plot(tu - 0.1 + (x / 4) * 0.2, -0.62, 0.7);
+    }
+    for (let x = 0; x <= 24; x += 1) plot(-1.5 + (x / 24) * 3, -0.72, 0.35);
+    for (let bottle = 0; bottle < 5; bottle += 1) {
+      const bu = -1.6 + bottle * 0.7 + eased * 0.7;
+      const under = Math.abs(bu + 0.7 - Math.round((bu + 0.7) / 0.7) * 0.7) < 0.1;
+      const level = bu < -0.75 ? 1 : under && filling ? fill : bu > -0.05 ? 1 : 0;
+      for (let y = 0; y <= 9; y += 1) {
+        const f = y / 9;
+        plot(bu - 0.16, 0.82 - f * 0.72, 0.6);
+        plot(bu + 0.16, 0.82 - f * 0.72, 0.6);
+      }
+      for (let y = 0; y <= 3; y += 1) plot(bu, 0.1 - (y / 3) * 0.24, 0.6);
+      for (let y = 0; y <= 8; y += 1) {
+        const f = y / 8;
+        plot(bu, 0.82 - f * 0.66 * level, level > 0 ? 0.85 : 0);
+      }
+      if (under && filling && fill < 1) {
+        plot(bu, -0.5 + ((t * 6) % 1) * 0.4, 0.95);
+      }
+    }
+  });
+}
+
+/* -- Tea pour: a long pour from a high spout into a small cup ------------- */
+
+function paintTeaPour(t: number): string {
+  return paintPlotted((plot) => {
+    const cycle = (t * 0.24) % 1;
+    /* Raise the pot, pour high and thin, lower it, and the cup keeps it. */
+    const height = cycle < 0.25 ? cycle * 4 : cycle < 0.75 ? 1 : clamp01(1 - (cycle - 0.75) * 4);
+    const pouring = cycle > 0.2 && cycle < 0.8;
+    const tilt = pouring ? 0.5 : 0;
+    const pv = -0.3 - height * 0.55;
+    for (let step = 0; step <= 20; step += 1) {
+      const a = Math.PI * 0.15 + (step / 20) * Math.PI * 1.7;
+      plot(-0.75 + Math.cos(a) * 0.38, pv + Math.sin(a) * 0.3 + tilt * 0.1, 0.6);
+    }
+    for (let step = 0; step <= 10; step += 1) {
+      const f = step / 10;
+      /* The spout swings down as the pot is tipped, and the stream follows. */
+      plot(-0.4 + f * 0.42, pv - 0.16 + f * (0.24 + tilt * 0.24), 0.7);
+    }
+    for (let step = 0; step <= 8; step += 1) {
+      const a = Math.PI * (step / 8);
+      plot(-1.12 + Math.cos(a) * 0.24, pv + Math.sin(a) * 0.22, 0.5);
+    }
+    if (pouring) {
+      for (let step = 0; step <= 26; step += 1) {
+        const f = step / 26;
+        const u = 0.02 + Math.sin(t * 4) * 0.02 * f;
+        plot(u, pv + 0.1 + f * (0.62 - pv - 0.1), 0.9 - f * 0.2);
+      }
+    }
+    const level = pouring ? clamp01((cycle - 0.2) / 0.6) : cycle < 0.2 ? 0 : 1;
+    for (let step = 0; step <= 20; step += 1) {
+      const a = Math.PI * (step / 20);
+      plot(Math.cos(a) * 0.34, 0.86 - Math.sin(a) * 0.24, 0.55);
+    }
+    for (let x = 0; x <= 10; x += 1) {
+      plot(-0.34 + (x / 10) * 0.68, 0.62, 0.5);
+      plot(-0.3 + (x / 10) * 0.6, 0.82 - level * 0.18, level > 0.02 ? 0.85 : 0);
+    }
+    for (let steam = 0; steam < 3; steam += 1) {
+      const life = (t * 0.8 + hash(steam)) % 1;
+      plot(Math.sin(life * 5 + steam) * 0.12, 0.55 - life * 0.5, (1 - life) * level * 0.5);
+    }
+  });
+}
+
+/* -- Coffee siphon: water climbing to the top and falling back brewed ----- */
+
+function paintCoffeeSiphon(t: number): string {
+  return paintPlotted((plot) => {
+    const cycle = (t * 0.16) % 1;
+    /* Heat, rise, brew, cut the flame, and the brew is drawn back down. */
+    const rise = clamp01((cycle - 0.15) * 4);
+    const drawn = clamp01((cycle - 0.7) * 3.5);
+    const upper = rise - drawn;
+    for (let step = 0; step <= 26; step += 1) {
+      const a = (step / 26) * TAU;
+      plot(Math.cos(a) * 0.55, 0.5 + Math.sin(a) * 0.36, 0.5);
+      plot(Math.cos(a) * 0.42, -0.5 + Math.sin(a) * 0.34, 0.5);
+    }
+    for (let y = 0; y <= 6; y += 1) plot(0, -0.16 + (y / 6) * 0.3, 0.6);
+    /* The lower bulb empties by exactly as much as the upper one fills. */
+    for (let x = 0; x <= 14; x += 1) {
+      const f = x / 14;
+      const half = Math.sin(Math.acos(Math.abs(f * 2 - 1)));
+      plot((f * 2 - 1) * 0.5 * half, 0.78 - (1 - upper) * 0.28, upper > 0.02 ? 0 : 0.8);
+    }
+    for (let x = 0; x <= 14; x += 1) {
+      const f = x / 14;
+      plot((f * 2 - 1) * 0.38, -0.72 + (1 - upper) * 0.4, 0.85);
+    }
+    for (let x = 0; x <= 12; x += 1) {
+      const f = x / 12;
+      plot((f * 2 - 1) * 0.5, 0.82 - upper * 0.5, upper > 0.05 ? 0.85 : 0);
+    }
+    if (upper > 0.4 && drawn < 0.05) {
+      for (let bubble = 0; bubble < 6; bubble += 1) {
+        const life = (t * 2 + hash(bubble)) % 1;
+        plot((hash(bubble * 3.1) - 0.5) * 0.7, 0.86 - life * 0.4, (1 - life) * 0.7);
+      }
+    }
+    const flame = cycle < 0.72 ? 0.6 + Math.sin(t * 12) * 0.4 : 0;
+    for (let step = 0; step <= 6; step += 1) {
+      const f = step / 6;
+      plot(-0.1 + f * 0.2, 0.98 - f * 0.14, flame);
+    }
+  });
+}
+
+/* -- Cocktail shaker: shaken hard, then opened and strained --------------- */
+
+function paintCocktailShaker(t: number): string {
+  return paintPlotted((plot) => {
+    const cycle = (t * 0.32) % 2;
+    const shaking = cycle < 1.2;
+    const shake = shaking ? Math.sin(t * 16) : 0;
+    const pour = clamp01((cycle - 1.4) * 2.5);
+    const cu = shake * 0.24;
+    const lean = shake * 0.2;
+    const drop = pour * 0.5;
+    for (let y = 0; y <= 12; y += 1) {
+      const f = y / 12;
+      plot(cu - 0.34 + lean * (1 - f) + (pour ? drop * f : 0), -0.7 + drop + f * 1.1, 0.6);
+      plot(cu + 0.34 + lean * (1 - f) + (pour ? drop * f : 0), -0.7 + drop + f * 1.1, 0.6);
+    }
+    for (let x = 0; x <= 10; x += 1) {
+      plot(cu - 0.34 + lean + (x / 10) * 0.68, -0.7 + drop, 0.7);
+      plot(cu - 0.34 + (x / 10) * 0.68, 0.4 + drop, 0.6);
+    }
+    if (shaking) {
+      /* The ice is what makes a shaker read as shaken rather than just moved. */
+      for (let cube = 0; cube < 5; cube += 1) {
+        const a = t * 9 + cube * 1.3;
+        plot(cu + Math.sin(a) * 0.22, -0.3 + Math.cos(a * 1.3) * 0.4, 0.9);
+      }
+    } else if (pour > 0) {
+      for (let step = 0; step <= 14; step += 1) {
+        const f = step / 14;
+        plot(cu + 0.34 + drop + f * 0.5, -0.16 + drop + f * 0.7, 0.9);
+      }
+    }
+    for (let step = 0; step <= 18; step += 1) {
+      const f = step / 18;
+      plot(0.9 + (f - 0.5) * 0.7, 0.44 + Math.abs(f - 0.5) * 0.5, 0.55);
+    }
+    for (let y = 0; y <= 4; y += 1) plot(0.9, 0.7 + (y / 4) * 0.24, 0.5);
+    const level = pour * 0.3;
+    for (let x = 0; x <= 8; x += 1) plot(0.9 - level * 1.1 + (x / 8) * level * 2.2, 0.68 - level * 0.8, level > 0.02 ? 0.85 : 0);
+  });
+}
+
+/* -- Noodle pull: dough folded and pulled, doubling every time ------------ */
+
+function paintNoodlePull(t: number): string {
+  return paintPlotted((plot) => {
+    const cycle = (t * 0.5) % 2;
+    /* Pull it out, fold it back, and the strand count doubles each round. */
+    const pulling = cycle < 1;
+    const stretch = pulling ? Math.sin(cycle * Math.PI) : 0;
+    const rounds = Math.floor((t * 0.25) % 4);
+    const strands = Math.min(12, 1 << rounds);
+    const reach = 0.55 + stretch * 0.9;
+    for (const side of [-1, 1] as const) {
+      for (let y = 0; y <= 5; y += 1) plot(side * (reach + 0.2), -0.5 + (y / 5) * 0.45, 0.7);
+      for (let x = 0; x <= 4; x += 1) plot(side * (reach + 0.2) - side * (x / 4) * 0.2, -0.5, 0.75);
+    }
+    for (let strand = 0; strand < strands; strand += 1) {
+      const spread = strands === 1 ? 0 : (strand / (strands - 1) - 0.5) * 0.5;
+      for (let x = 0; x <= 30; x += 1) {
+        const f = x / 30;
+        const u = -reach + f * reach * 2;
+        /* Slack in the middle, and it takes up as the pull comes on. */
+        const sag = Math.sin(f * Math.PI) * (0.42 - stretch * 0.3) + spread;
+        plot(u, -0.35 + sag, 0.45 + (1 - stretch) * 0.4);
+      }
+    }
+    if (!pulling) {
+      const fold = (cycle - 1);
+      for (let x = 0; x <= 12; x += 1) {
+        const f = x / 12;
+        plot(-reach + f * reach * (2 - fold * 1.4), -0.32 + Math.sin(f * Math.PI) * 0.45, 0.8);
+      }
+    }
+    for (let x = 0; x <= 26; x += 1) plot(-1.4 + (x / 26) * 2.8, 0.85, 0.45);
+    for (let flour = 0; flour < 5; flour += 1) {
+      const life = (t * 1.6 + hash(flour)) % 1;
+      plot((hash(flour * 3.7) - 0.5) * 2, 0.4 + life * 0.4, (1 - life) * 0.4 * stretch);
+    }
+  });
+}
+
+/* -- Wok toss: the contents thrown up and caught again -------------------- */
+
+function paintWokToss(t: number): string {
+  return paintPlotted((plot) => {
+    const cycle = (t * 1.1) % 1;
+    /* Pull back, flick up, catch: the wok leads the food by a beat. */
+    const flick = cycle < 0.25 ? -Math.sin(cycle * 4 * Math.PI) * 0.5 : 0;
+    const airborne = cycle > 0.2 && cycle < 0.85;
+    const flight = clamp01((cycle - 0.2) / 0.65);
+    const arc = Math.sin(flight * Math.PI);
+    for (let step = 0; step <= 24; step += 1) {
+      const a = Math.PI * (step / 24);
+      plot(Math.cos(a) * 0.7 + flick * 0.3, 0.45 - Math.sin(a) * 0.34 + flick * 0.2, 0.6);
+    }
+    for (let x = 0; x <= 12; x += 1) plot(0.7 + (x / 12) * 0.7 + flick * 0.3, 0.45 + flick * 0.2 - (x / 12) * 0.12, 0.55);
+    for (let piece = 0; piece < 9; piece += 1) {
+      const spread = (hash(piece * 2.9) - 0.5) * 0.9;
+      if (airborne) {
+        /* In the air the pile opens out and tumbles before it comes back. */
+        const own = 0.8 + hash(piece) * 0.4;
+        plot(spread * (1 + arc * 1.4), 0.3 - arc * own * 0.9 + flick * 0.2, 0.85);
+      } else {
+        plot(spread + flick * 0.3, 0.34 + hash(piece * 5.1) * 0.08 + flick * 0.2, 0.8);
+      }
+    }
+    /* Flame licks up the side only when the wok has just been tipped. */
+    const licking = cycle < 0.3 ? 1 : 0;
+    for (let flame = 0; flame < 5; flame += 1) {
+      const f = flame / 4;
+      plot(-0.7 + f * 1.4, 0.72 + Math.sin(t * 20 + flame) * 0.06, licking * (0.4 + hash(flame) * 0.6));
+    }
+    for (let steam = 0; steam < 4; steam += 1) {
+      const life = (t * 1.4 + hash(steam * 3.3)) % 1;
+      plot((hash(steam) - 0.5) * 1.2, 0.2 - life * 1, (1 - life) * 0.45);
+    }
+  });
+}
+
+/* -- Skewer grill: skewers turned over the coals -------------------------- */
+
+function paintSkewerGrill(t: number): string {
+  return paintPlotted((plot) => {
+    for (let x = 0; x <= 30; x += 1) {
+      const u = -1.4 + (x / 30) * 2.8;
+      /* The bed breathes: coals brighten where the draught is working. */
+      const glow = 0.35 + Math.pow(clamp01(Math.sin(u * 3 + t * 1.6) * 0.5 + 0.5), 2) * 0.6;
+      plot(u, 0.78, glow);
+      plot(u, 0.9, glow * 0.7);
+    }
+    for (let skewer = 0; skewer < 4; skewer += 1) {
+      const sv = 0.1 + skewer * 0.16;
+      /* Each skewer is turned a quarter at a time, on its own beat. */
+      const turn = Math.floor(t * 0.8 + skewer * 0.4) * (Math.PI / 2);
+      for (let x = 0; x <= 22; x += 1) {
+        const u = -1.25 + (x / 22) * 2.5;
+        plot(u, sv, 0.45);
+      }
+      for (let piece = 0; piece < 4; piece += 1) {
+        const pu = -0.85 + piece * 0.56;
+        const face = Math.cos(turn + piece * 0.3);
+        const done = 0.4 + Math.pow(clamp01(face), 2) * 0.55;
+        for (let step = 0; step <= 10; step += 1) {
+          const a = (step / 10) * TAU;
+          plot(pu + Math.cos(a) * 0.18, sv + Math.sin(a) * 0.1, done);
+        }
+      }
+    }
+    for (let smoke = 0; smoke < 6; smoke += 1) {
+      const life = (t * 0.8 + hash(smoke)) % 1;
+      const su = -1 + hash(smoke * 3.1) * 2;
+      plot(su + Math.sin(life * 5 + smoke) * 0.16, 0.7 - life * 1.5, (1 - life) * 0.5);
+    }
+  });
+}
+
+/* -- Lantern string: lanterns lighting along the line and swaying --------- */
+
+function paintLanternString(t: number): string {
+  return paintPlotted((plot) => {
+    const wind = Math.sin(t * 0.9);
+    for (let x = 0; x <= 40; x += 1) {
+      const f = x / 40;
+      const u = -ASPECT + f * ASPECT * 2;
+      plot(u, -0.75 + Math.sin(f * Math.PI) * 0.3 + wind * 0.06 * Math.sin(f * Math.PI), 0.5);
+    }
+    for (let lantern = 0; lantern < 5; lantern += 1) {
+      const f = (lantern + 0.5) / 5;
+      const u = -ASPECT + f * ASPECT * 2 + wind * 0.12 * Math.sin(f * Math.PI);
+      const hang = -0.75 + Math.sin(f * Math.PI) * 0.3 + 0.42;
+      /* The lights run down the string rather than blinking together. */
+      const lit = Math.pow(clamp01(Math.sin(t * 2.2 - lantern * 0.9) * 0.5 + 0.5), 1.6);
+      const bright = 0.3 + lit * 0.7;
+      for (let step = 0; step <= 16; step += 1) {
+        const a = (step / 16) * TAU;
+        plot(u + Math.cos(a) * 0.2, hang + Math.sin(a) * 0.26, bright);
+      }
+      plot(u, hang, bright);
+      /* A tassel under each one, and only the lit ones throw a tassel worth
+         seeing. */
+      for (let y = 0; y <= 3; y += 1) plot(u, hang + 0.28 + (y / 3) * 0.2, bright * 0.5);
+    }
+  });
+}
+
+/* -- Shaved ice: a block shaved into a cone and syrup poured over --------- */
+
+function paintShavedIce(t: number): string {
+  return paintPlotted((plot) => {
+    const cycle = (t * 0.2) % 1;
+    const shaving = cycle < 0.65;
+    const heap = clamp01(cycle / 0.65);
+    const blade = Math.sin(t * 7) * 0.3;
+    for (let step = 0; step <= 22; step += 1) {
+      const a = Math.PI * (step / 22);
+      plot(0.05 + Math.cos(a) * 0.42, 0.86 - Math.sin(a) * 0.16, 0.55);
+    }
+    for (let y = 0; y <= 5; y += 1) {
+      plot(-0.37, 0.86 - (y / 5) * 0.3, 0.55);
+      plot(0.47, 0.86 - (y / 5) * 0.3, 0.55);
+    }
+    /* The heap grows as a cone, so its outline is a pair of leaning lines. */
+    const height = heap * 0.75;
+    for (let x = 0; x <= 20; x += 1) {
+      const f = x / 20;
+      const u = -0.34 + f * 0.78;
+      const top = 0.56 - height * (1 - Math.abs(f - 0.5) * 2);
+      plot(u, top, 0.75);
+      for (let y = 0; y <= 4; y += 1) plot(u, top + (y / 4) * (0.56 - top), 0.35 + hash2(x, y) * 0.4);
+    }
+    if (shaving) {
+      for (let y = 0; y <= 6; y += 1) plot(0.05 + blade * 0.2, -0.9 + (y / 6) * 0.5, 0.6);
+      for (let x = 0; x <= 8; x += 1) plot(-0.2 + blade * 0.2 + (x / 8) * 0.5, -0.4, 0.85);
+      for (let flake = 0; flake < 7; flake += 1) {
+        const life = (t * 2.4 + hash(flake)) % 1;
+        plot(0.05 + (hash(flake * 3.3) - 0.5) * 0.7, -0.34 + life * 0.85, (1 - life * 0.4) * 0.8);
+      }
+    } else {
+      /* Syrup goes on last and soaks down through the heap. */
+      const soak = (cycle - 0.65) / 0.35;
+      for (let step = 0; step <= 12; step += 1) {
+        const f = step / 12;
+        plot(0.05, -0.5 + f * (1.06 - height), 0.9);
+      }
+      for (let x = 0; x <= 12; x += 1) {
+        const f = x / 12;
+        plot(-0.3 + f * 0.7, 0.56 - height * (1 - Math.abs(f - 0.5) * 2) + soak * 0.3, 0.95);
+      }
+    }
+  });
+}
+
+/* -- Candy floss: sugar caught on a stick and built up ------------------- */
+
+function paintCandyFloss(t: number): string {
+  return paintPlotted((plot) => {
+    const cycle = (t * 0.22) % 1;
+    const spin = t * 6;
+    /* The head keeps spinning; the stick turns slowly and collects. */
+    const size = 0.1 + cycle * 0.55;
+    for (let step = 0; step <= 26; step += 1) {
+      const a = (step / 26) * TAU;
+      plot(Math.cos(a) * 0.95, 0.6 + Math.sin(a) * 0.32, 0.45);
+    }
+    for (let x = 0; x <= 10; x += 1) plot(-0.3 + (x / 10) * 0.6, 0.42, 0.7);
+    for (let jet = 0; jet < 10; jet += 1) {
+      const a = spin + (jet / 10) * TAU;
+      const reach = 0.3 + ((t * 2 + hash(jet)) % 1) * 0.6;
+      plot(Math.cos(a) * reach, 0.5 + Math.sin(a) * reach * 0.45, clamp01(1 - reach) * 0.7);
+    }
+    const stickTurn = t * 2.4;
+    for (let y = 0; y <= 8; y += 1) plot(0.05, 0.3 + (y / 8) * 0.6, 0.6);
+    /* The floss winds on in threads rather than appearing as a blob. */
+    for (let thread = 0; thread < 14; thread += 1) {
+      const a = stickTurn + thread * 0.9;
+      const r = size * (0.5 + hash(thread) * 0.5);
+      plot(0.05 + Math.cos(a) * r * 1.5, 0.05 + Math.sin(a) * r, 0.4 + hash(thread * 3.1) * 0.5);
+    }
+    for (let step = 0; step <= 18; step += 1) {
+      const a = (step / 18) * TAU;
+      plot(0.05 + Math.cos(a) * size * 1.5, 0.05 + Math.sin(a) * size, 0.55);
+    }
+  });
+}
+
+/* -- Dumpling steamer: stacked baskets, and the top one lifted ------------ */
+
+function paintDumplingSteamer(t: number): string {
+  return paintPlotted((plot) => {
+    const cycle = (t * 0.4) % 1;
+    /* Steam for most of the cycle, then the lid comes off and it billows. */
+    const lifting = cycle > 0.55;
+    const lift = lifting ? Math.sin(((cycle - 0.55) / 0.45) * Math.PI) : 0;
+    for (let basket = 0; basket < 3; basket += 1) {
+      const bv = 0.72 - basket * 0.38;
+      for (let x = 0; x <= 24; x += 1) {
+        const u = -0.95 + (x / 24) * 1.9;
+        plot(u, bv, 0.6);
+        plot(u, bv - 0.28, 0.45);
+      }
+      for (let y = 0; y <= 4; y += 1) {
+        plot(-0.95, bv - (y / 4) * 0.28, 0.55);
+        plot(0.95, bv - (y / 4) * 0.28, 0.55);
+      }
+    }
+    const lidV = -0.5 - lift * 0.5;
+    for (let step = 0; step <= 22; step += 1) {
+      const a = Math.PI * (step / 22);
+      plot(Math.cos(a) * 0.98, lidV - Math.sin(a) * 0.2, 0.6);
+    }
+    if (lift > 0.2) {
+      /* With the lid off you can see what is in the top basket. */
+      for (let dumpling = 0; dumpling < 4; dumpling += 1) {
+        const du = -0.55 + dumpling * 0.37;
+        for (let step = 0; step <= 10; step += 1) {
+          const a = Math.PI * (step / 10);
+          plot(du + Math.cos(a) * 0.16, -0.36 - Math.sin(a) * 0.12, 0.85);
+        }
+      }
+    }
+    for (let puff = 0; puff < 10; puff += 1) {
+      const life = (t * (1 + lift * 1.6) + hash(puff)) % 1;
+      const pu = (hash(puff * 3.9) - 0.5) * (0.8 + lift * 1.8) * (0.4 + life);
+      plot(pu, lidV - 0.1 - life * 0.5, (1 - life * 0.7) * (0.5 + lift * 0.5));
+    }
+    for (let x = 0; x <= 20; x += 1) plot(-1.2 + (x / 20) * 2.4, 0.92, 0.4);
+  });
+}
+
 /** Builds one painter. Called once per surface that shows an animation. */
 export type PainterFactory = () => Painter;
 
@@ -11124,4 +12788,56 @@ export const ASCII_ANIMATIONS: readonly PainterFactory[] = [
   stateless(paintSwingBridge),
   stateless(paintFishLadder),
   stateless(paintRopeFerry),
+  /* The ninth collection: fields from small living things, then a
+     glassworks, a foundry, a dairy, a vineyard, and a night market. */
+  field(pondSkaterField),
+  field(dewWebField),
+  field(sporePrintField),
+  field(mossCushionField),
+  field(lichenCrustField),
+  field(rootHairField),
+  field(barnacleCirriField),
+  field(glowWormField),
+  field(cicadaChorusField),
+  field(beeSwarmField),
+  field(snailTrailField),
+  field(wingScaleField),
+  field(krillSwarmField),
+  field(tadpoleShoalField),
+  field(antRaftField),
+  stateless(paintGlassBlower),
+  stateless(paintFloatGlass),
+  stateless(paintAnnealingLehr),
+  stateless(paintGlassCane),
+  stateless(paintBottleMould),
+  stateless(paintGlassMarver),
+  stateless(paintGlassShears),
+  stateless(paintCrucible),
+  stateless(paintLadlePour),
+  stateless(paintSandMould),
+  stateless(paintIngotRoll),
+  stateless(paintQuenchBath),
+  stateless(paintPowerHammer),
+  stateless(paintWireDraw),
+  stateless(paintMilkChurn),
+  stateless(paintCheesePress),
+  stateless(paintCreamSeparator),
+  stateless(paintEggGrader),
+  stateless(paintHayBaler),
+  stateless(paintSheepShears),
+  stateless(paintHoneyExtractor),
+  stateless(paintGrapePress),
+  stateless(paintBarrelRoll),
+  stateless(paintCorker),
+  stateless(paintBottlingLine),
+  stateless(paintTeaPour),
+  stateless(paintCoffeeSiphon),
+  stateless(paintCocktailShaker),
+  stateless(paintNoodlePull),
+  stateless(paintWokToss),
+  stateless(paintSkewerGrill),
+  stateless(paintLanternString),
+  stateless(paintShavedIce),
+  stateless(paintCandyFloss),
+  stateless(paintDumplingSteamer),
 ];

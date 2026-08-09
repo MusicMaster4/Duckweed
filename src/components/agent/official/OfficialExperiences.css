@@ -1338,6 +1338,31 @@ strong.agent-activity-history-summary {
   animation-timing-function: cubic-bezier(0.5, 0, 0.2, 1);
 }
 
+.agent-activity-pulse.is-active[data-motion="spin"] > span {
+  animation-name: agent-activity-spin;
+  animation-timing-function: linear;
+}
+
+.agent-activity-pulse.is-active[data-motion="vault"] > span {
+  animation-name: agent-activity-vault;
+  animation-timing-function: cubic-bezier(0.25, 0.6, 0.4, 1);
+}
+
+.agent-activity-pulse.is-active[data-motion="peel"] > span {
+  animation-name: agent-activity-peel;
+  animation-timing-function: cubic-bezier(0.34, 1.2, 0.5, 1);
+}
+
+.agent-activity-pulse.is-active[data-motion="chime"] > span {
+  animation-name: agent-activity-chime;
+  animation-timing-function: cubic-bezier(0.12, 0.8, 0.3, 1);
+}
+
+.agent-activity-pulse.is-active[data-motion="flutter"] > span {
+  animation-name: agent-activity-flutter;
+  animation-timing-function: ease-in-out;
+}
+
 /* Cells a pattern leaves dark on purpose; kept dimmer than the resting glow. */
 .agent-activity-pulse.is-active > span.is-idle {
   animation: none;
@@ -2257,6 +2282,125 @@ strong.agent-activity-history-summary {
     opacity: 0.55;
     border-radius: 34%;
     transform: scale(1);
+  }
+}
+
+/* Spin: pinched into an ellipse so the turn on the spot actually reads; a
+   round cell rotating would look completely still. */
+@keyframes agent-activity-spin {
+  0%,
+  100% {
+    opacity: 0.24;
+    transform: rotate(0deg) scale(0.9, 0.78);
+  }
+
+  40% {
+    opacity: 0.96;
+    transform: rotate(200deg) scale(1.34, 0.86);
+  }
+
+  70% {
+    opacity: 0.55;
+    transform: rotate(300deg) scale(1.1, 0.9);
+  }
+}
+
+/* Vault: arcs from one side of its cell to the other, peaking in the middle. */
+@keyframes agent-activity-vault {
+  0% {
+    opacity: 0.2;
+    transform: translate(-1.4px, 0.9px) scale(0.82);
+  }
+
+  50% {
+    opacity: 1;
+    transform: translate(0, -1.5px) scale(1.16);
+  }
+
+  100% {
+    opacity: 0.2;
+    transform: translate(1.4px, 0.9px) scale(0.82);
+  }
+}
+
+/* Peel: tips over onto one edge, then springs back flat. */
+@keyframes agent-activity-peel {
+  0%,
+  100% {
+    opacity: 0.26;
+    transform: skewX(0deg) scale(1.02, 0.8);
+  }
+
+  35% {
+    opacity: 0.98;
+    transform: skewX(-26deg) scale(1.18, 1.06);
+  }
+
+  68% {
+    opacity: 0.6;
+    transform: skewX(10deg) scale(1, 1.02);
+  }
+}
+
+/* Chime: struck at full on the loop boundary, then ringing itself out. */
+@keyframes agent-activity-chime {
+  0% {
+    opacity: 1;
+    transform: scale(1.26);
+  }
+
+  18% {
+    opacity: 0.6;
+    transform: scale(0.94);
+  }
+
+  34% {
+    opacity: 0.78;
+    transform: scale(1.12);
+  }
+
+  56% {
+    opacity: 0.44;
+    transform: scale(0.96);
+  }
+
+  76% {
+    opacity: 0.3;
+    transform: scale(1.04);
+  }
+
+  100% {
+    opacity: 0.16;
+    transform: scale(0.98);
+  }
+}
+
+/* Flutter: two full wingbeats a cycle, the second one the stronger. */
+@keyframes agent-activity-flutter {
+  0%,
+  100% {
+    opacity: 0.24;
+    transform: scale(1.16, 0.62);
+  }
+
+  20% {
+    opacity: 0.9;
+    transform: scale(0.74, 1.28);
+  }
+
+  40% {
+    opacity: 0.62;
+    transform: scale(1.2, 0.7);
+  }
+
+  60% {
+    opacity: 1;
+    transform: scale(0.78, 1.32);
+  }
+
+  80% {
+    opacity: 0.5;
+    transform: scale(1.08, 0.78);
   }
 }
 
