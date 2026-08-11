@@ -15,18 +15,18 @@ describe("thinking pulse patterns", () => {
       rotatedSuffix.test(pattern.id),
     );
 
-    expect(originals).toHaveLength(563);
-    expect(rotations).toHaveLength(1563);
-    expect(THINKING_PULSE_PATTERNS).toHaveLength(2126);
+    expect(originals).toHaveLength(613);
+    expect(rotations).toHaveLength(1713);
+    expect(THINKING_PULSE_PATTERNS).toHaveLength(2326);
     expect(
       rotations.filter((pattern) => pattern.id.endsWith("-rotated-90")),
-    ).toHaveLength(537);
+    ).toHaveLength(587);
     expect(
       rotations.filter((pattern) => pattern.id.endsWith("-rotated-180")),
-    ).toHaveLength(513);
+    ).toHaveLength(563);
     expect(
       rotations.filter((pattern) => pattern.id.endsWith("-rotated-270")),
-    ).toHaveLength(513);
+    ).toHaveLength(563);
 
     const rotateClockwise = (steps: readonly number[]) =>
       steps.map((_, target) => {
@@ -263,7 +263,7 @@ describe("thinking pulse patterns", () => {
       "chain-drive",
       "bellows-fold",
     ];
-    const profiles = ["bobbing", "squashing", "gliding", "bouncing", "faceting"];
+    const profiles = ["bobbing", "jolting", "gliding", "bouncing", "zigzagging"];
     const ids = new Set(THINKING_PULSE_PATTERNS.map((pattern) => pattern.id));
 
     for (const formation of formations) {
@@ -319,7 +319,7 @@ describe("thinking pulse patterns", () => {
       "damask-fold",
       "carder-comb",
     ];
-    const profiles = ["turning", "vaulting", "peeling", "chiming", "fluttering"];
+    const profiles = ["spiralling", "vaulting", "flipping", "chiming", "fluttering"];
     const ids = new Set(THINKING_PULSE_PATTERNS.map((pattern) => pattern.id));
 
     for (const formation of formations) {
@@ -345,6 +345,62 @@ describe("thinking pulse patterns", () => {
       "warp-cross",
       "damask-fold",
       "carder-comb",
+    ];
+
+    for (const formation of formations) {
+      const family = THINKING_PULSE_PATTERNS.filter((pattern) =>
+        pattern.id.startsWith(`${formation}-`),
+      );
+      /* Five profiles, each with an original and three rotations. */
+      expect(family).toHaveLength(20);
+      expect(new Set(family.map((pattern) => JSON.stringify(pattern.steps))).size).toBe(4);
+      for (const pattern of family) {
+        expect([...pattern.steps].sort((a, b) => a - b)).toEqual([
+          0, 1, 2, 3, 4, 5, 6, 7, 8,
+        ]);
+      }
+    }
+  });
+
+  test("includes the ninth 50 matrix formation profiles", () => {
+    const formations = [
+      "furrow-turn",
+      "seed-drill",
+      "vine-climb",
+      "blossom-set",
+      "graft-join",
+      "trellis-weave",
+      "sap-rise",
+      "orchard-row",
+      "windfall-drop",
+      "hedge-clip",
+    ];
+    const profiles = ["winding", "darting", "wafting", "ratcheting", "dripping"];
+    const ids = new Set(THINKING_PULSE_PATTERNS.map((pattern) => pattern.id));
+
+    for (const formation of formations) {
+      for (const profile of profiles) {
+        expect(ids.has(`${formation}-${profile}`)).toBe(true);
+      }
+    }
+  });
+
+  /**
+   * Same guarantee the fifth, seventh and eighth banks carry: a formation that
+   * uses every step exactly once cannot match any of its own quarter-turns.
+   */
+  test("every ninth bank formation gives three distinct rotations", () => {
+    const formations = [
+      "furrow-turn",
+      "seed-drill",
+      "vine-climb",
+      "blossom-set",
+      "graft-join",
+      "trellis-weave",
+      "sap-rise",
+      "orchard-row",
+      "windfall-drop",
+      "hedge-clip",
     ];
 
     for (const formation of formations) {
@@ -416,9 +472,9 @@ describe("thinking pulse patterns", () => {
         new RegExp(`@keyframes agent-activity-${motion}\\s*\\{[\\s\\S]*?\\n\\}`),
       )![0];
       const frames = [...block.matchAll(/\{([^}]*)\}/g)].map((frame) => {
-        /* No scale in the frame means the cell sits at its resting size. A
-           two-axis scale is read as the size of the ellipse it draws, so a
-           squash that keeps its area counts as full size. */
+        /* No scale in the frame means the cell sits at its resting size. Two
+           axes are read as the size of the shape they draw, which the shape
+           guard below keeps uniform anyway. */
         const axes = (frame[1]!.match(/scale\(([\d.,\s]+)\)/)?.[1] ?? "1")
           .split(",")
           .map((axis) => Number(axis));
@@ -435,6 +491,37 @@ describe("thinking pulse patterns", () => {
     }
 
     expect(undersized).toEqual([]);
+  });
+
+  /**
+   * A cell is a dot and stays one. Motions carry the matrix through rhythm,
+   * size and position, never by stretching the cell into a pill or squaring it
+   * off, which reads as the grid itself changing shape.
+   */
+  test("no motion distorts the shape of a cell", async () => {
+    const css = await Bun.file(`${import.meta.dir}/OfficialExperiences.css`).text();
+    const motions = new Set(THINKING_PULSE_PATTERNS.map((pattern) => pattern.motion));
+    const distorting: string[] = [];
+
+    for (const motion of motions) {
+      const block = css.match(
+        new RegExp(`@keyframes agent-activity-${motion}\\s*\\{[\\s\\S]*?\\n\\}`),
+      )![0];
+
+      if (/skew|border-radius/.test(block)) {
+        distorting.push(`${motion} (skew or radius)`);
+        continue;
+      }
+
+      for (const [, args] of block.matchAll(/scale\(([^)]*)\)/g)) {
+        const axes = args.split(",").map((axis) => Number(axis));
+        if (axes.length > 1 && axes[0] !== axes[1]) {
+          distorting.push(`${motion} (scale ${args.trim()})`);
+        }
+      }
+    }
+
+    expect(distorting).toEqual([]);
   });
 
   test("each late bank's motions are exclusive to it", () => {
@@ -515,7 +602,7 @@ describe("thinking pulse patterns", () => {
         ],
       },
       {
-        motions: new Set(["bob", "squash", "glide", "bounce", "facet"]),
+        motions: new Set(["bob", "jolt", "glide", "bounce", "zigzag"]),
         formations: [
           "cog-turn",
           "escapement",
@@ -530,7 +617,7 @@ describe("thinking pulse patterns", () => {
         ],
       },
       {
-        motions: new Set(["spin", "vault", "peel", "chime", "flutter"]),
+        motions: new Set(["spiral", "vault", "flip", "chime", "flutter"]),
         formations: [
           "shuttle-pass",
           "heddle-lift",
@@ -542,6 +629,21 @@ describe("thinking pulse patterns", () => {
           "warp-cross",
           "damask-fold",
           "carder-comb",
+        ],
+      },
+      {
+        motions: new Set(["recoil", "dart", "waft", "ratchet", "drip"]),
+        formations: [
+          "furrow-turn",
+          "seed-drill",
+          "vine-climb",
+          "blossom-set",
+          "graft-join",
+          "trellis-weave",
+          "sap-rise",
+          "orchard-row",
+          "windfall-drop",
+          "hedge-clip",
         ],
       },
     ];
@@ -622,15 +724,20 @@ describe("thinking pulse patterns", () => {
         "morse",
         "fade",
         "bob",
-        "squash",
+        "jolt",
         "glide",
         "bounce",
-        "facet",
-        "spin",
+        "zigzag",
+        "spiral",
         "vault",
-        "peel",
+        "flip",
         "chime",
         "flutter",
+        "recoil",
+        "dart",
+        "waft",
+        "ratchet",
+        "drip",
       ]),
     );
   });

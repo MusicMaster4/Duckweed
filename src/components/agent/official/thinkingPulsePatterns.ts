@@ -41,15 +41,20 @@ export type ThinkingPulseMotion =
   | "morse"
   | "fade"
   | "bob"
-  | "squash"
+  | "jolt"
   | "glide"
   | "bounce"
-  | "facet"
-  | "spin"
+  | "zigzag"
+  | "spiral"
   | "vault"
-  | "peel"
+  | "flip"
   | "chime"
-  | "flutter";
+  | "flutter"
+  | "recoil"
+  | "dart"
+  | "waft"
+  | "ratchet"
+  | "drip";
 
 export interface ThinkingPulsePattern {
   id: string;
@@ -512,9 +517,9 @@ const SIXTH_MATRIX_PULSE_PATTERNS: readonly ThinkingPulsePattern[] =
  * the banks above: exclusive motions keep its 50 signatures clear of the rest
  * of the catalog, and every formation is a permutation of 0 through 8 so all
  * three quarter-turns stay distinct animations. The moves it adds are a float
- * up and down, a squash and stretch, a diagonal glide, a landing bounce, and
- * a cell that squares off into a facet as it lights. Cadence matches the rest
- * of the catalog: one cycle length, staggers in the same band.
+ * up and down, a shove that drifts back, a diagonal glide, a landing bounce,
+ * and a three-hop zigzag across the cell. Cadence matches the rest of the
+ * catalog: one cycle length, staggers in the same band.
  */
 const SEVENTH_MATRIX_FORMATIONS: ReadonlyArray<readonly [string, readonly number[]]> = [
   ["cog-turn", [2, 5, 8, 1, 4, 7, 0, 3, 6]],
@@ -533,10 +538,10 @@ const SEVENTH_MATRIX_PROFILES: ReadonlyArray<
   readonly [string, ThinkingPulseMotion, number]
 > = [
   ["bobbing", "bob", 46],
-  ["squashing", "squash", 63],
+  ["jolting", "jolt", 63],
   ["gliding", "glide", 55],
   ["bouncing", "bounce", 69],
-  ["faceting", "facet", 51],
+  ["zigzagging", "zigzag", 51],
 ];
 
 const SEVENTH_MATRIX_PULSE_PATTERNS: readonly ThinkingPulsePattern[] =
@@ -555,9 +560,9 @@ const SEVENTH_MATRIX_PULSE_PATTERNS: readonly ThinkingPulsePattern[] =
  * same rules as the banks above: exclusive motions keep its 50 signatures clear
  * of the rest of the catalog, and every formation is a permutation of 0 through
  * 8 so all three quarter-turns stay distinct animations. The moves it adds are
- * a turn on the spot, an arc up and over, a tip onto one edge, a struck note
- * ringing out, and a wingbeat. Cadence matches the rest of the catalog: one
- * cycle length, staggers in the same band.
+ * an outward spiral, an arc up and over, a turn edge-on and back, a struck
+ * note ringing out, and a wingbeat. Cadence matches the rest of the catalog:
+ * one cycle length, staggers in the same band.
  */
 const EIGHTH_MATRIX_FORMATIONS: ReadonlyArray<readonly [string, readonly number[]]> = [
   ["shuttle-pass", [0, 3, 6, 7, 8, 5, 4, 1, 2]],
@@ -575,9 +580,9 @@ const EIGHTH_MATRIX_FORMATIONS: ReadonlyArray<readonly [string, readonly number[
 const EIGHTH_MATRIX_PROFILES: ReadonlyArray<
   readonly [string, ThinkingPulseMotion, number]
 > = [
-  ["turning", "spin", 47],
+  ["spiralling", "spiral", 47],
   ["vaulting", "vault", 59],
-  ["peeling", "peel", 65],
+  ["flipping", "flip", 65],
   ["chiming", "chime", 53],
   ["fluttering", "flutter", 44],
 ];
@@ -585,6 +590,49 @@ const EIGHTH_MATRIX_PROFILES: ReadonlyArray<
 const EIGHTH_MATRIX_PULSE_PATTERNS: readonly ThinkingPulsePattern[] =
   EIGHTH_MATRIX_FORMATIONS.flatMap(([formationId, steps], formationIndex) =>
     EIGHTH_MATRIX_PROFILES.map(([profileId, motion, stepMs]) => ({
+      id: `${formationId}-${profileId}`,
+      steps,
+      motion,
+      durationMs: PULSE_DURATION_MS,
+      stepMs: stepMs + formationIndex,
+    })),
+  );
+
+/**
+ * A ninth bank of ten formations with five motions of its own, built to the
+ * same rules as the banks above: exclusive motions keep its 50 signatures clear
+ * of the rest of the catalog, and every formation is a permutation of 0 through
+ * 8 so all three quarter-turns stay distinct animations. The moves it adds are
+ * a slow wind up and snap open, a dart across the cell, a rise that drifts off,
+ * a climb in even steps, and a drop hanging and letting go. Cadence matches
+ * the rest of the catalog: one cycle length, staggers in the same band.
+ */
+const NINTH_MATRIX_FORMATIONS: ReadonlyArray<readonly [string, readonly number[]]> = [
+  ["furrow-turn", [0, 5, 6, 1, 4, 7, 2, 3, 8]],
+  ["seed-drill", [3, 0, 4, 8, 1, 5, 7, 6, 2]],
+  ["vine-climb", [8, 5, 2, 6, 4, 1, 7, 3, 0]],
+  ["blossom-set", [4, 1, 7, 2, 0, 8, 6, 3, 5]],
+  ["graft-join", [1, 6, 3, 8, 2, 0, 5, 7, 4]],
+  ["trellis-weave", [2, 7, 5, 0, 3, 8, 4, 1, 6]],
+  ["sap-rise", [6, 2, 8, 4, 7, 1, 3, 0, 5]],
+  ["orchard-row", [5, 8, 1, 3, 6, 2, 0, 4, 7]],
+  ["windfall-drop", [7, 4, 0, 5, 8, 3, 1, 2, 6]],
+  ["hedge-clip", [3, 1, 8, 6, 5, 4, 2, 0, 7]],
+];
+
+const NINTH_MATRIX_PROFILES: ReadonlyArray<
+  readonly [string, ThinkingPulseMotion, number]
+> = [
+  ["winding", "recoil", 56],
+  ["darting", "dart", 48],
+  ["wafting", "waft", 73],
+  ["ratcheting", "ratchet", 62],
+  ["dripping", "drip", 67],
+];
+
+const NINTH_MATRIX_PULSE_PATTERNS: readonly ThinkingPulsePattern[] =
+  NINTH_MATRIX_FORMATIONS.flatMap(([formationId, steps], formationIndex) =>
+    NINTH_MATRIX_PROFILES.map(([profileId, motion, stepMs]) => ({
       id: `${formationId}-${profileId}`,
       steps,
       motion,
@@ -657,6 +705,7 @@ const ORIGINAL_PULSE_PATTERNS: readonly ThinkingPulsePattern[] = [
   ...SIXTH_MATRIX_PULSE_PATTERNS,
   ...SEVENTH_MATRIX_PULSE_PATTERNS,
   ...EIGHTH_MATRIX_PULSE_PATTERNS,
+  ...NINTH_MATRIX_PULSE_PATTERNS,
 ];
 
 /**

@@ -12288,6 +12288,2752 @@ function paintDumplingSteamer(t: number): string {
   });
 }
 
+/* ========================================================================
+   The tenth collection: fields from ink, paper and materials under strain,
+   then a print shop, a tailor's, a garage, a fairground, and a theatre.
+   Same contract as everything above: a pure painter over the shared grid.
+   ===================================================================== */
+
+/* -- Halftone: a fixed dot screen with a tone wave passing under it ------- */
+
+const halftoneField: Field = (u, v, t) => {
+  /* The screen never moves and the tone does, which is what makes this read
+     as a halftone rather than as a field of pulsing dots. A screen this
+     coarse is as fine as a character grid can hold: any more dots across and
+     each one falls below one cell and the whole thing comes out as static. */
+  const tone = clamp01(0.5 + Math.sin(u * 1.1 - t * 1.4) * 0.5 + Math.sin(v * 1.7 + t * 0.6) * 0.22);
+  const cellU = u * 1.5 - Math.floor(u * 1.5) - 0.5;
+  const cellV = v * 1.5 - Math.floor(v * 1.5) - 0.5;
+  const dot = clamp01((0.18 + tone * 0.55 - Math.hypot(cellU, cellV)) * 3.4);
+  return clamp01(0.06 + dot * 0.94);
+};
+
+/* -- Darkroom: a print surfacing in the developer tray -------------------- */
+
+const darkroomField: Field = (u, v, t) => {
+  const cycle = (t * 0.22) % 1;
+  const developed = clamp01(cycle * 2.2);
+  const su = u + Math.sin(t * 1.6) * 0.05;
+  if (Math.abs(su) > 1.34 || Math.abs(v) > 0.82) {
+    /* Outside the sheet is only the tray, rocking. */
+    return clamp01(0.05 + Math.abs(Math.sin((u + v) * 6 - t * 2)) * 0.08);
+  }
+  /* A lit subject over a dark ground, which is all the sheet has to be for
+     the order it comes up in to read. */
+  const image = clamp01(
+    0.22 +
+      clamp01(1 - Math.hypot((su + 0.3) * 1.4, (v + 0.15) * 1.7)) * 0.72 +
+      clamp01((v - 0.3) * 2.2) * 0.3 +
+      Math.sin(su * 4 + v) * 0.08,
+  );
+  /* Shadows come up first and the highlights last, as they do in a tray, and
+     nothing ever goes darker than the density it is printed at. */
+  const density = clamp01(1 - image);
+  const surfaced = density * clamp01((density - (1 - developed)) * 4 + developed * 0.35);
+  const grain = hash2(Math.floor(su * 14), Math.floor(v * 14)) * 0.12;
+  return clamp01(0.08 + surfaced * 0.85 + grain * developed);
+};
+
+/* -- Capillary: dye wicking up a paper strip ------------------------------ */
+
+const capillaryField: Field = (u, v, t) => {
+  const strip = clamp01(1 - (Math.abs(u) - 0.9) * 4);
+  if (strip <= 0) return 0.04;
+  /* The front climbs as the root of time, then a fresh strip goes in. */
+  const cycle = (t * 0.3) % 1;
+  const fibre = fbm(u * 6, v * 2.2, 2);
+  /* Fibres pull at their own rates, so the front is ragged, never a line. */
+  const front = 0.95 - Math.sqrt(cycle) * 1.85 + (fibre - 0.5) * 0.16;
+  const wet = clamp01((v - front) * 3.4) * (0.35 + fibre * 0.4);
+  const band = clamp01(1 - Math.abs(v - front) * 5) * 0.5;
+  return clamp01(0.06 + strip * (wet + band));
+};
+
+/* -- Foam head: cells draining, coarsening, and popping ------------------- */
+
+const foamHeadField: Field = (u, v, t) => {
+  const settle = (t * 0.25) % 1;
+  const surface = -0.88 + settle * 0.62;
+  if (v < surface - 0.06) {
+    return clamp01(0.05 + hash2(Math.floor(u * 9), Math.floor(v * 9)) * 0.06);
+  }
+  /* The head sinks as it drains and the cells left behind get coarser. */
+  const coarse = 3.4 + settle * 2.2;
+  let edge = 0;
+  for (let cell = 0; cell < 14; cell += 1) {
+    const life = (t * 0.5 + hash(cell)) % 1;
+    const cu = -1.5 + hash(cell * 3.7) * 3;
+    const cv = surface + 0.08 + hash(cell * 5.3) * (0.9 - settle * 0.3);
+    const size = (0.1 + hash(cell * 7.1) * 0.16) * (1 + life * 0.5);
+    /* A cell is its wall: the film shows, the gas inside it does not. */
+    const radius = Math.hypot((u - cu) * 0.9, v - cv) / size;
+    edge = Math.max(edge, clamp01(1 - Math.abs(radius - 1) * coarse) * (1 - life * 0.6));
+  }
+  /* Under the head, single bubbles run up out of the liquid to feed it. */
+  let rising = 0;
+  for (let bubble = 0; bubble < 8; bubble += 1) {
+    const life = (t * 0.6 + hash(bubble * 2.1)) % 1;
+    const bu = -1.4 + hash(bubble * 4.3) * 2.8;
+    rising = Math.max(
+      rising,
+      clamp01(1 - Math.hypot((u - bu) * 9, (v - 0.95 + life * (0.95 - surface)) * 11)) * 0.6,
+    );
+  }
+  return clamp01(0.08 + clamp01((v - surface) * 1.4) * 0.28 + rising + edge * 0.9);
+};
+
+/* -- Rust bloom: rust creeping out from pits in a steel sheet ------------- */
+
+const rustBloomField: Field = (u, v, t) => {
+  const steel = 0.1 + hash2(Math.floor(u * 7), Math.floor(v * 7)) * 0.08;
+  let rust = 0;
+  for (let pit = 0; pit < 6; pit += 1) {
+    const pu = -1.4 + hash(pit * 2.7) * 2.8;
+    const pv = -0.8 + hash(pit * 6.1) * 1.6;
+    /* Each pit runs its own nine seconds of growth, then the sheet is new. */
+    const age = (t + hash(pit * 9.3) * 9) % 9;
+    const reach = clamp01(age * 0.16) * (0.5 + hash(pit) * 0.5);
+    const ragged = reach * (0.65 + fbm(Math.atan2(v - pv, u - pu) * 2.4 + pit, age * 0.05, 2) * 0.7);
+    const radius = Math.hypot((u - pu) * 0.85, v - pv);
+    if (radius > ragged) continue;
+    const scale = 0.4 + fbm(u * 6 + pit * 3, v * 6, 2) * 0.55;
+    rust = Math.max(rust, scale + clamp01(1 - (ragged - radius) * 5) * 0.35);
+  }
+  /* Bare steel or rust, never both: the scale sits on the sheet. */
+  return clamp01(Math.max(steel, rust));
+};
+
+/* -- Craquelure: a glaze crazing into islands as it cools ----------------- */
+
+const craquelureField: Field = (u, v, t) => {
+  /* The crazing arrives as a front out of one corner, and never heals. */
+  const front = ((t * 0.35) % 3.4) * 1.3;
+  const glaze = 0.4 + fbm(u * 1.6, v * 1.6, 2) * 0.18;
+  const distance = Math.hypot(u + 1.6, v + 1);
+  if (distance > front) return clamp01(glaze);
+  let crack = 0;
+  for (let seed = 0; seed < 6; seed += 1) {
+    /* One line per seed at its own angle, so the islands stay islands rather
+       than turning into a stripe pattern. */
+    const dir = hash(seed * 3.1) * Math.PI;
+    const across = u * Math.cos(dir) + v * Math.sin(dir) - (hash(seed * 5.9) - 0.5) * 2.4;
+    const wobble = Math.sin((v * Math.cos(dir) - u * Math.sin(dir)) * 3 + seed) * 0.08;
+    crack = Math.max(
+      crack,
+      clamp01(1 - Math.abs(across + wobble) * 9) * clamp01((front - distance) * 2),
+    );
+  }
+  return clamp01(glaze * (1 - crack * 0.9));
+};
+
+/* -- Dendrite: plating branching out from the cathode edge ---------------- */
+
+const dendriteField: Field = (u, v, t) => {
+  const bath = 0.06 + fbm(u * 2 + t * 0.2, v * 2, 2) * 0.1;
+  /* The cathode is the strip the growth starts from, not the whole bath. */
+  let metal = clamp01(1 - Math.abs(u + 1.5) * 6) * 0.65;
+  for (let branch = 0; branch < 5; branch += 1) {
+    /* A trunk creeps out into the bath; side arms only grow behind its tip. */
+    const reach = ((t * 0.4 + hash(branch) * 2.6) % 2.6) * 1.3;
+    const along = u + 1.5;
+    if (along < 0 || along > reach) continue;
+    const axis = -0.72 + branch * 0.36 + Math.sin(along * 3.4 + branch * 2.2) * 0.1;
+    const trunk = clamp01(1 - Math.abs(v - axis) * 9);
+    const arms =
+      clamp01(1 - Math.abs(((along * 6) % 1) - 0.5) * 6) *
+      clamp01(1 - (Math.abs(v - axis) - 0.05) * 9) *
+      clamp01((reach - along) * 2) *
+      0.75;
+    metal = Math.max(metal, Math.max(trunk, arms));
+  }
+  return clamp01(bath + metal);
+};
+
+/* -- Boil: bubbles nucleating on the base and leaving it ------------------ */
+
+const boilField: Field = (u, v, t) => {
+  const heat = clamp01((v - 0.4) * 3) * (0.2 + Math.abs(Math.sin(t * 3 + u * 4)) * 0.25);
+  let water = 0.1 + fbm(u * 2.2, v * 2.2 - t * 0.5, 2) * 0.14;
+  for (let site = 0; site < 11; site += 1) {
+    const su = -1.5 + hash(site * 2.3) * 3;
+    const life = (t * (0.5 + hash(site * 4.7) * 0.8) + hash(site)) % 1;
+    /* A bubble grows on its site, lets go, then runs for the surface. */
+    const grow = Math.min(life / 0.35, 1);
+    const rise = life > 0.35 ? (life - 0.35) / 0.65 : 0;
+    const size = 0.06 + grow * 0.11 + rise * 0.05;
+    const wobble = Math.sin(t * 6 + site) * rise * 0.08;
+    const radius = Math.hypot((u - su - wobble) / size, (v - 0.86 + rise * 1.7) / (size * 1.1));
+    water = Math.max(water, clamp01(1 - Math.abs(radius - 1) * 2.4) * 0.9);
+  }
+  return clamp01(water + heat * 0.4);
+};
+
+/* -- Chalkboard: chalk laid down and taken off again in sweeps ------------ */
+
+const chalkboardField: Field = (u, v, t) => {
+  const cycle = (t * 0.2) % 1;
+  const written = clamp01(cycle * 2.6);
+  const wipe = cycle > 0.62 ? (cycle - 0.62) / 0.38 : 0;
+  const column = (u + ASPECT) / (ASPECT * 2);
+  let chalk = 0;
+  for (let line = 0; line < 3; line += 1) {
+    /* Lines fill left to right, and the next one only starts once the one
+       above it is most of the way across. */
+    const filled = clamp01((written - line * 0.28) * 3.2);
+    if (column > filled) continue;
+    const stroke = Math.abs(Math.sin(u * 11 + line * 2.4 + Math.sin(u * 4) * 2));
+    const lv = -0.5 + line * 0.5 + Math.sin(u * 5 + line) * 0.06;
+    chalk = Math.max(chalk, clamp01(1 - Math.abs(v - lv) * 7) * (0.35 + stroke * 0.6));
+  }
+  /* The cloth takes the chalk off and leaves an arc of smear behind it. */
+  const arc = Math.abs(Math.hypot((u + 1.4 - wipe * 3) * 0.7, v * 0.5) - 0.3);
+  const cleaned = wipe > 0 ? clamp01(1 - arc * 1.6) : 0;
+  return clamp01(0.07 + chalk * (1 - cleaned) + cleaned * 0.22);
+};
+
+/* -- Watermark: a mark showing as the sheet is turned to the light -------- */
+
+const watermarkField: Field = (u, v, t) => {
+  const tilt = Math.sin(t * 0.7);
+  /* The sheet is even; what moves is where the light rakes across it. */
+  const rake = clamp01(1 - Math.abs(u - tilt * 1.3) * 0.6);
+  const laid = 0.42 + Math.abs(Math.sin(v * 16)) * 0.05 + Math.abs(Math.sin(u * 3.4)) * 0.04;
+  const ring = clamp01(1 - Math.abs(Math.hypot((u + tilt * 0.1) * 0.8, v) - 0.42) * 3.2);
+  const bar = clamp01(1 - Math.abs(v) * 6) * clamp01(1 - Math.abs(u) * 1.4);
+  /* Thin paper passes more light, so the mark only reads under the rake. */
+  const shown = (ring * 0.6 + bar * 0.4) * Math.pow(rake, 2);
+  return clamp01(laid * (0.55 + rake * 0.35) + shown * 0.5);
+};
+
+/* -- Smog layer: a lid of smog banding over a city at first light --------- */
+
+const smogLayerField: Field = (u, v, t) => {
+  const lid = -0.1 + Math.sin(t * 0.3) * 0.12;
+  const depth = clamp01((v - lid) * 1.8);
+  /* Under the lid the air is stirred; above it, it is clean and still. */
+  const haze = depth * (0.3 + fbm(u * 1.4 + t * 0.25, v * 2.6 - t * 0.1, 3) * 0.5);
+  const roof = 0.3 + hash(Math.floor(u * 3.1)) * 0.45;
+  const block = v > 0.9 - roof && Math.abs(u * 3.1) % 1 > 0.12 ? 0.7 : 0;
+  const sun = clamp01(1 - Math.hypot((u + 1.15) * 0.8, (v - lid + 0.55) * 1.1) * 2.4);
+  return clamp01(0.05 + haze + block * (0.4 + depth * 0.5) + sun * 0.55);
+};
+
+/* -- Bioluminescent wake: a hull lighting the water it disturbs ----------- */
+
+const bioluminWakeField: Field = (u, v, t) => {
+  const bow = -ASPECT - 0.5 + ((t * 0.75) % (ASPECT * 2 + 1.4));
+  const behind = bow - u;
+  if (behind < 0) return clamp01(0.04 + fbm(u * 2, v * 2 + t * 0.2, 2) * 0.07);
+  /* The V opens with distance and the light in it dies as it is left. */
+  const arm = clamp01(1 - Math.abs(Math.abs(v) - (0.1 + behind * 0.3)) * 5);
+  const churn = hash2(Math.floor(u * 8 - t), Math.floor(v * 8 + t * 0.5));
+  const glow = arm * (0.35 + churn * 0.65) * clamp01(1 - behind * 0.4);
+  const hull = clamp01(1 - Math.hypot((u - bow) * 3.4, v * 2.6)) * 0.5;
+  return clamp01(0.05 + glow + hull);
+};
+
+/* -- Zodiacal light: a cone of dust light leaning over as night turns ----- */
+
+const zodiacalLightField: Field = (u, v, t) => {
+  const turn = (t * 0.14) % 1;
+  const along = clamp01((0.9 - v) / 1.7);
+  /* The cone leans further over as the night goes on, and dims with it. */
+  const axis = (-0.5 + turn) * along * 1.5;
+  const cone = clamp01(1 - Math.abs(u - axis) / (0.75 * (1 - along * 0.7) + 0.12));
+  const fade = Math.pow(1 - along, 1.4) * (1 - turn * 0.55);
+  let stars = 0;
+  for (let star = 0; star < 9; star += 1) {
+    const su = -1.55 + hash(star * 3.3) * 3.1;
+    const sv = -0.9 + hash(star * 7.1) * 1.5;
+    const twinkle = 0.5 + Math.sin(t * 2.4 + star * 1.9) * 0.5;
+    stars = Math.max(
+      stars,
+      clamp01(1 - Math.hypot((u - su) * 7, (v - sv) * 8)) * (0.4 + twinkle * 0.5),
+    );
+  }
+  return clamp01(0.04 + cone * fade * 0.75 + stars + clamp01((v - 0.9) * 4) * 0.3);
+};
+
+/* -- Gravitational lens: a source smeared into an arc by a passing mass --- */
+
+const gravLensField: Field = (u, v, t) => {
+  const mu = -1.6 + ((t * 0.35) % 3.2);
+  const du = (u - mu) * 0.85;
+  const radius = Math.hypot(du, v);
+  /* Close in, the deflection is strong enough to close the arc into a ring. */
+  const strength = 0.34 / Math.max(radius, 0.12);
+  const bent = Math.atan2(v, du) + strength * 0.9;
+  const arc = Math.pow(clamp01(Math.cos(bent) * 0.5 + 0.5), 1.6);
+  const ring =
+    clamp01(1 - Math.abs(radius - 0.55) * 4) * (0.25 + arc * 0.75) * clamp01(strength * 1.4);
+  const sky = 0.05 + hash2(Math.floor(u * 5), Math.floor(v * 5)) * 0.08;
+  return clamp01(sky + ring * 0.9 + clamp01(1 - radius * 5) * 0.5);
+};
+
+/* -- Tokamak: a plasma ring pinched and heated in its chamber ------------- */
+
+const tokamakField: Field = (u, v, t) => {
+  const major = Math.hypot(u * 0.72, v);
+  const wall = Math.abs(major - 0.88);
+  const chamber = clamp01(1 - wall * 5) * 0.32;
+  /* The field squeezes the ring, and the squeeze is what heats it. */
+  const pinch = 0.5 + Math.sin(t * 1.6) * 0.5;
+  const plasma = clamp01(1 - Math.abs(major - 0.5) / (0.3 - pinch * 0.12));
+  const angle = Math.atan2(v, u * 0.72);
+  /* Current runs round the torus, so the bright patch travels with it. */
+  const flow = 0.55 + Math.sin(angle * 3 - t * 5) * 0.45;
+  const hot = Math.pow(plasma, 0.7) * (0.35 + flow * 0.4 + pinch * 0.3);
+  const coil = clamp01(1 - Math.abs(Math.sin(angle * 6)) * 6) * clamp01(1 - wall * 3) * 0.4;
+  return clamp01(0.05 + chamber + coil + hot);
+};
+
+/* -- Linotype: matrices dropping into a line and the slug cast ------------ */
+
+function paintLinotype(t: number): string {
+  return paintPlotted((plot) => {
+    const cycle = (t * 0.45) % 3;
+    /* Set the line, cast it, then send the matrices back up to the magazine. */
+    const setting = Math.min(cycle, 1);
+    const casting = cycle > 1 && cycle < 1.8 ? (cycle - 1) / 0.8 : 0;
+    const returning = cycle > 2 ? cycle - 2 : 0;
+    for (let x = 0; x <= 24; x += 1) plot(-1.5 + (x / 24) * 3, -0.9, 0.4);
+    const placed = Math.floor(setting * 12);
+    for (let mat = 0; mat < 12; mat += 1) {
+      const mu = -1.35 + mat * 0.22;
+      /* The magazine the matrices drop out of, one channel per letter. */
+      for (let y = 0; y <= 3; y += 1) plot(mu, -0.88 + (y / 3) * 0.32, 0.3);
+      if (mat < placed) {
+        for (let y = 0; y <= 3; y += 1) plot(mu, 0.1 + (y / 3) * 0.3, 0.75);
+      } else if (mat === placed) {
+        /* Only one matrix is ever in flight down the assembler. */
+        plot(mu, -0.7 + ((setting * 12) % 1) * 0.8, 0.95);
+      }
+    }
+    for (let y = 0; y <= 6; y += 1) plot(1.4, -0.6 + (y / 6) * 1.2, 0.45);
+    if (casting > 0) {
+      for (let x = 0; x <= 14; x += 1) {
+        plot(-1.3 + (x / 14) * 2.6, 0.62, 0.5 + Math.sin(casting * Math.PI) * 0.5);
+      }
+      for (let drip = 0; drip < 3; drip += 1) plot(-0.8 + drip * 0.8, 0.62 + casting * 0.2, casting * 0.8);
+    }
+    if (returning > 0) {
+      for (let mat = 0; mat < 6; mat += 1) plot(-1.2 + mat * 0.4, 0.25 - returning * 1.1, 0.6);
+    }
+  });
+}
+
+/* -- Screen print: a squeegee pulling ink through the mesh ---------------- */
+
+function paintScreenPrint(t: number): string {
+  return paintPlotted((plot) => {
+    const cycle = (t * 0.5) % 2;
+    const pull = Math.min(cycle, 1);
+    const lift = cycle < 1 ? 0 : cycle - 1;
+    for (let x = 0; x <= 30; x += 1) {
+      const u = -1.45 + (x / 30) * 2.9;
+      plot(u, -0.75, 0.45);
+      plot(u, 0.8, 0.45);
+    }
+    for (let y = 0; y <= 10; y += 1) {
+      plot(-1.45, -0.75 + (y / 10) * 1.55, 0.45);
+      plot(1.45, -0.75 + (y / 10) * 1.55, 0.45);
+    }
+    /* Ink exists only behind the blade, and only inside the stencil. */
+    const edge = -1.35 + pull * 2.7;
+    for (let x = 0; x <= 40; x += 1) {
+      const u = -1.35 + (x / 40) * 2.7;
+      if (u > edge) continue;
+      for (let y = 0; y <= 8; y += 1) {
+        const v = -0.55 + (y / 8) * 1.1;
+        if (Math.hypot(u * 0.8, v) < 0.62 || Math.abs(v) < 0.12) plot(u, v, 0.9 - lift * 0.3);
+      }
+    }
+    for (let y = 0; y <= 8; y += 1) plot(edge, -0.7 + (y / 8) * 1.4 - lift * 0.6, 1);
+    for (let x = 0; x <= 6; x += 1) plot(edge - 0.24 + (x / 6) * 0.48, -0.72 - lift * 0.6, 0.7);
+  });
+}
+
+/* -- Guillotine: a blade dropping through a stack of paper ---------------- */
+
+function paintGuillotine(t: number): string {
+  return paintPlotted((plot) => {
+    const cycle = (t * 0.4) % 2;
+    /* Clamp, cut, lift, and push the trimmed stack clear. */
+    const drop = cycle < 0.8 ? Math.pow(cycle / 0.8, 2) : cycle < 1.2 ? 1 : 1 - (cycle - 1.2) / 0.8;
+    const shove = cycle > 1.2 ? (cycle - 1.2) / 0.8 : 0;
+    for (let sheet = 0; sheet < 7; sheet += 1) {
+      const sv = 0.72 - sheet * 0.09;
+      for (let x = 0; x <= 22; x += 1) {
+        const u = -1.3 + (x / 22) * 2.3;
+        /* Everything right of the blade line is the offcut, and it moves. */
+        if (u > 0.35 && drop > 0.8) plot(u + shove * 0.5, sv, 0.55);
+        else plot(u, sv, 0.6);
+      }
+    }
+    const bladeV = -0.85 + drop * 1.35;
+    for (let x = 0; x <= 20; x += 1) {
+      const f = x / 20;
+      plot(-0.55 + f * 1.8, bladeV - f * 0.14, 0.9);
+      plot(-0.55 + f * 1.8, bladeV - f * 0.14 - 0.16, 0.6);
+    }
+    for (let y = 0; y <= 8; y += 1) {
+      plot(-1.45, -0.9 + (y / 8) * 1.8, 0.4);
+      plot(1.45, -0.9 + (y / 8) * 1.8, 0.4);
+    }
+    const clampV = -0.5 + Math.min(drop * 2, 1) * 0.9;
+    for (let x = 0; x <= 8; x += 1) plot(-1.05 + (x / 8) * 0.8, clampV, 0.75);
+  });
+}
+
+/* -- Folding machine: sheets creased in half as they pass the rollers ----- */
+
+function paintFoldingMachine(t: number): string {
+  return paintPlotted((plot) => {
+    for (let x = 0; x <= 30; x += 1) plot(-ASPECT + (x / 30) * ASPECT * 2, 0.86, 0.4);
+    /* A pile waits at the feed end and the top sheet is drawn off it. */
+    for (let sheet = 0; sheet < 5; sheet += 1) {
+      for (let x = 0; x <= 8; x += 1) plot(-1.5 + (x / 8) * 0.7, -0.8 + sheet * 0.09, 0.45);
+    }
+    for (let y = 0; y <= 8; y += 1) plot(-1.15 + (y / 8) * 0.55, -0.34 + (y / 8) * 0.44, 0.35);
+    for (let roller = 0; roller < 3; roller += 1) {
+      const ru = -0.4 + roller * 0.42;
+      const a = t * 4 + roller;
+      for (let step = 0; step <= 10; step += 1) {
+        const ra = (step / 10) * TAU;
+        plot(ru + Math.cos(ra) * 0.16, 0.34 + Math.sin(ra) * 0.15, 0.45);
+      }
+      plot(ru + Math.cos(a) * 0.11, 0.34 + Math.sin(a) * 0.1, 0.9);
+    }
+    for (let sheet = 0; sheet < 3; sheet += 1) {
+      const along = ((t * 0.6 + sheet / 3) % 1) * 3.6 - 1.8;
+      /* A sheet arrives flat, is creased at the rollers, and leaves folded. */
+      const fold = clamp01((along + 0.1) * 1.6);
+      const half = 0.42 * (1 - fold * 0.5);
+      for (let x = 0; x <= 14; x += 1) {
+        const f = x / 14;
+        plot(along - half + f * half * 2, 0.1 - fold * 0.12 * Math.sin(f * Math.PI), 0.8);
+        if (fold > 0.05) plot(along - half + f * half * 2, 0.1 + fold * 0.16, 0.5 + fold * 0.4);
+      }
+      plot(along + half, 0.1, 0.95);
+    }
+  });
+}
+
+/* -- Saddle stitcher: staples driven into a spine ------------------------- */
+
+function paintSaddleStitcher(t: number): string {
+  return paintPlotted((plot) => {
+    /* The book rides the saddle and the heads come down on it in turn. */
+    for (let x = 0; x <= 26; x += 1) {
+      const u = -1.4 + (x / 26) * 2.8;
+      plot(u, 0.84 - Math.abs(u) * 0.12, 0.4);
+    }
+    for (let x = 0; x <= 20; x += 1) {
+      const u = -1.2 + (x / 20) * 2.4;
+      plot(u, 0.58 + Math.abs(u) * 0.1, 0.65);
+      plot(u, 0.44 + Math.abs(u) * 0.1, 0.5);
+    }
+    for (let head = 0; head < 2; head += 1) {
+      const hu = -0.5 + head;
+      const beat = (t * 0.9 + head * 0.5) % 1;
+      const strike = beat < 0.4 ? Math.pow(beat / 0.4, 2) : 1 - (beat - 0.4) / 0.6;
+      const hv = -0.88 + strike * 1.16;
+      for (let y = 0; y <= 7; y += 1) plot(hu, hv - 0.7 + (y / 7) * 0.7, 0.6);
+      for (let x = 0; x <= 4; x += 1) plot(hu - 0.14 + (x / 4) * 0.28, hv, 0.9);
+      /* A staple stays behind once the head has been all the way down. */
+      if (beat > 0.4) for (let x = 0; x <= 3; x += 1) plot(hu - 0.1 + (x / 3) * 0.2, 0.48, 1);
+    }
+  });
+}
+
+/* -- Ink fountain: rollers splitting a film of ink between them ----------- */
+
+function paintInkFountain(t: number): string {
+  return paintPlotted((plot) => {
+    const spin = t * 3;
+    for (let roller = 0; roller < 3; roller += 1) {
+      const ru = -0.9 + roller * 0.9;
+      const rv = -0.25 + (roller % 2) * 0.5;
+      const size = 0.34 - roller * 0.04;
+      for (let step = 0; step <= 26; step += 1) {
+        const a = (step / 26) * TAU;
+        /* Ink carried round shows as a bright patch that never stops moving. */
+        const carried = Math.pow(clamp01(Math.cos(a - spin * (roller % 2 ? -1 : 1))), 2);
+        plot(ru + Math.cos(a) * size * 1.1, rv + Math.sin(a) * size, 0.35 + carried * 0.6);
+      }
+    }
+    /* Where two rollers meet the film splits into threads. */
+    for (let nip = 0; nip < 2; nip += 1) {
+      const nu = -0.45 + nip * 0.9;
+      for (let thread = 0; thread < 5; thread += 1) {
+        const f = thread / 4;
+        const stretch = 0.5 + Math.sin(t * 6 + thread * 1.3 + nip) * 0.5;
+        plot(nu + (f - 0.5) * 0.16, 0.02 + (f - 0.5) * 0.5 * stretch, 0.4 + stretch * 0.5);
+      }
+    }
+    for (let x = 0; x <= 20; x += 1) plot(-1.5 + (x / 20) * 3, 0.85, 0.45);
+    for (let drop = 0; drop < 3; drop += 1) {
+      const life = (t * 0.8 + drop / 3) % 1;
+      plot(-0.9 + drop * 0.9, 0.2 + life * 0.6, (1 - life) * 0.7);
+    }
+  });
+}
+
+/* -- Paper reel: a web unwinding off a reel that is running down ---------- */
+
+function paintPaperReel(t: number): string {
+  return paintPlotted((plot) => {
+    /* The reel loses diameter as it runs, so it has to turn faster to keep
+       the web at the same speed. */
+    const size = 0.62 - ((t * 0.12) % 1) * 0.34;
+    const spin = t * (1.6 / size);
+    for (let step = 0; step <= 34; step += 1) {
+      const a = (step / 34) * TAU;
+      plot(-1 + Math.cos(a) * size * 1.05, -0.05 + Math.sin(a) * size, 0.4);
+    }
+    for (let spoke = 0; spoke < 4; spoke += 1) {
+      const a = spin + (spoke / 4) * TAU;
+      for (let step = 0; step <= 8; step += 1) {
+        const f = step / 8;
+        plot(-1 + Math.cos(a) * size * f * 1.05, -0.05 + Math.sin(a) * size * f, 0.7);
+      }
+    }
+    /* The web is under tension, so it hangs in a shallow catenary. */
+    const sag = 0.2 + Math.sin(t * 1.4) * 0.16;
+    for (let x = 0; x <= 34; x += 1) {
+      const f = x / 34;
+      plot(-1 + size * 1.05 + f * (2.4 - size), -0.05 + size + Math.sin(f * Math.PI) * sag, 0.75);
+    }
+    for (let y = 0; y <= 6; y += 1) plot(1.42, -0.5 + (y / 6) * 1.1, 0.45);
+  });
+}
+
+/* -- Pinking shears: a zigzag cut running along the cloth ----------------- */
+
+function paintPinkingShears(t: number): string {
+  return paintPlotted((plot) => {
+    const cut = -1.4 + ((t * 0.35) % 1) * 2.9;
+    for (let x = 0; x <= 40; x += 1) {
+      const u = -1.45 + (x / 40) * 2.9;
+      /* Ahead of the shears the edge is straight; behind them it is pinked. */
+      const edge = u < cut ? -0.3 + (Math.abs(((u * 7) % 1) - 0.5) - 0.25) * 0.32 : -0.3;
+      plot(u, edge, u < cut ? 0.85 : 0.55);
+      for (let y = 0; y <= 8; y += 1) plot(u, edge + 0.08 + (y / 8) * 0.86, 0.3);
+      plot(u, 0.9, 0.4);
+    }
+    const bite = (Math.sin(t * 9) * 0.5 + 0.5) * 0.3;
+    for (const side of [-1, 1] as const) {
+      for (let step = 0; step <= 12; step += 1) {
+        const f = step / 12;
+        plot(cut - f * 0.9, -0.3 + side * (0.06 + bite) * (0.3 + f), 0.9);
+      }
+      for (let step = 0; step <= 8; step += 1) {
+        plot(cut - 0.9 - (step / 8) * 0.35, -0.3 + side * (0.28 + bite * 0.4), 0.6);
+      }
+    }
+  });
+}
+
+/* -- Buttonhole: a bar tack working its way round a slot ------------------ */
+
+function paintButtonhole(t: number): string {
+  return paintPlotted((plot) => {
+    const worked = (t * 0.28) % 1;
+    for (let x = 0; x <= 30; x += 1) {
+      const u = -1.5 + (x / 30) * 3;
+      plot(u, -0.85, 0.3);
+      plot(u, 0.85, 0.3);
+    }
+    /* The slot is fixed; what travels is the stitch going round it. */
+    const outline = (f: number): readonly [number, number] => {
+      const a = f * TAU;
+      return [Math.cos(a) * 0.55, Math.sin(a) * 0.22];
+    };
+    for (let step = 0; step <= 46; step += 1) {
+      const [su, sv] = outline(step / 46);
+      plot(su, sv, 0.35);
+    }
+    for (let step = 0; step <= 46; step += 1) {
+      const f = step / 46;
+      if (f > worked) break;
+      const [su, sv] = outline(f);
+      plot(su * 1.16, sv + Math.sign(sv || 1) * 0.16, worked - f < 0.08 ? 0.95 : 0.55);
+    }
+    const [nu, nv] = outline(worked);
+    const stab = Math.abs(Math.sin(t * 12));
+    for (let y = 0; y <= 6; y += 1) plot(nu, nv - 0.9 + (y / 6) * (0.7 + stab * 0.18), 0.75);
+    plot(nu, nv - 0.16 + stab * 0.14, 1);
+  });
+}
+
+/* -- Steam press: the head down on the cloth and a burst let go ----------- */
+
+function paintSteamPress(t: number): string {
+  return paintPlotted((plot) => {
+    const cycle = (t * 0.4) % 2;
+    const down = cycle < 0.7 ? cycle / 0.7 : cycle < 1.2 ? 1 : clamp01(1 - (cycle - 1.2) / 0.8);
+    const burst = cycle > 0.7 && cycle < 1.2 ? 1 - (cycle - 0.7) / 0.5 : 0;
+    for (let x = 0; x <= 26; x += 1) {
+      const u = -1.3 + (x / 26) * 2.6;
+      plot(u, 0.6, 0.55);
+      /* The cloth flattens under the head instead of staying rumpled. */
+      plot(u, 0.44 - Math.sin(u * 6 + 1) * 0.07 * (1 - down), 0.7);
+    }
+    const headV = -0.6 + down * 0.9;
+    for (let x = 0; x <= 26; x += 1) {
+      const u = -1.3 + (x / 26) * 2.6;
+      plot(u, headV, 0.8);
+      plot(u, headV - 0.16, 0.5);
+    }
+    /* The frame the head hangs off runs the full height of the machine. */
+    for (let y = 0; y <= 14; y += 1) plot(-1.42, -0.92 + (y / 14) * 1.72, 0.45);
+    for (let x = 0; x <= 10; x += 1) plot(-1.42 + (x / 10) * 0.9, -0.92, 0.4);
+    for (let jet = 0; jet < 9; jet += 1) {
+      const life = (t * 2.4 + hash(jet)) % 1;
+      const side = jet % 2 === 0 ? -1 : 1;
+      plot(side * (1 + life * 0.5), headV + 0.1 - life * 0.4, burst * (1 - life) * 0.9);
+    }
+  });
+}
+
+/* -- Tape measure: a tape drawn out and let go to snap back --------------- */
+
+function paintTapeMeasure(t: number): string {
+  return paintPlotted((plot) => {
+    const cycle = (t * 0.3) % 1;
+    /* Drawn out steadily, then released: the return is over in a moment. */
+    const out = cycle < 0.75 ? cycle / 0.75 : 1 - Math.pow((cycle - 0.75) / 0.25, 0.55);
+    const reach = -1.2 + out * 2.6;
+    for (let step = 0; step <= 20; step += 1) {
+      const a = (step / 20) * TAU;
+      plot(-1.25 + Math.cos(a) * 0.3, -0.05 + Math.sin(a) * 0.28, 0.45);
+    }
+    for (let spoke = 0; spoke < 3; spoke += 1) {
+      const a = -out * 9 + (spoke / 3) * TAU;
+      plot(-1.25 + Math.cos(a) * 0.18, -0.05 + Math.sin(a) * 0.17, 0.85);
+    }
+    for (let x = 0; x <= 44; x += 1) {
+      const f = x / 44;
+      const u = -1.2 + f * (reach + 1.2);
+      /* A tape that is out a long way loses its curl and starts to droop. */
+      const droop = Math.pow(f, 2.2) * out * 0.5;
+      plot(u, -0.2 + droop, 0.8);
+      if (((u + 1.2) * 6) % 1 < 0.18) plot(u, -0.32 + droop, 0.6);
+    }
+    for (let y = 0; y <= 4; y += 1) plot(reach, -0.34 + out * 0.5 + (y / 4) * 0.24, 0.95);
+    for (let x = 0; x <= 30; x += 1) plot(-1.5 + (x / 30) * 3, 0.88, 0.4);
+  });
+}
+
+/* -- Zip: a slider closing the teeth one pair at a time ------------------- */
+
+function paintZipPull(t: number): string {
+  return paintPlotted((plot) => {
+    const cycle = (t * 0.3) % 2;
+    const slider = -1.35 + (cycle < 1 ? cycle : 2 - cycle) * 2.7;
+    for (let tooth = 0; tooth < 22; tooth += 1) {
+      const u = -1.35 + (tooth / 21) * 2.7;
+      /* Behind the slider the two sides interlock; ahead they fall apart. */
+      const gap = 0.06 + clamp01((u - slider) * 1.4) * 0.42 + (tooth % 2) * 0.05;
+      plot(u, -gap, 0.85);
+      plot(u, gap, 0.85);
+      for (let y = 0; y <= 4; y += 1) {
+        plot(u, -gap - 0.12 - (y / 4) * 0.55, 0.3);
+        plot(u, gap + 0.12 + (y / 4) * 0.55, 0.3);
+      }
+    }
+    for (let step = 0; step <= 12; step += 1) {
+      const a = (step / 12) * TAU;
+      plot(slider + Math.cos(a) * 0.16, Math.sin(a) * 0.2, 0.95);
+    }
+    const swing = Math.sin(t * 5) * 0.25;
+    for (let y = 0; y <= 5; y += 1) {
+      plot(slider + Math.sin(swing) * (y / 5) * 0.4, 0.2 + (y / 5) * 0.4, 0.7);
+    }
+  });
+}
+
+/* -- Dress form: a form turning with cloth pinned round it ---------------- */
+
+function paintDressForm(t: number): string {
+  return paintPlotted((plot) => {
+    const turn = t * 0.9;
+    /* Wide at the shoulder, in at the waist, out again at the hip: that is
+       all it takes for the outline to read as a torso. */
+    const widthAt = (f: number) => 0.45 + Math.cos(f * TAU) * 0.12 + f * 0.05;
+    for (let y = 0; y <= 26; y += 1) {
+      const f = y / 26;
+      const v = -0.75 + f * 1.5;
+      const width = widthAt(f);
+      for (const side of [-1, 1] as const) {
+        plot(side * width, v, 0.4 + clamp01(Math.cos(turn + (side > 0 ? 0 : Math.PI))) * 0.4);
+      }
+      /* One seam wraps the form, and it is the seam that shows the turn. */
+      const a = turn + f * 1.4;
+      plot(Math.sin(a) * width, v, 0.45 + Math.pow(clamp01(Math.cos(a)), 2) * 0.55);
+    }
+    for (let y = 0; y <= 5; y += 1) plot(0, 0.75 + (y / 5) * 0.18, 0.5);
+    for (let x = 0; x <= 8; x += 1) plot(-0.24 + (x / 8) * 0.48, 0.93, 0.55);
+    for (let pin = 0; pin < 5; pin += 1) {
+      const f = 0.15 + pin * 0.17;
+      const a = turn + f * 1.4 + 0.5;
+      plot(Math.sin(a) * widthAt(f), -0.75 + f * 1.5, 0.4 + Math.pow(clamp01(Math.cos(a)), 3) * 0.6);
+    }
+  });
+}
+
+/* -- Car lift: a car taken up on a two-post lift -------------------------- */
+
+function paintCarLift(t: number): string {
+  return paintPlotted((plot) => {
+    const cycle = (t * 0.25) % 2;
+    const raise = cycle < 1 ? cycle : 2 - cycle;
+    const lift = raise * raise * (3 - 2 * raise) * 0.9;
+    for (const side of [-1, 1] as const) {
+      for (let y = 0; y <= 12; y += 1) plot(side * 1.3, 0.9 - (y / 12) * 1.8, 0.4);
+      for (let x = 0; x <= 6; x += 1) plot(side * (1.3 - (x / 6) * 0.5), 0.55 - lift, 0.6);
+    }
+    const bodyV = 0.4 - lift;
+    for (let x = 0; x <= 30; x += 1) {
+      const f = x / 30;
+      /* A roof that dips at both ends, so it reads as a car and not a box. */
+      plot(-1.05 + f * 2.1, bodyV, 0.8);
+      if (f > 0.2 && f < 0.8) plot(-1.05 + f * 2.1, bodyV - 0.3 - Math.sin(f * Math.PI) * 0.22, 0.7);
+    }
+    for (const wheel of [-0.62, 0.62] as const) {
+      for (let step = 0; step <= 12; step += 1) {
+        const a = (step / 12) * TAU;
+        plot(wheel + Math.cos(a) * 0.2, bodyV + 0.16 + Math.sin(a) * 0.18, 0.6);
+      }
+    }
+    for (let x = 0; x <= 30; x += 1) plot(-1.5 + (x / 30) * 3, 0.92, 0.35);
+    /* Somebody is under there as soon as there is room to be. */
+    if (lift > 0.45) {
+      const wave = Math.sin(t * 6) * 0.1;
+      for (let y = 0; y <= 4; y += 1) plot(0.1 + wave * (y / 4), 0.9 - (y / 4) * 0.4, 0.7);
+    }
+  });
+}
+
+/* -- Tyre change: nuts off, the wheel swapped, nuts back on --------------- */
+
+function paintTyreChange(t: number): string {
+  return paintPlotted((plot) => {
+    const cycle = (t * 0.3) % 3;
+    const loosen = Math.min(cycle, 1);
+    const swap = cycle > 1 ? Math.min(cycle - 1, 1) : 0;
+    const tighten = cycle > 2 ? cycle - 2 : 0;
+    for (let step = 0; step <= 14; step += 1) {
+      const a = (step / 14) * TAU;
+      plot(-0.5 + Math.cos(a) * 0.16, Math.sin(a) * 0.15, 0.6);
+    }
+    for (let nut = 0; nut < 5; nut += 1) {
+      const a = (nut / 5) * TAU + t * 0.4;
+      /* Nuts come off one at a time and go into the tray below. */
+      const off = clamp01(loosen * 5 - nut) * (1 - tighten);
+      plot(-0.5 + Math.cos(a) * 0.32 - off * 0.2, Math.sin(a) * 0.3 + off * 0.9, 0.9 - off * 0.3);
+    }
+    /* The old wheel rolls out to the right as the new one comes in. */
+    for (const [wu, weight] of [[-0.5 + swap * 2.2, 0.55], [1.6 - swap * 2.1, 0.85]] as const) {
+      for (let step = 0; step <= 20; step += 1) {
+        const a = (step / 20) * TAU;
+        plot(wu + Math.cos(a) * 0.42, Math.sin(a) * 0.4, weight);
+        plot(wu + Math.cos(a) * 0.24, Math.sin(a) * 0.23, weight * 0.7);
+      }
+      for (let spoke = 0; spoke < 4; spoke += 1) {
+        const a = (wu + 0.5) * 4 + (spoke / 4) * TAU;
+        plot(wu + Math.cos(a) * 0.32, Math.sin(a) * 0.3, weight);
+      }
+    }
+    for (let x = 0; x <= 30; x += 1) plot(-1.5 + (x / 30) * 3, 0.86, 0.35);
+    const working = loosen < 1 || tighten > 0;
+    for (let x = 0; x <= 6; x += 1) {
+      plot(-1.35 + (x / 6) * 0.5, 0.3 - (working ? Math.abs(Math.sin(t * 8)) * 0.1 : 0), 0.7);
+    }
+  });
+}
+
+/* -- Wheel balancer: a wheel spun up and left to find its heavy spot ------ */
+
+function paintWheelBalancer(t: number): string {
+  return paintPlotted((plot) => {
+    const cycle = (t * 0.3) % 2;
+    const coast = cycle < 1 ? 1 : clamp01(1 - (cycle - 1) * 1.6);
+    const angle = t * 9 * (0.3 + coast * 0.7) + Math.sin(cycle) * 0.4;
+    for (let step = 0; step <= 30; step += 1) {
+      const a = (step / 30) * TAU;
+      plot(Math.cos(a) * 0.78, Math.sin(a) * 0.74, 0.45);
+      plot(Math.cos(a) * 0.3, Math.sin(a) * 0.28, 0.4);
+    }
+    for (let spoke = 0; spoke < 5; spoke += 1) {
+      const a = angle + (spoke / 5) * TAU;
+      for (let step = 2; step <= 8; step += 1) {
+        const f = step / 8;
+        /* Spokes wash out while it is spinning and sharpen as it slows. */
+        plot(Math.cos(a) * 0.78 * f, Math.sin(a) * 0.74 * f, 0.35 + (1 - coast) * 0.4);
+      }
+    }
+    /* The heavy spot is marked, and the weight goes on opposite it. */
+    const heavy = angle + 0.6;
+    plot(Math.cos(heavy) * 0.7, Math.sin(heavy) * 0.66, 1);
+    plot(Math.cos(heavy + Math.PI) * 0.7, Math.sin(heavy + Math.PI) * 0.66, 0.55 + (1 - coast) * 0.45);
+    for (let y = 0; y <= 8; y += 1) plot(-1.5, -0.8 + (y / 8) * 1.6, 0.4);
+    for (let x = 0; x <= 5; x += 1) plot(-1.5 + (x / 5) * 0.55, 0, 0.5);
+    for (let bar = 0; bar < 6; bar += 1) {
+      const height = clamp01((1 - coast) * 1.4 - bar * 0.12);
+      plot(1.15 + bar * 0.07, 0.8 - height * 0.5, 0.3 + height * 0.7);
+    }
+  });
+}
+
+/* -- Engine hoist: an engine lifted out of the bay on a chain ------------- */
+
+function paintEngineHoist(t: number): string {
+  return paintPlotted((plot) => {
+    const cycle = (t * 0.22) % 2;
+    const up = cycle < 1 ? cycle : 2 - cycle;
+    const hook = 0.35 - up * up * (3 - 2 * up) * 1;
+    /* The load swings while it is moving and settles when it stops. */
+    const swing = Math.sin(t * 2.2) * 0.16 * Math.sin(up * Math.PI);
+    for (let x = 0; x <= 22; x += 1) plot(-1.35 + (x / 22) * 2.4, -0.88, 0.45);
+    for (let y = 0; y <= 12; y += 1) {
+      plot(-1.35 + (y / 12) * 0.3, -0.88 + (y / 12) * 1.76, 0.4);
+      plot(1.05 - (y / 12) * 0.3, -0.88 + (y / 12) * 1.76, 0.4);
+    }
+    for (let link = 0; link <= 10; link += 1) {
+      const f = link / 10;
+      plot(0.2 + swing * f, -0.85 + f * (hook + 0.85), link % 2 === 0 ? 0.75 : 0.45);
+    }
+    const eu = 0.2 + swing;
+    for (let x = 0; x <= 12; x += 1) {
+      const f = x / 12;
+      plot(eu - 0.34 + f * 0.68, hook, 0.85);
+      plot(eu - 0.34 + f * 0.68, hook + 0.42, 0.7);
+    }
+    for (let y = 0; y <= 6; y += 1) {
+      plot(eu - 0.34, hook + (y / 6) * 0.42, 0.7);
+      plot(eu + 0.34, hook + (y / 6) * 0.42, 0.7);
+    }
+    for (let pipe = 0; pipe < 3; pipe += 1) {
+      plot(eu - 0.2 + pipe * 0.2, hook - 0.16 - Math.abs(Math.sin(t + pipe)) * 0.06, 0.6);
+    }
+    /* The bay it came out of stays open underneath it. */
+    for (let x = 0; x <= 16; x += 1) plot(-1 + (x / 16), 0.7, 0.5);
+  });
+}
+
+/* -- Oil drain: the plug out and the sump running into a pan -------------- */
+
+function paintOilDrain(t: number): string {
+  return paintPlotted((plot) => {
+    const cycle = (t * 0.16) % 1;
+    /* A hard stream first, then a thread, and finally only drips. */
+    const flow = clamp01(1 - cycle * 1.5);
+    for (let x = 0; x <= 26; x += 1) {
+      const u = -1.3 + (x / 26) * 2.6;
+      plot(u, -0.6, 0.55);
+      plot(u, -0.36 + Math.abs(u) * 0.06, 0.4);
+    }
+    if (flow > 0.15) {
+      for (let step = 0; step <= 18; step += 1) {
+        const f = step / 18;
+        const spread = f * f * (1 - flow) * 0.3;
+        plot(0.1 + Math.sin(t * 9 + f * 6) * 0.03 + spread, -0.34 + f, 0.5 + flow * 0.5);
+      }
+    } else {
+      const life = (t * 1.6) % 1;
+      plot(0.1, -0.3 + life * 0.9, 1 - life * 0.4);
+    }
+    /* The pan fills at the same rate the stream falls off. */
+    const level = 0.72 - Math.min(cycle * 0.34, 0.3);
+    for (let x = 0; x <= 20; x += 1) {
+      const u = -0.6 + (x / 20) * 1.4;
+      plot(u, 0.78, 0.5);
+      plot(u, level + Math.sin(u * 7 + t * 5) * 0.02, 0.85);
+    }
+    for (let y = 0; y <= 4; y += 1) {
+      plot(-0.62, 0.78 - (y / 4) * 0.24, 0.5);
+      plot(0.78, 0.78 - (y / 4) * 0.24, 0.5);
+    }
+    plot(-0.5, -0.28 + Math.min(cycle * 4, 1) * 0.9, 0.8);
+  });
+}
+
+/* -- Spray booth: a gun laying paint in overlapping passes ---------------- */
+
+function paintSprayBooth(t: number): string {
+  return paintPlotted((plot) => {
+    const pass = (t * 0.45) % 2;
+    const outbound = pass < 1;
+    const gu = -1.25 + (outbound ? pass : 2 - pass) * 2.5;
+    const row = Math.floor(((t * 0.45) % 8) / 2);
+    const gv = -0.62 + row * 0.42;
+    for (let x = 0; x <= 26; x += 1) {
+      const u = -1.2 + (x / 26) * 2.4;
+      plot(u, -0.86, 0.4);
+      plot(u, 0.88, 0.4);
+      /* Coverage builds behind the gun, band by band down the panel. */
+      for (let band = 0; band <= row; band += 1) {
+        if (band < row || (outbound ? u < gu : u > gu)) plot(u, -0.62 + band * 0.42, 0.55);
+      }
+    }
+    for (let y = 0; y <= 10; y += 1) {
+      plot(-1.2, -0.86 + (y / 10) * 1.74, 0.4);
+      plot(1.2, -0.86 + (y / 10) * 1.74, 0.4);
+    }
+    for (let drop = 0; drop < 16; drop += 1) {
+      const f = hash(drop);
+      plot(gu + (hash(drop * 3.1) - 0.5) * 0.5 * f, gv - 0.34 + f * 0.34, 0.4 + (1 - f) * 0.6);
+    }
+    for (let y = 0; y <= 5; y += 1) plot(gu, gv - 0.9 + (y / 5) * 0.5, 0.7);
+    plot(gu, gv - 0.36, 1);
+  });
+}
+
+/* -- Jump start: the leads on, a spark, and the engine catching ----------- */
+
+function paintJumpStart(t: number): string {
+  return paintPlotted((plot) => {
+    const cycle = (t * 0.3) % 3;
+    const cranking = cycle > 1 && cycle < 2;
+    for (const side of [-1, 1] as const) {
+      for (let y = 0; y <= 8; y += 1) plot(side * 1.15, -0.1 + (y / 8) * 0.7, 0.5);
+      for (let x = 0; x <= 8; x += 1) plot(side * 1.15 - 0.28 + (x / 8) * 0.56, -0.1, 0.55);
+      for (let post = 0; post < 2; post += 1) plot(side * 1.15 - 0.16 + post * 0.32, -0.22, 0.75);
+    }
+    /* The leads never hang quite still, and they shiver hard once the starter
+       is pulling current through them. */
+    for (let lead = 0; lead < 2; lead += 1) {
+      for (let x = 0; x <= 26; x += 1) {
+        const f = x / 26;
+        const shiver = Math.sin(t * (cranking ? 30 : 2.2) + f * 12) * (cranking ? 0.03 : 0.015);
+        plot(-1 + f * 2, lead * 0.16 - 0.4 + Math.sin(f * Math.PI) * 0.34 + shiver, lead === 0 ? 0.7 : 0.45);
+      }
+    }
+    if (cycle > 0.8 && cycle < 1.1) {
+      for (let spark = 0; spark < 6; spark += 1) {
+        const a = hash(spark + Math.floor(t * 20)) * TAU;
+        plot(-1 + Math.cos(a) * 0.2, -0.2 + Math.sin(a) * 0.18, 1);
+      }
+    }
+    const revs = cycle >= 2 ? 1 : cranking ? 0.35 : 0;
+    for (let step = 0; step <= 16; step += 1) {
+      const a = (step / 16) * TAU;
+      plot(Math.cos(a) * 0.3, 0.6 + Math.sin(a) * 0.26, 0.4);
+    }
+    const needle = -2.2 + revs * 2.4 + (cranking ? Math.sin(t * 18) * 0.4 : 0);
+    for (let step = 0; step <= 6; step += 1) {
+      const f = step / 6;
+      plot(Math.cos(needle) * 0.26 * f, 0.6 + Math.sin(needle) * 0.24 * f, 0.9);
+    }
+  });
+}
+
+/* -- Waltzer: cars spinning free on a rolling floor ----------------------- */
+
+function paintWaltzer(t: number): string {
+  return paintPlotted((plot) => {
+    const carry = t * 0.9;
+    for (let step = 0; step <= 40; step += 1) {
+      const a = (step / 40) * TAU;
+      /* The track is a ring that rises and falls, and the cars follow it. */
+      plot(Math.cos(a) * 1.25, Math.sin(a) * 0.52 + Math.sin(a * 3) * 0.12, 0.35);
+    }
+    for (let car = 0; car < 5; car += 1) {
+      const a = carry + (car / 5) * TAU;
+      const cu = Math.cos(a) * 1.25;
+      const cv = Math.sin(a) * 0.52 + Math.sin(a * 3) * 0.12;
+      const near = 0.45 + clamp01(Math.sin(a) * 0.5 + 0.5) * 0.5;
+      for (let step = 0; step <= 10; step += 1) {
+        const ca = (step / 10) * TAU;
+        plot(cu + Math.cos(ca) * 0.2, cv + Math.sin(ca) * 0.18, near * 0.7);
+      }
+      /* Each car also spins on its own pin, hardest where the track drops. */
+      const own = t * (2.4 + car) + Math.sin(a * 3) * 3;
+      plot(cu + Math.cos(own) * 0.13, cv + Math.sin(own) * 0.12, near);
+    }
+  });
+}
+
+/* -- Swing boat: a boat pushed higher on every pass ----------------------- */
+
+function paintSwingBoat(t: number): string {
+  return paintPlotted((plot) => {
+    /* The arc builds over a run of passes, then the ride is brought down. */
+    const angle = Math.sin(t * 1.7) * (0.35 + Math.abs(Math.sin(t * 0.12)) * 1.05);
+    const pivotV = -0.82;
+    for (let y = 0; y <= 8; y += 1) {
+      plot(-0.5 - (y / 8) * 0.7, 0.9 - (y / 8) * 1.7, 0.4);
+      plot(0.5 + (y / 8) * 0.7, 0.9 - (y / 8) * 1.7, 0.4);
+    }
+    const bu = Math.sin(angle) * 1.35;
+    const bv = pivotV + Math.cos(angle) * 1.35;
+    for (let step = 0; step <= 12; step += 1) {
+      const f = step / 12;
+      plot(bu * f, pivotV + (bv - pivotV) * f, 0.5);
+    }
+    for (let x = 0; x <= 12; x += 1) {
+      const f = x / 12 - 0.5;
+      const ru = bu + f * 0.62 * Math.cos(angle);
+      const rv = bv - f * 0.62 * Math.sin(angle);
+      plot(ru, rv, 0.85);
+      plot(ru - Math.sin(angle) * 0.18, rv - Math.cos(angle) * 0.18, 0.6);
+    }
+    for (let rider = 0; rider < 2; rider += 1) {
+      const f = -0.2 + rider * 0.4;
+      plot(
+        bu + f * 0.62 * Math.cos(angle) + Math.sin(angle) * 0.22,
+        bv - f * 0.62 * Math.sin(angle) - Math.cos(angle) * 0.22,
+        0.95,
+      );
+    }
+  });
+}
+
+/* -- Helter skelter: a mat spiralling down the outside of the tower ------- */
+
+function paintHelterSkelter(t: number): string {
+  return paintPlotted((plot) => {
+    /* The slide is a helix; only its front half faces us, so the back of
+       each turn stays dim and the shape reads as round. */
+    for (let step = 0; step <= 120; step += 1) {
+      const f = step / 120;
+      const a = f * 8 - t * 0.4;
+      plot(
+        Math.cos(a) * (0.18 + f * 0.72),
+        -0.85 + f * 1.7 - Math.sin(a) * 0.06,
+        0.25 + clamp01(Math.sin(a)) * 0.4,
+      );
+    }
+    for (let y = 0; y <= 16; y += 1) plot(0, -0.9 + (y / 16) * 1.75, 0.35);
+    for (let flag = 0; flag < 3; flag += 1) plot(Math.sin(t * 2 + flag) * 0.14, -0.95 + flag * 0.05, 0.7);
+    const ride = (t * 0.35) % 1;
+    const ra = ride * 8 - t * 0.4;
+    const ru = Math.cos(ra) * (0.18 + ride * 0.72);
+    const rv = -0.85 + ride * 1.7 - Math.sin(ra) * 0.06;
+    plot(ru, rv, 0.4 + clamp01(Math.sin(ra)) * 0.6);
+    plot(ru, rv - 0.14, 0.35 + clamp01(Math.sin(ra)) * 0.55);
+  });
+}
+
+/* -- Coconut shy: balls thrown at coconuts on their posts ----------------- */
+
+function paintCoconutShy(t: number): string {
+  return paintPlotted((plot) => {
+    for (let x = 0; x <= 30; x += 1) plot(-1.5 + (x / 30) * 3, 0.88, 0.35);
+    const attempt = (t * 0.55) % 1;
+    const target = Math.floor((t * 0.55) % 5);
+    for (let post = 0; post < 5; post += 1) {
+      const pu = -1.1 + post * 0.55;
+      for (let y = 0; y <= 10; y += 1) plot(pu, 0.85 - (y / 10) * 1.05, 0.45);
+      /* A hit coconut leaves its post and is not back until its turn again. */
+      const hit = post === target && attempt > 0.55;
+      const knock = hit ? (attempt - 0.55) / 0.45 : 0;
+      for (let step = 0; step <= 8; step += 1) {
+        const a = (step / 8) * TAU;
+        plot(
+          pu + knock * 0.7 + Math.cos(a) * 0.13,
+          -0.3 + knock * knock * 1.1 + Math.sin(a) * 0.12,
+          hit ? 0.6 : 0.8,
+        );
+      }
+    }
+    if (attempt < 0.6) {
+      const f = attempt / 0.6;
+      plot(-1.45 + f * (2.55 + target * 0.55), 0.45 - Math.sin(f * Math.PI) * 0.9, 1);
+    }
+    for (let y = 0; y <= 8; y += 1) plot(-1.45, 0.88 - (y / 8) * 1.1, 0.5);
+  });
+}
+
+/* -- Hook a duck: ducks going round and a hook dipping for one ------------ */
+
+function paintHookADuck(t: number): string {
+  return paintPlotted((plot) => {
+    for (let step = 0; step <= 40; step += 1) {
+      const a = (step / 40) * TAU;
+      plot(Math.cos(a) * 1.2, 0.35 + Math.sin(a) * 0.42, 0.3);
+    }
+    const cycle = (t * 0.4) % 1;
+    /* The hook dips once a cycle, and lifts whichever duck is under it. */
+    const dip = cycle < 0.5 ? Math.sin(cycle * 2 * Math.PI) : 0;
+    const lifted = cycle > 0.5 ? (cycle - 0.5) / 0.5 : 0;
+    for (let duck = 0; duck < 6; duck += 1) {
+      const a = t * 0.7 + (duck / 6) * TAU;
+      const bob = Math.sin(t * 3 + duck) * 0.03;
+      const du = Math.cos(a) * 1.2 * (duck === 0 ? 1 - lifted : 1) + (duck === 0 ? 0.9 * lifted : 0);
+      const dv = 0.35 + Math.sin(a) * 0.42 - (duck === 0 ? lifted * 1.1 : 0) + bob;
+      plot(du, dv, 0.85);
+      plot(du + 0.1, dv - 0.09, 0.7);
+      plot(du - 0.12, dv + 0.02, 0.5);
+    }
+    const hv = -0.9 + dip;
+    for (let y = 0; y <= 8; y += 1) plot(0.9, -0.95 + (y / 8) * (hv + 0.95), 0.55);
+    plot(0.9, hv, 0.95);
+    plot(0.82, hv + 0.06, 0.8);
+  });
+}
+
+/* -- Strength tester: the puck sent up the tower at the bell -------------- */
+
+function paintStrengthTester(t: number): string {
+  return paintPlotted((plot) => {
+    const cycle = (t * 0.4) % 2;
+    /* Wind up, strike, and the puck carries as far as the blow was worth. */
+    const power = 0.45 + hash(Math.floor((t * 0.4) / 2)) * 0.6;
+    const flight = cycle < 1 ? Math.sin(cycle * Math.PI) * power : 0;
+    for (let y = 0; y <= 18; y += 1) {
+      const v = 0.9 - (y / 18) * 1.8;
+      plot(0.55, v, 0.4);
+      plot(0.95, v, 0.4);
+      if (y % 3 === 0) plot(0.75, v, 0.3);
+    }
+    for (let x = 0; x <= 6; x += 1) plot(0.55 + (x / 6) * 0.4, 0.82 - flight * 1.7, 0.95);
+    /* The bell only rings if the puck actually gets all the way to it. */
+    const rung = flight > 0.94;
+    for (let step = 0; step <= 12; step += 1) {
+      const a = (step / 12) * Math.PI;
+      plot(0.75 + Math.cos(a) * 0.22, -0.86 + Math.sin(a) * 0.12, rung ? 1 : 0.5);
+    }
+    if (rung) {
+      for (let ring = 0; ring < 4; ring += 1) {
+        const spread = 0.3 + ring * 0.16;
+        plot(0.75 - spread, -0.86 - 0.06 * ring, 0.8 - ring * 0.15);
+        plot(0.75 + spread, -0.86 - 0.06 * ring, 0.8 - ring * 0.15);
+      }
+    }
+    const swing = cycle < 1 ? Math.sin(cycle * Math.PI * 0.9 - 1.2) : -0.9;
+    for (let step = 0; step <= 10; step += 1) {
+      const f = step / 10;
+      plot(-0.7 + Math.cos(swing) * f * 0.9, 0.55 - Math.sin(swing) * f * 0.9, 0.6);
+    }
+    for (let x = 0; x <= 8; x += 1) {
+      plot(-0.9 + Math.cos(swing) * 0.9 + (x / 8) * 0.3, 0.55 - Math.sin(swing) * 0.9, 0.85);
+    }
+    for (let x = 0; x <= 30; x += 1) plot(-1.5 + (x / 30) * 3, 0.9, 0.35);
+  });
+}
+
+/* -- Ghost train: a car pushing through the doors into the dark ----------- */
+
+function paintGhostTrain(t: number): string {
+  return paintPlotted((plot) => {
+    const cu = -1.5 + ((t * 0.32) % 1) * 3.1;
+    /* Two sets of doors: one to go in by, one to come back out of. */
+    for (const door of [-0.55, 0.75] as const) {
+      const open = clamp01(1 - Math.abs(cu - door) * 3.2);
+      for (let y = 0; y <= 10; y += 1) {
+        const v = 0.75 - (y / 10) * 1.4;
+        plot(door - 0.3 - open * 0.28, v, 0.55);
+        plot(door + 0.3 + open * 0.28, v, 0.55);
+      }
+      for (let x = 0; x <= 6; x += 1) plot(door - 0.3 + (x / 6) * 0.6, -0.65, 0.45);
+    }
+    for (let x = 0; x <= 30; x += 1) plot(-1.5 + (x / 30) * 3, 0.8, 0.4);
+    for (let x = 0; x <= 12; x += 1) {
+      const f = x / 12;
+      plot(cu - 0.3 + f * 0.6, 0.6, 0.85);
+      plot(cu - 0.3 + f * 0.6, 0.24, 0.7);
+    }
+    for (let y = 0; y <= 4; y += 1) {
+      plot(cu - 0.3, 0.24 + (y / 4) * 0.36, 0.7);
+      plot(cu + 0.3, 0.24 + (y / 4) * 0.36, 0.7);
+    }
+    plot(cu + 0.34, 0.42, 1);
+    /* Something leans out of the dark whenever the car is between doors. */
+    if (cu > -0.2 && cu < 0.5) {
+      const lean = Math.sin(t * 5) * 0.1;
+      for (let y = 0; y <= 5; y += 1) plot(0.15 + lean, -0.5 + (y / 5) * 0.5, 0.6 + Math.abs(lean) * 3);
+      plot(0.15 + lean, -0.58, 0.95);
+    }
+  });
+}
+
+/* -- Teacups: cups turning on saucers on a turning floor ------------------ */
+
+function paintTeacups(t: number): string {
+  return paintPlotted((plot) => {
+    const floor = t * 0.55;
+    for (let step = 0; step <= 40; step += 1) {
+      const a = (step / 40) * TAU;
+      plot(Math.cos(a) * 1.35, Math.sin(a) * 0.6, 0.3);
+    }
+    for (let saucer = 0; saucer < 3; saucer += 1) {
+      const a = floor + (saucer / 3) * TAU;
+      const su = Math.cos(a) * 0.85;
+      const sv = Math.sin(a) * 0.38;
+      const near = clamp01(Math.sin(a) * 0.5 + 0.5);
+      for (let step = 0; step <= 16; step += 1) {
+        const sa = (step / 16) * TAU;
+        plot(su + Math.cos(sa) * 0.42, sv + Math.sin(sa) * 0.19, 0.25 + near * 0.25);
+      }
+      /* Each saucer turns against the floor, and each cup again on that. */
+      for (let cup = 0; cup < 2; cup += 1) {
+        const ca = -floor * 1.8 + saucer * 2 + cup * Math.PI;
+        const cu = su + Math.cos(ca) * 0.26;
+        const cv = sv + Math.sin(ca) * 0.12;
+        for (let step = 0; step <= 8; step += 1) {
+          const ba = (step / 8) * TAU;
+          plot(cu + Math.cos(ba) * 0.14, cv + Math.sin(ba) * 0.1, 0.35 + near * 0.4);
+        }
+        const spin = t * 2.6 + saucer + cup;
+        plot(cu + Math.cos(spin) * 0.16, cv + Math.sin(spin) * 0.11, 0.5 + near * 0.5);
+      }
+    }
+  });
+}
+
+/* -- Stage curtain: the house tabs going out and coming back in ----------- */
+
+function paintStageCurtain(t: number): string {
+  return paintPlotted((plot) => {
+    const cycle = (t * 0.24) % 2;
+    const open = cycle < 1 ? cycle : 2 - cycle;
+    const eased = open * open * (3 - 2 * open);
+    for (let x = 0; x <= 32; x += 1) plot(-1.6 + (x / 32) * 3.2, -0.92, 0.5);
+    for (const side of [-1, 1] as const) {
+      const edge = side * (0.05 + eased * 1.5);
+      for (let fold = 0; fold < 6; fold += 1) {
+        const f = fold / 5;
+        const fu = edge - side * f * (1.6 - eased * 1.3);
+        for (let y = 0; y <= 12; y += 1) {
+          const v = -0.88 + (y / 12) * 1.8;
+          /* Folds gather as the curtain draws back, so it never looks flat. */
+          const sway = Math.sin(v * 2.4 + fold * 1.7 + t * 0.8) * 0.05 * (1 - eased);
+          plot(fu + sway, v, fold === 0 ? 0.75 : 0.55);
+        }
+      }
+      plot(edge, 0.9, 0.6);
+    }
+    /* What is behind the tabs only reads once there is a gap to see it. */
+    if (eased > 0.25) {
+      const light = (eased - 0.25) / 0.75;
+      for (let step = 0; step <= 14; step += 1) {
+        const a = (step / 14) * TAU;
+        plot(Math.cos(a) * 0.36, 0.35 + Math.sin(a) * 0.3, light * 0.7);
+      }
+      for (let y = 0; y <= 5; y += 1) plot(0, 0.65 + (y / 5) * 0.24, light * 0.6);
+    }
+  });
+}
+
+/* -- Spotlight rig: beams hunting for a mark and holding it --------------- */
+
+function paintSpotlightRig(t: number): string {
+  return paintPlotted((plot) => {
+    for (let x = 0; x <= 30; x += 1) plot(-1.5 + (x / 30) * 3, -0.92, 0.45);
+    const marks = [-0.7, 0.1, 0.9] as const;
+    for (let lamp = 0; lamp < 3; lamp += 1) {
+      const lu = -1 + lamp;
+      /* Each lamp crosses to its next mark, then sits on it for a while. */
+      const phase = (t * 0.3 + lamp / 3) % 1;
+      const index = Math.floor(phase * 3) % 3;
+      const from = marks[(index + 2) % 3]!;
+      const target = marks[index]!;
+      const blend = clamp01(((phase * 3) % 1) * 2);
+      const hit = from + (target - from) * (blend * blend * (3 - 2 * blend));
+      for (let y = 0; y <= 5; y += 1) plot(lu, -0.9 + (y / 5) * 0.22, 0.6);
+      for (let step = 0; step <= 24; step += 1) {
+        const f = step / 24;
+        for (const side of [-1, 1] as const) {
+          plot(lu + (hit - lu) * f + side * f * 0.24, -0.68 + f * 1.5, 0.3 + (1 - f) * 0.35);
+        }
+      }
+      for (let step = 0; step <= 10; step += 1) {
+        const a = (step / 10) * TAU;
+        plot(hit + Math.cos(a) * 0.28, 0.82 + Math.sin(a) * 0.09, 0.8);
+      }
+    }
+  });
+}
+
+/* -- Trap door: a figure rising through the stage floor ------------------- */
+
+function paintTrapDoor(t: number): string {
+  return paintPlotted((plot) => {
+    const cycle = (t * 0.3) % 2;
+    const openness = cycle < 0.3 ? cycle / 0.3 : cycle < 1.5 ? 1 : clamp01(1 - (cycle - 1.5) / 0.5);
+    const rise = cycle > 0.3 && cycle < 1.5 ? Math.sin(((cycle - 0.3) / 1.2) * Math.PI) : 0;
+    /* Masking legs each side and a cloth behind: without them the stage is
+       just a line across an empty frame. */
+    for (let y = 0; y <= 14; y += 1) {
+      const v = -0.92 + (y / 14) * 1.34;
+      plot(-1.5 + Math.sin(v * 3) * 0.04, v, 0.45);
+      plot(1.5 - Math.sin(v * 3) * 0.04, v, 0.45);
+    }
+    for (let x = 0; x <= 30; x += 1) plot(-1.5 + (x / 30) * 3, -0.92, 0.4);
+    for (let x = 0; x <= 32; x += 1) {
+      const u = -1.6 + (x / 32) * 3.2;
+      if (Math.abs(u) < 0.42 * openness) continue;
+      plot(u, 0.42, 0.5);
+    }
+    for (const side of [-1, 1] as const) {
+      for (let step = 0; step <= 8; step += 1) {
+        const f = step / 8;
+        plot(
+          side * 0.42 + side * Math.cos(openness * 1.2) * f * 0.42,
+          0.42 - Math.sin(openness * 1.2) * f * 0.42,
+          0.6,
+        );
+      }
+    }
+    /* Smoke comes up through the opening whether anybody does or not. */
+    for (let puff = 0; puff < 7; puff += 1) {
+      const life = (t * 0.9 + hash(puff)) % 1;
+      plot((hash(puff * 3.3) - 0.5) * 0.8 * (0.3 + life), 0.42 - life * 1.2, openness * (1 - life) * 0.5);
+    }
+    if (rise > 0.02) {
+      for (let y = 0; y <= 6; y += 1) plot(0, 0.42 - rise * 1.1 * (y / 6), 0.7);
+      plot(0, 0.42 - rise * 1.1 - 0.14, 0.95);
+      for (let x = 0; x <= 4; x += 1) plot(-0.2 + (x / 4) * 0.4, 0.52 - rise * 1.1, 0.6);
+    }
+    for (let x = 0; x <= 30; x += 1) plot(-1.5 + (x / 30) * 3, 0.9, 0.3);
+  });
+}
+
+/* -- Fly tower: scenery flown in and out on its lines --------------------- */
+
+function paintFlyTower(t: number): string {
+  return paintPlotted((plot) => {
+    for (let x = 0; x <= 32; x += 1) plot(-1.6 + (x / 32) * 3.2, -0.94, 0.45);
+    for (let bar = 0; bar < 3; bar += 1) {
+      /* Three bars on their own cues, so the stage is never all in or out. */
+      const phase = (t * 0.22 + bar / 3) % 1;
+      const inFlight = phase < 0.5 ? phase / 0.5 : 1 - (phase - 0.5) / 0.5;
+      const v = -0.78 + inFlight * inFlight * (3 - 2 * inFlight) * 1.5;
+      for (let line = 0; line < 3; line += 1) {
+        const lu = -0.9 + bar * 0.05 + line * 0.9;
+        for (let y = 0; y <= 10; y += 1) plot(lu, -0.92 + (y / 10) * (v + 0.92), 0.35);
+      }
+      for (let x = 0; x <= 24; x += 1) plot(-1.05 + (x / 24) * 2.1, v, 0.7);
+      for (let x = 0; x <= 20; x += 1) {
+        const f = x / 20;
+        plot(-1 + f * 2, v + 0.34 + Math.sin(f * 9 + bar * 2) * 0.06, 0.4 + bar * 0.15);
+      }
+    }
+  });
+}
+
+/* -- Revolve: the stage turning the next scene into view ------------------ */
+
+function paintRevolveStage(t: number): string {
+  return paintPlotted((plot) => {
+    const turn = t * 0.5;
+    for (let step = 0; step <= 44; step += 1) {
+      const a = (step / 44) * TAU;
+      plot(Math.cos(a) * 1.3, Math.sin(a) * 0.6, 0.3);
+    }
+    /* A wall across the disc is what hides one scene from the other, so half
+       the set is always turning out of sight behind it. */
+    for (let step = 0; step <= 22; step += 1) {
+      const f = step / 22 - 0.5;
+      const wu = Math.cos(turn) * f * 2.6;
+      const wv = Math.sin(turn) * f * 1.2;
+      for (let y = 0; y <= 5; y += 1) plot(wu, wv - (y / 5) * 0.55, 0.55);
+    }
+    for (let prop = 0; prop < 4; prop += 1) {
+      const a = turn + (prop / 4) * TAU;
+      const pu = Math.cos(a) * 0.8;
+      const pv = Math.sin(a) * 0.36;
+      const near = clamp01(Math.sin(a) * 0.5 + 0.5);
+      const height = 0.25 + (prop % 2) * 0.3;
+      for (let y = 0; y <= 6; y += 1) plot(pu, pv - (y / 6) * height, 0.25 + near * 0.7);
+      plot(pu, pv - height - 0.08, 0.3 + near * 0.7);
+    }
+  });
+}
+
+/* -- Marionette: a figure walked on its strings --------------------------- */
+
+function paintPuppetStrings(t: number): string {
+  return paintPlotted((plot) => {
+    const step = Math.sin(t * 2.4);
+    const bar = Math.sin(t * 2.4 + 0.6) * 0.18;
+    const bodyV = -0.05 + Math.abs(Math.cos(t * 2.4)) * 0.08;
+    for (let x = 0; x <= 12; x += 1) plot(-0.4 + (x / 12) * 0.8, -0.85 + bar * 0.4, 0.6);
+    /* Head, two hands and two feet: the control bar leads all five. */
+    const joints: ReadonlyArray<readonly [number, number]> = [
+      [0, bodyV - 0.3],
+      [-0.3, bodyV - 0.05 + step * 0.1],
+      [0.3, bodyV - 0.05 - step * 0.1],
+      [-0.22, bodyV + 0.5 + step * 0.16],
+      [0.22, bodyV + 0.5 - step * 0.16],
+    ];
+    for (const [ju, jv] of joints) {
+      for (let y = 0; y <= 8; y += 1) {
+        const f = y / 8;
+        plot(ju * (0.4 + f * 0.6), -0.82 + bar * 0.4 + f * (jv + 0.82), 0.3);
+      }
+      plot(ju, jv, 0.9);
+    }
+    for (let y = 0; y <= 8; y += 1) plot(0, bodyV - 0.3 + (y / 8) * 0.55, 0.7);
+    for (let x = 0; x <= 6; x += 1) plot((x / 6 - 0.5) * 0.6, bodyV - 0.02, 0.6);
+    for (let x = 0; x <= 30; x += 1) plot(-1.5 + (x / 30) * 3, 0.88, 0.35);
+  });
+}
+
+/* -- Orchestra pit: bows moving as one under a beating stick -------------- */
+
+function paintOrchestraPit(t: number): string {
+  return paintPlotted((plot) => {
+    /* Four to the bar: the stick marks each one and the strings answer. */
+    const beat = (t * 1.6) % 4;
+    const swing = Math.sin(beat * Math.PI * 0.5);
+    const drop = Math.abs(Math.sin(beat * Math.PI));
+    for (let x = 0; x <= 32; x += 1) plot(-1.6 + (x / 32) * 3.2, 0.5, 0.45);
+    for (let y = 0; y <= 5; y += 1) plot(0, 0.5 + (y / 5) * 0.4, 0.5);
+    plot(0, 0.38, 0.8);
+    for (let step = 0; step <= 8; step += 1) {
+      const f = step / 8;
+      plot(swing * f * 0.5, 0.3 - drop * 0.3 * f - f * 0.2, 0.95);
+    }
+    for (let player = 0; player < 5; player += 1) {
+      const pu = -1.25 + player * 0.62;
+      const phase = swing * (player % 2 === 0 ? 1 : -1);
+      for (let y = 0; y <= 4; y += 1) plot(pu, 0.5 - (y / 4) * 0.3, 0.5);
+      plot(pu, 0.14, 0.7);
+      /* Every bow in a section moves the same way at the same time. */
+      for (let s = 0; s <= 8; s += 1) {
+        const f = s / 8 - 0.5;
+        plot(pu + f * 0.42 + phase * 0.16, 0.24 + f * 0.16 - phase * 0.05, 0.85);
+      }
+      plot(pu, -0.05, 0.4 + drop * 0.4);
+    }
+  });
+}
+
+/* ========================================================================
+   The eleventh collection: fields from the sky and the sea at the edge of
+   sight and from life under a microscope, then an airport apron, a
+   watchmaker's bench, a machine hall, a recycling plant, and a fishing quay.
+   Same contract as everything above: a pure painter over the shared grid.
+   ===================================================================== */
+
+/* -- Tephra fall: ash leaving a leaning column and settling ---------------- */
+
+const tephraFallField: Field = (u, v, t) => {
+  /* The column leans downwind, so the fall is always heaviest to one side of
+     it rather than spread evenly over the frame. */
+  const drift = Math.sin(t * 0.25) * 0.5;
+  const column = clamp01(1 - Math.abs(u + 1.2 - drift * (1 - v) * 0.4) * 1.1);
+  const fall = fbm(u * 1.6 + drift * 0.6, v * 1.1 + t * 0.9, 3);
+  const airborne = clamp01(0.15 + column * 0.55) * clamp01(fall * 1.8 - 0.4);
+  /* Ash that has landed stays landed, and the bed is deepest under the column. */
+  const bed = clamp01((v - (0.74 - column * 0.2 - ((t * 0.1) % 1) * 0.05)) * 6);
+  return clamp01(0.05 + airborne * 0.9 + bed * 0.55);
+};
+
+/* -- Mach diamonds: shock cells standing in an exhaust plume --------------- */
+
+const machDiamondField: Field = (u, v, t) => {
+  /* The cells stand still in the flow and only the turbulence between them
+     travels, which is the whole difference between this and a moving stripe. */
+  const along = (u + ASPECT) / (ASPECT * 2);
+  const spread = 0.14 + along * 0.52;
+  const core = clamp01(1 - Math.abs(v) / spread);
+  if (core <= 0) return clamp01(0.04 + fbm(u * 3 - t * 2.4, v * 3, 2) * 0.09);
+  const node = Math.abs(Math.sin((along * 5.5 + 0.2) * Math.PI));
+  /* Cells weaken downstream as the plume gives up its pressure. */
+  const shock = Math.pow(1 - node, 3) * clamp01(1 - along * 0.85);
+  const churn = fbm(u * 2.4 - t * 3.4, v * 4.2, 2);
+  return clamp01(0.09 + core * (0.32 + shock * 0.8) * (0.55 + churn * 0.65));
+};
+
+/* -- Vortex rings: smoke rings climbing and fattening ---------------------- */
+
+const vortexRingField: Field = (u, v, t) => {
+  let smoke = 0.05 + fbm(u * 1.4, v * 1.4 + t * 0.3, 2) * 0.1;
+  for (let ring = 0; ring < 3; ring += 1) {
+    const life = (t * 0.35 + ring / 3) % 1;
+    /* A ring widens and thickens as it climbs, and fades doing it, so the one
+       nearest the top is always the faintest. */
+    const height = 0.95 - life * 1.9;
+    const radius = 0.24 + life * 0.85;
+    const thickness = 0.09 + life * 0.15;
+    const across = Math.abs(Math.abs(u) - radius);
+    const core = clamp01(1 - Math.hypot(across / thickness, (v - height) / (thickness * 1.6)));
+    smoke = Math.max(smoke, core * (1 - life * 0.7));
+  }
+  return clamp01(smoke);
+};
+
+/* -- Sun glitter: the sun's path broken up over a swell -------------------- */
+
+const sunGlitterField: Field = (u, v, t) => {
+  /* The path narrows towards the horizon because the waves up there are seen
+     at a glancing angle. That taper is the shape people recognise. */
+  const horizon = -0.42;
+  if (v < horizon) return clamp01(0.14 + (horizon - v) * 0.28);
+  const near = (v - horizon) / (1 - horizon);
+  const path = clamp01(1 - Math.abs(u) / (0.2 + near * 1.15));
+  const facet = fbm(u * 5, v * 9 - t * 2.2, 2) + Math.sin(v * 20 - t * 4.5) * 0.16;
+  return clamp01(0.09 + near * 0.1 + clamp01((facet - 0.5) * 6) * path * 0.95);
+};
+
+/* -- St Elmo's fire: corona standing on the mastheads ---------------------- */
+
+const stElmoField: Field = (u, v, t) => {
+  const air = 0.06 + fbm(u * 2 + t * 0.3, v * 2, 2) * 0.07;
+  let rig = 0;
+  let corona = 0;
+  for (let mast = 0; mast < 3; mast += 1) {
+    const foot = -1.15 + mast * 1.15;
+    const tip = -0.72 + mast * 0.18;
+    /* The ship rolls, so the masts lean together rather than apart. */
+    const lean = Math.sin(t * 0.9 + mast * 0.4) * 0.09;
+    const axis = foot + lean * (0.9 - v);
+    if (v > tip) rig = Math.max(rig, clamp01(1 - Math.abs(u - axis) * 7) * 0.4);
+    /* A brush discharge sits on the point and breathes; it is a corona, not a
+       spark, so nothing here is allowed to flicker off. */
+    const breath = 0.5 + Math.sin(t * 3.1 + mast * 2.2) * 0.5;
+    corona = Math.max(
+      corona,
+      clamp01(1 - Math.hypot((u - axis) * 2.6, (v - tip) * 2.8)) * (0.4 + breath * 0.6),
+    );
+  }
+  const yard = clamp01(1 - Math.abs(v - 0.15) * 11) * clamp01(1 - Math.abs(u) * 0.55) * 0.32;
+  return clamp01(air + rig + yard + corona * 0.9);
+};
+
+/* -- Green flash: the last rim of a sun going under ------------------------ */
+
+const greenFlashField: Field = (u, v, t) => {
+  const horizon = 0.15;
+  const sunset = (t % 7) / 7;
+  const centre = horizon - 0.6 + sunset * 1.05;
+  const sunk = clamp01((centre - horizon + 0.5) / 0.5);
+  const disc = clamp01((0.5 - Math.hypot(u * 1.05, (v - centre) * 1.15)) * 4);
+  /* Only the top rim is left at the end, and it is brightest as it goes. */
+  const rim = clamp01(1 - Math.abs(v - (centre - 0.48)) * 14) * clamp01((sunk - 0.82) * 6);
+  if (v < horizon) {
+    return clamp01(0.05 + (horizon - v) * 0.14 + disc * (1 - sunk * 0.25) + rim * 0.95);
+  }
+  const sea = 0.12 + Math.abs(Math.sin(v * 10 + u * 1.6 - t * 1.8)) * 0.15;
+  /* The reflected path shortens as the disc sinks and goes out with it. */
+  const path = clamp01(1 - Math.abs(u) * 2.6) * (1 - sunk) * 0.35;
+  return clamp01(sea + path);
+};
+
+/* -- Thermocline: two bodies of water that refuse to mix ------------------- */
+
+const thermoclineField: Field = (u, v, t) => {
+  /* Internal waves travel along the boundary far more slowly than anything on
+     the surface would, which is why the top half looks busy and the rest does
+     not. */
+  const boundary = -0.05 + Math.sin(u * 1.5 - t * 0.7) * 0.22 + Math.sin(u * 3.1 + t * 0.4) * 0.08;
+  const sheet = clamp01(1 - Math.abs(v - boundary) * 7);
+  const body =
+    v < boundary
+      ? 0.1 + fbm(u * 2.6, v * 3.4 - t * 1.1, 2) * 0.45
+      : 0.3 + fbm(u * 1.2 + t * 0.12, v * 1.2, 2) * 0.3;
+  return clamp01(body + sheet * 0.4);
+};
+
+/* -- Siphonophore: a colony pumping on one nerve --------------------------- */
+
+const siphonophoreField: Field = (u, v, t) => {
+  const water = 0.05 + fbm(u * 1.6, v * 1.6 - t * 0.25, 2) * 0.07;
+  /* One command runs down the whole animal, so the swimming bells at the top
+     fire before the feeding units below them do. */
+  const sway = Math.sin(v * 1.8 + t * 0.9) * 0.28;
+  const axis = u - sway;
+  const pulse = 0.5 + Math.sin(t * 2.4 - (v + 1) * 2.6) * 0.5;
+  const stem = clamp01(1 - Math.abs(axis) * 5) * clamp01((v + 0.75) * 2);
+  const bell = clamp01(1 - Math.hypot(axis * 1.7, (v + 0.72) * 2) / (0.3 + pulse * 0.1));
+  const units =
+    clamp01(1 - Math.abs(Math.abs(axis) - 0.16) * 9) *
+    clamp01(1 - Math.abs(((v * 5) % 1) - 0.5) * 3) *
+    clamp01((v + 0.3) * 2);
+  return clamp01(water + stem * 0.35 + units * (0.4 + pulse * 0.5) + bell * 0.9);
+};
+
+/* -- Nacre: interference bands moving with the tilt of a shell ------------- */
+
+const nacreField: Field = (u, v, t) => {
+  /* The bands belong to the stack of platelets, not to time: they only move
+     because the shell is being turned in the light. */
+  const tilt = Math.sin(t * 0.5) * 0.6 + Math.sin(t * 0.23) * 0.25;
+  const growth = Math.hypot((u + 0.9) * 0.7, (v + 0.5) * 1.1);
+  const ridge = fbm(growth * 3.2, Math.atan2(v + 0.5, u + 0.9) * 1.4, 2);
+  const band = 0.5 + Math.sin(growth * 7 + ridge * 2.4 + tilt * 3) * 0.5;
+  const inside = clamp01((1.7 - growth) * 1.6);
+  return clamp01(0.06 + inside * (0.22 + Math.pow(band, 2.2) * 0.72));
+};
+
+/* -- Chromatophores: skin cells answering a wave of command ---------------- */
+
+const chromatophoreField: Field = (u, v, t) => {
+  /* Each sac is opened by its own muscle, so the wave passing over the skin
+     arrives at every cell in turn and none of them open by halves. */
+  const cellU = Math.floor(u * 4.5);
+  const cellV = Math.floor(v * 4.5);
+  const centreU = (cellU + 0.5) / 4.5;
+  const centreV = (cellV + 0.5) / 4.5;
+  const wave = 0.5 + Math.sin(centreU * 2.2 + centreV * 1.4 - t * 2.6) * 0.5;
+  const own = hash2(cellU, cellV);
+  const open = clamp01(wave * 1.5 - 0.25) * (0.45 + own * 0.55);
+  const radius = Math.hypot((u - centreU) * 4.5, (v - centreV) * 4.5);
+  return clamp01(0.07 + clamp01((open * 0.85 - radius) * 3.5) * 0.9);
+};
+
+/* -- Diatoms: striated shells drifting across a slide --------------------- */
+
+const diatomField: Field = (u, v, t) => {
+  const water = 0.05 + fbm(u * 2 + t * 0.15, v * 2, 2) * 0.06;
+  let shell = 0;
+  for (let cell = 0; cell < 5; cell += 1) {
+    /* They drift and turn at their own rates. The striae run across the
+       frustule, which is what tells one from a bubble. */
+    const drift = t * (0.1 + hash(cell) * 0.12);
+    const cu = ((hash(cell * 3.1) + drift) % 1) * 3.6 - 1.8;
+    const cv = -0.8 + hash(cell * 7.7) * 1.6 + Math.sin(t * 0.6 + cell) * 0.08;
+    const angle = t * (0.2 + hash(cell * 5.5) * 0.25) + cell;
+    const dx = (u - cu) * Math.cos(angle) + (v - cv) * Math.sin(angle);
+    const dy = (v - cv) * Math.cos(angle) - (u - cu) * Math.sin(angle);
+    const inside = 1 - Math.hypot(dx / (0.42 + hash(cell * 9.3) * 0.2), dy / 0.15);
+    if (inside <= 0) continue;
+    const striae = 0.55 + Math.sin(dx * 30) * 0.45;
+    shell = Math.max(shell, clamp01(inside * 3) * (0.3 + striae * 0.5) + clamp01(1 - inside * 6) * 0.4);
+  }
+  return clamp01(water + shell);
+};
+
+/* -- Mitosis: one cell coming apart in the right order --------------------- */
+
+const mitosisField: Field = (u, v, t) => {
+  const cycle = (t * 0.16) % 1;
+  /* Line up, pull apart, pinch in. The membrane is never allowed to close
+     before the chromatin has cleared the middle. */
+  const lined = clamp01(cycle / 0.3);
+  const pull = clamp01((cycle - 0.35) / 0.3);
+  const pinch = clamp01((cycle - 0.55) / 0.45);
+  const split = pull * 0.6;
+  const body = Math.min(
+    Math.hypot((u + split) * 1.1, v * 1.3),
+    Math.hypot((u - split) * 1.1, v * 1.3),
+  );
+  const membrane = clamp01(1 - Math.abs(body - 0.6) * 6);
+  const cytoplasm = clamp01((0.6 - body) * 2.4) * 0.28;
+  const waist =
+    clamp01(1 - Math.abs(v) * 2.2) * clamp01(1 - Math.abs(u) / (0.7 * (1 - pinch * 0.95) + 0.02));
+  let chromatin = 0;
+  for (let pair = 0; pair < 4; pair += 1) {
+    const cv = -0.42 + pair * 0.28;
+    const scatter = (1 - lined) * (hash(pair) - 0.5) * 1.6;
+    for (let side = 0; side < 2; side += 1) {
+      const cu = scatter + (side === 0 ? -split : split);
+      chromatin = Math.max(chromatin, clamp01(1 - Math.hypot((u - cu) * 5.5, (v - cv) * 4.5)));
+    }
+  }
+  return clamp01(0.06 + Math.max(cytoplasm, waist * 0.24 * (1 - pinch)) + membrane * 0.55 + chromatin * 0.9);
+};
+
+/* -- Cilia: a row beating one beat out of step with its neighbour ---------- */
+
+const ciliaField: Field = (u, v, t) => {
+  const base = 0.76;
+  if (v > base + 0.08) return clamp01(0.34 + Math.sin(u * 8) * 0.06);
+  let hair = 0;
+  for (let i = 0; i < 16; i += 1) {
+    /* Every cilium beats a fraction later than the one beside it, and that
+       lag is the only reason the row carries a wave rather than flapping. */
+    const stroke = Math.sin(t * 3.4 - i * 0.55);
+    const height = 0.3 + clamp01(stroke + 0.4) * 0.22;
+    const reach = (base - v) / height;
+    if (reach < 0 || reach > 1) continue;
+    /* Straight on the power stroke, curled back on the recovery. */
+    const bend = stroke * 0.34 * reach * reach;
+    const hu = -1.6 + (i / 15) * 3.2;
+    hair = Math.max(hair, clamp01(1 - Math.abs(u - hu - bend) * 9) * (0.45 + clamp01(stroke) * 0.5));
+  }
+  const flow = clamp01(1 - Math.abs(v + 0.45) * 2) * (0.1 + Math.abs(Math.sin(u * 2 - t * 2.4)) * 0.2);
+  return clamp01(0.05 + hair + flow);
+};
+
+/* -- Stomata: guard cells bowing a pore open ------------------------------ */
+
+const stomataField: Field = (u, v, t) => {
+  const leaf = 0.12 + fbm(u * 2.2, v * 2.2, 2) * 0.12;
+  let pore = 0;
+  for (let i = 0; i < 5; i += 1) {
+    const pu = -1.3 + (i % 3) * 1.3 + (i > 2 ? 0.65 : 0);
+    const pv = i > 2 ? 0.42 : -0.42;
+    const dx = (u - pu) / 0.46;
+    if (Math.abs(dx) > 1) continue;
+    /* Turgid guard cells bow apart, so the opening is a lens: widest in the
+       middle and shut at both ends, never a rectangle. */
+    const open = clamp01(0.5 + Math.sin(t * 0.8 + i * 1.7) * 0.7);
+    const lens = Math.sqrt(1 - dx * dx);
+    const gap = lens * (0.1 + open * 0.5);
+    const dy = (v - pv) / 0.34;
+    if (Math.abs(dy) < gap) return clamp01(0.03 + leaf * 0.12);
+    pore = Math.max(pore, clamp01(1 - Math.abs(Math.abs(dy) - (gap + 0.42)) * 3.2) * lens * 0.9);
+  }
+  return clamp01(leaf + pore);
+};
+
+/* -- Brownian motion: grains knocked about by what cannot be seen ---------- */
+
+const brownianField: Field = (u, v, t) => {
+  const water = 0.05 + fbm(u * 3, v * 3, 2) * 0.05;
+  let grain = 0;
+  for (let i = 0; i < 7; i += 1) {
+    let gu = -1.3 + hash(i * 1.7) * 2.6;
+    let gv = -0.7 + hash(i * 4.1) * 1.4;
+    /* The knocks come at no one rate, so the walk is built from several
+       wobbles that never line back up into a circle. */
+    for (let knock = 1; knock <= 3; knock += 1) {
+      const rate = 0.7 * knock + hash(i * knock * 3.3) * 1.4;
+      gu += Math.sin(t * rate + hash(i + knock) * TAU) * (0.18 / knock);
+      gv += Math.cos(t * rate * 1.13 + hash(i * 2 + knock) * TAU) * (0.13 / knock);
+    }
+    grain = Math.max(grain, clamp01(1 - Math.hypot((u - gu) * 4.4, (v - gv) * 5.2)));
+  }
+  return clamp01(water + grain * 0.95);
+};
+
+/* -- Pushback tug: aircraft and tug reversing together -------------------- */
+
+function paintPushbackTug(t: number): string {
+  return paintPlotted((plot) => {
+    const travel = ((t * 0.28) % 1) * 3.4 - 1.7;
+    const bounce = Math.sin(t * 5) * 0.025;
+    for (let x = 0; x <= 30; x += 1) plot(-ASPECT + (x / 30) * ASPECT * 2, 0.82, 0.35);
+    /* The nose wheel, towbar and tug stay locked together during the push. */
+    for (let x = 0; x <= 12; x += 1) plot(travel - 0.48 + (x / 12) * 0.86, 0.5 + bounce, 0.75);
+    for (let y = 0; y <= 5; y += 1) plot(travel - 0.48, 0.5 + (y / 5) * 0.24 + bounce, 0.55);
+    for (let wheel = 0; wheel < 2; wheel += 1) {
+      const wu = travel - 0.28 + wheel * 0.5;
+      for (let a = 0; a <= 10; a += 1) {
+        const angle = (a / 10) * TAU;
+        plot(wu + Math.cos(angle) * 0.1, 0.76 + Math.sin(angle) * 0.1, 0.8);
+      }
+    }
+    for (let s = 0; s <= 8; s += 1) plot(travel + 0.38 + (s / 8) * 0.55, 0.59 - (s / 8) * 0.09, 0.55);
+    plot(travel + 0.94, 0.57, 0.95);
+    /* A clipped aircraft nose gives the towbar a readable destination. */
+    for (let a = 0; a <= 15; a += 1) {
+      const angle = Math.PI * 0.55 + (a / 15) * Math.PI * 0.9;
+      plot(travel + 1.38 + Math.cos(angle) * 0.48, 0.05 + Math.sin(angle) * 0.58, 0.5);
+    }
+    for (let y = 0; y <= 4; y += 1) plot(travel + 0.94, 0.35 + (y / 4) * 0.25, 0.65);
+    plot(travel - 0.16, 0.36 + bounce, 0.55 + Math.abs(Math.sin(t * 4)) * 0.45);
+  });
+}
+
+/* -- Jet bridge: telescoping sections meeting an aircraft door ------------ */
+
+function paintJetBridge(t: number): string {
+  return paintPlotted((plot) => {
+    const extend = 0.5 + Math.sin(t * 0.65) * 0.5;
+    const end = 0.2 + extend * 0.95;
+    /* Terminal wall and aircraft door are fixed while the bridge moves. */
+    for (let y = 0; y <= 12; y += 1) plot(-1.55, -0.9 + (y / 12) * 1.8, 0.45);
+    for (let y = 0; y <= 6; y += 1) {
+      plot(1.35, -0.5 + (y / 6) * 0.75, 0.55);
+      plot(1.12, -0.5 + (y / 6) * 0.75, 0.45);
+    }
+    for (let x = 0; x <= 28; x += 1) {
+      const u = -1.48 + (x / 28) * (end + 1.48);
+      const droop = Math.pow((u + 1.48) / (end + 1.48), 2) * 0.12;
+      plot(u, -0.42 + droop, 0.72);
+      plot(u, 0.08 + droop, 0.58);
+      if (x % 5 === 0) plot(u, -0.17 + droop, 0.35);
+    }
+    /* The cab closes the last gap after the telescoping tunnel is extended. */
+    const cab = end + extend * 0.18;
+    for (let y = 0; y <= 7; y += 1) plot(cab, -0.48 + (y / 7) * 0.66, 0.8);
+    for (let x = 0; x <= 5; x += 1) plot(cab + (x / 5) * 0.2, 0.18, 0.55);
+    for (let y = 0; y <= 7; y += 1) plot(cab - 0.15, 0.18 + (y / 7) * 0.52, 0.42);
+    for (let a = 0; a <= 10; a += 1) {
+      const angle = (a / 10) * TAU;
+      plot(cab - 0.15 + Math.cos(angle) * 0.13, 0.73 + Math.sin(angle) * 0.12, 0.72);
+    }
+  });
+}
+
+/* -- Baggage loader: cases riding an inclined conveyor -------------------- */
+
+function paintBaggageLoader(t: number): string {
+  return paintPlotted((plot) => {
+    const startU = -1.35;
+    const endU = 1.1;
+    const startV = 0.68;
+    const endV = -0.45;
+    for (let rail = 0; rail < 2; rail += 1) {
+      for (let s = 0; s <= 32; s += 1) {
+        const f = s / 32;
+        plot(startU + (endU - startU) * f, startV + (endV - startV) * f + rail * 0.14, 0.5);
+      }
+    }
+    for (let roller = 0; roller < 9; roller += 1) {
+      const f = roller / 8;
+      const phase = t * 5 + roller;
+      plot(
+        startU + (endU - startU) * f + Math.cos(phase) * 0.035,
+        startV + (endV - startV) * f + 0.07 + Math.sin(phase) * 0.035,
+        0.65,
+      );
+    }
+    for (let bag = 0; bag < 4; bag += 1) {
+      const f = (t * 0.27 + bag / 4) % 1;
+      const bu = startU + (endU - startU) * f;
+      const bv = startV + (endV - startV) * f - 0.09;
+      for (let x = 0; x <= 4; x += 1) plot(bu - 0.16 + (x / 4) * 0.32, bv - 0.08, 0.9);
+      plot(bu - 0.16, bv, 0.7);
+      plot(bu + 0.16, bv - 0.05, 0.7);
+    }
+    /* Scissor legs keep changing their crossing point as the belt works. */
+    for (let s = 0; s <= 12; s += 1) {
+      const f = s / 12;
+      plot(-0.6 + f * 1.1, 0.8 - f * 0.55, 0.35);
+      plot(0.5 - f * 1.1, 0.8 - f * 0.55, 0.35);
+    }
+  });
+}
+
+/* -- Deicing boom: a nozzle sweeping fluid over a tail -------------------- */
+
+function paintDeicingBoom(t: number): string {
+  return paintPlotted((plot) => {
+    const sweep = Math.sin(t * 0.75);
+    const elbowU = -0.25 + sweep * 0.22;
+    const elbowV = 0.02 - Math.abs(sweep) * 0.18;
+    const nozzleU = 0.72 + sweep * 0.34;
+    const nozzleV = -0.5 + Math.cos(t * 0.75) * 0.08;
+    for (let x = 0; x <= 18; x += 1) plot(-1.35 + (x / 18) * 1.25, 0.65, 0.65);
+    for (let wheel = 0; wheel < 2; wheel += 1) {
+      const wu = -1.08 + wheel * 0.66;
+      for (let a = 0; a <= 8; a += 1) {
+        const angle = (a / 8) * TAU;
+        plot(wu + Math.cos(angle) * 0.11, 0.76 + Math.sin(angle) * 0.1, 0.7);
+      }
+    }
+    const drawArm = (au: number, av: number, bu: number, bv: number) => {
+      for (let s = 0; s <= 16; s += 1) {
+        const f = s / 16;
+        plot(au + (bu - au) * f, av + (bv - av) * f, 0.7);
+      }
+    };
+    drawArm(-0.62, 0.56, elbowU, elbowV);
+    drawArm(elbowU, elbowV, nozzleU, nozzleV);
+    for (let drop = 0; drop < 13; drop += 1) {
+      const life = (t * 0.8 + hash(drop * 2.3)) % 1;
+      const du = nozzleU + life * (0.55 + hash(drop) * 0.35);
+      const dv = nozzleV + life * 0.48 + (hash(drop * 5.1) - 0.5) * 0.35;
+      plot(du, dv, (1 - life) * 0.85);
+    }
+    /* The aircraft tail is the stationary target at the right edge. */
+    for (let y = 0; y <= 12; y += 1) plot(1.42, -0.85 + (y / 12) * 1.45, 0.4);
+    for (let x = 0; x <= 8; x += 1) plot(1.42 - (x / 8) * 0.68, -0.18 + (x / 8) * 0.28, 0.35);
+  });
+}
+
+/* -- Windsock: a segmented sock filling and sagging with the gusts -------- */
+
+function paintWindsock(t: number): string {
+  return paintPlotted((plot) => {
+    const gust = 0.5 + Math.sin(t * 0.85) * 0.35 + Math.sin(t * 2.2) * 0.15;
+    for (let y = 0; y <= 15; y += 1) plot(-1.1, -0.62 + (y / 15) * 1.48, 0.55);
+    for (let x = 0; x <= 8; x += 1) plot(-1.42 + (x / 8) * 0.64, 0.86, 0.42);
+    plot(-1.1, -0.72, 0.9);
+    for (let segment = 0; segment < 6; segment += 1) {
+      const f = segment / 5;
+      const centreU = -1 + f * (1.95 + gust * 0.35);
+      const centreV = -0.61 + f * (1 - gust) * 0.75 + Math.sin(t * 2 + f * 4) * f * 0.06;
+      const radius = 0.22 * (1 - f * 0.78);
+      plot(centreU, centreV - radius, 0.65 + (segment % 2) * 0.25);
+      plot(centreU, centreV + radius, 0.65 + (segment % 2) * 0.25);
+      if (segment < 5) plot(centreU, centreV, 0.35);
+    }
+    /* A loose tail makes the changing air speed visible even at full extension. */
+    for (let s = 0; s <= 8; s += 1) {
+      const f = s / 8;
+      plot(0.95 + gust * 0.35 + f * 0.35, -0.61 + (1 - gust) * 0.75 + Math.sin(t * 3 + f * 4) * 0.1, 0.65);
+    }
+  });
+}
+
+/* -- Runway lights: perspective lamps advancing beneath an arrival -------- */
+
+function paintRunwayLights(t: number): string {
+  return paintPlotted((plot) => {
+    const horizon = -0.7;
+    for (let edge = -1; edge <= 1; edge += 2) {
+      for (let s = 0; s <= 24; s += 1) {
+        const f = s / 24;
+        plot(edge * (0.12 + f * 1.45), horizon + f * 1.55, 0.25);
+      }
+    }
+    for (let lamp = 0; lamp < 11; lamp += 1) {
+      const f = (t * 0.42 + lamp / 11) % 1;
+      const depth = f * f;
+      const v = horizon + depth * 1.55;
+      const spread = 0.12 + depth * 1.45;
+      const flash = 0.5 + Math.sin(t * 7 - lamp * 0.8) * 0.5;
+      plot(-spread, v, 0.55 + flash * 0.45);
+      plot(spread, v, 0.55 + flash * 0.45);
+      if (lamp % 3 === 0) plot(0, v, 0.45 + flash * 0.35);
+    }
+    /* A threshold bar anchors the approaching stream of lights. */
+    for (let x = 0; x <= 22; x += 1) plot(-1.48 + (x / 22) * 2.96, 0.86, 0.58);
+  });
+}
+
+/* -- Air stairs: a mobile staircase raising to a cabin door --------------- */
+
+function paintAirStairs(t: number): string {
+  return paintPlotted((plot) => {
+    const lift = 0.5 + Math.sin(t * 0.55) * 0.5;
+    const topV = 0.1 - lift * 0.55;
+    const bottomU = -1.25;
+    const topU = 0.72;
+    for (let step = 0; step < 9; step += 1) {
+      const f = step / 8;
+      const u = bottomU + (topU - bottomU) * f;
+      const v = 0.6 + (topV - 0.6) * f;
+      for (let x = 0; x <= 4; x += 1) plot(u + (x / 4) * 0.28, v, 0.7);
+      if (step < 8) for (let y = 0; y <= 3; y += 1) plot(u + 0.28, v + (y / 3) * 0.12, 0.5);
+    }
+    for (let rail = 0; rail < 2; rail += 1) {
+      for (let s = 0; s <= 22; s += 1) {
+        const f = s / 22;
+        plot(bottomU + (topU - bottomU) * f, 0.36 + (topV - 0.24 - 0.36) * f + rail * 0.08, 0.4);
+      }
+    }
+    for (let x = 0; x <= 13; x += 1) plot(-1.35 + (x / 13) * 0.9, 0.75, 0.55);
+    for (let wheel = 0; wheel < 2; wheel += 1) plot(-1.18 + wheel * 0.55, 0.84, 0.9);
+    /* The door waits at one height while the stair platform rises to it. */
+    for (let y = 0; y <= 9; y += 1) plot(1.18, -0.78 + (y / 9) * 0.9, 0.5);
+    for (let x = 0; x <= 7; x += 1) plot(0.72 + (x / 7) * 0.46, topV, 0.75);
+  });
+}
+
+/* -- Escapement: pallet stones releasing one tooth at a time -------------- */
+
+function paintEscapement(t: number): string {
+  return paintPlotted((plot) => {
+    const tick = Math.sin(t * 4.2) >= 0 ? 1 : -1;
+    const turn = Math.floor(t * 4.2 / Math.PI) * (TAU / 15);
+    for (let tooth = 0; tooth < 15; tooth += 1) {
+      const angle = turn + (tooth / 15) * TAU;
+      for (let r = 0; r <= 5; r += 1) {
+        const radius = 0.48 + (r / 5) * 0.17;
+        plot(Math.cos(angle) * radius, 0.2 + Math.sin(angle) * radius * 0.82, 0.58 + (r / 5) * 0.25);
+      }
+    }
+    for (let a = 0; a <= 28; a += 1) {
+      const angle = (a / 28) * TAU;
+      plot(Math.cos(angle) * 0.47, 0.2 + Math.sin(angle) * 0.39, 0.42);
+    }
+    /* The fork rocks between two banking pins and only one stone locks. */
+    const fork = tick * 0.13;
+    for (let s = 0; s <= 12; s += 1) plot(fork + (s / 12 - 0.5) * 1.35, -0.48 + Math.abs(s / 12 - 0.5) * 0.35, 0.72);
+    plot(-0.68 + fork, -0.28, tick < 0 ? 1 : 0.45);
+    plot(0.68 + fork, -0.28, tick > 0 ? 1 : 0.45);
+    for (let y = 0; y <= 5; y += 1) plot(fork, -0.48 - (y / 5) * 0.36, 0.6);
+  });
+}
+
+/* -- Balance wheel: an oscillator returning through its centre ------------ */
+
+function paintBalanceWheel(t: number): string {
+  return paintPlotted((plot) => {
+    const angle = Math.sin(t * 2.8) * 1.15;
+    for (let a = 0; a <= 64; a += 1) {
+      const theta = (a / 64) * TAU;
+      plot(Math.cos(theta) * 1.02, Math.sin(theta) * 0.79, 0.62);
+    }
+    for (let spoke = 0; spoke < 5; spoke += 1) {
+      const theta = angle + (spoke / 5) * TAU;
+      for (let r = 0; r <= 12; r += 1) {
+        const f = r / 12;
+        plot(Math.cos(theta) * f, Math.sin(theta) * f * 0.78, 0.45 + f * 0.25);
+      }
+    }
+    for (let a = 0; a <= 12; a += 1) {
+      const theta = (a / 12) * TAU;
+      plot(Math.cos(theta) * 0.13, Math.sin(theta) * 0.1, 0.9);
+    }
+    /* The hairspring breathes opposite the wheel's angular displacement. */
+    for (let s = 0; s <= 55; s += 1) {
+      const f = s / 55;
+      const theta = f * TAU * 3.2 + angle;
+      const radius = 0.13 + f * (0.58 - Math.abs(angle) * 0.08);
+      plot(Math.cos(theta) * radius, Math.sin(theta) * radius * 0.78, 0.36);
+    }
+  });
+}
+
+/* -- Mainspring wind: a barrel tightening a strip from the outside -------- */
+
+function paintMainspringWind(t: number): string {
+  return paintPlotted((plot) => {
+    const wind = 0.5 + Math.sin(t * 0.52) * 0.5;
+    for (let a = 0; a <= 56; a += 1) {
+      const angle = (a / 56) * TAU;
+      plot(Math.cos(angle) * 1.12, Math.sin(angle) * 0.82, 0.45);
+    }
+    const turns = 2.3 + wind * 2.4;
+    for (let s = 0; s <= 120; s += 1) {
+      const f = s / 120;
+      const angle = f * TAU * turns - t * 0.2;
+      const radius = 0.12 + f * (0.86 - wind * 0.18);
+      plot(Math.cos(angle) * radius, Math.sin(angle) * radius * 0.78, 0.52 + f * 0.28);
+    }
+    /* The arbor turns as the outer end remains hooked to the barrel. */
+    for (let spoke = 0; spoke < 3; spoke += 1) {
+      const angle = t * 1.1 + (spoke / 3) * TAU;
+      for (let r = 0; r <= 5; r += 1) plot(Math.cos(angle) * (r / 5) * 0.22, Math.sin(angle) * (r / 5) * 0.17, 0.9);
+    }
+    plot(0.92, 0, 0.95);
+  });
+}
+
+/* -- Gear train: three wheels handing rotation down the movement ---------- */
+
+function paintWatchGearTrain(t: number): string {
+  return paintPlotted((plot) => {
+    const gears = [
+      { u: -0.82, v: 0.15, r: 0.56, teeth: 12, speed: 0.7 },
+      { u: 0.1, v: -0.3, r: 0.39, teeth: 9, speed: -1.0 },
+      { u: 0.82, v: 0.28, r: 0.3, teeth: 7, speed: 1.35 },
+    ];
+    for (const gear of gears) {
+      const turn = t * gear.speed;
+      for (let tooth = 0; tooth < gear.teeth; tooth += 1) {
+        const angle = turn + (tooth / gear.teeth) * TAU;
+        for (let r = 0; r <= 4; r += 1) {
+          const radius = gear.r * (0.82 + (r / 4) * 0.28);
+          plot(gear.u + Math.cos(angle) * radius, gear.v + Math.sin(angle) * radius * 0.82, 0.55 + (r / 4) * 0.3);
+        }
+      }
+      for (let a = 0; a <= 24; a += 1) {
+        const angle = (a / 24) * TAU;
+        plot(gear.u + Math.cos(angle) * gear.r * 0.72, gear.v + Math.sin(angle) * gear.r * 0.59, 0.36);
+      }
+      plot(gear.u, gear.v, 0.95);
+    }
+  });
+}
+
+/* -- Jewel press: a ruby seated by a descending staking tool -------------- */
+
+function paintJewelPress(t: number): string {
+  return paintPlotted((plot) => {
+    const cycle = (t * 0.48) % 1;
+    const press = cycle < 0.5 ? cycle * 2 : 2 - cycle * 2;
+    for (let x = 0; x <= 22; x += 1) plot(-1.3 + (x / 22) * 2.6, 0.78, 0.5);
+    for (let y = 0; y <= 16; y += 1) plot(-1.2, -0.82 + (y / 16) * 1.6, 0.45);
+    for (let x = 0; x <= 18; x += 1) plot(-1.2 + (x / 18) * 2.15, -0.78, 0.45);
+    const tipV = -0.54 + press * 1.05;
+    for (let y = 0; y <= 9; y += 1) plot(0.12, -0.8 + (y / 9) * (tipV + 0.8), 0.75);
+    for (let x = 0; x <= 7; x += 1) plot(-0.1 + (x / 7) * 0.44, tipV, 0.95);
+    /* The jewel settles into the plate only at the bottom of the stroke. */
+    const jewelV = 0.56 + press * 0.08;
+    for (let a = 0; a <= 14; a += 1) {
+      const angle = (a / 14) * TAU;
+      plot(0.12 + Math.cos(angle) * 0.18, jewelV + Math.sin(angle) * 0.13, 0.75 + press * 0.25);
+    }
+    for (let x = 0; x <= 14; x += 1) plot(-0.48 + (x / 14) * 1.2, 0.7, 0.55);
+  });
+}
+
+/* -- Loupe inspection: a lens sweeping across a running movement ---------- */
+
+function paintLoupeInspection(t: number): string {
+  return paintPlotted((plot) => {
+    const scan = Math.sin(t * 0.55) * 0.8;
+    const lensV = -0.12 + Math.cos(t * 0.7) * 0.12;
+    /* The movement underneath keeps turning while the lens crosses it. */
+    for (let gear = 0; gear < 3; gear += 1) {
+      const gu = -0.85 + gear * 0.85;
+      const gv = 0.34 + (gear % 2) * 0.2;
+      const radius = 0.25 + gear * 0.05;
+      for (let tooth = 0; tooth < 9; tooth += 1) {
+        const angle = t * (gear % 2 ? -1.2 : 0.9) + (tooth / 9) * TAU;
+        plot(gu + Math.cos(angle) * radius, gv + Math.sin(angle) * radius * 0.78, 0.42);
+      }
+    }
+    for (let a = 0; a <= 42; a += 1) {
+      const angle = (a / 42) * TAU;
+      plot(scan + Math.cos(angle) * 0.68, lensV + Math.sin(angle) * 0.54, 0.8);
+    }
+    for (let s = 0; s <= 17; s += 1) plot(scan + 0.52 + (s / 17) * 0.78, lensV + 0.34 + (s / 17) * 0.48, 0.58);
+    /* A magnified balance appears brighter only inside the glass. */
+    for (let a = 0; a <= 18; a += 1) {
+      const angle = t * 2 + (a / 18) * TAU;
+      plot(scan + Math.cos(angle) * 0.3, lensV + Math.sin(angle) * 0.22, 0.95);
+    }
+  });
+}
+
+/* -- Case polisher: a watch case meeting a fast buffing wheel ------------- */
+
+function paintCasePolisher(t: number): string {
+  return paintPlotted((plot) => {
+    const contact = 0.5 + Math.sin(t * 0.7) * 0.5;
+    const wheelU = -0.48;
+    const caseU = 0.95 - contact * 0.42;
+    for (let a = 0; a <= 52; a += 1) {
+      const angle = (a / 52) * TAU;
+      plot(wheelU + Math.cos(angle) * 0.64, -0.04 + Math.sin(angle) * 0.63, 0.45);
+    }
+    for (let spoke = 0; spoke < 7; spoke += 1) {
+      const angle = t * 7 + (spoke / 7) * TAU;
+      for (let r = 0; r <= 8; r += 1) plot(wheelU + Math.cos(angle) * (r / 8) * 0.6, -0.04 + Math.sin(angle) * (r / 8) * 0.59, 0.42);
+    }
+    for (let a = 0; a <= 30; a += 1) {
+      const angle = (a / 30) * TAU;
+      plot(caseU + Math.cos(angle) * 0.42, 0.08 + Math.sin(angle) * 0.33, 0.78);
+    }
+    for (let s = 0; s <= 12; s += 1) plot(caseU + 0.38 + (s / 12) * 0.58, 0.08 + (s / 12) * 0.55, 0.42);
+    if (contact > 0.72) {
+      for (let spark = 0; spark < 8; spark += 1) {
+        const life = (t * 1.8 + hash(spark)) % 1;
+        plot(0.15 + life * (0.45 + hash(spark * 3.3) * 0.3), 0.05 + life * (hash(spark * 7.1) - 0.2), (1 - life) * contact);
+      }
+    }
+  });
+}
+
+/* -- Line shaft: overhead power split among three machines ---------------- */
+
+function paintLineShaft(t: number): string {
+  return paintPlotted((plot) => {
+    for (let x = 0; x <= 30; x += 1) plot(-ASPECT + (x / 30) * ASPECT * 2, -0.72, 0.5);
+    for (let pulley = 0; pulley < 3; pulley += 1) {
+      const u = -1.05 + pulley * 1.05;
+      const radius = 0.16 + pulley * 0.04;
+      const turn = t * (3.4 - pulley * 0.45);
+      for (let a = 0; a <= 16; a += 1) {
+        const angle = (a / 16) * TAU;
+        plot(u + Math.cos(angle) * radius, -0.72 + Math.sin(angle) * radius, 0.65);
+      }
+      plot(u + Math.cos(turn) * radius, -0.72 + Math.sin(turn) * radius, 1);
+      /* Each crossed belt reverses the machine below it. */
+      for (let s = 0; s <= 14; s += 1) {
+        const f = s / 14;
+        plot(u - radius + f * radius * 2, -0.58 + f * 1.05, 0.35);
+        plot(u + radius - f * radius * 2, -0.58 + f * 1.05, 0.35);
+      }
+      for (let a = 0; a <= 18; a += 1) {
+        const angle = (a / 18) * TAU;
+        plot(u + Math.cos(angle) * 0.26, 0.56 + Math.sin(angle) * 0.23, 0.55);
+      }
+      plot(u + Math.cos(-turn * 0.7) * 0.22, 0.56 + Math.sin(-turn * 0.7) * 0.2, 0.9);
+    }
+  });
+}
+
+/* -- Shaper ram: a single-point tool cutting on the forward stroke -------- */
+
+function paintShaperRam(t: number): string {
+  return paintPlotted((plot) => {
+    const phase = (t * 0.65) % 1;
+    /* The return is faster than the cutting stroke, as the crank demands. */
+    const travel = phase < 0.72 ? phase / 0.72 : 1 - (phase - 0.72) / 0.28;
+    const ramU = -1.2 + travel * 1.65;
+    for (let x = 0; x <= 24; x += 1) plot(-1.48 + (x / 24) * 2.5, -0.45, 0.44);
+    for (let x = 0; x <= 13; x += 1) plot(ramU - 0.52 + (x / 13) * 1.04, -0.22, 0.78);
+    for (let y = 0; y <= 5; y += 1) plot(ramU + 0.46, -0.2 + (y / 5) * 0.45, 0.72);
+    plot(ramU + 0.46, 0.28, phase < 0.72 ? 1 : 0.45);
+    for (let layer = 0; layer < 5; layer += 1) {
+      for (let x = 0; x <= 13; x += 1) plot(0.25 + (x / 13) * 1.05, 0.48 + layer * 0.07, 0.58);
+    }
+    for (let x = 0; x <= 28; x += 1) plot(-1.45 + (x / 28) * 2.9, 0.84, 0.45);
+    if (phase < 0.72) {
+      for (let chip = 0; chip < 6; chip += 1) {
+        const life = (travel * 3 + chip / 6) % 1;
+        plot(ramU + 0.52 + life * 0.35, 0.3 - Math.sin(life * Math.PI) * 0.24, (1 - life) * 0.8);
+      }
+    }
+  });
+}
+
+/* -- Milling table: feed moving under a rotating cutter ------------------- */
+
+function paintMillingTable(t: number): string {
+  return paintPlotted((plot) => {
+    const feed = Math.sin(t * 0.5) * 0.72;
+    for (let y = 0; y <= 8; y += 1) plot(0, -0.85 + (y / 8) * 0.65, 0.5);
+    for (let tooth = 0; tooth < 10; tooth += 1) {
+      const angle = t * 4.5 + (tooth / 10) * TAU;
+      for (let r = 0; r <= 4; r += 1) {
+        const radius = 0.28 + (r / 4) * 0.16;
+        plot(Math.cos(angle) * radius, -0.08 + Math.sin(angle) * radius, 0.62 + (r / 4) * 0.25);
+      }
+    }
+    for (let x = 0; x <= 26; x += 1) plot(feed - 1.1 + (x / 26) * 2.2, 0.49, 0.6);
+    for (let groove = 0; groove < 6; groove += 1) {
+      const u = feed - 0.9 + groove * 0.36;
+      for (let y = 0; y <= 5; y += 1) plot(u, 0.5 + (y / 5) * 0.22, 0.42);
+    }
+    for (let x = 0; x <= 30; x += 1) plot(-1.55 + (x / 30) * 3.1, 0.78, 0.43);
+    /* Chips fly only on the side where the cutter leaves the work. */
+    for (let chip = 0; chip < 7; chip += 1) {
+      const life = (t * 1.5 + hash(chip)) % 1;
+      plot(0.2 + life * (0.35 + hash(chip * 3.1) * 0.35), 0.28 - Math.sin(life * Math.PI) * 0.42, (1 - life) * 0.72);
+    }
+  });
+}
+
+/* -- Surface grinder: the table reverses beneath a spinning wheel --------- */
+
+function paintSurfaceGrinder(t: number): string {
+  return paintPlotted((plot) => {
+    const table = Math.sin(t * 0.8) * 0.76;
+    const downfeed = 0.04 + Math.sin(t * 0.19) * 0.035;
+    for (let a = 0; a <= 40; a += 1) {
+      const angle = (a / 40) * TAU;
+      plot(-0.2 + Math.cos(angle) * 0.55, -0.22 + downfeed + Math.sin(angle) * 0.48, 0.62);
+    }
+    for (let spoke = 0; spoke < 6; spoke += 1) {
+      const angle = t * 7 + (spoke / 6) * TAU;
+      for (let r = 0; r <= 7; r += 1) plot(-0.2 + Math.cos(angle) * (r / 7) * 0.5, -0.22 + downfeed + Math.sin(angle) * (r / 7) * 0.43, 0.4);
+    }
+    for (let x = 0; x <= 25; x += 1) plot(table - 0.95 + (x / 25) * 1.9, 0.43, 0.7);
+    for (let x = 0; x <= 29; x += 1) plot(table - 1.15 + (x / 29) * 2.3, 0.68, 0.45);
+    for (let y = 0; y <= 5; y += 1) plot(table - 0.95, 0.44 + (y / 5) * 0.24, 0.45);
+    if (Math.abs(table + 0.2) < 0.58) {
+      for (let spark = 0; spark < 8; spark += 1) {
+        const life = (t * 2.2 + hash(spark)) % 1;
+        plot(0.2 + life * 0.65, 0.18 + life * (0.28 + hash(spark) * 0.25), (1 - life) * 0.8);
+      }
+    }
+  });
+}
+
+/* -- Turret indexer: a new tool locking into the cutting position --------- */
+
+function paintTurretIndexer(t: number): string {
+  return paintPlotted((plot) => {
+    const steps = 6;
+    const raw = t * 0.55;
+    const index = Math.floor(raw);
+    const move = clamp01((raw - index) * 3);
+    const eased = move * move * (3 - 2 * move);
+    const turn = (index + eased) * (TAU / steps);
+    for (let side = 0; side < steps; side += 1) {
+      const a = turn + (side / steps) * TAU;
+      const b = turn + ((side + 1) / steps) * TAU;
+      for (let s = 0; s <= 8; s += 1) {
+        const f = s / 8;
+        plot(
+          Math.cos(a) * 0.65 + (Math.cos(b) - Math.cos(a)) * 0.65 * f,
+          -0.12 + (Math.sin(a) + (Math.sin(b) - Math.sin(a)) * f) * 0.53,
+          0.65,
+        );
+      }
+      /* Tool holders point out from every turret face. */
+      for (let r = 0; r <= 7; r += 1) {
+        const radius = 0.65 + (r / 7) * 0.45;
+        plot(Math.cos(a) * radius, -0.12 + Math.sin(a) * radius * 0.82, side === 0 ? 1 : 0.48);
+      }
+    }
+    plot(0, -0.12, 0.95);
+    for (let x = 0; x <= 26; x += 1) plot(-1.35 + (x / 26) * 2.7, 0.75, 0.42);
+    for (let y = 0; y <= 8; y += 1) plot(1.25, 0.72 - (y / 8) * 0.48, 0.5);
+  });
+}
+
+/* -- Broach press: graduated teeth pulled through a keyed part ------------ */
+
+function paintBroachPress(t: number): string {
+  return paintPlotted((plot) => {
+    const cycle = (t * 0.35) % 1;
+    const pull = cycle < 0.78 ? cycle / 0.78 : 1 - (cycle - 0.78) / 0.22;
+    for (let y = 0; y <= 18; y += 1) {
+      const v = -0.86 + (y / 18) * 1.72;
+      plot(-1.22, v, 0.43);
+      plot(1.22, v, 0.43);
+    }
+    for (let x = 0; x <= 22; x += 1) plot(-1.1 + (x / 22) * 2.2, 0.42, 0.65);
+    for (let a = 0; a <= 18; a += 1) {
+      const angle = (a / 18) * TAU;
+      plot(Math.cos(angle) * 0.36, 0.42 + Math.sin(angle) * 0.18, 0.72);
+    }
+    const headV = -0.76 + pull * 1.38;
+    for (let y = 0; y <= 18; y += 1) {
+      const f = y / 18;
+      const v = headV - f * 1.25;
+      const width = 0.06 + f * 0.2;
+      plot(-width, v, 0.75);
+      plot(width, v, 0.75);
+      if (y % 3 === 0) {
+        plot(-width - 0.12, v, 0.9);
+        plot(width + 0.12, v, 0.9);
+      }
+    }
+    for (let x = 0; x <= 10; x += 1) plot(-0.45 + (x / 10) * 0.9, headV, 0.85);
+  });
+}
+
+/* -- Chain hoist: an endless hand chain lifting a travelling hook --------- */
+
+function paintChainHoist(t: number): string {
+  return paintPlotted((plot) => {
+    for (let x = 0; x <= 30; x += 1) plot(-ASPECT + (x / 30) * ASPECT * 2, -0.82, 0.45);
+    for (let a = 0; a <= 24; a += 1) {
+      const angle = (a / 24) * TAU;
+      plot(Math.cos(angle) * 0.34, -0.55 + Math.sin(angle) * 0.28, 0.65);
+    }
+    /* Bright links walk around the fixed hand-chain loop. */
+    for (let link = 0; link < 18; link += 1) {
+      const f = (link / 18 + t * 0.28) % 1;
+      const side = f < 0.5 ? -1 : 1;
+      const along = f < 0.5 ? f * 2 : (1 - f) * 2;
+      plot(0.72 + side * 0.16, -0.45 + along * 1.18, link % 2 ? 0.55 : 0.9);
+    }
+    for (let y = 0; y <= 13; y += 1) plot(0, -0.3 + (y / 13) * 0.9, 0.45);
+    const lift = 0.5 + Math.sin(t * 0.72) * 0.5;
+    const hookV = 0.62 - lift * 0.82;
+    for (let y = 0; y <= 12; y += 1) plot(0, -0.27 + (y / 12) * (hookV + 0.27), 0.75);
+    for (let a = 0; a <= 12; a += 1) {
+      const angle = (a / 12) * Math.PI * 1.45;
+      plot(0.13 + Math.cos(angle) * 0.2, hookV + 0.18 + Math.sin(angle) * 0.2, 0.9);
+    }
+    for (let x = 0; x <= 13; x += 1) plot(-0.52 + (x / 13) * 1.04, hookV + 0.48, 0.6);
+  });
+}
+
+/* -- Trommel screen: mixed fragments tumbling through a turning drum ------ */
+
+function paintTrommelScreen(t: number): string {
+  return paintPlotted((plot) => {
+    const leftU = -1.25;
+    const rightU = 1.18;
+    for (let s = 0; s <= 30; s += 1) {
+      const f = s / 30;
+      const u = leftU + (rightU - leftU) * f;
+      const centreV = -0.12 + f * 0.34;
+      plot(u, centreV - 0.42, 0.55);
+      plot(u, centreV + 0.42, 0.55);
+      if (s % 4 === 0) {
+        plot(u, centreV - 0.25, 0.34);
+        plot(u, centreV + 0.25, 0.34);
+      }
+    }
+    for (let ring = 0; ring < 4; ring += 1) {
+      const f = ring / 3;
+      const u = leftU + (rightU - leftU) * f;
+      const centreV = -0.12 + f * 0.34;
+      for (let a = 0; a <= 16; a += 1) {
+        const angle = (a / 16) * TAU;
+        plot(u + Math.cos(angle) * 0.13, centreV + Math.sin(angle) * 0.42, 0.5);
+      }
+    }
+    for (let scrap = 0; scrap < 15; scrap += 1) {
+      const f = (t * 0.16 + hash(scrap * 3.7)) % 1;
+      const angle = t * 2.8 + hash(scrap) * TAU;
+      const u = leftU + (rightU - leftU) * f;
+      const centreV = -0.12 + f * 0.34;
+      plot(u, centreV + Math.sin(angle) * 0.31, 0.55 + hash(scrap) * 0.4);
+      if (Math.sin(angle) > 0.7 && scrap % 3 === 0) plot(u, 0.76, 0.65);
+    }
+  });
+}
+
+/* -- Eddy separator: conductive pieces thrown clear of the belt ----------- */
+
+function paintEddySeparator(t: number): string {
+  return paintPlotted((plot) => {
+    for (let x = 0; x <= 25; x += 1) plot(-1.5 + (x / 25) * 2.35, 0.35, 0.55);
+    for (let roller = 0; roller < 2; roller += 1) {
+      const ru = -1.35 + roller * 2.05;
+      for (let a = 0; a <= 18; a += 1) {
+        const angle = (a / 18) * TAU;
+        plot(ru + Math.cos(angle) * 0.19, 0.48 + Math.sin(angle) * 0.18, 0.65);
+      }
+      plot(ru + Math.cos(t * 5) * 0.14, 0.48 + Math.sin(t * 5) * 0.13, 0.95);
+    }
+    for (let piece = 0; piece < 9; piece += 1) {
+      const life = (t * 0.28 + piece / 9) % 1;
+      if (life < 0.64) {
+        const f = life / 0.64;
+        plot(-1.35 + f * 2.05, 0.25, 0.55 + (piece % 2) * 0.35);
+      } else {
+        const f = (life - 0.64) / 0.36;
+        const conductive = piece % 2 === 0;
+        const u = 0.7 + f * (conductive ? 1.0 : 0.55);
+        const v = 0.25 - Math.sin(f * Math.PI) * (conductive ? 0.85 : 0.28) + f * 0.45;
+        plot(u, v, conductive ? 0.95 : 0.55);
+      }
+    }
+    /* The splitter makes the two landing bins unambiguous. */
+    for (let y = 0; y <= 7; y += 1) plot(1.18, 0.25 + (y / 7) * 0.65, 0.48);
+  });
+}
+
+/* -- Magnetic belt: ferrous pieces climbing away from the waste stream ---- */
+
+function paintMagneticBelt(t: number): string {
+  return paintPlotted((plot) => {
+    for (let x = 0; x <= 30; x += 1) plot(-1.55 + (x / 30) * 3.1, 0.68, 0.45);
+    for (let s = 0; s <= 30; s += 1) {
+      const f = s / 30;
+      plot(-1.15 + f * 2.3, -0.62 + Math.sin(f * Math.PI) * 0.18, 0.58);
+    }
+    for (let roller = 0; roller < 2; roller += 1) {
+      const ru = -1.15 + roller * 2.3;
+      for (let a = 0; a <= 14; a += 1) {
+        const angle = (a / 14) * TAU;
+        plot(ru + Math.cos(angle) * 0.17, -0.59 + Math.sin(angle) * 0.16, 0.6);
+      }
+    }
+    for (let item = 0; item < 11; item += 1) {
+      const f = (t * 0.22 + item / 11) % 1;
+      if (item % 3 === 0 && f > 0.28) {
+        const lift = clamp01((f - 0.28) * 3);
+        const u = -1.15 + f * 2.3;
+        const beltV = -0.62 + Math.sin(f * Math.PI) * 0.18;
+        plot(u, 0.58 + (beltV - 0.58) * lift, 0.95);
+        if (f > 0.9) plot(u, beltV + (f - 0.9) * 4, 0.75);
+      } else {
+        plot(-1.55 + f * 3.1, 0.58, 0.55);
+      }
+    }
+    for (let y = 0; y <= 7; y += 1) plot(1.35, 0.25 + (y / 7) * 0.64, 0.4);
+  });
+}
+
+/* -- Glass crusher: counter-moving jaws reducing bottles to cullet -------- */
+
+function paintGlassCrusher(t: number): string {
+  return paintPlotted((plot) => {
+    const crush = 0.5 + Math.sin(t * 1.3) * 0.5;
+    for (let side = -1; side <= 1; side += 2) {
+      const inner = side * (0.5 - crush * 0.28);
+      for (let y = 0; y <= 12; y += 1) {
+        const v = -0.55 + (y / 12) * 0.92;
+        const u = inner + side * Math.abs(v + 0.1) * 0.55;
+        plot(u, v, 0.75);
+        if (y % 3 === 0) plot(u - side * 0.16, v, 0.95);
+      }
+    }
+    for (let bottle = 0; bottle < 4; bottle += 1) {
+      const life = (t * 0.33 + bottle / 4) % 1;
+      if (life < 0.56) {
+        const v = -0.9 + (life / 0.56) * 0.75;
+        const u = (bottle - 1.5) * 0.24;
+        for (let y = 0; y <= 4; y += 1) plot(u, v + (y / 4) * 0.25, 0.62);
+        plot(u - 0.09, v + 0.24, 0.5);
+        plot(u + 0.09, v + 0.24, 0.5);
+      } else {
+        for (let shard = 0; shard < 4; shard += 1) {
+          const fall = (life - 0.56) / 0.44;
+          plot((hash(bottle * 7 + shard) - 0.5) * (0.35 + fall), 0.1 + fall * 0.72, (1 - fall * 0.5) * 0.8);
+        }
+      }
+    }
+    for (let x = 0; x <= 22; x += 1) plot(-0.85 + (x / 22) * 1.7, 0.85, 0.48);
+  });
+}
+
+/* -- Can baler: loose cans compressed and the finished bale ejected ------- */
+
+function paintCanBaler(t: number): string {
+  return paintPlotted((plot) => {
+    const cycle = (t * 0.28) % 1;
+    const close = cycle < 0.45 ? cycle / 0.45 : cycle < 0.7 ? 1 : clamp01(1 - (cycle - 0.7) / 0.2);
+    const eject = clamp01((cycle - 0.82) / 0.18);
+    for (let y = 0; y <= 15; y += 1) {
+      plot(-1.25, -0.7 + (y / 15) * 1.5, 0.48);
+      plot(0.72, -0.7 + (y / 15) * 1.5, 0.48);
+    }
+    for (let x = 0; x <= 18; x += 1) plot(-1.18 + (x / 18) * 1.82, 0.78, 0.5);
+    const platenV = -0.62 + close * 0.9;
+    for (let x = 0; x <= 17; x += 1) plot(-1.12 + (x / 17) * 1.7, platenV, 0.85);
+    for (let y = 0; y <= 7; y += 1) plot(-0.28, -0.86 + (y / 7) * (platenV + 0.86), 0.65);
+    for (let can = 0; can < 10; can += 1) {
+      const row = Math.floor(can / 5);
+      const u = -1 + (can % 5) * 0.34 + eject * 1.8;
+      const v = 0.62 - row * (0.18 - close * 0.08);
+      plot(u, v, 0.55 + close * 0.35);
+      plot(u + 0.12 * (1 - close), v, 0.5);
+    }
+    for (let x = 0; x <= 12; x += 1) plot(0.72 + (x / 12) * 0.85, 0.78, 0.38);
+  });
+}
+
+/* -- Bottle sorter: a star wheel metering containers into two lanes ------- */
+
+function paintBottleSorter(t: number): string {
+  return paintPlotted((plot) => {
+    const turn = t * 1.5;
+    for (let pocket = 0; pocket < 8; pocket += 1) {
+      const angle = turn + (pocket / 8) * TAU;
+      for (let r = 0; r <= 7; r += 1) {
+        const f = r / 7;
+        plot(Math.cos(angle) * f * 0.72, Math.sin(angle) * f * 0.56, 0.48 + f * 0.35);
+      }
+      plot(Math.cos(angle) * 0.78, Math.sin(angle) * 0.61, 0.9);
+    }
+    for (let x = 0; x <= 13; x += 1) plot(-1.55 + (x / 13) * 0.75, 0.02, 0.5);
+    for (let lane = -1; lane <= 1; lane += 2) {
+      for (let s = 0; s <= 14; s += 1) {
+        const f = s / 14;
+        plot(0.72 + f * 0.82, lane * 0.28 + f * lane * 0.34, 0.48);
+      }
+    }
+    for (let bottle = 0; bottle < 6; bottle += 1) {
+      const life = (t * 0.23 + bottle / 6) % 1;
+      if (life < 0.4) {
+        const u = -1.5 + (life / 0.4) * 0.75;
+        plot(u, 0, 0.75);
+        plot(u, -0.13, 0.55);
+      } else if (life > 0.7) {
+        const f = (life - 0.7) / 0.3;
+        const lane = bottle % 2 ? -1 : 1;
+        plot(0.72 + f * 0.8, lane * (0.28 + f * 0.34), 0.85);
+      }
+    }
+  });
+}
+
+/* -- Paper pulper: sheets disappearing into a churning hydrapulper -------- */
+
+function paintPaperPulper(t: number): string {
+  return paintPlotted((plot) => {
+    for (let a = 0; a <= 44; a += 1) {
+      const angle = (a / 44) * Math.PI;
+      plot(Math.cos(angle) * 1.32, 0.02 + Math.sin(angle) * 0.82, 0.52);
+    }
+    for (let x = 0; x <= 28; x += 1) plot(-1.32 + (x / 28) * 2.64, 0.03, 0.6);
+    for (let spiral = 0; spiral < 3; spiral += 1) {
+      for (let s = 0; s <= 36; s += 1) {
+        const f = s / 36;
+        const angle = t * 2.3 + spiral * (TAU / 3) + f * TAU * 1.4;
+        const radius = 0.12 + f * 0.9;
+        plot(Math.cos(angle) * radius, 0.35 + Math.sin(angle) * radius * 0.48, 0.35 + (1 - f) * 0.48);
+      }
+    }
+    for (let sheet = 0; sheet < 4; sheet += 1) {
+      const life = (t * 0.24 + sheet / 4) % 1;
+      if (life < 0.7) {
+        const v = -0.92 + (life / 0.7) * 1.25;
+        const u = -0.78 + sheet * 0.5 + Math.sin(life * TAU + sheet) * 0.1;
+        const shrink = 1 - life * 0.65;
+        for (let x = 0; x <= 5; x += 1) plot(u - 0.22 * shrink + (x / 5) * 0.44 * shrink, v, 0.75);
+      }
+    }
+    plot(Math.cos(t * 2.3) * 0.18, 0.36 + Math.sin(t * 2.3) * 0.1, 1);
+  });
+}
+
+/* -- Trawl winch: twin drums hauling a loaded net onto the quay ----------- */
+
+function paintTrawlWinch(t: number): string {
+  return paintPlotted((plot) => {
+    for (let drum = 0; drum < 2; drum += 1) {
+      const du = -0.72 + drum * 1.02;
+      for (let a = 0; a <= 24; a += 1) {
+        const angle = (a / 24) * TAU;
+        plot(du + Math.cos(angle) * 0.38, -0.12 + Math.sin(angle) * 0.36, 0.62);
+      }
+      for (let spoke = 0; spoke < 5; spoke += 1) {
+        const angle = t * 2.2 + (spoke / 5) * TAU;
+        for (let r = 0; r <= 6; r += 1) plot(du + Math.cos(angle) * (r / 6) * 0.34, -0.12 + Math.sin(angle) * (r / 6) * 0.32, 0.48);
+      }
+    }
+    const load = 0.5 + Math.sin(t * 0.55) * 0.5;
+    for (let s = 0; s <= 22; s += 1) {
+      const f = s / 22;
+      plot(0.68 + f * 0.9, 0.05 + f * (0.7 - load * 0.75), 0.7);
+    }
+    const netV = 0.72 - load * 0.75;
+    for (let row = 0; row < 5; row += 1) {
+      for (let col = 0; col < 6; col += 1) {
+        plot(1.08 + col * 0.09 + (row % 2) * 0.045, netV + row * 0.08, 0.42 + ((row + col) % 3) * 0.18);
+      }
+    }
+    for (let x = 0; x <= 30; x += 1) plot(-1.55 + (x / 30) * 3.1, 0.88, 0.4);
+  });
+}
+
+/* -- Net mender: a needle carrying twine across a torn mesh ---------------- */
+
+function paintNetMender(t: number): string {
+  return paintPlotted((plot) => {
+    const rows = 6;
+    const cols = 10;
+    for (let row = 0; row < rows; row += 1) {
+      for (let col = 0; col < cols; col += 1) {
+        const u = -1.45 + col * 0.32 + (row % 2) * 0.16;
+        const v = -0.72 + row * 0.28;
+        /* Leave one diamond open until the shuttle crosses it. */
+        if (!((row === 2 || row === 3) && (col === 4 || col === 5))) plot(u, v, 0.45);
+      }
+    }
+    const stitch = (t * 0.42) % 1;
+    const needleU = -0.35 + stitch * 1.05;
+    const needleV = -0.12 + Math.sin(stitch * TAU) * 0.24;
+    for (let s = 0; s <= 8; s += 1) plot(needleU - 0.28 + (s / 8) * 0.56, needleV, 0.95);
+    for (let s = 0; s <= 22; s += 1) {
+      const f = s / 22;
+      const end = Math.min(f, stitch);
+      plot(-0.42 + end * 1.1, -0.18 + Math.sin(end * TAU) * 0.2, 0.75);
+    }
+    if (stitch > 0.55) {
+      for (let s = 0; s <= 12; s += 1) {
+        const f = s / 12;
+        plot(-0.05 + f * 0.42, -0.34 + Math.abs(f - 0.5) * 0.5, 0.65);
+      }
+    }
+  });
+}
+
+/* -- Fish auction: lots advancing while the price clock counts down ------- */
+
+function paintFishAuction(t: number): string {
+  return paintPlotted((plot) => {
+    const lot = Math.floor(t * 0.25);
+    const price = 1 - ((t * 0.55) % 1);
+    for (let x = 0; x <= 30; x += 1) plot(-1.55 + (x / 30) * 3.1, 0.68, 0.45);
+    for (let crate = 0; crate < 4; crate += 1) {
+      const u = -1.4 + (((crate + lot) % 4) / 3) * 2.8;
+      for (let x = 0; x <= 7; x += 1) {
+        plot(u - 0.28 + (x / 7) * 0.56, 0.51, crate === lot % 4 ? 0.9 : 0.55);
+        plot(u - 0.28 + (x / 7) * 0.56, 0.78, 0.45);
+      }
+      plot(u - 0.28, 0.62, 0.5);
+      plot(u + 0.28, 0.62, 0.5);
+      plot(u - 0.08, 0.6, 0.75);
+      plot(u + 0.08, 0.6, 0.75);
+    }
+    const clockU = 0;
+    const clockV = -0.4;
+    for (let a = 0; a <= 30; a += 1) {
+      const angle = (a / 30) * TAU;
+      plot(clockU + Math.cos(angle) * 0.5, clockV + Math.sin(angle) * 0.42, 0.62);
+    }
+    const hand = -Math.PI / 2 + price * TAU;
+    for (let r = 0; r <= 8; r += 1) plot(clockU + Math.cos(hand) * (r / 8) * 0.4, clockV + Math.sin(hand) * (r / 8) * 0.33, 0.95);
+    plot(clockU, clockV, 1);
+  });
+}
+
+/* -- Ice chute: blocks sliding down to a waiting fish box ----------------- */
+
+function paintIceChute(t: number): string {
+  return paintPlotted((plot) => {
+    for (let rail = 0; rail < 2; rail += 1) {
+      for (let s = 0; s <= 28; s += 1) {
+        const f = s / 28;
+        plot(-1.45 + f * 2.25, -0.72 + f * 1.02 + rail * 0.17, 0.48);
+      }
+    }
+    for (let block = 0; block < 5; block += 1) {
+      const life = (t * 0.3 + block / 5) % 1;
+      if (life < 0.76) {
+        const f = life / 0.76;
+        const u = -1.38 + f * 2.15;
+        const v = -0.77 + f * 1.02;
+        plot(u, v, 0.95);
+        plot(u + 0.13, v + 0.05, 0.68);
+        plot(u - 0.1, v + 0.08, 0.58);
+      } else {
+        const fall = (life - 0.76) / 0.24;
+        plot(0.8 + fall * 0.16, 0.28 + fall * 0.42, 0.8);
+      }
+    }
+    for (let x = 0; x <= 18; x += 1) {
+      plot(0.45 + (x / 18) * 1.05, 0.62, 0.6);
+      plot(0.45 + (x / 18) * 1.05, 0.88, 0.46);
+    }
+    for (let y = 0; y <= 5; y += 1) {
+      plot(0.45, 0.62 + (y / 5) * 0.26, 0.5);
+      plot(1.5, 0.62 + (y / 5) * 0.26, 0.5);
+    }
+  });
+}
+
+/* -- Crab pot: a baited cage descending below the harbour surface --------- */
+
+function paintCrabPot(t: number): string {
+  return paintPlotted((plot) => {
+    const cycle = 0.5 + Math.sin(t * 0.5) * 0.5;
+    const potV = -0.3 + cycle * 0.95;
+    for (let x = 0; x <= 30; x += 1) plot(-1.55 + (x / 30) * 3.1, -0.58 + Math.sin(x * 1.3 + t * 1.4) * 0.05, 0.35);
+    for (let y = 0; y <= 16; y += 1) plot(0, -0.9 + (y / 16) * (potV + 0.9), 0.68);
+    for (let x = 0; x <= 18; x += 1) {
+      const u = -0.62 + (x / 18) * 1.24;
+      plot(u, potV, 0.72);
+      plot(u, potV + 0.44, 0.56);
+    }
+    for (let side = -1; side <= 1; side += 2) {
+      for (let y = 0; y <= 7; y += 1) plot(side * 0.62, potV + (y / 7) * 0.44, 0.62);
+    }
+    for (let rib = -2; rib <= 2; rib += 1) {
+      for (let y = 0; y <= 6; y += 1) plot(rib * 0.2, potV + (y / 6) * 0.44, 0.34);
+    }
+    for (let bubble = 0; bubble < 8; bubble += 1) {
+      const life = (t * 0.45 + hash(bubble)) % 1;
+      plot(0.1 + (hash(bubble * 3.2) - 0.5) * 0.9, potV - life * 1.1, (1 - life) * cycle * 0.7);
+    }
+  });
+}
+
+/* -- Harbour crane: a slewing jib transferring a crate ashore ------------- */
+
+function paintHarbourCrane(t: number): string {
+  return paintPlotted((plot) => {
+    const slew = 0.5 + Math.sin(t * 0.45) * 0.5;
+    const tipU = -1.18 + slew * 2.35;
+    const tipV = -0.58 + Math.abs(slew - 0.5) * 0.18;
+    for (let y = 0; y <= 17; y += 1) plot(0, -0.72 + (y / 17) * 1.55, 0.55);
+    for (let s = 0; s <= 26; s += 1) {
+      const f = s / 26;
+      plot(f * tipU, -0.68 + f * (tipV + 0.68), 0.72);
+      if (s % 4 === 0) plot(f * tipU, -0.5 + f * (tipV + 0.48), 0.35);
+    }
+    const lift = 0.5 + Math.sin(t * 0.9 + 0.8) * 0.5;
+    const crateV = tipV + 0.28 + lift * 0.75;
+    for (let y = 0; y <= 10; y += 1) plot(tipU, tipV + (y / 10) * (crateV - tipV), 0.65);
+    for (let x = 0; x <= 8; x += 1) {
+      plot(tipU - 0.28 + (x / 8) * 0.56, crateV, 0.8);
+      plot(tipU - 0.28 + (x / 8) * 0.56, crateV + 0.28, 0.55);
+    }
+    plot(tipU - 0.28, crateV + 0.14, 0.62);
+    plot(tipU + 0.28, crateV + 0.14, 0.62);
+    for (let x = 0; x <= 30; x += 1) plot(-1.55 + (x / 30) * 3.1, 0.88, 0.4);
+  });
+}
+
+/* -- Slipway boat: a hull climbing the greased rails ---------------------- */
+
+function paintSlipwayBoat(t: number): string {
+  return paintPlotted((plot) => {
+    const travel = 0.5 + Math.sin(t * 0.42) * 0.5;
+    for (let rail = 0; rail < 2; rail += 1) {
+      for (let s = 0; s <= 28; s += 1) {
+        const f = s / 28;
+        plot(-1.5 + f * 3, 0.85 - f * 0.88 + rail * 0.12, 0.42);
+      }
+    }
+    for (let roller = 0; roller < 8; roller += 1) {
+      const f = roller / 7;
+      plot(-1.35 + f * 2.7, 0.85 - f * 0.8, 0.55 + Math.sin(t * 4 + roller) * 0.22);
+    }
+    const boatU = -1.05 + travel * 2.1;
+    const boatV = 0.58 - travel * 0.62;
+    for (let s = 0; s <= 24; s += 1) {
+      const f = s / 24;
+      const u = boatU - 0.78 + f * 1.56;
+      const keel = boatV + Math.sin(f * Math.PI) * 0.33;
+      plot(u, keel, 0.8);
+      if (f > 0.14 && f < 0.86) plot(u, boatV - 0.06, 0.55);
+    }
+    for (let y = 0; y <= 6; y += 1) plot(boatU, boatV - 0.06 - (y / 6) * 0.52, 0.65);
+    for (let x = 0; x <= 9; x += 1) plot(boatU - 0.1 + (x / 9) * 0.62, boatV - 0.42, 0.55);
+    /* The winch cable shortens as the hull climbs the slip. */
+    for (let s = 0; s <= 14; s += 1) {
+      const f = s / 14;
+      plot(boatU + 0.75 + f * (1.58 - boatU - 0.75), boatV + f * (-0.7 - boatV), 0.45);
+    }
+  });
+}
+
 /** Builds one painter. Called once per surface that shows an animation. */
 export type PainterFactory = () => Painter;
 
@@ -12840,4 +15586,109 @@ export const ASCII_ANIMATIONS: readonly PainterFactory[] = [
   stateless(paintShavedIce),
   stateless(paintCandyFloss),
   stateless(paintDumplingSteamer),
+  /* The tenth collection: fields from ink, paper and materials under strain,
+     then a print shop, a tailor's, a garage, a fairground, and a theatre. */
+  field(halftoneField),
+  field(darkroomField),
+  field(capillaryField),
+  field(foamHeadField),
+  field(rustBloomField),
+  field(craquelureField),
+  field(dendriteField),
+  field(boilField),
+  field(chalkboardField),
+  field(watermarkField),
+  field(smogLayerField),
+  field(bioluminWakeField),
+  field(zodiacalLightField),
+  field(gravLensField),
+  field(tokamakField),
+  stateless(paintLinotype),
+  stateless(paintScreenPrint),
+  stateless(paintGuillotine),
+  stateless(paintFoldingMachine),
+  stateless(paintSaddleStitcher),
+  stateless(paintInkFountain),
+  stateless(paintPaperReel),
+  stateless(paintPinkingShears),
+  stateless(paintButtonhole),
+  stateless(paintSteamPress),
+  stateless(paintTapeMeasure),
+  stateless(paintZipPull),
+  stateless(paintDressForm),
+  stateless(paintCarLift),
+  stateless(paintTyreChange),
+  stateless(paintWheelBalancer),
+  stateless(paintEngineHoist),
+  stateless(paintOilDrain),
+  stateless(paintSprayBooth),
+  stateless(paintJumpStart),
+  stateless(paintWaltzer),
+  stateless(paintSwingBoat),
+  stateless(paintHelterSkelter),
+  stateless(paintCoconutShy),
+  stateless(paintHookADuck),
+  stateless(paintStrengthTester),
+  stateless(paintGhostTrain),
+  stateless(paintTeacups),
+  stateless(paintStageCurtain),
+  stateless(paintSpotlightRig),
+  stateless(paintTrapDoor),
+  stateless(paintFlyTower),
+  stateless(paintRevolveStage),
+  stateless(paintPuppetStrings),
+  stateless(paintOrchestraPit),
+  /* The eleventh collection: distant atmosphere, marine light and microscopic
+     life, followed by an airport, watch bench, machine hall, recycling plant,
+     and fishing quay. */
+  field(tephraFallField),
+  field(machDiamondField),
+  field(vortexRingField),
+  field(sunGlitterField),
+  field(stElmoField),
+  field(greenFlashField),
+  field(thermoclineField),
+  field(siphonophoreField),
+  field(nacreField),
+  field(chromatophoreField),
+  field(diatomField),
+  field(mitosisField),
+  field(ciliaField),
+  field(stomataField),
+  field(brownianField),
+  stateless(paintPushbackTug),
+  stateless(paintJetBridge),
+  stateless(paintBaggageLoader),
+  stateless(paintDeicingBoom),
+  stateless(paintWindsock),
+  stateless(paintRunwayLights),
+  stateless(paintAirStairs),
+  stateless(paintEscapement),
+  stateless(paintBalanceWheel),
+  stateless(paintMainspringWind),
+  stateless(paintWatchGearTrain),
+  stateless(paintJewelPress),
+  stateless(paintLoupeInspection),
+  stateless(paintCasePolisher),
+  stateless(paintLineShaft),
+  stateless(paintShaperRam),
+  stateless(paintMillingTable),
+  stateless(paintSurfaceGrinder),
+  stateless(paintTurretIndexer),
+  stateless(paintBroachPress),
+  stateless(paintChainHoist),
+  stateless(paintTrommelScreen),
+  stateless(paintEddySeparator),
+  stateless(paintMagneticBelt),
+  stateless(paintGlassCrusher),
+  stateless(paintCanBaler),
+  stateless(paintBottleSorter),
+  stateless(paintPaperPulper),
+  stateless(paintTrawlWinch),
+  stateless(paintNetMender),
+  stateless(paintFishAuction),
+  stateless(paintIceChute),
+  stateless(paintCrabPot),
+  stateless(paintHarbourCrane),
+  stateless(paintSlipwayBoat),
 ];

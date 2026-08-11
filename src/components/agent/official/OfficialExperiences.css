@@ -1318,9 +1318,9 @@ strong.agent-activity-history-summary {
   animation-timing-function: ease-in-out;
 }
 
-.agent-activity-pulse.is-active[data-motion="squash"] > span {
-  animation-name: agent-activity-squash;
-  animation-timing-function: cubic-bezier(0.34, 1.4, 0.5, 1);
+.agent-activity-pulse.is-active[data-motion="jolt"] > span {
+  animation-name: agent-activity-jolt;
+  animation-timing-function: cubic-bezier(0.12, 0.9, 0.3, 1);
 }
 
 .agent-activity-pulse.is-active[data-motion="glide"] > span {
@@ -1333,13 +1333,13 @@ strong.agent-activity-history-summary {
   animation-timing-function: cubic-bezier(0.3, 0.9, 0.4, 1);
 }
 
-.agent-activity-pulse.is-active[data-motion="facet"] > span {
-  animation-name: agent-activity-facet;
+.agent-activity-pulse.is-active[data-motion="zigzag"] > span {
+  animation-name: agent-activity-zigzag;
   animation-timing-function: cubic-bezier(0.5, 0, 0.2, 1);
 }
 
-.agent-activity-pulse.is-active[data-motion="spin"] > span {
-  animation-name: agent-activity-spin;
+.agent-activity-pulse.is-active[data-motion="spiral"] > span {
+  animation-name: agent-activity-spiral;
   animation-timing-function: linear;
 }
 
@@ -1348,9 +1348,9 @@ strong.agent-activity-history-summary {
   animation-timing-function: cubic-bezier(0.25, 0.6, 0.4, 1);
 }
 
-.agent-activity-pulse.is-active[data-motion="peel"] > span {
-  animation-name: agent-activity-peel;
-  animation-timing-function: cubic-bezier(0.34, 1.2, 0.5, 1);
+.agent-activity-pulse.is-active[data-motion="flip"] > span {
+  animation-name: agent-activity-flip;
+  animation-timing-function: cubic-bezier(0.55, 0, 0.45, 1);
 }
 
 .agent-activity-pulse.is-active[data-motion="chime"] > span {
@@ -1361,6 +1361,31 @@ strong.agent-activity-history-summary {
 .agent-activity-pulse.is-active[data-motion="flutter"] > span {
   animation-name: agent-activity-flutter;
   animation-timing-function: ease-in-out;
+}
+
+.agent-activity-pulse.is-active[data-motion="recoil"] > span {
+  animation-name: agent-activity-recoil;
+  animation-timing-function: cubic-bezier(0.36, 1.4, 0.5, 1);
+}
+
+.agent-activity-pulse.is-active[data-motion="dart"] > span {
+  animation-name: agent-activity-dart;
+  animation-timing-function: cubic-bezier(0.9, 0, 0.1, 1);
+}
+
+.agent-activity-pulse.is-active[data-motion="waft"] > span {
+  animation-name: agent-activity-waft;
+  animation-timing-function: cubic-bezier(0.22, 0.8, 0.3, 1);
+}
+
+.agent-activity-pulse.is-active[data-motion="ratchet"] > span {
+  animation-name: agent-activity-ratchet;
+  animation-timing-function: cubic-bezier(0.3, 0, 0.2, 1);
+}
+
+.agent-activity-pulse.is-active[data-motion="drip"] > span {
+  animation-name: agent-activity-drip;
+  animation-timing-function: cubic-bezier(0.5, 0, 0.3, 1);
 }
 
 /* Cells a pattern leaves dark on purpose; kept dimmer than the resting glow. */
@@ -2202,22 +2227,28 @@ strong.agent-activity-history-summary {
   }
 }
 
-/* Squash: flattens, then stretches tall, keeping roughly its own area. */
-@keyframes agent-activity-squash {
+/* Jolt: kicked off its spot in one hit, then creeping back over the rest of
+   the cycle. The shove is what reads, not the size. */
+@keyframes agent-activity-jolt {
   0%,
   100% {
     opacity: 0.26;
-    transform: scale(1.24, 0.72);
+    transform: translate(0, 0) scale(0.84);
   }
 
-  30% {
-    opacity: 0.92;
-    transform: scale(0.82, 1.3);
+  12% {
+    opacity: 1;
+    transform: translate(1.5px, -1.2px) scale(1.18);
   }
 
-  62% {
-    opacity: 0.58;
-    transform: scale(1.12, 0.9);
+  46% {
+    opacity: 0.7;
+    transform: translate(0.7px, -0.5px) scale(1.02);
+  }
+
+  78% {
+    opacity: 0.38;
+    transform: translate(0.2px, -0.1px) scale(0.92);
   }
 }
 
@@ -2239,7 +2270,8 @@ strong.agent-activity-history-summary {
   }
 }
 
-/* Bounce: drops in, squashes on the landing, and rebounds twice. */
+/* Bounce: drops in, hits bottom at full brightness, and rebounds twice with
+   less height each time. */
 @keyframes agent-activity-bounce {
   0%,
   100% {
@@ -2249,59 +2281,67 @@ strong.agent-activity-history-summary {
 
   38% {
     opacity: 1;
-    transform: translateY(1px) scale(1.24, 0.86);
+    transform: translateY(1.2px) scale(1.16);
   }
 
   54% {
     opacity: 0.8;
-    transform: translateY(-0.6px) scale(0.94, 1.14);
+    transform: translateY(-0.6px) scale(0.96);
   }
 
   78% {
     opacity: 0.45;
-    transform: translateY(0.55px) scale(1.06, 0.94);
+    transform: translateY(0.55px) scale(1.04);
   }
 }
 
-/* Facet: the cell squares off as it lights, then rounds back to a dot. */
-@keyframes agent-activity-facet {
+/* Zigzag: three hops across the cell, each corner brighter than the last. */
+@keyframes agent-activity-zigzag {
   0%,
   100% {
-    opacity: 0.24;
-    border-radius: 50%;
-    transform: scale(0.84);
+    opacity: 0.22;
+    transform: translate(-1.3px, 0.9px) scale(0.84);
   }
 
-  40% {
-    opacity: 0.96;
-    border-radius: 14%;
-    transform: scale(1.16);
+  32% {
+    opacity: 0.7;
+    transform: translate(0, -1.1px) scale(1);
   }
 
-  72% {
-    opacity: 0.55;
-    border-radius: 34%;
-    transform: scale(1);
+  64% {
+    opacity: 1;
+    transform: translate(1.3px, 0.9px) scale(1.16);
+  }
+
+  84% {
+    opacity: 0.42;
+    transform: translate(0.2px, -0.4px) scale(0.94);
   }
 }
 
-/* Spin: pinched into an ellipse so the turn on the spot actually reads; a
-   round cell rotating would look completely still. */
-@keyframes agent-activity-spin {
+/* Spiral: winds outward from the centre over a full turn, widening and
+   brightening as it goes, then drops back to the middle. Orbit holds one
+   radius; this one grows through the cycle. */
+@keyframes agent-activity-spiral {
   0%,
   100% {
     opacity: 0.24;
-    transform: rotate(0deg) scale(0.9, 0.78);
+    transform: translate(0, 0) scale(0.82);
   }
 
-  40% {
-    opacity: 0.96;
-    transform: rotate(200deg) scale(1.34, 0.86);
+  25% {
+    opacity: 0.5;
+    transform: translate(0.6px, -0.5px) scale(0.94);
   }
 
-  70% {
-    opacity: 0.55;
-    transform: rotate(300deg) scale(1.1, 0.9);
+  50% {
+    opacity: 0.78;
+    transform: translate(0, 1.1px) scale(1.06);
+  }
+
+  75% {
+    opacity: 1;
+    transform: translate(-1.5px, -0.4px) scale(1.18);
   }
 }
 
@@ -2323,22 +2363,32 @@ strong.agent-activity-history-summary {
   }
 }
 
-/* Peel: tips over onto one edge, then springs back flat. */
-@keyframes agent-activity-peel {
-  0%,
-  100% {
-    opacity: 0.26;
-    transform: skewX(0deg) scale(1.02, 0.8);
+/* Flip: pinches away to nothing at the halfway point and comes back up on the
+   other side of it, as if the cell had turned edge-on and round again. */
+@keyframes agent-activity-flip {
+  0% {
+    opacity: 0.28;
+    transform: scale(0.86);
   }
 
-  35% {
+  22% {
     opacity: 0.98;
-    transform: skewX(-26deg) scale(1.18, 1.06);
+    transform: scale(1.16);
   }
 
-  68% {
-    opacity: 0.6;
-    transform: skewX(10deg) scale(1, 1.02);
+  50% {
+    opacity: 0.12;
+    transform: scale(0.24);
+  }
+
+  78% {
+    opacity: 0.9;
+    transform: scale(1.1);
+  }
+
+  100% {
+    opacity: 0.28;
+    transform: scale(0.86);
   }
 }
 
@@ -2375,32 +2425,163 @@ strong.agent-activity-history-summary {
   }
 }
 
-/* Flutter: two full wingbeats a cycle, the second one the stronger. */
+/* Flutter: two wingbeats a cycle, hopping up and down off the resting spot,
+   the second beat the stronger of the two. */
 @keyframes agent-activity-flutter {
   0%,
   100% {
     opacity: 0.24;
-    transform: scale(1.16, 0.62);
+    transform: translateY(0.9px) scale(0.84);
   }
 
   20% {
     opacity: 0.9;
-    transform: scale(0.74, 1.28);
+    transform: translateY(-0.9px) scale(1.08);
   }
 
   40% {
     opacity: 0.62;
-    transform: scale(1.2, 0.7);
+    transform: translateY(0.7px) scale(0.9);
   }
 
   60% {
     opacity: 1;
-    transform: scale(0.78, 1.32);
+    transform: translateY(-1.2px) scale(1.16);
   }
 
   80% {
     opacity: 0.5;
-    transform: scale(1.08, 0.78);
+    transform: translateY(0.4px) scale(0.94);
+  }
+}
+
+/* Recoil: wound down slowly over most of the cycle, then let go all at once. */
+@keyframes agent-activity-recoil {
+  0% {
+    opacity: 0.5;
+    transform: scale(0.92);
+  }
+
+  56% {
+    opacity: 0.18;
+    transform: scale(0.6);
+  }
+
+  70% {
+    opacity: 1;
+    transform: scale(1.3);
+  }
+
+  84% {
+    opacity: 0.66;
+    transform: scale(0.96);
+  }
+
+  100% {
+    opacity: 0.5;
+    transform: scale(0.92);
+  }
+}
+
+/* Dart: a shot across the cell that stops dead in the middle of the run. */
+@keyframes agent-activity-dart {
+  0% {
+    opacity: 0.2;
+    transform: translate(-1.8px, 0) scale(0.8);
+  }
+
+  30% {
+    opacity: 1;
+    transform: translate(0.6px, 0) scale(1.18);
+  }
+
+  46% {
+    opacity: 0.7;
+    transform: translate(0, 0) scale(1.02);
+  }
+
+  100% {
+    opacity: 0.18;
+    transform: translate(1.8px, 0) scale(0.82);
+  }
+}
+
+/* Waft: lifts off the baseline, drifting sideways and swelling as it thins
+   out, the way smoke leaves the source. */
+@keyframes agent-activity-waft {
+  0%,
+  100% {
+    opacity: 0.22;
+    transform: translate(0, 1.3px) scale(0.72);
+  }
+
+  34% {
+    opacity: 1;
+    transform: translate(0.5px, -0.2px) scale(1.08);
+  }
+
+  72% {
+    opacity: 0.42;
+    transform: translate(-0.6px, -1.4px) scale(1.34);
+  }
+}
+
+/* Ratchet: climbs in three even holds, each one a notch brighter and wider,
+   then falls back to rest in one drop. */
+@keyframes agent-activity-ratchet {
+  0%,
+  16% {
+    opacity: 0.24;
+    transform: scale(0.76);
+  }
+
+  24%,
+  40% {
+    opacity: 0.52;
+    transform: scale(0.92);
+  }
+
+  48%,
+  64% {
+    opacity: 0.78;
+    transform: scale(1.06);
+  }
+
+  72%,
+  88% {
+    opacity: 1;
+    transform: scale(1.2);
+  }
+
+  96%,
+  100% {
+    opacity: 0.24;
+    transform: scale(0.76);
+  }
+}
+
+/* Drip: gathers at the top and hangs there, then lets go and falls away fast.
+   The long hold before the fall is what sets it apart from a plain sink. */
+@keyframes agent-activity-drip {
+  0% {
+    opacity: 0.22;
+    transform: translateY(-1.2px) scale(0.7);
+  }
+
+  30%,
+  52% {
+    opacity: 1;
+    transform: translateY(-1.2px) scale(1.2);
+  }
+
+  76% {
+    opacity: 0.5;
+    transform: translateY(0.6px) scale(0.94);
+  }
+
+  100% {
+    opacity: 0.14;
+    transform: translateY(1.5px) scale(0.68);
   }
 }
 
