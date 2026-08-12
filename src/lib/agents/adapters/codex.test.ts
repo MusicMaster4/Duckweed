@@ -142,7 +142,18 @@ describe("codex adapter", () => {
     const h = harness();
     await h.handshake();
 
-    expect(h.sent[0]).toMatchObject({ method: "initialize" });
+    expect(h.sent[0]).toEqual({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        clientInfo: { name: "duckweed", title: "Duckweed", version: "0.1.0" },
+        capabilities: {
+          experimentalApi: true,
+          requestAttestation: false,
+        },
+      },
+    });
     expect(h.sent[1]).toMatchObject({ method: "initialized" });
     // No override: app-server inherits the same config as the normal TUI.
     expect(h.sent[2]).toEqual({

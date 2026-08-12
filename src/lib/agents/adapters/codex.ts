@@ -468,6 +468,14 @@ export function createCodexAdapter(): AgentAdapter {
     try {
       await request(ctx, "initialize", {
         clientInfo: { name: "duckweed", title: "Duckweed", version: "0.1.0" },
+        // `thread/settings/update` is currently part of app-server's
+        // experimental surface. Fast Mode uses that method to change the
+        // service tier without starting a throwaway turn, so opt in during
+        // capability negotiation before sending any thread requests.
+        capabilities: {
+          experimentalApi: true,
+          requestAttestation: false,
+        },
       });
       notify(ctx, "initialized", {});
 
