@@ -58,6 +58,7 @@ const FALLBACKS: Record<AgentId, { name: string; description: string }[]> = {
   codex: [
     { name: "/resume", description: "Continue a past Codex thread in this folder" },
     { name: "/goal", description: "Set or view the goal for a long-running task" },
+    { name: "/fast", description: "Toggle Fast Mode for later turns" },
     { name: "/model", description: "Change the model for later turns" },
     { name: "/effort", description: "Set reasoning effort for later turns" },
     { name: "/compact", description: "Compact the conversation to free context" },

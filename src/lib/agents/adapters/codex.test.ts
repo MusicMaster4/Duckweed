@@ -111,6 +111,9 @@ function harness(overrides: Partial<AgentLaunch> = {}) {
               { reasoningEffort: "medium", description: "" },
               { reasoningEffort: "high", description: "" },
             ],
+            serviceTiers: [
+              { id: "priority", name: "Fast", description: "1.5x speed, increased usage" },
+            ],
           },
           {
             id: "gpt-5.5",
@@ -121,6 +124,7 @@ function harness(overrides: Partial<AgentLaunch> = {}) {
               { reasoningEffort: "low", description: "" },
               { reasoningEffort: "medium", description: "" },
             ],
+            serviceTiers: [],
           },
         ],
         nextCursor: null,
@@ -197,6 +201,12 @@ describe("codex adapter", () => {
     const h = harness();
     await h.handshake();
     expect(h.state()).toMatchObject({ model: "gpt-5.6-sol", effort: "high" });
+  });
+
+  test("reads Fast Mode from the service tier the thread started with", async () => {
+    const h = harness();
+    await h.handshake({ serviceTier: "priority" });
+    expect(h.state().serviceTier).toBe("priority");
   });
 
   test("publishes model/list rows for the header and composer pickers", async () => {
@@ -291,6 +301,65 @@ describe("codex adapter", () => {
     expect(h.state().items.filter((item) => item.kind === "notice").at(-1)).toMatchObject({
       tone: "info",
       text: "Effort: high. gpt-5.6-sol supports: low, medium, high.",
+    });
+  });
+
+  test("toggles Fast Mode through thread settings and carries it on later turns", async () => {
+    const h = harness();
+    await h.handshake();
+    await h.loadModels();
+
+    expect(h.adapter.command?.("/fast", h.ctx)).toBe("handled");
+    expect(h.sent.at(-1)).toMatchObject({
+      id: 4,
+      method: "thread/settings/update",
+      params: { threadId: "thread_1", serviceTier: "priority" },
+    });
+    h.feed({ jsonrpc: "2.0", id: 4, result: {} });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(h.state().serviceTier).toBe("priority");
+    expect(h.state().items.at(-1)).toMatchObject({
+      kind: "notice",
+      tone: "info",
+      text: "Fast Mode enabled.",
+    });
+
+    h.adapter.prompt({ text: "hello", images: [] }, h.ctx);
+    expect(h.sent.at(-1)).toMatchObject({
+      method: "turn/start",
+      params: { serviceTier: "priority" },
+    });
+  });
+
+  test("a second /fast clears the priority service tier", async () => {
+    const h = harness();
+    await h.handshake({ serviceTier: "priority" });
+    await h.loadModels();
+
+    h.adapter.command?.("/fast", h.ctx);
+    expect(h.sent.at(-1)).toMatchObject({
+      id: 4,
+      method: "thread/settings/update",
+      params: { threadId: "thread_1", serviceTier: null },
+    });
+    h.feed({ jsonrpc: "2.0", id: 4, result: {} });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(h.state().serviceTier).toBeNull();
+    expect(h.state().items.at(-1)).toMatchObject({ text: "Fast Mode disabled." });
+  });
+
+  test("blocks models that do not advertise Fast Mode while it is active", async () => {
+    const h = harness();
+    await h.handshake({ serviceTier: "priority" });
+    await h.loadModels();
+
+    h.adapter.command?.("/model gpt-5.5", h.ctx);
+    expect(h.state().model).toBe("gpt-5.6-sol");
+    expect(h.state().items.at(-1)).toMatchObject({
+      tone: "error",
+      text: "gpt-5.5 does not support Fast Mode. Use /fast to turn it off first.",
     });
   });
 
@@ -469,7 +538,7 @@ describe("codex adapter", () => {
     expect(h.sent.at(-1)).toMatchObject({ method: "model/list" });
     expect(h.state().items.find((item) => item.kind === "notice")).toMatchObject({
       tone: "error",
-      text: "Unknown command /frobnicate. Codex knows /model, /effort, /compact, /goal.",
+      text: "Unknown command /frobnicate. Codex knows /model, /effort, /fast, /compact, /goal.",
     });
   });
 
@@ -478,9 +547,19 @@ describe("codex adapter", () => {
     await h.handshake();
     h.notify("thread/settings/updated", {
       threadId: "thread_1",
-      threadSettings: { model: "gpt-5.5", effort: "low" },
+      threadSettings: { model: "gpt-5.5", effort: "low", serviceTier: "priority" },
     });
-    expect(h.state()).toMatchObject({ model: "gpt-5.5", effort: "low" });
+    expect(h.state()).toMatchObject({
+      model: "gpt-5.5",
+      effort: "low",
+      serviceTier: "priority",
+    });
+
+    h.notify("thread/settings/updated", {
+      threadId: "thread_1",
+      threadSettings: { model: "gpt-5.5", effort: "low", serviceTier: null },
+    });
+    expect(h.state().serviceTier).toBeNull();
   });
 
   test("streams reasoning and message deltas without repeating the settled text", async () => {

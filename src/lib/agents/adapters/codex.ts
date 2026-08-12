@@ -48,6 +48,7 @@ interface CodexModel {
   id: string;
   displayName: string;
   efforts: string[];
+  serviceTiers: string[];
   isDefault: boolean;
 }
 
@@ -60,6 +61,7 @@ interface CodexGoal {
 }
 
 const MAX_GOAL_OBJECTIVE_CHARS = 4_000;
+const FAST_SERVICE_TIER = "priority";
 
 const EXEC_STATUS: Record<string, ToolStatus> = {
   inProgress: "running",
@@ -213,6 +215,7 @@ export function createCodexAdapter(): AgentAdapter {
    */
   let currentModel: string | null = null;
   let currentEffort: string | null = null;
+  let currentServiceTier: string | null = null;
   let currentAccess: AgentAccessMode = "default";
   /** `model/list`, once it lands; empty until then, so validation is lenient. */
   let models: CodexModel[] = [];
@@ -244,6 +247,7 @@ export function createCodexAdapter(): AgentAdapter {
       cwd: "",
       model: null,
       effort: null,
+      serviceTier: null,
       accessMode: "default",
       models: [],
       sessionId: childThreadId,
@@ -492,6 +496,7 @@ export function createCodexAdapter(): AgentAdapter {
 
       currentModel = ctx.launch.model;
       currentEffort = ctx.launch.effort;
+      currentServiceTier = null;
       currentAccess = ctx.launch.accessMode ?? "default";
       const thread = await request(ctx, "thread/start", {
         cwd: ctx.cwd,
@@ -510,11 +515,13 @@ export function createCodexAdapter(): AgentAdapter {
       // and the first turn/start is what applies the request.
       currentModel = ctx.launch.model ?? asString(thread.model) ?? currentModel;
       currentEffort = ctx.launch.effort ?? asString(thread.reasoningEffort) ?? currentEffort;
+      currentServiceTier = asString(thread.serviceTier);
       ctx.emit({
         type: "session",
         sessionId: asString(started.sessionId) ?? threadId,
         ...(currentModel ? { model: currentModel } : {}),
         ...(currentEffort ? { effort: currentEffort } : {}),
+        serviceTier: currentServiceTier,
       });
       ctx.emit({ type: "status", status: "idle" });
 
@@ -532,6 +539,13 @@ export function createCodexAdapter(): AgentAdapter {
                 .filter((effort): effort is Record<string, unknown> => effort !== null)
                 .map((effort) => asString(effort.reasoningEffort) ?? "")
                 .filter(Boolean),
+              serviceTiers: [
+                ...asArray(model.serviceTiers)
+                  .map((raw) => asRecord(raw))
+                  .filter((tier): tier is Record<string, unknown> => tier !== null)
+                  .map((tier) => asString(tier.id) ?? ""),
+                ...asArray(model.additionalSpeedTiers).map((tier) => asString(tier) ?? ""),
+              ].filter((tier, index, all) => Boolean(tier) && all.indexOf(tier) === index),
               isDefault: model.isDefault === true,
             }))
             .filter((model) => model.id);
@@ -961,17 +975,23 @@ export function createCodexAdapter(): AgentAdapter {
         return;
       }
       case "thread/settings/updated": {
-        // Codex confirming (or another client making) a model/effort change.
+        // Codex confirming (or another client making) a model, effort, or
+        // service-tier change.
         const settings = asRecord(params.threadSettings);
         const model = asString(settings?.model);
         const effort = asString(settings?.effort);
+        const hasServiceTier = Boolean(
+          settings && Object.prototype.hasOwnProperty.call(settings, "serviceTier"),
+        );
         if (model) currentModel = model;
         if (effort) currentEffort = effort;
-        if (model || effort) {
+        if (hasServiceTier) currentServiceTier = asString(settings?.serviceTier);
+        if (model || effort || hasServiceTier) {
           ctx.emit({
             type: "session",
             ...(model ? { model } : {}),
             ...(effort ? { effort } : {}),
+            ...(hasServiceTier ? { serviceTier: currentServiceTier } : {}),
           });
         }
         return;
@@ -1297,7 +1317,71 @@ export function createCodexAdapter(): AgentAdapter {
     else replaceGoal(objective, ctx);
   }
 
-  /** `/model`, `/effort`, `/compact`, `/goal` — TUI controls wired to RPCs. */
+  /** Codex TUI controls that Duckweed maps onto app-server requests. */
+  function handleFastCommand(arg: string, ctx: AdapterContext): void {
+    const normalized = arg.toLowerCase();
+    if (normalized && normalized !== "on" && normalized !== "off") {
+      ctx.emit({
+        type: "notice",
+        tone: "error",
+        text: "Usage: /fast, /fast on, or /fast off.",
+      });
+      return;
+    }
+
+    const enabled = currentServiceTier === FAST_SERVICE_TIER;
+    const shouldEnable = normalized === "on" ? true : normalized === "off" ? false : !enabled;
+    if (shouldEnable === enabled) {
+      ctx.emit({
+        type: "notice",
+        tone: "info",
+        text: `Fast Mode is already ${enabled ? "enabled" : "disabled"}.`,
+      });
+      return;
+    }
+
+    if (shouldEnable) {
+      const active = models.find((model) => model.id === currentModel);
+      if (active && !active.serviceTiers.includes(FAST_SERVICE_TIER)) {
+        ctx.emit({
+          type: "notice",
+          tone: "error",
+          text: `${currentModel ?? "This model"} does not support Fast Mode.`,
+        });
+        return;
+      }
+    }
+
+    if (!threadId) {
+      ctx.emit({
+        type: "notice",
+        tone: "error",
+        text: "Fast Mode is not available until the Codex session is ready.",
+      });
+      return;
+    }
+
+    const serviceTier = shouldEnable ? FAST_SERVICE_TIER : null;
+    void request(ctx, "thread/settings/update", { threadId, serviceTier })
+      .then(() => {
+        currentServiceTier = serviceTier;
+        ctx.emit({ type: "session", serviceTier });
+        ctx.emit({
+          type: "notice",
+          tone: "info",
+          text: `Fast Mode ${shouldEnable ? "enabled" : "disabled"}.`,
+        });
+      })
+      .catch((error: unknown) => {
+        const record = asRecord(error);
+        ctx.emit({
+          type: "notice",
+          tone: "error",
+          text: asString(record?.message) ?? "Codex could not change Fast Mode.",
+        });
+      });
+  }
+
   function handleCommand(text: string, ctx: AdapterContext): "handled" | "prompt" {
     const space = text.search(/\s/);
     const name = (space < 0 ? text : text.slice(0, space)).toLowerCase();
@@ -1324,6 +1408,18 @@ export function createCodexAdapter(): AgentAdapter {
           type: "notice",
           tone: "error",
           text: `Unknown model "${arg}". Available: ${models.map((model) => model.id).join(", ")}.`,
+        });
+        return "handled";
+      }
+      if (
+        currentServiceTier === FAST_SERVICE_TIER &&
+        known &&
+        !known.serviceTiers.includes(FAST_SERVICE_TIER)
+      ) {
+        ctx.emit({
+          type: "notice",
+          tone: "error",
+          text: `${known.id} does not support Fast Mode. Use /fast to turn it off first.`,
         });
         return "handled";
       }
@@ -1361,6 +1457,11 @@ export function createCodexAdapter(): AgentAdapter {
       return "handled";
     }
 
+    if (name === "/fast") {
+      handleFastCommand(arg, ctx);
+      return "handled";
+    }
+
     if (name === "/compact") {
       if (threadId) {
         void request(ctx, "thread/compact/start", { threadId })
@@ -1385,7 +1486,7 @@ export function createCodexAdapter(): AgentAdapter {
     ctx.emit({
       type: "notice",
       tone: "error",
-      text: `Unknown command ${name}. Codex knows /model, /effort, /compact, /goal.`,
+      text: `Unknown command ${name}. Codex knows /model, /effort, /fast, /compact, /goal.`,
     });
     return "handled";
   }
@@ -1490,6 +1591,7 @@ export function createCodexAdapter(): AgentAdapter {
         // Same sticky override semantics as `model`, and the same casing
         // discipline: `effort` is the exact field name in TurnStartParams.
         ...(currentEffort ? { effort: currentEffort } : {}),
+        ...(currentServiceTier ? { serviceTier: currentServiceTier } : {}),
       }).catch((error: unknown) => {
         const record = asRecord(error);
         ctx.emit({
@@ -1549,6 +1651,7 @@ export function createCodexAdapter(): AgentAdapter {
             ...turnAccessParams(currentAccess),
             ...(child.model ? { model: child.model } : {}),
             ...(currentEffort ? { effort: currentEffort } : {}),
+            ...(currentServiceTier ? { serviceTier: currentServiceTier } : {}),
           });
         } else {
           return false;
@@ -1613,10 +1716,12 @@ export function createCodexAdapter(): AgentAdapter {
           // inside it; neither is guaranteed, so take whichever is there.
           const model = asString(result.model) ?? asString(thread.model);
           if (model) currentModel = model;
+          currentServiceTier = asString(result.serviceTier);
           ctx.emit({
             type: "session",
             sessionId: asString(thread.sessionId) ?? threadId,
             ...(model ? { model } : {}),
+            serviceTier: currentServiceTier,
           });
           ctx.emit({ type: "goal", goal: null });
           void request(ctx, "thread/goal/get", { threadId })

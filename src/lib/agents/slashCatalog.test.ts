@@ -46,6 +46,13 @@ describe("slashCatalog", () => {
     );
   });
 
+  test("offers /fast only to Codex", () => {
+    expect(fallbackCommands("codex").some((command) => command.name === "/fast")).toBe(true);
+    for (const agent of ["claude", "grok", "opencode", "cursor"] as const) {
+      expect(fallbackCommands(agent).some((command) => command.name === "/fast")).toBe(false);
+    }
+  });
+
   test("offers /goal only where the harness can dispatch it", () => {
     expect(fallbackCommands("codex").some((command) => command.name === "/goal")).toBe(true);
     expect(fallbackCommands("claude").some((command) => command.name === "/goal")).toBe(true);
