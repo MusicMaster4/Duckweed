@@ -1116,12 +1116,25 @@ fn grok_credit_observed_at(value: &Value) -> Option<i64> {
         .and_then(parse_rfc3339_ms)
 }
 
+/// Utilization from a Grok billing snapshot. A bare number is the usual form;
+/// `{val: n}` matches the wrapper used for the on-demand counters.
+fn grok_credit_usage_percent(config: &Value) -> Option<f64> {
+    let value = config.get("creditUsagePercent")?;
+    value
+        .as_f64()
+        .or_else(|| value.get("val").and_then(Value::as_f64))
+}
+
 fn grok_quota_at(home: &Path, now: i64) -> Option<Quota> {
     let value = latest_grok_credit_config(home)?;
     let context = value.get("ctx")?;
     let config = context.get("config")?;
-    let reported_percent = config.get("creditUsagePercent")?.as_f64()?;
     let period = config.get("currentPeriod");
+    // Proto3 JSON omits `creditUsagePercent` when it is 0. After a weekly
+    // reset Grok still writes a billing snapshot with the new window, just
+    // no percent field — requiring the field made Usage say there was no
+    // snapshot at all.
+    let reported_percent = grok_credit_usage_percent(config);
     let kind = period
         .and_then(|value| value.get("type"))
         .and_then(Value::as_str)
@@ -1152,6 +1165,9 @@ fn grok_quota_at(home: &Path, now: i64) -> Option<Quota> {
         .zip(period_start)
         .and_then(|(end, start)| (end > start).then_some(end - start))
         .or_else(|| period_window_ms(kind));
+    if reported_percent.is_none() && period.is_none() && period_start.is_none() {
+        return None;
+    }
     let expired = reported_reset.is_some_and(|reset| reset <= now);
     let resets_at = match (reported_reset, window_ms) {
         (Some(reset), Some(window)) if expired => {
@@ -1163,11 +1179,12 @@ fn grok_quota_at(home: &Path, now: i64) -> Option<Quota> {
     // Usage belongs to a billing period, not to the account forever. Once the
     // saved period has ended, carrying its percentage into the next one is
     // strictly wrong. Grok will replace this inferred reset state the next
-    // time it writes a billing snapshot.
+    // time it writes a billing snapshot. A live window with no percent is
+    // the proto3 zero, not a missing snapshot.
     let percent = if expired && window_ms.is_some() {
         0.0
     } else {
-        reported_percent
+        reported_percent.unwrap_or(0.0)
     };
 
     Some(Quota {
@@ -2218,6 +2235,36 @@ mod tests {
             .message
             .as_deref()
             .is_some_and(|message| message.contains("new period")));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn grok_omitted_zero_percent_is_still_a_snapshot() {
+        let root = std::env::temp_dir().join(format!(
+            "duckweed-grok-omitted-percent-{}",
+            std::process::id()
+        ));
+        let dir = root.join(".grok/logs");
+        std::fs::create_dir_all(&dir).unwrap();
+        // After a reset Grok writes the new window and drops creditUsagePercent
+        // (proto3 omits 0). That must still produce a meter, not "unavailable".
+        let line = r#"{"ts":"2026-08-13T12:53:28.124Z","msg":"billing: fetched credits config","ctx":{"config":{"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","start":"2026-08-13T11:57:58.252814+00:00","end":"2026-08-20T11:57:58.252814+00:00"},"onDemandCap":{"val":0},"onDemandUsed":{"val":0},"prepaidBalance":{"val":0},"isUnifiedBillingUser":true,"billingPeriodStart":"2026-08-13T11:57:58.252814+00:00","billingPeriodEnd":"2026-08-20T11:57:58.252814+00:00","historyLen":0},"subscriptionTier":"SuperGrok"}}"#;
+        std::fs::write(dir.join("unified.jsonl"), format!("{line}\n")).unwrap();
+
+        let now = parse_rfc3339_ms("2026-08-13T13:00:00Z").unwrap();
+        let quota = grok_quota_at(&root, now).expect("grok quota");
+        let limit = &quota.limits[0];
+
+        assert_eq!(quota.source, "reported");
+        assert_eq!(quota.plan.as_deref(), Some("SuperGrok"));
+        assert_eq!(limit.label, "Weekly credit limit");
+        assert!((limit.percent - 0.0).abs() < f64::EPSILON);
+        assert_eq!(
+            limit.resets_at,
+            parse_rfc3339_ms("2026-08-20T11:57:58.252814Z")
+        );
+        assert!(quota.message.is_none());
 
         let _ = std::fs::remove_dir_all(&root);
     }
