@@ -1162,6 +1162,10 @@ describe("codex adapter", () => {
       method: "turn/interrupt",
       params: { threadId: "thread_1", turnId: "turn_7" },
     });
+    const interrupt = h.sent.at(-1) as { id: number };
+    h.feed({ jsonrpc: "2.0", id: interrupt.id, result: {} });
+    await Promise.resolve();
+    expect(h.state().status).toBe("idle");
   });
 
   test("reports a refused handshake instead of a blank pane", async () => {
@@ -1307,6 +1311,63 @@ describe("codex adapter", () => {
     h.feed({ jsonrpc: "2.0", id: steer.id, result: {} });
     await Promise.resolve();
     expect(await steered).toBe(true);
+  });
+
+  test("ignores a stale active thread status when every stored turn is finished", async () => {
+    const h = harness();
+    await h.handshake();
+
+    const resumed = h.adapter.resume?.("thread_stale", h.ctx);
+    const call = h.sent.find((message) => message.method === "thread/resume") as { id: number };
+    h.feed({
+      jsonrpc: "2.0",
+      id: call.id,
+      result: {
+        thread: {
+          id: "thread_stale",
+          status: { type: "active" },
+          turns: [
+            {
+              id: "turn_finished",
+              status: "completed",
+              items: [
+                {
+                  type: "userMessage",
+                  id: "user-finished",
+                  content: [{ type: "text", text: "Already done" }],
+                },
+                { type: "agentMessage", id: "answer-finished", text: "Finished." },
+              ],
+            },
+          ],
+        },
+      },
+    });
+
+    expect(await resumed).toBe(true);
+    expect(h.state().status).toBe("idle");
+    h.adapter.interrupt(h.ctx);
+    expect(h.sent.some((message) => message.method === "turn/interrupt")).toBe(false);
+  });
+
+  test("lets Stop cancel a resume request that never answered", async () => {
+    const h = harness();
+    await h.handshake();
+
+    const resumed = h.adapter.resume?.("thread_stuck", h.ctx);
+    const call = h.sent.find((message) => message.method === "thread/resume") as { id: number };
+    expect(h.state().status).toBe("working");
+
+    h.adapter.interrupt(h.ctx);
+    expect(h.sent.at(-1)).toMatchObject({
+      method: "$/cancelRequest",
+      params: { id: call.id },
+    });
+    expect(await resumed).toBe(false);
+    expect(h.state().status).toBe("idle");
+    expect(
+      h.state().items.some((item) => item.kind === "notice" && item.tone === "error"),
+    ).toBe(false);
   });
 
   test("says so when a thread cannot be resumed", async () => {

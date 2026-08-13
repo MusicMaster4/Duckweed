@@ -179,6 +179,8 @@ interface Pending {
 
 type RequestKey = string | number;
 
+const RESUME_CANCELLED = "duckweed_resume_cancelled";
+
 interface ChildThread {
   callId: string | null;
   label: string | null;
@@ -207,6 +209,8 @@ export function createCodexAdapter(): AgentAdapter {
   const pending = new Map<RequestKey, Pending>();
   let threadId: string | null = null;
   let currentTurnId: string | null = null;
+  /** The resume RPC currently occupying the pane, so Stop can cancel it too. */
+  let resumeRequestId: RequestKey | null = null;
   /**
    * The model and effort turns run with. Seeded from the launch flags,
    * corrected by the `thread/start` response, and moved by /model and
@@ -365,7 +369,10 @@ export function createCodexAdapter(): AgentAdapter {
     return null;
   }
 
-  function hydratedTurnId(thread: Record<string, unknown>): string | null {
+  function hydratedTurnId(
+    thread: Record<string, unknown>,
+    trustThreadStatus = false,
+  ): string | null {
     const explicit =
       asString(thread.currentTurnId) ??
       asString(thread.activeTurnId) ??
@@ -380,7 +387,10 @@ export function createCodexAdapter(): AgentAdapter {
         return asString(turns[index].id);
       }
     }
-    return threadStatus(thread.status) === "working"
+    // A persisted thread-level `active` bit can outlive the turn that set it.
+    // Never turn the last completed turn into an interrupt target just because
+    // that coarse status is stale.
+    return trustThreadStatus && threadStatus(thread.status) === "working"
       ? asString(turns.at(-1)?.id)
       : null;
   }
@@ -398,7 +408,9 @@ export function createCodexAdapter(): AgentAdapter {
         child.model = asString(thread.model) ?? child.model;
         const status = threadStatus(thread.status) ?? "idle";
         if (status === "working") {
-          child.currentTurnId ??= hydratedTurnId(thread);
+          // The parent collaboration item independently reported this child as
+          // running, so its coarse thread status is corroborated here.
+          child.currentTurnId ??= hydratedTurnId(thread, true);
         } else {
           child.currentTurnId = null;
         }
@@ -1713,7 +1725,9 @@ export function createCodexAdapter(): AgentAdapter {
     resume: (sessionId, ctx) => {
       ctx.emit({ type: "status", status: "working" });
       ctx.emit({ type: "goal", goal: null });
-      return request(ctx, "thread/resume", { threadId: sessionId })
+      const requestId = nextId++;
+      resumeRequestId = requestId;
+      return requestWithId(ctx, requestId, "thread/resume", { threadId: sessionId })
         .then((result) => {
           const thread = asRecord(result.thread) ?? result;
           threadId = asString(thread.id) ?? sessionId;
@@ -1748,27 +1762,57 @@ export function createCodexAdapter(): AgentAdapter {
           // of being rejected and queued against the temporary blank thread.
           ctx.emit({
             type: "status",
-            status: currentTurnId || hydratedStatus === "working" ? "working" : "idle",
+            status: currentTurnId ? "working" : "idle",
           });
           return true;
         })
         .catch((error: unknown) => {
           const record = asRecord(error);
-          ctx.emit({
-            type: "notice",
-            tone: "error",
-            text: asString(record?.message) ?? "Codex could not resume that thread.",
-          });
+          if (asString(record?.code) !== RESUME_CANCELLED) {
+            ctx.emit({
+              type: "notice",
+              tone: "error",
+              text: asString(record?.message) ?? "Codex could not resume that thread.",
+            });
+          }
           ctx.emit({ type: "status", status: "idle" });
           return false;
+        })
+        .finally(() => {
+          if (resumeRequestId === requestId) resumeRequestId = null;
         });
     },
 
     interrupt: (ctx) => {
-      if (!threadId || !currentTurnId) return;
-      void request(ctx, "turn/interrupt", { threadId, turnId: currentTurnId }).catch(() => {
-        // The turn may have finished between the click and the call.
-      });
+      if (resumeRequestId !== null) {
+        const requestId = resumeRequestId;
+        resumeRequestId = null;
+        const inFlight = pending.get(requestId);
+        pending.delete(requestId);
+        inFlight?.reject({ code: RESUME_CANCELLED });
+        notify(ctx, "$/cancelRequest", { id: requestId });
+        return;
+      }
+      if (!threadId || !currentTurnId) {
+        // Working without an interruptible turn is stale adapter state. Let the
+        // session recover instead of leaving a Stop button that cannot work.
+        ctx.emit({ type: "turn-end" });
+        return;
+      }
+      const turnId = currentTurnId;
+      void request(ctx, "turn/interrupt", { threadId, turnId })
+        .then(() => {
+          if (currentTurnId !== turnId) return;
+          currentTurnId = null;
+          ctx.emit({ type: "turn-end" });
+        })
+        .catch(() => {
+          // The turn may have finished between the click and the call. Either
+          // way, keeping the local session marked as working would be stale.
+          if (currentTurnId !== turnId) return;
+          currentTurnId = null;
+          ctx.emit({ type: "turn-end" });
+        });
     },
 
     respond: (permissionId, optionId, ctx) => {

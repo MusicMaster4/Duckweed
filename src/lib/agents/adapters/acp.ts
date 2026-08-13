@@ -48,6 +48,8 @@ interface Pending {
   reject: (error: Record<string, unknown>) => void;
 }
 
+const RESUME_CANCELLED = "duckweed_resume_cancelled";
+
 /** A model the agent says it can switch to, with its effort levels if any. */
 interface AcpModel {
   id: string;
@@ -165,6 +167,8 @@ export function createAcpAdapter(): AgentAdapter {
   let nextId = 1;
   const pending = new Map<number, Pending>();
   let sessionId: string | null = null;
+  /** The session/load request currently replaying history into the pane. */
+  let resumeRequestId: number | null = null;
   /** Turn ids so streamed chunks group into one bubble per turn. */
   let turnSeq = 0;
   /**
@@ -227,6 +231,8 @@ export function createAcpAdapter(): AgentAdapter {
    * one message each — see {@link flushReplayedUser}.
    */
   let loading = false;
+  /** True after the first replay update replaced the previous transcript. */
+  let replayStarted = false;
   let replayedUser = "";
 
   function resetContentSegments() {
@@ -624,6 +630,13 @@ export function createAcpAdapter(): AgentAdapter {
   function handleSessionUpdate(params: Record<string, unknown>, ctx: AdapterContext) {
     const update = asRecord(params.update);
     if (!update) return;
+    if (loading && !replayStarted) {
+      // Keep the current conversation visible until the provider actually
+      // starts replaying the selected one. A stalled or rejected load should
+      // never erase a perfectly good transcript.
+      replayStarted = true;
+      ctx.emit({ type: "transcript" });
+    }
     const kind = asString(update.sessionUpdate);
 
     if (kind === "user_message_chunk") {
@@ -1105,17 +1118,34 @@ export function createAcpAdapter(): AgentAdapter {
      */
     resume: (id, ctx) => {
       if (!canLoadSession) return false;
-      ctx.emit({ type: "transcript" });
       currentGoal = null;
       goalBeforeCommand = null;
       goalResponsePending = false;
       goalResponseText = "";
       loading = true;
+      replayStarted = false;
       replayedUser = "";
       ctx.emit({ type: "status", status: "working" });
-      return request(ctx, "session/load", { sessionId: id, cwd: ctx.cwd, mcpServers: [] })
+      const requestId = nextId++;
+      resumeRequestId = requestId;
+      const loadingRequest = new Promise<Record<string, unknown>>((resolve, reject) => {
+        pending.set(requestId, { resolve, reject });
+        ctx.send({
+          jsonrpc: "2.0",
+          id: requestId,
+          method: "session/load",
+          params: { sessionId: id, cwd: ctx.cwd, mcpServers: [] },
+        });
+      });
+      return loadingRequest
         .then((result) => {
           sessionId = id;
+          // A valid session may have no visible messages. Clear the previous
+          // transcript only after the load itself has succeeded.
+          if (!replayStarted) {
+            replayStarted = true;
+            ctx.emit({ type: "transcript" });
+          }
           flushReplayedUser(ctx);
           const identity = {
             ...readModelState(result.models),
@@ -1128,21 +1158,33 @@ export function createAcpAdapter(): AgentAdapter {
         .catch((error: unknown) => {
           const record = asRecord(error);
           flushReplayedUser(ctx);
-          ctx.emit({
-            type: "notice",
-            tone: "error",
-            text: asString(record?.message) ?? "The agent could not load that session.",
-          });
+          if (asString(record?.code) !== RESUME_CANCELLED) {
+            ctx.emit({
+              type: "notice",
+              tone: "error",
+              text: asString(record?.message) ?? "The agent could not load that session.",
+            });
+          }
           ctx.emit({ type: "turn-end" });
           return false;
         })
         .finally(() => {
+          if (resumeRequestId === requestId) resumeRequestId = null;
           loading = false;
+          replayStarted = false;
         });
     },
 
     interrupt: (ctx) => {
-      // Cancelling during a replay would abandon a half-drawn transcript.
+      if (resumeRequestId !== null) {
+        const requestId = resumeRequestId;
+        resumeRequestId = null;
+        const inFlight = pending.get(requestId);
+        pending.delete(requestId);
+        inFlight?.reject({ code: RESUME_CANCELLED });
+        notify(ctx, "$/cancelRequest", { id: requestId });
+        return;
+      }
       if (!sessionId || loading) return;
       notify(ctx, "session/cancel", { sessionId });
     },
