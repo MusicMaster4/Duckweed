@@ -414,7 +414,7 @@
 }
 
 .official-plan--grok {
-  --plan-color: #b5b5b5;
+  --plan-color: #7ea6ff;
 }
 
 .official-plan-head {
@@ -615,7 +615,7 @@
 }
 
 .official-tool--grok {
-  --tool-color: #c4c4c4;
+  --tool-color: #7ea6ff;
 }
 
 .official-tool.is-error {
@@ -941,7 +941,7 @@
 }
 
 .agent-activity-cluster[data-variant="grok"] {
-  --activity-accent: #b8b8b8;
+  --activity-accent: #7ea6ff;
 }
 
 .agent-activity-cluster[data-variant="cursor"] {
