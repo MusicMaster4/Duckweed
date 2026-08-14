@@ -370,6 +370,8 @@ export interface AgentSessionState {
   /** Accent colour for the session chrome. */
   accent: string;
   status: AgentStatus;
+  /** True while a stored transcript is replacing the current conversation. */
+  loadingHistory?: boolean;
   /** Wall-clock time when the current turn first entered `working`. */
   workStartedAt: number | null;
   /** Wall-clock duration of the most recently completed turn. */

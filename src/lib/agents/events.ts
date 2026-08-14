@@ -48,6 +48,8 @@ export type AgentEvent =
       models?: AgentModelChoice[];
     }
   | { type: "status"; status: AgentStatus; error?: string }
+  /** A provider is loading a stored conversation, not running an agent turn. */
+  | { type: "history-loading"; loading: boolean }
   /** Set, update, finish, or clear the provider's long-running objective. */
   | { type: "goal"; goal: AgentGoal | null }
   /** The user's own message, echoed into the transcript. */
@@ -337,6 +339,17 @@ export function applyEvent(state: AgentSessionState, event: AgentEvent): AgentSe
         error: event.error ?? (event.status === "error" ? state.error : null),
       };
     }
+
+    case "history-loading":
+      return state.loadingHistory === event.loading
+        ? state
+        : {
+            ...state,
+            loadingHistory: event.loading,
+            ...(!event.loading && state.status !== "working"
+              ? { workStartedAt: null, lastWorkedForMs: null }
+              : {}),
+          };
 
     case "goal":
       return {

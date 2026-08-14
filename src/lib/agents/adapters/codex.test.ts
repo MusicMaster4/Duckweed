@@ -1184,7 +1184,15 @@ describe("codex adapter", () => {
 
     const resumed = h.adapter.resume?.("thread_old", h.ctx);
     const call = h.sent.slice(before).find((message) => message.method === "thread/resume");
-    expect(call?.params).toEqual({ threadId: "thread_old" });
+    expect(call?.params).toEqual({
+      threadId: "thread_old",
+      excludeTurns: true,
+      initialTurnsPage: {
+        limit: 100,
+        sortDirection: "desc",
+        itemsView: "full",
+      },
+    });
 
     h.feed({
       jsonrpc: "2.0",
@@ -1249,6 +1257,114 @@ describe("codex adapter", () => {
       method: "turn/start",
       params: expect.objectContaining({ threadId: "thread_old" }),
     });
+  });
+
+  test("hydrates paginated history in order, including image-only prompts", async () => {
+    const h = harness();
+    await h.handshake();
+
+    const resumed = h.adapter.resume?.("thread_paged", h.ctx);
+    const resumeCall = h.sent.find((message) => message.method === "thread/resume") as {
+      id: number;
+    };
+    expect(h.state()).toMatchObject({ status: "working", loadingHistory: true });
+
+    h.feed({
+      jsonrpc: "2.0",
+      id: resumeCall.id,
+      result: {
+        thread: {
+          id: "thread_paged",
+          sessionId: "sess_paged",
+          status: { type: "idle" },
+          turns: [],
+        },
+        initialTurnsPage: {
+          data: [
+            {
+              id: "turn-new",
+              status: "completed",
+              itemsView: "full",
+              items: [
+                {
+                  type: "userMessage",
+                  id: "user-image",
+                  content: [{ type: "image", url: image.dataUrl }],
+                },
+                {
+                  type: "agentMessage",
+                  id: "answer-new",
+                  text: "The screenshot is clear.",
+                },
+              ],
+            },
+          ],
+          nextCursor: "older-turns",
+          backwardsCursor: null,
+        },
+      },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const pageCall = h.sent.find((message) => message.method === "thread/turns/list") as {
+      id: number;
+      params: Record<string, unknown>;
+    };
+    expect(pageCall.params).toEqual({
+      threadId: "thread_paged",
+      cursor: "older-turns",
+      limit: 100,
+      sortDirection: "desc",
+      itemsView: "full",
+    });
+    h.feed({
+      jsonrpc: "2.0",
+      id: pageCall.id,
+      result: {
+        data: [
+          {
+            id: "turn-old",
+            status: "completed",
+            itemsView: "full",
+            items: [
+              {
+                type: "userMessage",
+                id: "user-old",
+                content: [{ type: "text", text: "Inspect the old layout" }],
+              },
+              { type: "agentMessage", id: "answer-old", text: "I found the layout." },
+            ],
+          },
+        ],
+        nextCursor: null,
+        backwardsCursor: null,
+      },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(await resumed).toBe(true);
+    expect(h.state()).toMatchObject({
+      status: "idle",
+      loadingHistory: false,
+      sessionId: "sess_paged",
+    });
+    expect(h.state().items).toEqual([
+      expect.objectContaining({ kind: "user", text: "Inspect the old layout" }),
+      expect.objectContaining({ kind: "assistant", text: "I found the layout." }),
+      expect.objectContaining({
+        kind: "user",
+        text: "",
+        images: [
+          expect.objectContaining({
+            mimeType: "image/png",
+            dataUrl: image.dataUrl,
+          }),
+        ],
+      }),
+      expect.objectContaining({ kind: "assistant", text: "The screenshot is clear." }),
+    ]);
   });
 
   test("reattaches to an active turn when a background thread is resumed", async () => {

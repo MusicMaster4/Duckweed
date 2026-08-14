@@ -497,8 +497,10 @@ export function AgentSurface({ termId, active, onClose, onSelectionCopied }: Pro
         </span>
         <span className="agent-name">{session.label}</span>
         <span className={`agent-state is-${session.status}`}>
-          {session.status === "working" && <span className="agent-pulse" aria-hidden="true" />}
-          {workStatusLabel(session, clockNow)}
+          {session.status === "working" && !session.loadingHistory && (
+            <span className="agent-pulse" aria-hidden="true" />
+          )}
+          {session.loadingHistory ? "Loading conversation" : workStatusLabel(session, clockNow)}
         </span>
         <span className="agent-head-spacer" />
         {tokens > 0 && (
@@ -618,7 +620,7 @@ export function AgentSurface({ termId, active, onClose, onSelectionCopied }: Pro
             items={timelineItems}
             termId={termId}
             agent={session.agent}
-            status={session.status}
+            status={session.loadingHistory ? "idle" : session.status}
             started={session.started}
             label={session.label}
             mark={session.mark}

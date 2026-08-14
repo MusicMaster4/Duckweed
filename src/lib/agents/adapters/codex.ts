@@ -18,6 +18,7 @@ import {
   type AgentAccessMode,
   type AgentFileChange,
   type AgentGoalStatus,
+  type AgentImageAttachment,
   type AgentItem,
   type AgentSessionState,
   type AgentStatus,
@@ -61,6 +62,8 @@ interface CodexGoal {
 }
 
 const MAX_GOAL_OBJECTIVE_CHARS = 4_000;
+const RESUME_PAGE_SIZE = 100;
+const MAX_RESUMED_TURNS = 500;
 const FAST_SERVICE_TIER = "priority";
 
 const EXEC_STATUS: Record<string, ToolStatus> = {
@@ -423,17 +426,7 @@ export function createCodexAdapter(): AgentAdapter {
           for (const rawItem of asArray(turn.items)) {
             const item = asRecord(rawItem);
             if (!item) continue;
-            if (asString(item.type) === "userMessage") {
-              const text = asArray(item.content)
-                .map((entry) => asRecord(entry))
-                .filter((entry): entry is Record<string, unknown> => entry !== null)
-                .filter((entry) => asString(entry.type) === "text")
-                .map((entry) => asString(entry.text) ?? "")
-                .filter(Boolean)
-                .join("\n");
-              if (text) nested.emit({ type: "user", text });
-              continue;
-            }
+            if (replayUserMessage(item, nested)) continue;
             handleItem(item, true, nested);
           }
         }
@@ -845,28 +838,58 @@ export function createCodexAdapter(): AgentAdapter {
     }
   }
 
-  /** Rebuild the visible transcript returned inside `thread/resume`. */
-  function replayThread(thread: Record<string, unknown>, ctx: AdapterContext) {
+  function replayImage(
+    part: Record<string, unknown>,
+    itemId: string,
+    index: number,
+  ): AgentImageAttachment | null {
+    if (asString(part.type) !== "image") return null;
+    const dataUrl = asString(part.url);
+    const match = dataUrl?.match(/^data:(image\/(?:png|jpeg|gif|webp));base64,(.*)$/is);
+    if (!dataUrl || !match) return null;
+    const mimeType = match[1].toLowerCase() as AgentImageAttachment["mimeType"];
+    const encoded = match[2];
+    const padding = encoded.endsWith("==") ? 2 : encoded.endsWith("=") ? 1 : 0;
+    const extension = mimeType === "image/jpeg" ? "jpg" : mimeType.slice("image/".length);
+    return {
+      id: `history-${itemId}-${index}`,
+      name: `image-${index + 1}.${extension}`,
+      mimeType,
+      dataUrl,
+      size: Math.max(0, Math.floor((encoded.length * 3) / 4) - padding),
+    };
+  }
+
+  function replayUserMessage(item: Record<string, unknown>, ctx: AdapterContext): boolean {
+    if (asString(item.type) !== "userMessage") return false;
+    const itemId = asString(item.id) ?? "user";
+    const content = asArray(item.content)
+      .map((entry) => asRecord(entry))
+      .filter((entry): entry is Record<string, unknown> => entry !== null);
+    const text = content
+      .filter((entry) => asString(entry.type) === "text")
+      .map((entry) => asString(entry.text) ?? "")
+      .filter(Boolean)
+      .join("\n");
+    const images = content
+      .map((entry, index) => replayImage(entry, itemId, index))
+      .filter((image): image is AgentImageAttachment => image !== null);
+    if (text || images.length) ctx.emit({ type: "user", text, images });
+    return true;
+  }
+
+  /** Rebuild the visible transcript returned by Codex's resume pagination. */
+  function replayTurns(turns: unknown[], ctx: AdapterContext) {
     ctx.emit({ type: "transcript" });
     streamed.clear();
 
-    for (const rawTurn of asArray(thread.turns)) {
+    for (const rawTurn of turns) {
       const turn = asRecord(rawTurn);
       if (!turn) continue;
       for (const rawItem of asArray(turn.items)) {
         const item = asRecord(rawItem);
         if (!item) continue;
-        if (asString(item.type) === "userMessage") {
-          const text = asArray(item.content)
-            .map((entry) => asRecord(entry))
-            .filter((entry): entry is Record<string, unknown> => entry !== null)
-            .filter((entry) => asString(entry.type) === "text")
-            .map((entry) => asString(entry.text) ?? "")
-            .filter(Boolean)
-            .join("\n");
-          if (text) ctx.emit({ type: "user", text });
-          continue;
-        }
+        if (replayUserMessage(item, ctx)) continue;
         handleItem(item, true, ctx);
       }
     }
@@ -1719,53 +1742,86 @@ export function createCodexAdapter(): AgentAdapter {
     },
 
     /**
-     * `thread/resume` keeps the running process and returns the selected
-     * thread's complete turn list, which is replayed into the shared timeline.
+     * `thread/resume` keeps the running process. Newer app-server builds page
+     * the transcript, so hydrate bounded full-detail pages before replaying it.
      */
     resume: (sessionId, ctx) => {
+      ctx.emit({ type: "history-loading", loading: true });
       ctx.emit({ type: "status", status: "working" });
       ctx.emit({ type: "goal", goal: null });
-      const requestId = nextId++;
-      resumeRequestId = requestId;
-      return requestWithId(ctx, requestId, "thread/resume", { threadId: sessionId })
-        .then((result) => {
-          const thread = asRecord(result.thread) ?? result;
-          threadId = asString(thread.id) ?? sessionId;
-          replayThread(thread, ctx);
-          const hydratedStatus = threadStatus(thread.status);
-          currentTurnId = hydratedStatus === "working" ? hydratedTurnId(thread) : null;
-          // `thread/start` reports the model beside the thread, `thread/resume`
-          // inside it; neither is guaranteed, so take whichever is there.
-          const model = asString(result.model) ?? asString(thread.model);
-          if (model) currentModel = model;
-          currentServiceTier = asString(result.serviceTier);
-          ctx.emit({
-            type: "session",
-            sessionId: asString(thread.sessionId) ?? threadId,
-            ...(model ? { model } : {}),
-            serviceTier: currentServiceTier,
+
+      const load = async (): Promise<boolean> => {
+        const requestId = nextId++;
+        resumeRequestId = requestId;
+        const result = await requestWithId(ctx, requestId, "thread/resume", {
+          threadId: sessionId,
+          excludeTurns: true,
+          initialTurnsPage: {
+            limit: RESUME_PAGE_SIZE,
+            sortDirection: "desc",
+            itemsView: "full",
+          },
+        });
+        const thread = asRecord(result.thread) ?? result;
+        threadId = asString(thread.id) ?? sessionId;
+
+        const initialPage = asRecord(result.initialTurnsPage);
+        const paginated = initialPage !== null;
+        const turns = paginated ? asArray(initialPage.data) : asArray(thread.turns);
+        let cursor = asString(initialPage?.nextCursor);
+        while (cursor && turns.length < MAX_RESUMED_TURNS) {
+          const pageRequestId = nextId++;
+          resumeRequestId = pageRequestId;
+          const page = await requestWithId(ctx, pageRequestId, "thread/turns/list", {
+            threadId,
+            cursor,
+            limit: Math.min(RESUME_PAGE_SIZE, MAX_RESUMED_TURNS - turns.length),
+            sortDirection: "desc",
+            itemsView: "full",
           });
-          ctx.emit({ type: "goal", goal: null });
-          void request(ctx, "thread/goal/get", { threadId })
-            .then((goalResult) => {
-              const goal = readGoal(goalResult.goal);
-              ctx.emit({
-                type: "goal",
-                goal: goal ? { objective: goal.objective, status: goal.status } : null,
-              });
-            })
-            .catch(() => {
-              // Older app-server builds can resume threads without goal support.
+          turns.push(...asArray(page.data));
+          cursor = asString(page.nextCursor);
+        }
+
+        // Descending pagination starts at the newest turn. The transcript
+        // renderer expects natural conversation order from oldest to newest.
+        const chronologicalTurns = paginated ? turns.reverse() : turns;
+        replayTurns(chronologicalTurns, ctx);
+        currentTurnId = hydratedTurnId({ ...thread, turns: chronologicalTurns });
+        // `thread/start` reports the model beside the thread, `thread/resume`
+        // inside it; neither is guaranteed, so take whichever is there.
+        const model = asString(result.model) ?? asString(thread.model);
+        if (model) currentModel = model;
+        currentServiceTier = asString(result.serviceTier);
+        ctx.emit({
+          type: "session",
+          sessionId: asString(thread.sessionId) ?? threadId,
+          ...(model ? { model } : {}),
+          serviceTier: currentServiceTier,
+        });
+        ctx.emit({ type: "goal", goal: null });
+        void request(ctx, "thread/goal/get", { threadId })
+          .then((goalResult) => {
+            const goal = readGoal(goalResult.goal);
+            ctx.emit({
+              type: "goal",
+              goal: goal ? { objective: goal.objective, status: goal.status } : null,
             });
-          // A thread can still own a live background turn when it is resumed.
-          // Preserve that turn id so follow-ups steer the resumed work instead
-          // of being rejected and queued against the temporary blank thread.
-          ctx.emit({
-            type: "status",
-            status: currentTurnId ? "working" : "idle",
+          })
+          .catch(() => {
+            // Older app-server builds can resume threads without goal support.
           });
-          return true;
-        })
+        // A thread can still own a live background turn when it is resumed.
+        // Preserve that turn id so follow-ups steer the resumed work instead
+        // of being rejected and queued against the temporary blank thread.
+        ctx.emit({
+          type: "status",
+          status: currentTurnId ? "working" : "idle",
+        });
+        return true;
+      };
+
+      return load()
         .catch((error: unknown) => {
           const record = asRecord(error);
           if (asString(record?.code) !== RESUME_CANCELLED) {
@@ -1779,7 +1835,8 @@ export function createCodexAdapter(): AgentAdapter {
           return false;
         })
         .finally(() => {
-          if (resumeRequestId === requestId) resumeRequestId = null;
+          resumeRequestId = null;
+          ctx.emit({ type: "history-loading", loading: false });
         });
     },
 

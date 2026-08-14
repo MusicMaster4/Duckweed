@@ -614,7 +614,8 @@ function emit(session: Session, event: AgentEvent): void {
   // answering a permission prompt mid-turn, not a new job.
   if (
     next.status === "working" &&
-    (before === "idle" || before === "starting")
+    (before === "idle" || before === "starting") &&
+    !next.loadingHistory
   ) {
     announceTurnStart(session);
   }
