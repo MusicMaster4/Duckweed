@@ -684,7 +684,13 @@ export function AgentComposer({ session, active, inputRef, onSubmit, onInterrupt
   return (
     <div
       ref={rootRef}
-      className={`agent-composer${fileDragging ? " is-file-drag" : ""}`}
+      className={[
+        "agent-composer",
+        session.serviceTier === "priority" ? "is-fast" : "",
+        fileDragging ? "is-file-drag" : "",
+      ]
+        .filter(Boolean)
+        .join(" ")}
       onMouseDown={focusInputFromChrome}
     >
       {menu && rows.length > 0 && (

@@ -38,6 +38,8 @@ export type AgentEvent =
        * thought_level option). `undefined` leaves the current value alone.
        */
       effort?: string | null;
+      /** `null` clears a provider service-tier override. */
+      serviceTier?: string | null;
       /** Permission level selected in the custom UI. */
       accessMode?: AgentAccessMode;
       cwd?: string;
@@ -298,6 +300,8 @@ export function applyEvent(state: AgentSessionState, event: AgentEvent): AgentSe
         sessionId: event.sessionId ?? state.sessionId,
         model: event.model ?? state.model,
         effort: event.effort !== undefined ? event.effort : state.effort,
+        serviceTier:
+          event.serviceTier !== undefined ? event.serviceTier : state.serviceTier,
         accessMode: event.accessMode ?? state.accessMode,
         cwd: event.cwd ?? state.cwd,
         commands: event.commands ? mergeCommands(state.commands, event.commands) : state.commands,

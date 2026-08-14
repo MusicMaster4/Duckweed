@@ -776,6 +776,7 @@ export async function start(
       cwd,
       model: seedModel,
       effort: launch.effort,
+      serviceTier: null,
       accessMode: launch.accessMode ?? "default",
       // Live model lists from the adapter replace this; Claude/Claudex start
       // with their known aliases so the picker works before the first turn.

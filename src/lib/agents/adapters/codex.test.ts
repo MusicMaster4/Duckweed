@@ -111,6 +111,9 @@ function harness(overrides: Partial<AgentLaunch> = {}) {
               { reasoningEffort: "medium", description: "" },
               { reasoningEffort: "high", description: "" },
             ],
+            serviceTiers: [
+              { id: "priority", name: "Fast", description: "1.5x speed, increased usage" },
+            ],
           },
           {
             id: "gpt-5.5",
@@ -121,6 +124,7 @@ function harness(overrides: Partial<AgentLaunch> = {}) {
               { reasoningEffort: "low", description: "" },
               { reasoningEffort: "medium", description: "" },
             ],
+            serviceTiers: [],
           },
         ],
         nextCursor: null,
@@ -138,7 +142,18 @@ describe("codex adapter", () => {
     const h = harness();
     await h.handshake();
 
-    expect(h.sent[0]).toMatchObject({ method: "initialize" });
+    expect(h.sent[0]).toEqual({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        clientInfo: { name: "duckweed", title: "Duckweed", version: "0.1.0" },
+        capabilities: {
+          experimentalApi: true,
+          requestAttestation: false,
+        },
+      },
+    });
     expect(h.sent[1]).toMatchObject({ method: "initialized" });
     // No override: app-server inherits the same config as the normal TUI.
     expect(h.sent[2]).toEqual({
@@ -197,6 +212,12 @@ describe("codex adapter", () => {
     const h = harness();
     await h.handshake();
     expect(h.state()).toMatchObject({ model: "gpt-5.6-sol", effort: "high" });
+  });
+
+  test("reads Fast Mode from the service tier the thread started with", async () => {
+    const h = harness();
+    await h.handshake({ serviceTier: "priority" });
+    expect(h.state().serviceTier).toBe("priority");
   });
 
   test("publishes model/list rows for the header and composer pickers", async () => {
@@ -291,6 +312,65 @@ describe("codex adapter", () => {
     expect(h.state().items.filter((item) => item.kind === "notice").at(-1)).toMatchObject({
       tone: "info",
       text: "Effort: high. gpt-5.6-sol supports: low, medium, high.",
+    });
+  });
+
+  test("toggles Fast Mode through thread settings and carries it on later turns", async () => {
+    const h = harness();
+    await h.handshake();
+    await h.loadModels();
+
+    expect(h.adapter.command?.("/fast", h.ctx)).toBe("handled");
+    expect(h.sent.at(-1)).toMatchObject({
+      id: 4,
+      method: "thread/settings/update",
+      params: { threadId: "thread_1", serviceTier: "priority" },
+    });
+    h.feed({ jsonrpc: "2.0", id: 4, result: {} });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(h.state().serviceTier).toBe("priority");
+    expect(h.state().items.at(-1)).toMatchObject({
+      kind: "notice",
+      tone: "info",
+      text: "Fast Mode enabled.",
+    });
+
+    h.adapter.prompt({ text: "hello", images: [] }, h.ctx);
+    expect(h.sent.at(-1)).toMatchObject({
+      method: "turn/start",
+      params: { serviceTier: "priority" },
+    });
+  });
+
+  test("a second /fast clears the priority service tier", async () => {
+    const h = harness();
+    await h.handshake({ serviceTier: "priority" });
+    await h.loadModels();
+
+    h.adapter.command?.("/fast", h.ctx);
+    expect(h.sent.at(-1)).toMatchObject({
+      id: 4,
+      method: "thread/settings/update",
+      params: { threadId: "thread_1", serviceTier: null },
+    });
+    h.feed({ jsonrpc: "2.0", id: 4, result: {} });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(h.state().serviceTier).toBeNull();
+    expect(h.state().items.at(-1)).toMatchObject({ text: "Fast Mode disabled." });
+  });
+
+  test("blocks models that do not advertise Fast Mode while it is active", async () => {
+    const h = harness();
+    await h.handshake({ serviceTier: "priority" });
+    await h.loadModels();
+
+    h.adapter.command?.("/model gpt-5.5", h.ctx);
+    expect(h.state().model).toBe("gpt-5.6-sol");
+    expect(h.state().items.at(-1)).toMatchObject({
+      tone: "error",
+      text: "gpt-5.5 does not support Fast Mode. Use /fast to turn it off first.",
     });
   });
 
@@ -469,7 +549,7 @@ describe("codex adapter", () => {
     expect(h.sent.at(-1)).toMatchObject({ method: "model/list" });
     expect(h.state().items.find((item) => item.kind === "notice")).toMatchObject({
       tone: "error",
-      text: "Unknown command /frobnicate. Codex knows /model, /effort, /compact, /goal.",
+      text: "Unknown command /frobnicate. Codex knows /model, /effort, /fast, /compact, /goal.",
     });
   });
 
@@ -478,9 +558,19 @@ describe("codex adapter", () => {
     await h.handshake();
     h.notify("thread/settings/updated", {
       threadId: "thread_1",
-      threadSettings: { model: "gpt-5.5", effort: "low" },
+      threadSettings: { model: "gpt-5.5", effort: "low", serviceTier: "priority" },
     });
-    expect(h.state()).toMatchObject({ model: "gpt-5.5", effort: "low" });
+    expect(h.state()).toMatchObject({
+      model: "gpt-5.5",
+      effort: "low",
+      serviceTier: "priority",
+    });
+
+    h.notify("thread/settings/updated", {
+      threadId: "thread_1",
+      threadSettings: { model: "gpt-5.5", effort: "low", serviceTier: null },
+    });
+    expect(h.state().serviceTier).toBeNull();
   });
 
   test("streams reasoning and message deltas without repeating the settled text", async () => {
@@ -1072,6 +1162,10 @@ describe("codex adapter", () => {
       method: "turn/interrupt",
       params: { threadId: "thread_1", turnId: "turn_7" },
     });
+    const interrupt = h.sent.at(-1) as { id: number };
+    h.feed({ jsonrpc: "2.0", id: interrupt.id, result: {} });
+    await Promise.resolve();
+    expect(h.state().status).toBe("idle");
   });
 
   test("reports a refused handshake instead of a blank pane", async () => {
@@ -1217,6 +1311,63 @@ describe("codex adapter", () => {
     h.feed({ jsonrpc: "2.0", id: steer.id, result: {} });
     await Promise.resolve();
     expect(await steered).toBe(true);
+  });
+
+  test("ignores a stale active thread status when every stored turn is finished", async () => {
+    const h = harness();
+    await h.handshake();
+
+    const resumed = h.adapter.resume?.("thread_stale", h.ctx);
+    const call = h.sent.find((message) => message.method === "thread/resume") as { id: number };
+    h.feed({
+      jsonrpc: "2.0",
+      id: call.id,
+      result: {
+        thread: {
+          id: "thread_stale",
+          status: { type: "active" },
+          turns: [
+            {
+              id: "turn_finished",
+              status: "completed",
+              items: [
+                {
+                  type: "userMessage",
+                  id: "user-finished",
+                  content: [{ type: "text", text: "Already done" }],
+                },
+                { type: "agentMessage", id: "answer-finished", text: "Finished." },
+              ],
+            },
+          ],
+        },
+      },
+    });
+
+    expect(await resumed).toBe(true);
+    expect(h.state().status).toBe("idle");
+    h.adapter.interrupt(h.ctx);
+    expect(h.sent.some((message) => message.method === "turn/interrupt")).toBe(false);
+  });
+
+  test("lets Stop cancel a resume request that never answered", async () => {
+    const h = harness();
+    await h.handshake();
+
+    const resumed = h.adapter.resume?.("thread_stuck", h.ctx);
+    const call = h.sent.find((message) => message.method === "thread/resume") as { id: number };
+    expect(h.state().status).toBe("working");
+
+    h.adapter.interrupt(h.ctx);
+    expect(h.sent.at(-1)).toMatchObject({
+      method: "$/cancelRequest",
+      params: { id: call.id },
+    });
+    expect(await resumed).toBe(false);
+    expect(h.state().status).toBe("idle");
+    expect(
+      h.state().items.some((item) => item.kind === "notice" && item.tone === "error"),
+    ).toBe(false);
   });
 
   test("says so when a thread cannot be resumed", async () => {

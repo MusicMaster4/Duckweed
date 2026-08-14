@@ -1052,6 +1052,30 @@ describe("acp adapter", () => {
     expect(h.state().status).toBe("idle");
   });
 
+  test("lets Stop cancel a session replay that never answered", async () => {
+    const h = harness();
+    await h.handshake({ agentCapabilities: { loadSession: true } });
+    h.ctx.emit({ type: "user", text: "Keep this conversation" });
+
+    const resumed = h.adapter.resume?.("old-stuck", h.ctx);
+    const load = h.sent.find((message) => message.method === "session/load") as { id: number };
+    expect(h.state().status).toBe("working");
+
+    h.adapter.interrupt(h.ctx);
+    expect(h.sent.at(-1)).toMatchObject({
+      method: "$/cancelRequest",
+      params: { id: load.id },
+    });
+    expect(await resumed).toBe(false);
+    expect(h.state().status).toBe("idle");
+    expect(
+      h.state().items.some((item) => item.kind === "notice" && item.tone === "error"),
+    ).toBe(false);
+    expect(h.state().items).toEqual([
+      expect.objectContaining({ kind: "user", text: "Keep this conversation" }),
+    ]);
+  });
+
   test("refuses to resume when the agent never advertised loadSession", async () => {
     const h = harness();
     await h.handshake();

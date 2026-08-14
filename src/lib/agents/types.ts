@@ -379,6 +379,12 @@ export interface AgentSessionState {
   model: string | null;
   /** Reasoning effort in effect, when the agent exposes one. */
   effort: string | null;
+  /**
+   * Provider service tier used for turns in this session. Codex reports
+   * `priority` while Fast Mode is active. Optional for older persisted and
+   * test state that predates service-tier support.
+   */
+  serviceTier?: string | null;
   /** Model selected for the next user message but not applied to an active turn. */
   nextModel?: string | null;
   /** Reasoning effort selected for the next user message. */

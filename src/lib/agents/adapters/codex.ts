@@ -48,6 +48,7 @@ interface CodexModel {
   id: string;
   displayName: string;
   efforts: string[];
+  serviceTiers: string[];
   isDefault: boolean;
 }
 
@@ -60,6 +61,7 @@ interface CodexGoal {
 }
 
 const MAX_GOAL_OBJECTIVE_CHARS = 4_000;
+const FAST_SERVICE_TIER = "priority";
 
 const EXEC_STATUS: Record<string, ToolStatus> = {
   inProgress: "running",
@@ -177,6 +179,8 @@ interface Pending {
 
 type RequestKey = string | number;
 
+const RESUME_CANCELLED = "duckweed_resume_cancelled";
+
 interface ChildThread {
   callId: string | null;
   label: string | null;
@@ -205,6 +209,8 @@ export function createCodexAdapter(): AgentAdapter {
   const pending = new Map<RequestKey, Pending>();
   let threadId: string | null = null;
   let currentTurnId: string | null = null;
+  /** The resume RPC currently occupying the pane, so Stop can cancel it too. */
+  let resumeRequestId: RequestKey | null = null;
   /**
    * The model and effort turns run with. Seeded from the launch flags,
    * corrected by the `thread/start` response, and moved by /model and
@@ -213,6 +219,7 @@ export function createCodexAdapter(): AgentAdapter {
    */
   let currentModel: string | null = null;
   let currentEffort: string | null = null;
+  let currentServiceTier: string | null = null;
   let currentAccess: AgentAccessMode = "default";
   /** `model/list`, once it lands; empty until then, so validation is lenient. */
   let models: CodexModel[] = [];
@@ -244,6 +251,7 @@ export function createCodexAdapter(): AgentAdapter {
       cwd: "",
       model: null,
       effort: null,
+      serviceTier: null,
       accessMode: "default",
       models: [],
       sessionId: childThreadId,
@@ -361,7 +369,10 @@ export function createCodexAdapter(): AgentAdapter {
     return null;
   }
 
-  function hydratedTurnId(thread: Record<string, unknown>): string | null {
+  function hydratedTurnId(
+    thread: Record<string, unknown>,
+    trustThreadStatus = false,
+  ): string | null {
     const explicit =
       asString(thread.currentTurnId) ??
       asString(thread.activeTurnId) ??
@@ -376,7 +387,10 @@ export function createCodexAdapter(): AgentAdapter {
         return asString(turns[index].id);
       }
     }
-    return threadStatus(thread.status) === "working"
+    // A persisted thread-level `active` bit can outlive the turn that set it.
+    // Never turn the last completed turn into an interrupt target just because
+    // that coarse status is stale.
+    return trustThreadStatus && threadStatus(thread.status) === "working"
       ? asString(turns.at(-1)?.id)
       : null;
   }
@@ -394,7 +408,9 @@ export function createCodexAdapter(): AgentAdapter {
         child.model = asString(thread.model) ?? child.model;
         const status = threadStatus(thread.status) ?? "idle";
         if (status === "working") {
-          child.currentTurnId ??= hydratedTurnId(thread);
+          // The parent collaboration item independently reported this child as
+          // running, so its coarse thread status is corroborated here.
+          child.currentTurnId ??= hydratedTurnId(thread, true);
         } else {
           child.currentTurnId = null;
         }
@@ -464,6 +480,14 @@ export function createCodexAdapter(): AgentAdapter {
     try {
       await request(ctx, "initialize", {
         clientInfo: { name: "duckweed", title: "Duckweed", version: "0.1.0" },
+        // `thread/settings/update` is currently part of app-server's
+        // experimental surface. Fast Mode uses that method to change the
+        // service tier without starting a throwaway turn, so opt in during
+        // capability negotiation before sending any thread requests.
+        capabilities: {
+          experimentalApi: true,
+          requestAttestation: false,
+        },
       });
       notify(ctx, "initialized", {});
 
@@ -492,6 +516,7 @@ export function createCodexAdapter(): AgentAdapter {
 
       currentModel = ctx.launch.model;
       currentEffort = ctx.launch.effort;
+      currentServiceTier = null;
       currentAccess = ctx.launch.accessMode ?? "default";
       const thread = await request(ctx, "thread/start", {
         cwd: ctx.cwd,
@@ -510,11 +535,13 @@ export function createCodexAdapter(): AgentAdapter {
       // and the first turn/start is what applies the request.
       currentModel = ctx.launch.model ?? asString(thread.model) ?? currentModel;
       currentEffort = ctx.launch.effort ?? asString(thread.reasoningEffort) ?? currentEffort;
+      currentServiceTier = asString(thread.serviceTier);
       ctx.emit({
         type: "session",
         sessionId: asString(started.sessionId) ?? threadId,
         ...(currentModel ? { model: currentModel } : {}),
         ...(currentEffort ? { effort: currentEffort } : {}),
+        serviceTier: currentServiceTier,
       });
       ctx.emit({ type: "status", status: "idle" });
 
@@ -532,6 +559,13 @@ export function createCodexAdapter(): AgentAdapter {
                 .filter((effort): effort is Record<string, unknown> => effort !== null)
                 .map((effort) => asString(effort.reasoningEffort) ?? "")
                 .filter(Boolean),
+              serviceTiers: [
+                ...asArray(model.serviceTiers)
+                  .map((raw) => asRecord(raw))
+                  .filter((tier): tier is Record<string, unknown> => tier !== null)
+                  .map((tier) => asString(tier.id) ?? ""),
+                ...asArray(model.additionalSpeedTiers).map((tier) => asString(tier) ?? ""),
+              ].filter((tier, index, all) => Boolean(tier) && all.indexOf(tier) === index),
               isDefault: model.isDefault === true,
             }))
             .filter((model) => model.id);
@@ -961,17 +995,23 @@ export function createCodexAdapter(): AgentAdapter {
         return;
       }
       case "thread/settings/updated": {
-        // Codex confirming (or another client making) a model/effort change.
+        // Codex confirming (or another client making) a model, effort, or
+        // service-tier change.
         const settings = asRecord(params.threadSettings);
         const model = asString(settings?.model);
         const effort = asString(settings?.effort);
+        const hasServiceTier = Boolean(
+          settings && Object.prototype.hasOwnProperty.call(settings, "serviceTier"),
+        );
         if (model) currentModel = model;
         if (effort) currentEffort = effort;
-        if (model || effort) {
+        if (hasServiceTier) currentServiceTier = asString(settings?.serviceTier);
+        if (model || effort || hasServiceTier) {
           ctx.emit({
             type: "session",
             ...(model ? { model } : {}),
             ...(effort ? { effort } : {}),
+            ...(hasServiceTier ? { serviceTier: currentServiceTier } : {}),
           });
         }
         return;
@@ -1297,7 +1337,71 @@ export function createCodexAdapter(): AgentAdapter {
     else replaceGoal(objective, ctx);
   }
 
-  /** `/model`, `/effort`, `/compact`, `/goal` — TUI controls wired to RPCs. */
+  /** Codex TUI controls that Duckweed maps onto app-server requests. */
+  function handleFastCommand(arg: string, ctx: AdapterContext): void {
+    const normalized = arg.toLowerCase();
+    if (normalized && normalized !== "on" && normalized !== "off") {
+      ctx.emit({
+        type: "notice",
+        tone: "error",
+        text: "Usage: /fast, /fast on, or /fast off.",
+      });
+      return;
+    }
+
+    const enabled = currentServiceTier === FAST_SERVICE_TIER;
+    const shouldEnable = normalized === "on" ? true : normalized === "off" ? false : !enabled;
+    if (shouldEnable === enabled) {
+      ctx.emit({
+        type: "notice",
+        tone: "info",
+        text: `Fast Mode is already ${enabled ? "enabled" : "disabled"}.`,
+      });
+      return;
+    }
+
+    if (shouldEnable) {
+      const active = models.find((model) => model.id === currentModel);
+      if (active && !active.serviceTiers.includes(FAST_SERVICE_TIER)) {
+        ctx.emit({
+          type: "notice",
+          tone: "error",
+          text: `${currentModel ?? "This model"} does not support Fast Mode.`,
+        });
+        return;
+      }
+    }
+
+    if (!threadId) {
+      ctx.emit({
+        type: "notice",
+        tone: "error",
+        text: "Fast Mode is not available until the Codex session is ready.",
+      });
+      return;
+    }
+
+    const serviceTier = shouldEnable ? FAST_SERVICE_TIER : null;
+    void request(ctx, "thread/settings/update", { threadId, serviceTier })
+      .then(() => {
+        currentServiceTier = serviceTier;
+        ctx.emit({ type: "session", serviceTier });
+        ctx.emit({
+          type: "notice",
+          tone: "info",
+          text: `Fast Mode ${shouldEnable ? "enabled" : "disabled"}.`,
+        });
+      })
+      .catch((error: unknown) => {
+        const record = asRecord(error);
+        ctx.emit({
+          type: "notice",
+          tone: "error",
+          text: asString(record?.message) ?? "Codex could not change Fast Mode.",
+        });
+      });
+  }
+
   function handleCommand(text: string, ctx: AdapterContext): "handled" | "prompt" {
     const space = text.search(/\s/);
     const name = (space < 0 ? text : text.slice(0, space)).toLowerCase();
@@ -1324,6 +1428,18 @@ export function createCodexAdapter(): AgentAdapter {
           type: "notice",
           tone: "error",
           text: `Unknown model "${arg}". Available: ${models.map((model) => model.id).join(", ")}.`,
+        });
+        return "handled";
+      }
+      if (
+        currentServiceTier === FAST_SERVICE_TIER &&
+        known &&
+        !known.serviceTiers.includes(FAST_SERVICE_TIER)
+      ) {
+        ctx.emit({
+          type: "notice",
+          tone: "error",
+          text: `${known.id} does not support Fast Mode. Use /fast to turn it off first.`,
         });
         return "handled";
       }
@@ -1361,6 +1477,11 @@ export function createCodexAdapter(): AgentAdapter {
       return "handled";
     }
 
+    if (name === "/fast") {
+      handleFastCommand(arg, ctx);
+      return "handled";
+    }
+
     if (name === "/compact") {
       if (threadId) {
         void request(ctx, "thread/compact/start", { threadId })
@@ -1385,7 +1506,7 @@ export function createCodexAdapter(): AgentAdapter {
     ctx.emit({
       type: "notice",
       tone: "error",
-      text: `Unknown command ${name}. Codex knows /model, /effort, /compact, /goal.`,
+      text: `Unknown command ${name}. Codex knows /model, /effort, /fast, /compact, /goal.`,
     });
     return "handled";
   }
@@ -1490,6 +1611,7 @@ export function createCodexAdapter(): AgentAdapter {
         // Same sticky override semantics as `model`, and the same casing
         // discipline: `effort` is the exact field name in TurnStartParams.
         ...(currentEffort ? { effort: currentEffort } : {}),
+        ...(currentServiceTier ? { serviceTier: currentServiceTier } : {}),
       }).catch((error: unknown) => {
         const record = asRecord(error);
         ctx.emit({
@@ -1549,6 +1671,7 @@ export function createCodexAdapter(): AgentAdapter {
             ...turnAccessParams(currentAccess),
             ...(child.model ? { model: child.model } : {}),
             ...(currentEffort ? { effort: currentEffort } : {}),
+            ...(currentServiceTier ? { serviceTier: currentServiceTier } : {}),
           });
         } else {
           return false;
@@ -1602,7 +1725,9 @@ export function createCodexAdapter(): AgentAdapter {
     resume: (sessionId, ctx) => {
       ctx.emit({ type: "status", status: "working" });
       ctx.emit({ type: "goal", goal: null });
-      return request(ctx, "thread/resume", { threadId: sessionId })
+      const requestId = nextId++;
+      resumeRequestId = requestId;
+      return requestWithId(ctx, requestId, "thread/resume", { threadId: sessionId })
         .then((result) => {
           const thread = asRecord(result.thread) ?? result;
           threadId = asString(thread.id) ?? sessionId;
@@ -1613,10 +1738,12 @@ export function createCodexAdapter(): AgentAdapter {
           // inside it; neither is guaranteed, so take whichever is there.
           const model = asString(result.model) ?? asString(thread.model);
           if (model) currentModel = model;
+          currentServiceTier = asString(result.serviceTier);
           ctx.emit({
             type: "session",
             sessionId: asString(thread.sessionId) ?? threadId,
             ...(model ? { model } : {}),
+            serviceTier: currentServiceTier,
           });
           ctx.emit({ type: "goal", goal: null });
           void request(ctx, "thread/goal/get", { threadId })
@@ -1635,27 +1762,57 @@ export function createCodexAdapter(): AgentAdapter {
           // of being rejected and queued against the temporary blank thread.
           ctx.emit({
             type: "status",
-            status: currentTurnId || hydratedStatus === "working" ? "working" : "idle",
+            status: currentTurnId ? "working" : "idle",
           });
           return true;
         })
         .catch((error: unknown) => {
           const record = asRecord(error);
-          ctx.emit({
-            type: "notice",
-            tone: "error",
-            text: asString(record?.message) ?? "Codex could not resume that thread.",
-          });
+          if (asString(record?.code) !== RESUME_CANCELLED) {
+            ctx.emit({
+              type: "notice",
+              tone: "error",
+              text: asString(record?.message) ?? "Codex could not resume that thread.",
+            });
+          }
           ctx.emit({ type: "status", status: "idle" });
           return false;
+        })
+        .finally(() => {
+          if (resumeRequestId === requestId) resumeRequestId = null;
         });
     },
 
     interrupt: (ctx) => {
-      if (!threadId || !currentTurnId) return;
-      void request(ctx, "turn/interrupt", { threadId, turnId: currentTurnId }).catch(() => {
-        // The turn may have finished between the click and the call.
-      });
+      if (resumeRequestId !== null) {
+        const requestId = resumeRequestId;
+        resumeRequestId = null;
+        const inFlight = pending.get(requestId);
+        pending.delete(requestId);
+        inFlight?.reject({ code: RESUME_CANCELLED });
+        notify(ctx, "$/cancelRequest", { id: requestId });
+        return;
+      }
+      if (!threadId || !currentTurnId) {
+        // Working without an interruptible turn is stale adapter state. Let the
+        // session recover instead of leaving a Stop button that cannot work.
+        ctx.emit({ type: "turn-end" });
+        return;
+      }
+      const turnId = currentTurnId;
+      void request(ctx, "turn/interrupt", { threadId, turnId })
+        .then(() => {
+          if (currentTurnId !== turnId) return;
+          currentTurnId = null;
+          ctx.emit({ type: "turn-end" });
+        })
+        .catch(() => {
+          // The turn may have finished between the click and the call. Either
+          // way, keeping the local session marked as working would be stale.
+          if (currentTurnId !== turnId) return;
+          currentTurnId = null;
+          ctx.emit({ type: "turn-end" });
+        });
     },
 
     respond: (permissionId, optionId, ctx) => {
