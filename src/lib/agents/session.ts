@@ -24,6 +24,7 @@ import {
   isAnnounceableTurn,
   isTurnEnd,
   type AgentEvent,
+  type TurnAnnounceInput,
 } from "./events";
 import { latest as latestSession, transcript as sessionTranscript } from "./history";
 import { AGENT_PROGRAMS, type AgentLaunch } from "./launch";
@@ -95,11 +96,17 @@ interface Session {
    */
   interrupted: boolean;
   /**
-   * A user prompt opened the current working stretch. Cleared when the turn
-   * returns to idle so a later synthetic working→idle (resume, load) cannot
-   * reuse the flag and fire a completion for work nobody asked for.
+   * A user action owns the current working stretch: a new prompt, a steer, or
+   * rejoining live work. Cleared on idle so a later synthetic transition
+   * cannot reuse it and announce work nobody requested.
    */
   userInitiatedTurn: boolean;
+  /**
+   * An authoritative turn end received while resume history was still being
+   * hydrated. Announce it when loading finishes instead of confusing it with
+   * the resume handshake's own synthetic idle transition.
+   */
+  deferredTurnEnd: TurnAnnounceInput | null;
   /** A picker command is negotiating with the CLI without becoming a chat turn. */
   configuring: boolean;
   /** Tracks whether a provider-native config turn such as Claude `/effort` worked. */
@@ -635,6 +642,12 @@ function emit(session: Session, event: AgentEvent): void {
     ...inspectTurn(next.items),
   };
   const ended = isTurnEnd(turnEnd);
+  let deferredToAnnounce: TurnAnnounceInput | null = null;
+
+  if (event.type === "history-loading" && !event.loading && session.deferredTurnEnd) {
+    deferredToAnnounce = session.deferredTurnEnd;
+    session.deferredTurnEnd = null;
+  }
 
   // Spend the flags that belonged to the turn which just became idle before
   // releasing a queued prompt. `dispatch` starts the next turn synchronously
@@ -660,7 +673,19 @@ function emit(session: Session, event: AgentEvent): void {
 
   // Config slash commands and synthetic idles still end the turn for the
   // protocol — they just do not earn a sound or unread flash.
-  if (ended && isAnnounceableTurn(turnEnd)) {
+  if (
+    ended &&
+    next.loadingHistory &&
+    event.type === "turn-end" &&
+    isAnnounceableTurn(turnEnd)
+  ) {
+    // Codex can finish the live resumed turn while transcript pages are still
+    // loading. Keep that authoritative end until the synthetic load is over.
+    session.deferredTurnEnd = turnEnd;
+  } else if (ended && !next.loadingHistory && isAnnounceableTurn(turnEnd)) {
+    announceTurnEnd(session);
+  }
+  if (deferredToAnnounce && isAnnounceableTurn(deferredToAnnounce)) {
     announceTurnEnd(session);
   }
 }
@@ -758,6 +783,7 @@ export async function start(
     notifyHandle: null,
     interrupted: false,
     userInitiatedTurn: false,
+    deferredTurnEnd: null,
     configuring: false,
     configurationTurn: null,
     interactionEpoch: 0,
@@ -924,6 +950,11 @@ function steerPrompt(session: Session, prompt: AgentPrompt): void {
     restoreAfterFailedSteer(session, prompt);
     return;
   }
+  // A rejoined background turn was not opened by dispatchNow. Once the user
+  // steers it, its eventual completion is user-owned and must still announce.
+  session.interrupted = false;
+  session.userInitiatedTurn = true;
+  session.interactionEpoch += 1;
   void Promise.resolve(session.adapter.steer(prompt, session.context))
     .then((accepted) => {
       if (!accepted) restoreAfterFailedSteer(session, prompt);
@@ -1147,8 +1178,14 @@ export function configure(
  * one. Emits the transcript marker only once the agent has taken it.
  */
 async function applyResume(session: Session, sessionId: string, title: string): Promise<void> {
+  // Rejoining is an explicit request. Idle history stays silent because its
+  // working -> idle transition occurs under `loadingHistory`; a live turn
+  // keeps ownership until its real completion arrives.
+  session.interrupted = false;
+  session.userInitiatedTurn = true;
   const attempt = session.adapter.resume?.(sessionId, session.context);
   if (attempt === false || attempt === undefined) {
+    session.userInitiatedTurn = false;
     // An ACP agent that never advertised `loadSession`, and no CLI flag to fall
     // back on in its headless mode. Saying so beats a picker that does nothing.
     emit(session, {
@@ -1160,6 +1197,8 @@ async function applyResume(session: Session, sessionId: string, title: string): 
   }
   if (await attempt) {
     emit(session, { type: "resumed", sessionId, title });
+  } else if (session.state.status !== "working" && session.state.status !== "waiting") {
+    session.userInitiatedTurn = false;
   }
 }
 

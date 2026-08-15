@@ -29,10 +29,13 @@ const image = {
   size: 5,
 };
 
-function harness(overrides: Partial<AgentLaunch> = {}) {
+function harness(
+  overrides: Partial<AgentLaunch> = {},
+  adapterOptions: Parameters<typeof createCodexAdapter>[0] = { completionQuietMs: 0 },
+) {
   const events: AgentEvent[] = [];
   const sent: Record<string, unknown>[] = [];
-  const adapter = createCodexAdapter();
+  const adapter = createCodexAdapter(adapterOptions);
   const ctx: AdapterContext = {
     cwd: "H:/project",
     launch: { ...launch, ...overrides },
@@ -1018,6 +1021,143 @@ describe("codex adapter", () => {
     });
   });
 
+  test("accepts completion when the turn/start response is the only source of the turn id", async () => {
+    const h = harness();
+    await h.handshake();
+    h.adapter.prompt({ text: "finish the build", images: [] }, h.ctx);
+    const start = h.sent.at(-1) as { id: number };
+
+    // Some app-server schedules can answer the RPC without delivering the
+    // matching turn/started notification to this client first.
+    h.feed({
+      jsonrpc: "2.0",
+      id: start.id,
+      result: { turn: { id: "turn_from_response", status: "inProgress", items: [] } },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    h.notify("turn/completed", {
+      threadId: "thread_1",
+      turn: { id: "turn_from_response", status: "completed", items: [] },
+    });
+
+    expect(h.state().status).toBe("idle");
+    expect(h.events.filter((event) => event.type === "turn-end")).toHaveLength(1);
+  });
+
+  test("accepts a fast root completion before the turn/start response arrives", async () => {
+    const h = harness();
+    await h.handshake();
+    h.adapter.prompt({ text: "quick check", images: [] }, h.ctx);
+    const start = h.sent.at(-1) as { id: number };
+
+    h.notify("turn/completed", {
+      threadId: "thread_1",
+      turn: { id: "turn_fast", status: "completed", items: [] },
+    });
+    expect(h.state().status).toBe("idle");
+
+    // A late response must not resurrect the already completed turn as an
+    // interrupt target or leave the adapter working again.
+    h.feed({
+      jsonrpc: "2.0",
+      id: start.id,
+      result: { turn: { id: "turn_fast", status: "completed", items: [] } },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    const sentBeforeInterrupt = h.sent.length;
+    h.adapter.interrupt(h.ctx);
+    expect(h.sent).toHaveLength(sentBeforeInterrupt);
+    expect(h.state().status).toBe("idle");
+  });
+
+  test("waits through Codex auto-continuations and ends only after final quiet", async () => {
+    const h = harness({}, { completionQuietMs: 20 });
+    await h.handshake();
+    h.adapter.prompt({ text: "finish the entire goal", images: [] }, h.ctx);
+    h.notify("turn/started", {
+      threadId: "thread_1",
+      turn: { id: "goal_turn_1", status: "inProgress", items: [] },
+    });
+    h.notify("turn/completed", {
+      threadId: "thread_1",
+      turn: { id: "goal_turn_1", status: "completed", items: [] },
+    });
+
+    expect(h.state().status).toBe("working");
+    h.notify("turn/started", {
+      threadId: "thread_1",
+      turn: { id: "goal_turn_2", status: "inProgress", items: [] },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(h.events.filter((event) => event.type === "turn-end")).toHaveLength(0);
+    expect(h.state().status).toBe("working");
+
+    h.notify("turn/completed", {
+      threadId: "thread_1",
+      turn: { id: "goal_turn_2", status: "completed", items: [] },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(h.events.filter((event) => event.type === "turn-end")).toHaveLength(1);
+    expect(h.state().status).toBe("idle");
+  });
+
+  test("uses root thread idle as a completion fallback without double-ending", async () => {
+    const h = harness();
+    await h.handshake();
+    h.adapter.prompt({ text: "run the audit", images: [] }, h.ctx);
+
+    h.notify("thread/status/changed", {
+      threadId: "thread_1",
+      status: { type: "idle" },
+    });
+    expect(h.state().status).toBe("idle");
+
+    h.notify("turn/completed", {
+      threadId: "thread_1",
+      turn: { id: "late_duplicate", status: "completed", items: [] },
+    });
+    expect(h.events.filter((event) => event.type === "turn-end")).toHaveLength(1);
+  });
+
+  test("uses the final-answer item when both boundary notifications are missing", async () => {
+    const h = harness({}, { completionQuietMs: 10 });
+    await h.handshake();
+    h.adapter.prompt({ text: "finish visibly", images: [] }, h.ctx);
+    h.notify("turn/started", {
+      threadId: "thread_1",
+      turn: { id: "turn_visible", status: "inProgress", items: [] },
+    });
+    h.notify("item/completed", {
+      threadId: "thread_1",
+      turnId: "turn_visible",
+      item: {
+        id: "progress_visible",
+        type: "agentMessage",
+        phase: "commentary",
+        text: "Still checking.",
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(h.state().status).toBe("working");
+
+    h.notify("item/completed", {
+      threadId: "thread_1",
+      turnId: "turn_visible",
+      item: {
+        id: "answer_visible",
+        type: "agentMessage",
+        phase: "final_answer",
+        text: "Everything is complete.",
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(h.state().status).toBe("idle");
+    expect(h.events.filter((event) => event.type === "turn-end")).toHaveLength(1);
+  });
+
   test("starts a turn with the typed prompt", async () => {
     const h = harness();
     await h.handshake();
@@ -1365,6 +1505,232 @@ describe("codex adapter", () => {
       }),
       expect.objectContaining({ kind: "assistant", text: "The screenshot is clear." }),
     ]);
+  });
+
+  test("keeps a resumed thread completion on the root while hydration is in flight", async () => {
+    const h = harness();
+    await h.handshake();
+
+    const resumed = h.adapter.resume?.("thread_finishing", h.ctx);
+    const call = h.sent.find((message) => message.method === "thread/resume") as { id: number };
+
+    // The target can finish before thread/resume returns. It is the selected
+    // root conversation, not a newly discovered child thread.
+    h.notify("turn/started", {
+      threadId: "thread_finishing",
+      turn: { id: "turn_finishing", status: "inProgress", items: [] },
+    });
+    h.notify("item/completed", {
+      threadId: "thread_finishing",
+      turnId: "turn_finishing",
+      item: { id: "answer-finishing", type: "agentMessage", text: "Finished in time." },
+    });
+    h.notify("turn/completed", {
+      threadId: "thread_finishing",
+      turn: { id: "turn_finishing", status: "completed", items: [] },
+    });
+    expect(h.events.filter((event) => event.type === "turn-end")).toHaveLength(1);
+
+    h.feed({
+      jsonrpc: "2.0",
+      id: call.id,
+      result: {
+        thread: {
+          id: "thread_finishing",
+          sessionId: "sess_finishing",
+          status: { type: "idle" },
+          turns: [],
+        },
+        initialTurnsPage: {
+          data: [
+            {
+              id: "turn_finishing",
+              status: "completed",
+              items: [
+                {
+                  type: "userMessage",
+                  id: "user-finishing",
+                  content: [{ type: "text", text: "Finish the task" }],
+                },
+                {
+                  type: "agentMessage",
+                  id: "answer-finishing",
+                  text: "Finished in time.",
+                },
+              ],
+            },
+          ],
+          nextCursor: null,
+        },
+      },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(await resumed).toBe(true);
+    expect(h.state()).toMatchObject({ status: "idle", loadingHistory: false });
+    expect(h.state().items).toEqual([
+      expect.objectContaining({ kind: "user", text: "Finish the task" }),
+      expect.objectContaining({ kind: "assistant", text: "Finished in time." }),
+    ]);
+    expect(h.state().items.some((item) => item.kind === "tool")).toBe(false);
+  });
+
+  test("does not invent a completion when an idle resumed thread reports its status", async () => {
+    const h = harness();
+    await h.handshake();
+
+    const resumed = h.adapter.resume?.("thread_idle", h.ctx);
+    const call = h.sent.find((message) => message.method === "thread/resume") as { id: number };
+    h.notify("thread/status/changed", {
+      threadId: "thread_idle",
+      status: { type: "idle" },
+    });
+    expect(h.events.filter((event) => event.type === "turn-end")).toHaveLength(0);
+
+    h.feed({
+      jsonrpc: "2.0",
+      id: call.id,
+      result: {
+        thread: {
+          id: "thread_idle",
+          sessionId: "sess_idle",
+          status: { type: "idle" },
+          turns: [],
+        },
+        initialTurnsPage: { data: [], nextCursor: null },
+      },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(await resumed).toBe(true);
+    expect(h.state().status).toBe("idle");
+    expect(h.events.filter((event) => event.type === "turn-end")).toHaveLength(0);
+  });
+
+  test("reconciles a resumed completion from final output and thread idle alone", async () => {
+    const h = harness();
+    await h.handshake();
+
+    const resumed = h.adapter.resume?.("thread_boundary_gap", h.ctx);
+    const call = h.sent.find((message) => message.method === "thread/resume") as { id: number };
+    h.notify("item/completed", {
+      threadId: "thread_boundary_gap",
+      turnId: "turn_boundary_gap",
+      item: {
+        id: "answer-boundary-gap",
+        type: "agentMessage",
+        text: "The work is complete.",
+      },
+    });
+    h.notify("thread/status/changed", {
+      threadId: "thread_boundary_gap",
+      status: { type: "idle" },
+    });
+    expect(h.events.filter((event) => event.type === "turn-end")).toHaveLength(1);
+
+    h.feed({
+      jsonrpc: "2.0",
+      id: call.id,
+      result: {
+        thread: {
+          id: "thread_boundary_gap",
+          sessionId: "sess_boundary_gap",
+          status: { type: "idle" },
+          turns: [],
+        },
+        initialTurnsPage: { data: [], nextCursor: null },
+      },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(await resumed).toBe(true);
+    expect(h.state().status).toBe("idle");
+  });
+
+  test("does not let resume hydration preempt a quiet-window completion", async () => {
+    const h = harness({}, { completionQuietMs: 20 });
+    await h.handshake();
+
+    const resumed = h.adapter.resume?.("thread_quiet_resume", h.ctx);
+    const call = h.sent.find((message) => message.method === "thread/resume") as { id: number };
+    h.notify("turn/started", {
+      threadId: "thread_quiet_resume",
+      turn: { id: "turn_quiet_resume", status: "inProgress", items: [] },
+    });
+    h.notify("turn/completed", {
+      threadId: "thread_quiet_resume",
+      turn: { id: "turn_quiet_resume", status: "completed", items: [] },
+    });
+
+    h.feed({
+      jsonrpc: "2.0",
+      id: call.id,
+      result: {
+        thread: {
+          id: "thread_quiet_resume",
+          sessionId: "sess_quiet_resume",
+          status: { type: "idle" },
+          turns: [],
+        },
+        initialTurnsPage: { data: [], nextCursor: null },
+      },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(await resumed).toBe(true);
+
+    // Hydration is an older snapshot. The authoritative turn end owns the
+    // working -> idle transition after its auto-continuation guard expires.
+    expect(h.state().status).toBe("working");
+    expect(h.events.filter((event) => event.type === "turn-end")).toHaveLength(0);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(h.state().status).toBe("idle");
+    expect(h.events.filter((event) => event.type === "turn-end")).toHaveLength(1);
+  });
+
+  test("does not resurrect a fallback completion from a late resume snapshot", async () => {
+    const h = harness({}, { completionQuietMs: 10 });
+    await h.handshake();
+
+    const resumed = h.adapter.resume?.("thread_late_snapshot", h.ctx);
+    const call = h.sent.find((message) => message.method === "thread/resume") as { id: number };
+    h.notify("item/completed", {
+      threadId: "thread_late_snapshot",
+      turnId: "turn_late_snapshot",
+      item: { id: "answer-late", type: "agentMessage", text: "Done." },
+    });
+    h.notify("thread/status/changed", {
+      threadId: "thread_late_snapshot",
+      status: { type: "idle" },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(h.state().status).toBe("idle");
+
+    // This older response still says active and contains an unfinished turn.
+    // The live item + idle notifications must remain authoritative.
+    h.feed({
+      jsonrpc: "2.0",
+      id: call.id,
+      result: {
+        thread: {
+          id: "thread_late_snapshot",
+          status: { type: "active" },
+          turns: [
+            {
+              id: "turn_late_snapshot",
+              status: "inProgress",
+              items: [],
+            },
+          ],
+        },
+      },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(await resumed).toBe(true);
+    expect(h.state().status).toBe("idle");
+    expect(h.events.filter((event) => event.type === "turn-end")).toHaveLength(1);
   });
 
   test("reattaches to an active turn when a background thread is resumed", async () => {
