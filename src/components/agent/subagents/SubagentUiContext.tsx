@@ -1,4 +1,4 @@
-import { createContext, useContext, type ReactNode } from "react";
+import { createContext, useContext, useMemo, type ReactNode } from "react";
 
 interface SubagentUiValue {
   selectedCallId: string | null;
@@ -21,12 +21,13 @@ export function SubagentUiProvider({
   onSelect: (callId: string) => void;
   children: ReactNode;
 }) {
+  const value = useMemo(
+    () => ({ selectedCallId, selectSubagent: onSelect }),
+    [onSelect, selectedCallId],
+  );
+
   return (
-    <SubagentUiContext.Provider
-      value={{ selectedCallId, selectSubagent: onSelect }}
-    >
-      {children}
-    </SubagentUiContext.Provider>
+    <SubagentUiContext.Provider value={value}>{children}</SubagentUiContext.Provider>
   );
 }
 

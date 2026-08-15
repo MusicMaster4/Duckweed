@@ -441,9 +441,7 @@ export function applyEvent(state: AgentSessionState, event: AgentEvent): AgentSe
     }
 
     case "tool": {
-      const index = state.items.findIndex(
-        (item) => item.kind === "tool" && item.callId === event.callId,
-      );
+      const index = findTool(state, event.callId);
       if (index < 0) {
         const subagent = mergeSubagentMeta(
           undefined,
@@ -647,6 +645,15 @@ function findStreaming(
   for (let i = state.items.length - 1; i >= 0; i--) {
     const item = state.items[i];
     if (item.kind === kind && item.id === id) return i;
+  }
+  return -1;
+}
+
+/** Live tool updates overwhelmingly target the newest rows in a long transcript. */
+function findTool(state: AgentSessionState, callId: string): number {
+  for (let i = state.items.length - 1; i >= 0; i -= 1) {
+    const item = state.items[i];
+    if (item.kind === "tool" && item.callId === callId) return i;
   }
   return -1;
 }

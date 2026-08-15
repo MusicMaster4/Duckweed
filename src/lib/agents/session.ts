@@ -648,16 +648,21 @@ function emit(session: Session, event: AgentEvent): void {
   // protocol we speak runs one turn at a time, so pushing the whole backlog
   // would just make the agent reject the rest.
   const releasingQueued = next.status === "idle" && session.queued.length > 0;
-  const turnEnd = {
+  const turnEndState = {
     before,
     after: next.status,
     permission: next.permission !== null,
     releasingQueued,
     interrupted: session.interrupted,
-    userInitiated: session.userInitiatedTurn,
-    ...inspectTurn(next.items),
   };
-  const ended = isTurnEnd(turnEnd);
+  const ended = isTurnEnd(turnEndState);
+  const turnEnd: TurnAnnounceInput = {
+    ...turnEndState,
+    userInitiated: session.userInitiatedTurn,
+    ...(ended
+      ? inspectTurn(next.items)
+      : { usedTools: false, userText: null }),
+  };
   let deferredToAnnounce: TurnAnnounceInput | null = null;
 
   if (event.type === "history-loading" && !event.loading && session.deferredTurnEnd) {

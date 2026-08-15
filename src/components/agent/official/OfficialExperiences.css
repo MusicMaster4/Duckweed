@@ -14,6 +14,19 @@
   padding: 8px 2px 24px;
 }
 
+/* Long transcripts keep their full DOM and accessibility tree, but Chromium
+   can skip layout and paint for turns that are far outside the viewport. The
+   auto size remembers each measured turn and prevents scroll jumps on revisit. */
+.official-transcript > .official-user-turn,
+.official-transcript > .official-answer,
+.official-transcript > .official-answer-layer,
+.official-transcript > .official-notice,
+.official-transcript > .official-plan,
+.official-transcript > .agent-activity-cluster {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 96px;
+}
+
 /* New conversational turns arrive with a short, spatially quiet handoff. */
 [data-message-enter] {
   animation: agent-message-enter 150ms cubic-bezier(0.22, 1, 0.36, 1) both;

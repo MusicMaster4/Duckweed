@@ -2,6 +2,7 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   useSyncExternalStore,
@@ -74,50 +75,7 @@ export function latestWorkflow(items: AgentSessionState["items"]) {
   return findLatestWorkflow(items);
 }
 
-/** A compact signal for streamed text, tool output, diffs, and plan updates. */
-export function agentTimelineRevision(items: AgentSessionState["items"]): number {
-  let revision = items.length;
-  for (const item of items) {
-    revision += item.id.length + item.kind.length;
-    if (item.kind === "tool") {
-      revision +=
-        item.title.length +
-        item.output.length +
-        (item.command?.length ?? 0) +
-        item.status.length +
-        (item.subagent
-          ? (item.subagent.label?.length ?? 0) +
-            (item.subagent.role?.length ?? 0) +
-            (item.subagent.threadId?.length ?? 0) +
-            (item.subagent.parentCallId?.length ?? 0) +
-            (item.subagent.model?.length ?? 0) +
-            (item.subagent.activity?.length ?? 0) +
-            (item.subagent.prompt?.length ?? 0) +
-            JSON.stringify(item.subagent.items ?? []).length
-          : 0) +
-        item.changes.reduce(
-          (sum, change) =>
-            sum +
-            change.path.length +
-            (change.before?.length ?? 0) +
-            (change.after?.length ?? 0) +
-            (change.diff?.length ?? 0),
-          0,
-        );
-    } else if (item.kind === "plan") {
-      revision += item.steps.reduce(
-        (sum, step) => sum + step.text.length + step.status.length,
-        0,
-      );
-    } else {
-      revision += item.text.length;
-      if (item.kind === "assistant" || item.kind === "thinking") {
-        revision += item.streaming ? 1 : 0;
-      }
-    }
-  }
-  return revision;
-}
+const EMPTY_ITEMS: AgentSessionState["items"] = [];
 
 /**
  * The custom agent UI: a layer over the terminal that ran the agent.
@@ -147,21 +105,28 @@ export function AgentSurface({ termId, active, onClose, onSelectionCopied }: Pro
   const userPausedRef = useRef(false);
   const lastScrollTopRef = useRef(0);
   const [showJumpToBottom, setShowJumpToBottom] = useState(false);
-  const timelineRevision = agentTimelineRevision(session?.items ?? []);
-  const workflow = latestWorkflow(session?.items ?? []);
+  const items = session?.items ?? EMPTY_ITEMS;
+  const workflow = useMemo(() => latestWorkflow(items), [items]);
   const workflowComplete = workflowIsComplete(workflow, session?.status);
   const [expiredWorkflowId, setExpiredWorkflowId] = useState<string | null>(null);
   const [clockNow, setClockNow] = useState(() => Date.now());
   const [selectedSubagentCallId, setSelectedSubagentCallId] = useState<string | null>(
     null,
   );
-  const fleet = subagentsForTurn(session?.items ?? []);
-  const fleetKey = fleet.map((subagent) => subagent.callId).join("\u001f");
+  const fleet = useMemo(() => subagentsForTurn(items), [items]);
+  const fleetKey = useMemo(
+    () => fleet.map((subagent) => subagent.callId).join("\u001f"),
+    [fleet],
+  );
   const fleetComplete = subagentFleetIsComplete(fleet, session?.status);
   const [expiredFleetKey, setExpiredFleetKey] = useState<string | null>(null);
-  const selectedSubagent = selectedSubagentCallId
-    ? subagentForCallId(session?.items ?? [], selectedSubagentCallId)
-    : null;
+  const selectedSubagent = useMemo(
+    () =>
+      selectedSubagentCallId
+        ? subagentForCallId(items, selectedSubagentCallId)
+        : null,
+    [items, selectedSubagentCallId],
+  );
   const dockedFleet =
     fleetComplete && expiredFleetKey === fleetKey ? [] : fleet;
   const visibleFleet =
@@ -169,6 +134,10 @@ export function AgentSurface({ termId, active, onClose, onSelectionCopied }: Pro
     !dockedFleet.some((subagent) => subagent.callId === selectedSubagent.callId)
       ? [...dockedFleet, selectedSubagent]
       : dockedFleet;
+  const timelineItems = useMemo(
+    () => (workflow ? items.filter((item) => item.kind !== "plan") : items),
+    [items, workflow],
+  );
 
   const closeSubagentInspector = useCallback(() => {
     setSelectedSubagentCallId(null);
@@ -295,19 +264,15 @@ export function AgentSurface({ termId, active, onClose, onSelectionCopied }: Pro
     return () => window.clearTimeout(timer);
   }, [workflow?.id, workflowComplete]);
 
+  // A mounted or remounted conversation opens at its newest turn. Later
+  // streamed height changes are handled by ResizeObserver without forcing a
+  // synchronous full-transcript layout for every text delta.
   useLayoutEffect(() => {
     const node = scrollRef.current;
     if (!node || !pinnedRef.current) return;
     node.scrollTop = node.scrollHeight;
     lastScrollTopRef.current = node.scrollTop;
-    setShowJumpToBottom(false);
-  }, [
-    timelineRevision,
-    session?.status,
-    session?.pending.length,
-    session?.permission?.id,
-    session?.error,
-  ]);
+  }, [termId]);
 
   useEffect(() => {
     const node = scrollRef.current;
@@ -361,9 +326,6 @@ export function AgentSurface({ termId, active, onClose, onSelectionCopied }: Pro
     workflow && workflow.steps.length > 0 && workflow.id !== expiredWorkflowId
       ? workflow
       : null;
-  const timelineItems = workflow
-    ? session.items.filter((item) => item.kind !== "plan")
-    : session.items;
   const tokens = usage.inputTokens + usage.outputTokens;
   const usageDetail = [
     `${formatTokens(usage.inputTokens)} input`,

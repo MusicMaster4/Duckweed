@@ -336,7 +336,7 @@ function OpenCodeTool({ item, elapsed }: { item: ToolItem; elapsed: string | nul
   );
 }
 
-function OpenCodeItem({
+const OpenCodeItem = memo(function OpenCodeItem({
   item,
   now,
   continued = false,
@@ -387,7 +387,7 @@ function OpenCodeItem({
         <OpenCodeTool item={item} elapsed={elapsed} />
       );
   }
-}
+});
 
 /**
  * One lane module.
@@ -437,6 +437,28 @@ const OpenCodeModule = memo(function OpenCodeModule({
       </div>
     </section>
   );
+}, (previous, next) => {
+  if (
+    previous.now !== next.now ||
+    previous.module.key !== next.module.key ||
+    previous.module.lane !== next.module.lane ||
+    previous.module.merges !== next.module.merges ||
+    previous.module.items.length !== next.module.items.length
+  ) {
+    return false;
+  }
+  for (let index = 0; index < previous.module.items.length; index += 1) {
+    const item = previous.module.items[index];
+    if (item !== next.module.items[index]) return false;
+    if (item.kind !== "assistant") continue;
+    if (
+      previous.continuedIds.has(item.id) !== next.continuedIds.has(item.id) ||
+      (previous.liveAssistantId === item.id) !== (next.liveAssistantId === item.id)
+    ) {
+      return false;
+    }
+  }
+  return true;
 });
 
 export function OpenCodeExperience({ session, items, className }: ProviderExperienceProps) {
