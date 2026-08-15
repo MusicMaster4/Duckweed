@@ -213,9 +213,13 @@ export function createAcpAdapter(): AgentAdapter {
   let turnSeq = 0;
   /**
    * ACP only labels a chunk as message or thought; it does not provide a
-   * content-block id. Keep adjacent chunks together, but open a new block
-   * after the stream crosses a tool call or switches content kind. Without
-   * this, Grok's whole turn collapses into one giant reasoning/message item.
+   * content-block id. Keep one thought stream and one message stream per
+   * tool-bounded phase. Grok interleaves `agent_thought_chunk` with
+   * `agent_message_chunk` at token granularity, and its workflow also emits
+   * `tool_call_update` while prose is still arriving. Opening a new block on
+   * every kind switch (or every tool update) shatters one sentence into a
+   * stack of interim bubbles. A new phase starts only when a tool call id
+   * first appears.
    */
   let activeContent: "assistant" | "thinking" | null = null;
   let assistantSegment = 0;
@@ -224,6 +228,12 @@ export function createAcpAdapter(): AgentAdapter {
   let goalResponsePending = false;
   let goalResponseText = "";
   let thinkingSegment = 0;
+  /** Counts tool-bounded phases so thought/message can resume after a switch. */
+  let contentPhase = 0;
+  let assistantPhase = -1;
+  let thinkingPhase = -1;
+  /** Tool ids already used to open a content phase. */
+  const seenToolCalls = new Set<string>();
   /** Permission id → the JSON-RPC request id ACP is waiting on. */
   const permissionRequests = new Map<string, string | number>();
   /** Tool calls whose content we have already seen, to merge partial updates. */
@@ -279,6 +289,10 @@ export function createAcpAdapter(): AgentAdapter {
     activeContent = null;
     assistantSegment = 0;
     thinkingSegment = 0;
+    contentPhase = 0;
+    assistantPhase = -1;
+    thinkingPhase = -1;
+    seenToolCalls.clear();
   }
 
   function workflowId(update: Record<string, unknown>): string {
@@ -339,12 +353,27 @@ export function createAcpAdapter(): AgentAdapter {
     if (activeContent !== kind) {
       closeActiveContent(ctx);
       activeContent = kind;
-      if (kind === "assistant") assistantSegment += 1;
-      else thinkingSegment += 1;
+    }
+    if (kind === "assistant") {
+      if (assistantPhase !== contentPhase) {
+        assistantPhase = contentPhase;
+        assistantSegment += 1;
+      }
+    } else if (thinkingPhase !== contentPhase) {
+      thinkingPhase = contentPhase;
+      thinkingSegment += 1;
     }
     const segment = kind === "assistant" ? assistantSegment : thinkingSegment;
     const prefix = kind === "assistant" ? "a" : "r";
     return `${prefix}${turnSeq}${segment > 1 ? `-${segment}` : ""}`;
+  }
+
+  /** First sighting of a tool starts a new thought/message phase. */
+  function beginToolContentPhase(callId: string, ctx: AdapterContext) {
+    if (seenToolCalls.has(callId)) return;
+    seenToolCalls.add(callId);
+    closeActiveContent(ctx);
+    contentPhase += 1;
   }
 
   function request(
@@ -732,9 +761,9 @@ export function createAcpAdapter(): AgentAdapter {
       }
       case "tool_call":
       case "tool_call_update": {
-        closeActiveContent(ctx);
         const callId = asString(update.toolCallId);
         if (!callId) return;
+        beginToolContentPhase(callId, ctx);
         turnHadContent = true;
         const title = asString(update.title);
         if (title) toolTitles.set(callId, title);

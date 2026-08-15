@@ -155,6 +155,82 @@ describe("acp adapter", () => {
     expect(h.state().items[2]).toMatchObject({ text: "Done.", streaming: true });
   });
 
+  test("keeps interleaved thought and message tokens in one block each", async () => {
+    const h = harness();
+    await h.handshake();
+    h.adapter.prompt({ text: "inspect", images: [] }, h.ctx);
+
+    h.update({
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "The repo is " },
+    });
+    h.update({
+      sessionUpdate: "agent_thought_chunk",
+      content: { type: "text", text: "Expo first. " },
+    });
+    h.update({
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "Expo/" },
+    });
+    h.update({
+      sessionUpdate: "agent_thought_chunk",
+      content: { type: "text", text: "Then RN." },
+    });
+    h.update({
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "RN." },
+    });
+
+    expect(
+      h.state().items
+        .filter((item) => item.kind === "thinking" || item.kind === "assistant")
+        .map((item) => ({ id: item.id, kind: item.kind, text: item.text })),
+    ).toEqual([
+      { id: "a1", kind: "assistant", text: "The repo is Expo/RN." },
+      { id: "r1", kind: "thinking", text: "Expo first. Then RN." },
+    ]);
+  });
+
+  test("does not split a message when an existing tool reports progress", async () => {
+    const h = harness();
+    await h.handshake();
+    h.adapter.prompt({ text: "inspect", images: [] }, h.ctx);
+
+    h.update({
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "and the existing implement" },
+    });
+    h.update({
+      sessionUpdate: "tool_call",
+      toolCallId: "call_1",
+      title: "Read notes",
+      kind: "read",
+      status: "in_progress",
+    });
+    h.update({
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "er notes so the feature " },
+    });
+    h.update({
+      sessionUpdate: "tool_call_update",
+      toolCallId: "call_1",
+      status: "in_progress",
+    });
+    h.update({
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "map cites real symbols." },
+    });
+
+    expect(
+      h.state().items
+        .filter((item) => item.kind === "assistant")
+        .map((item) => ({ id: item.id, text: item.text })),
+    ).toEqual([
+      { id: "a1", text: "and the existing implement" },
+      { id: "a1-2", text: "er notes so the feature map cites real symbols." },
+    ]);
+  });
+
   test("opens new thought and message segments around tool calls", async () => {
     const h = harness();
     await h.handshake();

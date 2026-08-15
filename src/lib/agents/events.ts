@@ -399,7 +399,11 @@ export function applyEvent(state: AgentSessionState, event: AgentEvent): AgentSe
       }
       const items = state.items.slice();
       const current = items[index] as { text: string };
-      items[index] = { ...items[index], text: clampEnd(current.text + event.text, MAX_TEXT) } as never;
+      items[index] = {
+        ...items[index],
+        text: clampEnd(current.text + event.text, MAX_TEXT),
+        streaming: true,
+      } as never;
       return { ...state, items };
     }
 
