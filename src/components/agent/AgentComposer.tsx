@@ -15,7 +15,10 @@ import {
   searchWorkspaceIndex,
   type FileMention,
 } from "../../lib/agentComposer";
-import { GUIDED_ARG_COMMANDS } from "../../lib/agents/slashCatalog";
+import {
+  GUIDED_ARG_COMMANDS,
+  INLINE_ARG_COMMANDS,
+} from "../../lib/agents/slashCatalog";
 import {
   effortsFor,
   shortModelLabel,
@@ -573,10 +576,12 @@ export function AgentComposer({ session, active, inputRef, onSubmit, onInterrupt
           return;
         }
         const selected = rows[highlighted];
-        // Complete the command name (with a trailing space) instead of
-        // submitting bare `/model` / `/effort`, so the options list opens.
+        // Complete commands that expect an argument instead of submitting the
+        // bare name. Guided commands open their picker; side commands leave a
+        // clean insertion point for the question.
         if (
           GUIDED_ARG_COMMANDS.has(selected.value.toLowerCase()) ||
+          INLINE_ARG_COMMANDS.has(selected.value.toLowerCase()) ||
           value.toLowerCase() !== selected.value.toLowerCase()
         ) {
           change(`${selected.value} `);

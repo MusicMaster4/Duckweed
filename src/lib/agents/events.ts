@@ -11,6 +11,7 @@ import type {
   AgentPlanStep,
   AgentPlanType,
   AgentSessionState,
+  AgentSideQuestion,
   AgentStatus,
   AgentUsage,
   SubagentMeta,
@@ -91,6 +92,8 @@ export type AgentEvent =
     }
   | { type: "plan"; planType?: AgentPlanType; steps: AgentPlanStep[] }
   | { type: "notice"; text: string; tone: "info" | "error"; transient?: boolean }
+  /** Replace or dismiss the ephemeral response shown beside the transcript. */
+  | { type: "side-question"; sideQuestion: AgentSideQuestion | null }
   | { type: "exit-armed"; armed: boolean }
   /** Remove picker confirmations and double-Ctrl+C hints without touching errors. */
   | { type: "dismiss-transient-notices" }
@@ -547,6 +550,12 @@ export function applyEvent(state: AgentSessionState, event: AgentEvent): AgentSe
         ],
       };
 
+    case "side-question":
+      return {
+        ...state,
+        sideQuestion: event.sideQuestion ? { ...event.sideQuestion } : null,
+      };
+
     case "exit-armed":
       return state.exitArmed === event.armed ? state : { ...state, exitArmed: event.armed };
 
@@ -560,6 +569,7 @@ export function applyEvent(state: AgentSessionState, event: AgentEvent): AgentSe
         ...state,
         started: true,
         goal: null,
+        sideQuestion: null,
         items: event.items ?? [],
         lastWorkedForMs: null,
         pending: [],

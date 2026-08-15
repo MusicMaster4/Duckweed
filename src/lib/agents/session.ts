@@ -122,6 +122,8 @@ interface Session {
   exitArmedUntil: number;
   /** Prevent late protocol frames from requesting the same native handoff. */
   authHandoff: boolean;
+  /** Side responses the user already dismissed while their request was in flight. */
+  dismissedSideQuestions: Set<string>;
   disposed: boolean;
 }
 
@@ -553,6 +555,13 @@ function dispatch(session: Session, prompt: AgentPrompt, echoUser = true): void 
 
 function emit(session: Session, event: AgentEvent): void {
   if (session.disposed) return;
+  if (
+    event.type === "side-question" &&
+    event.sideQuestion &&
+    session.dismissedSideQuestions.has(event.sideQuestion.id)
+  ) {
+    return;
+  }
 
   // Browser and device authentication cannot finish over these headless
   // streams. Reveal the PTY and launch the provider's own flow instead.
@@ -796,6 +805,7 @@ export async function start(
     interactionEpoch: 0,
     exitArmedUntil: 0,
     authHandoff: false,
+    dismissedSideQuestions: new Set(),
     disposed: false,
     state: {
       termId,
@@ -1347,6 +1357,18 @@ export function interrupt(termId: string): void {
   if (!session || session.disposed) return;
   session.interrupted = true;
   session.adapter.interrupt(session.context);
+}
+
+/** Hide the ephemeral side response without changing the main conversation. */
+export function dismissSideQuestion(termId: string): void {
+  const session = sessions.get(termId);
+  if (!session || session.disposed || !session.state.sideQuestion) return;
+  session.dismissedSideQuestions.add(session.state.sideQuestion.id);
+  if (session.dismissedSideQuestions.size > 32) {
+    const oldest = session.dismissedSideQuestions.values().next().value;
+    if (oldest) session.dismissedSideQuestions.delete(oldest);
+  }
+  emit(session, { type: "side-question", sideQuestion: null });
 }
 
 /**

@@ -7,6 +7,7 @@ import {
   fallbackModels,
   formatSessionUsage,
   GUIDED_ARG_COMMANDS,
+  INLINE_ARG_COMMANDS,
   isNewChatCommand,
   mergeCommands,
 } from "./slashCatalog";
@@ -50,6 +51,21 @@ describe("slashCatalog", () => {
     expect(fallbackCommands("codex").some((command) => command.name === "/fast")).toBe(true);
     for (const agent of ["claude", "grok", "opencode", "cursor"] as const) {
       expect(fallbackCommands(agent).some((command) => command.name === "/fast")).toBe(false);
+    }
+  });
+
+  test("offers each agent's native side-conversation commands", () => {
+    const claude = fallbackCommands("claude").map((command) => command.name);
+    const codex = fallbackCommands("codex").map((command) => command.name);
+    const unsupported = ["grok", "opencode", "cursor"] as const;
+
+    expect(claude).toContain("/btw");
+    expect(claude).not.toContain("/side");
+    expect(codex).toEqual(expect.arrayContaining(["/side", "/btw"]));
+    for (const agent of unsupported) {
+      const commands = fallbackCommands(agent).map((command) => command.name);
+      expect(commands).not.toContain("/side");
+      expect(commands).not.toContain("/btw");
     }
   });
 
@@ -124,6 +140,10 @@ describe("slashCatalog", () => {
 
   test("guided arg commands are exactly model and effort", () => {
     expect([...GUIDED_ARG_COMMANDS].sort()).toEqual(["/effort", "/model"]);
+  });
+
+  test("side commands keep autocomplete open for an inline question", () => {
+    expect([...INLINE_ARG_COMMANDS].sort()).toEqual(["/btw", "/side"]);
   });
 
   test("/resume is offered exactly where a session can be found and resumed", () => {

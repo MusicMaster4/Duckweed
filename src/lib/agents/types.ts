@@ -168,6 +168,18 @@ export interface AgentPendingPrompt extends AgentPrompt {
   id: string;
 }
 
+/** An ephemeral question that runs beside the main conversation. */
+export interface AgentSideQuestion {
+  /** Stable while the provider resolves the question. */
+  id: string;
+  /** Slash spelling the user invoked. */
+  command: "/btw" | "/side";
+  question: string;
+  /** Empty until the first response text arrives. */
+  answer: string;
+  status: "asking" | "answered" | "error";
+}
+
 interface ItemBase {
   id: string;
   at: number;
@@ -407,6 +419,8 @@ export interface AgentSessionState {
   /** Long-running objective currently owned by the provider, when known. */
   goal: AgentGoal | null;
   items: AgentItem[];
+  /** Ephemeral side response, rendered outside the main transcript. */
+  sideQuestion?: AgentSideQuestion | null;
   /**
    * Prompts the user sent while a turn was still running, oldest first.
    *

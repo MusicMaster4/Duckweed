@@ -440,6 +440,71 @@ describe("codex adapter", () => {
     });
   });
 
+  test("runs /side in an ephemeral read-only fork without touching the main transcript", async () => {
+    const h = harness();
+    await h.handshake();
+
+    expect(h.adapter.commandAvailableDuringTurn?.("/side what changed?")).toBe(true);
+    expect(h.adapter.command?.("/side what changed?", h.ctx)).toBe("handled");
+    expect(h.sent.at(-1)).toMatchObject({
+      id: 4,
+      method: "thread/fork",
+      params: {
+        threadId: "thread_1",
+        ephemeral: true,
+        sandbox: "read-only",
+        model: "gpt-5.6-sol",
+      },
+    });
+    expect(h.state().sideQuestion).toMatchObject({
+      command: "/side",
+      question: "what changed?",
+      status: "asking",
+    });
+    expect(h.state().items).toEqual([]);
+
+    h.feed({ jsonrpc: "2.0", id: 4, result: { thread: { id: "side_1" } } });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(h.sent.at(-1)).toMatchObject({
+      id: 5,
+      method: "turn/start",
+      params: {
+        threadId: "side_1",
+        input: [{ type: "text", text: "what changed?" }],
+        approvalPolicy: "never",
+        sandboxPolicy: { type: "readOnly" },
+      },
+    });
+    h.feed({ jsonrpc: "2.0", id: 5, result: { turn: { id: "side_turn_1" } } });
+    h.notify("item/agentMessage/delta", {
+      threadId: "side_1",
+      turnId: "side_turn_1",
+      itemId: "side_message_1",
+      delta: "Only the parser changed.",
+    });
+    h.notify("item/completed", {
+      threadId: "side_1",
+      turnId: "side_turn_1",
+      item: { id: "side_message_1", type: "agentMessage", text: "Only the parser changed." },
+    });
+    h.notify("turn/completed", {
+      threadId: "side_1",
+      turn: { id: "side_turn_1", status: "completed", items: [] },
+    });
+
+    expect(h.state().sideQuestion).toMatchObject({
+      answer: "Only the parser changed.",
+      status: "answered",
+    });
+    expect(h.state().items).toEqual([]);
+    expect(h.sent.at(-1)).toMatchObject({
+      id: 6,
+      method: "thread/unsubscribe",
+      params: { threadId: "side_1" },
+    });
+  });
+
   test("sets a fresh persistent goal through the Codex control plane", async () => {
     const h = harness();
     await h.handshake();
@@ -605,7 +670,7 @@ describe("codex adapter", () => {
     expect(h.sent.at(-1)).toMatchObject({ method: "model/list" });
     expect(h.state().items.find((item) => item.kind === "notice")).toMatchObject({
       tone: "error",
-      text: "Unknown command /frobnicate. Codex knows /model, /effort, /fast, /compact, /goal.",
+      text: "Unknown command /frobnicate. Codex knows /model, /effort, /fast, /compact, /goal, /side, and /btw.",
     });
   });
 

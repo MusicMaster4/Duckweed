@@ -40,6 +40,7 @@ import { AgentPermission } from "./AgentPermission";
 import { AgentProviderIcon } from "./AgentProviderIcon";
 import { AgentQuestion } from "./AgentQuestion";
 import { AgentSessions } from "./AgentSessions";
+import { AgentSideQuestion } from "./AgentSideQuestion";
 import { AgentTimeline } from "./AgentTimeline";
 import { copySelectedTextFromContextMenu } from "./selectionCopy";
 import { PlanTracker, type OfficialVariant } from "./official/OfficialShared";
@@ -444,6 +445,11 @@ export function AgentSurface({ termId, active, onClose, onSelectionCopied }: Pro
     lastScrollTopRef.current = node.scrollTop;
   };
 
+  const dismissSideQuestion = () => {
+    agents.dismissSideQuestion(termId);
+    window.requestAnimationFrame(() => composerRef.current?.focus());
+  };
+
   const showSubagentInTimeline = (callId: string) => {
     const target = Array.from(
       surfaceRef.current?.querySelectorAll<HTMLElement>("[data-subagent-call-id]") ?? [],
@@ -747,6 +753,14 @@ export function AgentSurface({ termId, active, onClose, onSelectionCopied }: Pro
                 item={visibleWorkflow}
                 variant={workflowVariant(session.agent)}
                 runningSubagents={runningSubagentCount(fleet)}
+              />
+            </div>
+          )}
+          {session.sideQuestion && (
+            <div className="agent-side-question-dock">
+              <AgentSideQuestion
+                question={session.sideQuestion}
+                onDismiss={dismissSideQuestion}
               />
             </div>
           )}

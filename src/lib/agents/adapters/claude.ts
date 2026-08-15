@@ -22,6 +22,7 @@ import {
   type AgentGoal,
   type AgentPrompt,
   type AgentQuestionItem,
+  type AgentSideQuestion,
   type AgentPlanStep,
   type SubagentMeta,
   type ToolStatus,
@@ -44,7 +45,9 @@ import {
  * model tokens involved (verified against claude 2.1). The one exception is
  * `/model <id>`, which we route through the `set_model` control request so
  * the header learns the new model from a structured ACK rather than by
- * parsing the CLI's friendly confirmation sentence.
+ * parsing the CLI's friendly confirmation sentence. `/btw` also uses its
+ * dedicated `side_question` control request so it can run without interrupting
+ * or entering the main transcript.
  */
 
 interface ToolCall {
@@ -537,6 +540,13 @@ export function createClaudeAdapter(): AgentAdapter {
     string,
     { mode: AgentAccessMode; announce: boolean }
   >();
+  /** Outbound one-shot `/btw` requests, separate from the main turn. */
+  const pendingSideQuestions = new Map<
+    string,
+    { sideQuestion: AgentSideQuestion }
+  >();
+  let activeSideQuestionRequestId: string | null = null;
+  let lastSideQuestion: AgentSideQuestion | null = null;
   /**
    * Claude can report one API failure through several protocol frames: a
    * synthetic assistant message, a forwarded child-agent message, and the
@@ -1355,6 +1365,25 @@ export function createClaudeAdapter(): AgentAdapter {
     const response = asRecord(frame.response);
     const requestId = asString(response?.request_id);
     if (!requestId) return;
+    const side = pendingSideQuestions.get(requestId);
+    if (side !== undefined) {
+      pendingSideQuestions.delete(requestId);
+      if (activeSideQuestionRequestId === requestId) activeSideQuestionRequestId = null;
+      const payload = asRecord(response?.response);
+      const answer = asString(payload?.response);
+      const succeeded = asString(response?.subtype) === "success" && answer !== null;
+      const settled: AgentSideQuestion = {
+        ...side.sideQuestion,
+        answer:
+          answer ??
+          asString(response?.error) ??
+          "Claude did not return a side-question response.",
+        status: succeeded ? "answered" : "error",
+      };
+      if (succeeded) lastSideQuestion = settled;
+      ctx.emit({ type: "side-question", sideQuestion: settled });
+      return;
+    }
     const modelChange = pendingModelChanges.get(requestId);
     if (modelChange !== undefined) {
       pendingModelChanges.delete(requestId);
@@ -1438,6 +1467,47 @@ export function createClaudeAdapter(): AgentAdapter {
     const space = text.search(/\s/);
     const name = (space < 0 ? text : text.slice(0, space)).toLowerCase();
     const arg = space < 0 ? "" : text.slice(space + 1).trim();
+
+    if (name === "/btw") {
+      if (!arg) {
+        if (lastSideQuestion) {
+          ctx.emit({ type: "side-question", sideQuestion: lastSideQuestion });
+        } else {
+          ctx.emit({
+            type: "notice",
+            tone: "error",
+            text: "Usage: /btw <your question>",
+          });
+        }
+        return "handled";
+      }
+      if (activeSideQuestionRequestId) {
+        ctx.emit({
+          type: "notice",
+          tone: "error",
+          text: "A side question is already in progress.",
+        });
+        return "handled";
+      }
+      controlSeq += 1;
+      const requestId = `dw-side-${controlSeq}`;
+      const sideQuestion: AgentSideQuestion = {
+        id: requestId,
+        command: "/btw",
+        question: arg,
+        answer: "",
+        status: "asking",
+      };
+      activeSideQuestionRequestId = requestId;
+      pendingSideQuestions.set(requestId, { sideQuestion });
+      ctx.emit({ type: "side-question", sideQuestion });
+      ctx.send({
+        type: "control_request",
+        request_id: requestId,
+        request: { subtype: "side_question", question: arg },
+      });
+      return "handled";
+    }
 
     if (name === "/goal") {
       goalBeforeCommand = currentGoal;
@@ -1651,6 +1721,8 @@ export function createClaudeAdapter(): AgentAdapter {
     },
 
     command: handleCommand,
+
+    commandAvailableDuringTurn: (text) => /^\/btw(?:\s|$)/i.test(text.trim()),
 
     configure: (kind, value, ctx) => {
       if (kind !== "model") return false;
