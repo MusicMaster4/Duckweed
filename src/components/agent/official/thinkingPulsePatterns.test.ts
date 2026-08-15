@@ -436,31 +436,70 @@ describe("thinking pulse patterns", () => {
   });
 
   /**
-   * Because the still bank cannot scale, a resting-size cell is the only size
-   * it ever shows, which reads as a smaller grid beside a matrix that opens to
-   * 1.1 and past it. The stylesheet compensates with a wider cell; if that
-   * rule goes, the bank silently looks undersized again.
+   * Every matrix uses the same 2.5px cell as the original catalog. A motion
+   * that overrides --pulse-cell, or that scales a cell past the original
+   * band, reads as a grid of larger or smaller squares than the pane next
+   * to it.
    */
-  test("the still bank's cells are sized up to make up for not scaling", async () => {
+  test("every matrix uses the original catalog cell size", async () => {
     const css = await Bun.file(`${import.meta.dir}/OfficialExperiences.css`).text();
-    const rule = css.match(
-      /((?:\.agent-activity-pulse\[data-motion="(?:lamp|wink|ember|morse|fade)"\],?\s*)+)\{([^}]*)\}/,
+
+    expect(css).toMatch(
+      /\.agent-activity-pulse > span\s*\{[^}]*width: var\(--pulse-cell, 2\.5px\)/,
+    );
+    expect(css).toMatch(
+      /\.agent-activity-pulse > span\s*\{[^}]*height: var\(--pulse-cell, 2\.5px\)/,
     );
 
-    expect(rule).not.toBeNull();
-    for (const motion of ["lamp", "wink", "ember", "morse", "fade"]) {
-      expect(rule![1]).toContain(`[data-motion="${motion}"]`);
+    const overrides = [
+      ...css.matchAll(
+        /\.agent-activity-pulse\[data-motion="([^"]+)"\][^{]*\{([^}]*)\}/g,
+      ),
+    ];
+    for (const [, motion, body] of overrides) {
+      const cell = body.match(/--pulse-cell:\s*([\d.]+)px/);
+      if (cell) {
+        expect({ motion, cell: Number(cell[1]) }).toEqual({
+          motion,
+          cell: 2.5,
+        });
+      }
     }
-    expect(Number(rule![2]!.match(/--pulse-cell:\s*([\d.]+)px/)?.[1])).toBeGreaterThan(2.5);
-    /* The cell has to read that variable, or the override is dead weight. */
-    expect(css).toContain("width: var(--pulse-cell");
-    expect(css).toContain("height: var(--pulse-cell");
+  });
+
+  /**
+   * The original motions (chase through settle) stay inside 0.62 to 1.14.
+   * Newer banks must match that band so a matrix does not read as a grid of
+   * smaller or larger squares than the one next to it.
+   */
+  test("no motion scales a cell outside the original catalog size band", async () => {
+    const css = await Bun.file(`${import.meta.dir}/OfficialExperiences.css`).text();
+    const motions = new Set(THINKING_PULSE_PATTERNS.map((pattern) => pattern.motion));
+    const outliers: string[] = [];
+
+    for (const motion of motions) {
+      const block = css.match(
+        new RegExp(`@keyframes agent-activity-${motion}\\s*\\{[\\s\\S]*?\\n\\}`),
+      )![0];
+
+      for (const [, args] of block.matchAll(/scale\(([^)]*)\)/g)) {
+        const axes = args.split(",").map((axis) => Number(axis));
+        for (const axis of axes) {
+          if (axis < 0.62 || axis > 1.14) {
+            outliers.push(`${motion} (${axis})`);
+          }
+        }
+      }
+    }
+
+    expect(outliers).toEqual([]);
   });
 
   /**
    * A cell reads at whatever size it holds when it is brightest, so a motion
    * whose lit frame scales under 1 renders a matrix of visibly smaller dots
-   * than the pane next to it. Full size is the floor; growing past it is fine.
+   * than the pane next to it. Full size is the floor; growing past it is fine
+   * so long as it stays inside the original catalog band.
    */
   test("no motion lights a cell below its resting size", async () => {
     const css = await Bun.file(`${import.meta.dir}/OfficialExperiences.css`).text();
