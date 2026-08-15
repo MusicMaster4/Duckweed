@@ -541,6 +541,66 @@ describe("codex adapter", () => {
     });
   });
 
+  test("holds /side and /btw out of the same-turn path until resume hydration finishes", async () => {
+    const h = harness();
+    await h.handshake();
+
+    const resumed = h.adapter.resume?.("thread_old", h.ctx);
+    expect(h.state()).toMatchObject({ status: "working", loadingHistory: true });
+    expect(h.adapter.commandAvailableDuringTurn?.("/side what changed?")).toBe(false);
+    expect(h.adapter.commandAvailableDuringTurn?.("/btw what changed?")).toBe(false);
+    expect(h.adapter.commandAvailableDuringTurn?.("/goal pause")).toBe(true);
+
+    const call = h.sent.find((message) => message.method === "thread/resume") as { id: number };
+    h.feed({
+      jsonrpc: "2.0",
+      id: call.id,
+      result: {
+        thread: {
+          id: "thread_old",
+          sessionId: "sess_old",
+          status: { type: "idle" },
+          turns: [],
+        },
+        initialTurnsPage: {
+          data: [
+            {
+              id: "turn-old",
+              status: "completed",
+              itemsView: "full",
+              items: [
+                {
+                  type: "userMessage",
+                  id: "user-old",
+                  content: [{ type: "text", text: "Inspect the parser" }],
+                },
+                {
+                  type: "agentMessage",
+                  id: "answer-old",
+                  text: "The parser is compatible.",
+                },
+              ],
+            },
+          ],
+          nextCursor: null,
+        },
+      },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(await resumed).toBe(true);
+    expect(h.state()).toMatchObject({ status: "idle", loadingHistory: false });
+    expect(h.adapter.commandAvailableDuringTurn?.("/side what changed?")).toBe(true);
+    expect(h.adapter.commandAvailableDuringTurn?.("/btw what changed?")).toBe(true);
+
+    expect(h.adapter.command?.("/side what changed?", h.ctx)).toBe("handled");
+    expect(h.sent.at(-1)).toMatchObject({
+      method: "thread/fork",
+      params: expect.objectContaining({ threadId: "thread_old" }),
+    });
+  });
+
   test("sets a fresh persistent goal through the Codex control plane", async () => {
     const h = harness();
     await h.handshake();

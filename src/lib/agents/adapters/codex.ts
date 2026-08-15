@@ -251,6 +251,12 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
   /** The resume RPC currently occupying the pane, so Stop can cancel it too. */
   let resumeRequestId: RequestKey | null = null;
   /**
+   * True from the first resume emit until `thread/resume` and its transcript
+   * pages have settled. `threadId` is claimed earlier so a live completion
+   * cannot be misrouted; side forks must still wait for that hydration.
+   */
+  let hydratingResume = false;
+  /**
    * The model and effort turns run with. Seeded from the launch flags,
    * corrected by the `thread/start` response, and moved by /model and
    * /effort — `turn/start` overrides persist server-side, but keeping our
@@ -2111,8 +2117,15 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
 
     command: handleCommand,
 
-    commandAvailableDuringTurn: (text) =>
-      /^\/(?:goal|side|btw)(?:\s|$)/i.test(text.trim()),
+    commandAvailableDuringTurn: (text) => {
+      const trimmed = text.trim();
+      // `/goal pause` has to land while the provider is working. `/side` and
+      // `/btw` also run during a turn, but not while resume is still hydrating:
+      // the session is `working` then, and a fork would race `thread/resume`.
+      if (/^\/goal(?:\s|$)/i.test(trimmed)) return true;
+      if (hydratingResume) return false;
+      return /^\/(?:side|btw)(?:\s|$)/i.test(trimmed);
+    },
 
     configureAccess: (mode, ctx) => {
       currentAccess = mode;
@@ -2142,6 +2155,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
      */
     resume: (sessionId, ctx) => {
       cancelPendingRootCompletion();
+      hydratingResume = true;
       ctx.emit({ type: "history-loading", loading: true });
       ctx.emit({ type: "status", status: "working" });
       ctx.emit({ type: "goal", goal: null });
@@ -2249,6 +2263,10 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         // A thread can still own a live background turn when it is resumed.
         // Preserve that turn id so follow-ups steer the resumed work instead
         // of being rejected and queued against the temporary blank thread.
+        // Drop the hydration gate before the status emit so a queued `/side`
+        // released on idle, or one typed against a live resumed turn, can
+        // fork the now-complete thread instead of racing it.
+        hydratingResume = false;
         if (!completionAlreadyObserved) {
           ctx.emit({
             type: "status",
@@ -2260,6 +2278,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
 
       return load()
         .catch((error: unknown) => {
+          hydratingResume = false;
           if (rootTurnGeneration === resumeGeneration) {
             threadId = previousThreadId;
             settleRootTurn(null);
@@ -2277,6 +2296,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         })
         .finally(() => {
           resumeRequestId = null;
+          hydratingResume = false;
           ctx.emit({ type: "history-loading", loading: false });
         });
     },
