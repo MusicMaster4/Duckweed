@@ -419,14 +419,19 @@ function dispatchNow(session: Session, prompt: AgentPrompt, echoUser = true): vo
     });
     return;
   }
-  if (
-    prompt.images.length === 0 &&
-    prompt.text.startsWith("/") &&
-    session.adapter.command?.(prompt.text, context) === "handled"
-  ) {
-    // Local answer only (notice, model switch over RPC). No working stretch,
-    // so nothing to announce when it "finishes".
-    return;
+  if (prompt.images.length === 0 && prompt.text.startsWith("/")) {
+    const previousModel = session.state.model;
+    if (session.adapter.command?.(prompt.text, context) === "handled") {
+      // Codex may report temporary or provider-selected models in ordinary
+      // session events. Only a successful user /model command belongs in its
+      // durable preference.
+      if (session.launch.agent === "codex" && session.state.model !== previousModel) {
+        rememberPreferences(session.launch, { model: session.state.model });
+      }
+      // Local answer only (notice, model switch over RPC). No working stretch,
+      // so nothing to announce when it "finishes".
+      return;
+    }
   }
   // Everything that reaches `prompt` is a user-opened turn, including slash
   // text the CLI will interpret (`/effort high` on Claude, advertised ACP
@@ -600,7 +605,9 @@ function emit(session: Session, event: AgentEvent): void {
       next.accessMode !== session.state.accessMode)
   ) {
     rememberPreferences(session.launch, {
-      model: next.model,
+      // Codex's wire state can temporarily name an internal reviewer or a
+      // rerouted model. Its preference is recorded only at user selection.
+      ...(session.launch.agent !== "codex" ? { model: next.model } : {}),
       effort: next.effort,
       accessMode: next.accessMode ?? "default",
     });
@@ -1159,6 +1166,9 @@ export function configure(
 
   const clean = value.trim();
   if (kind === "model") {
+    if (session.launch.agent === "codex") {
+      rememberPreferences(session.launch, { model: clean });
+    }
     session.state = {
       ...session.state,
       nextModel: clean === session.state.model ? null : clean,

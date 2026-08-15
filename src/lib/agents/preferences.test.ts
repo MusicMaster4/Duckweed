@@ -94,6 +94,26 @@ describe("custom agent model preferences", () => {
     });
   });
 
+  test("does not restore or remember Codex's hidden auto-review model", () => {
+    const codex = launch("codex", "codex");
+    resetForTests({
+      [preferenceScope(codex)]: {
+        model: "codex-auto-review",
+        effort: "medium",
+        accessMode: "default",
+      },
+    });
+
+    expect(withRememberedPreferences(codex).model).toBeNull();
+
+    rememberPreferences(codex, { model: "codex-auto-review" });
+    expect(withRememberedPreferences(codex).model).toBeNull();
+
+    rememberPreferences(codex, { model: "gpt-5.5" });
+    rememberPreferences(codex, { model: "codex-auto-review" });
+    expect(withRememberedPreferences(codex).model).toBe("gpt-5.5");
+  });
+
   test("restores the last access level in a later session", () => {
     const codex = launch("codex", "codex");
     rememberPreferences(codex, { accessMode: "workspace" });

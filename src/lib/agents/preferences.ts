@@ -25,6 +25,20 @@ function cleanValue(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
+/** Internal Codex utility models must never become a user-facing preference. */
+function isInternalCodexModel(launch: AgentLaunch, model: string | null): boolean {
+  return Boolean(
+    launch.agent === "codex" &&
+      model &&
+      /^codex-auto-review(?:er)?$/i.test(model),
+  );
+}
+
+function cleanModel(launch: AgentLaunch, value: unknown): string | null {
+  const model = cleanValue(value);
+  return isInternalCodexModel(launch, model) ? null : model;
+}
+
 function cleanAccessMode(value: unknown): AgentAccessMode {
   return value === "read-only" || value === "workspace" || value === "full-access"
     ? value
@@ -81,10 +95,13 @@ export function preferenceScope(launch: AgentLaunch): string {
 /** Fill missing launch choices without overriding flags the user just typed. */
 export function withRememberedPreferences(launch: AgentLaunch): AgentLaunch {
   const preference = load().choices[preferenceScope(launch)];
-  if (!preference) return launch;
+  if (!preference) {
+    const model = cleanModel(launch, launch.model);
+    return model === launch.model ? launch : { ...launch, model };
+  }
   return {
     ...launch,
-    model: launch.model ?? preference.model,
+    model: cleanModel(launch, launch.model ?? preference.model),
     effort: launch.effort ?? preference.effort,
     accessMode: launch.accessMode ?? preference.accessMode,
   };
@@ -109,8 +126,14 @@ export function rememberPreferences(
     effort: null,
     accessMode: "default" as const,
   };
+  const selectedModel = cleanValue(selection.model);
   const next = {
-    model: selection.model === undefined ? previous.model : cleanValue(selection.model),
+    model:
+      selection.model === undefined
+        ? cleanModel(launch, previous.model)
+        : isInternalCodexModel(launch, selectedModel)
+          ? cleanModel(launch, previous.model)
+          : selectedModel,
     effort: selection.effort === undefined ? previous.effort : cleanValue(selection.effort),
     accessMode:
       selection.accessMode === undefined

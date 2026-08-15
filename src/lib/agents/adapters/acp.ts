@@ -97,6 +97,46 @@ function readContentText(value: unknown): string {
   return inner ? (asString(inner.text) ?? "") : "";
 }
 
+/**
+ * Recover only the text the person typed from Grok's stored user messages.
+ *
+ * Grok persists harness context such as `<user_info>` and `<system-reminder>`
+ * as user-role messages. `session/load` then replays those records through the
+ * same `user_message_chunk` channel as real prompts. The custom transcript
+ * must not expose that private protocol plumbing as conversation content.
+ * Goal sessions are the exception: their original prompt is nested inside a
+ * reminder, so extract that prompt instead of dropping the whole record.
+ */
+function visibleGrokReplayText(text: string): string | null {
+  let visible = text.trim();
+  if (!visible) return null;
+
+  const query = /^<user_query>\s*([\s\S]*?)\s*<\/user_query>$/i.exec(visible);
+  if (query) visible = query[1].trim();
+
+  if (/^<system-reminder>/i.test(visible)) {
+    const goal = /^<system-reminder>\s*A goal has been set:\s*([\s\S]*?)(?:\r?\n){2}You are working directly on this goal across multiple turns\./i.exec(
+      visible,
+    );
+    if (goal) return goal[1].trim() || null;
+
+    const reminderEnd = visible.indexOf("</system-reminder>");
+    if (reminderEnd < 0) return null;
+    visible = visible.slice(reminderEnd + "</system-reminder>".length).trim();
+    if (!visible) return null;
+  }
+
+  if (/^<(?:user_info|rules|INSTRUCTIONS|recommended_plugins)>/i.test(visible)) return null;
+  return visible || null;
+}
+
+/** A complete Grok context record starts a new stored user-role message. */
+function startsGrokReplayRecord(text: string): boolean {
+  return /^<(?:user_query|user_info|system-reminder|rules|INSTRUCTIONS|recommended_plugins)>/i.test(
+    text.trimStart(),
+  );
+}
+
 function lastLine(text: string): string | null {
   const lines = text
     .split(/\r?\n/)
@@ -620,8 +660,10 @@ export function createAcpAdapter(): AgentAdapter {
    */
   function flushReplayedUser(ctx: AdapterContext) {
     if (!replayedUser) return;
-    const text = replayedUser;
+    const text =
+      ctx.launch.agent === "grok" ? visibleGrokReplayText(replayedUser) : replayedUser.trim();
     replayedUser = "";
+    if (!text) return;
     turnSeq += 1;
     resetContentSegments();
     ctx.emit({ type: "user", text });
@@ -644,7 +686,21 @@ export function createAcpAdapter(): AgentAdapter {
       // The app has already emitted that prompt locally, so accepting the echo
       // would draw the same message twice (and advance `turnSeq` twice). Stored
       // session replay is the one case where no local prompt exists.
-      if (loading) replayedUser += readContentText(update.content);
+      if (loading) {
+        const chunk = readContentText(update.content);
+        // Grok emits its stored context records consecutively, without a
+        // non-user update between them. A new wrapper is therefore also the
+        // only reliable boundary between those messages. Ordinary prompt
+        // chunks still concatenate exactly as ACP intends.
+        if (
+          ctx.launch.agent === "grok" &&
+          replayedUser &&
+          startsGrokReplayRecord(chunk)
+        ) {
+          flushReplayedUser(ctx);
+        }
+        replayedUser += chunk;
+      }
       return;
     }
     if (loading) flushReplayedUser(ctx);

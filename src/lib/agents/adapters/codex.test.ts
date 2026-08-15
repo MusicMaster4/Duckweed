@@ -129,6 +129,17 @@ function harness(
             ],
             serviceTiers: [],
           },
+          {
+            id: "codex-auto-review",
+            displayName: "Codex Auto Review",
+            hidden: true,
+            isDefault: false,
+            defaultReasoningEffort: "medium",
+            supportedReasoningEfforts: [
+              { reasoningEffort: "medium", description: "" },
+            ],
+            serviceTiers: [],
+          },
         ],
         nextCursor: null,
       },
@@ -233,6 +244,18 @@ describe("codex adapter", () => {
     expect(models[0].label).toBe("GPT-5.6-Sol");
   });
 
+  test("hides internal models and repairs an internal current model", async () => {
+    const h = harness();
+    await h.handshake({ model: "codex-auto-review" });
+    await h.loadModels();
+
+    expect(h.state().models.map((model) => model.id)).toEqual([
+      "gpt-5.6-sol",
+      "gpt-5.5",
+    ]);
+    expect(h.state().model).toBe("gpt-5.6-sol");
+  });
+
   test("passes a requested model into the thread", async () => {
     const h = harness({ model: "gpt-5.6" });
     await h.handshake({ model: "gpt-5.6" });
@@ -324,12 +347,27 @@ describe("codex adapter", () => {
     await h.loadModels();
 
     expect(h.adapter.command?.("/fast", h.ctx)).toBe("handled");
-    expect(h.sent.at(-1)).toMatchObject({
+    expect(h.sent.at(-2)).toMatchObject({
       id: 4,
       method: "thread/settings/update",
       params: { threadId: "thread_1", serviceTier: "priority" },
     });
+    expect(h.sent.at(-1)).toMatchObject({
+      id: 5,
+      method: "config/batchWrite",
+      params: {
+        edits: [
+          {
+            keyPath: "service_tier",
+            value: "fast",
+            mergeStrategy: "replace",
+          },
+        ],
+        reloadUserConfig: true,
+      },
+    });
     h.feed({ jsonrpc: "2.0", id: 4, result: {} });
+    h.feed({ jsonrpc: "2.0", id: 5, result: {} });
     await Promise.resolve();
     await Promise.resolve();
     expect(h.state().serviceTier).toBe("priority");
@@ -346,21 +384,36 @@ describe("codex adapter", () => {
     });
   });
 
-  test("a second /fast clears the priority service tier", async () => {
+  test("a second /fast persists the default service tier", async () => {
     const h = harness();
     await h.handshake({ serviceTier: "priority" });
     await h.loadModels();
 
     h.adapter.command?.("/fast", h.ctx);
-    expect(h.sent.at(-1)).toMatchObject({
+    expect(h.sent.at(-2)).toMatchObject({
       id: 4,
       method: "thread/settings/update",
-      params: { threadId: "thread_1", serviceTier: null },
+      params: { threadId: "thread_1", serviceTier: "default" },
+    });
+    expect(h.sent.at(-1)).toMatchObject({
+      id: 5,
+      method: "config/batchWrite",
+      params: {
+        edits: [
+          {
+            keyPath: "service_tier",
+            value: "default",
+            mergeStrategy: "replace",
+          },
+        ],
+        reloadUserConfig: true,
+      },
     });
     h.feed({ jsonrpc: "2.0", id: 4, result: {} });
+    h.feed({ jsonrpc: "2.0", id: 5, result: {} });
     await Promise.resolve();
     await Promise.resolve();
-    expect(h.state().serviceTier).toBeNull();
+    expect(h.state().serviceTier).toBe("default");
     expect(h.state().items.at(-1)).toMatchObject({ text: "Fast Mode disabled." });
   });
 

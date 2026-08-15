@@ -1052,6 +1052,85 @@ describe("acp adapter", () => {
     expect(h.state().status).toBe("idle");
   });
 
+  test("hides Grok harness reminders while restoring the real goal prompt", async () => {
+    const h = harness();
+    await h.handshake({ agentCapabilities: { loadSession: true } });
+
+    const resumed = h.adapter.resume?.("goal-session", h.ctx);
+    h.update({
+      sessionUpdate: "user_message_chunk",
+      content: {
+        type: "text",
+        text: "<user_info>\nOS Version: windows\nWorkspace Path: H:/project\n</user_info>",
+      },
+    });
+    h.update({
+      sessionUpdate: "user_message_chunk",
+      content: {
+        type: "text",
+        text: "<system-reminder>\nMCP servers connected:\n- tasks\n</system-reminder>",
+      },
+    });
+    h.update({
+      sessionUpdate: "user_message_chunk",
+      content: {
+        type: "text",
+        text: [
+          "<user_query>",
+          "<system-reminder>",
+          "A goal has been set: Build the audio normalizer.",
+          "Keep the interface in dark mode.",
+          "",
+          "You are working directly on this goal across multiple turns. Deliver everything.",
+          "Plan: C:/private/session/goal/plan.md",
+          "</system-reminder>",
+          "</user_query>",
+        ].join("\n"),
+      },
+    });
+    h.update({
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "The app is ready." },
+    });
+    h.feed({ jsonrpc: "2.0", id: 3, result: {} });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(await resumed).toBe(true);
+
+    expect(h.state().items.filter((item) => item.kind === "user")).toEqual([
+      expect.objectContaining({
+        text: "Build the audio normalizer.\nKeep the interface in dark mode.",
+      }),
+    ]);
+    const transcript = JSON.stringify(h.state().items);
+    expect(transcript).not.toContain("system-reminder");
+    expect(transcript).not.toContain("user_info");
+    expect(transcript).not.toContain("C:/private/session");
+  });
+
+  test("unwraps ordinary Grok user queries during session replay", async () => {
+    const h = harness();
+    await h.handshake({ agentCapabilities: { loadSession: true } });
+
+    const resumed = h.adapter.resume?.("ordinary-session", h.ctx);
+    h.update({
+      sessionUpdate: "user_message_chunk",
+      content: { type: "text", text: "<user_query>\nFix the parser\n</user_query>" },
+    });
+    h.update({
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "Fixed." },
+    });
+    h.feed({ jsonrpc: "2.0", id: 3, result: {} });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(await resumed).toBe(true);
+
+    expect(h.state().items.filter((item) => item.kind === "user")).toEqual([
+      expect.objectContaining({ text: "Fix the parser" }),
+    ]);
+  });
+
   test("lets Stop cancel a session replay that never answered", async () => {
     const h = harness();
     await h.handshake({ agentCapabilities: { loadSession: true } });

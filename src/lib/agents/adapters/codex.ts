@@ -50,6 +50,7 @@ interface CodexModel {
   displayName: string;
   efforts: string[];
   serviceTiers: string[];
+  hidden: boolean;
   isDefault: boolean;
 }
 
@@ -65,6 +66,7 @@ const MAX_GOAL_OBJECTIVE_CHARS = 4_000;
 const RESUME_PAGE_SIZE = 100;
 const MAX_RESUMED_TURNS = 500;
 const FAST_SERVICE_TIER = "priority";
+const DEFAULT_SERVICE_TIER = "default";
 /** Matches the native log monitor's guard for Codex auto-continuations. */
 const ROOT_COMPLETION_QUIET_MS = 800;
 
@@ -599,7 +601,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       // Not awaited: /model and /effort validate leniently until this lands.
       void request(ctx, "model/list", {})
         .then((result) => {
-          models = asArray(result.data)
+          const advertisedModels = asArray(result.data)
             .map((raw) => asRecord(raw))
             .filter((model): model is Record<string, unknown> => model !== null)
             .map((model) => ({
@@ -617,12 +619,25 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
                   .map((tier) => asString(tier.id) ?? ""),
                 ...asArray(model.additionalSpeedTiers).map((tier) => asString(tier) ?? ""),
               ].filter((tier, index, all) => Boolean(tier) && all.indexOf(tier) === index),
+              hidden: model.hidden === true,
               isDefault: model.isDefault === true,
             }))
             .filter((model) => model.id);
+          models = advertisedModels.filter((model) => !model.hidden);
           if (models.length) {
+            const hiddenCurrent = advertisedModels.some(
+              (model) =>
+                model.hidden &&
+                (model.id === currentModel || model.displayName === currentModel),
+            );
+            let repairedModel: string | undefined;
+            if (hiddenCurrent) {
+              repairedModel = (models.find((model) => model.isDefault) ?? models[0]).id;
+              currentModel = repairedModel;
+            }
             ctx.emit({
               type: "session",
+              ...(repairedModel ? { model: repairedModel } : {}),
               models: models.map((model) => ({
                 id: model.id,
                 label: model.displayName || model.id,
@@ -1520,8 +1535,24 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       return;
     }
 
-    const serviceTier = shouldEnable ? FAST_SERVICE_TIER : null;
-    void request(ctx, "thread/settings/update", { threadId, serviceTier })
+    // Match Codex's native /fast behavior: update this thread and persist the
+    // selection for chats opened later. `default` is an explicit off state;
+    // clearing only the thread override would expose an older global `priority`
+    // value again as soon as a new chat starts.
+    const serviceTier = shouldEnable ? FAST_SERVICE_TIER : DEFAULT_SERVICE_TIER;
+    void Promise.all([
+      request(ctx, "thread/settings/update", { threadId, serviceTier }),
+      request(ctx, "config/batchWrite", {
+        edits: [
+          {
+            keyPath: "service_tier",
+            value: shouldEnable ? "fast" : DEFAULT_SERVICE_TIER,
+            mergeStrategy: "replace",
+          },
+        ],
+        reloadUserConfig: true,
+      }),
+    ])
       .then(() => {
         currentServiceTier = serviceTier;
         ctx.emit({ type: "session", serviceTier });
