@@ -259,6 +259,13 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
   let currentModel: string | null = null;
   let currentEffort: string | null = null;
   let currentServiceTier: string | null = null;
+  /**
+   * `/fast` only changes the service tier. Codex still announces the thread's
+   * stored effort in `thread/settings/updated`, and that value is often the
+   * model default (`low`) because `/effort` is a local `turn/start` override.
+   * While a Fast Mode write is in flight, keep the effort the user already has.
+   */
+  let preserveEffortDuringFastToggle = false;
   let currentAccess: AgentAccessMode = "default";
   /** `model/list`, once it lands; empty until then, so validation is lenient. */
   let models: CodexModel[] = [];
@@ -1340,14 +1347,15 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         const hasServiceTier = Boolean(
           settings && Object.prototype.hasOwnProperty.call(settings, "serviceTier"),
         );
+        const applyEffort = Boolean(effort) && !preserveEffortDuringFastToggle;
         if (model) currentModel = model;
-        if (effort) currentEffort = effort;
+        if (applyEffort) currentEffort = effort;
         if (hasServiceTier) currentServiceTier = asString(settings?.serviceTier);
-        if (model || effort || hasServiceTier) {
+        if (model || applyEffort || hasServiceTier) {
           ctx.emit({
             type: "session",
             ...(model ? { model } : {}),
-            ...(effort ? { effort } : {}),
+            ...(applyEffort ? { effort } : {}),
             ...(hasServiceTier ? { serviceTier: currentServiceTier } : {}),
           });
         }
@@ -1726,10 +1734,17 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     // Match Codex's native /fast behavior: update this thread and persist the
     // selection for chats opened later. `default` is an explicit off state;
     // clearing only the thread override would expose an older global `priority`
-    // value again as soon as a new chat starts.
+    // value again as soon as a new chat starts. Send the current effort with
+    // the tier so a config reload cannot put the model default back.
     const serviceTier = shouldEnable ? FAST_SERVICE_TIER : DEFAULT_SERVICE_TIER;
+    const effortToKeep = currentEffort;
+    preserveEffortDuringFastToggle = true;
     void Promise.all([
-      request(ctx, "thread/settings/update", { threadId, serviceTier }),
+      request(ctx, "thread/settings/update", {
+        threadId,
+        serviceTier,
+        ...(effortToKeep ? { effort: effortToKeep } : {}),
+      }),
       request(ctx, "config/batchWrite", {
         edits: [
           {
@@ -1743,7 +1758,12 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     ])
       .then(() => {
         currentServiceTier = serviceTier;
-        ctx.emit({ type: "session", serviceTier });
+        if (effortToKeep) currentEffort = effortToKeep;
+        ctx.emit({
+          type: "session",
+          serviceTier,
+          ...(effortToKeep ? { effort: effortToKeep } : {}),
+        });
         ctx.emit({
           type: "notice",
           tone: "info",
@@ -1757,6 +1777,9 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
           tone: "error",
           text: asString(record?.message) ?? "Codex could not change Fast Mode.",
         });
+      })
+      .finally(() => {
+        preserveEffortDuringFastToggle = false;
       });
   }
 

@@ -384,6 +384,42 @@ describe("codex adapter", () => {
     });
   });
 
+  test("keeps the current reasoning effort when toggling Fast Mode", async () => {
+    const h = harness();
+    await h.handshake();
+    await h.loadModels();
+
+    expect(h.state().effort).toBe("high");
+    h.adapter.command?.("/fast", h.ctx);
+    expect(h.sent.at(-2)).toMatchObject({
+      method: "thread/settings/update",
+      params: { threadId: "thread_1", serviceTier: "priority", effort: "high" },
+    });
+
+    // Codex announces the full thread settings after a tier change, and the
+    // stored effort is often still the model default.
+    h.notify("thread/settings/updated", {
+      threadId: "thread_1",
+      threadSettings: { model: "gpt-5.6-sol", effort: "low", serviceTier: "priority" },
+    });
+    h.feed({ jsonrpc: "2.0", id: 4, result: {} });
+    h.feed({ jsonrpc: "2.0", id: 5, result: {} });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(h.state()).toMatchObject({
+      effort: "high",
+      serviceTier: "priority",
+    });
+    expect(h.state().items.at(-1)).toMatchObject({ text: "Fast Mode enabled." });
+
+    h.adapter.prompt({ text: "hello", images: [] }, h.ctx);
+    expect(h.sent.at(-1)).toMatchObject({
+      method: "turn/start",
+      params: { effort: "high", serviceTier: "priority" },
+    });
+  });
+
   test("a second /fast persists the default service tier", async () => {
     const h = harness();
     await h.handshake({ serviceTier: "priority" });
