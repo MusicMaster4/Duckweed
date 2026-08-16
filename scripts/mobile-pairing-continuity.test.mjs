@@ -51,4 +51,25 @@ describe("mobile pairing continuity", () => {
       "NotificationManagerCompat.from(context).cancelAll()",
     );
   });
+
+  test("logging responses is independent from notification delivery", () => {
+    const service = read(
+      "android/app/src/main/java/dev/slop/duckweed/companion/DuckweedMessagingService.kt",
+    );
+    const activity = read(
+      "android/app/src/main/java/dev/slop/duckweed/companion/MainActivity.kt",
+    );
+    const store = read(
+      "android/app/src/main/java/dev/slop/duckweed/companion/MessageStore.kt",
+    );
+
+    expect(service.indexOf("store.put(preview)")).toBeLessThan(
+      service.indexOf("NotificationPreference.isEnabled(this)"),
+    );
+    expect(service).toContain("store.markNotified(preview.id, preview.sentAt)");
+    expect(activity).toContain("store.dismissPendingNotifications()");
+    expect(activity).toContain("latestForOpenAgents(openAgentTerminals, 50)");
+    expect(store).toContain("fun latestForOpenAgents(");
+    expect(store).toContain(".take(limit.coerceIn(1, 50))");
+  });
 });

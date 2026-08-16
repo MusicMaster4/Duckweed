@@ -44,9 +44,10 @@ inside the companion invalidates its receive token and clears local secrets.
 5. Use **Send test** to verify delivery.
 
 The **Notifications** switch at the top of **Responses** controls Android
-alerts without disabling the encrypted response history. Responses that arrive
-while alerts are off stay pending. Turning alerts back on shows those pending
-agent completions, while previously delivered alerts are not replayed.
+alerts without disabling the encrypted response history. Responses received
+while alerts are off are still saved, but they are never replayed as alerts
+when notifications are enabled again. **Responses** shows the newest response
+from each currently open agent, up to 50 agents.
 
 The main companion navigation contains **Responses**, **Projects**,
 **Connections**, and **Updates**. Tapping a response opens its terminal

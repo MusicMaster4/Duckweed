@@ -70,7 +70,11 @@ class MainActivity : AppCompatActivity() {
     ) { granted ->
         NotificationPreference.setEnabled(this, granted)
         syncNotificationToggle()
-        if (granted) showPendingNotifications()
+        if (granted) {
+            showPendingNotifications()
+        } else {
+            MessageStore(this).dismissPendingNotifications()
+        }
     }
 
     private val installPermission = registerForActivityResult(
@@ -291,7 +295,9 @@ class MainActivity : AppCompatActivity() {
             if (enabled == notificationsAreActive()) return@setOnCheckedChangeListener
             if (!enabled) {
                 NotificationPreference.setEnabled(this, false)
-                NotificationTools.cancel(this, MessageStore(this).latest())
+                val store = MessageStore(this)
+                store.dismissPendingNotifications()
+                NotificationTools.cancel(this, store.latest())
                 return@setOnCheckedChangeListener
             }
             if (needsNotificationPermission()) {
@@ -305,7 +311,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun requestNotificationPermissionIfEnabled() {
-        if (!NotificationPreference.isEnabled(this)) return
+        if (!NotificationPreference.isEnabled(this)) {
+            MessageStore(this).dismissPendingNotifications()
+            return
+        }
         if (needsNotificationPermission()) {
             notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
         } else {
@@ -536,19 +545,27 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun refreshRemoteState() {
-        val messages = MessageStore(this).latest()
+        val snapshots = WorkspaceStore(this).all()
+        val openAgentTerminals = snapshots.flatMap { snapshot ->
+            snapshot.projects.flatMap { project ->
+                project.terminals
+                    .filter { it.agent != null }
+                    .map { Pair(snapshot.pairId, it.id) }
+            }
+        }.toSet()
+        val messages = MessageStore(this).latestForOpenAgents(openAgentTerminals, 50)
         legacyResponse?.let { current ->
             legacyResponse = messages.firstOrNull { it.id == current.id } ?: current
         }
         messageAdapter.submit(messages)
         emptyState.visibility = if (messages.isEmpty()) View.VISIBLE else View.GONE
-        refreshWorkspaces()
+        refreshWorkspaces(snapshots)
         if (conversationDetail.visibility == View.VISIBLE) refreshConversation()
         openIntentResponse()
     }
 
-    private fun refreshWorkspaces() {
-        val rows = WorkspaceStore(this).all().flatMap { snapshot ->
+    private fun refreshWorkspaces(snapshots: List<WorkspaceSnapshot> = WorkspaceStore(this).all()) {
+        val rows = snapshots.flatMap { snapshot ->
             snapshot.projects.map { ProjectRow(snapshot.pairId, it) }
         }
         projectAdapter.submit(rows)
@@ -717,7 +734,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun openIntentResponse() {
         val messageId = intent.getStringExtra("message_id") ?: return
-        val message = MessageStore(this).latest().firstOrNull { it.id == messageId } ?: return
+        val message = MessageStore(this).response(messageId) ?: return
         intent.removeExtra("message_id")
         showPage(Page.RESPONSES)
         openResponse(message)

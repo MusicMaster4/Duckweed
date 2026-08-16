@@ -44,7 +44,9 @@ class DuckweedMessagingService : FirebaseMessagingService() {
         if (preview.kind != "workspace") {
             val store = MessageStore(this)
             store.put(preview)
-            if (store.isNotificationPending(preview.id) && NotificationTools.show(this, preview)) {
+            if (!NotificationPreference.isEnabled(this)) {
+                store.markNotified(preview.id, preview.sentAt)
+            } else if (store.isNotificationPending(preview.id) && NotificationTools.show(this, preview)) {
                 store.markNotified(preview.id)
             }
         }

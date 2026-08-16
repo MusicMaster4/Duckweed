@@ -59,7 +59,7 @@ class MessageStore(context: Context) : SQLiteOpenHelper(context, "duckweed-messa
             SQLiteDatabase.CONFLICT_REPLACE,
         )
         writableDatabase.execSQL(
-            "DELETE FROM messages WHERE id NOT IN (SELECT id FROM messages ORDER BY sent_at DESC LIMIT 200)",
+            "DELETE FROM messages WHERE id NOT IN (SELECT id FROM messages ORDER BY sent_at DESC LIMIT 500)",
         )
     }
 
@@ -74,11 +74,43 @@ class MessageStore(context: Context) : SQLiteOpenHelper(context, "duckweed-messa
 
     fun isNotificationPending(messageId: String): Boolean = notifiedAt(messageId) == null
 
+    fun dismissPendingNotifications(at: Long = System.currentTimeMillis()) {
+        writableDatabase.update(
+            "messages",
+            ContentValues().apply { put("notified_at", at) },
+            "notified_at IS NULL",
+            null,
+        )
+    }
+
     fun pendingNotifications(): List<CompletionRecord> =
         read("notified_at IS NULL").filter { it.kind == "completed" || it.kind == "attention" }
 
     fun latest(): List<CompletionRecord> =
         read(null).filter { it.kind == "completed" || it.kind == "attention" }
+
+    fun latestForOpenAgents(
+        openTerminals: Set<Pair<String, String>>,
+        limit: Int = 50,
+    ): List<CompletionRecord> {
+        val responses = latest()
+        val visible = if (openTerminals.isEmpty()) {
+            responses
+        } else {
+            responses.filter { message ->
+                val pairId = message.pairId
+                val terminalId = message.terminalId
+                pairId != null && terminalId != null && Pair(pairId, terminalId) in openTerminals
+            }
+        }
+        return visible.distinctBy { message ->
+            message.terminalId?.let { "${message.pairId.orEmpty()}:$it" }
+                ?: "${message.pairId.orEmpty()}:${message.projectId ?: message.project}:${message.agent.lowercase()}"
+        }.take(limit.coerceIn(1, 50))
+    }
+
+    fun response(messageId: String): CompletionRecord? =
+        latest().firstOrNull { it.id == messageId }
 
     fun conversation(terminalId: String): List<CompletionRecord> =
         read(null).filter { it.terminalId == terminalId }.sortedBy { it.sentAt }
@@ -113,7 +145,7 @@ class MessageStore(context: Context) : SQLiteOpenHelper(context, "duckweed-messa
             null,
             null,
             "sent_at DESC",
-            "200",
+            "500",
         ).use { cursor ->
             while (cursor.moveToNext()) {
                 runCatching {

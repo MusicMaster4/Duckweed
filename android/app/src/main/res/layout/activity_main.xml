@@ -110,7 +110,7 @@
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="3dp"
-                        android:text="Alert me when an agent finishes."
+                        android:text="Controls alerts only. Responses are always saved."
                         android:textColor="@color/duckweed_text_faint"
                         android:textSize="12sp" />
                 </LinearLayout>
