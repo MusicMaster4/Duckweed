@@ -108,6 +108,7 @@ class MainActivity : AppCompatActivity() {
         }
         requestNotificationPermission()
         refreshPairingStatus()
+        refreshPushRegistration()
         refreshMessages()
 
         if (intent.getStringExtra("message_id") != null) showPage(Page.RESPONSES)
@@ -413,6 +414,19 @@ class MainActivity : AppCompatActivity() {
             "Connected as ${credentials.single().deviceName}. Full encrypted responses stay inside this app."
         } else {
             "Connected to ${credentials.size} desktops as ${credentials.last().deviceName}. Full encrypted responses stay inside this app."
+        }
+    }
+
+    /** Keep existing pairings routable if Firebase rotates its token during an app update. */
+    private fun refreshPushRegistration() {
+        val credentials = SecretStore.loadAll(this)
+        if (credentials.isEmpty()) return
+        FirebaseMessaging.getInstance().token.addOnSuccessListener { token ->
+            executor.execute {
+                credentials.forEach { pairing ->
+                    runCatching { RelayClient.refreshFcmToken(pairing, token) }
+                }
+            }
         }
     }
 

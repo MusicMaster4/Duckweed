@@ -42,6 +42,19 @@ beta builds only pull beta updates. Open **Updates** in the companion to check,
 download, verify, and install a newer APK. Android always shows its native
 installation confirmation.
 
+### Pairing continuity across updates
+
+Normal in-place updates do not require pairing the phone again. The Android
+package identity stays fixed, so Android retains the encrypted pairing in app
+storage and its non-exportable Keystore key. On launch, the updated companion
+also refreshes its Firebase delivery token for every retained desktop pairing.
+
+Desktop updates keep the same application identifier, app-data location, and
+operating-system credential-store service, so the device list and sender keys
+survive an update there as well. Pairing is lost only when the user disconnects
+or removes the device, clears app data, uninstalls the companion, or installs a
+build with a different package identity or signing key.
+
 ## Free infrastructure
 
 The production design uses two free services:
