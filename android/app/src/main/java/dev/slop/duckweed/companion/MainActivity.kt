@@ -16,6 +16,7 @@ import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.appcompat.widget.SwitchCompat
 import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
@@ -35,20 +36,25 @@ class MainActivity : AppCompatActivity() {
     private lateinit var scanButton: Button
     private lateinit var disconnectButton: Button
     private lateinit var emptyState: View
+    private lateinit var notificationsToggle: SwitchCompat
     private lateinit var updateStatus: TextView
     private lateinit var updateButton: Button
     private lateinit var updateProgress: ProgressBar
     private lateinit var appUpdater: AppUpdater
     private val adapter = MessageAdapter()
     private val executor = Executors.newSingleThreadExecutor()
-    private val asciiAnimators = mutableListOf<AsciiAnimator>()
     private var receiverRegistered = false
+    private var syncingNotificationsToggle = false
     private var updateAvailable: AndroidUpdateManifest? = null
     private var selectedPage = Page.RESPONSES
 
     private val notificationPermission = registerForActivityResult(
         ActivityResultContracts.RequestPermission(),
-    ) { refreshPairingStatus() }
+    ) { granted ->
+        NotificationPreference.setEnabled(this, granted)
+        syncNotificationToggle()
+        if (granted) showPendingNotifications()
+    }
 
     private val installPermission = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult(),
@@ -85,6 +91,7 @@ class MainActivity : AppCompatActivity() {
         scanButton = findViewById(R.id.scan_button)
         disconnectButton = findViewById(R.id.disconnect_button)
         emptyState = findViewById(R.id.empty_state)
+        notificationsToggle = findViewById(R.id.notifications_toggle)
         updateStatus = findViewById(R.id.update_status)
         updateButton = findViewById(R.id.update_button)
         updateProgress = findViewById(R.id.update_progress)
@@ -95,10 +102,10 @@ class MainActivity : AppCompatActivity() {
         }
 
         configureNavigation()
+        configureNotificationToggle()
         savedInstanceState?.getString(STATE_PAGE)
             ?.let { runCatching { Page.valueOf(it) }.getOrNull() }
             ?.let(::showPage)
-        configureAscii()
         configureUpdater()
         resumePendingUpdate()
         scanButton.setOnClickListener { scanPairingCode() }
@@ -106,7 +113,7 @@ class MainActivity : AppCompatActivity() {
         updateButton.setOnClickListener {
             updateAvailable?.let(::downloadUpdate) ?: checkForUpdates()
         }
-        requestNotificationPermission()
+        requestNotificationPermissionIfEnabled()
         refreshPairingStatus()
         refreshPushRegistration()
         refreshMessages()
@@ -131,11 +138,9 @@ class MainActivity : AppCompatActivity() {
             )
             receiverRegistered = true
         }
-        asciiAnimators.forEach(AsciiAnimator::start)
     }
 
     override fun onStop() {
-        asciiAnimators.forEach(AsciiAnimator::stop)
         if (receiverRegistered) {
             unregisterReceiver(messagesChanged)
             unregisterReceiver(downloadFinished)
@@ -146,6 +151,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        syncNotificationToggle()
         refreshMessages()
     }
 
@@ -207,11 +213,6 @@ class MainActivity : AppCompatActivity() {
         navigation.forEach { (candidate, id) -> findViewById<View>(id).isSelected = candidate == page }
     }
 
-    private fun configureAscii() {
-        asciiAnimators += AsciiAnimator(findViewById(R.id.connection_ascii), AsciiAnimator.CONNECTION, 520L)
-        asciiAnimators += AsciiAnimator(findViewById(R.id.update_ascii), AsciiAnimator.UPDATE, 460L)
-    }
-
     private fun configureUpdater() {
         val channelLabel = if (BuildConfig.UPDATE_CHANNEL == "testing") "BETA" else "STABLE"
         findViewById<TextView>(R.id.current_version).text = "Version ${BuildConfig.VERSION_NAME}"
@@ -233,12 +234,62 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun requestNotificationPermission() {
+    private fun configureNotificationToggle() {
+        notificationsToggle.setOnCheckedChangeListener { _, enabled ->
+            if (syncingNotificationsToggle) return@setOnCheckedChangeListener
+            if (enabled == notificationsAreActive()) return@setOnCheckedChangeListener
+            if (!enabled) {
+                NotificationPreference.setEnabled(this, false)
+                NotificationTools.cancel(this, MessageStore(this).latest())
+                return@setOnCheckedChangeListener
+            }
+            if (needsNotificationPermission()) {
+                notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+            } else {
+                NotificationPreference.setEnabled(this, true)
+                showPendingNotifications()
+            }
+        }
+        syncNotificationToggle()
+    }
+
+    private fun requestNotificationPermissionIfEnabled() {
+        if (!NotificationPreference.isEnabled(this)) return
+        if (needsNotificationPermission()) {
+            notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+        } else {
+            showPendingNotifications()
+        }
+    }
+
+    private fun needsNotificationPermission(): Boolean =
         if (
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) {
-            notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+            true
+        } else {
+            false
+        }
+
+    private fun notificationsAreActive(): Boolean =
+        NotificationPreference.isEnabled(this) && !needsNotificationPermission()
+
+    private fun syncNotificationToggle() {
+        if (!::notificationsToggle.isInitialized) return
+        val active = notificationsAreActive()
+        if (notificationsToggle.isChecked == active) return
+        syncingNotificationsToggle = true
+        notificationsToggle.isChecked = active
+        syncingNotificationsToggle = false
+    }
+
+    private fun showPendingNotifications() {
+        executor.execute {
+            val store = MessageStore(this)
+            store.pendingNotifications().asReversed().forEach { message ->
+                if (NotificationTools.show(this, message)) store.markNotified(message.id)
+            }
         }
     }
 

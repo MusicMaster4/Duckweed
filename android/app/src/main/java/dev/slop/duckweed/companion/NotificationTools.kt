@@ -30,11 +30,12 @@ object NotificationTools {
         context.getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
     }
 
-    fun show(context: Context, message: CompletionRecord) {
+    fun show(context: Context, message: CompletionRecord): Boolean {
+        if (!NotificationPreference.isEnabled(context)) return false
         if (
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
-        ) return
+        ) return false
         val intent = Intent(context, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
             putExtra("message_id", message.id)
@@ -72,6 +73,12 @@ object NotificationTools {
             .setPublicVersion(publicVersion)
             .build()
         NotificationManagerCompat.from(context).notify(message.id.hashCode(), notification)
+        return true
+    }
+
+    fun cancel(context: Context, messages: List<CompletionRecord>) {
+        val manager = NotificationManagerCompat.from(context)
+        messages.forEach { manager.cancel(it.id.hashCode()) }
     }
 
     fun announceChanged(context: Context) {

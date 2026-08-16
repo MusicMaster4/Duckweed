@@ -74,6 +74,24 @@ function paintDuck(png, widthShare) {
   }
 }
 
+function notification(size) {
+  const png = new PNG({ width: size, height: size });
+  const cropWidth = CROP.right - CROP.left;
+  const cropHeight = CROP.bottom - CROP.top;
+  const drawWidth = size * 0.9;
+  const drawHeight = drawWidth * (cropHeight / cropWidth);
+  const left = (size - drawWidth) / 2;
+  const top = (size - drawHeight) / 2;
+  for (let y = Math.floor(top); y < Math.ceil(top + drawHeight); y += 1) {
+    for (let x = Math.floor(left); x < Math.ceil(left + drawWidth); x += 1) {
+      const sourceX = CROP.left + ((x + 0.5 - left) / drawWidth) * cropWidth;
+      const sourceY = CROP.top + ((y + 0.5 - top) / drawHeight) * cropHeight;
+      blendPixel(png, x, y, [255, 255, 255], duckAlpha(sourceX, sourceY));
+    }
+  }
+  return png;
+}
+
 function legacy(size, shape) {
   const png = new PNG({ width: size, height: size });
   for (let y = 0; y < size; y += 1) {
@@ -92,11 +110,11 @@ function foreground(size) {
 }
 
 const densities = {
-  mdpi: { legacy: 48, foreground: 108 },
-  hdpi: { legacy: 72, foreground: 162 },
-  xhdpi: { legacy: 96, foreground: 216 },
-  xxhdpi: { legacy: 144, foreground: 324 },
-  xxxhdpi: { legacy: 192, foreground: 432 },
+  mdpi: { legacy: 48, foreground: 108, notification: 24 },
+  hdpi: { legacy: 72, foreground: 162, notification: 36 },
+  xhdpi: { legacy: 96, foreground: 216, notification: 48 },
+  xxhdpi: { legacy: 144, foreground: 324, notification: 72 },
+  xxxhdpi: { legacy: 192, foreground: 432, notification: 96 },
 };
 
 for (const [density, sizes] of Object.entries(densities)) {
@@ -110,6 +128,13 @@ for (const [density, sizes] of Object.entries(densities)) {
   for (const [name, png] of Object.entries(assets)) {
     writeFileSync(path.join(directory, name), PNG.sync.write(png));
   }
+
+  const drawableDirectory = path.join(RES, `drawable-${density}`);
+  mkdirSync(drawableDirectory, { recursive: true });
+  writeFileSync(
+    path.join(drawableDirectory, "ic_notification.png"),
+    PNG.sync.write(notification(sizes.notification)),
+  );
 }
 
-console.log("Generated Android launcher assets with adaptive-icon safe-zone padding.");
+console.log("Generated Android launcher and notification assets from the official duck logo.");

@@ -36,6 +36,11 @@ inside the companion invalidates its receive token and clears local secrets.
 4. Allow notifications when Android asks.
 5. Use **Send test** to verify delivery.
 
+The **Notifications** switch at the top of **Responses** controls Android
+alerts without disabling the encrypted response history. Responses that arrive
+while alerts are off stay pending. Turning alerts back on shows those pending
+agent completions, while previously delivered alerts are not replayed.
+
 The same companion can pair with either desktop channel. Its own update feed is
 fixed by the APK that was installed: stable builds only pull stable updates and
 beta builds only pull beta updates. Open **Updates** in the companion to check,

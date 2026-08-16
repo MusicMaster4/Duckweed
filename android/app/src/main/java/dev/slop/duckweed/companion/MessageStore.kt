@@ -6,14 +6,15 @@ import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 import org.json.JSONObject
 
-class MessageStore(context: Context) : SQLiteOpenHelper(context, "duckweed-messages.db", null, 2) {
+class MessageStore(context: Context) : SQLiteOpenHelper(context, "duckweed-messages.db", null, 3) {
     override fun onCreate(database: SQLiteDatabase) {
         database.execSQL(
             """
             CREATE TABLE messages (
               id TEXT PRIMARY KEY,
               sent_at INTEGER NOT NULL,
-              encrypted_payload TEXT NOT NULL
+              encrypted_payload TEXT NOT NULL,
+              notified_at INTEGER
             )
             """.trimIndent(),
         )
@@ -21,11 +22,16 @@ class MessageStore(context: Context) : SQLiteOpenHelper(context, "duckweed-messa
     }
 
     override fun onUpgrade(database: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        database.execSQL("DROP TABLE IF EXISTS messages")
-        onCreate(database)
+        if (oldVersion < 3) {
+            database.execSQL("ALTER TABLE messages ADD COLUMN notified_at INTEGER")
+            // Responses from an older build have already had their alert. Do not
+            // replay the entire history the first time the new toggle is enabled.
+            database.execSQL("UPDATE messages SET notified_at = sent_at")
+        }
     }
 
     fun put(message: CompletionRecord) {
+        val notifiedAt = notifiedAt(message.id)
         val payload = JSONObject()
             .put("id", message.id)
             .put("sentAt", message.sentAt)
@@ -43,6 +49,7 @@ class MessageStore(context: Context) : SQLiteOpenHelper(context, "duckweed-messa
                 put("id", message.id)
                 put("sent_at", message.sentAt)
                 put("encrypted_payload", SecretStore.encryptLocal(payload))
+                if (notifiedAt != null) put("notified_at", notifiedAt)
             },
             SQLiteDatabase.CONFLICT_REPLACE,
         )
@@ -51,12 +58,27 @@ class MessageStore(context: Context) : SQLiteOpenHelper(context, "duckweed-messa
         )
     }
 
-    fun latest(): List<CompletionRecord> {
+    fun markNotified(messageId: String, at: Long = System.currentTimeMillis()) {
+        writableDatabase.update(
+            "messages",
+            ContentValues().apply { put("notified_at", at) },
+            "id = ?",
+            arrayOf(messageId),
+        )
+    }
+
+    fun isNotificationPending(messageId: String): Boolean = notifiedAt(messageId) == null
+
+    fun pendingNotifications(): List<CompletionRecord> = latest("notified_at IS NULL")
+
+    fun latest(): List<CompletionRecord> = latest(null)
+
+    private fun latest(selection: String?): List<CompletionRecord> {
         val messages = mutableListOf<CompletionRecord>()
         readableDatabase.query(
             "messages",
             arrayOf("encrypted_payload"),
-            null,
+            selection,
             null,
             null,
             null,
@@ -80,5 +102,21 @@ class MessageStore(context: Context) : SQLiteOpenHelper(context, "duckweed-messa
             }
         }
         return messages
+    }
+
+    private fun notifiedAt(messageId: String): Long? {
+        readableDatabase.query(
+            "messages",
+            arrayOf("notified_at"),
+            "id = ?",
+            arrayOf(messageId),
+            null,
+            null,
+            null,
+            "1",
+        ).use { cursor ->
+            if (!cursor.moveToFirst() || cursor.isNull(0)) return null
+            return cursor.getLong(0)
+        }
     }
 }
