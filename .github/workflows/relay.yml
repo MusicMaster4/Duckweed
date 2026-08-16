@@ -1,0 +1,54 @@
+name: Deploy notification relay
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: notification-relay-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy free Cloudflare relay
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: relay/package-lock.json
+
+      - run: npm ci --prefix relay
+
+      - name: Test and build the encrypted relay
+        run: |
+          npm test --prefix relay
+          npm run --prefix relay build
+
+      - name: Bind the production D1 database
+        env:
+          CLOUDFLARE_D1_DATABASE_ID: ${{ vars.CLOUDFLARE_D1_DATABASE_ID }}
+        run: node relay/scripts/configure-deploy.mjs
+
+      - name: Apply D1 migrations
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: npx --prefix relay wrangler d1 migrations apply DB --remote --config relay/wrangler.deploy.json
+
+      - name: Deploy the Worker and its FCM secret
+        uses: cloudflare/wrangler-action@v4
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: relay
+          command: deploy --config wrangler.deploy.json
+          secrets: |
+            FCM_SERVICE_ACCOUNT_JSON
+        env:
+          FCM_SERVICE_ACCOUNT_JSON: ${{ secrets.FCM_SERVICE_ACCOUNT_JSON }}

@@ -29,6 +29,64 @@ export const openUrl = (url: string) => invoke<void>("open_url", { url });
  */
 export const playCompletionCue = () => invoke<void>("play_completion_sound");
 
+export interface MobileDevice {
+  id: string;
+  name: string;
+  pairedAt: number;
+}
+
+export interface PendingMobilePairing {
+  id: string;
+  expiresAt: number;
+}
+
+export interface MobileNotificationStatus {
+  relayUrl: string;
+  devices: MobileDevice[];
+  pending: PendingMobilePairing | null;
+}
+
+export interface MobilePairingStart {
+  id: string;
+  qrPayload: string;
+  expiresAt: number;
+}
+
+export interface MobileCompletionMessage {
+  agent: string;
+  project: string;
+  kind: "completed" | "attention";
+  response: string | null;
+  durationMs: number | null;
+}
+
+export interface MobileSendResult {
+  sent: number;
+  failed: number;
+  errors: string[];
+}
+
+/** Paired phones and any QR code that is still waiting to be scanned. */
+export const mobileStatus = () =>
+  invoke<MobileNotificationStatus>("mobile_status");
+
+/** Create a ten-minute, single-use pairing QR payload. */
+export const mobilePairStart = () =>
+  invoke<MobilePairingStart>("mobile_pair_start");
+
+/** Ask the relay whether the pending phone has finished pairing. */
+export const mobilePairPoll = () =>
+  invoke<MobileNotificationStatus>("mobile_pair_poll");
+
+export const mobileDeviceRemove = (id: string) =>
+  invoke<MobileNotificationStatus>("mobile_device_remove", { id });
+
+export const mobileSendCompletion = (message: MobileCompletionMessage) =>
+  invoke<MobileSendResult>("mobile_send_completion", { message });
+
+export const mobileSendTest = () =>
+  invoke<MobileSendResult>("mobile_send_test");
+
 /**
  * Suspend or shut the machine down, for the power watch.
  *

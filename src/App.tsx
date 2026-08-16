@@ -57,6 +57,7 @@ import * as suggestFeedback from "./lib/suggestFeedback";
 import {
   frontendReady,
   listShells,
+  mobileSendCompletion,
   powerAction,
   projectInfo,
   shellIntegrationSet,
@@ -724,6 +725,29 @@ export default function App() {
       if (!previous) return;
 
       if (!shouldSignalCompletion(previous, current)) return;
+      // Agent turns are also delivered to paired phones. The transport runs in
+      // Rust so encryption keys never enter the WebView; structured sessions
+      // contribute their settled assistant prose, while terminal-only agents
+      // still produce an honest project-level completion without scraping ANSI.
+      if (current.completionSeq > previous.completionSeq) {
+        const owner = tabsRef.current.find((tab) =>
+          leaves(tab.root).some((node) => node.term === termId),
+        );
+        const details = agentSessions.completionDetails(termId);
+        const rawAgent = current.agent ?? previous.agent;
+        const agent = details?.label ??
+          (rawAgent ? rawAgent.charAt(0).toUpperCase() + rawAgent.slice(1) : "Agent");
+        const startedAt = current.completionStartedAt ?? previous.processStartedAt;
+        void mobileSendCompletion({
+          agent,
+          project: owner?.project?.name ?? owner?.title ?? "Duckweed",
+          kind: details?.needsAttention ? "attention" : "completed",
+          response: details?.response ?? null,
+          durationMs:
+            details?.durationMs ??
+            (startedAt === null ? null : Math.max(0, Date.now() - startedAt)),
+        }).catch((error) => console.error("mobile completion notification", error));
+      }
       // Every eligible completion gets one cue. The shared audio player
       // coalesces simultaneous finishes, so several agents returning together
       // do not stack copies of the effect.
@@ -3077,6 +3101,7 @@ export default function App() {
                 shell={shell}
                 shells={shells}
                 updateLabel={`${updater.channel === "testing" ? "Beta" : "Stable"}${updater.version ? ` · v${updater.version}` : ""}`}
+                updateChannel={updater.channel}
                 onFontSize={applyFontSize}
                 onToggleInputMode={toggleInputMode}
                 onToggleHighlight={toggleHighlight}

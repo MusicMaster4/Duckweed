@@ -10,6 +10,10 @@ import {
 } from "../ipc";
 import type { AdapterContext, AgentAdapter } from "./adapter";
 import {
+  completionDetailsFromState,
+  type AgentCompletionDetails,
+} from "../mobileCompletion";
+import {
   isAuthenticationFailure,
   nativeAuthCommand,
   type AgentAuthAction,
@@ -262,6 +266,13 @@ export function subscribe(termId: string, callback: () => void): () => void {
 
 export function get(termId: string): AgentSessionState | null {
   return sessions.get(termId)?.state ?? null;
+}
+
+/** Content safe to hand to the encrypted mobile-notification transport. */
+export function completionDetails(termId: string): AgentCompletionDetails | null {
+  const state = sessions.get(termId)?.state;
+  if (!state) return null;
+  return completionDetailsFromState(state);
 }
 
 export function isActive(termId: string): boolean {

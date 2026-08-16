@@ -1,0 +1,80 @@
+package dev.slop.duckweed.companion
+
+import android.util.Base64
+import org.json.JSONObject
+import java.nio.charset.StandardCharsets
+import javax.crypto.Cipher
+import javax.crypto.Mac
+import javax.crypto.spec.GCMParameterSpec
+import javax.crypto.spec.SecretKeySpec
+
+object Crypto {
+    private fun decode(value: String): ByteArray =
+        Base64.decode(value, Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING)
+
+    fun encode(value: ByteArray): String =
+        Base64.encodeToString(value, Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING)
+
+    private fun hmac(key: ByteArray, value: ByteArray): ByteArray {
+        val mac = Mac.getInstance("HmacSHA256")
+        mac.init(SecretKeySpec(key, "HmacSHA256"))
+        return mac.doFinal(value)
+    }
+
+    private fun encryptionKey(input: ByteArray, pairId: String): ByteArray {
+        val prk = hmac(pairId.toByteArray(StandardCharsets.UTF_8), input)
+        return hmac(prk, "duckweed/mobile/encryption/v1\u0001".toByteArray(StandardCharsets.UTF_8))
+    }
+
+    fun pairingProof(secret: String, pairId: String, deviceId: String, name: String): String {
+        val value = "$pairId\n$deviceId\n$name".toByteArray(StandardCharsets.UTF_8)
+        return encode(hmac(decode(secret), value))
+    }
+
+    fun decrypt(
+        credentials: PairCredentials,
+        messageId: String,
+        kind: String,
+        envelope: EncryptedEnvelope,
+    ): CompletionRecord {
+        val plain = decryptBytes(
+            decode(credentials.masterKey),
+            credentials.pairId,
+            messageId,
+            kind,
+            decode(envelope.nonce),
+            decode(envelope.ciphertext),
+        )
+        val json = JSONObject(String(plain, StandardCharsets.UTF_8))
+        check(json.getInt("version") == 1 && json.getString("id") == messageId) {
+            "Notification identity did not match its encrypted payload"
+        }
+        return CompletionRecord(
+            id = messageId,
+            sentAt = json.getLong("sentAt"),
+            agent = json.getString("agent"),
+            project = json.getString("project"),
+            kind = json.optString("kind", "completed"),
+            response = if (json.isNull("response")) null else json.getString("response"),
+            durationMs = if (json.isNull("durationMs")) null else json.getLong("durationMs"),
+        )
+    }
+
+    internal fun decryptBytes(
+        secret: ByteArray,
+        pairId: String,
+        messageId: String,
+        kind: String,
+        nonce: ByteArray,
+        ciphertext: ByteArray,
+    ): ByteArray {
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(
+            Cipher.DECRYPT_MODE,
+            SecretKeySpec(encryptionKey(secret, pairId), "AES"),
+            GCMParameterSpec(128, nonce),
+        )
+        cipher.updateAAD("v1\n$pairId\n$messageId\n$kind".toByteArray(StandardCharsets.UTF_8))
+        return cipher.doFinal(ciphertext)
+    }
+}

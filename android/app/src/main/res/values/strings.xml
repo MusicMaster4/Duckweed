@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Duckweed Companion</string>
+    <string name="notification_channel_name">Agent completions</string>
+    <string name="notification_channel_description">Encrypted completion alerts from paired Duckweed desktops</string>
+</resources>
