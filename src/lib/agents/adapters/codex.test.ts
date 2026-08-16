@@ -541,6 +541,81 @@ describe("codex adapter", () => {
     });
   });
 
+  test("settles /side on thread idle when turn/completed is omitted", async () => {
+    const h = harness();
+    await h.handshake();
+
+    expect(h.adapter.command?.("/side what changed?", h.ctx)).toBe("handled");
+    h.feed({ jsonrpc: "2.0", id: 4, result: { thread: { id: "side_1" } } });
+    await Promise.resolve();
+    await Promise.resolve();
+    h.feed({ jsonrpc: "2.0", id: 5, result: { turn: { id: "side_turn_1" } } });
+    h.notify("item/agentMessage/delta", {
+      threadId: "side_1",
+      turnId: "side_turn_1",
+      itemId: "side_message_1",
+      delta: "Only the parser changed.",
+    });
+    h.notify("item/completed", {
+      threadId: "side_1",
+      turnId: "side_turn_1",
+      item: { id: "side_message_1", type: "agentMessage", text: "Only the parser changed." },
+    });
+    h.notify("thread/status/changed", {
+      threadId: "side_1",
+      status: { type: "idle" },
+    });
+
+    expect(h.state().sideQuestion).toMatchObject({
+      answer: "Only the parser changed.",
+      status: "answered",
+    });
+    expect(h.sent.at(-1)).toMatchObject({
+      method: "thread/unsubscribe",
+      params: { threadId: "side_1" },
+    });
+
+    h.notify("turn/completed", {
+      threadId: "side_1",
+      turn: { id: "side_turn_1", status: "completed", items: [] },
+    });
+    expect(h.state().sideQuestion).toMatchObject({
+      answer: "Only the parser changed.",
+      status: "answered",
+    });
+
+    expect(h.adapter.command?.("/btw and the tests?", h.ctx)).toBe("handled");
+    expect(h.state().sideQuestion).toMatchObject({
+      command: "/btw",
+      question: "and the tests?",
+      status: "asking",
+    });
+  });
+
+  test("ignores side-thread idle until the forked turn has started", async () => {
+    const h = harness();
+    await h.handshake();
+
+    expect(h.adapter.command?.("/side what changed?", h.ctx)).toBe("handled");
+    h.feed({ jsonrpc: "2.0", id: 4, result: { thread: { id: "side_1" } } });
+    await Promise.resolve();
+    await Promise.resolve();
+    h.notify("thread/status/changed", {
+      threadId: "side_1",
+      status: { type: "idle" },
+    });
+
+    expect(h.state().sideQuestion).toMatchObject({
+      question: "what changed?",
+      status: "asking",
+      answer: "",
+    });
+    expect(h.sent.at(-1)).toMatchObject({
+      method: "turn/start",
+      params: { threadId: "side_1" },
+    });
+  });
+
   test("holds /side and /btw out of the same-turn path until resume hydration finishes", async () => {
     const h = harness();
     await h.handshake();

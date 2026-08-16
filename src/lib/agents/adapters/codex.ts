@@ -633,8 +633,17 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         return;
       }
       case "thread/status/changed": {
-        if (threadStatus(params.status) === "error") {
+        const status = threadStatus(params.status);
+        if (status === "error") {
           finishSide(sideThreadId, "error", ctx, "The side conversation failed.");
+        } else if (
+          status === "idle" &&
+          (side.currentTurnId || side.sideQuestion.answer.trim())
+        ) {
+          // Thread-level idle is Codex's reconciliation channel. Side forks
+          // often receive this without a matching turn/completed, which would
+          // otherwise leave the card asking and reject later /side and /btw.
+          finishSide(sideThreadId, "answered", ctx);
         }
         return;
       }
