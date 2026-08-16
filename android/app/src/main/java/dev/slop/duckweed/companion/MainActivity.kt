@@ -151,6 +151,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        NotificationTools.cancelAll(this)
         syncNotificationToggle()
         refreshMessages()
     }

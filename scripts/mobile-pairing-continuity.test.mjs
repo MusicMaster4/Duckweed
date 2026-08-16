@@ -35,4 +35,20 @@ describe("mobile pairing continuity", () => {
     expect(activity).toContain("refreshPushRegistration()\n        refreshMessages()");
     expect(activity).toContain("RelayClient.refreshFcmToken(pairing, token)");
   });
+
+  test("opening the companion clears its delivered notifications", () => {
+    const activity = read(
+      "android/app/src/main/java/dev/slop/duckweed/companion/MainActivity.kt",
+    );
+    const notifications = read(
+      "android/app/src/main/java/dev/slop/duckweed/companion/NotificationTools.kt",
+    );
+
+    expect(activity).toContain(
+      "override fun onResume() {\n        super.onResume()\n        NotificationTools.cancelAll(this)",
+    );
+    expect(notifications).toContain(
+      "NotificationManagerCompat.from(context).cancelAll()",
+    );
+  });
 });

@@ -81,6 +81,10 @@ object NotificationTools {
         messages.forEach { manager.cancel(it.id.hashCode()) }
     }
 
+    fun cancelAll(context: Context) {
+        NotificationManagerCompat.from(context).cancelAll()
+    }
+
     fun announceChanged(context: Context) {
         context.sendBroadcast(Intent(ACTION_MESSAGES_CHANGED).setPackage(context.packageName))
     }
