@@ -1,6 +1,7 @@
 package dev.slop.duckweed.companion
 
 import android.Manifest
+import android.app.DownloadManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -10,6 +11,7 @@ import android.os.Build
 import android.os.Bundle
 import android.view.View
 import android.widget.Button
+import android.widget.ProgressBar
 import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
@@ -24,41 +26,87 @@ import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
 import java.util.concurrent.Executors
 
 class MainActivity : AppCompatActivity() {
+    private enum class Page { RESPONSES, CONNECTIONS, UPDATES }
+
     private lateinit var pairingStatus: TextView
     private lateinit var scanButton: Button
     private lateinit var disconnectButton: Button
-    private lateinit var emptyState: TextView
+    private lateinit var emptyState: View
+    private lateinit var updateStatus: TextView
+    private lateinit var updateButton: Button
+    private lateinit var updateProgress: ProgressBar
+    private lateinit var appUpdater: AppUpdater
     private val adapter = MessageAdapter()
     private val executor = Executors.newSingleThreadExecutor()
+    private val asciiAnimators = mutableListOf<AsciiAnimator>()
     private var receiverRegistered = false
+    private var updateAvailable: AndroidUpdateManifest? = null
+    private var selectedPage = Page.RESPONSES
 
     private val notificationPermission = registerForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { refreshPairingStatus() }
 
+    private val installPermission = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) {
+        if (appUpdater.canInstallPackages()) {
+            runCatching { appUpdater.installVerified() }
+                .onFailure { showUpdateError(it.message ?: "Could not open the Android installer.") }
+        } else {
+            showUpdateError("Allow installs from Duckweed to finish this update.")
+        }
+    }
+
     private val messagesChanged = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) = refreshMessages()
+    }
+
+    private val downloadFinished = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action != DownloadManager.ACTION_DOWNLOAD_COMPLETE) return
+            val id = intent.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1L)
+            if (!appUpdater.isPendingDownload(id)) return
+            finishDownloadedUpdate(id)
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
         NotificationTools.createChannel(this)
+        appUpdater = AppUpdater(this)
 
         pairingStatus = findViewById(R.id.pairing_status)
         scanButton = findViewById(R.id.scan_button)
         disconnectButton = findViewById(R.id.disconnect_button)
         emptyState = findViewById(R.id.empty_state)
+        updateStatus = findViewById(R.id.update_status)
+        updateButton = findViewById(R.id.update_button)
+        updateProgress = findViewById(R.id.update_progress)
+
         findViewById<RecyclerView>(R.id.message_list).apply {
             layoutManager = LinearLayoutManager(this@MainActivity)
             adapter = this@MainActivity.adapter
         }
 
+        configureNavigation()
+        savedInstanceState?.getString(STATE_PAGE)
+            ?.let { runCatching { Page.valueOf(it) }.getOrNull() }
+            ?.let(::showPage)
+        configureAscii()
+        configureUpdater()
+        resumePendingUpdate()
         scanButton.setOnClickListener { scanPairingCode() }
         disconnectButton.setOnClickListener { confirmDisconnect() }
+        updateButton.setOnClickListener {
+            updateAvailable?.let(::downloadUpdate) ?: checkForUpdates()
+        }
         requestNotificationPermission()
         refreshPairingStatus()
         refreshMessages()
+
+        if (intent.getStringExtra("message_id") != null) showPage(Page.RESPONSES)
     }
 
     override fun onStart() {
@@ -70,13 +118,22 @@ class MainActivity : AppCompatActivity() {
                 IntentFilter(NotificationTools.ACTION_MESSAGES_CHANGED),
                 ContextCompat.RECEIVER_NOT_EXPORTED,
             )
+            ContextCompat.registerReceiver(
+                this,
+                downloadFinished,
+                IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE),
+                ContextCompat.RECEIVER_EXPORTED,
+            )
             receiverRegistered = true
         }
+        asciiAnimators.forEach(AsciiAnimator::start)
     }
 
     override fun onStop() {
+        asciiAnimators.forEach(AsciiAnimator::stop)
         if (receiverRegistered) {
             unregisterReceiver(messagesChanged)
+            unregisterReceiver(downloadFinished)
             receiverRegistered = false
         }
         super.onStop()
@@ -85,6 +142,74 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         refreshMessages()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (intent.getStringExtra("message_id") != null) showPage(Page.RESPONSES)
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putString(STATE_PAGE, selectedPage.name)
+        super.onSaveInstanceState(outState)
+    }
+
+    override fun onDestroy() {
+        executor.shutdownNow()
+        super.onDestroy()
+    }
+
+    private fun configureNavigation() {
+        findViewById<View>(R.id.nav_responses).setOnClickListener { showPage(Page.RESPONSES) }
+        findViewById<View>(R.id.nav_connections).setOnClickListener { showPage(Page.CONNECTIONS) }
+        findViewById<View>(R.id.nav_updates).setOnClickListener { showPage(Page.UPDATES) }
+        showPage(Page.RESPONSES)
+    }
+
+    private fun showPage(page: Page) {
+        selectedPage = page
+        val pages = mapOf(
+            Page.RESPONSES to R.id.responses_page,
+            Page.CONNECTIONS to R.id.connections_page,
+            Page.UPDATES to R.id.updates_page,
+        )
+        val navigation = mapOf(
+            Page.RESPONSES to R.id.nav_responses,
+            Page.CONNECTIONS to R.id.nav_connections,
+            Page.UPDATES to R.id.nav_updates,
+        )
+        pages.forEach { (candidate, id) ->
+            findViewById<View>(id).visibility = if (candidate == page) View.VISIBLE else View.GONE
+        }
+        navigation.forEach { (candidate, id) -> findViewById<View>(id).isSelected = candidate == page }
+    }
+
+    private fun configureAscii() {
+        asciiAnimators += AsciiAnimator(findViewById(R.id.empty_ascii), AsciiAnimator.DUCK)
+        asciiAnimators += AsciiAnimator(findViewById(R.id.connection_ascii), AsciiAnimator.CONNECTION, 520L)
+        asciiAnimators += AsciiAnimator(findViewById(R.id.update_ascii), AsciiAnimator.UPDATE, 460L)
+    }
+
+    private fun configureUpdater() {
+        val channelLabel = if (BuildConfig.UPDATE_CHANNEL == "testing") "BETA" else "STABLE"
+        findViewById<TextView>(R.id.current_version).text = "Version ${BuildConfig.VERSION_NAME}"
+        findViewById<TextView>(R.id.update_channel).text = channelLabel
+    }
+
+    private fun resumePendingUpdate() {
+        val id = appUpdater.pendingDownloadId() ?: return
+        when (appUpdater.downloadState(id)) {
+            AppUpdater.DownloadState.COMPLETE -> finishDownloadedUpdate(id)
+            AppUpdater.DownloadState.RUNNING ->
+                setUpdateBusy(true, "Downloading the selected update. Android will notify you when it is ready...")
+            AppUpdater.DownloadState.FAILED,
+            AppUpdater.DownloadState.MISSING,
+            -> {
+                appUpdater.clearPending()
+                showUpdateError("The previous update download did not finish. Please try again.")
+            }
+        }
     }
 
     private fun requestNotificationPermission() {
@@ -96,9 +221,87 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun checkForUpdates() {
+        setUpdateBusy(true, "Checking the ${channelLabel()} channel on GitHub...")
+        executor.execute {
+            runCatching { UpdateClient.fetch(BuildConfig.UPDATE_CHANNEL) }
+                .onSuccess { manifest ->
+                    runOnUiThread {
+                        if (manifest.isNewerThan(BuildConfig.VERSION_CODE)) {
+                            updateAvailable = manifest
+                            updateStatus.text = "Version ${manifest.versionName} is ready for this phone."
+                            updateButton.text = "Download and install"
+                        } else {
+                            updateAvailable = null
+                            updateStatus.text = "You are up to date on the ${channelLabel()} channel."
+                            updateButton.text = "Check again"
+                        }
+                        setUpdateBusy(false)
+                    }
+                }
+                .onFailure { error ->
+                    runOnUiThread {
+                        showUpdateError(
+                            if (error.message?.contains("404") == true) {
+                                "No mobile update feed has been published for this channel yet."
+                            } else {
+                                "Could not check for updates. ${error.message ?: "Try again later."}"
+                            },
+                        )
+                    }
+                }
+        }
+    }
+
+    private fun downloadUpdate(manifest: AndroidUpdateManifest) {
+        runCatching { appUpdater.enqueue(manifest) }
+            .onSuccess {
+                updateAvailable = null
+                setUpdateBusy(true, "Downloading ${manifest.versionName}. Android will notify you when it is ready...")
+            }
+            .onFailure { showUpdateError(it.message ?: "Could not start the update download.") }
+    }
+
+    private fun finishDownloadedUpdate(id: Long) {
+        setUpdateBusy(true, "Verifying the downloaded APK...")
+        executor.execute {
+            runCatching { appUpdater.verifyDownload(id) }
+                .onSuccess { manifest ->
+                    runOnUiThread {
+                        setUpdateBusy(false)
+                        updateStatus.text = "Version ${manifest.versionName} is verified and ready to install."
+                        if (appUpdater.canInstallPackages()) {
+                            runCatching { appUpdater.installVerified() }
+                                .onFailure { showUpdateError(it.message ?: "Could not open the Android installer.") }
+                        } else {
+                            updateStatus.text = "Allow installs from Duckweed, then Android will open the verified update."
+                            installPermission.launch(appUpdater.requestInstallPermission())
+                        }
+                    }
+                }
+                .onFailure { error ->
+                    runOnUiThread { showUpdateError(error.message ?: "The update could not be verified.") }
+                }
+        }
+    }
+
+    private fun setUpdateBusy(busy: Boolean, message: String? = null) {
+        updateProgress.visibility = if (busy) View.VISIBLE else View.GONE
+        updateButton.isEnabled = !busy
+        if (message != null) updateStatus.text = message
+    }
+
+    private fun showUpdateError(message: String) {
+        setUpdateBusy(false, message)
+        updateButton.text = "Try again"
+        updateAvailable = null
+    }
+
+    private fun channelLabel(): String = if (BuildConfig.UPDATE_CHANNEL == "testing") "beta" else "stable"
+
     private fun scanPairingCode() {
         scanButton.isEnabled = false
-        pairingStatus.text = "Opening the secure QR scanner…"
+        pairingStatus.text = "Opening the secure QR scanner..."
         val options = GmsBarcodeScannerOptions.Builder()
             .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
             .enableAutoZoom()
@@ -116,7 +319,7 @@ class MainActivity : AppCompatActivity() {
                         showPairingError(it.message ?: "This is not a Duckweed pairing code.")
                         return@addOnSuccessListener
                     }
-                pairingStatus.text = "Registering this phone with Duckweed…"
+                pairingStatus.text = "Registering this phone with Duckweed..."
                 FirebaseMessaging.getInstance().token
                     .addOnSuccessListener { token -> pair(code, token) }
                     .addOnFailureListener { showPairingError("Could not register for push notifications: ${it.message}") }
@@ -159,7 +362,7 @@ class MainActivity : AppCompatActivity() {
             )
             .setNegativeButton("Cancel", null)
             .setPositiveButton("Disconnect") { _, _ ->
-                pairingStatus.text = "Disconnecting…"
+                pairingStatus.text = "Disconnecting..."
                 executor.execute {
                     val failures = mutableListOf<String>()
                     credentials.forEach { pairing ->
@@ -185,11 +388,11 @@ class MainActivity : AppCompatActivity() {
         scanButton.text = if (credentials.isEmpty()) "Scan pairing code" else "Pair another desktop"
         scanButton.isEnabled = true
         pairingStatus.text = message ?: if (credentials.isEmpty()) {
-            "Not paired. In Duckweed desktop, open Settings → Agents → Mobile notifications and scan the QR code."
+            "Not paired yet. On desktop, open Settings, then Agents and Mobile notifications, and scan its QR code."
         } else if (credentials.size == 1) {
-            "Paired as ${credentials.single().deviceName}. Notifications show the agent and project; full encrypted responses stay in this app."
+            "Connected as ${credentials.single().deviceName}. Full encrypted responses stay inside this app."
         } else {
-            "Paired with ${credentials.size} desktops as ${credentials.last().deviceName}. Notifications show the agent and project; full encrypted responses stay in this app."
+            "Connected to ${credentials.size} desktops as ${credentials.last().deviceName}. Full encrypted responses stay inside this app."
         }
     }
 
@@ -202,5 +405,9 @@ class MainActivity : AppCompatActivity() {
     private fun showPairingError(message: String) {
         scanButton.isEnabled = true
         pairingStatus.text = message
+    }
+
+    companion object {
+        private const val STATE_PAGE = "selected-page"
     }
 }

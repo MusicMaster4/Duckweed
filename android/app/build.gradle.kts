@@ -14,6 +14,11 @@ android {
         targetSdk = 36
         versionCode = (providers.gradleProperty("duckweedVersionCode").orNull ?: "1").toInt()
         versionName = providers.gradleProperty("duckweedVersionName").orNull ?: "0.1.0"
+        val updateChannel = providers.gradleProperty("duckweedChannel").orNull ?: "stable"
+        require(updateChannel == "stable" || updateChannel == "testing") {
+            "duckweedChannel must be stable or testing"
+        }
+        buildConfigField("String", "UPDATE_CHANNEL", "\"$updateChannel\"")
     }
 
     val releaseKeystore = System.getenv("DUCKWEED_ANDROID_KEYSTORE")
@@ -65,4 +70,5 @@ dependencies {
     implementation("androidx.recyclerview:recyclerview:1.4.0")
     implementation("androidx.work:work-runtime-ktx:2.10.5")
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20250517")
 }

@@ -21,8 +21,14 @@ export function MobileNotificationsSettings({ channel }: { channel: Channel }) {
   const [status, setStatus] = useState<MobileNotificationStatus | null>(null);
   const [qr, setQr] = useState<string | null>(null);
   const [busy, setBusy] = useState<"pair" | "test" | "remove" | null>(null);
+  const [downloadQr, setDownloadQr] = useState<string | null>(null);
+  const [downloadQrBusy, setDownloadQrBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const download = useMemo(() => companionApkUrl(channel), [channel]);
+
+  useEffect(() => {
+    setDownloadQr(null);
+  }, [download]);
 
   useEffect(() => {
     let disposed = false;
@@ -112,6 +118,29 @@ export function MobileNotificationsSettings({ channel }: { channel: Channel }) {
     }
   };
 
+  const toggleDownloadQr = async () => {
+    if (downloadQr) {
+      setDownloadQr(null);
+      return;
+    }
+    setDownloadQrBusy(true);
+    setMessage(null);
+    try {
+      setDownloadQr(
+        await QRCode.toDataURL(download, {
+          width: 260,
+          margin: 2,
+          color: { dark: "#151b16", light: "#ffffff" },
+          errorCorrectionLevel: "M",
+        }),
+      );
+    } catch (error) {
+      setMessage(errorText(error));
+    } finally {
+      setDownloadQrBusy(false);
+    }
+  };
+
   return (
     <section className="settings-section mobile-notifications-settings">
       <h2>Mobile notifications</h2>
@@ -123,10 +152,27 @@ export function MobileNotificationsSettings({ channel }: { channel: Channel }) {
             companion can pair with either desktop channel.
           </span>
         </span>
-        <button type="button" className="settings-inline-button" onClick={() => void openUrl(download)}>
-          Download APK
+        <button type="button" className="settings-inline-button" onClick={() => void toggleDownloadQr()}>
+          {downloadQrBusy ? "Preparing..." : downloadQr ? "Hide QR code" : "Download APK"}
         </button>
       </div>
+
+      {downloadQr && (
+        <div className="mobile-pair-card mobile-download-card">
+          <img src={downloadQr} alt={`QR code for the latest ${channel === "testing" ? "beta" : "stable"} Android APK`} />
+          <div>
+            <strong>Scan to download on your phone</strong>
+            <span>
+              This QR code opens the latest {channel === "testing" ? "beta" : "stable"} APK. It
+              follows the same update channel as this desktop build.
+            </span>
+            <code>{download}</code>
+            <button type="button" className="settings-inline-button" onClick={() => void openUrl(download)}>
+              Open download here
+            </button>
+          </div>
+        </div>
+      )}
 
       {(status?.devices ?? []).map((device) => (
         <div className="settings-row mobile-device-row" key={device.id}>

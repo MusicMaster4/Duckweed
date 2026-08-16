@@ -254,6 +254,10 @@ response on your phone. Pair it from **Settings > Agents > Mobile
 notifications**. See [mobile notifications](docs/mobile-notifications.md) for
 the privacy model and deployment setup.
 
+The desktop download action displays a phone-scannable QR code. After install,
+the companion's **Updates** tab checks its own stable or beta feed, verifies the
+APK checksum, and opens Android's installation confirmation.
+
 The Windows installer is per-user. It does not ask for administrator access, and
 later updates can be installed from the version chip in the status bar or from
 **Check for updates** in the command palette.

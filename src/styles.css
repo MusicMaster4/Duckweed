@@ -9138,6 +9138,20 @@ body.is-resizing * {
   line-height: 1.5;
 }
 
+.mobile-download-card code {
+  display: block;
+  max-width: 100%;
+  padding: 7px 9px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text-faint);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .mobile-settings-message {
   margin: 8px 10px 0;
   white-space: pre-wrap;

@@ -408,7 +408,8 @@ jobs:
           set -euo pipefail
           gradle -p android :app:testDebugUnitTest :app:assembleRelease \
             -PduckweedVersionName="${{ needs.version.outputs.version }}" \
-            -PduckweedVersionCode="$GITHUB_RUN_NUMBER"
+            -PduckweedVersionCode="$GITHUB_RUN_NUMBER" \
+            -PduckweedChannel="${{ needs.version.outputs.channel }}"
           mkdir -p release-assets
           APK="android/app/build/outputs/apk/release/app-release.apk"
           test -f "$APK"
@@ -452,13 +453,23 @@ jobs:
             --bundle-dir release-assets \
             --notes "$(git log -1 --pretty=%s)"
 
+      - name: Build the channel-bound Android update manifest
+        run: |
+          bun scripts/android-update-manifest.mjs \
+            --channel "${{ needs.version.outputs.channel }}" \
+            --version "${{ needs.version.outputs.version }}" \
+            --version-code "$GITHUB_RUN_NUMBER" \
+            --tag "${{ needs.version.outputs.tag }}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --bundle-dir release-assets
+
       - name: Upload every installer and the manifest to the release
         if: needs.version.outputs.publish == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release upload "${{ needs.version.outputs.tag }}" \
-            release-assets/* latest.json \
+            release-assets/* latest.json android-update*.json \
             --repo "$GITHUB_REPOSITORY" --clobber
 
       - name: Keep the complete unpublished release as a workflow artifact
@@ -469,6 +480,7 @@ jobs:
           path: |
             release-assets/*
             latest.json
+            android-update*.json
           if-no-files-found: error
 
   # Everything is uploaded: make the release visible, and — on the beta channel —
@@ -532,7 +544,8 @@ jobs:
           set -euo pipefail
           mkdir -p beta-channel
           gh release download "$TAG" --repo "$REPO" \
-            --pattern latest.json --pattern "*.exe" --pattern "*companion*.apk" --dir beta-channel
+            --pattern latest.json --pattern android-update-beta.json \
+            --pattern "*.exe" --pattern "*companion*.apk" --dir beta-channel
           INSTALLER="$(find beta-channel -maxdepth 1 -type f -name '*.exe' -print -quit)"
           COMPANION="$(find beta-channel -maxdepth 1 -type f -name '*companion*.apk' -print -quit)"
           test -n "$INSTALLER"
@@ -548,5 +561,5 @@ jobs:
           fi
           gh release upload "$BETA_POINTER_TAG" \
             beta-channel/latest.json beta-channel/duckweed-beta-setup.exe \
-            beta-channel/duckweed-companion-beta.apk \
+            beta-channel/duckweed-companion-beta.apk beta-channel/android-update-beta.json \
             --repo "$REPO" --clobber

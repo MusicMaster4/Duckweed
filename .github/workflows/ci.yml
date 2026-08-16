@@ -108,7 +108,7 @@ jobs:
           fi
 
       - name: Build installable debug APK
-        run: gradle -p android :app:testDebugUnitTest :app:assembleDebug -PduckweedVersionName="0.1.0-ci.${GITHUB_RUN_NUMBER}" -PduckweedVersionCode="$GITHUB_RUN_NUMBER"
+        run: gradle -p android :app:testDebugUnitTest :app:assembleDebug -PduckweedVersionName="0.1.0-ci.${GITHUB_RUN_NUMBER}" -PduckweedVersionCode="$GITHUB_RUN_NUMBER" -PduckweedChannel="stable"
 
       - uses: actions/upload-artifact@v5
         with:

@@ -28,15 +28,19 @@ inside the companion invalidates its receive token and clears local secrets.
 
 ## User flow
 
-1. Install `duckweed-companion.apk` on the Android phone.
-2. In Duckweed, open **Settings > Agents > Mobile notifications**.
-3. Choose **Pair a phone**, then scan the QR code in the companion.
+1. In Duckweed desktop, open **Settings > Agents > Mobile notifications** and
+   choose **Download APK**. Scan the download QR code with the Android phone.
+2. Install the APK, open the companion, and choose **Connections**.
+3. Back on the desktop, choose **Pair a phone**, then scan its QR code in the
+   companion.
 4. Allow notifications when Android asks.
 5. Use **Send test** to verify delivery.
 
-The same companion works with both desktop channels. Stable links to the APK
-from the latest GitHub release. Beta links to the permanent `channel-testing`
-release, which is replaced by every beta publish.
+The same companion can pair with either desktop channel. Its own update feed is
+fixed by the APK that was installed: stable builds only pull stable updates and
+beta builds only pull beta updates. Open **Updates** in the companion to check,
+download, verify, and install a newer APK. Android always shows its native
+installation confirmation.
 
 ## Free infrastructure
 
@@ -160,6 +164,9 @@ build requires JDK 17, Android SDK 36, and Gradle 8.13:
 ```bash
 gradle -p android :app:testDebugUnitTest :app:assembleDebug
 ```
+
+Use `-PduckweedChannel=testing` to build a companion that follows the beta
+update feed. The default is `stable`.
 
 The debug APK is written to
 `android/app/build/outputs/apk/debug/app-debug.apk`.

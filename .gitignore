@@ -14,5 +14,6 @@ android/app/google-services.json
 
 # Release build output — the workflow uploads these, they are never committed.
 latest.json
+android-update*.json
 *.key
 *.key.pub

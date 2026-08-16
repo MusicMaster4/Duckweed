@@ -230,12 +230,22 @@ describe("the build job", () => {
     expect(compile.run).toContain(":app:testDebugUnitTest");
     expect(compile.run).toContain("duckweed-companion-beta.apk");
     expect(compile.run).toContain("duckweed-companion.apk");
+    expect(compile.run).toContain("-PduckweedChannel");
     expect(artifact.with.name).toBe("duckweed-release-android");
+  });
+
+  test("publishes a channel-bound Android update feed beside each APK", () => {
+    const generate = manifest.steps.find((step) => step.run?.includes("android-update-manifest.mjs"));
+    const upload = manifest.steps.find((step) => step.run?.includes("release upload"));
+    expect(generate.run).toContain("--channel");
+    expect(generate.run).toContain("--version-code");
+    expect(upload.run).toContain("android-update*.json");
   });
 
   test("keeps a permanent APK URL for the newest beta", () => {
     const pointer = runSteps(release).find((step) => step.run.includes("BETA_POINTER_TAG") && step.run.includes("companion"));
     expect(pointer.run).toContain("duckweed-companion-beta.apk");
+    expect(pointer.run).toContain("android-update-beta.json");
     expect(pointer.run).toContain("--pattern \"*companion*.apk\"");
   });
 
