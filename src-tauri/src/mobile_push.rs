@@ -20,12 +20,11 @@ use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Manager};
 use uuid::Uuid;
 
-const DEFAULT_RELAY_URL: &str =
-    "https://duckweed-notification-relay.idealmusic18.workers.dev";
+const DEFAULT_RELAY_URL: &str = "https://duckweed-notification-relay.idealmusic18.workers.dev";
 const KEYRING_SERVICE: &str = "dev.slop.duckweed.mobile";
 const PAIRING_LIFETIME_MS: i64 = 10 * 60 * 1000;
 const MAX_RESPONSE_BYTES: usize = 180_000;
-const MAX_PREVIEW_BYTES: usize = 960;
+const MAX_PREVIEW_CIPHERTEXT: usize = 3_000;
 
 static FILE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
@@ -339,6 +338,80 @@ fn truncate_utf8(value: &str, limit: usize) -> String {
     format!("{}…", &value[..end])
 }
 
+fn encrypted_ciphertext_len(plaintext_len: usize) -> usize {
+    let ciphertext_len = plaintext_len + 16;
+    (ciphertext_len / 3) * 4
+        + match ciphertext_len % 3 {
+            0 => 0,
+            1 => 2,
+            _ => 3,
+        }
+}
+
+fn bounded_preview_plaintext(
+    message_id: &str,
+    sent_at: i64,
+    agent: &str,
+    project: &str,
+    kind: &str,
+    response: Option<&str>,
+    duration_ms: Option<u64>,
+) -> Result<Vec<u8>, String> {
+    let serialize = |preview_response: Option<&str>| {
+        serde_json::to_vec(&PlainMessage {
+            version: 1,
+            id: message_id,
+            sent_at,
+            agent,
+            project,
+            kind,
+            response: preview_response,
+            duration_ms,
+        })
+        .map_err(|error| error.to_string())
+    };
+    let fits = |plain: &[u8]| encrypted_ciphertext_len(plain.len()) <= MAX_PREVIEW_CIPHERTEXT;
+    let Some(response) = response else {
+        let plain = serialize(None)?;
+        return fits(&plain)
+            .then_some(plain)
+            .ok_or_else(|| "mobile notification metadata exceeds the preview limit".to_string());
+    };
+
+    let full = serialize(Some(response))?;
+    if fits(&full) {
+        return Ok(full);
+    }
+
+    let without_response = serialize(None)?;
+    if !fits(&without_response) {
+        return Err("mobile notification metadata exceeds the preview limit".into());
+    }
+
+    let mut boundaries = vec![0];
+    boundaries.extend(
+        response
+            .char_indices()
+            .map(|(index, _)| index)
+            .filter(|index| *index > 0),
+    );
+    let mut low = 0usize;
+    let mut high = boundaries.len();
+    let mut best = without_response;
+    while low < high {
+        let middle = low + (high - low) / 2;
+        let candidate = format!("{}…", &response[..boundaries[middle]]);
+        let plain = serialize(Some(&candidate))?;
+        if fits(&plain) {
+            best = plain;
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+    Ok(best)
+}
+
 fn status_blocking(app: &AppHandle) -> Result<MobileStatus, String> {
     let _guard = FILE_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
     let path = state_path(app)?;
@@ -472,17 +545,14 @@ fn remove_device_blocking(app: &AppHandle, id: &str) -> Result<MobileStatus, Str
     let _guard = FILE_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
     let path = state_path(app)?;
     let mut state = read_state(&path);
-    if let Ok(secret) = load_secret(id) {
-        let _ = client().and_then(|http| {
-            checked(
-                http.delete(format!("{}/v1/pairings/{id}", relay_url()))
-                    .bearer_auth(secret.send_token)
-                    .send()
-                    .map_err(|error| error.to_string())?,
-            )?;
-            Ok(http)
-        });
-    }
+    let secret = load_secret(id)?;
+    checked(
+        client()?
+            .delete(format!("{}/v1/pairings/{id}", relay_url()))
+            .bearer_auth(secret.send_token)
+            .send()
+            .map_err(|error| format!("could not reach notification relay: {error}"))?,
+    )?;
     state.devices.retain(|device| device.id != id);
     if state
         .pending
@@ -526,20 +596,15 @@ fn send_to_device(
         .response
         .as_deref()
         .map(|value| truncate_utf8(value, MAX_RESPONSE_BYTES));
-    let preview_response = response
-        .as_deref()
-        .map(|value| truncate_utf8(value, MAX_PREVIEW_BYTES));
-    let preview_plain = serde_json::to_vec(&PlainMessage {
-        version: 1,
-        id: message_id,
+    let preview_plain = bounded_preview_plaintext(
+        message_id,
         sent_at,
-        agent: &agent,
-        project: &project,
+        &agent,
+        &project,
         kind,
-        response: preview_response.as_deref(),
-        duration_ms: message.duration_ms,
-    })
-    .map_err(|error| error.to_string())?;
+        response.as_deref(),
+        message.duration_ms,
+    )?;
     let full_plain = serde_json::to_vec(&PlainMessage {
         version: 1,
         id: message_id,
@@ -665,7 +730,10 @@ pub async fn mobile_send_test(app: AppHandle) -> Result<SendResult, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{encrypt, encrypt_with_nonce, pairing_proof, truncate_utf8};
+    use super::{
+        bounded_preview_plaintext, encrypt, encrypt_with_nonce, encrypted_ciphertext_len,
+        pairing_proof, truncate_utf8, MAX_PREVIEW_CIPHERTEXT,
+    };
 
     #[test]
     fn pairing_proof_binds_the_phone_identity() {
@@ -709,5 +777,37 @@ mod tests {
         assert_eq!(truncate_utf8("abcdef", 5), "ab…");
         assert_eq!(truncate_utf8("🦆ponds", 8), "🦆p…");
         assert!(truncate_utf8("🦆ponds", 8).len() <= 8);
+    }
+
+    #[test]
+    fn preview_limit_includes_json_escaping_and_encryption_encoding() {
+        let response = "\u{0000}".repeat(960);
+        let plain = bounded_preview_plaintext(
+            "00000000-0000-4000-8000-000000000001",
+            1_700_000_000_000,
+            "Codex",
+            "Duckweed",
+            "completed",
+            Some(&response),
+            Some(42),
+        )
+        .unwrap();
+        let decoded: serde_json::Value = serde_json::from_slice(&plain).unwrap();
+        let preview_response = decoded["response"].as_str().unwrap();
+        let envelope = encrypt(
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "pair",
+            "00000000-0000-4000-8000-000000000001",
+            "preview",
+            &plain,
+        )
+        .unwrap();
+
+        assert!(preview_response.len() < response.len());
+        assert_eq!(
+            envelope.ciphertext.len(),
+            encrypted_ciphertext_len(plain.len())
+        );
+        assert!(envelope.ciphertext.len() <= MAX_PREVIEW_CIPHERTEXT);
     }
 }

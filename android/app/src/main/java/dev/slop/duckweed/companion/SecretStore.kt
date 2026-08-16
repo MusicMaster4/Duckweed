@@ -4,6 +4,7 @@ import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
+import org.json.JSONArray
 import org.json.JSONObject
 import java.security.KeyStore
 import javax.crypto.Cipher
@@ -34,38 +35,74 @@ object SecretStore {
         }
     }
 
+    @Synchronized
     fun save(context: Context, credentials: PairCredentials) {
-        val plain = JSONObject()
+        val credentialsByPair = loadAll(context)
+            .filterNot { it.pairId == credentials.pairId }
+            .plus(credentials)
+        write(context, credentialsByPair)
+    }
+
+    private fun toJson(credentials: PairCredentials): JSONObject = JSONObject()
             .put("pairId", credentials.pairId)
             .put("relayUrl", credentials.relayUrl)
             .put("masterKey", credentials.masterKey)
             .put("receiveToken", credentials.receiveToken)
             .put("deviceId", credentials.deviceId)
             .put("deviceName", credentials.deviceName)
-            .toString()
-            .toByteArray(Charsets.UTF_8)
+
+    private fun fromJson(json: JSONObject) = PairCredentials(
+        pairId = json.getString("pairId"),
+        relayUrl = json.getString("relayUrl"),
+        masterKey = json.getString("masterKey"),
+        receiveToken = json.getString("receiveToken"),
+        deviceId = json.getString("deviceId"),
+        deviceName = json.getString("deviceName"),
+    )
+
+    private fun write(context: Context, credentials: List<PairCredentials>) {
+        val plain = JSONArray()
+        credentials.forEach { plain.put(toJson(it)) }
         context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
             .edit()
-            .putString(VALUE, encryptLocal(plain))
+            .putString(VALUE, encryptLocal(plain.toString().toByteArray(Charsets.UTF_8)))
             .apply()
     }
 
-    fun load(context: Context): PairCredentials? = runCatching {
-        val stored = context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
-            .getString(VALUE, null) ?: return null
-        val json = JSONObject(String(decryptLocal(stored), Charsets.UTF_8))
-        PairCredentials(
-            pairId = json.getString("pairId"),
-            relayUrl = json.getString("relayUrl"),
-            masterKey = json.getString("masterKey"),
-            receiveToken = json.getString("receiveToken"),
-            deviceId = json.getString("deviceId"),
-            deviceName = json.getString("deviceName"),
-        )
-    }.getOrNull()
+    @Synchronized
+    fun load(context: Context, pairId: String): PairCredentials? =
+        loadAll(context).firstOrNull { it.pairId == pairId }
 
+    @Synchronized
+    fun loadAll(context: Context): List<PairCredentials> = runCatching {
+        val stored = context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
+            .getString(VALUE, null) ?: return emptyList()
+        val raw = String(decryptLocal(stored), Charsets.UTF_8)
+        if (raw.trimStart().startsWith("[")) {
+            val json = JSONArray(raw)
+            (0 until json.length()).map { fromJson(json.getJSONObject(it)) }
+        } else {
+            // Migrate credentials written by versions that only supported one desktop.
+            listOf(fromJson(JSONObject(raw)))
+        }
+    }.getOrDefault(emptyList())
+
+    @Synchronized
+    fun remove(context: Context, pairId: String) {
+        val remaining = loadAll(context).filterNot { it.pairId == pairId }
+        if (remaining.isEmpty()) {
+            clear(context)
+        } else {
+            write(context, remaining)
+        }
+    }
+
+    @Synchronized
     fun clear(context: Context) {
-        context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE).edit().clear().apply()
+        context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
+            .edit()
+            .remove(VALUE)
+            .apply()
     }
 
     fun encryptLocal(plain: ByteArray): String {

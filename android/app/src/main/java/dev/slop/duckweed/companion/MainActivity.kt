@@ -145,36 +145,51 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun confirmDisconnect() {
-        val credentials = SecretStore.load(this) ?: return
+        val credentials = SecretStore.loadAll(this)
+        if (credentials.isEmpty()) return
+        val multiple = credentials.size > 1
         AlertDialog.Builder(this)
-            .setTitle("Disconnect this phone?")
-            .setMessage("Duckweed will stop sending agent completions to this device. Local response history stays on the phone.")
+            .setTitle(if (multiple) "Disconnect from all desktops?" else "Disconnect this phone?")
+            .setMessage(
+                if (multiple) {
+                    "All paired Duckweed desktops will stop sending agent completions to this device. Local response history stays on the phone."
+                } else {
+                    "Duckweed will stop sending agent completions to this device. Local response history stays on the phone."
+                },
+            )
             .setNegativeButton("Cancel", null)
             .setPositiveButton("Disconnect") { _, _ ->
                 pairingStatus.text = "Disconnecting…"
                 executor.execute {
-                    runCatching { RelayClient.disconnect(credentials) }
-                        .onSuccess {
-                            SecretStore.clear(this)
-                            runOnUiThread { refreshPairingStatus("Phone disconnected.") }
+                    val failures = mutableListOf<String>()
+                    credentials.forEach { pairing ->
+                        runCatching { RelayClient.disconnect(pairing) }
+                            .onSuccess { SecretStore.remove(this, pairing.pairId) }
+                            .onFailure { failures += it.message ?: pairing.pairId }
+                    }
+                    runOnUiThread {
+                        if (failures.isEmpty()) {
+                            refreshPairingStatus("Phone disconnected.")
+                        } else {
+                            showPairingError("Could not disconnect from every desktop. Please try again.")
                         }
-                        .onFailure { error ->
-                            runOnUiThread { showPairingError(error.message ?: "Could not disconnect.") }
-                        }
+                    }
                 }
             }
             .show()
     }
 
     private fun refreshPairingStatus(message: String? = null) {
-        val credentials = SecretStore.load(this)
-        disconnectButton.visibility = if (credentials == null) View.GONE else View.VISIBLE
-        scanButton.text = if (credentials == null) "Scan pairing code" else "Pair another desktop"
+        val credentials = SecretStore.loadAll(this)
+        disconnectButton.visibility = if (credentials.isEmpty()) View.GONE else View.VISIBLE
+        scanButton.text = if (credentials.isEmpty()) "Scan pairing code" else "Pair another desktop"
         scanButton.isEnabled = true
-        pairingStatus.text = message ?: if (credentials == null) {
+        pairingStatus.text = message ?: if (credentials.isEmpty()) {
             "Not paired. In Duckweed desktop, open Settings → Agents → Mobile notifications and scan the QR code."
+        } else if (credentials.size == 1) {
+            "Paired as ${credentials.single().deviceName}. Notifications show the agent and project; full encrypted responses stay in this app."
         } else {
-            "Paired as ${credentials.deviceName}. Notifications show the agent and project; full encrypted responses stay in this app."
+            "Paired with ${credentials.size} desktops as ${credentials.last().deviceName}. Notifications show the agent and project; full encrypted responses stay in this app."
         }
     }
 

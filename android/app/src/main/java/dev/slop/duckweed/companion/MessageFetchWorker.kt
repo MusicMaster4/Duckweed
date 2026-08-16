@@ -8,8 +8,7 @@ class MessageFetchWorker(context: Context, parameters: WorkerParameters) : Worke
     override fun doWork(): Result {
         val pairId = inputData.getString(PAIR_ID) ?: return Result.failure()
         val messageId = inputData.getString(MESSAGE_ID) ?: return Result.failure()
-        val credentials = SecretStore.load(applicationContext) ?: return Result.failure()
-        if (credentials.pairId != pairId) return Result.failure()
+        val credentials = SecretStore.load(applicationContext, pairId) ?: return Result.failure()
         return try {
             val envelope = RelayClient.fetch(credentials, messageId)
             val message = Crypto.decrypt(credentials, messageId, "payload", envelope)

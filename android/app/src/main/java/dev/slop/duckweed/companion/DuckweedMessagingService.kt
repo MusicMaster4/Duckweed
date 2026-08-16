@@ -17,22 +17,22 @@ class DuckweedMessagingService : FirebaseMessagingService() {
     }
 
     override fun onNewToken(token: String) {
-        val credentials = SecretStore.load(this) ?: return
+        val credentials = SecretStore.loadAll(this)
         executor.execute {
-            runCatching { RelayClient.refreshFcmToken(credentials, token) }
+            credentials.forEach { pairing ->
+                runCatching { RelayClient.refreshFcmToken(pairing, token) }
+            }
         }
     }
 
     override fun onMessageReceived(remoteMessage: RemoteMessage) {
         val data = remoteMessage.data
         if (data["version"] != "1") return
-        val credentials = SecretStore.load(this) ?: return
         val pairId = data["pair_id"] ?: return
+        val credentials = SecretStore.load(this, pairId) ?: return
         val messageId = data["message_id"] ?: return
         val nonce = data["preview_nonce"] ?: return
         val ciphertext = data["preview_ciphertext"] ?: return
-        if (pairId != credentials.pairId) return
-
         val preview = runCatching {
             Crypto.decrypt(
                 credentials,
