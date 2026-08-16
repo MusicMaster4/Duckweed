@@ -66,3 +66,20 @@ export function isAppModifier(event: { ctrlKey: boolean; metaKey: boolean }, app
   if (apple) return event.metaKey || event.ctrlKey;
   return event.ctrlKey || event.metaKey;
 }
+
+/** True for the F11 key, including auto-repeat. `code` covers odd layouts. */
+export function isFullscreenKey(event: { key: string; code?: string }): boolean {
+  return event.key === "F11" || event.code === "F11";
+}
+
+/**
+ * F11 toggles the OS window, not pane zoom. Auto-repeat is ignored so holding
+ * the key does not flicker in and out of fullscreen.
+ */
+export function isFullscreenHotkey(event: {
+  key: string;
+  code?: string;
+  repeat?: boolean;
+}): boolean {
+  return !event.repeat && isFullscreenKey(event);
+}

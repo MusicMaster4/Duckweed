@@ -341,6 +341,7 @@ export async function handleRequest(request: Request, env: Env, push: PushSender
       if (!found) return fail(401, "invalid sender credential");
       await env.DB.batch([
         env.DB.prepare("DELETE FROM messages WHERE pair_id = ?").bind(pairId),
+        env.DB.prepare("DELETE FROM commands WHERE pair_id = ?").bind(pairId),
         env.DB.prepare("DELETE FROM pairings WHERE pair_id = ?").bind(pairId),
       ]);
       return empty();
@@ -361,6 +362,7 @@ export async function handleRequest(request: Request, env: Env, push: PushSender
       if (request.method === "DELETE") {
         await env.DB.batch([
           env.DB.prepare("DELETE FROM messages WHERE pair_id = ?").bind(pairId),
+          env.DB.prepare("DELETE FROM commands WHERE pair_id = ?").bind(pairId),
           env.DB.prepare("DELETE FROM pairings WHERE pair_id = ?").bind(pairId),
         ]);
         return empty();
@@ -414,6 +416,72 @@ export async function handleRequest(request: Request, env: Env, push: PushSender
       return response({ accepted: true, messageId }, 202);
     }
 
+    if (parts.length === 4 && parts[3] === "commands") {
+      if (request.method === "POST") {
+        const found = await requireReceive(env, pairId, request);
+        if (!found?.device_id) return fail(found ? 409 : 401, found ? "phone has not paired" : "invalid receiver credential");
+        const input = await readBody(request);
+        if (!input) return fail(400, "invalid encrypted command");
+        const commandId = text(input.commandId, 64);
+        const sentAt = typeof input.sentAt === "number" ? input.sentAt : 0;
+        const payload = envelope(input.payload, MAX_CIPHERTEXT);
+        if (!commandId || !UUID_PATTERN.test(commandId) || !payload || Math.abs(Date.now() - sentAt) > 10 * 60 * 1000) {
+          return fail(400, "invalid encrypted command");
+        }
+        const now = Date.now();
+        await env.DB.prepare(`
+          INSERT INTO commands (
+            pair_id, command_id, payload_nonce, payload_ciphertext,
+            sent_at, created_at, expires_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        `).bind(
+          pairId,
+          commandId,
+          payload.nonce,
+          payload.ciphertext,
+          sentAt,
+          now,
+          now + MESSAGE_TTL_MS,
+        ).run();
+        return response({ accepted: true, commandId }, 202);
+      }
+
+      if (request.method === "GET") {
+        const found = await requireSend(env, pairId, request);
+        if (!found) return fail(401, "invalid sender credential");
+        const commands = await env.DB.prepare(`
+          SELECT command_id, payload_nonce, payload_ciphertext, sent_at
+            FROM commands
+           WHERE pair_id = ? AND expires_at > ?
+           ORDER BY created_at ASC
+           LIMIT 50
+        `).bind(pairId, Date.now()).all<{
+          command_id: string;
+          payload_nonce: string;
+          payload_ciphertext: string;
+          sent_at: number;
+        }>();
+        return response({
+          commands: commands.results.map((command) => ({
+            commandId: command.command_id,
+            payload: { nonce: command.payload_nonce, ciphertext: command.payload_ciphertext },
+            sentAt: command.sent_at,
+          })),
+        }, 200);
+      }
+    }
+
+    const commandId = parts[4];
+    if (parts.length === 5 && parts[3] === "commands" && commandId && UUID_PATTERN.test(commandId)) {
+      const found = await requireSend(env, pairId, request);
+      if (!found) return fail(401, "invalid sender credential");
+      if (request.method === "DELETE") {
+        await env.DB.prepare("DELETE FROM commands WHERE pair_id = ? AND command_id = ?")
+          .bind(pairId, commandId).run();
+        return empty();
+      }
+    }
+
     const messageId = parts[4];
     if (parts.length === 5 && parts[3] === "messages" && messageId && UUID_PATTERN.test(messageId)) {
       const found = await requireReceive(env, pairId, request);
@@ -452,6 +520,7 @@ async function cleanup(env: Env): Promise<void> {
   const now = Date.now();
   await env.DB.batch([
     env.DB.prepare("DELETE FROM messages WHERE expires_at <= ?").bind(now),
+    env.DB.prepare("DELETE FROM commands WHERE expires_at <= ?").bind(now),
     env.DB.prepare("DELETE FROM pairings WHERE device_id IS NULL AND expires_at <= ?").bind(now),
     env.DB.prepare("DELETE FROM pairing_rate_limits WHERE window_start < ?").bind(Math.floor(now / 60_000) - 2 * 24 * 60),
   ]);

@@ -8,9 +8,10 @@ import android.widget.TextView
 import androidx.core.content.ContextCompat
 import androidx.recyclerview.widget.RecyclerView
 
-class MessageAdapter : RecyclerView.Adapter<MessageAdapter.Holder>() {
+class MessageAdapter(
+    private val onOpen: (CompletionRecord) -> Unit,
+) : RecyclerView.Adapter<MessageAdapter.Holder>() {
     private var messages: List<CompletionRecord> = emptyList()
-    private val expanded = mutableSetOf<String>()
 
     fun submit(next: List<CompletionRecord>) {
         messages = next
@@ -26,7 +27,6 @@ class MessageAdapter : RecyclerView.Adapter<MessageAdapter.Holder>() {
 
     override fun onBindViewHolder(holder: Holder, position: Int) {
         val message = messages[position]
-        val isExpanded = expanded.contains(message.id)
         holder.agent.text = if (message.kind == "attention") {
             "${message.agent} · needs attention"
         } else {
@@ -46,15 +46,10 @@ class MessageAdapter : RecyclerView.Adapter<MessageAdapter.Holder>() {
         )
         holder.response.text = message.response
             ?: "This terminal-only session did not expose a structured final response."
-        holder.response.maxLines = if (isExpanded) Int.MAX_VALUE else 6
-        val canExpand = (message.response?.length ?: 0) > 260
-        holder.expand.visibility = if (canExpand) View.VISIBLE else View.GONE
-        holder.expand.text = if (isExpanded) "Collapse response" else "Show full response"
-        holder.itemView.setOnClickListener {
-            if (!canExpand) return@setOnClickListener
-            if (!expanded.add(message.id)) expanded.remove(message.id)
-            notifyItemChanged(holder.bindingAdapterPosition)
-        }
+        holder.response.maxLines = 5
+        holder.expand.visibility = View.VISIBLE
+        holder.expand.text = "Open conversation  ›"
+        holder.itemView.setOnClickListener { onOpen(message) }
     }
 
     class Holder(view: View) : RecyclerView.ViewHolder(view) {

@@ -54,6 +54,7 @@ export function MobileNotificationsSettings({ channel }: { channel: Channel }) {
           if (paired) {
             setQr(null);
             setMessage("Phone paired. Send a test notification when you are ready.");
+            window.dispatchEvent(new Event("duckweed:mobile-paired"));
           }
         })
         .catch((error) => setMessage(errorText(error)));

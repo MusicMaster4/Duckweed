@@ -1,5 +1,6 @@
 import { type ReactNode, useEffect, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { toggleFullscreen } from "../lib/window";
 
 interface Props {
   children: ReactNode;
@@ -19,20 +20,34 @@ export function TitleBar({
   locked = false,
 }: Props) {
   const [maximized, setMaximized] = useState(false);
+  const [fullscreen, setFullscreen] = useState(false);
 
   useEffect(() => {
-    if (!("__TAURI_INTERNALS__" in window)) return;
-    const win = getCurrentWindow();
+    const tauri = "__TAURI_INTERNALS__" in window;
     let disposed = false;
     const sync = async () => {
-      const max = await win.isMaximized();
-      if (!disposed) setMaximized(max);
+      if (tauri) {
+        const current = getCurrentWindow();
+        const [max, full] = await Promise.all([current.isMaximized(), current.isFullscreen()]);
+        if (!disposed) {
+          setMaximized(max);
+          setFullscreen(full);
+        }
+        return;
+      }
+      if (!disposed) {
+        setMaximized(false);
+        setFullscreen(!!document.fullscreenElement);
+      }
     };
     void sync();
-    const unlisten = win.onResized(() => void sync());
+    const onDomFullscreen = () => void sync();
+    document.addEventListener("fullscreenchange", onDomFullscreen);
+    const unlisten = tauri ? getCurrentWindow().onResized(() => void sync()) : null;
     return () => {
       disposed = true;
-      void unlisten.then((off) => off());
+      document.removeEventListener("fullscreenchange", onDomFullscreen);
+      void unlisten?.then((off) => off());
     };
   }, []);
 
@@ -99,12 +114,15 @@ export function TitleBar({
         <button
           type="button"
           className="win-btn"
-          title={maximized ? "Restore" : "Maximize"}
-          aria-label={maximized ? "Restore" : "Maximize"}
-          onClick={() => void win().toggleMaximize()}
+          title={fullscreen ? "Exit fullscreen (F11)" : maximized ? "Restore" : "Maximize"}
+          aria-label={fullscreen ? "Exit fullscreen" : maximized ? "Restore" : "Maximize"}
+          onClick={() => {
+            if (fullscreen) void toggleFullscreen();
+            else void win().toggleMaximize();
+          }}
         >
           <svg viewBox="0 0 12 12" aria-hidden="true">
-            {maximized ? (
+            {fullscreen || maximized ? (
               <>
                 {/*
                   The back square is drawn open — only the part that escapes the

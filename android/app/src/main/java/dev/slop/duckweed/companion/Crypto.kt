@@ -2,6 +2,7 @@ package dev.slop.duckweed.companion
 
 import android.util.Base64
 import org.json.JSONObject
+import org.json.JSONArray
 import java.nio.charset.StandardCharsets
 import javax.crypto.Cipher
 import javax.crypto.Mac
@@ -51,13 +52,63 @@ object Crypto {
         }
         return CompletionRecord(
             id = messageId,
+            pairId = credentials.pairId,
             sentAt = json.getLong("sentAt"),
-            agent = json.getString("agent"),
-            project = json.getString("project"),
+            agent = json.optString("agent", "Agent"),
+            project = json.optString("project", "Duckweed"),
+            projectId = json.optString("projectId").takeIf { it.isNotBlank() },
+            terminalId = json.optString("terminalId").takeIf { it.isNotBlank() },
+            terminalTitle = json.optString("terminalTitle").takeIf { it.isNotBlank() },
             kind = json.optString("kind", "completed"),
             response = if (json.isNull("response")) null else json.getString("response"),
             durationMs = if (json.isNull("durationMs")) null else json.getLong("durationMs"),
+            soundCue = if (json.isNull("soundCue")) null else json.optInt("soundCue").takeIf { it in 0..5 },
+            workspace = parseWorkspace(credentials.pairId, json),
         )
+    }
+
+    fun encrypt(
+        credentials: PairCredentials,
+        messageId: String,
+        kind: String,
+        plain: ByteArray,
+    ): EncryptedEnvelope {
+        val nonce = ByteArray(12).also(java.security.SecureRandom()::nextBytes)
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(
+            Cipher.ENCRYPT_MODE,
+            SecretKeySpec(encryptionKey(decode(credentials.masterKey), credentials.pairId), "AES"),
+            GCMParameterSpec(128, nonce),
+        )
+        cipher.updateAAD("v1\n${credentials.pairId}\n$messageId\n$kind".toByteArray(StandardCharsets.UTF_8))
+        return EncryptedEnvelope(encode(nonce), encode(cipher.doFinal(plain)))
+    }
+
+    private fun parseWorkspace(pairId: String, json: JSONObject): WorkspaceSnapshot? {
+        if (json.optString("kind") != "workspace" || !json.has("projects")) return null
+        val projectsJson = json.optJSONArray("projects") ?: JSONArray()
+        val projects = (0 until projectsJson.length()).mapNotNull { projectIndex ->
+            val project = projectsJson.optJSONObject(projectIndex) ?: return@mapNotNull null
+            val terminalsJson = project.optJSONArray("terminals") ?: JSONArray()
+            RemoteProject(
+                id = project.optString("id"),
+                name = project.optString("name", "Project"),
+                path = project.optString("path"),
+                branch = if (project.isNull("branch")) null else project.optString("branch").takeIf { it.isNotBlank() },
+                terminals = (0 until terminalsJson.length()).mapNotNull { terminalIndex ->
+                    val terminal = terminalsJson.optJSONObject(terminalIndex) ?: return@mapNotNull null
+                    RemoteTerminal(
+                        id = terminal.optString("id"),
+                        title = terminal.optString("title", "Terminal"),
+                        shell = terminal.optString("shell", "Terminal"),
+                        agent = if (terminal.isNull("agent")) null else terminal.optString("agent").takeIf { it.isNotBlank() },
+                        model = if (terminal.isNull("model")) null else terminal.optString("model").takeIf { it.isNotBlank() },
+                        status = terminal.optString("status", "idle"),
+                    )
+                }.filter { it.id.isNotBlank() },
+            )
+        }.filter { it.id.isNotBlank() }
+        return WorkspaceSnapshot(pairId, json.optLong("sentAt", System.currentTimeMillis()), projects)
     }
 
     internal fun decryptBytes(

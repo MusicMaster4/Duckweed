@@ -59,6 +59,19 @@ android {
     buildFeatures {
         buildConfig = true
     }
+
+    val generatedSounds = layout.buildDirectory.dir("generated/res/completionSounds")
+    sourceSets["main"].res.srcDir(generatedSounds)
+    val syncCompletionSounds by tasks.registering(Sync::class) {
+        from(rootProject.projectDir.resolve("../assets")) {
+            include("completion_sound_*.ogg")
+            rename { name ->
+                name.lowercase().replace("completion_sound_c2", "completion_sound_c_2")
+            }
+        }
+        into(generatedSounds.map { it.dir("raw") })
+    }
+    tasks.named("preBuild").configure { dependsOn(syncCompletionSounds) }
 }
 
 dependencies {

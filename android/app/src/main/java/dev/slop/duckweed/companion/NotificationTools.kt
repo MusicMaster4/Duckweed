@@ -8,26 +8,43 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
+import android.media.AudioAttributes
+import android.net.Uri
 import android.os.Build
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 
 object NotificationTools {
-    const val CHANNEL_ID = "agent-completions"
+    private const val SILENT_CHANNEL_ID = "agent-completions-v2-silent"
+    private const val SOUND_CHANNEL_PREFIX = "agent-completions-v2-"
     const val ACTION_MESSAGES_CHANGED = "dev.slop.duckweed.companion.MESSAGES_CHANGED"
 
     fun createChannel(context: Context) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
-        val channel = NotificationChannel(
-            CHANNEL_ID,
+        val manager = context.getSystemService(NotificationManager::class.java)
+        val silent = NotificationChannel(
+            SILENT_CHANNEL_ID,
             context.getString(R.string.notification_channel_name),
             NotificationManager.IMPORTANCE_HIGH,
         ).apply {
             description = context.getString(R.string.notification_channel_description)
             lockscreenVisibility = android.app.Notification.VISIBILITY_PRIVATE
+            setSound(null, null)
         }
-        context.getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
+        manager.createNotificationChannel(silent)
+        completionSounds.forEachIndexed { index, sound ->
+            val channel = NotificationChannel(
+                "$SOUND_CHANNEL_PREFIX$index",
+                context.getString(R.string.notification_channel_name),
+                NotificationManager.IMPORTANCE_HIGH,
+            ).apply {
+                description = context.getString(R.string.notification_channel_description)
+                lockscreenVisibility = android.app.Notification.VISIBILITY_PRIVATE
+                setSound(soundUri(context, sound), notificationAudioAttributes)
+            }
+            manager.createNotificationChannel(channel)
+        }
     }
 
     fun show(context: Context, message: CompletionRecord): Boolean {
@@ -47,12 +64,15 @@ object NotificationTools {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
         val copy = CompletionNotificationCopyBuilder.build(message)
-        val publicVersion = NotificationCompat.Builder(context, CHANNEL_ID)
+        val channelId = message.soundCue?.takeIf { it in completionSounds.indices }
+            ?.let { "$SOUND_CHANNEL_PREFIX$it" }
+            ?: SILENT_CHANNEL_ID
+        val publicVersion = NotificationCompat.Builder(context, channelId)
             .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle("Duckweed agent update")
             .setContentText("Open the companion to view details")
             .build()
-        val notification = NotificationCompat.Builder(context, CHANNEL_ID)
+        val builder = NotificationCompat.Builder(context, channelId)
             .setSmallIcon(R.drawable.ic_notification)
             .setLargeIcon(BitmapFactory.decodeResource(context.resources, R.mipmap.ic_launcher))
             .setColor(ContextCompat.getColor(context, R.color.duckweed_accent))
@@ -71,7 +91,11 @@ object NotificationTools {
             .setContentIntent(pending)
             .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
             .setPublicVersion(publicVersion)
-            .build()
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+            message.soundCue?.let { completionSounds.getOrNull(it) }
+                ?.let { builder.setSound(soundUri(context, it)) }
+        }
+        val notification = builder.build()
         NotificationManagerCompat.from(context).notify(message.id.hashCode(), notification)
         return true
     }
@@ -88,4 +112,22 @@ object NotificationTools {
     fun announceChanged(context: Context) {
         context.sendBroadcast(Intent(ACTION_MESSAGES_CHANGED).setPackage(context.packageName))
     }
+
+    private val completionSounds = intArrayOf(
+        R.raw.completion_sound_a,
+        R.raw.completion_sound_c,
+        R.raw.completion_sound_c_2,
+        R.raw.completion_sound_d,
+        R.raw.completion_sound_e,
+        R.raw.completion_sound_g,
+    )
+
+    private val notificationAudioAttributes = AudioAttributes.Builder()
+        .setUsage(AudioAttributes.USAGE_NOTIFICATION)
+        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+        .build()
+
+    private fun soundUri(context: Context, resource: Int): Uri = Uri.parse(
+        "${android.content.ContentResolver.SCHEME_ANDROID_RESOURCE}://${context.packageName}/$resource",
+    )
 }

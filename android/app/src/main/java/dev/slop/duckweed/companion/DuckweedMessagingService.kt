@@ -41,10 +41,12 @@ class DuckweedMessagingService : FirebaseMessagingService() {
                 EncryptedEnvelope(nonce, ciphertext),
             )
         }.getOrNull() ?: return
-        val store = MessageStore(this)
-        store.put(preview)
-        if (store.isNotificationPending(preview.id) && NotificationTools.show(this, preview)) {
-            store.markNotified(preview.id)
+        if (preview.kind != "workspace") {
+            val store = MessageStore(this)
+            store.put(preview)
+            if (store.isNotificationPending(preview.id) && NotificationTools.show(this, preview)) {
+                store.markNotified(preview.id)
+            }
         }
         NotificationTools.announceChanged(this)
 

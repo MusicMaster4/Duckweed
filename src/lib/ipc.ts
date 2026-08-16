@@ -19,6 +19,8 @@ export const homeDir = () => invoke<string>("home_dir");
 export const projectInfo = (path: string) => invoke<ProjectInfo>("project_info", { path });
 export const watchProject = (path: string | null) => invoke<void>("watch_project", { path });
 export const frontendReady = () => invoke<void>("frontend_ready");
+export const toggleWindowFullscreen = () => invoke<boolean>("toggle_window_fullscreen");
+export const syncWebviewBounds = () => invoke<void>("sync_webview_bounds");
 
 /** Open an http(s) URL in the system default browser (Ctrl/Cmd-click on links). */
 export const openUrl = (url: string) => invoke<void>("open_url", { url });
@@ -27,7 +29,8 @@ export const openUrl = (url: string) => invoke<void>("open_url", { url });
  * Play one completion cue from the app process instead of the WebView, so the
  * Windows volume mixer lists it as Duckweed. Resolves when the cue starts.
  */
-export const playCompletionCue = () => invoke<void>("play_completion_sound");
+export const playCompletionCue = (cueIndex: number) =>
+  invoke<void>("play_completion_sound", { cueIndex });
 
 export interface MobileDevice {
   id: string;
@@ -55,9 +58,42 @@ export interface MobilePairingStart {
 export interface MobileCompletionMessage {
   agent: string;
   project: string;
+  projectId: string | null;
+  terminalId: string | null;
+  terminalTitle: string | null;
   kind: "completed" | "attention";
   response: string | null;
   durationMs: number | null;
+  soundCue: number | null;
+}
+
+export interface MobileTerminalSnapshot {
+  id: string;
+  title: string;
+  shell: string;
+  agent: string | null;
+  model: string | null;
+  status: "idle" | "working" | "waiting" | "exited";
+}
+
+export interface MobileProjectSnapshot {
+  id: string;
+  name: string;
+  path: string;
+  branch: string | null;
+  terminals: MobileTerminalSnapshot[];
+}
+
+export interface MobileWorkspaceSnapshot {
+  projects: MobileProjectSnapshot[];
+}
+
+export interface MobileRemoteCommand {
+  deviceId: string;
+  commandId: string;
+  terminalId: string;
+  projectId: string | null;
+  text: string;
 }
 
 export interface MobileSendResult {
@@ -83,6 +119,15 @@ export const mobileDeviceRemove = (id: string) =>
 
 export const mobileSendCompletion = (message: MobileCompletionMessage) =>
   invoke<MobileSendResult>("mobile_send_completion", { message });
+
+export const mobileSendWorkspace = (snapshot: MobileWorkspaceSnapshot) =>
+  invoke<MobileSendResult>("mobile_send_workspace", { snapshot });
+
+export const mobilePollCommands = () =>
+  invoke<MobileRemoteCommand[]>("mobile_poll_commands");
+
+export const mobileAckCommand = (deviceId: string, commandId: string) =>
+  invoke<void>("mobile_ack_command", { deviceId, commandId });
 
 export const mobileSendTest = () =>
   invoke<MobileSendResult>("mobile_send_test");

@@ -35,10 +35,15 @@ function completionAudios(): HTMLAudioElement[] {
   return audioPlayers;
 }
 
-function randomCompletionAudio(): HTMLAudioElement | null {
-  const players = completionAudios();
-  if (players.length === 0) return null;
-  return players[Math.floor(Math.random() * players.length)] ?? null;
+export type CompletionCue = 0 | 1 | 2 | 3 | 4 | 5;
+
+/** Pick once so desktop playback and the encrypted mobile alert stay in sync. */
+export function chooseCompletionCue(): CompletionCue {
+  return Math.floor(Math.random() * COMPLETION_SOUND_URLS.length) as CompletionCue;
+}
+
+function completionAudio(cue: CompletionCue): HTMLAudioElement | null {
+  return completionAudios()[cue] ?? null;
 }
 
 function safeRewind(player: HTMLAudioElement): void {
@@ -158,15 +163,6 @@ function nativePlayerAvailable(): boolean {
   );
 }
 
-/** Play one cue in the WebView, the fallback for browsers and dead devices. */
-function playInWebView(): void {
-  bindGestureUnlock();
-  const player = randomCompletionAudio();
-  if (!player) return;
-  const generation = ++playGeneration;
-  attemptPlay(player, generation);
-}
-
 /** Decode the short effects ahead of the first process completion when possible. */
 export function preloadCompletionSound(): void {
   // The native player reads the cues straight out of the binary, so there is
@@ -186,16 +182,19 @@ export function preloadCompletionSound(): void {
  * Signal a completion once with a randomly selected cue. Simultaneous
  * completions restart the cue instead of stacking several copies.
  */
-export function playCompletionSound(): void {
+export function playCompletionSound(cue: CompletionCue = chooseCompletionCue()): void {
   if (nativePlayerAvailable()) {
-    void playCompletionCue().catch(() => {
+    void playCompletionCue(cue).catch(() => {
       // No output device the app process can open, or an older build without
       // the command. Hand the rest of the session to the WebView so
       // completions stay audible even with the wrong name in the mixer.
       nativePlayerUsable = false;
-      playInWebView();
+      const player = completionAudio(cue);
+      if (player) attemptPlay(player, ++playGeneration);
     });
     return;
   }
-  playInWebView();
+  bindGestureUnlock();
+  const player = completionAudio(cue);
+  if (player) attemptPlay(player, ++playGeneration);
 }

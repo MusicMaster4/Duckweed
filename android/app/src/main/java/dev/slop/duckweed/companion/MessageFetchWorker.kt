@@ -12,7 +12,11 @@ class MessageFetchWorker(context: Context, parameters: WorkerParameters) : Worke
         return try {
             val envelope = RelayClient.fetch(credentials, messageId)
             val message = Crypto.decrypt(credentials, messageId, "payload", envelope)
-            MessageStore(applicationContext).put(message)
+            if (message.workspace != null) {
+                WorkspaceStore(applicationContext).put(message.workspace)
+            } else {
+                MessageStore(applicationContext).put(message)
+            }
             RelayClient.acknowledge(credentials, messageId)
             NotificationTools.announceChanged(applicationContext)
             Result.success()

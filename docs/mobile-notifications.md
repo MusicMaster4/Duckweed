@@ -1,8 +1,9 @@
 # Mobile notifications
 
 Duckweed can notify an Android phone when a coding agent finishes or needs
-attention. The desktop app and phone pair through a short-lived QR code. No
-Duckweed account is required.
+attention, and the companion can send a follow-up back to any open terminal.
+The desktop app and phone pair through a short-lived QR code. No Duckweed
+account is required.
 
 ## Privacy model
 
@@ -20,6 +21,12 @@ Duckweed account is required.
 - The phone fetches the encrypted full response, decrypts it locally, saves it
   in the companion history, and removes it from the relay after acknowledgement.
   Unclaimed messages expire after seven days.
+- Open project and terminal metadata is delivered as a separate encrypted
+  workspace snapshot. Live agent output is never included. The phone only shows
+  the terminal state, such as `Thinking`, `Needs attention`, or `Ready`.
+- Replies and terminal commands are encrypted on the phone with the same paired
+  secret. The relay stores only their opaque ciphertext until the desktop polls,
+  decrypts, applies, and acknowledges them.
 - Desktop secrets use the operating system credential store. Android secrets
   and response history are encrypted with a non-exportable Android Keystore key.
 
@@ -40,6 +47,18 @@ The **Notifications** switch at the top of **Responses** controls Android
 alerts without disabling the encrypted response history. Responses that arrive
 while alerts are off stay pending. Turning alerts back on shows those pending
 agent completions, while previously delivered alerts are not replayed.
+
+The main companion navigation contains **Responses**, **Projects**,
+**Connections**, and **Updates**. Tapping a response opens its terminal
+conversation. Tapping a project opens its current terminal cards. Both paths
+lead to the same compact conversation view, which keeps submitted messages and
+final responses while replacing in-progress output with **Agent is thinking**.
+Sending `codex`, `claude`, or another installed agent command to an idle terminal
+starts it through the desktop in the same way as a local terminal submission.
+
+Completion notifications use the same six bundled Duckweed cues as the desktop.
+The desktop selects one cue for the completion and includes only its numeric cue
+identifier inside the encrypted payload, so Android plays the exact same cue.
 
 The same companion can pair with either desktop channel. Its own update feed is
 fixed by the APK that was installed: stable builds only pull stable updates and

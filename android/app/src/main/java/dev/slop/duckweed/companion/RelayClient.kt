@@ -112,6 +112,44 @@ object RelayClient {
         )
     }
 
+    data class SentCommand(val id: String, val sentAt: Long)
+
+    fun sendCommand(
+        credentials: PairCredentials,
+        projectId: String,
+        terminalId: String,
+        text: String,
+    ): SentCommand {
+        val commandId = UUID.randomUUID().toString()
+        val sentAt = System.currentTimeMillis()
+        val plain = JSONObject()
+            .put("version", 1)
+            .put("id", commandId)
+            .put("sentAt", sentAt)
+            .put("kind", "input")
+            .put("projectId", projectId)
+            .put("terminalId", terminalId)
+            .put("text", text)
+            .toString()
+            .toByteArray(Charsets.UTF_8)
+        val encrypted = Crypto.encrypt(credentials, commandId, "command", plain)
+        request(
+            method = "POST",
+            url = "${credentials.relayUrl}/v1/pairings/${credentials.pairId}/commands",
+            bearer = credentials.receiveToken,
+            payload = JSONObject()
+                .put("commandId", commandId)
+                .put("sentAt", sentAt)
+                .put(
+                    "payload",
+                    JSONObject()
+                        .put("nonce", encrypted.nonce)
+                        .put("ciphertext", encrypted.ciphertext),
+                ),
+        )
+        return SentCommand(commandId, sentAt)
+    }
+
     private fun request(
         method: String,
         url: String,

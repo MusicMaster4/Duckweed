@@ -32,7 +32,7 @@ describe("mobile pairing continuity", () => {
       "android/app/src/main/java/dev/slop/duckweed/companion/MainActivity.kt",
     );
 
-    expect(activity).toContain("refreshPushRegistration()\n        refreshMessages()");
+    expect(activity).toContain("refreshPushRegistration()\n        refreshRemoteState()");
     expect(activity).toContain("RelayClient.refreshFcmToken(pairing, token)");
   });
 

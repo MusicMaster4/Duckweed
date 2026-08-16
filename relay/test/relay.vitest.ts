@@ -143,6 +143,65 @@ describe("encrypted notification relay", () => {
     expect(fetched.status).toBe(404);
   });
 
+  it("relays encrypted phone commands back to the paired desktop", async () => {
+    const pairId = "50000000-0000-4000-8000-000000000005";
+    const commandId = "60000000-0000-4000-8000-000000000006";
+    const registrationToken = "e".repeat(43);
+    const sendToken = "f".repeat(43);
+    const receiveToken = "g".repeat(43);
+    const accept = async () => {};
+
+    await handleRequest(request("/v1/pairings", "POST", undefined, {
+      pairId,
+      registrationTokenHash: await hash(registrationToken),
+      sendTokenHash: await hash(sendToken),
+      expiresAt: Date.now() + 9 * 60_000,
+    }, "203.0.113.7"), env, accept);
+    await handleRequest(request(`/v1/pairings/${pairId}/register`, "POST", undefined, {
+      registrationToken,
+      receiveToken,
+      fcmToken: "fcm-command-token",
+      deviceId: "phone-3",
+      name: "Phone",
+      proof: "h".repeat(43),
+    }), env, accept);
+
+    const payload = { nonce: "I".repeat(16), ciphertext: "J".repeat(256) };
+    const queued = await handleRequest(request(`/v1/pairings/${pairId}/commands`, "POST", receiveToken, {
+      commandId,
+      sentAt: Date.now(),
+      payload,
+    }), env, accept);
+    expect(queued.status).toBe(202);
+
+    const polled = await handleRequest(
+      request(`/v1/pairings/${pairId}/commands`, "GET", sendToken),
+      env,
+      accept,
+    );
+    expect(await polled.json()).toMatchObject({ commands: [{ commandId, payload }] });
+
+    const unauthorized = await handleRequest(
+      request(`/v1/pairings/${pairId}/commands`, "GET", receiveToken),
+      env,
+      accept,
+    );
+    expect(unauthorized.status).toBe(401);
+
+    const acknowledged = await handleRequest(
+      request(`/v1/pairings/${pairId}/commands/${commandId}`, "DELETE", sendToken),
+      env,
+      accept,
+    );
+    expect(acknowledged.status).toBe(204);
+    const emptyQueue = await handleRequest(
+      request(`/v1/pairings/${pairId}/commands`, "GET", sendToken),
+      env,
+      accept,
+    );
+    expect(await emptyQueue.json()).toEqual({ commands: [] });
+  });
+
   it("rate limits pairing creation by source address", async () => {
     for (let attempt = 0; attempt < 12; attempt += 1) {
       const invalid = await handleRequest(request("/v1/pairings", "POST", undefined, {}, "198.51.100.9"), env);

@@ -56,17 +56,19 @@ struct Output {
 pub struct SoundPlayer(Arc<Mutex<Option<Sender<Request>>>>);
 
 impl SoundPlayer {
-    /// Play one randomly chosen completion cue.
+    /// Play the selected completion cue, or choose one when no index is given.
     ///
     /// Resolves once the cue has started, not once it has finished. The call
     /// blocks for as long as opening the output device takes, so it belongs on
     /// a blocking task rather than the IPC thread.
-    pub fn play(&self) -> Result<(), String> {
+    pub fn play(&self, cue_index: Option<usize>) -> Result<(), String> {
+        let cue_index = cue_index.unwrap_or_else(next_cue_index);
+        let cue = CUES
+            .get(cue_index)
+            .copied()
+            .ok_or_else(|| "unknown completion cue".to_string())?;
         let (reply, started) = mpsc::sync_channel(1);
-        self.send(Request {
-            cue: CUES[next_cue_index()],
-            reply,
-        })?;
+        self.send(Request { cue, reply })?;
         started
             .recv_timeout(START_TIMEOUT)
             .unwrap_or_else(|_| Err("the audio thread did not answer".into()))
@@ -206,7 +208,7 @@ mod tests {
     #[ignore = "opens the default output device and makes noise"]
     fn plays_a_cue_on_the_default_device() {
         let player = SoundPlayer::default();
-        player.play().expect("the cue starts");
+        player.play(None).expect("the cue starts");
         std::thread::sleep(Duration::from_secs(3));
     }
 

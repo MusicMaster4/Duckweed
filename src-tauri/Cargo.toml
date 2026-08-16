@@ -60,6 +60,11 @@ windows-sys = { version = "0.59", features = [
     "Win32_UI_Shell",
 ] }
 winreg = "0.55"
+# Same version wry/tauri already use. Lets F11 reach the page instead of
+# WebView2's own (no-op, in a frameless window) browser fullscreen.
+webview2-com = "0.38"
+windows-core = "0.61"
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm"] }
 
 [target.'cfg(unix)'.dependencies]
 # GUI launches do not inherit PATH additions from shell startup files. Without

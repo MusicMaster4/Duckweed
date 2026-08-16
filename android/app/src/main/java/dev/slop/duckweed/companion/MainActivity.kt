@@ -11,6 +11,7 @@ import android.os.Build
 import android.os.Bundle
 import android.view.View
 import android.widget.Button
+import android.widget.EditText
 import android.widget.ProgressBar
 import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
@@ -30,7 +31,7 @@ import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
 import java.util.concurrent.Executors
 
 class MainActivity : AppCompatActivity() {
-    private enum class Page { RESPONSES, CONNECTIONS, UPDATES }
+    private enum class Page { RESPONSES, PROJECTS, CONNECTIONS, UPDATES }
 
     private lateinit var pairingStatus: TextView
     private lateinit var scanButton: Button
@@ -40,13 +41,29 @@ class MainActivity : AppCompatActivity() {
     private lateinit var updateStatus: TextView
     private lateinit var updateButton: Button
     private lateinit var updateProgress: ProgressBar
+    private lateinit var projectsEmpty: View
+    private lateinit var projectDetail: View
+    private lateinit var conversationDetail: View
+    private lateinit var conversationThinking: View
+    private lateinit var conversationComposer: View
+    private lateinit var conversationUnavailable: View
+    private lateinit var conversationInput: EditText
+    private lateinit var conversationSend: TextView
+    private lateinit var conversationList: RecyclerView
     private lateinit var appUpdater: AppUpdater
-    private val adapter = MessageAdapter()
+    private val messageAdapter = MessageAdapter { openResponse(it) }
+    private val projectAdapter = ProjectAdapter { openProject(it) }
+    private val terminalAdapter = TerminalAdapter { openConversation(it, true) }
+    private val conversationAdapter = ConversationAdapter()
     private val executor = Executors.newSingleThreadExecutor()
     private var receiverRegistered = false
     private var syncingNotificationsToggle = false
     private var updateAvailable: AndroidUpdateManifest? = null
     private var selectedPage = Page.RESPONSES
+    private var selectedProject: ProjectRow? = null
+    private var selectedTarget: ConversationTarget? = null
+    private var legacyResponse: CompletionRecord? = null
+    private var conversationReturnsToProject = false
 
     private val notificationPermission = registerForActivityResult(
         ActivityResultContracts.RequestPermission(),
@@ -68,7 +85,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private val messagesChanged = object : BroadcastReceiver() {
-        override fun onReceive(context: Context?, intent: Intent?) = refreshMessages()
+        override fun onReceive(context: Context?, intent: Intent?) = refreshRemoteState()
     }
 
     private val downloadFinished = object : BroadcastReceiver() {
@@ -95,11 +112,35 @@ class MainActivity : AppCompatActivity() {
         updateStatus = findViewById(R.id.update_status)
         updateButton = findViewById(R.id.update_button)
         updateProgress = findViewById(R.id.update_progress)
+        projectsEmpty = findViewById(R.id.projects_empty)
+        projectDetail = findViewById(R.id.project_detail)
+        conversationDetail = findViewById(R.id.conversation_detail)
+        conversationThinking = findViewById(R.id.conversation_thinking)
+        conversationComposer = findViewById(R.id.conversation_composer)
+        conversationUnavailable = findViewById(R.id.conversation_unavailable)
+        conversationInput = findViewById(R.id.conversation_input)
+        conversationSend = findViewById(R.id.conversation_send)
+        conversationList = findViewById(R.id.conversation_list)
 
         findViewById<RecyclerView>(R.id.message_list).apply {
             layoutManager = LinearLayoutManager(this@MainActivity)
-            adapter = this@MainActivity.adapter
+            adapter = messageAdapter
         }
+        findViewById<RecyclerView>(R.id.project_list).apply {
+            layoutManager = LinearLayoutManager(this@MainActivity)
+            adapter = projectAdapter
+        }
+        findViewById<RecyclerView>(R.id.terminal_list).apply {
+            layoutManager = LinearLayoutManager(this@MainActivity)
+            adapter = terminalAdapter
+        }
+        conversationList.apply {
+            layoutManager = LinearLayoutManager(this@MainActivity).apply { stackFromEnd = true }
+            adapter = conversationAdapter
+        }
+        findViewById<View>(R.id.project_back).setOnClickListener { closeProject() }
+        findViewById<View>(R.id.conversation_back).setOnClickListener { closeConversation() }
+        conversationSend.setOnClickListener { sendConversationMessage() }
 
         configureNavigation()
         configureNotificationToggle()
@@ -116,9 +157,9 @@ class MainActivity : AppCompatActivity() {
         requestNotificationPermissionIfEnabled()
         refreshPairingStatus()
         refreshPushRegistration()
-        refreshMessages()
+        refreshRemoteState()
 
-        if (intent.getStringExtra("message_id") != null) showPage(Page.RESPONSES)
+        openIntentResponse()
     }
 
     override fun onStart() {
@@ -153,13 +194,13 @@ class MainActivity : AppCompatActivity() {
         super.onResume()
         NotificationTools.cancelAll(this)
         syncNotificationToggle()
-        refreshMessages()
+        refreshRemoteState()
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        if (intent.getStringExtra("message_id") != null) showPage(Page.RESPONSES)
+        openIntentResponse()
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -174,6 +215,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun configureNavigation() {
         findViewById<View>(R.id.nav_responses).setOnClickListener { showPage(Page.RESPONSES) }
+        findViewById<View>(R.id.nav_projects).setOnClickListener { showPage(Page.PROJECTS) }
         findViewById<View>(R.id.nav_connections).setOnClickListener { showPage(Page.CONNECTIONS) }
         findViewById<View>(R.id.nav_updates).setOnClickListener { showPage(Page.UPDATES) }
         showPage(Page.RESPONSES)
@@ -197,14 +239,22 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showPage(page: Page) {
+        selectedProject = null
+        selectedTarget = null
+        legacyResponse = null
+        projectDetail.visibility = View.GONE
+        conversationDetail.visibility = View.GONE
+        setDetailChrome(false)
         selectedPage = page
         val pages = mapOf(
             Page.RESPONSES to R.id.responses_page,
+            Page.PROJECTS to R.id.projects_page,
             Page.CONNECTIONS to R.id.connections_page,
             Page.UPDATES to R.id.updates_page,
         )
         val navigation = mapOf(
             Page.RESPONSES to R.id.nav_responses,
+            Page.PROJECTS to R.id.nav_projects,
             Page.CONNECTIONS to R.id.nav_connections,
             Page.UPDATES to R.id.nav_updates,
         )
@@ -440,7 +490,10 @@ class MainActivity : AppCompatActivity() {
                     val failures = mutableListOf<String>()
                     credentials.forEach { pairing ->
                         runCatching { RelayClient.disconnect(pairing) }
-                            .onSuccess { SecretStore.remove(this, pairing.pairId) }
+                            .onSuccess {
+                                SecretStore.remove(this, pairing.pairId)
+                                WorkspaceStore(this).remove(pairing.pairId)
+                            }
                             .onFailure { failures += it.message ?: pairing.pairId }
                     }
                     runOnUiThread {
@@ -482,10 +535,205 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun refreshMessages() {
+    private fun refreshRemoteState() {
         val messages = MessageStore(this).latest()
-        adapter.submit(messages)
+        legacyResponse?.let { current ->
+            legacyResponse = messages.firstOrNull { it.id == current.id } ?: current
+        }
+        messageAdapter.submit(messages)
         emptyState.visibility = if (messages.isEmpty()) View.VISIBLE else View.GONE
+        refreshWorkspaces()
+        if (conversationDetail.visibility == View.VISIBLE) refreshConversation()
+        openIntentResponse()
+    }
+
+    private fun refreshWorkspaces() {
+        val rows = WorkspaceStore(this).all().flatMap { snapshot ->
+            snapshot.projects.map { ProjectRow(snapshot.pairId, it) }
+        }
+        projectAdapter.submit(rows)
+        projectsEmpty.visibility = if (rows.isEmpty()) View.VISIBLE else View.GONE
+
+        selectedProject?.let { current ->
+            selectedProject = rows.firstOrNull {
+                it.pairId == current.pairId && it.project.id == current.project.id
+            } ?: current
+            terminalAdapter.submit(selectedProject)
+        }
+        selectedTarget?.let { current ->
+            rows.firstOrNull {
+                it.pairId == current.pairId && it.project.id == current.projectId
+            }?.let { row ->
+                row.project.terminals.firstOrNull { it.id == current.terminal.id }?.let { terminal ->
+                    selectedTarget = ConversationTarget(
+                        row.pairId,
+                        row.project.id,
+                        row.project.name,
+                        terminal,
+                    )
+                }
+            }
+        }
+    }
+
+    private fun openProject(row: ProjectRow) {
+        selectedProject = row
+        terminalAdapter.submit(row)
+        findViewById<TextView>(R.id.project_detail_title).text = row.project.name
+        findViewById<TextView>(R.id.project_detail_meta).text = buildList {
+            add("${row.project.terminals.size} open terminals")
+            row.project.branch?.let { add(it) }
+        }.joinToString("  •  ")
+        projectDetail.visibility = View.VISIBLE
+        conversationDetail.visibility = View.GONE
+        setDetailChrome(true)
+    }
+
+    private fun closeProject() {
+        selectedProject = null
+        projectDetail.visibility = View.GONE
+        setDetailChrome(false)
+    }
+
+    private fun openResponse(message: CompletionRecord) {
+        val target = findConversationTarget(message)
+        if (target != null) {
+            openConversation(target, false)
+            return
+        }
+        selectedTarget = null
+        legacyResponse = message
+        conversationReturnsToProject = false
+        projectDetail.visibility = View.GONE
+        conversationDetail.visibility = View.VISIBLE
+        setDetailChrome(true)
+        refreshConversation()
+    }
+
+    private fun findConversationTarget(message: CompletionRecord): ConversationTarget? {
+        val pairId = message.pairId ?: return null
+        val terminalId = message.terminalId ?: return null
+        return WorkspaceStore(this).all()
+            .firstOrNull { it.pairId == pairId }
+            ?.projects
+            ?.asSequence()
+            ?.mapNotNull { project ->
+                project.terminals.firstOrNull { it.id == terminalId }?.let { terminal ->
+                    ConversationTarget(pairId, project.id, project.name, terminal)
+                }
+            }
+            ?.firstOrNull()
+    }
+
+    private fun openConversation(target: ConversationTarget, returnToProject: Boolean) {
+        selectedTarget = target
+        legacyResponse = null
+        conversationReturnsToProject = returnToProject
+        projectDetail.visibility = View.GONE
+        conversationDetail.visibility = View.VISIBLE
+        setDetailChrome(true)
+        refreshConversation()
+    }
+
+    private fun closeConversation() {
+        selectedTarget = null
+        legacyResponse = null
+        conversationDetail.visibility = View.GONE
+        if (conversationReturnsToProject && selectedProject != null) {
+            projectDetail.visibility = View.VISIBLE
+        } else {
+            setDetailChrome(false)
+        }
+    }
+
+    private fun refreshConversation() {
+        val legacy = legacyResponse
+        if (legacy != null) {
+            findViewById<TextView>(R.id.conversation_title).text = legacy.agent
+            findViewById<TextView>(R.id.conversation_status).text = legacy.project
+            conversationAdapter.submit(listOf(legacy))
+            conversationThinking.visibility = View.GONE
+            conversationComposer.visibility = View.GONE
+            conversationUnavailable.visibility = View.VISIBLE
+            return
+        }
+        val target = selectedTarget ?: return
+        val messages = MessageStore(this).conversation(target.terminal.id)
+        val last = messages.lastOrNull()
+        val thinking = target.terminal.isWorking || last?.kind == "user"
+        findViewById<TextView>(R.id.conversation_title).text =
+            target.terminal.agent ?: target.terminal.title
+        findViewById<TextView>(R.id.conversation_status).text = buildList {
+            add(target.projectName)
+            target.terminal.model?.let { add(it) }
+            add(
+                when {
+                    thinking -> "Thinking"
+                    target.terminal.status == "waiting" -> "Needs attention"
+                    target.terminal.status == "exited" -> "Closed"
+                    else -> "Ready"
+                },
+            )
+        }.joinToString("  •  ")
+        conversationAdapter.submit(messages)
+        conversationThinking.visibility = if (thinking) View.VISIBLE else View.GONE
+        val canReply = SecretStore.load(this, target.pairId) != null && target.terminal.status != "exited"
+        conversationComposer.visibility = if (canReply) View.VISIBLE else View.GONE
+        conversationUnavailable.visibility = if (canReply) View.GONE else View.VISIBLE
+        if (messages.isNotEmpty()) conversationList.scrollToPosition(messages.lastIndex)
+    }
+
+    private fun sendConversationMessage() {
+        val target = selectedTarget ?: return
+        val text = conversationInput.text.toString().trim().take(32_000)
+        if (text.isEmpty()) return
+        val credentials = SecretStore.load(this, target.pairId) ?: return
+        conversationSend.isEnabled = false
+        findViewById<TextView>(R.id.conversation_status).text = "Sending securely..."
+        executor.execute {
+            runCatching {
+                val sent = RelayClient.sendCommand(
+                    credentials,
+                    target.projectId,
+                    target.terminal.id,
+                    text,
+                )
+                MessageStore(this).putOutgoing(target, sent.id, sent.sentAt, text)
+            }.onSuccess {
+                runOnUiThread {
+                    conversationSend.isEnabled = true
+                    conversationInput.text.clear()
+                    refreshConversation()
+                }
+            }.onFailure { error ->
+                runOnUiThread {
+                    conversationSend.isEnabled = true
+                    findViewById<TextView>(R.id.conversation_status).text =
+                        error.message ?: "Could not send this message."
+                }
+            }
+        }
+    }
+
+    private fun openIntentResponse() {
+        val messageId = intent.getStringExtra("message_id") ?: return
+        val message = MessageStore(this).latest().firstOrNull { it.id == messageId } ?: return
+        intent.removeExtra("message_id")
+        showPage(Page.RESPONSES)
+        openResponse(message)
+    }
+
+    private fun setDetailChrome(detail: Boolean) {
+        findViewById<View>(R.id.top_header).visibility = if (detail) View.GONE else View.VISIBLE
+        findViewById<View>(R.id.bottom_nav).visibility = if (detail) View.GONE else View.VISIBLE
+    }
+
+    override fun onBackPressed() {
+        when {
+            conversationDetail.visibility == View.VISIBLE -> closeConversation()
+            projectDetail.visibility == View.VISIBLE -> closeProject()
+            else -> super.onBackPressed()
+        }
     }
 
     private fun showPairingError(message: String) {

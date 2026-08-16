@@ -50,14 +50,21 @@ import {
   shouldFlashCompletionReview,
   type CompletionFlash,
 } from "./lib/completionHighlights";
-import { playCompletionSound, preloadCompletionSound } from "./lib/completionSound";
+import {
+  chooseCompletionCue,
+  playCompletionSound,
+  preloadCompletionSound,
+} from "./lib/completionSound";
 import * as commandHistory from "./lib/commandHistory";
 import { clearGreetings } from "./lib/greetings";
 import * as suggestFeedback from "./lib/suggestFeedback";
 import {
   frontendReady,
   listShells,
+  mobileAckCommand,
+  mobilePollCommands,
   mobileSendCompletion,
+  mobileSendWorkspace,
   powerAction,
   projectInfo,
   shellIntegrationSet,
@@ -67,7 +74,7 @@ import {
   type LaunchIntent,
   type ShellIntegrationStatus,
 } from "./lib/ipc";
-import { cKeyAction } from "./lib/platform";
+import { cKeyAction, isFullscreenHotkey } from "./lib/platform";
 import {
   balance,
   findLeaf,
@@ -406,6 +413,7 @@ export default function App() {
   /** Dirty flag for the lifted file editor (file switches confirm through this). */
   const editorDirtyRef = useRef(false);
   const processState = useRef(new Map<string, ProcessState>());
+  const mobileWorkspaceSnapshotRef = useRef("");
   /** Last folder opened in any tab — only ever used to seed the folder picker. */
   const lastProject = useRef<string | null>(initial.lastProject);
 
@@ -663,6 +671,147 @@ export default function App() {
   );
   const termIdsKey = termIds.join("\0");
 
+  // Keep a compact remote index on paired phones. It contains only open
+  // projects, terminal identity, and status, never terminal output or an
+  // in-progress agent transcript.
+  useEffect(() => {
+    if (!TAURI_RUNTIME) return;
+    let timer = 0;
+    let stopped = false;
+
+    const publish = () => {
+      timer = 0;
+      const snapshot = {
+        projects: tabsRef.current.map((tab) => ({
+          id: tab.id,
+          name: tab.project?.name ?? tab.title,
+          path: tab.project?.path ?? "",
+          branch: tab.project?.branch ?? null,
+          terminals: leaves(tab.root).flatMap((node) => {
+            const meta = terminals.getMeta(node.term);
+            if (!meta) return [];
+            const session = agentSessions.get(node.term);
+            const status = session
+              ? session.status === "working" || session.status === "starting"
+                ? "working" as const
+                : session.status === "waiting"
+                  ? "waiting" as const
+                  : session.status === "exited" || session.status === "error"
+                    ? "exited" as const
+                    : "idle" as const
+              : meta.exited
+                ? "exited" as const
+                : meta.agent && terminals.hasPendingAgentTurn(node.term)
+                  ? "working" as const
+                  : meta.busy
+                    ? "working" as const
+                    : "idle" as const;
+            const rawAgent = meta.agent
+              ? meta.agent.charAt(0).toUpperCase() + meta.agent.slice(1)
+              : null;
+            return [{
+              id: node.term,
+              title: meta.title || session?.label || meta.shellLabel || "Terminal",
+              shell: meta.shellLabel || "Terminal",
+              agent: session?.label ?? rawAgent,
+              model: session?.model ?? null,
+              status,
+            }];
+          }),
+        })),
+      };
+      const serialized = JSON.stringify(snapshot);
+      if (serialized === mobileWorkspaceSnapshotRef.current) return;
+      mobileWorkspaceSnapshotRef.current = serialized;
+      void mobileSendWorkspace(snapshot).then((result) => {
+        if (result.failed > 0) throw new Error(result.errors.join("; "));
+      }).catch((error) => {
+        if (!stopped) {
+          if (mobileWorkspaceSnapshotRef.current === serialized) {
+            mobileWorkspaceSnapshotRef.current = "";
+          }
+          console.error("mobile workspace sync", error);
+          timer = window.setTimeout(publish, 5_000);
+        }
+      });
+    };
+
+    const schedule = () => {
+      if (stopped || timer) return;
+      timer = window.setTimeout(publish, 250);
+    };
+    const offAgents = agentSessions.subscribeAll(schedule);
+    const offTerminals = termIds.map((termId) => terminals.subscribeSession(termId, schedule));
+    const paired = () => {
+      mobileWorkspaceSnapshotRef.current = "";
+      schedule();
+    };
+    window.addEventListener("duckweed:mobile-paired", paired);
+    schedule();
+    return () => {
+      stopped = true;
+      if (timer) window.clearTimeout(timer);
+      window.removeEventListener("duckweed:mobile-paired", paired);
+      offAgents();
+      offTerminals.forEach((off) => off());
+    };
+  }, [tabs, termIds, termIdsKey]);
+
+  // The relay cannot open an inbound connection through a user's router, so
+  // the desktop checks the small encrypted command queue while Duckweed runs.
+  useEffect(() => {
+    if (!TAURI_RUNTIME) return;
+    let stopped = false;
+    let timer = 0;
+    let polling = false;
+    const handling = new Set<string>();
+    const applied = new Set<string>();
+
+    const poll = async () => {
+      if (stopped || polling) return;
+      polling = true;
+      try {
+        const commands = await mobilePollCommands();
+        for (const command of commands) {
+          const key = `${command.deviceId}:${command.commandId}`;
+          if (handling.has(key)) continue;
+          handling.add(key);
+          try {
+            if (!applied.has(key)) {
+              const meta = terminals.getMeta(command.terminalId);
+              if (meta && !meta.exited) {
+                const session = agentSessions.get(command.terminalId);
+                if (session) {
+                  agentSessions.submit(command.terminalId, command.text);
+                } else if (meta.agent || meta.busy) {
+                  terminals.writeRaw(command.terminalId, `${command.text}\r`);
+                } else {
+                  terminals.submitCommand(command.terminalId, command.text);
+                }
+              }
+              applied.add(key);
+            }
+            await mobileAckCommand(command.deviceId, command.commandId);
+            applied.delete(key);
+          } finally {
+            handling.delete(key);
+          }
+        }
+      } catch (error) {
+        if (!stopped) console.error("mobile command sync", error);
+      } finally {
+        polling = false;
+        if (!stopped) timer = window.setTimeout(poll, 1_800);
+      }
+    };
+
+    void poll();
+    return () => {
+      stopped = true;
+      if (timer) window.clearTimeout(timer);
+    };
+  }, []);
+
   // Agent sessions can stay open after a turn finishes, so the tab activity
   // indicator follows outstanding work rather than the lifetime of the CLI.
   // Structured sessions announce their status directly; raw terminal agents
@@ -725,6 +874,12 @@ export default function App() {
       if (!previous) return;
 
       if (!shouldSignalCompletion(previous, current)) return;
+      const completionCue =
+        !dailyLockedRef.current &&
+        completionSoundEnabledRef.current &&
+        shouldPlayCompletionSound(previous, current)
+          ? chooseCompletionCue()
+          : null;
       // Agent turns are also delivered to paired phones. The transport runs in
       // Rust so encryption keys never enter the WebView; structured sessions
       // contribute their settled assistant prose, while terminal-only agents
@@ -743,23 +898,21 @@ export default function App() {
         void mobileSendCompletion({
           agent,
           project,
+          projectId: owner?.id ?? null,
+          terminalId: termId,
+          terminalTitle: meta.title || null,
           kind: details?.needsAttention ? "attention" : "completed",
           response: details?.response ?? null,
           durationMs:
             details?.durationMs ??
             (startedAt === null ? null : Math.max(0, Date.now() - startedAt)),
+          soundCue: completionCue,
         }).catch((error) => console.error("mobile completion notification", error));
       }
       // Every eligible completion gets one cue. The shared audio player
       // coalesces simultaneous finishes, so several agents returning together
       // do not stack copies of the effect.
-      if (
-        !dailyLockedRef.current &&
-        completionSoundEnabledRef.current &&
-        shouldPlayCompletionSound(previous, current)
-      ) {
-        playCompletionSound();
-      }
+      if (completionCue !== null) playCompletionSound(completionCue);
       if (isFocusedTerm(termId)) {
         if (completionHighlightsRef.current) flashCompletion(termId, "focused");
         return;
@@ -2347,15 +2500,17 @@ export default function App() {
         e.stopPropagation();
       };
 
+      // OS window fullscreen. Pane zoom is Ctrl+Shift+Z. Handle this before
+      // the daily lockout swallows keys, and keep it out of the terminal.
+      if (isFullscreenHotkey(e)) {
+        void toggleFullscreen();
+        return take();
+      }
+
       if (dailyLockedRef.current) {
         const lockoutControl =
           e.target instanceof Element && e.target.closest(".daily-lockout");
         if (lockoutControl) return;
-        return take();
-      }
-
-      if (e.key === "F11") {
-        void toggleFullscreen();
         return take();
       }
 
