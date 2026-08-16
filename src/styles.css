@@ -9067,6 +9067,100 @@ body.is-resizing * {
   scrollbar-gutter: stable;
 }
 
+.settings-inline-button {
+  flex: none;
+  min-height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  background: var(--bg);
+  color: var(--text-dim);
+  font-size: 10.5px;
+}
+
+.settings-inline-button:hover:not(:disabled) {
+  border-color: var(--accent-line);
+  color: var(--text);
+}
+
+.settings-inline-button:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.settings-inline-button.is-danger:hover:not(:disabled) {
+  border-color: rgba(235, 113, 113, 0.42);
+  color: var(--rose);
+}
+
+.mobile-device-actions {
+  display: flex;
+  flex: none;
+  gap: 6px;
+}
+
+.mobile-pair-card {
+  display: grid;
+  grid-template-columns: 196px 1fr;
+  gap: 22px;
+  align-items: center;
+  margin: 8px 10px;
+  padding: 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.mobile-pair-card img {
+  display: block;
+  width: 196px;
+  height: 196px;
+  border-radius: 5px;
+}
+
+.mobile-pair-card > div {
+  display: flex;
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.mobile-pair-card strong {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.mobile-pair-card span,
+.mobile-settings-message {
+  color: var(--text-faint);
+  font-size: 10.5px;
+  line-height: 1.5;
+}
+
+.mobile-settings-message {
+  margin: 8px 10px 0;
+  white-space: pre-wrap;
+}
+
+@media (max-width: 760px) {
+  .mobile-pair-card {
+    grid-template-columns: 1fr;
+  }
+
+  .mobile-pair-card img {
+    width: min(220px, 100%);
+    height: auto;
+  }
+
+  .mobile-device-row,
+  .mobile-download-row {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 10px;
+  }
+}
+
 .agent-side-question-dock {
   padding: 7px 14px 8px;
   border-top: 1px solid var(--border);

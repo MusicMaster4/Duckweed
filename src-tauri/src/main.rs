@@ -8,8 +8,9 @@ mod discord_presence;
 mod fs;
 mod git;
 mod launch;
-mod power;
+mod mobile_push;
 mod ports;
+mod power;
 mod process_tree;
 mod project;
 mod pty;
@@ -91,7 +92,10 @@ fn merge_history(stored: &str, incoming: &str) -> String {
     let mut merged: Vec<HistoryEntry> = Vec::new();
     let mut index: HashMap<(String, String), usize> = HashMap::new();
 
-    for entry in parse_history(stored).into_iter().chain(parse_history(incoming)) {
+    for entry in parse_history(stored)
+        .into_iter()
+        .chain(parse_history(incoming))
+    {
         if entry.command.trim().is_empty() {
             continue;
         }
@@ -161,7 +165,10 @@ fn settings_save(
     // History accumulates across windows, builds and updates; everything else
     // is a single-writer snapshot that simply replaces the stored copy.
     let value = if key == COMMAND_HISTORY_KEY && !replace.unwrap_or(false) {
-        merge_history(settings.get(&key).map(String::as_str).unwrap_or("[]"), &value)
+        merge_history(
+            settings.get(&key).map(String::as_str).unwrap_or("[]"),
+            &value,
+        )
     } else {
         value
     };
@@ -843,6 +850,12 @@ fn main() {
             usage_set_pricing,
             settings_load,
             settings_save,
+            mobile_push::mobile_status,
+            mobile_push::mobile_pair_start,
+            mobile_push::mobile_pair_poll,
+            mobile_push::mobile_device_remove,
+            mobile_push::mobile_send_completion,
+            mobile_push::mobile_send_test,
         ])
         .on_window_event(|window, event| {
             // Make sure we never leave orphaned shells behind.
@@ -877,7 +890,10 @@ mod tests {
     fn merge_keeps_commands_a_stale_snapshot_never_saw() {
         let stored = r#"[{"command":"cargo build","cwd":"/a","at":1}]"#;
         let incoming = r#"[{"command":"npm test","cwd":"/a","at":2}]"#;
-        assert_eq!(commands(&merge_history(stored, incoming)), ["cargo build", "npm test"]);
+        assert_eq!(
+            commands(&merge_history(stored, incoming)),
+            ["cargo build", "npm test"]
+        );
     }
 
     #[test]

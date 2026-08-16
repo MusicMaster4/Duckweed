@@ -1,0 +1,12 @@
+<resources>
+    <color name="duckweed_background">#0F120F</color>
+    <color name="duckweed_surface">#171C18</color>
+    <color name="duckweed_surface_high">#202721</color>
+    <color name="duckweed_text">#E7ECE7</color>
+    <color name="duckweed_text_dim">#A0AAA1</color>
+    <color name="duckweed_text_faint">#717B72</color>
+    <color name="duckweed_border">#303A31</color>
+    <color name="duckweed_accent">#7BE05A</color>
+    <color name="duckweed_accent_dark">#31552A</color>
+    <color name="duckweed_attention">#F0C052</color>
+</resources>
