@@ -2,6 +2,9 @@ name: Deploy notification relay
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - feature/mobile-notifications
 
 permissions:
   contents: read
