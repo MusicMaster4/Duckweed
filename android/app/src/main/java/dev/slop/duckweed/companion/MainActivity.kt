@@ -17,6 +17,9 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.updatePadding
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.google.firebase.messaging.FirebaseMessaging
@@ -74,6 +77,7 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+        configureSystemBarInsets()
         NotificationTools.createChannel(this)
         appUpdater = AppUpdater(this)
 
@@ -167,6 +171,23 @@ class MainActivity : AppCompatActivity() {
         showPage(Page.RESPONSES)
     }
 
+    private fun configureSystemBarInsets() {
+        val root = findViewById<View>(R.id.app_root)
+        ViewCompat.setOnApplyWindowInsetsListener(root) { view, insets ->
+            val safeArea = insets.getInsets(
+                WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout(),
+            )
+            view.updatePadding(
+                left = safeArea.left,
+                top = safeArea.top,
+                right = safeArea.right,
+                bottom = safeArea.bottom,
+            )
+            insets
+        }
+        ViewCompat.requestApplyInsets(root)
+    }
+
     private fun showPage(page: Page) {
         selectedPage = page
         val pages = mapOf(
@@ -186,7 +207,6 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun configureAscii() {
-        asciiAnimators += AsciiAnimator(findViewById(R.id.empty_ascii), AsciiAnimator.DUCK)
         asciiAnimators += AsciiAnimator(findViewById(R.id.connection_ascii), AsciiAnimator.CONNECTION, 520L)
         asciiAnimators += AsciiAnimator(findViewById(R.id.update_ascii), AsciiAnimator.UPDATE, 460L)
     }

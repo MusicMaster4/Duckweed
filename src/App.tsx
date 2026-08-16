@@ -738,9 +738,11 @@ export default function App() {
         const agent = details?.label ??
           (rawAgent ? rawAgent.charAt(0).toUpperCase() + rawAgent.slice(1) : "Agent");
         const startedAt = current.completionStartedAt ?? previous.processStartedAt;
+        const project = owner?.project?.name ??
+          (meta.cwd.trim() ? basename(meta.cwd) : owner?.title ?? "Duckweed");
         void mobileSendCompletion({
           agent,
-          project: owner?.project?.name ?? owner?.title ?? "Duckweed",
+          project,
           kind: details?.needsAttention ? "attention" : "completed",
           response: details?.response ?? null,
           durationMs:

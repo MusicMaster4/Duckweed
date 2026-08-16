@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/app_root"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="@color/duckweed_background"
@@ -93,37 +94,35 @@
                 <LinearLayout
                     android:id="@+id/empty_state"
                     android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_gravity="center"
-                    android:gravity="center"
+                    android:layout_height="match_parent"
+                    android:gravity="center_horizontal"
                     android:orientation="vertical"
-                    android:padding="24dp">
+                    android:paddingTop="24dp"
+                    android:paddingBottom="24dp">
 
-                    <TextView
+                    <dev.slop.duckweed.companion.DuckAsciiView
                         android:id="@+id/empty_ascii"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:fontFamily="monospace"
-                        android:gravity="center"
-                        android:includeFontPadding="false"
-                        android:lineSpacingExtra="-2dp"
-                        android:textColor="@color/duckweed_accent"
-                        android:textSize="14sp" />
+                        android:layout_width="match_parent"
+                        android:layout_height="0dp"
+                        android:layout_weight="1"
+                        android:importantForAccessibility="no" />
 
                     <TextView
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:layout_marginTop="20dp"
+                        android:layout_marginTop="12dp"
                         android:fontFamily="sans-serif-medium"
                         android:text="Quiet for now"
                         android:textColor="@color/duckweed_text"
                         android:textSize="16sp" />
 
                     <TextView
-                        android:layout_width="280dp"
+                        android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="6dp"
                         android:gravity="center"
+                        android:paddingStart="16dp"
+                        android:paddingEnd="16dp"
                         android:text="Responses will arrive here after you connect a Duckweed desktop."
                         android:textColor="@color/duckweed_text_faint"
                         android:textSize="13sp" />

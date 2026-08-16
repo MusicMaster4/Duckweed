@@ -45,11 +45,7 @@ object NotificationTools {
             intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        val title = if (message.kind == "attention") {
-            "${message.agent} needs attention"
-        } else {
-            "${message.agent} finished"
-        }
+        val copy = CompletionNotificationCopyBuilder.build(message)
         val publicVersion = NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle("Duckweed agent update")
@@ -59,8 +55,15 @@ object NotificationTools {
             .setSmallIcon(R.drawable.ic_notification)
             .setLargeIcon(BitmapFactory.decodeResource(context.resources, R.mipmap.ic_launcher))
             .setColor(ContextCompat.getColor(context, R.color.duckweed_accent))
-            .setContentTitle(title)
-            .setContentText(message.project)
+            .setContentTitle(copy.title)
+            .setContentText(copy.text)
+            .setSubText(copy.context)
+            .setStyle(
+                NotificationCompat.BigTextStyle()
+                    .setBigContentTitle(copy.title)
+                    .bigText(copy.expandedText)
+                    .setSummaryText(copy.context),
+            )
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setAutoCancel(true)
