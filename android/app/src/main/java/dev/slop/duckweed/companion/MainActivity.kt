@@ -20,6 +20,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.SwitchCompat
 import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.updatePadding
 import androidx.recyclerview.widget.LinearLayoutManager
@@ -109,6 +110,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        WindowCompat.setDecorFitsSystemWindows(window, false)
         setContentView(R.layout.activity_main)
         configureSystemBarInsets()
         NotificationTools.createChannel(this)
@@ -250,14 +252,15 @@ class MainActivity : AppCompatActivity() {
     private fun configureSystemBarInsets() {
         val root = findViewById<View>(R.id.app_root)
         ViewCompat.setOnApplyWindowInsetsListener(root) { view, insets ->
-            val safeArea = insets.getInsets(
+            val systemArea = insets.getInsets(
                 WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout(),
             )
+            val keyboardArea = insets.getInsets(WindowInsetsCompat.Type.ime())
             view.updatePadding(
-                left = safeArea.left,
-                top = safeArea.top,
-                right = safeArea.right,
-                bottom = safeArea.bottom,
+                left = systemArea.left,
+                top = systemArea.top,
+                right = systemArea.right,
+                bottom = maxOf(systemArea.bottom, keyboardArea.bottom),
             )
             insets
         }
