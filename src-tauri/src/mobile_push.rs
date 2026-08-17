@@ -15,6 +15,7 @@ use base64::Engine;
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
 use reqwest::blocking::{Client, Response};
+use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Manager};
@@ -148,6 +149,17 @@ pub struct WorkspaceTerminal {
     pub agent: Option<String>,
     pub model: Option<String>,
     pub status: String,
+    #[serde(default)]
+    pub conversation: Vec<WorkspaceConversationMessage>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceConversationMessage {
+    pub id: String,
+    pub sent_at: i64,
+    pub role: String,
+    pub text: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -182,9 +194,11 @@ struct PlainRemoteCommand {
     version: u8,
     id: String,
     kind: String,
-    terminal_id: String,
+    #[serde(default)]
+    terminal_id: Option<String>,
     project_id: Option<String>,
-    text: String,
+    #[serde(default)]
+    text: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -192,9 +206,10 @@ struct PlainRemoteCommand {
 pub struct RemoteCommand {
     pub device_id: String,
     pub command_id: String,
-    pub terminal_id: String,
+    pub kind: String,
+    pub terminal_id: Option<String>,
     pub project_id: Option<String>,
-    pub text: String,
+    pub text: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -337,6 +352,13 @@ fn checked(response: Response) -> Result<Response, String> {
     } else {
         format!("notification relay returned {status}: {}", detail.trim())
     })
+}
+
+fn pairing_is_gone(status: StatusCode) -> bool {
+    matches!(
+        status,
+        StatusCode::UNAUTHORIZED | StatusCode::NOT_FOUND | StatusCode::GONE
+    )
 }
 
 fn secret_bytes(secret: &str) -> Result<Vec<u8>, String> {
@@ -526,19 +548,59 @@ fn bounded_preview_plaintext(
 }
 
 fn status_blocking(app: &AppHandle) -> Result<MobileStatus, String> {
-    let _guard = FILE_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
     let path = state_path(app)?;
-    let mut state = read_state(&path);
-    if state
-        .pending
-        .as_ref()
-        .is_some_and(|pairing| pairing.expires_at <= now_ms())
-    {
-        if let Some(expired) = state.pending.take() {
-            remove_secret(&expired.id);
+    let state = {
+        let _guard = FILE_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let mut state = read_state(&path);
+        if state
+            .pending
+            .as_ref()
+            .is_some_and(|pairing| pairing.expires_at <= now_ms())
+        {
+            if let Some(expired) = state.pending.take() {
+                remove_secret(&expired.id);
+            }
+            save_state(&path, &state)?;
         }
-        save_state(&path, &state)?;
+        state
+    };
+
+    // A phone can disconnect with its receive credential, deleting the relay
+    // row before the desktop knows. Reconcile local rows whenever Settings asks
+    // for status so stale phones disappear automatically.
+    let relay = relay_url();
+    let http = client()?;
+    let mut removed = Vec::new();
+    for device in &state.devices {
+        let Ok(secret) = load_secret(&device.id) else {
+            removed.push(device.id.clone());
+            continue;
+        };
+        let response = http
+            .get(format!("{relay}/v1/pairings/{}", device.id))
+            .bearer_auth(&secret.send_token)
+            .send();
+        if response
+            .as_ref()
+            .is_ok_and(|response| pairing_is_gone(response.status()))
+        {
+            removed.push(device.id.clone());
+        }
     }
+    let state = if removed.is_empty() {
+        state
+    } else {
+        let _guard = FILE_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let mut current = read_state(&path);
+        current
+            .devices
+            .retain(|device| !removed.contains(&device.id));
+        for id in removed {
+            remove_secret(&id);
+        }
+        save_state(&path, &current)?;
+        current
+    };
     Ok(MobileStatus {
         relay_url: relay_url(),
         devices: state.devices,
@@ -655,17 +717,18 @@ fn pair_poll_blocking(app: &AppHandle) -> Result<MobileStatus, String> {
 }
 
 fn remove_device_blocking(app: &AppHandle, id: &str) -> Result<MobileStatus, String> {
-    let _guard = FILE_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
     let path = state_path(app)?;
-    let mut state = read_state(&path);
-    let secret = load_secret(id)?;
-    checked(
-        client()?
+    // Local removal is authoritative and idempotent. If the phone already
+    // deleted the relay row, the sender credential necessarily returns 401.
+    // A missing keyring item must not leave an undeletable row in Settings.
+    if let Ok(secret) = load_secret(id) {
+        let _ = client()?
             .delete(format!("{}/v1/pairings/{id}", relay_url()))
             .bearer_auth(secret.send_token)
-            .send()
-            .map_err(|error| format!("could not reach notification relay: {error}"))?,
-    )?;
+            .send();
+    }
+    let _guard = FILE_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+    let mut state = read_state(&path);
     state.devices.retain(|device| device.id != id);
     if state
         .pending
@@ -851,21 +914,28 @@ fn poll_commands_blocking(app: &AppHandle) -> Result<Vec<RemoteCommand>, String>
         read_state(&state_path(app)?)
     };
     let mut commands = Vec::new();
+    let mut removed = Vec::new();
     for device in &state.devices {
-        let secret = load_secret(&device.id)?;
-        let list: RemoteCommandList = checked(
-            client()?
-                .get(format!(
-                    "{}/v1/pairings/{}/commands",
-                    relay_url(),
-                    device.id
-                ))
-                .bearer_auth(&secret.send_token)
-                .send()
-                .map_err(|error| format!("could not poll mobile commands: {error}"))?,
-        )?
-        .json()
-        .map_err(|error| error.to_string())?;
+        let Ok(secret) = load_secret(&device.id) else {
+            removed.push(device.id.clone());
+            continue;
+        };
+        let response = client()?
+            .get(format!(
+                "{}/v1/pairings/{}/commands",
+                relay_url(),
+                device.id
+            ))
+            .bearer_auth(&secret.send_token)
+            .send()
+            .map_err(|error| format!("could not poll mobile commands: {error}"))?;
+        if pairing_is_gone(response.status()) {
+            removed.push(device.id.clone());
+            continue;
+        }
+        let list: RemoteCommandList = checked(response)?
+            .json()
+            .map_err(|error| error.to_string())?;
         for remote in list.commands {
             let plain = decrypt(
                 &secret.master_key,
@@ -876,22 +946,47 @@ fn poll_commands_blocking(app: &AppHandle) -> Result<Vec<RemoteCommand>, String>
             )?;
             let command: PlainRemoteCommand =
                 serde_json::from_slice(&plain).map_err(|error| error.to_string())?;
-            if command.version != 1
-                || command.id != remote.command_id
-                || command.kind != "input"
-                || command.terminal_id.trim().is_empty()
-                || command.text.trim().is_empty()
-            {
+            if command.version != 1 || command.id != remote.command_id {
+                continue;
+            }
+            let valid = match command.kind.as_str() {
+                "refresh" => true,
+                "input" => {
+                    command
+                        .terminal_id
+                        .as_deref()
+                        .is_some_and(|value| !value.trim().is_empty())
+                        && command
+                            .text
+                            .as_deref()
+                            .is_some_and(|value| !value.trim().is_empty())
+                }
+                _ => false,
+            };
+            if !valid {
                 continue;
             }
             commands.push(RemoteCommand {
                 device_id: device.id.clone(),
                 command_id: remote.command_id,
+                kind: command.kind,
                 terminal_id: command.terminal_id,
                 project_id: command.project_id,
                 text: command.text,
             });
         }
+    }
+    if !removed.is_empty() {
+        let _guard = FILE_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let path = state_path(app)?;
+        let mut current = read_state(&path);
+        current
+            .devices
+            .retain(|device| !removed.contains(&device.id));
+        for id in removed {
+            remove_secret(&id);
+        }
+        save_state(&path, &current)?;
     }
     Ok(commands)
 }
@@ -1018,7 +1113,7 @@ pub async fn mobile_send_test(app: AppHandle) -> Result<SendResult, String> {
 mod tests {
     use super::{
         bounded_preview_plaintext, decrypt, encrypt, encrypt_with_nonce, encrypted_ciphertext_len,
-        pairing_proof, truncate_utf8, MAX_PREVIEW_CIPHERTEXT,
+        pairing_is_gone, pairing_proof, truncate_utf8, PlainRemoteCommand, MAX_PREVIEW_CIPHERTEXT,
     };
 
     #[test]
@@ -1051,6 +1146,24 @@ mod tests {
             decrypt(secret, pair, id, "command", &envelope).unwrap(),
             plain
         );
+    }
+
+    #[test]
+    fn refresh_commands_do_not_require_terminal_input() {
+        let command: PlainRemoteCommand = serde_json::from_str(
+            r#"{"version":1,"id":"00000000-0000-4000-8000-000000000001","kind":"refresh"}"#,
+        )
+        .unwrap();
+        assert_eq!(command.kind, "refresh");
+        assert!(command.terminal_id.is_none());
+        assert!(command.text.is_none());
+    }
+
+    #[test]
+    fn missing_pairings_are_safe_to_prune_locally() {
+        assert!(pairing_is_gone(reqwest::StatusCode::UNAUTHORIZED));
+        assert!(pairing_is_gone(reqwest::StatusCode::NOT_FOUND));
+        assert!(!pairing_is_gone(reqwest::StatusCode::SERVICE_UNAVAILABLE));
     }
 
     #[test]

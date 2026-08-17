@@ -74,6 +74,14 @@ export interface MobileTerminalSnapshot {
   agent: string | null;
   model: string | null;
   status: "idle" | "working" | "waiting" | "exited";
+  conversation: MobileConversationSnapshot[];
+}
+
+export interface MobileConversationSnapshot {
+  id: string;
+  sentAt: number;
+  role: "user" | "assistant";
+  text: string;
 }
 
 export interface MobileProjectSnapshot {
@@ -91,9 +99,10 @@ export interface MobileWorkspaceSnapshot {
 export interface MobileRemoteCommand {
   deviceId: string;
   commandId: string;
-  terminalId: string;
+  kind: "input" | "refresh";
+  terminalId: string | null;
   projectId: string | null;
-  text: string;
+  text: string | null;
 }
 
 export interface MobileSendResult {

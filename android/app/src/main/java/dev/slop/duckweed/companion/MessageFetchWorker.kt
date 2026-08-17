@@ -14,6 +14,7 @@ class MessageFetchWorker(context: Context, parameters: WorkerParameters) : Worke
             val message = Crypto.decrypt(credentials, messageId, "payload", envelope)
             if (message.workspace != null) {
                 WorkspaceStore(applicationContext).put(message.workspace)
+                MessageStore(applicationContext).putSyncedConversation(message.workspace)
             } else {
                 MessageStore(applicationContext).put(message)
             }

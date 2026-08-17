@@ -112,8 +112,10 @@ class MessageStore(context: Context) : SQLiteOpenHelper(context, "duckweed-messa
     fun response(messageId: String): CompletionRecord? =
         latest().firstOrNull { it.id == messageId }
 
-    fun conversation(terminalId: String): List<CompletionRecord> =
-        read(null).filter { it.terminalId == terminalId }.sortedBy { it.sentAt }
+    fun conversation(pairId: String, terminalId: String): List<CompletionRecord> =
+        read(null)
+            .filter { it.pairId == pairId && it.terminalId == terminalId }
+            .sortedBy { it.sentAt }
 
     fun putOutgoing(target: ConversationTarget, id: String, sentAt: Long, text: String) {
         put(
@@ -133,6 +135,34 @@ class MessageStore(context: Context) : SQLiteOpenHelper(context, "duckweed-messa
                 workspace = null,
             ),
         )
+    }
+
+    fun putSyncedConversation(snapshot: WorkspaceSnapshot) {
+        snapshot.projects.forEach { project ->
+            project.terminals.forEach { terminal ->
+                terminal.conversation.forEach { message ->
+                    val id = "workspace:${snapshot.pairId}:${terminal.id}:${message.id}"
+                    put(
+                        CompletionRecord(
+                            id = id,
+                            pairId = snapshot.pairId,
+                            sentAt = message.sentAt,
+                            agent = terminal.agent ?: "Agent",
+                            project = project.name,
+                            projectId = project.id,
+                            terminalId = terminal.id,
+                            terminalTitle = terminal.title,
+                            kind = if (message.role == "user") "user" else "completed",
+                            response = message.text,
+                            durationMs = null,
+                            soundCue = null,
+                            workspace = null,
+                        ),
+                    )
+                    markNotified(id, message.sentAt)
+                }
+            }
+        }
     }
 
     private fun read(selection: String?): List<CompletionRecord> {

@@ -681,6 +681,7 @@ export default function App() {
 
     const publish = () => {
       timer = 0;
+      let remainingConversationChars = 120_000;
       const snapshot = {
         projects: tabsRef.current.map((tab) => ({
           id: tab.id,
@@ -709,6 +710,39 @@ export default function App() {
             const rawAgent = meta.agent
               ? meta.agent.charAt(0).toUpperCase() + meta.agent.slice(1)
               : null;
+            const conversationSource: Array<{
+              id: string;
+              sentAt: number;
+              role: "user" | "assistant";
+              rawText: string;
+            }> = [];
+            for (const item of session?.items ?? []) {
+              if (item.kind === "user") {
+                conversationSource.push({
+                  id: item.id,
+                  sentAt: item.at,
+                  role: "user",
+                  rawText: item.text,
+                });
+              } else if (item.kind === "assistant" && !item.streaming) {
+                conversationSource.push({
+                  id: item.id,
+                  sentAt: item.at,
+                  role: "assistant",
+                  rawText: item.text,
+                });
+              }
+            }
+            const conversation = conversationSource.slice(-6).map((item) => {
+              const text = item.rawText
+                .trim()
+                .slice(0, Math.min(4_000, remainingConversationChars));
+              remainingConversationChars = Math.max(
+                0,
+                remainingConversationChars - text.length,
+              );
+              return { id: item.id, sentAt: item.sentAt, role: item.role, text };
+            }).filter((item) => item.text.length > 0);
             return [{
               id: node.term,
               title: meta.title || session?.label || meta.shellLabel || "Terminal",
@@ -716,6 +750,7 @@ export default function App() {
               agent: session?.label ?? rawAgent,
               model: session?.model ?? null,
               status,
+              conversation,
             }];
           }),
         })),
@@ -747,11 +782,18 @@ export default function App() {
       schedule();
     };
     window.addEventListener("duckweed:mobile-paired", paired);
+    window.addEventListener("duckweed:mobile-refresh", paired);
+    const heartbeat = window.setInterval(() => {
+      mobileWorkspaceSnapshotRef.current = "";
+      schedule();
+    }, 30_000);
     schedule();
     return () => {
       stopped = true;
       if (timer) window.clearTimeout(timer);
+      window.clearInterval(heartbeat);
       window.removeEventListener("duckweed:mobile-paired", paired);
+      window.removeEventListener("duckweed:mobile-refresh", paired);
       offAgents();
       offTerminals.forEach((off) => off());
     };
@@ -778,15 +820,19 @@ export default function App() {
           handling.add(key);
           try {
             if (!applied.has(key)) {
-              const meta = terminals.getMeta(command.terminalId);
-              if (meta && !meta.exited) {
-                const session = agentSessions.get(command.terminalId);
-                if (session) {
-                  agentSessions.submit(command.terminalId, command.text);
-                } else if (meta.agent || meta.busy) {
-                  terminals.writeRaw(command.terminalId, `${command.text}\r`);
-                } else {
-                  terminals.submitCommand(command.terminalId, command.text);
+              if (command.kind === "refresh") {
+                window.dispatchEvent(new Event("duckweed:mobile-refresh"));
+              } else if (command.terminalId && command.text) {
+                const meta = terminals.getMeta(command.terminalId);
+                if (meta && !meta.exited) {
+                  const session = agentSessions.get(command.terminalId);
+                  if (session) {
+                    agentSessions.submit(command.terminalId, command.text);
+                  } else if (meta.agent || meta.busy) {
+                    terminals.writeRaw(command.terminalId, `${command.text}\r`);
+                  } else {
+                    terminals.submitCommand(command.terminalId, command.text);
+                  }
                 }
               }
               applied.add(key);

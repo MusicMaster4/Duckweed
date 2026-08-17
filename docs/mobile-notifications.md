@@ -22,8 +22,10 @@ account is required.
   in the companion history, and removes it from the relay after acknowledgement.
   Unclaimed messages expire after seven days.
 - Open project and terminal metadata is delivered as a separate encrypted
-  workspace snapshot. Live agent output is never included. The phone only shows
-  the terminal state, such as `Thinking`, `Needs attention`, or `Ready`.
+  workspace snapshot. It includes a compact history of user messages and
+  settled final responses, but never live agent output, tool output, or exposed
+  reasoning. The phone also shows the terminal state, such as `Thinking`,
+  `Needs attention`, or `Ready`.
 - Replies and terminal commands are encrypted on the phone with the same paired
   secret. The relay stores only their opaque ciphertext until the desktop polls,
   decrypts, applies, and acknowledges them.
@@ -32,6 +34,8 @@ account is required.
 
 Removing a phone in Duckweed invalidates its sender-side route. Disconnecting
 inside the companion invalidates its receive token and clears local secrets.
+The desktop reconciles that removal automatically, and removing an already
+disconnected phone from desktop Settings always clears its local row.
 
 ## User flow
 
@@ -56,6 +60,9 @@ lead to the same compact conversation view, which keeps submitted messages and
 final responses while replacing in-progress output with **Agent is thinking**.
 Sending `codex`, `claude`, or another installed agent command to an idle terminal
 starts it through the desktop in the same way as a local terminal submission.
+The desktop republishes the encrypted workspace periodically and whenever its
+terminal state changes. Pull down on **Responses** or **Projects** to request an
+immediate refresh from a running paired desktop.
 
 Completion notifications use the same six bundled Duckweed cues as the desktop.
 The desktop selects one cue for the completion and includes only its numeric cue

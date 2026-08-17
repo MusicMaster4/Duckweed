@@ -24,6 +24,7 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.updatePadding
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
+import androidx.swiperefreshlayout.widget.SwipeRefreshLayout
 import com.google.firebase.messaging.FirebaseMessaging
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
@@ -50,6 +51,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var conversationInput: EditText
     private lateinit var conversationSend: TextView
     private lateinit var conversationList: RecyclerView
+    private lateinit var responsesRefresh: SwipeRefreshLayout
+    private lateinit var projectsRefresh: SwipeRefreshLayout
     private lateinit var appUpdater: AppUpdater
     private val messageAdapter = MessageAdapter { openResponse(it) }
     private val projectAdapter = ProjectAdapter { openProject(it) }
@@ -64,6 +67,8 @@ class MainActivity : AppCompatActivity() {
     private var selectedTarget: ConversationTarget? = null
     private var legacyResponse: CompletionRecord? = null
     private var conversationReturnsToProject = false
+    private var refreshRequestedAt = 0L
+    private var refreshSnapshotVersion = 0L
 
     private val notificationPermission = registerForActivityResult(
         ActivityResultContracts.RequestPermission(),
@@ -125,6 +130,8 @@ class MainActivity : AppCompatActivity() {
         conversationInput = findViewById(R.id.conversation_input)
         conversationSend = findViewById(R.id.conversation_send)
         conversationList = findViewById(R.id.conversation_list)
+        responsesRefresh = findViewById(R.id.responses_page)
+        projectsRefresh = findViewById(R.id.projects_page)
 
         findViewById<RecyclerView>(R.id.message_list).apply {
             layoutManager = LinearLayoutManager(this@MainActivity)
@@ -142,6 +149,14 @@ class MainActivity : AppCompatActivity() {
             layoutManager = LinearLayoutManager(this@MainActivity).apply { stackFromEnd = true }
             adapter = conversationAdapter
         }
+        responsesRefresh.setOnChildScrollUpCallback { _, _ ->
+            findViewById<RecyclerView>(R.id.message_list).canScrollVertically(-1)
+        }
+        projectsRefresh.setOnChildScrollUpCallback { _, _ ->
+            findViewById<RecyclerView>(R.id.project_list).canScrollVertically(-1)
+        }
+        responsesRefresh.setOnRefreshListener { requestRemoteRefresh() }
+        projectsRefresh.setOnRefreshListener { requestRemoteRefresh() }
         findViewById<View>(R.id.project_back).setOnClickListener { closeProject() }
         findViewById<View>(R.id.conversation_back).setOnClickListener { closeConversation() }
         conversationSend.setOnClickListener { sendConversationMessage() }
@@ -199,6 +214,7 @@ class MainActivity : AppCompatActivity() {
         NotificationTools.cancelAll(this)
         syncNotificationToggle()
         refreshRemoteState()
+        requestRemoteRefresh(showSpinner = false)
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -546,6 +562,9 @@ class MainActivity : AppCompatActivity() {
 
     private fun refreshRemoteState() {
         val snapshots = WorkspaceStore(this).all()
+        if (refreshRequestedAt > 0 && snapshots.any { it.updatedAt > refreshSnapshotVersion }) {
+            finishRemoteRefresh()
+        }
         val openAgentTerminals = snapshots.flatMap { snapshot ->
             snapshot.projects.flatMap { project ->
                 project.terminals
@@ -675,7 +694,25 @@ class MainActivity : AppCompatActivity() {
             return
         }
         val target = selectedTarget ?: return
-        val messages = MessageStore(this).conversation(target.terminal.id)
+        val synced = target.terminal.conversation.map { message ->
+            CompletionRecord(
+                id = "workspace:${target.pairId}:${message.id}",
+                pairId = target.pairId,
+                sentAt = message.sentAt,
+                agent = target.terminal.agent ?: "Agent",
+                project = target.projectName,
+                projectId = target.projectId,
+                terminalId = target.terminal.id,
+                terminalTitle = target.terminal.title,
+                kind = if (message.role == "user") "user" else "completed",
+                response = message.text,
+                durationMs = null,
+                soundCue = null,
+                workspace = null,
+            )
+        }
+        val stored = MessageStore(this).conversation(target.pairId, target.terminal.id)
+        val messages = mergeConversation(synced, stored)
         val last = messages.lastOrNull()
         val thinking = target.terminal.isWorking || last?.kind == "user"
         findViewById<TextView>(R.id.conversation_title).text =
@@ -698,6 +735,56 @@ class MainActivity : AppCompatActivity() {
         conversationComposer.visibility = if (canReply) View.VISIBLE else View.GONE
         conversationUnavailable.visibility = if (canReply) View.GONE else View.VISIBLE
         if (messages.isNotEmpty()) conversationList.scrollToPosition(messages.lastIndex)
+    }
+
+    private fun mergeConversation(
+        synced: List<CompletionRecord>,
+        stored: List<CompletionRecord>,
+    ): List<CompletionRecord> {
+        val merged = mutableListOf<CompletionRecord>()
+        (synced + stored).sortedBy { it.sentAt }.forEach { candidate ->
+            val duplicate = merged.indexOfLast { existing ->
+                existing.kind == candidate.kind &&
+                    existing.response == candidate.response &&
+                    kotlin.math.abs(existing.sentAt - candidate.sentAt) <= 2 * 60_000
+            }
+            if (duplicate < 0) {
+                merged += candidate
+            } else if (!candidate.id.startsWith("workspace:")) {
+                merged[duplicate] = candidate
+            }
+        }
+        return merged
+    }
+
+    private fun requestRemoteRefresh(showSpinner: Boolean = true) {
+        val credentials = SecretStore.loadAll(this)
+        if (credentials.isEmpty()) {
+            finishRemoteRefresh()
+            return
+        }
+        if (showSpinner) {
+            if (selectedPage == Page.PROJECTS) projectsRefresh.isRefreshing = true
+            if (selectedPage == Page.RESPONSES) responsesRefresh.isRefreshing = true
+        }
+        refreshRequestedAt = System.currentTimeMillis()
+        refreshSnapshotVersion = WorkspaceStore(this).all().maxOfOrNull { it.updatedAt } ?: 0L
+        executor.execute {
+            credentials.forEach { pairing ->
+                runCatching { RelayClient.requestWorkspaceRefresh(pairing) }
+            }
+            responsesRefresh.postDelayed({
+                refreshRemoteState()
+                finishRemoteRefresh()
+            }, 10_000)
+        }
+    }
+
+    private fun finishRemoteRefresh() {
+        refreshRequestedAt = 0
+        refreshSnapshotVersion = 0
+        if (::responsesRefresh.isInitialized) responsesRefresh.isRefreshing = false
+        if (::projectsRefresh.isInitialized) projectsRefresh.isRefreshing = false
     }
 
     private fun sendConversationMessage() {

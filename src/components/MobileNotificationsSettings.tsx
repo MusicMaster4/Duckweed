@@ -32,15 +32,20 @@ export function MobileNotificationsSettings({ channel }: { channel: Channel }) {
 
   useEffect(() => {
     let disposed = false;
-    void mobileStatus()
-      .then((next) => {
-        if (!disposed) setStatus(next);
-      })
-      .catch((error) => {
-        if (!disposed) setMessage(errorText(error));
-      });
+    const refresh = () => {
+      void mobileStatus()
+        .then((next) => {
+          if (!disposed) setStatus(next);
+        })
+        .catch((error) => {
+          if (!disposed) setMessage(errorText(error));
+        });
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 5_000);
     return () => {
       disposed = true;
+      window.clearInterval(timer);
     };
   }, []);
 

@@ -12,6 +12,16 @@ class WorkspaceStore(private val context: Context) {
         snapshot.projects.forEach { project ->
             val terminals = JSONArray()
             project.terminals.forEach { terminal ->
+                val conversation = JSONArray()
+                terminal.conversation.forEach { message ->
+                    conversation.put(
+                        JSONObject()
+                            .put("id", message.id)
+                            .put("sentAt", message.sentAt)
+                            .put("role", message.role)
+                            .put("text", message.text),
+                    )
+                }
                 terminals.put(
                     JSONObject()
                         .put("id", terminal.id)
@@ -19,7 +29,8 @@ class WorkspaceStore(private val context: Context) {
                         .put("shell", terminal.shell)
                         .put("agent", terminal.agent)
                         .put("model", terminal.model)
-                        .put("status", terminal.status),
+                        .put("status", terminal.status)
+                        .put("conversation", conversation),
                 )
             }
             projects.put(
@@ -58,6 +69,7 @@ class WorkspaceStore(private val context: Context) {
                         branch = if (project.isNull("branch")) null else project.optString("branch").takeIf { it.isNotBlank() },
                         terminals = (0 until terminalsJson.length()).map { terminalIndex ->
                             val terminal = terminalsJson.getJSONObject(terminalIndex)
+                            val conversationJson = terminal.optJSONArray("conversation") ?: JSONArray()
                             RemoteTerminal(
                                 id = terminal.getString("id"),
                                 title = terminal.optString("title", "Terminal"),
@@ -65,6 +77,20 @@ class WorkspaceStore(private val context: Context) {
                                 agent = if (terminal.isNull("agent")) null else terminal.optString("agent").takeIf { it.isNotBlank() },
                                 model = if (terminal.isNull("model")) null else terminal.optString("model").takeIf { it.isNotBlank() },
                                 status = terminal.optString("status", "idle"),
+                                conversation = (0 until conversationJson.length()).mapNotNull { messageIndex ->
+                                    val message = conversationJson.optJSONObject(messageIndex) ?: return@mapNotNull null
+                                    val role = message.optString("role")
+                                    val text = message.optString("text").trim()
+                                    if ((role != "user" && role != "assistant") || text.isEmpty()) {
+                                        return@mapNotNull null
+                                    }
+                                    RemoteConversationMessage(
+                                        id = message.optString("id", "remote-$messageIndex"),
+                                        sentAt = message.optLong("sentAt", json.optLong("updatedAt")),
+                                        role = role,
+                                        text = text,
+                                    )
+                                },
                             )
                         },
                     )

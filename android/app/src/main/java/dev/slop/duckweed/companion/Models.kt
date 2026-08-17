@@ -48,9 +48,17 @@ data class RemoteTerminal(
     val agent: String?,
     val model: String?,
     val status: String,
+    val conversation: List<RemoteConversationMessage> = emptyList(),
 ) {
     val isWorking: Boolean get() = status == "working" || status == "waiting"
 }
+
+data class RemoteConversationMessage(
+    val id: String,
+    val sentAt: Long,
+    val role: String,
+    val text: String,
+)
 
 data class ConversationTarget(
     val pairId: String,

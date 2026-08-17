@@ -97,6 +97,7 @@ object Crypto {
                 branch = if (project.isNull("branch")) null else project.optString("branch").takeIf { it.isNotBlank() },
                 terminals = (0 until terminalsJson.length()).mapNotNull { terminalIndex ->
                     val terminal = terminalsJson.optJSONObject(terminalIndex) ?: return@mapNotNull null
+                    val conversationJson = terminal.optJSONArray("conversation") ?: JSONArray()
                     RemoteTerminal(
                         id = terminal.optString("id"),
                         title = terminal.optString("title", "Terminal"),
@@ -104,6 +105,20 @@ object Crypto {
                         agent = if (terminal.isNull("agent")) null else terminal.optString("agent").takeIf { it.isNotBlank() },
                         model = if (terminal.isNull("model")) null else terminal.optString("model").takeIf { it.isNotBlank() },
                         status = terminal.optString("status", "idle"),
+                        conversation = (0 until conversationJson.length()).mapNotNull { messageIndex ->
+                            val message = conversationJson.optJSONObject(messageIndex) ?: return@mapNotNull null
+                            val role = message.optString("role")
+                            val text = message.optString("text").trim()
+                            if ((role != "user" && role != "assistant") || text.isEmpty()) {
+                                return@mapNotNull null
+                            }
+                            RemoteConversationMessage(
+                                id = message.optString("id", "remote-$messageIndex"),
+                                sentAt = message.optLong("sentAt", json.optLong("sentAt")),
+                                role = role,
+                                text = text,
+                            )
+                        },
                     )
                 }.filter { it.id.isNotBlank() },
             )

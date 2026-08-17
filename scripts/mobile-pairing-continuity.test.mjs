@@ -72,4 +72,47 @@ describe("mobile pairing continuity", () => {
     expect(store).toContain("fun latestForOpenAgents(");
     expect(store).toContain(".take(limit.coerceIn(1, 50))");
   });
+
+  test("workspace state can refresh automatically and on a phone gesture", () => {
+    const desktop = read("src/App.tsx");
+    const activity = read(
+      "android/app/src/main/java/dev/slop/duckweed/companion/MainActivity.kt",
+    );
+    const relay = read(
+      "android/app/src/main/java/dev/slop/duckweed/companion/RelayClient.kt",
+    );
+    const build = read("android/app/build.gradle.kts");
+
+    expect(desktop).toContain('window.addEventListener("duckweed:mobile-refresh", paired)');
+    expect(desktop).toContain("}, 30_000);");
+    expect(desktop).toContain('command.kind === "refresh"');
+    expect(activity).toContain("setOnRefreshListener { requestRemoteRefresh() }");
+    expect(relay).toContain('put("kind", "refresh")');
+    expect(build).toContain("androidx.swiperefreshlayout:swiperefreshlayout:1.2.0");
+  });
+
+  test("workspace snapshots retain compact readable conversation history", () => {
+    const desktop = read("src/App.tsx");
+    const worker = read(
+      "android/app/src/main/java/dev/slop/duckweed/companion/MessageFetchWorker.kt",
+    );
+    const store = read(
+      "android/app/src/main/java/dev/slop/duckweed/companion/MessageStore.kt",
+    );
+
+    expect(desktop).toContain("remainingConversationChars = 120_000");
+    expect(desktop).toContain('.slice(-6)');
+    expect(desktop).toContain('item.kind === "assistant" && !item.streaming');
+    expect(worker).toContain("putSyncedConversation(message.workspace)");
+    expect(store).toContain("fun putSyncedConversation(snapshot: WorkspaceSnapshot)");
+  });
+
+  test("desktop pairing rows reconcile phone-side disconnects", () => {
+    const settings = read("src/components/MobileNotificationsSettings.tsx");
+    const push = read("src-tauri/src/mobile_push.rs");
+
+    expect(settings).toContain("window.setInterval(refresh, 5_000)");
+    expect(push).toContain("Reconcile local rows whenever Settings asks");
+    expect(push).toContain("Local removal is authoritative and idempotent");
+  });
 });
