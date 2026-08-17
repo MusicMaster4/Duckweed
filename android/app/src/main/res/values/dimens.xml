@@ -1,4 +1,12 @@
 <resources>
+    <dimen name="screen_gutter">20dp</dimen>
+    <dimen name="detail_gutter">16dp</dimen>
+    <dimen name="space_xs">4dp</dimen>
+    <dimen name="space_sm">8dp</dimen>
+    <dimen name="space_md">12dp</dimen>
+    <dimen name="space_lg">16dp</dimen>
+    <dimen name="icon_touch_target">48dp</dimen>
+    <dimen name="icon_button_padding">12dp</dimen>
     <dimen name="mobile_action_height">48dp</dimen>
     <dimen name="mobile_action_gap">8dp</dimen>
 </resources>

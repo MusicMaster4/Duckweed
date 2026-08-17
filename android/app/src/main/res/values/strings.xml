@@ -2,4 +2,8 @@
     <string name="app_name">Duckweed</string>
     <string name="notification_channel_name">Agent completions</string>
     <string name="notification_channel_description">Encrypted completion alerts from paired Duckweed desktops</string>
+    <string name="app_lock_title">App lock</string>
+    <string name="app_lock_summary">Require biometrics or your device PIN when opening Duckweed.</string>
+    <string name="app_lock_prompt_title">Unlock Duckweed</string>
+    <string name="app_lock_prompt_subtitle">Use biometrics or your device PIN</string>
 </resources>

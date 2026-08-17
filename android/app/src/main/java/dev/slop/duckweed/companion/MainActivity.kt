@@ -30,6 +30,8 @@ import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.SwitchCompat
+import androidx.biometric.BiometricManager
+import androidx.biometric.BiometricPrompt
 import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
@@ -49,11 +51,13 @@ import java.util.UUID
 class MainActivity : AppCompatActivity() {
     private enum class Page { ACTIVITY, PROJECTS, CONVERSATIONS, SETTINGS }
 
+    private lateinit var appRoot: View
     private lateinit var pairingStatus: TextView
     private lateinit var scanButton: Button
     private lateinit var disconnectButton: Button
     private lateinit var emptyState: View
     private lateinit var notificationsToggle: SwitchCompat
+    private lateinit var appLockToggle: SwitchCompat
     private lateinit var updateStatus: TextView
     private lateinit var updateButton: Button
     private lateinit var updateProgress: ProgressBar
@@ -94,6 +98,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var draftStore: DraftStore
     private var receiverRegistered = false
     private var syncingNotificationsToggle = false
+    private var syncingAppLockToggle = false
+    private var appUnlocked = false
+    private var appLockPromptVisible = false
     private var updateAvailable: AndroidUpdateManifest? = null
     private var selectedPage = Page.ACTIVITY
     private var selectedProject: ProjectRow? = null
@@ -189,6 +196,8 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         WindowCompat.setDecorFitsSystemWindows(window, false)
         setContentView(R.layout.activity_main)
+        appRoot = findViewById(R.id.app_root)
+        if (isAppLockEnabled()) appRoot.visibility = View.INVISIBLE
         configureSystemBarInsets()
         NotificationTools.createChannel(this)
         appUpdater = AppUpdater(this)
@@ -200,6 +209,7 @@ class MainActivity : AppCompatActivity() {
         disconnectButton = findViewById(R.id.disconnect_button)
         emptyState = findViewById(R.id.empty_state)
         notificationsToggle = findViewById(R.id.notifications_toggle)
+        appLockToggle = findViewById(R.id.app_lock_toggle)
         updateStatus = findViewById(R.id.update_status)
         updateButton = findViewById(R.id.update_button)
         updateProgress = findViewById(R.id.update_progress)
@@ -306,6 +316,7 @@ class MainActivity : AppCompatActivity() {
         combineSettingsSections()
         configureNavigation()
         configureNotificationToggle()
+        configureAppLockToggle()
         savedInstanceState?.getString(STATE_PAGE)
             ?.let { runCatching { Page.valueOf(it) }.getOrNull() }
             ?.let(::showPage)
@@ -345,6 +356,10 @@ class MainActivity : AppCompatActivity() {
 
     override fun onStop() {
         persistCurrentDraft()
+        if (isAppLockEnabled() && !appLockPromptVisible && !isChangingConfigurations) {
+            appUnlocked = false
+            appRoot.visibility = View.INVISIBLE
+        }
         if (receiverRegistered) {
             unregisterReceiver(messagesChanged)
             unregisterReceiver(downloadFinished)
@@ -356,6 +371,7 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         NotificationTools.cancelAll(this)
+        requestAppUnlockIfNeeded()
         syncNotificationToggle()
         refreshRemoteState()
         requestRemoteRefresh(showSpinner = false)
@@ -528,6 +544,111 @@ class MainActivity : AppCompatActivity() {
             }
         }
         syncNotificationToggle()
+    }
+
+    private fun configureAppLockToggle() {
+        syncAppLockToggle()
+        appLockToggle.setOnCheckedChangeListener { _, enabled ->
+            if (syncingAppLockToggle || enabled == isAppLockEnabled()) return@setOnCheckedChangeListener
+            if (!enabled) {
+                setAppLockEnabled(false)
+                appUnlocked = true
+                appRoot.visibility = View.VISIBLE
+                return@setOnCheckedChangeListener
+            }
+
+            when (BiometricManager.from(this).canAuthenticate(APP_LOCK_AUTHENTICATORS)) {
+                BiometricManager.BIOMETRIC_SUCCESS -> showAppLockPrompt(
+                    enabling = true,
+                    onSuccess = {
+                        setAppLockEnabled(true)
+                        appUnlocked = true
+                        syncAppLockToggle()
+                        Toast.makeText(this, "App lock enabled.", Toast.LENGTH_SHORT).show()
+                    },
+                )
+                BiometricManager.BIOMETRIC_ERROR_NONE_ENROLLED -> {
+                    syncAppLockToggle()
+                    Toast.makeText(
+                        this,
+                        "Set up biometrics or a device screen lock first.",
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }
+                else -> {
+                    syncAppLockToggle()
+                    Toast.makeText(
+                        this,
+                        "App lock is not available on this device.",
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }
+            }
+        }
+    }
+
+    private fun requestAppUnlockIfNeeded() {
+        if (!::appRoot.isInitialized || !isAppLockEnabled() || appUnlocked || appLockPromptVisible) {
+            return
+        }
+        appRoot.visibility = View.INVISIBLE
+        showAppLockPrompt(
+            enabling = false,
+            onSuccess = {
+                appUnlocked = true
+                appRoot.visibility = View.VISIBLE
+            },
+        )
+    }
+
+    private fun showAppLockPrompt(enabling: Boolean, onSuccess: () -> Unit) {
+        appLockPromptVisible = true
+        val prompt = BiometricPrompt(
+            this,
+            ContextCompat.getMainExecutor(this),
+            object : BiometricPrompt.AuthenticationCallback() {
+                override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+                    super.onAuthenticationSucceeded(result)
+                    appLockPromptVisible = false
+                    onSuccess()
+                }
+
+                override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
+                    super.onAuthenticationError(errorCode, errString)
+                    appLockPromptVisible = false
+                    if (enabling) {
+                        syncAppLockToggle()
+                    } else {
+                        Toast.makeText(this@MainActivity, errString, Toast.LENGTH_SHORT).show()
+                        finishAndRemoveTask()
+                    }
+                }
+            },
+        )
+        val promptInfo = BiometricPrompt.PromptInfo.Builder()
+            .setTitle(getString(R.string.app_lock_prompt_title))
+            .setSubtitle(getString(R.string.app_lock_prompt_subtitle))
+            .setAllowedAuthenticators(APP_LOCK_AUTHENTICATORS)
+            .build()
+        prompt.authenticate(promptInfo)
+    }
+
+    private fun isAppLockEnabled(): Boolean =
+        getSharedPreferences(APP_LOCK_PREFERENCES, Context.MODE_PRIVATE)
+            .getBoolean(APP_LOCK_ENABLED, false)
+
+    private fun setAppLockEnabled(enabled: Boolean) {
+        getSharedPreferences(APP_LOCK_PREFERENCES, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(APP_LOCK_ENABLED, enabled)
+            .apply()
+    }
+
+    private fun syncAppLockToggle() {
+        if (!::appLockToggle.isInitialized) return
+        syncingAppLockToggle = true
+        appLockToggle.isChecked = isAppLockEnabled()
+        syncingAppLockToggle = false
     }
 
     private fun requestNotificationPermissionIfEnabled() {
@@ -1561,5 +1682,10 @@ class MainActivity : AppCompatActivity() {
     companion object {
         private const val STATE_PAGE = "selected-page"
         private const val CONNECTION_FRESH_MS = 75_000L
+        private const val APP_LOCK_PREFERENCES = "app-lock"
+        private const val APP_LOCK_ENABLED = "enabled"
+        private val APP_LOCK_AUTHENTICATORS =
+            BiometricManager.Authenticators.BIOMETRIC_WEAK or
+                BiometricManager.Authenticators.DEVICE_CREDENTIAL
     }
 }

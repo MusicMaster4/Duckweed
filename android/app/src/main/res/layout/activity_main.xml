@@ -13,9 +13,9 @@
         android:layout_height="wrap_content"
         android:gravity="center_vertical"
         android:orientation="horizontal"
-        android:paddingStart="20dp"
+        android:paddingStart="@dimen/screen_gutter"
         android:paddingTop="14dp"
-        android:paddingEnd="20dp"
+        android:paddingEnd="@dimen/screen_gutter"
         android:paddingBottom="12dp">
 
         <LinearLayout
@@ -60,12 +60,12 @@
 
         <ImageButton
             android:id="@+id/settings_button"
-            android:layout_width="48dp"
-            android:layout_height="48dp"
+            android:layout_width="@dimen/icon_touch_target"
+            android:layout_height="@dimen/icon_touch_target"
             android:layout_marginStart="8dp"
             android:background="@drawable/nav_item"
             android:contentDescription="Open settings"
-            android:padding="12dp"
+            android:padding="@dimen/icon_button_padding"
             android:src="@drawable/ic_settings"
             app:tint="@color/duckweed_text_dim" />
     </LinearLayout>
@@ -85,9 +85,9 @@
                 android:layout_width="match_parent"
                 android:layout_height="match_parent"
                 android:orientation="vertical"
-                android:paddingStart="20dp"
+                android:paddingStart="@dimen/screen_gutter"
                 android:paddingTop="10dp"
-                android:paddingEnd="20dp">
+                android:paddingEnd="@dimen/screen_gutter">
 
             <TextView
                 android:layout_width="wrap_content"
@@ -214,9 +214,9 @@
                 android:layout_width="match_parent"
                 android:layout_height="match_parent"
                 android:orientation="vertical"
-                android:paddingStart="20dp"
+                android:paddingStart="@dimen/screen_gutter"
                 android:paddingTop="10dp"
-                android:paddingEnd="20dp">
+                android:paddingEnd="@dimen/screen_gutter">
 
             <TextView
                 android:layout_width="wrap_content"
@@ -237,7 +237,7 @@
             <FrameLayout
                 android:layout_width="match_parent"
                 android:layout_height="0dp"
-                android:layout_marginTop="18dp"
+                android:layout_marginTop="@dimen/space_lg"
                 android:layout_weight="1">
 
                 <androidx.recyclerview.widget.RecyclerView
@@ -281,9 +281,9 @@
             android:layout_width="match_parent"
             android:layout_height="match_parent"
             android:orientation="vertical"
-            android:paddingStart="20dp"
+            android:paddingStart="@dimen/screen_gutter"
             android:paddingTop="10dp"
-            android:paddingEnd="20dp"
+            android:paddingEnd="@dimen/screen_gutter"
             android:visibility="gone">
 
             <TextView
@@ -305,7 +305,7 @@
             <FrameLayout
                 android:layout_width="match_parent"
                 android:layout_height="0dp"
-                android:layout_marginTop="18dp"
+                android:layout_marginTop="@dimen/space_lg"
                 android:layout_weight="1">
 
                 <androidx.recyclerview.widget.RecyclerView
@@ -355,9 +355,9 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:orientation="vertical"
-                android:paddingStart="20dp"
+                android:paddingStart="@dimen/screen_gutter"
                 android:paddingTop="10dp"
-                android:paddingEnd="20dp"
+                android:paddingEnd="@dimen/screen_gutter"
                 android:paddingBottom="24dp">
 
                 <TextView
@@ -386,10 +386,10 @@
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="12dp"
+                    android:layout_marginTop="@dimen/space_md"
                     android:background="@drawable/message_card"
                     android:orientation="vertical"
-                    android:padding="18dp">
+                    android:padding="@dimen/space_lg">
 
                     <TextView
                         android:layout_width="wrap_content"
@@ -437,11 +437,56 @@
                         android:textSize="13sp" />
                 </LinearLayout>
 
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="@dimen/space_md"
+                    android:background="@drawable/message_card"
+                    android:gravity="center_vertical"
+                    android:minHeight="72dp"
+                    android:orientation="horizontal"
+                    android:paddingStart="@dimen/space_lg"
+                    android:paddingTop="@dimen/space_md"
+                    android:paddingEnd="@dimen/space_md"
+                    android:paddingBottom="@dimen/space_md">
+
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:orientation="vertical"
+                        android:paddingEnd="@dimen/space_md">
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:fontFamily="sans-serif-medium"
+                            android:text="@string/app_lock_title"
+                            android:textColor="@color/duckweed_text"
+                            android:textSize="14sp" />
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="@dimen/space_xs"
+                            android:text="@string/app_lock_summary"
+                            android:textColor="@color/duckweed_text_faint"
+                            android:textSize="12sp" />
+                    </LinearLayout>
+
+                    <androidx.appcompat.widget.SwitchCompat
+                        android:id="@+id/app_lock_toggle"
+                        android:layout_width="wrap_content"
+                        android:layout_height="@dimen/icon_touch_target"
+                        android:contentDescription="@string/app_lock_title"
+                        android:minWidth="@dimen/icon_touch_target" />
+                </LinearLayout>
+
                 <Button
                     android:id="@+id/scan_button"
                     android:layout_width="match_parent"
                     android:layout_height="52dp"
-                    android:layout_marginTop="12dp"
+                    android:layout_marginTop="@dimen/space_md"
                     android:background="@drawable/button_primary"
                     android:fontFamily="sans-serif-medium"
                     android:text="Scan pairing code"
@@ -453,7 +498,7 @@
                     android:id="@+id/disconnect_button"
                     android:layout_width="match_parent"
                     android:layout_height="48dp"
-                    android:layout_marginTop="8dp"
+                    android:layout_marginTop="@dimen/space_sm"
                     android:background="@drawable/button_secondary"
                     android:text="Disconnect all desktops"
                     android:textAllCaps="false"
@@ -464,7 +509,7 @@
                 <TextView
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="18dp"
+                    android:layout_marginTop="@dimen/space_lg"
                     android:gravity="center"
                     android:text="Agent, project, and response data are encrypted end to end."
                     android:textColor="@color/duckweed_text_faint"
@@ -484,9 +529,9 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:orientation="vertical"
-                android:paddingStart="20dp"
-                android:paddingTop="10dp"
-                android:paddingEnd="20dp"
+                android:paddingStart="0dp"
+                android:paddingTop="24dp"
+                android:paddingEnd="0dp"
                 android:paddingBottom="24dp">
 
                 <TextView
@@ -518,7 +563,7 @@
                     android:layout_marginTop="12dp"
                     android:background="@drawable/message_card"
                     android:orientation="vertical"
-                    android:padding="18dp">
+                    android:padding="@dimen/space_lg">
 
                     <LinearLayout
                         android:layout_width="match_parent"
@@ -613,9 +658,9 @@
             android:layout_height="match_parent"
             android:background="@color/duckweed_background"
             android:orientation="vertical"
-            android:paddingStart="16dp"
+            android:paddingStart="@dimen/detail_gutter"
             android:paddingTop="10dp"
-            android:paddingEnd="16dp"
+            android:paddingEnd="@dimen/detail_gutter"
             android:visibility="gone">
 
             <LinearLayout
@@ -626,11 +671,11 @@
 
                 <ImageButton
                     android:id="@+id/project_back"
-                    android:layout_width="48dp"
-                    android:layout_height="48dp"
+                    android:layout_width="@dimen/icon_touch_target"
+                    android:layout_height="@dimen/icon_touch_target"
                     android:background="@drawable/nav_item"
                     android:contentDescription="Back to projects"
-                    android:padding="12dp"
+                    android:padding="@dimen/icon_button_padding"
                     android:src="@drawable/ic_back"
                     app:tint="@color/duckweed_text" />
 
@@ -690,9 +735,9 @@
             android:layout_height="match_parent"
             android:background="@color/duckweed_background"
             android:orientation="vertical"
-            android:paddingStart="16dp"
+            android:paddingStart="@dimen/detail_gutter"
             android:paddingTop="10dp"
-            android:paddingEnd="16dp"
+            android:paddingEnd="@dimen/detail_gutter"
             android:visibility="gone">
 
             <LinearLayout
@@ -703,11 +748,11 @@
 
                 <ImageButton
                     android:id="@+id/conversation_back"
-                    android:layout_width="48dp"
-                    android:layout_height="48dp"
+                    android:layout_width="@dimen/icon_touch_target"
+                    android:layout_height="@dimen/icon_touch_target"
                     android:background="@drawable/nav_item"
                     android:contentDescription="Back"
-                    android:padding="12dp"
+                    android:padding="@dimen/icon_button_padding"
                     android:src="@drawable/ic_back"
                     app:tint="@color/duckweed_text" />
 
@@ -852,8 +897,8 @@
 
                     <ImageView
                         android:id="@+id/conversation_attachment_image"
-                        android:layout_width="48dp"
-                        android:layout_height="48dp"
+                        android:layout_width="@dimen/icon_touch_target"
+                        android:layout_height="@dimen/icon_touch_target"
                         android:contentDescription="Selected image preview"
                         android:scaleType="centerCrop" />
 
@@ -886,11 +931,11 @@
 
                     <ImageButton
                         android:id="@+id/conversation_attachment_remove"
-                        android:layout_width="48dp"
-                        android:layout_height="48dp"
+                        android:layout_width="@dimen/icon_touch_target"
+                        android:layout_height="@dimen/icon_touch_target"
                         android:background="@drawable/nav_item"
                         android:contentDescription="Remove selected image"
-                        android:padding="14dp"
+                        android:padding="@dimen/icon_button_padding"
                         android:src="@drawable/ic_close"
                         app:tint="@color/duckweed_text_dim" />
                 </LinearLayout>
@@ -903,11 +948,11 @@
 
                 <ImageButton
                     android:id="@+id/conversation_attach"
-                    android:layout_width="48dp"
-                    android:layout_height="48dp"
+                    android:layout_width="@dimen/icon_touch_target"
+                    android:layout_height="@dimen/icon_touch_target"
                     android:background="@drawable/nav_item"
                     android:contentDescription="Attach an image"
-                    android:padding="12dp"
+                    android:padding="@dimen/icon_button_padding"
                     android:src="@drawable/ic_attach"
                     app:tint="@color/duckweed_text_dim" />
 
@@ -930,11 +975,11 @@
 
                 <ImageButton
                     android:id="@+id/conversation_send"
-                    android:layout_width="48dp"
-                    android:layout_height="48dp"
+                    android:layout_width="@dimen/icon_touch_target"
+                    android:layout_height="@dimen/icon_touch_target"
                     android:background="@drawable/send_button"
                     android:contentDescription="Send message"
-                    android:padding="13dp"
+                    android:padding="@dimen/icon_button_padding"
                     android:src="@drawable/ic_send"
                     app:tint="@color/duckweed_accent_ink" />
                 </LinearLayout>
