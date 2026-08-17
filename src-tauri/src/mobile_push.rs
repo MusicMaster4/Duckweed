@@ -121,6 +121,7 @@ pub struct CompletionMessage {
     pub response: Option<String>,
     pub duration_ms: Option<u64>,
     pub sound_cue: Option<u8>,
+    pub unread_on_desktop: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -138,6 +139,7 @@ struct PlainMessage<'a> {
     response: Option<&'a str>,
     duration_ms: Option<u64>,
     sound_cue: Option<u8>,
+    unread_on_desktop: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -149,6 +151,8 @@ pub struct WorkspaceTerminal {
     pub agent: Option<String>,
     pub model: Option<String>,
     pub status: String,
+    #[serde(default)]
+    pub unread_on_desktop: bool,
     #[serde(default)]
     pub conversation: Vec<WorkspaceConversationMessage>,
     pub permission: Option<WorkspacePermission>,
@@ -571,6 +575,7 @@ fn bounded_preview_plaintext(
     response: Option<&str>,
     duration_ms: Option<u64>,
     sound_cue: Option<u8>,
+    unread_on_desktop: bool,
 ) -> Result<Vec<u8>, String> {
     let serialize = |preview_response: Option<&str>| {
         serde_json::to_vec(&PlainMessage {
@@ -586,6 +591,7 @@ fn bounded_preview_plaintext(
             response: preview_response,
             duration_ms,
             sound_cue,
+            unread_on_desktop,
         })
         .map_err(|error| error.to_string())
     };
@@ -833,6 +839,7 @@ fn send_to_device(
         response.as_deref(),
         message.duration_ms,
         message.sound_cue,
+        message.unread_on_desktop,
     )?;
     let full_plain = serde_json::to_vec(&PlainMessage {
         version: 1,
@@ -847,6 +854,7 @@ fn send_to_device(
         response: response.as_deref(),
         duration_ms: message.duration_ms,
         sound_cue: message.sound_cue.filter(|cue| *cue < 6),
+        unread_on_desktop: message.unread_on_desktop,
     })
     .map_err(|error| error.to_string())?;
     let preview = encrypt(
@@ -1134,6 +1142,7 @@ pub async fn mobile_send_test(app: AppHandle) -> Result<SendResult, String> {
                 ),
                 duration_ms: None,
                 sound_cue: None,
+                unread_on_desktop: true,
             },
         )
     })
@@ -1269,10 +1278,12 @@ mod tests {
             Some(&response),
             Some(42),
             Some(3),
+            true,
         )
         .unwrap();
         let decoded: serde_json::Value = serde_json::from_slice(&plain).unwrap();
         let preview_response = decoded["response"].as_str().unwrap();
+        assert_eq!(decoded["unreadOnDesktop"], true);
         let envelope = encrypt(
             "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
             "pair",

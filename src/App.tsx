@@ -750,6 +750,7 @@ export default function App() {
               agent: session?.label ?? rawAgent,
               model: session?.model ?? null,
               status,
+              unreadOnDesktop: unreadTermIdsRef.current.has(node.term),
               conversation,
               permission: session?.permission && session.permission.kind !== "question"
                 ? {
@@ -810,7 +811,7 @@ export default function App() {
       offAgents();
       offTerminals.forEach((off) => off());
     };
-  }, [tabs, termIds, termIdsKey]);
+  }, [tabs, termIds, termIdsKey, unreadTermIds]);
 
   // The relay cannot open an inbound connection through a user's router, so
   // the desktop checks the small encrypted command queue while Duckweed runs.
@@ -972,6 +973,7 @@ export default function App() {
         const startedAt = current.completionStartedAt ?? previous.processStartedAt;
         const project = owner?.project?.name ??
           (meta.cwd.trim() ? basename(meta.cwd) : owner?.title ?? "Duckweed");
+        const unreadOnDesktop = !isFocusedTerm(termId);
         void mobileSendCompletion({
           agent,
           project,
@@ -984,6 +986,7 @@ export default function App() {
             details?.durationMs ??
             (startedAt === null ? null : Math.max(0, Date.now() - startedAt)),
           soundCue: completionCue,
+          unreadOnDesktop,
         }).catch((error) => console.error("mobile completion notification", error));
       }
       // Every eligible completion gets one cue. The shared audio player

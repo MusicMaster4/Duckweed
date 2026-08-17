@@ -13,15 +13,26 @@ class TerminalAdapter(
 ) : RecyclerView.Adapter<TerminalAdapter.Holder>() {
     private var targets: List<ConversationTarget> = emptyList()
 
-    fun submit(next: ProjectRow?) {
+    fun submit(
+        next: ProjectRow?,
+        unreadKeys: Set<Pair<String, String>> = emptySet(),
+    ) {
         submitTargets(next?.let { row ->
             row.project.terminals.map { terminal ->
-                ConversationTarget(row.pairId, row.project.id, row.project.name, terminal)
+                ConversationTarget(
+                    row.pairId,
+                    row.project.id,
+                    row.project.name,
+                    terminal,
+                    Pair(row.pairId, terminal.id) in unreadKeys,
+                    row.desktopOnline,
+                )
             }
         }.orEmpty())
     }
 
     fun submitTargets(next: List<ConversationTarget>) {
+        if (next == targets) return
         val previous = targets
         val diff = DiffUtil.calculateDiff(object : DiffUtil.Callback() {
             override fun getOldListSize(): Int = previous.size
@@ -36,6 +47,15 @@ class TerminalAdapter(
         diff.dispatchUpdatesTo(this)
     }
 
+    fun markRead(pairId: String, terminalId: String) {
+        val index = targets.indexOfFirst {
+            it.pairId == pairId && it.terminal.id == terminalId && it.unread
+        }
+        if (index < 0) return
+        targets = targets.toMutableList().also { it[index] = it[index].copy(unread = false) }
+        notifyItemChanged(index)
+    }
+
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): Holder = Holder(
         LayoutInflater.from(parent.context).inflate(R.layout.item_terminal, parent, false),
     )
@@ -45,27 +65,43 @@ class TerminalAdapter(
     override fun onBindViewHolder(holder: Holder, position: Int) {
         val target = targets[position]
         val terminal = target.terminal
+        holder.itemView.setBackgroundResource(
+            if (target.unread) R.drawable.message_card_unread else R.drawable.message_card,
+        )
         holder.context.text = "Project  ${target.projectName}"
         holder.title.text = terminal.agent ?: terminal.title
         holder.model.text = terminal.model ?: terminal.shell
-        holder.status.text = when (terminal.status) {
-            "working" -> "THINKING"
-            "waiting" -> "NEEDS YOU"
-            "exited" -> "CLOSED"
-            else -> "READY"
+        holder.status.text = if (!target.desktopOnline) {
+            "OFFLINE"
+        } else {
+            when (terminal.status) {
+                "working" -> "THINKING"
+                "waiting" -> "NEEDS YOU"
+                "exited" -> "CLOSED"
+                else -> "READY"
+            }
         }
         holder.status.setTextColor(
             ContextCompat.getColor(
                 holder.itemView.context,
-                when (terminal.status) {
-                    "working" -> R.color.duckweed_accent
-                    "waiting" -> R.color.duckweed_attention
-                    else -> R.color.duckweed_text_faint
+                if (!target.desktopOnline) {
+                    R.color.duckweed_error
+                } else {
+                    when (terminal.status) {
+                        "working" -> R.color.duckweed_accent
+                        "waiting" -> R.color.duckweed_attention
+                        else -> R.color.duckweed_text_faint
+                    }
                 },
             ),
         )
-        holder.shimmer.visibility = if (terminal.status == "working") View.VISIBLE else View.GONE
+        holder.shimmer.visibility =
+            if (target.desktopOnline && terminal.status == "working") View.VISIBLE else View.GONE
         holder.itemView.setOnClickListener { onOpen(target) }
+        holder.itemView.contentDescription = buildString {
+            if (target.unread) append("Unread conversation. ")
+            append("${terminal.agent ?: terminal.title}, ${target.projectName}")
+        }
     }
 
     class Holder(view: View) : RecyclerView.ViewHolder(view) {

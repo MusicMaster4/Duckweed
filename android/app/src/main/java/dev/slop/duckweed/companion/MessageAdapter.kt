@@ -15,6 +15,7 @@ class MessageAdapter(
     private var messages: List<CompletionRecord> = emptyList()
 
     fun submit(next: List<CompletionRecord>) {
+        if (next == messages) return
         val previous = messages
         val diff = DiffUtil.calculateDiff(object : DiffUtil.Callback() {
             override fun getOldListSize(): Int = previous.size

@@ -13,12 +13,22 @@ class MessageFetchWorker(context: Context, parameters: WorkerParameters) : Worke
             val envelope = RelayClient.fetch(credentials, messageId)
             val message = Crypto.decrypt(credentials, messageId, "payload", envelope)
             if (message.workspace != null) {
-                WorkspaceStore(applicationContext).put(message.workspace)
-                MessageStore(applicationContext).putSyncedConversation(message.workspace)
-                NotificationTools.refreshApprovalActions(applicationContext)
+                if (WorkspaceStore(applicationContext).put(message.workspace)) {
+                    val cleared = MessageStore(applicationContext)
+                        .putSyncedConversation(message.workspace)
+                    NotificationTools.cancelIds(applicationContext, cleared)
+                    NotificationTools.refreshApprovalActions(applicationContext)
+                }
             } else {
-                MessageStore(applicationContext).put(message)
-                if (message.kind == "attention" && NotificationPreference.isEnabled(applicationContext)) {
+                val store = MessageStore(applicationContext)
+                store.put(message)
+                val unread = store.message(message.id)?.readAt == null
+                if (!unread) {
+                    NotificationTools.cancelIds(applicationContext, listOf(message.id))
+                } else if (
+                    message.kind == "attention" &&
+                    NotificationPreference.isEnabled(applicationContext)
+                ) {
                     NotificationTools.show(applicationContext, message)
                 }
             }

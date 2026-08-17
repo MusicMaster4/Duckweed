@@ -63,6 +63,7 @@ object Crypto {
             response = if (json.isNull("response")) null else json.getString("response"),
             durationMs = if (json.isNull("durationMs")) null else json.getLong("durationMs"),
             soundCue = if (json.isNull("soundCue")) null else json.optInt("soundCue").takeIf { it in 0..5 },
+            unreadOnDesktop = if (json.has("unreadOnDesktop")) json.optBoolean("unreadOnDesktop") else null,
             workspace = parseWorkspace(credentials.pairId, json),
         )
     }
@@ -106,6 +107,11 @@ object Crypto {
                         agent = if (terminal.isNull("agent")) null else terminal.optString("agent").takeIf { it.isNotBlank() },
                         model = if (terminal.isNull("model")) null else terminal.optString("model").takeIf { it.isNotBlank() },
                         status = terminal.optString("status", "idle"),
+                        unreadOnDesktop = if (terminal.has("unreadOnDesktop")) {
+                            terminal.optBoolean("unreadOnDesktop")
+                        } else {
+                            null
+                        },
                         conversation = (0 until conversationJson.length()).mapNotNull { messageIndex ->
                             val message = conversationJson.optJSONObject(messageIndex) ?: return@mapNotNull null
                             val role = message.optString("role")

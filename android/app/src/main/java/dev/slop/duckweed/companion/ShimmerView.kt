@@ -73,11 +73,12 @@ class ShimmerView @JvmOverloads constructor(
         paint.shader = shimmerShader
         canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), paint)
         if (animatorsEnabled && isShown && windowVisibility == VISIBLE) {
-            postInvalidateOnAnimation()
+            postInvalidateDelayed(FRAME_DELAY_MS)
         }
     }
 
     private companion object {
         const val DURATION_MS = 1_800L
+        const val FRAME_DELAY_MS = 33L
     }
 }
