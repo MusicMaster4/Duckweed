@@ -107,13 +107,14 @@ describe("mobile pairing continuity", () => {
     expect(store).toContain("fun putSyncedConversation(snapshot: WorkspaceSnapshot)");
   });
 
-  test("desktop pairing rows reconcile phone-side disconnects", () => {
+  test("only explicit desktop removal can erase a paired phone", () => {
     const settings = read("src/components/MobileNotificationsSettings.tsx");
     const push = read("src-tauri/src/mobile_push.rs");
 
     expect(settings).toContain("window.setInterval(refresh, 5_000)");
-    expect(push).toContain("Reconcile local rows whenever Settings asks");
+    expect(push).toContain("Only the explicit remove command may erase");
     expect(push).toContain("Local removal is authoritative and idempotent");
+    expect(push).toContain("Keep the local credential until the user");
   });
 
   test("temporary credential failures never erase the desktop pairing", () => {

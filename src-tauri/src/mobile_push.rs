@@ -618,45 +618,10 @@ fn status_blocking(app: &AppHandle) -> Result<MobileStatus, String> {
         state
     };
 
-    // A phone can disconnect with its receive credential, deleting the relay
-    // row before the desktop knows. Reconcile local rows whenever Settings asks
-    // for status so stale phones disappear automatically.
-    let relay = relay_url();
-    let http = client()?;
-    let mut removed = Vec::new();
-    for device in &state.devices {
-        // Credential-manager reads can fail transiently while Windows is
-        // starting, unlocking, or updating the app. Keep the local pairing so
-        // the next poll can recover instead of irreversibly deleting both the
-        // row and its credential.
-        let Ok(secret) = load_secret(&device.id) else {
-            continue;
-        };
-        let response = http
-            .get(format!("{relay}/v1/pairings/{}", device.id))
-            .bearer_auth(&secret.send_token)
-            .send();
-        if response
-            .as_ref()
-            .is_ok_and(|response| pairing_is_gone(response.status()))
-        {
-            removed.push(device.id.clone());
-        }
-    }
-    let state = if removed.is_empty() {
-        state
-    } else {
-        let _guard = FILE_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
-        let mut current = read_state(&path);
-        current
-            .devices
-            .retain(|device| !removed.contains(&device.id));
-        for id in removed {
-            remove_secret(&id);
-        }
-        save_state(&path, &current)?;
-        current
-    };
+    // Status is intentionally local. A background health check must never
+    // destroy a pairing: credential stores, networks, and relay deployments
+    // can all fail transiently. Only the explicit remove command may erase a
+    // paired device and its credential.
     Ok(MobileStatus {
         relay_url: relay_url(),
         devices: state.devices,
@@ -970,7 +935,6 @@ fn poll_commands_blocking(app: &AppHandle) -> Result<Vec<RemoteCommand>, String>
         read_state(&state_path(app)?)
     };
     let mut commands = Vec::new();
-    let mut removed = Vec::new();
     for device in &state.devices {
         // A temporary keyring failure must not turn into an implicit unpair.
         // Sending and polling can recover as soon as the credential store does.
@@ -987,7 +951,9 @@ fn poll_commands_blocking(app: &AppHandle) -> Result<Vec<RemoteCommand>, String>
             .send()
             .map_err(|error| format!("could not poll mobile commands: {error}"))?;
         if pairing_is_gone(response.status()) {
-            removed.push(device.id.clone());
+            // The phone may have removed the relay row, or the relay may be
+            // between deployments. Keep the local credential until the user
+            // explicitly removes the device from Settings.
             continue;
         }
         let list: RemoteCommandList = checked(response)?
@@ -1020,18 +986,6 @@ fn poll_commands_blocking(app: &AppHandle) -> Result<Vec<RemoteCommand>, String>
                 option_id: command.option_id,
             });
         }
-    }
-    if !removed.is_empty() {
-        let _guard = FILE_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
-        let path = state_path(app)?;
-        let mut current = read_state(&path);
-        current
-            .devices
-            .retain(|device| !removed.contains(&device.id));
-        for id in removed {
-            remove_secret(&id);
-        }
-        save_state(&path, &current)?;
     }
     Ok(commands)
 }
@@ -1221,7 +1175,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_pairings_are_safe_to_prune_locally() {
+    fn only_explicit_removal_may_prune_a_local_pairing() {
         // 401 can mean a credential-store mismatch or another recoverable
         // authentication problem. Only an explicit missing/expired row is
         // authoritative enough to erase local pairing state.
