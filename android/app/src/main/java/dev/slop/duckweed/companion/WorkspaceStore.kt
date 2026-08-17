@@ -7,7 +7,14 @@ import org.json.JSONObject
 class WorkspaceStore(private val context: Context) {
     private val preferences = context.getSharedPreferences("duckweed-workspaces", Context.MODE_PRIVATE)
 
-    fun put(snapshot: WorkspaceSnapshot) {
+    fun put(snapshot: WorkspaceSnapshot): Boolean {
+        val currentUpdatedAt = preferences.getString(snapshot.pairId, null)?.let { stored ->
+            runCatching {
+                JSONObject(String(SecretStore.decryptLocal(stored), Charsets.UTF_8))
+                    .optLong("updatedAt")
+            }.getOrNull()
+        } ?: 0L
+        if (currentUpdatedAt > snapshot.updatedAt) return false
         val projects = JSONArray()
         snapshot.projects.forEach { project ->
             val terminals = JSONArray()
@@ -50,6 +57,7 @@ class WorkspaceStore(private val context: Context) {
                         .put("agent", terminal.agent)
                         .put("model", terminal.model)
                         .put("status", terminal.status)
+                        .put("unreadOnDesktop", terminal.unreadOnDesktop)
                         .put("conversation", conversation)
                         .put("permission", permission),
                 )
@@ -70,6 +78,7 @@ class WorkspaceStore(private val context: Context) {
             .toString()
             .toByteArray(Charsets.UTF_8)
         preferences.edit().putString(snapshot.pairId, SecretStore.encryptLocal(raw)).apply()
+        return true
     }
 
     fun all(): List<WorkspaceSnapshot> = preferences.all.values.mapNotNull { stored ->
@@ -99,6 +108,11 @@ class WorkspaceStore(private val context: Context) {
                                 agent = if (terminal.isNull("agent")) null else terminal.optString("agent").takeIf { it.isNotBlank() },
                                 model = if (terminal.isNull("model")) null else terminal.optString("model").takeIf { it.isNotBlank() },
                                 status = terminal.optString("status", "idle"),
+                                unreadOnDesktop = if (terminal.has("unreadOnDesktop") && !terminal.isNull("unreadOnDesktop")) {
+                                    terminal.optBoolean("unreadOnDesktop")
+                                } else {
+                                    null
+                                },
                                 conversation = (0 until conversationJson.length()).mapNotNull { messageIndex ->
                                     val message = conversationJson.optJSONObject(messageIndex) ?: return@mapNotNull null
                                     val role = message.optString("role")

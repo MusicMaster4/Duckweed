@@ -7,7 +7,11 @@ import android.widget.TextView
 import androidx.recyclerview.widget.RecyclerView
 import androidx.recyclerview.widget.DiffUtil
 
-data class ProjectRow(val pairId: String, val project: RemoteProject)
+data class ProjectRow(
+    val pairId: String,
+    val project: RemoteProject,
+    val desktopOnline: Boolean = true,
+)
 
 class ProjectAdapter(
     private val onOpen: (ProjectRow) -> Unit,
@@ -15,6 +19,7 @@ class ProjectAdapter(
     private var projects: List<ProjectRow> = emptyList()
 
     fun submit(next: List<ProjectRow>) {
+        if (next == projects) return
         val previous = projects
         val diff = DiffUtil.calculateDiff(object : DiffUtil.Callback() {
             override fun getOldListSize(): Int = previous.size
@@ -38,13 +43,17 @@ class ProjectAdapter(
     override fun onBindViewHolder(holder: Holder, position: Int) {
         val row = projects[position]
         val project = row.project
-        val working = project.terminals.count(RemoteTerminal::isWorking)
+        val working = if (row.desktopOnline) project.terminals.count(RemoteTerminal::isWorking) else 0
         holder.name.text = project.name
         holder.meta.text = buildList {
             add("${project.terminals.size} terminal${if (project.terminals.size == 1) "" else "s"}")
             project.branch?.let { add(it) }
         }.joinToString("  •  ")
-        holder.status.text = if (working > 0) "$working working" else "Open  ›"
+        holder.status.text = when {
+            !row.desktopOnline -> "Offline"
+            working > 0 -> "$working working"
+            else -> "Open  ›"
+        }
         holder.shimmer.visibility = if (working > 0) View.VISIBLE else View.GONE
         holder.itemView.setOnClickListener { onOpen(row) }
     }

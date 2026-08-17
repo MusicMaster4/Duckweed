@@ -148,8 +148,12 @@ object NotificationTools {
     }
 
     fun cancel(context: Context, messages: List<CompletionRecord>) {
+        cancelIds(context, messages.map { it.id })
+    }
+
+    fun cancelIds(context: Context, messageIds: List<String>) {
         val manager = NotificationManagerCompat.from(context)
-        messages.forEach { manager.cancel(it.id.hashCode()) }
+        messageIds.forEach { manager.cancel(it.hashCode()) }
     }
 
     fun cancelAll(context: Context) {

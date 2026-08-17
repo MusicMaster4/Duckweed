@@ -90,6 +90,7 @@ class MainActivity : AppCompatActivity() {
     private val conversationsAdapter = TerminalAdapter { openConversation(it, false) }
     private val conversationAdapter = ConversationAdapter(::retryConversationMessage)
     private val executor = Executors.newSingleThreadExecutor()
+    private val storageExecutor = Executors.newSingleThreadExecutor()
     private lateinit var draftStore: DraftStore
     private var receiverRegistered = false
     private var syncingNotificationsToggle = false
@@ -105,9 +106,15 @@ class MainActivity : AppCompatActivity() {
     private val draftPersistRunnable = Runnable { writeCurrentDraft() }
     private var refreshRequestedAt = 0L
     private var refreshSnapshotVersion = 0L
+    private var cachedSnapshots: List<WorkspaceSnapshot> = emptyList()
+    private var unreadConversationKeys: Set<Pair<String, String>> = emptySet()
+    private var remoteStateLoading = false
+    private var remoteStateReloadPending = false
     private val connectionTicker = object : Runnable {
         override fun run() {
             refreshConnectionHealth()
+            refreshWorkspaces()
+            refreshConversationAvailability()
             connectionDot.postDelayed(this, 30_000)
         }
     }
@@ -186,7 +193,7 @@ class MainActivity : AppCompatActivity() {
         NotificationTools.createChannel(this)
         appUpdater = AppUpdater(this)
         draftStore = DraftStore(this)
-        MessageStore(this).recoverInterruptedSends()
+        storageExecutor.execute { MessageStore(this).recoverInterruptedSends() }
 
         pairingStatus = findViewById(R.id.pairing_status)
         scanButton = findViewById(R.id.scan_button)
@@ -315,8 +322,6 @@ class MainActivity : AppCompatActivity() {
         refreshPushRegistration()
         refreshRemoteState()
         connectionDot.post(connectionTicker)
-
-        openIntentResponse()
     }
 
     override fun onStart() {
@@ -371,6 +376,7 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         if (::connectionDot.isInitialized) connectionDot.removeCallbacks(connectionTicker)
         executor.shutdownNow()
+        storageExecutor.shutdownNow()
         super.onDestroy()
     }
 
@@ -722,6 +728,7 @@ class MainActivity : AppCompatActivity() {
                     runOnUiThread {
                         if (failures.isEmpty()) {
                             refreshPairingStatus("Phone disconnected.")
+                            refreshRemoteState()
                         } else {
                             showPairingError("Could not disconnect from every desktop. Please try again.")
                         }
@@ -747,14 +754,14 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun refreshConnectionHealth(
-        snapshots: List<WorkspaceSnapshot> = WorkspaceStore(this).all(),
+        snapshots: List<WorkspaceSnapshot> = cachedSnapshots,
     ) {
         if (!::connectionHealth.isInitialized) return
         val credentials = SecretStore.loadAll(this)
         val now = System.currentTimeMillis()
         val latest = snapshots.maxOfOrNull { it.updatedAt }
         val freshPairings = snapshots
-            .filter { now - it.updatedAt <= CONNECTION_FRESH_MS }
+            .filter { MobileSyncPolicy.isDesktopOnline(it.updatedAt, now, CONNECTION_FRESH_MS) }
             .map { it.pairId }
             .toSet()
         val color: Int
@@ -809,38 +816,91 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun refreshRemoteState() {
-        val snapshots = WorkspaceStore(this).all()
+        if (remoteStateLoading) {
+            remoteStateReloadPending = true
+            return
+        }
+        remoteStateLoading = true
+        storageExecutor.execute {
+            val loaded = runCatching {
+                val snapshots = WorkspaceStore(this).all()
+                val openAgentTerminals = snapshots.flatMap { snapshot ->
+                    snapshot.projects.flatMap { project ->
+                        project.terminals
+                            .filter { it.agent != null }
+                            .map { Pair(snapshot.pairId, it.id) }
+                    }
+                }.toSet()
+                val store = MessageStore(this)
+                Triple(
+                    snapshots,
+                    store.latestForOpenAgents(openAgentTerminals, 50),
+                    store.unreadConversationKeys(),
+                )
+            }
+            runOnUiThread {
+                remoteStateLoading = false
+                if (!isFinishing && !isDestroyed) {
+                    loaded.onSuccess { (snapshots, messages, unreadKeys) ->
+                        applyRemoteState(snapshots, messages, unreadKeys)
+                    }.onFailure {
+                        connectionHealth.text = "Could not load encrypted mobile state."
+                    }
+                }
+                if (remoteStateReloadPending && !isFinishing && !isDestroyed) {
+                    remoteStateReloadPending = false
+                    refreshRemoteState()
+                }
+            }
+        }
+    }
+
+    private fun applyRemoteState(
+        snapshots: List<WorkspaceSnapshot>,
+        messages: List<CompletionRecord>,
+        unreadKeys: Set<Pair<String, String>>,
+    ) {
+        cachedSnapshots = snapshots
+        unreadConversationKeys = unreadKeys
         if (refreshRequestedAt > 0 && snapshots.any { it.updatedAt > refreshSnapshotVersion }) {
             finishRemoteRefresh()
         }
-        val openAgentTerminals = snapshots.flatMap { snapshot ->
-            snapshot.projects.flatMap { project ->
-                project.terminals
-                    .filter { it.agent != null }
-                    .map { Pair(snapshot.pairId, it.id) }
-            }
-        }.toSet()
-        val messages = MessageStore(this).latestForOpenAgents(openAgentTerminals, 50)
         legacyResponse?.let { current ->
             legacyResponse = messages.firstOrNull { it.id == current.id } ?: current
         }
         messageAdapter.submit(messages)
         emptyState.visibility = if (messages.isEmpty()) View.VISIBLE else View.GONE
-        refreshWorkspaces(snapshots)
+        refreshWorkspaces(snapshots, unreadKeys)
         refreshConnectionHealth(snapshots)
         if (conversationDetail.visibility == View.VISIBLE) refreshConversation()
         openIntentResponse()
     }
 
-    private fun refreshWorkspaces(snapshots: List<WorkspaceSnapshot> = WorkspaceStore(this).all()) {
+    private fun refreshWorkspaces(
+        snapshots: List<WorkspaceSnapshot> = cachedSnapshots,
+        unreadKeys: Set<Pair<String, String>> = unreadConversationKeys,
+    ) {
+        val now = System.currentTimeMillis()
+        val onlinePairIds = snapshots
+            .filter { MobileSyncPolicy.isDesktopOnline(it.updatedAt, now, CONNECTION_FRESH_MS) }
+            .mapTo(mutableSetOf()) { it.pairId }
         val rows = snapshots.flatMap { snapshot ->
-            snapshot.projects.map { ProjectRow(snapshot.pairId, it) }
+            snapshot.projects.map {
+                ProjectRow(snapshot.pairId, it, snapshot.pairId in onlinePairIds)
+            }
         }
         projectAdapter.submit(rows)
         projectsEmpty.visibility = if (rows.isEmpty()) View.VISIBLE else View.GONE
         val targets = rows.flatMap { row ->
             row.project.terminals.map { terminal ->
-                ConversationTarget(row.pairId, row.project.id, row.project.name, terminal)
+                ConversationTarget(
+                    row.pairId,
+                    row.project.id,
+                    row.project.name,
+                    terminal,
+                    Pair(row.pairId, terminal.id) in unreadKeys,
+                    row.desktopOnline,
+                )
             }
         }.sortedWith(
             compareBy<ConversationTarget> {
@@ -859,7 +919,7 @@ class MainActivity : AppCompatActivity() {
             selectedProject = rows.firstOrNull {
                 it.pairId == current.pairId && it.project.id == current.project.id
             } ?: current
-            terminalAdapter.submit(selectedProject)
+            terminalAdapter.submit(selectedProject, unreadKeys)
         }
         selectedTarget?.let { current ->
             rows.firstOrNull {
@@ -871,6 +931,8 @@ class MainActivity : AppCompatActivity() {
                         row.project.id,
                         row.project.name,
                         terminal,
+                        Pair(row.pairId, terminal.id) in unreadKeys,
+                        row.desktopOnline,
                     )
                 }
             }
@@ -880,7 +942,7 @@ class MainActivity : AppCompatActivity() {
     private fun openProject(row: ProjectRow) {
         persistCurrentDraft()
         selectedProject = row
-        terminalAdapter.submit(row)
+        terminalAdapter.submit(row, unreadConversationKeys)
         findViewById<TextView>(R.id.project_detail_title).text = row.project.name
         findViewById<TextView>(R.id.project_detail_meta).text = buildList {
             add("${row.project.terminals.size} open terminals")
@@ -919,13 +981,20 @@ class MainActivity : AppCompatActivity() {
     private fun findConversationTarget(message: CompletionRecord): ConversationTarget? {
         val pairId = message.pairId ?: return null
         val terminalId = message.terminalId ?: return null
-        return WorkspaceStore(this).all()
+        return cachedSnapshots
             .firstOrNull { it.pairId == pairId }
             ?.projects
             ?.asSequence()
             ?.mapNotNull { project ->
                 project.terminals.firstOrNull { it.id == terminalId }?.let { terminal ->
-                    ConversationTarget(pairId, project.id, project.name, terminal)
+                    ConversationTarget(
+                        pairId,
+                        project.id,
+                        project.name,
+                        terminal,
+                        Pair(pairId, terminal.id) in unreadConversationKeys,
+                        isDesktopOnline(pairId),
+                    )
                 }
             }
             ?.firstOrNull()
@@ -935,7 +1004,10 @@ class MainActivity : AppCompatActivity() {
         persistCurrentDraft()
         MessageStore(this).markConversationRead(target.pairId, target.terminal.id)
         messageAdapter.markConversationRead(target.pairId, target.terminal.id)
-        selectedTarget = target
+        unreadConversationKeys = unreadConversationKeys - Pair(target.pairId, target.terminal.id)
+        terminalAdapter.markRead(target.pairId, target.terminal.id)
+        conversationsAdapter.markRead(target.pairId, target.terminal.id)
+        selectedTarget = target.copy(unread = false)
         legacyResponse = null
         conversationReturnsToProject = returnToProject
         conversationShouldStickToBottom = true
@@ -972,13 +1044,15 @@ class MainActivity : AppCompatActivity() {
             conversationThinking.visibility = View.GONE
             conversationApproval.visibility = View.GONE
             conversationComposer.visibility = View.GONE
+            conversationUnavailable.text =
+                "Replying requires the current desktop version and an open terminal."
             conversationUnavailable.visibility = View.VISIBLE
             return
         }
         val target = selectedTarget ?: return
         val synced = target.terminal.conversation.map { message ->
             CompletionRecord(
-                id = "workspace:${target.pairId}:${message.id}",
+                id = "workspace:${target.pairId}:${target.terminal.id}:${message.id}",
                 pairId = target.pairId,
                 sentAt = message.sentAt,
                 agent = target.terminal.agent ?: "Agent",
@@ -998,6 +1072,7 @@ class MainActivity : AppCompatActivity() {
         val last = messages.lastOrNull()
         val thinking = target.terminal.status == "working" ||
             (last?.kind == "user" && target.terminal.status != "waiting")
+        val desktopOnline = isDesktopOnline(target.pairId)
         findViewById<TextView>(R.id.conversation_title).text =
             target.terminal.agent ?: target.terminal.title
         findViewById<TextView>(R.id.conversation_status).text = buildList {
@@ -1005,6 +1080,7 @@ class MainActivity : AppCompatActivity() {
             target.terminal.model?.let { add(it) }
             add(
                 when {
+                    !desktopOnline -> "Desktop offline"
                     thinking -> "Thinking"
                     target.terminal.status == "waiting" -> "Needs attention"
                     target.terminal.status == "exited" -> "Closed"
@@ -1014,13 +1090,9 @@ class MainActivity : AppCompatActivity() {
         }.joinToString("  •  ")
         val shouldScrollToBottom = conversationShouldStickToBottom
         conversationAdapter.submit(messages)
-        setAnimatedVisibility(conversationThinking, thinking)
+        setAnimatedVisibility(conversationThinking, thinking && desktopOnline)
         renderApproval(target)
-        val canReply = SecretStore.load(this, target.pairId) != null && target.terminal.status != "exited"
-        conversationComposer.visibility = if (canReply) View.VISIBLE else View.GONE
-        conversationUnavailable.visibility = if (canReply) View.GONE else View.VISIBLE
-        conversationAttach.visibility = if (canReply && target.terminal.agent != null) View.VISIBLE else View.GONE
-        updateComposerActions()
+        refreshConversationAvailability()
         messages.filter { it.kind == "user" && it.deliveryState == "sent" }
             .takeLast(5)
             .forEach { trackDelivery(it.id, target.pairId) }
@@ -1075,11 +1147,53 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun isDesktopOnline(pairId: String, now: Long = System.currentTimeMillis()): Boolean =
+        MobileSyncPolicy.isDesktopOnline(
+            cachedSnapshots.firstOrNull { it.pairId == pairId }?.updatedAt,
+            now,
+            CONNECTION_FRESH_MS,
+        )
+
+    private fun refreshConversationAvailability() {
+        if (!::conversationComposer.isInitialized) return
+        val target = selectedTarget ?: return
+        val paired = SecretStore.load(this, target.pairId) != null
+        val open = target.terminal.status != "exited"
+        val online = isDesktopOnline(target.pairId)
+        val canCompose = paired && open
+        conversationComposer.visibility = if (canCompose) View.VISIBLE else View.GONE
+        conversationAttach.visibility =
+            if (canCompose && target.terminal.agent != null) View.VISIBLE else View.GONE
+        conversationUnavailable.text = when {
+            !paired -> "Pair this desktop again before sending messages."
+            !open -> "This terminal is closed and cannot receive messages."
+            !online -> "This desktop instance is offline and cannot receive messages."
+            else -> ""
+        }
+        conversationUnavailable.visibility = if (canCompose && online) View.GONE else View.VISIBLE
+        for (index in 0 until approvalActions.childCount) {
+            approvalActions.getChildAt(index).isEnabled = online
+        }
+        updateComposerActions()
+    }
+
+    private fun showDesktopOffline() {
+        val message = "This desktop instance is offline and cannot receive messages."
+        conversationUnavailable.text = message
+        conversationUnavailable.visibility = View.VISIBLE
+        Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+        updateComposerActions()
+    }
+
     private fun sendApproval(
         target: ConversationTarget,
         permission: RemotePermission,
         option: RemotePermissionOption,
     ) {
+        if (!isDesktopOnline(target.pairId)) {
+            showDesktopOffline()
+            return
+        }
         val credentials = SecretStore.load(this, target.pairId) ?: return
         for (index in 0 until approvalActions.childCount) {
             approvalActions.getChildAt(index).isEnabled = false
@@ -1144,7 +1258,7 @@ class MainActivity : AppCompatActivity() {
         retryConnectionButton.isEnabled = false
         connectionHealth.text = "Checking desktop connection..."
         refreshRequestedAt = System.currentTimeMillis()
-        refreshSnapshotVersion = WorkspaceStore(this).all().maxOfOrNull { it.updatedAt } ?: 0L
+        refreshSnapshotVersion = cachedSnapshots.maxOfOrNull { it.updatedAt } ?: 0L
         executor.execute {
             credentials.forEach { pairing ->
                 runCatching { RelayClient.requestWorkspaceRefresh(pairing) }
@@ -1172,6 +1286,10 @@ class MainActivity : AppCompatActivity() {
         if (text.isEmpty() && attachments.isEmpty()) return
         if (attachments.isNotEmpty() && target.terminal.agent == null) {
             Toast.makeText(this, "Images require an active agent session.", Toast.LENGTH_LONG).show()
+            return
+        }
+        if (!isDesktopOnline(target.pairId)) {
+            showDesktopOffline()
             return
         }
         val credentials = SecretStore.load(this, target.pairId) ?: return
@@ -1227,6 +1345,10 @@ class MainActivity : AppCompatActivity() {
         val pairId = message.pairId ?: return
         val projectId = message.projectId ?: return
         val terminalId = message.terminalId ?: return
+        if (!isDesktopOnline(pairId)) {
+            showDesktopOffline()
+            return
+        }
         val credentials = SecretStore.load(this, pairId) ?: return
         val text = message.response.orEmpty()
         if (text.isBlank() && message.attachments.none { it.dataUrl != null }) {
@@ -1333,7 +1455,12 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateComposerActions() {
         if (!::conversationSend.isInitialized || !::conversationInput.isInitialized) return
-        conversationSend.isEnabled = conversationInput.text.isNotBlank() || selectedDraftAttachment != null
+        val target = selectedTarget
+        conversationSend.isEnabled =
+            target != null &&
+            target.terminal.status != "exited" &&
+            isDesktopOnline(target.pairId) &&
+            (conversationInput.text.isNotBlank() || selectedDraftAttachment != null)
         conversationSend.alpha = if (conversationSend.isEnabled) 1f else 0.38f
     }
 

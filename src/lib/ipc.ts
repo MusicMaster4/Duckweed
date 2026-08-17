@@ -65,6 +65,7 @@ export interface MobileCompletionMessage {
   response: string | null;
   durationMs: number | null;
   soundCue: number | null;
+  unreadOnDesktop: boolean;
 }
 
 export interface MobileTerminalSnapshot {
@@ -74,6 +75,7 @@ export interface MobileTerminalSnapshot {
   agent: string | null;
   model: string | null;
   status: "idle" | "working" | "waiting" | "exited";
+  unreadOnDesktop: boolean;
   conversation: MobileConversationSnapshot[];
   permission: MobilePermissionSnapshot | null;
 }

@@ -27,6 +27,7 @@ data class CompletionRecord(
     val attachments: List<MobileImageAttachment> = emptyList(),
     val deliveryState: String? = null,
     val deliveryError: String? = null,
+    val unreadOnDesktop: Boolean? = null,
 )
 
 data class MobileImageAttachment(
@@ -60,6 +61,7 @@ data class RemoteTerminal(
     val agent: String?,
     val model: String?,
     val status: String,
+    val unreadOnDesktop: Boolean? = null,
     val conversation: List<RemoteConversationMessage> = emptyList(),
     val permission: RemotePermission? = null,
 ) {
@@ -92,4 +94,6 @@ data class ConversationTarget(
     val projectId: String,
     val projectName: String,
     val terminal: RemoteTerminal,
+    val unread: Boolean = false,
+    val desktopOnline: Boolean = true,
 )
