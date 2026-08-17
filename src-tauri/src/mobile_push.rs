@@ -151,6 +151,25 @@ pub struct WorkspaceTerminal {
     pub status: String,
     #[serde(default)]
     pub conversation: Vec<WorkspaceConversationMessage>,
+    pub permission: Option<WorkspacePermission>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspacePermissionOption {
+    pub id: String,
+    pub label: String,
+    pub kind: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspacePermission {
+    pub id: String,
+    pub title: String,
+    pub detail: Option<String>,
+    pub command: Option<String>,
+    pub options: Vec<WorkspacePermissionOption>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -199,6 +218,41 @@ struct PlainRemoteCommand {
     project_id: Option<String>,
     #[serde(default)]
     text: Option<String>,
+    #[serde(default)]
+    permission_id: Option<String>,
+    #[serde(default)]
+    option_id: Option<String>,
+}
+
+impl PlainRemoteCommand {
+    fn is_valid(&self) -> bool {
+        match self.kind.as_str() {
+            "refresh" => true,
+            "input" => {
+                self.terminal_id
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty())
+                    && self
+                        .text
+                        .as_deref()
+                        .is_some_and(|value| !value.trim().is_empty())
+            }
+            "approval" => {
+                self.terminal_id
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty())
+                    && self
+                        .permission_id
+                        .as_deref()
+                        .is_some_and(|value| !value.trim().is_empty())
+                    && self
+                        .option_id
+                        .as_deref()
+                        .is_some_and(|value| !value.trim().is_empty())
+            }
+            _ => false,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -210,6 +264,8 @@ pub struct RemoteCommand {
     pub terminal_id: Option<String>,
     pub project_id: Option<String>,
     pub text: Option<String>,
+    pub permission_id: Option<String>,
+    pub option_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -355,10 +411,7 @@ fn checked(response: Response) -> Result<Response, String> {
 }
 
 fn pairing_is_gone(status: StatusCode) -> bool {
-    matches!(
-        status,
-        StatusCode::UNAUTHORIZED | StatusCode::NOT_FOUND | StatusCode::GONE
-    )
+    matches!(status, StatusCode::NOT_FOUND | StatusCode::GONE)
 }
 
 fn secret_bytes(secret: &str) -> Result<Vec<u8>, String> {
@@ -572,8 +625,11 @@ fn status_blocking(app: &AppHandle) -> Result<MobileStatus, String> {
     let http = client()?;
     let mut removed = Vec::new();
     for device in &state.devices {
+        // Credential-manager reads can fail transiently while Windows is
+        // starting, unlocking, or updating the app. Keep the local pairing so
+        // the next poll can recover instead of irreversibly deleting both the
+        // row and its credential.
         let Ok(secret) = load_secret(&device.id) else {
-            removed.push(device.id.clone());
             continue;
         };
         let response = http
@@ -916,8 +972,9 @@ fn poll_commands_blocking(app: &AppHandle) -> Result<Vec<RemoteCommand>, String>
     let mut commands = Vec::new();
     let mut removed = Vec::new();
     for device in &state.devices {
+        // A temporary keyring failure must not turn into an implicit unpair.
+        // Sending and polling can recover as soon as the credential store does.
         let Ok(secret) = load_secret(&device.id) else {
-            removed.push(device.id.clone());
             continue;
         };
         let response = client()?
@@ -949,21 +1006,7 @@ fn poll_commands_blocking(app: &AppHandle) -> Result<Vec<RemoteCommand>, String>
             if command.version != 1 || command.id != remote.command_id {
                 continue;
             }
-            let valid = match command.kind.as_str() {
-                "refresh" => true,
-                "input" => {
-                    command
-                        .terminal_id
-                        .as_deref()
-                        .is_some_and(|value| !value.trim().is_empty())
-                        && command
-                            .text
-                            .as_deref()
-                            .is_some_and(|value| !value.trim().is_empty())
-                }
-                _ => false,
-            };
-            if !valid {
+            if !command.is_valid() {
                 continue;
             }
             commands.push(RemoteCommand {
@@ -973,6 +1016,8 @@ fn poll_commands_blocking(app: &AppHandle) -> Result<Vec<RemoteCommand>, String>
                 terminal_id: command.terminal_id,
                 project_id: command.project_id,
                 text: command.text,
+                permission_id: command.permission_id,
+                option_id: command.option_id,
             });
         }
     }
@@ -1157,12 +1202,32 @@ mod tests {
         assert_eq!(command.kind, "refresh");
         assert!(command.terminal_id.is_none());
         assert!(command.text.is_none());
+        assert!(command.is_valid());
+    }
+
+    #[test]
+    fn approval_commands_require_the_exact_pending_decision_identity() {
+        let valid: PlainRemoteCommand = serde_json::from_str(
+            r#"{"version":1,"id":"00000000-0000-4000-8000-000000000001","kind":"approval","terminalId":"term-1","permissionId":"permission-1","optionId":"allow-once"}"#,
+        )
+        .unwrap();
+        assert!(valid.is_valid());
+
+        let missing_option: PlainRemoteCommand = serde_json::from_str(
+            r#"{"version":1,"id":"00000000-0000-4000-8000-000000000001","kind":"approval","terminalId":"term-1","permissionId":"permission-1"}"#,
+        )
+        .unwrap();
+        assert!(!missing_option.is_valid());
     }
 
     #[test]
     fn missing_pairings_are_safe_to_prune_locally() {
-        assert!(pairing_is_gone(reqwest::StatusCode::UNAUTHORIZED));
+        // 401 can mean a credential-store mismatch or another recoverable
+        // authentication problem. Only an explicit missing/expired row is
+        // authoritative enough to erase local pairing state.
+        assert!(!pairing_is_gone(reqwest::StatusCode::UNAUTHORIZED));
         assert!(pairing_is_gone(reqwest::StatusCode::NOT_FOUND));
+        assert!(pairing_is_gone(reqwest::StatusCode::GONE));
         assert!(!pairing_is_gone(reqwest::StatusCode::SERVICE_UNAVAILABLE));
     }
 

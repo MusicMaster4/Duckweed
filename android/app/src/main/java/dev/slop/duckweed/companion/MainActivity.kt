@@ -6,12 +6,16 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.res.ColorStateList
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.text.format.DateUtils
 import android.view.View
+import android.view.ViewGroup
 import android.widget.Button
 import android.widget.EditText
+import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
@@ -33,7 +37,7 @@ import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
 import java.util.concurrent.Executors
 
 class MainActivity : AppCompatActivity() {
-    private enum class Page { RESPONSES, PROJECTS, CONNECTIONS, UPDATES }
+    private enum class Page { ACTIVITY, PROJECTS, CONVERSATIONS, SETTINGS }
 
     private lateinit var pairingStatus: TextView
     private lateinit var scanButton: Button
@@ -44,6 +48,12 @@ class MainActivity : AppCompatActivity() {
     private lateinit var updateButton: Button
     private lateinit var updateProgress: ProgressBar
     private lateinit var projectsEmpty: View
+    private lateinit var conversationsEmpty: View
+    private lateinit var connectionDot: View
+    private lateinit var headerConnectionStatus: TextView
+    private lateinit var connectionHealth: TextView
+    private lateinit var connectionLastSync: TextView
+    private lateinit var retryConnectionButton: Button
     private lateinit var projectDetail: View
     private lateinit var conversationDetail: View
     private lateinit var conversationThinking: View
@@ -52,18 +62,24 @@ class MainActivity : AppCompatActivity() {
     private lateinit var conversationInput: EditText
     private lateinit var conversationSend: TextView
     private lateinit var conversationList: RecyclerView
+    private lateinit var conversationApproval: View
+    private lateinit var approvalTitle: TextView
+    private lateinit var approvalDetail: TextView
+    private lateinit var approvalCommand: TextView
+    private lateinit var approvalActions: LinearLayout
     private lateinit var responsesRefresh: SwipeRefreshLayout
     private lateinit var projectsRefresh: SwipeRefreshLayout
     private lateinit var appUpdater: AppUpdater
     private val messageAdapter = MessageAdapter { openResponse(it) }
     private val projectAdapter = ProjectAdapter { openProject(it) }
     private val terminalAdapter = TerminalAdapter { openConversation(it, true) }
+    private val conversationsAdapter = TerminalAdapter { openConversation(it, false) }
     private val conversationAdapter = ConversationAdapter()
     private val executor = Executors.newSingleThreadExecutor()
     private var receiverRegistered = false
     private var syncingNotificationsToggle = false
     private var updateAvailable: AndroidUpdateManifest? = null
-    private var selectedPage = Page.RESPONSES
+    private var selectedPage = Page.ACTIVITY
     private var selectedProject: ProjectRow? = null
     private var selectedTarget: ConversationTarget? = null
     private var legacyResponse: CompletionRecord? = null
@@ -71,6 +87,12 @@ class MainActivity : AppCompatActivity() {
     private var conversationShouldStickToBottom = true
     private var refreshRequestedAt = 0L
     private var refreshSnapshotVersion = 0L
+    private val connectionTicker = object : Runnable {
+        override fun run() {
+            refreshConnectionHealth()
+            connectionDot.postDelayed(this, 30_000)
+        }
+    }
 
     private val notificationPermission = registerForActivityResult(
         ActivityResultContracts.RequestPermission(),
@@ -125,6 +147,12 @@ class MainActivity : AppCompatActivity() {
         updateButton = findViewById(R.id.update_button)
         updateProgress = findViewById(R.id.update_progress)
         projectsEmpty = findViewById(R.id.projects_empty)
+        conversationsEmpty = findViewById(R.id.conversations_empty)
+        connectionDot = findViewById(R.id.connection_dot)
+        headerConnectionStatus = findViewById(R.id.header_connection_status)
+        connectionHealth = findViewById(R.id.connection_health)
+        connectionLastSync = findViewById(R.id.connection_last_sync)
+        retryConnectionButton = findViewById(R.id.retry_connection_button)
         projectDetail = findViewById(R.id.project_detail)
         conversationDetail = findViewById(R.id.conversation_detail)
         conversationThinking = findViewById(R.id.conversation_thinking)
@@ -133,6 +161,11 @@ class MainActivity : AppCompatActivity() {
         conversationInput = findViewById(R.id.conversation_input)
         conversationSend = findViewById(R.id.conversation_send)
         conversationList = findViewById(R.id.conversation_list)
+        conversationApproval = findViewById(R.id.conversation_approval)
+        approvalTitle = findViewById(R.id.approval_title)
+        approvalDetail = findViewById(R.id.approval_detail)
+        approvalCommand = findViewById(R.id.approval_command)
+        approvalActions = findViewById(R.id.approval_actions)
         responsesRefresh = findViewById(R.id.responses_page)
         projectsRefresh = findViewById(R.id.projects_page)
 
@@ -147,6 +180,10 @@ class MainActivity : AppCompatActivity() {
         findViewById<RecyclerView>(R.id.terminal_list).apply {
             layoutManager = LinearLayoutManager(this@MainActivity)
             adapter = terminalAdapter
+        }
+        findViewById<RecyclerView>(R.id.conversations_list).apply {
+            layoutManager = LinearLayoutManager(this@MainActivity)
+            adapter = conversationsAdapter
         }
         conversationList.apply {
             layoutManager = LinearLayoutManager(this@MainActivity).apply { stackFromEnd = true }
@@ -169,6 +206,7 @@ class MainActivity : AppCompatActivity() {
         findViewById<View>(R.id.conversation_back).setOnClickListener { closeConversation() }
         conversationSend.setOnClickListener { sendConversationMessage() }
 
+        combineSettingsSections()
         configureNavigation()
         configureNotificationToggle()
         savedInstanceState?.getString(STATE_PAGE)
@@ -181,10 +219,12 @@ class MainActivity : AppCompatActivity() {
         updateButton.setOnClickListener {
             updateAvailable?.let(::downloadUpdate) ?: checkForUpdates()
         }
+        retryConnectionButton.setOnClickListener { requestRemoteRefresh(showSpinner = false) }
         requestNotificationPermissionIfEnabled()
         refreshPairingStatus()
         refreshPushRegistration()
         refreshRemoteState()
+        connectionDot.post(connectionTicker)
 
         openIntentResponse()
     }
@@ -237,16 +277,23 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        if (::connectionDot.isInitialized) connectionDot.removeCallbacks(connectionTicker)
         executor.shutdownNow()
         super.onDestroy()
     }
 
     private fun configureNavigation() {
-        findViewById<View>(R.id.nav_responses).setOnClickListener { showPage(Page.RESPONSES) }
+        findViewById<View>(R.id.nav_responses).setOnClickListener { showPage(Page.ACTIVITY) }
         findViewById<View>(R.id.nav_projects).setOnClickListener { showPage(Page.PROJECTS) }
-        findViewById<View>(R.id.nav_connections).setOnClickListener { showPage(Page.CONNECTIONS) }
-        findViewById<View>(R.id.nav_updates).setOnClickListener { showPage(Page.UPDATES) }
-        showPage(Page.RESPONSES)
+        findViewById<View>(R.id.nav_conversations).setOnClickListener { showPage(Page.CONVERSATIONS) }
+        findViewById<View>(R.id.settings_button).setOnClickListener { showPage(Page.SETTINGS) }
+        showPage(Page.ACTIVITY)
+    }
+
+    private fun combineSettingsSections() {
+        val updateContent = findViewById<View>(R.id.update_content)
+        (updateContent.parent as? ViewGroup)?.removeView(updateContent)
+        findViewById<LinearLayout>(R.id.settings_content).addView(updateContent)
     }
 
     private fun configureSystemBarInsets() {
@@ -276,21 +323,21 @@ class MainActivity : AppCompatActivity() {
         setDetailChrome(false)
         selectedPage = page
         val pages = mapOf(
-            Page.RESPONSES to R.id.responses_page,
+            Page.ACTIVITY to R.id.responses_page,
             Page.PROJECTS to R.id.projects_page,
-            Page.CONNECTIONS to R.id.connections_page,
-            Page.UPDATES to R.id.updates_page,
+            Page.CONVERSATIONS to R.id.conversations_page,
+            Page.SETTINGS to R.id.connections_page,
         )
         val navigation = mapOf(
-            Page.RESPONSES to R.id.nav_responses,
+            Page.ACTIVITY to R.id.nav_responses,
             Page.PROJECTS to R.id.nav_projects,
-            Page.CONNECTIONS to R.id.nav_connections,
-            Page.UPDATES to R.id.nav_updates,
+            Page.CONVERSATIONS to R.id.nav_conversations,
         )
         pages.forEach { (candidate, id) ->
             findViewById<View>(id).visibility = if (candidate == page) View.VISIBLE else View.GONE
         }
         navigation.forEach { (candidate, id) -> findViewById<View>(id).isSelected = candidate == page }
+        findViewById<View>(R.id.settings_button).isSelected = page == Page.SETTINGS
     }
 
     private fun configureUpdater() {
@@ -554,6 +601,56 @@ class MainActivity : AppCompatActivity() {
         } else {
             "Connected to ${credentials.size} desktops as ${credentials.last().deviceName}. Full encrypted responses stay inside this app."
         }
+        refreshConnectionHealth()
+    }
+
+    private fun refreshConnectionHealth(
+        snapshots: List<WorkspaceSnapshot> = WorkspaceStore(this).all(),
+    ) {
+        if (!::connectionHealth.isInitialized) return
+        val credentials = SecretStore.loadAll(this)
+        val now = System.currentTimeMillis()
+        val latest = snapshots.maxOfOrNull { it.updatedAt }
+        val freshPairings = snapshots
+            .filter { now - it.updatedAt <= CONNECTION_FRESH_MS }
+            .map { it.pairId }
+            .toSet()
+        val color: Int
+        when {
+            credentials.isEmpty() -> {
+                headerConnectionStatus.text = "Not paired"
+                connectionHealth.text = "No desktop connected"
+                connectionLastSync.text = "Pair a desktop to start encrypted sync."
+                color = R.color.duckweed_text_faint
+            }
+            freshPairings.isNotEmpty() -> {
+                headerConnectionStatus.text = "Online"
+                connectionHealth.text = if (credentials.size == 1) {
+                    "Desktop online"
+                } else {
+                    "${freshPairings.size} of ${credentials.size} desktops online"
+                }
+                connectionLastSync.text = latest?.let {
+                    "Last synced ${DateUtils.getRelativeTimeSpanString(it, now, DateUtils.SECOND_IN_MILLIS)}"
+                }.orEmpty()
+                color = R.color.duckweed_accent
+            }
+            latest != null -> {
+                headerConnectionStatus.text = "Offline"
+                connectionHealth.text = "Desktop may be offline"
+                connectionLastSync.text =
+                    "Last synced ${DateUtils.getRelativeTimeSpanString(latest, now, DateUtils.SECOND_IN_MILLIS)}"
+                color = R.color.duckweed_error
+            }
+            else -> {
+                headerConnectionStatus.text = "Waiting"
+                connectionHealth.text = "Waiting for the first desktop sync"
+                connectionLastSync.text = "Keep Duckweed open on desktop, then retry."
+                color = R.color.duckweed_attention
+            }
+        }
+        connectionDot.backgroundTintList = ColorStateList.valueOf(ContextCompat.getColor(this, color))
+        retryConnectionButton.visibility = if (credentials.isEmpty()) View.GONE else View.VISIBLE
     }
 
     /** Keep existing pairings routable if Firebase rotates its token during an app update. */
@@ -588,6 +685,7 @@ class MainActivity : AppCompatActivity() {
         messageAdapter.submit(messages)
         emptyState.visibility = if (messages.isEmpty()) View.VISIBLE else View.GONE
         refreshWorkspaces(snapshots)
+        refreshConnectionHealth(snapshots)
         if (conversationDetail.visibility == View.VISIBLE) refreshConversation()
         openIntentResponse()
     }
@@ -598,6 +696,22 @@ class MainActivity : AppCompatActivity() {
         }
         projectAdapter.submit(rows)
         projectsEmpty.visibility = if (rows.isEmpty()) View.VISIBLE else View.GONE
+        val targets = rows.flatMap { row ->
+            row.project.terminals.map { terminal ->
+                ConversationTarget(row.pairId, row.project.id, row.project.name, terminal)
+            }
+        }.sortedWith(
+            compareBy<ConversationTarget> {
+                when (it.terminal.status) {
+                    "waiting" -> 0
+                    "working" -> 1
+                    "idle" -> 2
+                    else -> 3
+                }
+            }.thenBy { it.projectName.lowercase() },
+        )
+        conversationsAdapter.submitTargets(targets)
+        conversationsEmpty.visibility = if (targets.isEmpty()) View.VISIBLE else View.GONE
 
         selectedProject?.let { current ->
             selectedProject = rows.firstOrNull {
@@ -641,6 +755,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun openResponse(message: CompletionRecord) {
+        MessageStore(this).markRead(message.id)
+        messageAdapter.markRead(message.id)
         val target = findConversationTarget(message)
         if (target != null) {
             openConversation(target, false)
@@ -672,6 +788,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun openConversation(target: ConversationTarget, returnToProject: Boolean) {
+        MessageStore(this).markConversationRead(target.pairId, target.terminal.id)
+        messageAdapter.markConversationRead(target.pairId, target.terminal.id)
         selectedTarget = target
         legacyResponse = null
         conversationReturnsToProject = returnToProject
@@ -700,6 +818,7 @@ class MainActivity : AppCompatActivity() {
             findViewById<TextView>(R.id.conversation_status).text = legacy.project
             conversationAdapter.submit(listOf(legacy))
             conversationThinking.visibility = View.GONE
+            conversationApproval.visibility = View.GONE
             conversationComposer.visibility = View.GONE
             conversationUnavailable.visibility = View.VISIBLE
             return
@@ -725,7 +844,8 @@ class MainActivity : AppCompatActivity() {
         val stored = MessageStore(this).conversation(target.pairId, target.terminal.id)
         val messages = mergeConversation(synced, stored)
         val last = messages.lastOrNull()
-        val thinking = target.terminal.isWorking || last?.kind == "user"
+        val thinking = target.terminal.status == "working" ||
+            (last?.kind == "user" && target.terminal.status != "waiting")
         findViewById<TextView>(R.id.conversation_title).text =
             target.terminal.agent ?: target.terminal.title
         findViewById<TextView>(R.id.conversation_status).text = buildList {
@@ -743,12 +863,89 @@ class MainActivity : AppCompatActivity() {
         val shouldScrollToBottom = conversationShouldStickToBottom
         conversationAdapter.submit(messages)
         conversationThinking.visibility = if (thinking) View.VISIBLE else View.GONE
+        renderApproval(target)
         val canReply = SecretStore.load(this, target.pairId) != null && target.terminal.status != "exited"
         conversationComposer.visibility = if (canReply) View.VISIBLE else View.GONE
         conversationUnavailable.visibility = if (canReply) View.GONE else View.VISIBLE
         if (shouldScrollToBottom && messages.isNotEmpty()) {
             conversationList.post {
                 conversationList.scrollToPosition(messages.lastIndex)
+            }
+        }
+    }
+
+    private fun renderApproval(target: ConversationTarget) {
+        val permission = target.terminal.permission
+        if (permission == null) {
+            conversationApproval.visibility = View.GONE
+            approvalActions.removeAllViews()
+            return
+        }
+        conversationApproval.visibility = View.VISIBLE
+        approvalTitle.text = permission.title
+        approvalDetail.text = permission.detail
+        approvalDetail.visibility = if (permission.detail.isNullOrBlank()) View.GONE else View.VISIBLE
+        approvalCommand.text = permission.command
+        approvalCommand.visibility = if (permission.command.isNullOrBlank()) View.GONE else View.VISIBLE
+        approvalActions.removeAllViews()
+        permission.options.forEach { option ->
+            val affirmative = option.kind == "allow" || option.kind == "allow-always"
+            val button = Button(this).apply {
+                text = option.label
+                setAllCaps(false)
+                textSize = 13f
+                setBackgroundResource(
+                    if (affirmative) R.drawable.button_primary else R.drawable.button_secondary,
+                )
+                setTextColor(
+                    ContextCompat.getColor(
+                        this@MainActivity,
+                        if (affirmative) R.color.duckweed_accent_ink else R.color.duckweed_text_dim,
+                    ),
+                )
+                setOnClickListener { sendApproval(target, permission, option) }
+            }
+            approvalActions.addView(
+                button,
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    resources.getDimensionPixelSize(R.dimen.mobile_action_height),
+                ).apply { topMargin = resources.getDimensionPixelSize(R.dimen.mobile_action_gap) },
+            )
+        }
+    }
+
+    private fun sendApproval(
+        target: ConversationTarget,
+        permission: RemotePermission,
+        option: RemotePermissionOption,
+    ) {
+        val credentials = SecretStore.load(this, target.pairId) ?: return
+        for (index in 0 until approvalActions.childCount) {
+            approvalActions.getChildAt(index).isEnabled = false
+        }
+        findViewById<TextView>(R.id.conversation_status).text = "Sending approval securely..."
+        executor.execute {
+            runCatching {
+                RelayClient.sendApproval(
+                    credentials,
+                    target.projectId,
+                    target.terminal.id,
+                    permission.id,
+                    option.id,
+                )
+            }.onSuccess {
+                runOnUiThread {
+                    findViewById<TextView>(R.id.conversation_status).text =
+                        "Decision sent. Waiting for desktop..."
+                    requestRemoteRefresh(showSpinner = false)
+                }
+            }.onFailure { error ->
+                runOnUiThread {
+                    findViewById<TextView>(R.id.conversation_status).text =
+                        error.message ?: "Could not send this decision."
+                    renderApproval(target)
+                }
             }
         }
     }
@@ -777,12 +974,15 @@ class MainActivity : AppCompatActivity() {
         val credentials = SecretStore.loadAll(this)
         if (credentials.isEmpty()) {
             finishRemoteRefresh()
+            refreshConnectionHealth()
             return
         }
         if (showSpinner) {
             if (selectedPage == Page.PROJECTS) projectsRefresh.isRefreshing = true
-            if (selectedPage == Page.RESPONSES) responsesRefresh.isRefreshing = true
+            if (selectedPage == Page.ACTIVITY) responsesRefresh.isRefreshing = true
         }
+        retryConnectionButton.isEnabled = false
+        connectionHealth.text = "Checking desktop connection..."
         refreshRequestedAt = System.currentTimeMillis()
         refreshSnapshotVersion = WorkspaceStore(this).all().maxOfOrNull { it.updatedAt } ?: 0L
         executor.execute {
@@ -801,6 +1001,8 @@ class MainActivity : AppCompatActivity() {
         refreshSnapshotVersion = 0
         if (::responsesRefresh.isInitialized) responsesRefresh.isRefreshing = false
         if (::projectsRefresh.isInitialized) projectsRefresh.isRefreshing = false
+        if (::retryConnectionButton.isInitialized) retryConnectionButton.isEnabled = true
+        refreshConnectionHealth()
     }
 
     private fun sendConversationMessage() {
@@ -840,7 +1042,7 @@ class MainActivity : AppCompatActivity() {
         val messageId = intent.getStringExtra("message_id") ?: return
         val message = MessageStore(this).response(messageId) ?: return
         intent.removeExtra("message_id")
-        showPage(Page.RESPONSES)
+        showPage(Page.ACTIVITY)
         openResponse(message)
     }
 
@@ -853,6 +1055,7 @@ class MainActivity : AppCompatActivity() {
         when {
             conversationDetail.visibility == View.VISIBLE -> closeConversation()
             projectDetail.visibility == View.VISIBLE -> closeProject()
+            selectedPage == Page.SETTINGS -> showPage(Page.ACTIVITY)
             else -> super.onBackPressed()
         }
     }
@@ -864,5 +1067,6 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val STATE_PAGE = "selected-page"
+        private const val CONNECTION_FRESH_MS = 75_000L
     }
 }

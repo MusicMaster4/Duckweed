@@ -75,6 +75,21 @@ export interface MobileTerminalSnapshot {
   model: string | null;
   status: "idle" | "working" | "waiting" | "exited";
   conversation: MobileConversationSnapshot[];
+  permission: MobilePermissionSnapshot | null;
+}
+
+export interface MobilePermissionOptionSnapshot {
+  id: string;
+  label: string;
+  kind: "allow" | "allow-always" | "reject" | "reject-always";
+}
+
+export interface MobilePermissionSnapshot {
+  id: string;
+  title: string;
+  detail: string | null;
+  command: string | null;
+  options: MobilePermissionOptionSnapshot[];
 }
 
 export interface MobileConversationSnapshot {
@@ -99,10 +114,12 @@ export interface MobileWorkspaceSnapshot {
 export interface MobileRemoteCommand {
   deviceId: string;
   commandId: string;
-  kind: "input" | "refresh";
+  kind: "input" | "refresh" | "approval";
   terminalId: string | null;
   projectId: string | null;
   text: string | null;
+  permissionId: string | null;
+  optionId: string | null;
 }
 
 export interface MobileSendResult {

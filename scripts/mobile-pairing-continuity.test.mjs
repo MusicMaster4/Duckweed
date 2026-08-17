@@ -115,4 +115,53 @@ describe("mobile pairing continuity", () => {
     expect(push).toContain("Reconcile local rows whenever Settings asks");
     expect(push).toContain("Local removal is authoritative and idempotent");
   });
+
+  test("temporary credential failures never erase the desktop pairing", () => {
+    const push = read("src-tauri/src/mobile_push.rs");
+
+    expect(push).toContain("A temporary keyring failure must not turn into an implicit unpair");
+    expect(push).toContain("StatusCode::NOT_FOUND | StatusCode::GONE");
+    expect(push).not.toContain(
+      "StatusCode::UNAUTHORIZED | StatusCode::NOT_FOUND | StatusCode::GONE",
+    );
+  });
+
+  test("mobile activity keeps unread responses distinct until they are opened", () => {
+    const store = read(
+      "android/app/src/main/java/dev/slop/duckweed/companion/MessageStore.kt",
+    );
+    const adapter = read(
+      "android/app/src/main/java/dev/slop/duckweed/companion/MessageAdapter.kt",
+    );
+
+    expect(store).toContain('read_at INTEGER');
+    expect(store).toContain("fun markRead(messageId: String");
+    expect(adapter).toContain("R.drawable.message_card_unread");
+    expect(adapter).toContain("message.readAt == null");
+  });
+
+  test("mobile approvals are encrypted and revalidated against the live permission", () => {
+    const desktop = read("src/App.tsx");
+    const relay = read(
+      "android/app/src/main/java/dev/slop/duckweed/companion/RelayClient.kt",
+    );
+
+    expect(relay).toContain('.put("kind", "approval")');
+    expect(relay).toContain('Crypto.encrypt(credentials, commandId, "command", plain)');
+    expect(desktop).toContain('permission?.id === command.permissionId');
+    expect(desktop).toContain(
+      'permission.options.some((option) => option.id === command.optionId)',
+    );
+  });
+
+  test("mobile primary navigation leaves connection and updates inside settings", () => {
+    const layout = read("android/app/src/main/res/layout/activity_main.xml");
+
+    expect(layout).toContain('android:text="Activity"');
+    expect(layout).toContain('android:text="Projects"');
+    expect(layout).toContain('android:text="Conversations"');
+    expect(layout).toContain('android:id="@+id/settings_button"');
+    expect(layout).not.toContain('android:id="@+id/nav_connections"');
+    expect(layout).not.toContain('android:id="@+id/nav_updates"');
+  });
 });

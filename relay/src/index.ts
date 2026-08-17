@@ -324,8 +324,12 @@ export async function handleRequest(request: Request, env: Env, push: PushSender
     }
 
     if (request.method === "GET" && parts.length === 3) {
-      const found = await requireSend(env, pairId, request);
-      if (!found) return fail(401, "invalid sender credential");
+      const found = await pairing(env, pairId);
+      if (!found) return fail(404, "pairing not found");
+      const token = bearer(request);
+      if (!token || !await matchesToken(found.send_token_hash, token)) {
+        return fail(401, "invalid sender credential");
+      }
       return response({
         device: found.device_id ? {
           id: found.device_id,
@@ -447,8 +451,12 @@ export async function handleRequest(request: Request, env: Env, push: PushSender
       }
 
       if (request.method === "GET") {
-        const found = await requireSend(env, pairId, request);
-        if (!found) return fail(401, "invalid sender credential");
+        const found = await pairing(env, pairId);
+        if (!found) return fail(404, "pairing not found");
+        const token = bearer(request);
+        if (!token || !await matchesToken(found.send_token_hash, token)) {
+          return fail(401, "invalid sender credential");
+        }
         const commands = await env.DB.prepare(`
           SELECT command_id, payload_nonce, payload_ciphertext, sent_at
             FROM commands

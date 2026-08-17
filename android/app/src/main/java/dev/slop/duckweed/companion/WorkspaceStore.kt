@@ -22,6 +22,26 @@ class WorkspaceStore(private val context: Context) {
                             .put("text", message.text),
                     )
                 }
+                val permission = terminal.permission?.let { pending ->
+                    JSONObject()
+                        .put("id", pending.id)
+                        .put("title", pending.title)
+                        .put("detail", pending.detail)
+                        .put("command", pending.command)
+                        .put(
+                            "options",
+                            JSONArray().apply {
+                                pending.options.forEach { option ->
+                                    put(
+                                        JSONObject()
+                                            .put("id", option.id)
+                                            .put("label", option.label)
+                                            .put("kind", option.kind),
+                                    )
+                                }
+                            },
+                        )
+                }
                 terminals.put(
                     JSONObject()
                         .put("id", terminal.id)
@@ -30,7 +50,8 @@ class WorkspaceStore(private val context: Context) {
                         .put("agent", terminal.agent)
                         .put("model", terminal.model)
                         .put("status", terminal.status)
-                        .put("conversation", conversation),
+                        .put("conversation", conversation)
+                        .put("permission", permission),
                 )
             }
             projects.put(
@@ -70,6 +91,7 @@ class WorkspaceStore(private val context: Context) {
                         terminals = (0 until terminalsJson.length()).map { terminalIndex ->
                             val terminal = terminalsJson.getJSONObject(terminalIndex)
                             val conversationJson = terminal.optJSONArray("conversation") ?: JSONArray()
+                            val permissionJson = terminal.optJSONObject("permission")
                             RemoteTerminal(
                                 id = terminal.getString("id"),
                                 title = terminal.optString("title", "Terminal"),
@@ -90,6 +112,23 @@ class WorkspaceStore(private val context: Context) {
                                         role = role,
                                         text = text,
                                     )
+                                },
+                                permission = permissionJson?.let { permission ->
+                                    val optionsJson = permission.optJSONArray("options") ?: JSONArray()
+                                    RemotePermission(
+                                        id = permission.optString("id"),
+                                        title = permission.optString("title", "Approval required"),
+                                        detail = permission.optString("detail").takeIf { it.isNotBlank() },
+                                        command = permission.optString("command").takeIf { it.isNotBlank() },
+                                        options = (0 until optionsJson.length()).mapNotNull { optionIndex ->
+                                            val option = optionsJson.optJSONObject(optionIndex) ?: return@mapNotNull null
+                                            val id = option.optString("id")
+                                            val label = option.optString("label")
+                                            val kind = option.optString("kind")
+                                            if (id.isBlank() || label.isBlank()) return@mapNotNull null
+                                            RemotePermissionOption(id, label, kind)
+                                        },
+                                    ).takeIf { it.id.isNotBlank() && it.options.isNotEmpty() }
                                 },
                             )
                         },

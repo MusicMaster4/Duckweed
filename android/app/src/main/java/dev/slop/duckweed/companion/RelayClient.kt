@@ -150,6 +150,52 @@ object RelayClient {
         return SentCommand(commandId, sentAt)
     }
 
+    fun sendApproval(
+        credentials: PairCredentials,
+        projectId: String,
+        terminalId: String,
+        permissionId: String,
+        optionId: String,
+    ): SentCommand = sendEncryptedCommand(
+        credentials,
+        JSONObject()
+            .put("kind", "approval")
+            .put("projectId", projectId)
+            .put("terminalId", terminalId)
+            .put("permissionId", permissionId)
+            .put("optionId", optionId),
+    )
+
+    private fun sendEncryptedCommand(
+        credentials: PairCredentials,
+        fields: JSONObject,
+    ): SentCommand {
+        val commandId = UUID.randomUUID().toString()
+        val sentAt = System.currentTimeMillis()
+        val plain = fields
+            .put("version", 1)
+            .put("id", commandId)
+            .put("sentAt", sentAt)
+            .toString()
+            .toByteArray(Charsets.UTF_8)
+        val encrypted = Crypto.encrypt(credentials, commandId, "command", plain)
+        request(
+            method = "POST",
+            url = "${credentials.relayUrl}/v1/pairings/${credentials.pairId}/commands",
+            bearer = credentials.receiveToken,
+            payload = JSONObject()
+                .put("commandId", commandId)
+                .put("sentAt", sentAt)
+                .put(
+                    "payload",
+                    JSONObject()
+                        .put("nonce", encrypted.nonce)
+                        .put("ciphertext", encrypted.ciphertext),
+                ),
+        )
+        return SentCommand(commandId, sentAt)
+    }
+
     fun requestWorkspaceRefresh(credentials: PairCredentials) {
         val commandId = UUID.randomUUID().toString()
         val sentAt = System.currentTimeMillis()

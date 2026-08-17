@@ -24,11 +24,15 @@ account is required.
 - Open project and terminal metadata is delivered as a separate encrypted
   workspace snapshot. It includes a compact history of user messages and
   settled final responses, but never live agent output, tool output, or exposed
-  reasoning. The phone also shows the terminal state, such as `Thinking`,
-  `Needs attention`, or `Ready`.
+  reasoning. A pending approval includes only its title, detail, command, and
+  available decision labels. The phone also shows the terminal state, such as
+  `Thinking`, `Needs attention`, or `Ready`.
 - Replies and terminal commands are encrypted on the phone with the same paired
   secret. The relay stores only their opaque ciphertext until the desktop polls,
   decrypts, applies, and acknowledges them.
+- Approval decisions use that same encrypted queue. The desktop applies a
+  decision only when its permission and option identifiers still match the
+  currently pending approval.
 - Desktop secrets use the operating system credential store. Android secrets
   and response history are encrypted with a non-exportable Android Keystore key.
 
@@ -47,17 +51,23 @@ disconnected phone from desktop Settings always clears its local row.
 4. Allow notifications when Android asks.
 5. Use **Send test** to verify delivery.
 
-The **Notifications** switch at the top of **Responses** controls Android
+The **Notifications** switch at the top of **Activity** controls Android
 alerts without disabling the encrypted response history. Responses received
 while alerts are off are still saved, but they are never replayed as alerts
-when notifications are enabled again. **Responses** shows the newest response
-from each currently open agent, up to 50 agents.
+when notifications are enabled again. **Activity** shows the newest response
+from each currently open agent, up to 50 agents. A new response uses the same
+red outline as an unread desktop terminal and loses it when its conversation is
+opened.
 
-The main companion navigation contains **Responses**, **Projects**,
-**Connections**, and **Updates**. Tapping a response opens its terminal
-conversation. Tapping a project opens its current terminal cards. Both paths
-lead to the same compact conversation view, which keeps submitted messages and
-final responses while replacing in-progress output with **Agent is thinking**.
+The main companion navigation contains **Activity**, **Projects**, and
+**Conversations**. Connection management, sync health, and updates live in
+**Settings**. The header reports whether a desktop heartbeat is current, and
+Settings shows the last sync time with a manual retry action. Tapping a response
+or conversation opens its terminal. Tapping a project opens its current terminal
+cards. Every path leads to the same compact conversation view, which keeps
+submitted messages and final responses while replacing in-progress output with
+**Agent is thinking**. When an agent is blocked on an approval, the phone shows
+the exact encrypted choices and can send the selected decision back securely.
 Sending `codex`, `claude`, or another installed agent command to an idle terminal
 starts it through the desktop in the same way as a local terminal submission.
 The desktop republishes the encrypted workspace periodically and whenever its

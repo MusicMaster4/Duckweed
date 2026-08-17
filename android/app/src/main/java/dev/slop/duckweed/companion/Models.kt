@@ -23,6 +23,7 @@ data class CompletionRecord(
     val terminalTitle: String? = null,
     val soundCue: Int? = null,
     val workspace: WorkspaceSnapshot? = null,
+    val readAt: Long? = null,
 )
 
 data class EncryptedEnvelope(val nonce: String, val ciphertext: String)
@@ -49,9 +50,24 @@ data class RemoteTerminal(
     val model: String?,
     val status: String,
     val conversation: List<RemoteConversationMessage> = emptyList(),
+    val permission: RemotePermission? = null,
 ) {
     val isWorking: Boolean get() = status == "working" || status == "waiting"
 }
+
+data class RemotePermission(
+    val id: String,
+    val title: String,
+    val detail: String?,
+    val command: String?,
+    val options: List<RemotePermissionOption>,
+)
+
+data class RemotePermissionOption(
+    val id: String,
+    val label: String,
+    val kind: String,
+)
 
 data class RemoteConversationMessage(
     val id: String,

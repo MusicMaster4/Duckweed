@@ -10,10 +10,19 @@ import androidx.recyclerview.widget.RecyclerView
 class TerminalAdapter(
     private val onOpen: (ConversationTarget) -> Unit,
 ) : RecyclerView.Adapter<TerminalAdapter.Holder>() {
-    private var project: ProjectRow? = null
+    private var targets: List<ConversationTarget> = emptyList()
 
     fun submit(next: ProjectRow?) {
-        project = next
+        targets = next?.let { row ->
+            row.project.terminals.map { terminal ->
+                ConversationTarget(row.pairId, row.project.id, row.project.name, terminal)
+            }
+        }.orEmpty()
+        notifyDataSetChanged()
+    }
+
+    fun submitTargets(next: List<ConversationTarget>) {
+        targets = next
         notifyDataSetChanged()
     }
 
@@ -21,12 +30,12 @@ class TerminalAdapter(
         LayoutInflater.from(parent.context).inflate(R.layout.item_terminal, parent, false),
     )
 
-    override fun getItemCount(): Int = project?.project?.terminals?.size ?: 0
+    override fun getItemCount(): Int = targets.size
 
     override fun onBindViewHolder(holder: Holder, position: Int) {
-        val row = project ?: return
-        val terminal = row.project.terminals[position]
-        holder.context.text = "⌁  ${row.project.name}"
+        val target = targets[position]
+        val terminal = target.terminal
+        holder.context.text = "Project  ${target.projectName}"
         holder.title.text = terminal.agent ?: terminal.title
         holder.model.text = terminal.model ?: terminal.shell
         holder.status.text = when (terminal.status) {
@@ -45,10 +54,8 @@ class TerminalAdapter(
                 },
             ),
         )
-        holder.shimmer.visibility = if (terminal.isWorking) View.VISIBLE else View.GONE
-        holder.itemView.setOnClickListener {
-            onOpen(ConversationTarget(row.pairId, row.project.id, row.project.name, terminal))
-        }
+        holder.shimmer.visibility = if (terminal.status == "working") View.VISIBLE else View.GONE
+        holder.itemView.setOnClickListener { onOpen(target) }
     }
 
     class Holder(view: View) : RecyclerView.ViewHolder(view) {

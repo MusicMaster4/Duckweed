@@ -6,7 +6,7 @@ import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 import org.json.JSONObject
 
-class MessageStore(context: Context) : SQLiteOpenHelper(context, "duckweed-messages.db", null, 3) {
+class MessageStore(context: Context) : SQLiteOpenHelper(context, "duckweed-messages.db", null, 4) {
     override fun onCreate(database: SQLiteDatabase) {
         database.execSQL(
             """
@@ -14,7 +14,8 @@ class MessageStore(context: Context) : SQLiteOpenHelper(context, "duckweed-messa
               id TEXT PRIMARY KEY,
               sent_at INTEGER NOT NULL,
               encrypted_payload TEXT NOT NULL,
-              notified_at INTEGER
+              notified_at INTEGER,
+              read_at INTEGER
             )
             """.trimIndent(),
         )
@@ -28,10 +29,16 @@ class MessageStore(context: Context) : SQLiteOpenHelper(context, "duckweed-messa
             // replay the entire history the first time the new toggle is enabled.
             database.execSQL("UPDATE messages SET notified_at = sent_at")
         }
+        if (oldVersion < 4) {
+            database.execSQL("ALTER TABLE messages ADD COLUMN read_at INTEGER")
+            // Do not turn the existing response history red after an upgrade.
+            database.execSQL("UPDATE messages SET read_at = sent_at")
+        }
     }
 
     fun put(message: CompletionRecord) {
         val notifiedAt = notifiedAt(message.id)
+        val readAt = readAt(message.id) ?: message.readAt
         val payload = JSONObject()
             .put("id", message.id)
             .put("pairId", message.pairId)
@@ -55,6 +62,7 @@ class MessageStore(context: Context) : SQLiteOpenHelper(context, "duckweed-messa
                 put("sent_at", message.sentAt)
                 put("encrypted_payload", SecretStore.encryptLocal(payload))
                 if (notifiedAt != null) put("notified_at", notifiedAt)
+                if (readAt != null) put("read_at", readAt)
             },
             SQLiteDatabase.CONFLICT_REPLACE,
         )
@@ -70,6 +78,21 @@ class MessageStore(context: Context) : SQLiteOpenHelper(context, "duckweed-messa
             "id = ?",
             arrayOf(messageId),
         )
+    }
+
+    fun markRead(messageId: String, at: Long = System.currentTimeMillis()) {
+        writableDatabase.update(
+            "messages",
+            ContentValues().apply { put("read_at", at) },
+            "id = ?",
+            arrayOf(messageId),
+        )
+    }
+
+    fun markConversationRead(pairId: String, terminalId: String, at: Long = System.currentTimeMillis()) {
+        latest()
+            .filter { it.pairId == pairId && it.terminalId == terminalId && it.readAt == null }
+            .forEach { markRead(it.id, at) }
     }
 
     fun isNotificationPending(messageId: String): Boolean = notifiedAt(messageId) == null
@@ -160,6 +183,7 @@ class MessageStore(context: Context) : SQLiteOpenHelper(context, "duckweed-messa
                         ),
                     )
                     markNotified(id, message.sentAt)
+                    markRead(id, message.sentAt)
                 }
             }
         }
@@ -169,7 +193,7 @@ class MessageStore(context: Context) : SQLiteOpenHelper(context, "duckweed-messa
         val messages = mutableListOf<CompletionRecord>()
         readableDatabase.query(
             "messages",
-            arrayOf("encrypted_payload"),
+            arrayOf("encrypted_payload", "read_at"),
             selection,
             null,
             null,
@@ -178,6 +202,7 @@ class MessageStore(context: Context) : SQLiteOpenHelper(context, "duckweed-messa
             "500",
         ).use { cursor ->
             while (cursor.moveToNext()) {
+                val readAt = if (cursor.isNull(1)) null else cursor.getLong(1)
                 runCatching {
                     JSONObject(String(SecretStore.decryptLocal(cursor.getString(0)), Charsets.UTF_8))
                 }.getOrNull()?.let { json ->
@@ -195,6 +220,7 @@ class MessageStore(context: Context) : SQLiteOpenHelper(context, "duckweed-messa
                         durationMs = if (json.isNull("durationMs")) null else json.getLong("durationMs"),
                         soundCue = if (json.isNull("soundCue")) null else json.optInt("soundCue").takeIf { it in 0..5 },
                         workspace = null,
+                        readAt = readAt,
                     )
                 }
             }
@@ -206,6 +232,22 @@ class MessageStore(context: Context) : SQLiteOpenHelper(context, "duckweed-messa
         readableDatabase.query(
             "messages",
             arrayOf("notified_at"),
+            "id = ?",
+            arrayOf(messageId),
+            null,
+            null,
+            null,
+            "1",
+        ).use { cursor ->
+            if (!cursor.moveToFirst() || cursor.isNull(0)) return null
+            return cursor.getLong(0)
+        }
+    }
+
+    private fun readAt(messageId: String): Long? {
+        readableDatabase.query(
+            "messages",
+            arrayOf("read_at"),
             "id = ?",
             arrayOf(messageId),
             null,

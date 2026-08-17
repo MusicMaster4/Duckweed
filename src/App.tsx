@@ -751,6 +751,19 @@ export default function App() {
               model: session?.model ?? null,
               status,
               conversation,
+              permission: session?.permission && session.permission.kind !== "question"
+                ? {
+                    id: session.permission.id,
+                    title: session.permission.title.slice(0, 240),
+                    detail: session.permission.detail?.slice(0, 4_000) ?? null,
+                    command: session.permission.command?.slice(0, 8_000) ?? null,
+                    options: session.permission.options.map((option) => ({
+                      id: option.id,
+                      label: option.label.slice(0, 120),
+                      kind: option.kind,
+                    })),
+                  }
+                : null,
             }];
           }),
         })),
@@ -822,6 +835,20 @@ export default function App() {
             if (!applied.has(key)) {
               if (command.kind === "refresh") {
                 window.dispatchEvent(new Event("duckweed:mobile-refresh"));
+              } else if (
+                command.kind === "approval" &&
+                command.terminalId &&
+                command.permissionId &&
+                command.optionId
+              ) {
+                const permission = agentSessions.get(command.terminalId)?.permission;
+                if (
+                  permission?.id === command.permissionId &&
+                  permission.kind !== "question" &&
+                  permission.options.some((option) => option.id === command.optionId)
+                ) {
+                  agentSessions.respond(command.terminalId, command.permissionId, command.optionId);
+                }
               } else if (command.terminalId && command.text) {
                 const meta = terminals.getMeta(command.terminalId);
                 if (meta && !meta.exited) {

@@ -12,4 +12,5 @@
     <color name="duckweed_accent_wash">#20341F</color>
     <color name="duckweed_attention">#F0C052</color>
     <color name="duckweed_error">#FF8A80</color>
+    <color name="duckweed_unread">#F2686F</color>
 </resources>

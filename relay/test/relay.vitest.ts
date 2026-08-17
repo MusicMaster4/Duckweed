@@ -202,6 +202,42 @@ describe("encrypted notification relay", () => {
     expect(await emptyQueue.json()).toEqual({ commands: [] });
   });
 
+  it("distinguishes a deleted pairing from a bad sender credential", async () => {
+    const pairId = "70000000-0000-4000-8000-000000000007";
+    const missingId = "80000000-0000-4000-8000-000000000008";
+    const registrationToken = "i".repeat(43);
+    const sendToken = "j".repeat(43);
+    const accept = async () => {};
+
+    await handleRequest(request("/v1/pairings", "POST", undefined, {
+      pairId,
+      registrationTokenHash: await hash(registrationToken),
+      sendTokenHash: await hash(sendToken),
+      expiresAt: Date.now() + 9 * 60_000,
+    }, "203.0.113.8"), env, accept);
+
+    const badStatus = await handleRequest(
+      request(`/v1/pairings/${pairId}`, "GET", "k".repeat(43)),
+      env,
+      accept,
+    );
+    expect(badStatus.status).toBe(401);
+
+    const missingStatus = await handleRequest(
+      request(`/v1/pairings/${missingId}`, "GET", sendToken),
+      env,
+      accept,
+    );
+    expect(missingStatus.status).toBe(404);
+
+    const missingCommands = await handleRequest(
+      request(`/v1/pairings/${missingId}/commands`, "GET", sendToken),
+      env,
+      accept,
+    );
+    expect(missingCommands.status).toBe(404);
+  });
+
   it("rate limits pairing creation by source address", async () => {
     for (let attempt = 0; attempt < 12; attempt += 1) {
       const invalid = await handleRequest(request("/v1/pairings", "POST", undefined, {}, "198.51.100.9"), env);

@@ -98,6 +98,7 @@ object Crypto {
                 terminals = (0 until terminalsJson.length()).mapNotNull { terminalIndex ->
                     val terminal = terminalsJson.optJSONObject(terminalIndex) ?: return@mapNotNull null
                     val conversationJson = terminal.optJSONArray("conversation") ?: JSONArray()
+                    val permissionJson = terminal.optJSONObject("permission")
                     RemoteTerminal(
                         id = terminal.optString("id"),
                         title = terminal.optString("title", "Terminal"),
@@ -118,6 +119,27 @@ object Crypto {
                                 role = role,
                                 text = text,
                             )
+                        },
+                        permission = permissionJson?.let { permission ->
+                            val optionsJson = permission.optJSONArray("options") ?: JSONArray()
+                            val options = (0 until optionsJson.length()).mapNotNull { optionIndex ->
+                                val option = optionsJson.optJSONObject(optionIndex) ?: return@mapNotNull null
+                                val id = option.optString("id")
+                                val label = option.optString("label")
+                                val kind = option.optString("kind")
+                                if (id.isBlank() || label.isBlank() || kind !in setOf(
+                                        "allow", "allow-always", "reject", "reject-always",
+                                    )
+                                ) return@mapNotNull null
+                                RemotePermissionOption(id, label, kind)
+                            }
+                            RemotePermission(
+                                id = permission.optString("id"),
+                                title = permission.optString("title", "Approval required"),
+                                detail = permission.optString("detail").takeIf { it.isNotBlank() },
+                                command = permission.optString("command").takeIf { it.isNotBlank() },
+                                options = options,
+                            ).takeIf { it.id.isNotBlank() && it.options.isNotEmpty() }
                         },
                     )
                 }.filter { it.id.isNotBlank() },

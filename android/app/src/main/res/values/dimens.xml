@@ -1,0 +1,4 @@
+<resources>
+    <dimen name="mobile_action_height">48dp</dimen>
+    <dimen name="mobile_action_gap">8dp</dimen>
+</resources>

@@ -18,6 +18,28 @@ class MessageAdapter(
         notifyDataSetChanged()
     }
 
+    fun markRead(messageId: String, at: Long = System.currentTimeMillis()) {
+        val index = messages.indexOfFirst { it.id == messageId }
+        if (index < 0 || messages[index].readAt != null) return
+        messages = messages.toMutableList().also { it[index] = it[index].copy(readAt = at) }
+        notifyItemChanged(index)
+    }
+
+    fun markConversationRead(pairId: String, terminalId: String, at: Long = System.currentTimeMillis()) {
+        val changed = mutableListOf<Int>()
+        messages = messages.mapIndexed { index, message ->
+            if (
+                message.pairId == pairId && message.terminalId == terminalId && message.readAt == null
+            ) {
+                changed += index
+                message.copy(readAt = at)
+            } else {
+                message
+            }
+        }
+        changed.forEach(::notifyItemChanged)
+    }
+
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): Holder {
         val view = LayoutInflater.from(parent.context).inflate(R.layout.item_message, parent, false)
         return Holder(view)
@@ -27,6 +49,9 @@ class MessageAdapter(
 
     override fun onBindViewHolder(holder: Holder, position: Int) {
         val message = messages[position]
+        holder.itemView.setBackgroundResource(
+            if (message.readAt == null) R.drawable.message_card_unread else R.drawable.message_card,
+        )
         holder.agent.text = if (message.kind == "attention") {
             "${message.agent} · needs attention"
         } else {
@@ -50,6 +75,10 @@ class MessageAdapter(
         holder.expand.visibility = View.VISIBLE
         holder.expand.text = "Open conversation  ›"
         holder.itemView.setOnClickListener { onOpen(message) }
+        holder.itemView.contentDescription = buildString {
+            if (message.readAt == null) append("Unread response. ")
+            append("${message.agent}, ${message.project}")
+        }
     }
 
     class Holder(view: View) : RecyclerView.ViewHolder(view) {

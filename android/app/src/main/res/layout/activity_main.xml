@@ -42,9 +42,31 @@
         </LinearLayout>
 
         <View
+            android:id="@+id/connection_dot"
             android:layout_width="8dp"
             android:layout_height="8dp"
             android:background="@drawable/status_dot" />
+
+        <TextView
+            android:id="@+id/header_connection_status"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="7dp"
+            android:maxLines="1"
+            android:text="Offline"
+            android:textColor="@color/duckweed_text_faint"
+            android:textSize="11sp" />
+
+        <ImageButton
+            android:id="@+id/settings_button"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:layout_marginStart="8dp"
+            android:background="@drawable/nav_item"
+            android:contentDescription="Open settings"
+            android:padding="12dp"
+            android:src="@drawable/ic_settings"
+            android:tint="@color/duckweed_text_dim" />
     </LinearLayout>
 
     <FrameLayout
@@ -70,7 +92,7 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:fontFamily="sans-serif-medium"
-                android:text="Recent responses"
+                android:text="Activity"
                 android:textColor="@color/duckweed_text"
                 android:textSize="24sp" />
 
@@ -78,7 +100,7 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="4dp"
-                android:text="Completed agent work, available securely on this phone."
+                android:text="Recent agent responses. Unread work is outlined in red."
                 android:textColor="@color/duckweed_text_faint"
                 android:textSize="13sp" />
 
@@ -253,6 +275,73 @@
             </LinearLayout>
         </androidx.swiperefreshlayout.widget.SwipeRefreshLayout>
 
+        <LinearLayout
+            android:id="@+id/conversations_page"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:orientation="vertical"
+            android:paddingStart="20dp"
+            android:paddingTop="10dp"
+            android:paddingEnd="20dp"
+            android:visibility="gone">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:fontFamily="sans-serif-medium"
+                android:text="Conversations"
+                android:textColor="@color/duckweed_text"
+                android:textSize="24sp" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="All open terminals across paired desktops."
+                android:textColor="@color/duckweed_text_faint"
+                android:textSize="13sp" />
+
+            <FrameLayout
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_marginTop="18dp"
+                android:layout_weight="1">
+
+                <androidx.recyclerview.widget.RecyclerView
+                    android:id="@+id/conversations_list"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:clipToPadding="false"
+                    android:paddingBottom="20dp" />
+
+                <LinearLayout
+                    android:id="@+id/conversations_empty"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:gravity="center"
+                    android:orientation="vertical"
+                    android:padding="24dp">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:fontFamily="sans-serif-medium"
+                        android:text="No open conversations"
+                        android:textColor="@color/duckweed_text"
+                        android:textSize="16sp" />
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="7dp"
+                        android:gravity="center"
+                        android:text="Open a terminal on desktop to continue it from this phone."
+                        android:textColor="@color/duckweed_text_faint"
+                        android:textSize="13sp" />
+                </LinearLayout>
+            </FrameLayout>
+        </LinearLayout>
+
         <ScrollView
             android:id="@+id/connections_page"
             android:layout_width="match_parent"
@@ -261,6 +350,7 @@
             android:visibility="gone">
 
             <LinearLayout
+                android:id="@+id/settings_content"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:orientation="vertical"
@@ -273,7 +363,7 @@
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:fontFamily="sans-serif-medium"
-                    android:text="Connections"
+                    android:text="Settings"
                     android:textColor="@color/duckweed_text"
                     android:textSize="24sp" />
 
@@ -281,7 +371,7 @@
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="4dp"
-                    android:text="Pair this phone with one or more Duckweed desktops."
+                    android:text="Connections, sync health, notifications, and updates."
                     android:textColor="@color/duckweed_text_faint"
                     android:textSize="13sp" />
 
@@ -314,6 +404,34 @@
                         android:layout_height="wrap_content"
                         android:layout_marginTop="8dp"
                         android:lineSpacingExtra="2dp"
+                        android:textColor="@color/duckweed_text_dim"
+                        android:textSize="13sp" />
+
+                    <TextView
+                        android:id="@+id/connection_health"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="14dp"
+                        android:fontFamily="sans-serif-medium"
+                        android:textColor="@color/duckweed_text"
+                        android:textSize="13sp" />
+
+                    <TextView
+                        android:id="@+id/connection_last_sync"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="4dp"
+                        android:textColor="@color/duckweed_text_faint"
+                        android:textSize="12sp" />
+
+                    <Button
+                        android:id="@+id/retry_connection_button"
+                        android:layout_width="match_parent"
+                        android:layout_height="48dp"
+                        android:layout_marginTop="12dp"
+                        android:background="@drawable/button_secondary"
+                        android:text="Retry connection"
+                        android:textAllCaps="false"
                         android:textColor="@color/duckweed_text_dim"
                         android:textSize="13sp" />
                 </LinearLayout>
@@ -361,6 +479,7 @@
             android:visibility="gone">
 
             <LinearLayout
+                android:id="@+id/update_content"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:orientation="vertical"
@@ -636,6 +755,55 @@
                 android:paddingTop="8dp"
                 android:paddingBottom="8dp" />
 
+            <LinearLayout
+                android:id="@+id/conversation_approval"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:layout_marginBottom="8dp"
+                android:background="@drawable/approval_card"
+                android:orientation="vertical"
+                android:padding="16dp"
+                android:visibility="gone">
+
+                <TextView
+                    android:id="@+id/approval_title"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:fontFamily="sans-serif-medium"
+                    android:textColor="@color/duckweed_text"
+                    android:textSize="14sp" />
+
+                <TextView
+                    android:id="@+id/approval_detail"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="7dp"
+                    android:maxLines="4"
+                    android:textColor="@color/duckweed_text_dim"
+                    android:textSize="12sp" />
+
+                <TextView
+                    android:id="@+id/approval_command"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="9dp"
+                    android:background="@color/duckweed_background"
+                    android:fontFamily="monospace"
+                    android:maxLines="5"
+                    android:padding="10dp"
+                    android:textColor="@color/duckweed_text_dim"
+                    android:textIsSelectable="true"
+                    android:textSize="11sp" />
+
+                <LinearLayout
+                    android:id="@+id/approval_actions"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:orientation="vertical" />
+            </LinearLayout>
+
             <FrameLayout
                 android:id="@+id/conversation_thinking"
                 android:layout_width="match_parent"
@@ -741,13 +909,13 @@
             android:layout_weight="1"
             android:background="@drawable/nav_item"
             android:clickable="true"
-            android:drawableTop="@drawable/ic_responses"
+            android:drawableTop="@drawable/ic_activity"
             android:drawablePadding="3dp"
             android:drawableTint="@color/nav_item_color"
             android:focusable="true"
             android:fontFamily="sans-serif-medium"
             android:gravity="center"
-            android:text="Responses"
+            android:text="Activity"
             android:textColor="@color/nav_item_color"
             android:textSize="11sp" />
 
@@ -770,38 +938,22 @@
             android:textSize="11sp" />
 
         <TextView
-            android:id="@+id/nav_connections"
+            android:id="@+id/nav_conversations"
             android:layout_width="0dp"
             android:layout_height="match_parent"
             android:layout_marginStart="4dp"
             android:layout_weight="1"
             android:background="@drawable/nav_item"
             android:clickable="true"
-            android:drawableTop="@drawable/ic_connections"
+            android:drawableTop="@drawable/ic_responses"
             android:drawablePadding="3dp"
             android:drawableTint="@color/nav_item_color"
             android:focusable="true"
             android:fontFamily="sans-serif-medium"
             android:gravity="center"
-            android:text="Connections"
+            android:text="Conversations"
             android:textColor="@color/nav_item_color"
             android:textSize="11sp" />
 
-        <TextView
-            android:id="@+id/nav_updates"
-            android:layout_width="0dp"
-            android:layout_height="match_parent"
-            android:layout_weight="1"
-            android:background="@drawable/nav_item"
-            android:clickable="true"
-            android:drawableTop="@drawable/ic_updates"
-            android:drawablePadding="3dp"
-            android:drawableTint="@color/nav_item_color"
-            android:focusable="true"
-            android:fontFamily="sans-serif-medium"
-            android:gravity="center"
-            android:text="Updates"
-            android:textColor="@color/nav_item_color"
-            android:textSize="11sp" />
     </LinearLayout>
 </LinearLayout>
