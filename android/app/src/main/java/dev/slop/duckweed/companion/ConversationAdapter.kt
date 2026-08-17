@@ -8,14 +8,27 @@ import android.view.ViewGroup
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.core.content.ContextCompat
+import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.RecyclerView
 
 class ConversationAdapter : RecyclerView.Adapter<ConversationAdapter.Holder>() {
     private var messages: List<CompletionRecord> = emptyList()
 
     fun submit(next: List<CompletionRecord>) {
+        val previous = messages
+        val diff = DiffUtil.calculateDiff(object : DiffUtil.Callback() {
+            override fun getOldListSize(): Int = previous.size
+
+            override fun getNewListSize(): Int = next.size
+
+            override fun areItemsTheSame(oldItemPosition: Int, newItemPosition: Int): Boolean =
+                previous[oldItemPosition].id == next[newItemPosition].id
+
+            override fun areContentsTheSame(oldItemPosition: Int, newItemPosition: Int): Boolean =
+                previous[oldItemPosition] == next[newItemPosition]
+        })
         messages = next
-        notifyDataSetChanged()
+        diff.dispatchUpdatesTo(this)
     }
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): Holder = Holder(

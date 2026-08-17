@@ -67,6 +67,7 @@ class MainActivity : AppCompatActivity() {
     private var selectedTarget: ConversationTarget? = null
     private var legacyResponse: CompletionRecord? = null
     private var conversationReturnsToProject = false
+    private var conversationShouldStickToBottom = true
     private var refreshRequestedAt = 0L
     private var refreshSnapshotVersion = 0L
 
@@ -148,6 +149,11 @@ class MainActivity : AppCompatActivity() {
         conversationList.apply {
             layoutManager = LinearLayoutManager(this@MainActivity).apply { stackFromEnd = true }
             adapter = conversationAdapter
+            addOnScrollListener(object : RecyclerView.OnScrollListener() {
+                override fun onScrolled(recyclerView: RecyclerView, dx: Int, dy: Int) {
+                    conversationShouldStickToBottom = !recyclerView.canScrollVertically(1)
+                }
+            })
         }
         responsesRefresh.setOnChildScrollUpCallback { _, _ ->
             findViewById<RecyclerView>(R.id.message_list).canScrollVertically(-1)
@@ -640,6 +646,7 @@ class MainActivity : AppCompatActivity() {
         selectedTarget = null
         legacyResponse = message
         conversationReturnsToProject = false
+        conversationShouldStickToBottom = true
         projectDetail.visibility = View.GONE
         conversationDetail.visibility = View.VISIBLE
         setDetailChrome(true)
@@ -665,6 +672,7 @@ class MainActivity : AppCompatActivity() {
         selectedTarget = target
         legacyResponse = null
         conversationReturnsToProject = returnToProject
+        conversationShouldStickToBottom = true
         projectDetail.visibility = View.GONE
         conversationDetail.visibility = View.VISIBLE
         setDetailChrome(true)
@@ -729,12 +737,17 @@ class MainActivity : AppCompatActivity() {
                 },
             )
         }.joinToString("  •  ")
+        val shouldScrollToBottom = conversationShouldStickToBottom
         conversationAdapter.submit(messages)
         conversationThinking.visibility = if (thinking) View.VISIBLE else View.GONE
         val canReply = SecretStore.load(this, target.pairId) != null && target.terminal.status != "exited"
         conversationComposer.visibility = if (canReply) View.VISIBLE else View.GONE
         conversationUnavailable.visibility = if (canReply) View.GONE else View.VISIBLE
-        if (messages.isNotEmpty()) conversationList.scrollToPosition(messages.lastIndex)
+        if (shouldScrollToBottom && messages.isNotEmpty()) {
+            conversationList.post {
+                conversationList.scrollToPosition(messages.lastIndex)
+            }
+        }
     }
 
     private fun mergeConversation(
@@ -807,6 +820,7 @@ class MainActivity : AppCompatActivity() {
                 runOnUiThread {
                     conversationSend.isEnabled = true
                     conversationInput.text.clear()
+                    conversationShouldStickToBottom = true
                     refreshConversation()
                 }
             }.onFailure { error ->
