@@ -68,7 +68,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var conversationDetail: View
     private lateinit var conversationThinking: View
     private lateinit var conversationComposer: View
-    private lateinit var conversationUnavailable: View
+    private lateinit var conversationUnavailable: TextView
     private lateinit var conversationInput: EditText
     private lateinit var conversationSend: ImageButton
     private lateinit var conversationAttach: ImageButton
