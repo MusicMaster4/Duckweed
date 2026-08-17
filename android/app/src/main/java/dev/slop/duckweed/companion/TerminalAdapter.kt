@@ -6,6 +6,7 @@ import android.view.ViewGroup
 import android.widget.TextView
 import androidx.core.content.ContextCompat
 import androidx.recyclerview.widget.RecyclerView
+import androidx.recyclerview.widget.DiffUtil
 
 class TerminalAdapter(
     private val onOpen: (ConversationTarget) -> Unit,
@@ -13,17 +14,26 @@ class TerminalAdapter(
     private var targets: List<ConversationTarget> = emptyList()
 
     fun submit(next: ProjectRow?) {
-        targets = next?.let { row ->
+        submitTargets(next?.let { row ->
             row.project.terminals.map { terminal ->
                 ConversationTarget(row.pairId, row.project.id, row.project.name, terminal)
             }
-        }.orEmpty()
-        notifyDataSetChanged()
+        }.orEmpty())
     }
 
     fun submitTargets(next: List<ConversationTarget>) {
+        val previous = targets
+        val diff = DiffUtil.calculateDiff(object : DiffUtil.Callback() {
+            override fun getOldListSize(): Int = previous.size
+            override fun getNewListSize(): Int = next.size
+            override fun areItemsTheSame(oldItemPosition: Int, newItemPosition: Int): Boolean =
+                previous[oldItemPosition].pairId == next[newItemPosition].pairId &&
+                    previous[oldItemPosition].terminal.id == next[newItemPosition].terminal.id
+            override fun areContentsTheSame(oldItemPosition: Int, newItemPosition: Int): Boolean =
+                previous[oldItemPosition] == next[newItemPosition]
+        })
         targets = next
-        notifyDataSetChanged()
+        diff.dispatchUpdatesTo(this)
     }
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): Holder = Holder(

@@ -30,6 +30,10 @@
             </intent-filter>
         </service>
 
+        <receiver
+            android:name=".ApprovalActionReceiver"
+            android:exported="false" />
+
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.files"

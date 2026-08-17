@@ -222,6 +222,33 @@ struct PlainRemoteCommand {
     permission_id: Option<String>,
     #[serde(default)]
     option_id: Option<String>,
+    #[serde(default)]
+    images: Vec<RemoteImageAttachment>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteImageAttachment {
+    id: String,
+    name: String,
+    mime_type: String,
+    data_url: String,
+    size: usize,
+}
+
+impl RemoteImageAttachment {
+    fn is_valid(&self) -> bool {
+        matches!(
+            self.mime_type.as_str(),
+            "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+        ) && self
+            .data_url
+            .starts_with(&format!("data:{};base64,", self.mime_type))
+            && self.data_url.len() <= 180_000
+            && self.size <= 115 * 1024
+            && !self.id.trim().is_empty()
+            && !self.name.trim().is_empty()
+    }
 }
 
 impl PlainRemoteCommand {
@@ -232,10 +259,13 @@ impl PlainRemoteCommand {
                 self.terminal_id
                     .as_deref()
                     .is_some_and(|value| !value.trim().is_empty())
-                    && self
+                    && (self
                         .text
                         .as_deref()
                         .is_some_and(|value| !value.trim().is_empty())
+                        || !self.images.is_empty())
+                    && self.images.len() <= 1
+                    && self.images.iter().all(RemoteImageAttachment::is_valid)
             }
             "approval" => {
                 self.terminal_id
@@ -266,6 +296,7 @@ pub struct RemoteCommand {
     pub text: Option<String>,
     pub permission_id: Option<String>,
     pub option_id: Option<String>,
+    pub images: Vec<RemoteImageAttachment>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -984,6 +1015,7 @@ fn poll_commands_blocking(app: &AppHandle) -> Result<Vec<RemoteCommand>, String>
                 text: command.text,
                 permission_id: command.permission_id,
                 option_id: command.option_id,
+                images: command.images,
             });
         }
     }
@@ -1172,6 +1204,21 @@ mod tests {
         )
         .unwrap();
         assert!(!missing_option.is_valid());
+    }
+
+    #[test]
+    fn image_commands_require_a_bounded_supported_data_url() {
+        let valid: PlainRemoteCommand = serde_json::from_str(
+            r#"{"version":1,"id":"00000000-0000-4000-8000-000000000001","kind":"input","terminalId":"term-1","text":"","images":[{"id":"image-1","name":"shot.png","mimeType":"image/png","dataUrl":"data:image/png;base64,AA","size":1}]}"#,
+        )
+        .unwrap();
+        assert!(valid.is_valid());
+
+        let unsupported: PlainRemoteCommand = serde_json::from_str(
+            r#"{"version":1,"id":"00000000-0000-4000-8000-000000000001","kind":"input","terminalId":"term-1","images":[{"id":"image-1","name":"shot.svg","mimeType":"image/svg+xml","dataUrl":"data:image/svg+xml;base64,AA","size":1}]}"#,
+        )
+        .unwrap();
+        assert!(!unsupported.is_valid());
     }
 
     #[test]

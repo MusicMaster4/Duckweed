@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:id="@+id/conversation_row"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
@@ -38,11 +39,39 @@
             android:textSize="13sp" />
 
         <TextView
+            android:id="@+id/conversation_attachment"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:background="@drawable/chip_accent"
+            app:drawableStartCompat="@drawable/ic_attach"
+            android:drawablePadding="6dp"
+            app:drawableTint="@color/duckweed_accent"
+            android:maxLines="1"
+            android:paddingStart="9dp"
+            android:paddingTop="7dp"
+            android:paddingEnd="9dp"
+            android:paddingBottom="7dp"
+            android:textColor="@color/duckweed_text_dim"
+            android:textSize="11sp"
+            android:visibility="gone" />
+
+        <TextView
             android:id="@+id/conversation_time"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_marginTop="7dp"
             android:textColor="@color/duckweed_text_faint"
             android:textSize="10sp" />
+
+        <TextView
+            android:id="@+id/conversation_delivery"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:fontFamily="sans-serif-medium"
+            android:textColor="@color/duckweed_text_faint"
+            android:textSize="10sp"
+            android:visibility="gone" />
     </LinearLayout>
 </LinearLayout>

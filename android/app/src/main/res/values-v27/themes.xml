@@ -1,0 +1,5 @@
+<resources>
+    <style name="Theme.DuckweedCompanion" parent="Base.Theme.DuckweedCompanion">
+        <item name="android:windowLightNavigationBar">false</item>
+    </style>
+</resources>

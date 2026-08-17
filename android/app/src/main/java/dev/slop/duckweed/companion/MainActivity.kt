@@ -10,15 +10,23 @@ import android.content.res.ColorStateList
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.text.Editable
+import android.text.TextWatcher
 import android.text.format.DateUtils
+import android.view.HapticFeedbackConstants
 import android.view.View
 import android.view.ViewGroup
+import android.view.animation.DecelerateInterpolator
 import android.widget.Button
 import android.widget.EditText
+import android.widget.ImageButton
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
+import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.SwitchCompat
@@ -29,12 +37,14 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.updatePadding
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
+import androidx.recyclerview.widget.SimpleItemAnimator
 import androidx.swiperefreshlayout.widget.SwipeRefreshLayout
 import com.google.firebase.messaging.FirebaseMessaging
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
 import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
 import java.util.concurrent.Executors
+import java.util.UUID
 
 class MainActivity : AppCompatActivity() {
     private enum class Page { ACTIVITY, PROJECTS, CONVERSATIONS, SETTINGS }
@@ -60,7 +70,11 @@ class MainActivity : AppCompatActivity() {
     private lateinit var conversationComposer: View
     private lateinit var conversationUnavailable: View
     private lateinit var conversationInput: EditText
-    private lateinit var conversationSend: TextView
+    private lateinit var conversationSend: ImageButton
+    private lateinit var conversationAttach: ImageButton
+    private lateinit var conversationAttachmentPreview: View
+    private lateinit var conversationAttachmentImage: ImageView
+    private lateinit var conversationAttachmentName: TextView
     private lateinit var conversationList: RecyclerView
     private lateinit var conversationApproval: View
     private lateinit var approvalTitle: TextView
@@ -74,8 +88,9 @@ class MainActivity : AppCompatActivity() {
     private val projectAdapter = ProjectAdapter { openProject(it) }
     private val terminalAdapter = TerminalAdapter { openConversation(it, true) }
     private val conversationsAdapter = TerminalAdapter { openConversation(it, false) }
-    private val conversationAdapter = ConversationAdapter()
+    private val conversationAdapter = ConversationAdapter(::retryConversationMessage)
     private val executor = Executors.newSingleThreadExecutor()
+    private lateinit var draftStore: DraftStore
     private var receiverRegistered = false
     private var syncingNotificationsToggle = false
     private var updateAvailable: AndroidUpdateManifest? = null
@@ -85,6 +100,9 @@ class MainActivity : AppCompatActivity() {
     private var legacyResponse: CompletionRecord? = null
     private var conversationReturnsToProject = false
     private var conversationShouldStickToBottom = true
+    private var selectedDraftAttachment: MobileImageAttachment? = null
+    private val deliveryChecks = mutableSetOf<String>()
+    private val draftPersistRunnable = Runnable { writeCurrentDraft() }
     private var refreshRequestedAt = 0L
     private var refreshSnapshotVersion = 0L
     private val connectionTicker = object : Runnable {
@@ -103,6 +121,36 @@ class MainActivity : AppCompatActivity() {
             showPendingNotifications()
         } else {
             MessageStore(this).dismissPendingNotifications()
+        }
+    }
+
+    private val imagePicker = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        uri ?: return@registerForActivityResult
+        conversationAttach.isEnabled = false
+        findViewById<TextView>(R.id.conversation_status).text = "Preparing image..."
+        executor.execute {
+            runCatching { MobileImageTools.read(this, uri) }
+                .onSuccess { attachment ->
+                    runOnUiThread {
+                        conversationAttach.isEnabled = true
+                        selectedDraftAttachment = attachment
+                        persistCurrentDraft()
+                        renderDraftAttachment()
+                        refreshConversation()
+                        conversationInput.requestFocus()
+                    }
+                }
+                .onFailure { error ->
+                    runOnUiThread {
+                        conversationAttach.isEnabled = true
+                        Toast.makeText(
+                            this,
+                            error.message ?: "Could not attach this image.",
+                            Toast.LENGTH_LONG,
+                        ).show()
+                        refreshConversation()
+                    }
+                }
         }
     }
 
@@ -137,6 +185,8 @@ class MainActivity : AppCompatActivity() {
         configureSystemBarInsets()
         NotificationTools.createChannel(this)
         appUpdater = AppUpdater(this)
+        draftStore = DraftStore(this)
+        MessageStore(this).recoverInterruptedSends()
 
         pairingStatus = findViewById(R.id.pairing_status)
         scanButton = findViewById(R.id.scan_button)
@@ -160,6 +210,10 @@ class MainActivity : AppCompatActivity() {
         conversationUnavailable = findViewById(R.id.conversation_unavailable)
         conversationInput = findViewById(R.id.conversation_input)
         conversationSend = findViewById(R.id.conversation_send)
+        conversationAttach = findViewById(R.id.conversation_attach)
+        conversationAttachmentPreview = findViewById(R.id.conversation_attachment_preview)
+        conversationAttachmentImage = findViewById(R.id.conversation_attachment_image)
+        conversationAttachmentName = findViewById(R.id.conversation_attachment_name)
         conversationList = findViewById(R.id.conversation_list)
         conversationApproval = findViewById(R.id.conversation_approval)
         approvalTitle = findViewById(R.id.approval_title)
@@ -172,22 +226,27 @@ class MainActivity : AppCompatActivity() {
         findViewById<RecyclerView>(R.id.message_list).apply {
             layoutManager = LinearLayoutManager(this@MainActivity)
             adapter = messageAdapter
+            tuneListMotion(this)
         }
         findViewById<RecyclerView>(R.id.project_list).apply {
             layoutManager = LinearLayoutManager(this@MainActivity)
             adapter = projectAdapter
+            tuneListMotion(this)
         }
         findViewById<RecyclerView>(R.id.terminal_list).apply {
             layoutManager = LinearLayoutManager(this@MainActivity)
             adapter = terminalAdapter
+            tuneListMotion(this)
         }
         findViewById<RecyclerView>(R.id.conversations_list).apply {
             layoutManager = LinearLayoutManager(this@MainActivity)
             adapter = conversationsAdapter
+            tuneListMotion(this)
         }
         conversationList.apply {
             layoutManager = LinearLayoutManager(this@MainActivity).apply { stackFromEnd = true }
             adapter = conversationAdapter
+            tuneListMotion(this)
             addOnScrollListener(object : RecyclerView.OnScrollListener() {
                 override fun onScrolled(recyclerView: RecyclerView, dx: Int, dy: Int) {
                     conversationShouldStickToBottom = !recyclerView.canScrollVertically(1)
@@ -205,6 +264,37 @@ class MainActivity : AppCompatActivity() {
         findViewById<View>(R.id.project_back).setOnClickListener { closeProject() }
         findViewById<View>(R.id.conversation_back).setOnClickListener { closeConversation() }
         conversationSend.setOnClickListener { sendConversationMessage() }
+        conversationAttach.setOnClickListener {
+            it.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
+            imagePicker.launch("image/*")
+        }
+        findViewById<View>(R.id.conversation_attachment_remove).setOnClickListener {
+            it.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
+            selectedDraftAttachment = null
+            persistCurrentDraft()
+            renderDraftAttachment()
+        }
+        conversationInput.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(value: CharSequence?, start: Int, count: Int, after: Int) = Unit
+            override fun onTextChanged(value: CharSequence?, start: Int, before: Int, count: Int) = Unit
+            override fun afterTextChanged(value: Editable?) {
+                scheduleDraftPersist()
+                updateComposerActions()
+            }
+        })
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                when {
+                    conversationDetail.visibility == View.VISIBLE -> closeConversation()
+                    projectDetail.visibility == View.VISIBLE -> closeProject()
+                    selectedPage == Page.SETTINGS -> showPage(Page.ACTIVITY)
+                    else -> {
+                        isEnabled = false
+                        onBackPressedDispatcher.onBackPressed()
+                    }
+                }
+            }
+        })
 
         combineSettingsSections()
         configureNavigation()
@@ -249,6 +339,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onStop() {
+        persistCurrentDraft()
         if (receiverRegistered) {
             unregisterReceiver(messagesChanged)
             unregisterReceiver(downloadFinished)
@@ -272,6 +363,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
+        persistCurrentDraft()
         outState.putString(STATE_PAGE, selectedPage.name)
         super.onSaveInstanceState(outState)
     }
@@ -283,11 +375,29 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun configureNavigation() {
-        findViewById<View>(R.id.nav_responses).setOnClickListener { showPage(Page.ACTIVITY) }
-        findViewById<View>(R.id.nav_projects).setOnClickListener { showPage(Page.PROJECTS) }
-        findViewById<View>(R.id.nav_conversations).setOnClickListener { showPage(Page.CONVERSATIONS) }
-        findViewById<View>(R.id.settings_button).setOnClickListener { showPage(Page.SETTINGS) }
+        fun bind(id: Int, page: Page) {
+            findViewById<View>(id).setOnClickListener { view ->
+                if (selectedPage != page) {
+                    view.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
+                    showPage(page)
+                }
+            }
+        }
+        bind(R.id.nav_responses, Page.ACTIVITY)
+        bind(R.id.nav_projects, Page.PROJECTS)
+        bind(R.id.nav_conversations, Page.CONVERSATIONS)
+        bind(R.id.settings_button, Page.SETTINGS)
         showPage(Page.ACTIVITY)
+    }
+
+    private fun tuneListMotion(list: RecyclerView) {
+        (list.itemAnimator as? SimpleItemAnimator)?.apply {
+            supportsChangeAnimations = false
+            addDuration = 130L
+            removeDuration = 100L
+            moveDuration = 150L
+            changeDuration = 100L
+        }
     }
 
     private fun combineSettingsSections() {
@@ -315,13 +425,15 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showPage(page: Page) {
+        persistCurrentDraft()
+        val previousPage = selectedPage
         selectedProject = null
         selectedTarget = null
+        selectedDraftAttachment = null
         legacyResponse = null
         projectDetail.visibility = View.GONE
         conversationDetail.visibility = View.GONE
         setDetailChrome(false)
-        selectedPage = page
         val pages = mapOf(
             Page.ACTIVITY to R.id.responses_page,
             Page.PROJECTS to R.id.projects_page,
@@ -333,9 +445,39 @@ class MainActivity : AppCompatActivity() {
             Page.PROJECTS to R.id.nav_projects,
             Page.CONVERSATIONS to R.id.nav_conversations,
         )
-        pages.forEach { (candidate, id) ->
-            findViewById<View>(id).visibility = if (candidate == page) View.VISIBLE else View.GONE
+        if (previousPage == page) {
+            pages.forEach { (candidate, id) ->
+                findViewById<View>(id).apply {
+                    animate().cancel()
+                    alpha = 1f
+                    translationY = 0f
+                    visibility = if (candidate == page) View.VISIBLE else View.GONE
+                }
+            }
+        } else {
+            val outgoing = pages[previousPage]?.let { findViewById<View>(it) }
+            val incoming = findViewById<View>(pages.getValue(page))
+            outgoing?.animate()?.cancel()
+            incoming.animate().cancel()
+            incoming.alpha = 0f
+            incoming.translationY = 10f * resources.displayMetrics.density
+            incoming.visibility = View.VISIBLE
+            outgoing?.animate()
+                ?.alpha(0f)
+                ?.setDuration(90L)
+                ?.withEndAction {
+                    outgoing.visibility = View.GONE
+                    outgoing.alpha = 1f
+                }
+                ?.start()
+            incoming.animate()
+                .alpha(1f)
+                .translationY(0f)
+                .setDuration(150L)
+                .setInterpolator(DecelerateInterpolator())
+                .start()
         }
+        selectedPage = page
         navigation.forEach { (candidate, id) -> findViewById<View>(id).isSelected = candidate == page }
         findViewById<View>(R.id.settings_button).isSelected = page == Page.SETTINGS
     }
@@ -736,6 +878,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun openProject(row: ProjectRow) {
+        persistCurrentDraft()
         selectedProject = row
         terminalAdapter.submit(row)
         findViewById<TextView>(R.id.project_detail_title).text = row.project.name
@@ -743,18 +886,19 @@ class MainActivity : AppCompatActivity() {
             add("${row.project.terminals.size} open terminals")
             row.project.branch?.let { add(it) }
         }.joinToString("  •  ")
-        projectDetail.visibility = View.VISIBLE
         conversationDetail.visibility = View.GONE
         setDetailChrome(true)
+        animateDetailIn(projectDetail)
     }
 
     private fun closeProject() {
         selectedProject = null
-        projectDetail.visibility = View.GONE
+        animateDetailOut(projectDetail)
         setDetailChrome(false)
     }
 
     private fun openResponse(message: CompletionRecord) {
+        persistCurrentDraft()
         MessageStore(this).markRead(message.id)
         messageAdapter.markRead(message.id)
         val target = findConversationTarget(message)
@@ -767,9 +911,9 @@ class MainActivity : AppCompatActivity() {
         conversationReturnsToProject = false
         conversationShouldStickToBottom = true
         projectDetail.visibility = View.GONE
-        conversationDetail.visibility = View.VISIBLE
         setDetailChrome(true)
         refreshConversation()
+        animateDetailIn(conversationDetail)
     }
 
     private fun findConversationTarget(message: CompletionRecord): ConversationTarget? {
@@ -788,24 +932,32 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun openConversation(target: ConversationTarget, returnToProject: Boolean) {
+        persistCurrentDraft()
         MessageStore(this).markConversationRead(target.pairId, target.terminal.id)
         messageAdapter.markConversationRead(target.pairId, target.terminal.id)
         selectedTarget = target
         legacyResponse = null
         conversationReturnsToProject = returnToProject
         conversationShouldStickToBottom = true
+        val draft = draftStore.load(target.pairId, target.terminal.id)
+        selectedDraftAttachment = draft.attachment
+        conversationInput.setText(draft.text)
+        conversationInput.setSelection(conversationInput.text.length)
+        renderDraftAttachment()
         projectDetail.visibility = View.GONE
-        conversationDetail.visibility = View.VISIBLE
         setDetailChrome(true)
         refreshConversation()
+        animateDetailIn(conversationDetail)
     }
 
     private fun closeConversation() {
+        persistCurrentDraft()
         selectedTarget = null
+        selectedDraftAttachment = null
         legacyResponse = null
-        conversationDetail.visibility = View.GONE
+        animateDetailOut(conversationDetail)
         if (conversationReturnsToProject && selectedProject != null) {
-            projectDetail.visibility = View.VISIBLE
+            animateDetailIn(projectDetail)
         } else {
             setDetailChrome(false)
         }
@@ -862,11 +1014,16 @@ class MainActivity : AppCompatActivity() {
         }.joinToString("  •  ")
         val shouldScrollToBottom = conversationShouldStickToBottom
         conversationAdapter.submit(messages)
-        conversationThinking.visibility = if (thinking) View.VISIBLE else View.GONE
+        setAnimatedVisibility(conversationThinking, thinking)
         renderApproval(target)
         val canReply = SecretStore.load(this, target.pairId) != null && target.terminal.status != "exited"
         conversationComposer.visibility = if (canReply) View.VISIBLE else View.GONE
         conversationUnavailable.visibility = if (canReply) View.GONE else View.VISIBLE
+        conversationAttach.visibility = if (canReply && target.terminal.agent != null) View.VISIBLE else View.GONE
+        updateComposerActions()
+        messages.filter { it.kind == "user" && it.deliveryState == "sent" }
+            .takeLast(5)
+            .forEach { trackDelivery(it.id, target.pairId) }
         if (shouldScrollToBottom && messages.isNotEmpty()) {
             conversationList.post {
                 conversationList.scrollToPosition(messages.lastIndex)
@@ -877,11 +1034,11 @@ class MainActivity : AppCompatActivity() {
     private fun renderApproval(target: ConversationTarget) {
         val permission = target.terminal.permission
         if (permission == null) {
-            conversationApproval.visibility = View.GONE
+            setAnimatedVisibility(conversationApproval, false)
             approvalActions.removeAllViews()
             return
         }
-        conversationApproval.visibility = View.VISIBLE
+        setAnimatedVisibility(conversationApproval, true)
         approvalTitle.text = permission.title
         approvalDetail.text = permission.detail
         approvalDetail.visibility = if (permission.detail.isNullOrBlank()) View.GONE else View.VISIBLE
@@ -903,7 +1060,10 @@ class MainActivity : AppCompatActivity() {
                         if (affirmative) R.color.duckweed_accent_ink else R.color.duckweed_text_dim,
                     ),
                 )
-                setOnClickListener { sendApproval(target, permission, option) }
+                setOnClickListener { view ->
+                    view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+                    sendApproval(target, permission, option)
+                }
             }
             approvalActions.addView(
                 button,
@@ -1008,34 +1168,173 @@ class MainActivity : AppCompatActivity() {
     private fun sendConversationMessage() {
         val target = selectedTarget ?: return
         val text = conversationInput.text.toString().trim().take(32_000)
-        if (text.isEmpty()) return
+        val attachments = listOfNotNull(selectedDraftAttachment)
+        if (text.isEmpty() && attachments.isEmpty()) return
+        if (attachments.isNotEmpty() && target.terminal.agent == null) {
+            Toast.makeText(this, "Images require an active agent session.", Toast.LENGTH_LONG).show()
+            return
+        }
         val credentials = SecretStore.load(this, target.pairId) ?: return
-        conversationSend.isEnabled = false
-        findViewById<TextView>(R.id.conversation_status).text = "Sending securely..."
+        val commandId = UUID.randomUUID().toString()
+        val sentAt = System.currentTimeMillis()
+        conversationSend.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+        MessageStore(this).putOutgoing(
+            target,
+            commandId,
+            sentAt,
+            text,
+            attachments,
+            deliveryState = "sending",
+        )
+        draftStore.clear(target.pairId, target.terminal.id)
+        selectedDraftAttachment = null
+        conversationInput.text.clear()
+        renderDraftAttachment()
+        conversationShouldStickToBottom = true
+        refreshConversation()
         executor.execute {
             runCatching {
-                val sent = RelayClient.sendCommand(
+                RelayClient.sendCommand(
                     credentials,
                     target.projectId,
                     target.terminal.id,
                     text,
+                    attachments,
+                    commandId,
+                    sentAt,
                 )
-                MessageStore(this).putOutgoing(target, sent.id, sent.sentAt, text)
             }.onSuccess {
+                MessageStore(this).updateOutgoingState(commandId, "sent")
                 runOnUiThread {
-                    conversationSend.isEnabled = true
-                    conversationInput.text.clear()
-                    conversationShouldStickToBottom = true
                     refreshConversation()
+                    trackDelivery(commandId, target.pairId)
                 }
             }.onFailure { error ->
+                MessageStore(this).updateOutgoingState(
+                    commandId,
+                    "failed",
+                    error.message ?: "Could not send this message.",
+                )
                 runOnUiThread {
-                    conversationSend.isEnabled = true
-                    findViewById<TextView>(R.id.conversation_status).text =
-                        error.message ?: "Could not send this message."
+                    refreshConversation()
                 }
             }
         }
+    }
+
+    private fun retryConversationMessage(message: CompletionRecord) {
+        if (message.kind != "user" || message.deliveryState != "failed") return
+        val pairId = message.pairId ?: return
+        val projectId = message.projectId ?: return
+        val terminalId = message.terminalId ?: return
+        val credentials = SecretStore.load(this, pairId) ?: return
+        val text = message.response.orEmpty()
+        if (text.isBlank() && message.attachments.none { it.dataUrl != null }) {
+            Toast.makeText(this, "This image is no longer available to retry.", Toast.LENGTH_LONG).show()
+            return
+        }
+        conversationList.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+        MessageStore(this).updateOutgoingState(message.id, "sending")
+        refreshConversation()
+        executor.execute {
+            runCatching {
+                RelayClient.sendCommand(
+                    credentials,
+                    projectId,
+                    terminalId,
+                    text,
+                    message.attachments,
+                    message.id,
+                    System.currentTimeMillis(),
+                )
+            }.onSuccess {
+                MessageStore(this).updateOutgoingState(message.id, "sent")
+                runOnUiThread {
+                    refreshConversation()
+                    trackDelivery(message.id, pairId)
+                }
+            }.onFailure { error ->
+                MessageStore(this).updateOutgoingState(
+                    message.id,
+                    "failed",
+                    error.message ?: "Could not send this message.",
+                )
+                runOnUiThread { refreshConversation() }
+            }
+        }
+    }
+
+    private fun trackDelivery(messageId: String, pairId: String) {
+        if (!deliveryChecks.add(messageId)) return
+        scheduleDeliveryCheck(messageId, pairId, 0)
+    }
+
+    private fun scheduleDeliveryCheck(messageId: String, pairId: String, attempt: Int) {
+        conversationList.postDelayed({
+            if (isFinishing || isDestroyed) {
+                deliveryChecks.remove(messageId)
+                return@postDelayed
+            }
+            executor.execute {
+                val credentials = SecretStore.load(this, pairId)
+                val delivered = credentials?.let {
+                    runCatching { !RelayClient.isCommandPending(it, messageId) }.getOrNull()
+                }
+                runOnUiThread {
+                    when {
+                        delivered == true -> {
+                            MessageStore(this).updateOutgoingState(messageId, "delivered")
+                            deliveryChecks.remove(messageId)
+                            if (conversationDetail.visibility == View.VISIBLE) refreshConversation()
+                        }
+                        attempt >= 20 -> deliveryChecks.remove(messageId)
+                        else -> scheduleDeliveryCheck(messageId, pairId, attempt + 1)
+                    }
+                }
+            }
+        }, if (attempt == 0) 1_200L else 3_000L)
+    }
+
+    private fun persistCurrentDraft() {
+        if (!::draftStore.isInitialized || !::conversationInput.isInitialized) return
+        conversationInput.removeCallbacks(draftPersistRunnable)
+        writeCurrentDraft()
+    }
+
+    private fun scheduleDraftPersist() {
+        if (!::conversationInput.isInitialized) return
+        conversationInput.removeCallbacks(draftPersistRunnable)
+        conversationInput.postDelayed(draftPersistRunnable, 350L)
+    }
+
+    private fun writeCurrentDraft() {
+        if (!::draftStore.isInitialized || !::conversationInput.isInitialized) return
+        val target = selectedTarget ?: return
+        draftStore.save(
+            target.pairId,
+            target.terminal.id,
+            ConversationDraft(conversationInput.text.toString(), selectedDraftAttachment),
+        )
+    }
+
+    private fun renderDraftAttachment() {
+        if (!::conversationAttachmentPreview.isInitialized) return
+        val attachment = selectedDraftAttachment
+        if (attachment == null) {
+            setAnimatedVisibility(conversationAttachmentPreview, false)
+            conversationAttachmentImage.setImageDrawable(null)
+        } else {
+            conversationAttachmentName.text = attachment.name
+            conversationAttachmentImage.setImageBitmap(MobileImageTools.decodePreview(attachment))
+            setAnimatedVisibility(conversationAttachmentPreview, true)
+        }
+        updateComposerActions()
+    }
+
+    private fun updateComposerActions() {
+        if (!::conversationSend.isInitialized || !::conversationInput.isInitialized) return
+        conversationSend.isEnabled = conversationInput.text.isNotBlank() || selectedDraftAttachment != null
+        conversationSend.alpha = if (conversationSend.isEnabled) 1f else 0.38f
     }
 
     private fun openIntentResponse() {
@@ -1046,17 +1345,84 @@ class MainActivity : AppCompatActivity() {
         openResponse(message)
     }
 
-    private fun setDetailChrome(detail: Boolean) {
-        findViewById<View>(R.id.top_header).visibility = if (detail) View.GONE else View.VISIBLE
-        findViewById<View>(R.id.bottom_nav).visibility = if (detail) View.GONE else View.VISIBLE
+    private fun animateDetailIn(view: View) {
+        if (view.visibility == View.VISIBLE && view.alpha == 1f) return
+        view.animate().cancel()
+        view.visibility = View.VISIBLE
+        view.alpha = 0f
+        view.translationX = 22f * resources.displayMetrics.density
+        view.animate()
+            .alpha(1f)
+            .translationX(0f)
+            .setDuration(170L)
+            .setInterpolator(DecelerateInterpolator())
+            .start()
     }
 
-    override fun onBackPressed() {
-        when {
-            conversationDetail.visibility == View.VISIBLE -> closeConversation()
-            projectDetail.visibility == View.VISIBLE -> closeProject()
-            selectedPage == Page.SETTINGS -> showPage(Page.ACTIVITY)
-            else -> super.onBackPressed()
+    private fun animateDetailOut(view: View) {
+        if (view.visibility != View.VISIBLE) return
+        view.animate().cancel()
+        view.animate()
+            .alpha(0f)
+            .translationX(14f * resources.displayMetrics.density)
+            .setDuration(110L)
+            .withEndAction {
+                view.visibility = View.GONE
+                view.alpha = 1f
+                view.translationX = 0f
+            }
+            .start()
+    }
+
+    private fun setAnimatedVisibility(view: View, visible: Boolean) {
+        if (visible && view.visibility == View.VISIBLE) return
+        if (!visible && view.visibility != View.VISIBLE) return
+        view.animate().cancel()
+        if (visible) {
+            view.visibility = View.VISIBLE
+            view.alpha = 0f
+            view.translationY = 6f * resources.displayMetrics.density
+            view.animate()
+                .alpha(1f)
+                .translationY(0f)
+                .setDuration(130L)
+                .setInterpolator(DecelerateInterpolator())
+                .start()
+        } else {
+            view.animate()
+                .alpha(0f)
+                .translationY(4f * resources.displayMetrics.density)
+                .setDuration(90L)
+                .withEndAction {
+                    view.visibility = View.GONE
+                    view.alpha = 1f
+                    view.translationY = 0f
+                }
+                .start()
+        }
+    }
+
+    private fun setDetailChrome(detail: Boolean) {
+        listOf(
+            findViewById<View>(R.id.top_header),
+            findViewById<View>(R.id.bottom_nav),
+        ).forEach { view ->
+            view.animate().cancel()
+            if (detail) {
+                if (view.visibility != View.VISIBLE) return@forEach
+                view.animate()
+                    .alpha(0f)
+                    .setDuration(80L)
+                    .withEndAction {
+                        view.visibility = View.GONE
+                        view.alpha = 1f
+                    }
+                    .start()
+            } else if (view.visibility != View.VISIBLE) {
+                view.alpha = 0f
+                view.visibility = View.VISIBLE
+                view.animate().alpha(1f).setDuration(120L).start()
+            }
         }
     }
 

@@ -15,8 +15,12 @@ class MessageFetchWorker(context: Context, parameters: WorkerParameters) : Worke
             if (message.workspace != null) {
                 WorkspaceStore(applicationContext).put(message.workspace)
                 MessageStore(applicationContext).putSyncedConversation(message.workspace)
+                NotificationTools.refreshApprovalActions(applicationContext)
             } else {
                 MessageStore(applicationContext).put(message)
+                if (message.kind == "attention" && NotificationPreference.isEnabled(applicationContext)) {
+                    NotificationTools.show(applicationContext, message)
+                }
             }
             RelayClient.acknowledge(credentials, messageId)
             NotificationTools.announceChanged(applicationContext)

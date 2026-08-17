@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:id="@+id/app_root"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
@@ -66,7 +67,7 @@
             android:contentDescription="Open settings"
             android:padding="12dp"
             android:src="@drawable/ic_settings"
-            android:tint="@color/duckweed_text_dim" />
+            app:tint="@color/duckweed_text_dim" />
     </LinearLayout>
 
     <FrameLayout
@@ -623,18 +624,15 @@
                 android:gravity="center_vertical"
                 android:orientation="horizontal">
 
-                <TextView
+                <ImageButton
                     android:id="@+id/project_back"
                     android:layout_width="48dp"
                     android:layout_height="48dp"
                     android:background="@drawable/nav_item"
-                    android:clickable="true"
                     android:contentDescription="Back to projects"
-                    android:focusable="true"
-                    android:gravity="center"
-                    android:text="‹"
-                    android:textColor="@color/duckweed_text"
-                    android:textSize="32sp" />
+                    android:padding="12dp"
+                    android:src="@drawable/ic_back"
+                    app:tint="@color/duckweed_text" />
 
                 <LinearLayout
                     android:layout_width="0dp"
@@ -703,18 +701,15 @@
                 android:gravity="center_vertical"
                 android:orientation="horizontal">
 
-                <TextView
+                <ImageButton
                     android:id="@+id/conversation_back"
                     android:layout_width="48dp"
                     android:layout_height="48dp"
                     android:background="@drawable/nav_item"
-                    android:clickable="true"
                     android:contentDescription="Back"
-                    android:focusable="true"
-                    android:gravity="center"
-                    android:text="‹"
-                    android:textColor="@color/duckweed_text"
-                    android:textSize="32sp" />
+                    android:padding="12dp"
+                    android:src="@drawable/ic_back"
+                    app:tint="@color/duckweed_text" />
 
                 <LinearLayout
                     android:layout_width="0dp"
@@ -837,13 +832,84 @@
                 android:layout_height="wrap_content"
                 android:layout_marginBottom="10dp"
                 android:background="@drawable/composer_background"
-                android:gravity="bottom"
                 android:minHeight="58dp"
-                android:orientation="horizontal"
-                android:paddingStart="14dp"
-                android:paddingTop="5dp"
-                android:paddingEnd="5dp"
-                android:paddingBottom="5dp">
+                android:orientation="vertical"
+                android:padding="5dp">
+
+                <LinearLayout
+                    android:id="@+id/conversation_attachment_preview"
+                    android:layout_width="match_parent"
+                    android:layout_height="64dp"
+                    android:layout_marginStart="6dp"
+                    android:layout_marginTop="5dp"
+                    android:layout_marginEnd="6dp"
+                    android:layout_marginBottom="3dp"
+                    android:background="@drawable/message_card"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal"
+                    android:padding="7dp"
+                    android:visibility="gone">
+
+                    <ImageView
+                        android:id="@+id/conversation_attachment_image"
+                        android:layout_width="48dp"
+                        android:layout_height="48dp"
+                        android:contentDescription="Selected image preview"
+                        android:scaleType="centerCrop" />
+
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="10dp"
+                        android:layout_weight="1"
+                        android:orientation="vertical">
+
+                        <TextView
+                            android:id="@+id/conversation_attachment_name"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:ellipsize="middle"
+                            android:fontFamily="sans-serif-medium"
+                            android:maxLines="1"
+                            android:textColor="@color/duckweed_text"
+                            android:textSize="12sp" />
+
+                        <TextView
+                            android:id="@+id/conversation_attachment_meta"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="2dp"
+                            android:text="Ready to send securely"
+                            android:textColor="@color/duckweed_text_faint"
+                            android:textSize="10sp" />
+                    </LinearLayout>
+
+                    <ImageButton
+                        android:id="@+id/conversation_attachment_remove"
+                        android:layout_width="48dp"
+                        android:layout_height="48dp"
+                        android:background="@drawable/nav_item"
+                        android:contentDescription="Remove selected image"
+                        android:padding="14dp"
+                        android:src="@drawable/ic_close"
+                        app:tint="@color/duckweed_text_dim" />
+                </LinearLayout>
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:gravity="bottom"
+                    android:orientation="horizontal">
+
+                <ImageButton
+                    android:id="@+id/conversation_attach"
+                    android:layout_width="48dp"
+                    android:layout_height="48dp"
+                    android:background="@drawable/nav_item"
+                    android:contentDescription="Attach an image"
+                    android:padding="12dp"
+                    android:src="@drawable/ic_attach"
+                    app:tint="@color/duckweed_text_dim" />
 
                 <EditText
                     android:id="@+id/conversation_input"
@@ -856,25 +922,22 @@
                     android:inputType="textCapSentences|textMultiLine"
                     android:maxLines="4"
                     android:minHeight="48dp"
-                    android:paddingStart="0dp"
+                    android:paddingStart="6dp"
                     android:paddingEnd="8dp"
                     android:textColor="@color/duckweed_text"
                     android:textColorHint="@color/duckweed_text_faint"
                     android:textSize="14sp" />
 
-                <TextView
+                <ImageButton
                     android:id="@+id/conversation_send"
                     android:layout_width="48dp"
                     android:layout_height="48dp"
                     android:background="@drawable/send_button"
-                    android:clickable="true"
                     android:contentDescription="Send message"
-                    android:focusable="true"
-                    android:fontFamily="sans-serif-medium"
-                    android:gravity="center"
-                    android:text="↑"
-                    android:textColor="@color/duckweed_accent_ink"
-                    android:textSize="22sp" />
+                    android:padding="13dp"
+                    android:src="@drawable/ic_send"
+                    app:tint="@color/duckweed_accent_ink" />
+                </LinearLayout>
             </LinearLayout>
 
             <TextView

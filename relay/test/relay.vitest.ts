@@ -173,6 +173,19 @@ describe("encrypted notification relay", () => {
       payload,
     }), env, accept);
     expect(queued.status).toBe(202);
+    const duplicate = await handleRequest(request(`/v1/pairings/${pairId}/commands`, "POST", receiveToken, {
+      commandId,
+      sentAt: Date.now(),
+      payload,
+    }), env, accept);
+    expect(duplicate.status).toBe(202);
+
+    const pending = await handleRequest(
+      request(`/v1/pairings/${pairId}/commands/${commandId}`, "GET", receiveToken),
+      env,
+      accept,
+    );
+    expect(await pending.json()).toEqual({ pending: true });
 
     const polled = await handleRequest(
       request(`/v1/pairings/${pairId}/commands`, "GET", sendToken),
@@ -194,6 +207,12 @@ describe("encrypted notification relay", () => {
       accept,
     );
     expect(acknowledged.status).toBe(204);
+    const delivered = await handleRequest(
+      request(`/v1/pairings/${pairId}/commands/${commandId}`, "GET", receiveToken),
+      env,
+      accept,
+    );
+    expect(await delivered.json()).toEqual({ pending: false });
     const emptyQueue = await handleRequest(
       request(`/v1/pairings/${pairId}/commands`, "GET", sendToken),
       env,

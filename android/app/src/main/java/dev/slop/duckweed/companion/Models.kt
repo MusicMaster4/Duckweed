@@ -24,6 +24,17 @@ data class CompletionRecord(
     val soundCue: Int? = null,
     val workspace: WorkspaceSnapshot? = null,
     val readAt: Long? = null,
+    val attachments: List<MobileImageAttachment> = emptyList(),
+    val deliveryState: String? = null,
+    val deliveryError: String? = null,
+)
+
+data class MobileImageAttachment(
+    val id: String,
+    val name: String,
+    val mimeType: String,
+    val dataUrl: String?,
+    val size: Int,
 )
 
 data class EncryptedEnvelope(val nonce: String, val ciphertext: String)

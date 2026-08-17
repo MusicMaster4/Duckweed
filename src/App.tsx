@@ -849,15 +849,19 @@ export default function App() {
                 ) {
                   agentSessions.respond(command.terminalId, command.permissionId, command.optionId);
                 }
-              } else if (command.terminalId && command.text) {
+              } else if (
+                command.kind === "input" &&
+                command.terminalId &&
+                (command.text || command.images.length > 0)
+              ) {
                 const meta = terminals.getMeta(command.terminalId);
                 if (meta && !meta.exited) {
                   const session = agentSessions.get(command.terminalId);
                   if (session) {
-                    agentSessions.submit(command.terminalId, command.text);
-                  } else if (meta.agent || meta.busy) {
+                    agentSessions.submit(command.terminalId, command.text ?? "", command.images);
+                  } else if (command.text && (meta.agent || meta.busy)) {
                     terminals.writeRaw(command.terminalId, `${command.text}\r`);
-                  } else {
+                  } else if (command.text) {
                     terminals.submitCommand(command.terminalId, command.text);
                   }
                 }

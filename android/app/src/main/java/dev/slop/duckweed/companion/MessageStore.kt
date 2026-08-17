@@ -5,6 +5,7 @@ import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 import org.json.JSONObject
+import org.json.JSONArray
 
 class MessageStore(context: Context) : SQLiteOpenHelper(context, "duckweed-messages.db", null, 4) {
     override fun onCreate(database: SQLiteDatabase) {
@@ -52,6 +53,23 @@ class MessageStore(context: Context) : SQLiteOpenHelper(context, "duckweed-messa
             .put("response", message.response)
             .put("durationMs", message.durationMs)
             .put("soundCue", message.soundCue)
+            .put("deliveryState", message.deliveryState)
+            .put("deliveryError", message.deliveryError)
+            .put(
+                "attachments",
+                JSONArray().apply {
+                    message.attachments.forEach { attachment ->
+                        put(
+                            JSONObject()
+                                .put("id", attachment.id)
+                                .put("name", attachment.name)
+                                .put("mimeType", attachment.mimeType)
+                                .put("dataUrl", attachment.dataUrl)
+                                .put("size", attachment.size),
+                        )
+                    }
+                },
+            )
             .toString()
             .toByteArray(Charsets.UTF_8)
         writableDatabase.insertWithOnConflict(
@@ -135,12 +153,23 @@ class MessageStore(context: Context) : SQLiteOpenHelper(context, "duckweed-messa
     fun response(messageId: String): CompletionRecord? =
         latest().firstOrNull { it.id == messageId }
 
+    fun message(messageId: String): CompletionRecord? =
+        read("id = ?", arrayOf(messageId)).firstOrNull()
+
     fun conversation(pairId: String, terminalId: String): List<CompletionRecord> =
         read(null)
             .filter { it.pairId == pairId && it.terminalId == terminalId }
             .sortedBy { it.sentAt }
 
-    fun putOutgoing(target: ConversationTarget, id: String, sentAt: Long, text: String) {
+    fun putOutgoing(
+        target: ConversationTarget,
+        id: String,
+        sentAt: Long,
+        text: String,
+        attachments: List<MobileImageAttachment> = emptyList(),
+        deliveryState: String = "sending",
+        deliveryError: String? = null,
+    ) {
         put(
             CompletionRecord(
                 id = id,
@@ -156,8 +185,40 @@ class MessageStore(context: Context) : SQLiteOpenHelper(context, "duckweed-messa
                 durationMs = null,
                 soundCue = null,
                 workspace = null,
+                attachments = attachments,
+                deliveryState = deliveryState,
+                deliveryError = deliveryError,
             ),
         )
+    }
+
+    fun updateOutgoingState(messageId: String, state: String, error: String? = null) {
+        val current = message(messageId) ?: return
+        val attachments = if (state == "sent" || state == "delivered") {
+            current.attachments.map { it.copy(dataUrl = null) }
+        } else {
+            current.attachments
+        }
+        put(
+            current.copy(
+                attachments = attachments,
+                deliveryState = state,
+                deliveryError = error,
+            ),
+        )
+    }
+
+    fun recoverInterruptedSends() {
+        read(null)
+            .filter { it.kind == "user" && it.deliveryState == "sending" }
+            .forEach {
+                put(
+                    it.copy(
+                        deliveryState = "failed",
+                        deliveryError = "Sending was interrupted. Tap to retry.",
+                    ),
+                )
+            }
     }
 
     fun putSyncedConversation(snapshot: WorkspaceSnapshot) {
@@ -189,13 +250,13 @@ class MessageStore(context: Context) : SQLiteOpenHelper(context, "duckweed-messa
         }
     }
 
-    private fun read(selection: String?): List<CompletionRecord> {
+    private fun read(selection: String?, selectionArgs: Array<String>? = null): List<CompletionRecord> {
         val messages = mutableListOf<CompletionRecord>()
         readableDatabase.query(
             "messages",
             arrayOf("encrypted_payload", "read_at"),
             selection,
-            null,
+            selectionArgs,
             null,
             null,
             "sent_at DESC",
@@ -206,6 +267,7 @@ class MessageStore(context: Context) : SQLiteOpenHelper(context, "duckweed-messa
                 runCatching {
                     JSONObject(String(SecretStore.decryptLocal(cursor.getString(0)), Charsets.UTF_8))
                 }.getOrNull()?.let { json ->
+                    val attachmentsJson = json.optJSONArray("attachments") ?: JSONArray()
                     messages += CompletionRecord(
                         id = json.getString("id"),
                         pairId = if (json.isNull("pairId")) null else json.optString("pairId").takeIf { it.isNotBlank() },
@@ -221,6 +283,21 @@ class MessageStore(context: Context) : SQLiteOpenHelper(context, "duckweed-messa
                         soundCue = if (json.isNull("soundCue")) null else json.optInt("soundCue").takeIf { it in 0..5 },
                         workspace = null,
                         readAt = readAt,
+                        attachments = (0 until attachmentsJson.length()).mapNotNull { index ->
+                            val attachment = attachmentsJson.optJSONObject(index) ?: return@mapNotNull null
+                            val name = attachment.optString("name")
+                            val mimeType = attachment.optString("mimeType")
+                            if (name.isBlank() || mimeType.isBlank()) return@mapNotNull null
+                            MobileImageAttachment(
+                                id = attachment.optString("id", "image-$index"),
+                                name = name,
+                                mimeType = mimeType,
+                                dataUrl = if (attachment.isNull("dataUrl")) null else attachment.optString("dataUrl"),
+                                size = attachment.optInt("size"),
+                            )
+                        },
+                        deliveryState = if (json.isNull("deliveryState")) null else json.optString("deliveryState"),
+                        deliveryError = if (json.isNull("deliveryError")) null else json.optString("deliveryError"),
                     )
                 }
             }

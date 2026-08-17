@@ -434,7 +434,7 @@ export async function handleRequest(request: Request, env: Env, push: PushSender
         }
         const now = Date.now();
         await env.DB.prepare(`
-          INSERT INTO commands (
+          INSERT OR IGNORE INTO commands (
             pair_id, command_id, payload_nonce, payload_ciphertext,
             sent_at, created_at, expires_at
           ) VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -481,6 +481,14 @@ export async function handleRequest(request: Request, env: Env, push: PushSender
 
     const commandId = parts[4];
     if (parts.length === 5 && parts[3] === "commands" && commandId && UUID_PATTERN.test(commandId)) {
+      if (request.method === "GET") {
+        const found = await requireReceive(env, pairId, request);
+        if (!found) return fail(401, "invalid receiver credential");
+        const pending = await env.DB.prepare(
+          "SELECT 1 AS present FROM commands WHERE pair_id = ? AND command_id = ? AND expires_at > ?",
+        ).bind(pairId, commandId, Date.now()).first<{ present: number }>();
+        return response({ pending: Boolean(pending?.present) }, 200);
+      }
       const found = await requireSend(env, pairId, request);
       if (!found) return fail(401, "invalid sender credential");
       if (request.method === "DELETE") {

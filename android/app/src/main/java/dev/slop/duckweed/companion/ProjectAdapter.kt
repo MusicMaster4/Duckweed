@@ -5,6 +5,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.TextView
 import androidx.recyclerview.widget.RecyclerView
+import androidx.recyclerview.widget.DiffUtil
 
 data class ProjectRow(val pairId: String, val project: RemoteProject)
 
@@ -14,8 +15,18 @@ class ProjectAdapter(
     private var projects: List<ProjectRow> = emptyList()
 
     fun submit(next: List<ProjectRow>) {
+        val previous = projects
+        val diff = DiffUtil.calculateDiff(object : DiffUtil.Callback() {
+            override fun getOldListSize(): Int = previous.size
+            override fun getNewListSize(): Int = next.size
+            override fun areItemsTheSame(oldItemPosition: Int, newItemPosition: Int): Boolean =
+                previous[oldItemPosition].pairId == next[newItemPosition].pairId &&
+                    previous[oldItemPosition].project.id == next[newItemPosition].project.id
+            override fun areContentsTheSame(oldItemPosition: Int, newItemPosition: Int): Boolean =
+                previous[oldItemPosition] == next[newItemPosition]
+        })
         projects = next
-        notifyDataSetChanged()
+        diff.dispatchUpdatesTo(this)
     }
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): Holder = Holder(

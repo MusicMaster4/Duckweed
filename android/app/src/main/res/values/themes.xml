@@ -1,8 +1,7 @@
 <resources>
-    <style name="Theme.DuckweedCompanion" parent="Theme.AppCompat.DayNight.NoActionBar">
+    <style name="Base.Theme.DuckweedCompanion" parent="Theme.AppCompat.DayNight.NoActionBar">
         <item name="android:fontFamily">sans</item>
         <item name="android:windowLightStatusBar">false</item>
-        <item name="android:windowLightNavigationBar">false</item>
         <item name="android:statusBarColor">@color/duckweed_background</item>
         <item name="android:navigationBarColor">@color/duckweed_background</item>
         <item name="android:windowBackground">@color/duckweed_background</item>
@@ -10,4 +9,5 @@
         <item name="android:colorControlHighlight">#267BE05A</item>
         <item name="colorAccent">@color/duckweed_accent</item>
     </style>
+    <style name="Theme.DuckweedCompanion" parent="Base.Theme.DuckweedCompanion" />
 </resources>

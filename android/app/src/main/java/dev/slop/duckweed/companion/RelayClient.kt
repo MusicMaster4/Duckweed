@@ -1,6 +1,7 @@
 package dev.slop.duckweed.companion
 
 import android.os.Build
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
 import java.net.HttpURLConnection
@@ -119,35 +120,38 @@ object RelayClient {
         projectId: String,
         terminalId: String,
         text: String,
+        attachments: List<MobileImageAttachment> = emptyList(),
+        commandId: String = UUID.randomUUID().toString(),
+        sentAt: Long = System.currentTimeMillis(),
     ): SentCommand {
-        val commandId = UUID.randomUUID().toString()
-        val sentAt = System.currentTimeMillis()
-        val plain = JSONObject()
-            .put("version", 1)
-            .put("id", commandId)
-            .put("sentAt", sentAt)
-            .put("kind", "input")
-            .put("projectId", projectId)
-            .put("terminalId", terminalId)
-            .put("text", text)
-            .toString()
-            .toByteArray(Charsets.UTF_8)
-        val encrypted = Crypto.encrypt(credentials, commandId, "command", plain)
-        request(
-            method = "POST",
-            url = "${credentials.relayUrl}/v1/pairings/${credentials.pairId}/commands",
-            bearer = credentials.receiveToken,
-            payload = JSONObject()
-                .put("commandId", commandId)
-                .put("sentAt", sentAt)
+        require(attachments.size <= 1) { "Only one image can be sent at a time." }
+        return sendEncryptedCommand(
+            credentials,
+            JSONObject()
+                .put("kind", "input")
+                .put("projectId", projectId)
+                .put("terminalId", terminalId)
+                .put("text", text)
                 .put(
-                    "payload",
-                    JSONObject()
-                        .put("nonce", encrypted.nonce)
-                        .put("ciphertext", encrypted.ciphertext),
+                    "images",
+                    JSONArray().apply {
+                        attachments.forEach { attachment ->
+                            val dataUrl = attachment.dataUrl
+                                ?: error("The selected image is no longer available.")
+                            put(
+                                JSONObject()
+                                    .put("id", attachment.id)
+                                    .put("name", attachment.name)
+                                    .put("mimeType", attachment.mimeType)
+                                    .put("dataUrl", dataUrl)
+                                    .put("size", attachment.size),
+                            )
+                        }
+                    },
                 ),
+            commandId,
+            sentAt,
         )
-        return SentCommand(commandId, sentAt)
     }
 
     fun sendApproval(
@@ -169,9 +173,9 @@ object RelayClient {
     private fun sendEncryptedCommand(
         credentials: PairCredentials,
         fields: JSONObject,
+        commandId: String = UUID.randomUUID().toString(),
+        sentAt: Long = System.currentTimeMillis(),
     ): SentCommand {
-        val commandId = UUID.randomUUID().toString()
-        val sentAt = System.currentTimeMillis()
         val plain = fields
             .put("version", 1)
             .put("id", commandId)
@@ -195,6 +199,13 @@ object RelayClient {
         )
         return SentCommand(commandId, sentAt)
     }
+
+    fun isCommandPending(credentials: PairCredentials, commandId: String): Boolean =
+        request(
+            method = "GET",
+            url = "${credentials.relayUrl}/v1/pairings/${credentials.pairId}/commands/$commandId",
+            bearer = credentials.receiveToken,
+        ).optBoolean("pending", false)
 
     fun requestWorkspaceRefresh(credentials: PairCredentials) {
         val commandId = UUID.randomUUID().toString()

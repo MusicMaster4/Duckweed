@@ -155,6 +155,39 @@ describe("mobile pairing continuity", () => {
     );
   });
 
+  test("attention notifications expose authenticated approve and reject actions", () => {
+    const notifications = read(
+      "android/app/src/main/java/dev/slop/duckweed/companion/NotificationTools.kt",
+    );
+    const receiver = read(
+      "android/app/src/main/java/dev/slop/duckweed/companion/ApprovalActionReceiver.kt",
+    );
+    const manifest = read("android/app/src/main/AndroidManifest.xml");
+
+    expect(notifications).toContain('.setAuthenticationRequired(true)');
+    expect(notifications).toContain('"Approve" to it');
+    expect(notifications).toContain('"Reject" to it');
+    expect(receiver).toContain("check(permission.id == permissionId)");
+    expect(receiver).toContain("RelayClient.sendApproval(");
+    expect(manifest).toContain('android:name=".ApprovalActionReceiver"');
+    expect(manifest).toContain('android:exported="false"');
+  });
+
+  test("mobile chat keeps encrypted drafts and end-to-end image prompts", () => {
+    const draft = read(
+      "android/app/src/main/java/dev/slop/duckweed/companion/DraftStore.kt",
+    );
+    const relay = read(
+      "android/app/src/main/java/dev/slop/duckweed/companion/RelayClient.kt",
+    );
+    const desktop = read("src/App.tsx");
+
+    expect(draft).toContain("SecretStore.encryptLocal");
+    expect(relay).toContain('"images",');
+    expect(desktop).toContain("command.images");
+    expect(desktop).toContain("agentSessions.submit(command.terminalId, command.text ?? \"\", command.images)");
+  });
+
   test("mobile primary navigation leaves connection and updates inside settings", () => {
     const layout = read("android/app/src/main/res/layout/activity_main.xml");
 

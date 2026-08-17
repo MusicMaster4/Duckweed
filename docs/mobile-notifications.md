@@ -68,8 +68,19 @@ cards. Every path leads to the same compact conversation view, which keeps
 submitted messages and final responses while replacing in-progress output with
 **Agent is thinking**. When an agent is blocked on an approval, the phone shows
 the exact encrypted choices and can send the selected decision back securely.
+Attention notifications also expose **Approve** and **Reject** when the pending
+request offers one-time versions of those decisions. Supported Android versions
+require the device to be unlocked before either action is delivered, and the
+companion revalidates the current permission and option identifiers before
+sending it.
 Sending `codex`, `claude`, or another installed agent command to an idle terminal
 starts it through the desktop in the same way as a local terminal submission.
+Conversation drafts are encrypted locally and survive navigation or an app
+restart. Agent conversations accept one PNG, JPEG, GIF, or WebP image per
+message; large images are resized on the phone before the complete prompt is
+encrypted. Outgoing bubbles distinguish sending, relay acceptance, desktop
+receipt, and failure. A failed bubble can be tapped to retry with the same
+idempotent command identity.
 The desktop republishes the encrypted workspace periodically and whenever its
 terminal state changes. Pull down on **Responses** or **Projects** to request an
 immediate refresh from a running paired desktop.

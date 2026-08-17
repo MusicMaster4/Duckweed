@@ -11,7 +11,9 @@ import androidx.core.content.ContextCompat
 import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.RecyclerView
 
-class ConversationAdapter : RecyclerView.Adapter<ConversationAdapter.Holder>() {
+class ConversationAdapter(
+    private val onRetry: (CompletionRecord) -> Unit,
+) : RecyclerView.Adapter<ConversationAdapter.Holder>() {
     private var messages: List<CompletionRecord> = emptyList()
 
     fun submit(next: List<CompletionRecord>) {
@@ -51,11 +53,39 @@ class ConversationAdapter : RecyclerView.Adapter<ConversationAdapter.Holder>() {
         )
         holder.text.text = message.response
             ?: "This terminal session did not expose a structured final response."
+        val attachment = message.attachments.firstOrNull()
+        holder.text.visibility = if (message.response.isNullOrBlank() && attachment != null) View.GONE else View.VISIBLE
+        holder.attachment.visibility = if (attachment == null) View.GONE else View.VISIBLE
+        holder.attachment.text = attachment?.name
         holder.time.text = DateUtils.getRelativeTimeSpanString(
             message.sentAt,
             System.currentTimeMillis(),
             DateUtils.MINUTE_IN_MILLIS,
         )
+        val delivery = if (outgoing) message.deliveryState else null
+        holder.delivery.visibility = if (delivery == null) View.GONE else View.VISIBLE
+        holder.delivery.text = when (delivery) {
+            "sending" -> "Sending securely..."
+            "sent" -> "Sent securely"
+            "delivered" -> "Received by desktop"
+            "failed" -> "Not sent. Tap to retry"
+            else -> delivery
+        }
+        holder.delivery.setTextColor(
+            ContextCompat.getColor(
+                holder.itemView.context,
+                if (delivery == "failed") R.color.duckweed_error else R.color.duckweed_text_faint,
+            ),
+        )
+        val retryable = outgoing && delivery == "failed"
+        holder.bubble.isClickable = retryable
+        holder.bubble.isFocusable = retryable
+        holder.bubble.contentDescription = if (retryable) {
+            "Message not sent. Double tap to retry."
+        } else {
+            null
+        }
+        holder.bubble.setOnClickListener(if (retryable) View.OnClickListener { onRetry(message) } else null)
     }
 
     class Holder(view: View) : RecyclerView.ViewHolder(view) {
@@ -63,6 +93,8 @@ class ConversationAdapter : RecyclerView.Adapter<ConversationAdapter.Holder>() {
         val bubble: LinearLayout = view.findViewById(R.id.conversation_bubble)
         val author: TextView = view.findViewById(R.id.conversation_author)
         val text: TextView = view.findViewById(R.id.conversation_text)
+        val attachment: TextView = view.findViewById(R.id.conversation_attachment)
         val time: TextView = view.findViewById(R.id.conversation_time)
+        val delivery: TextView = view.findViewById(R.id.conversation_delivery)
     }
 }

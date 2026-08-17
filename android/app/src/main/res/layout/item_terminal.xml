@@ -4,6 +4,9 @@
     android:layout_height="wrap_content"
     android:layout_marginBottom="8dp"
     android:background="@drawable/message_card"
+    android:clickable="true"
+    android:focusable="true"
+    android:foreground="?attr/selectableItemBackground"
     android:clipChildren="true"
     android:clipToOutline="true"
     android:minHeight="78dp">

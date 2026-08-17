@@ -7,6 +7,7 @@ import android.view.ViewGroup
 import android.widget.TextView
 import androidx.core.content.ContextCompat
 import androidx.recyclerview.widget.RecyclerView
+import androidx.recyclerview.widget.DiffUtil
 
 class MessageAdapter(
     private val onOpen: (CompletionRecord) -> Unit,
@@ -14,8 +15,17 @@ class MessageAdapter(
     private var messages: List<CompletionRecord> = emptyList()
 
     fun submit(next: List<CompletionRecord>) {
+        val previous = messages
+        val diff = DiffUtil.calculateDiff(object : DiffUtil.Callback() {
+            override fun getOldListSize(): Int = previous.size
+            override fun getNewListSize(): Int = next.size
+            override fun areItemsTheSame(oldItemPosition: Int, newItemPosition: Int): Boolean =
+                previous[oldItemPosition].id == next[newItemPosition].id
+            override fun areContentsTheSame(oldItemPosition: Int, newItemPosition: Int): Boolean =
+                previous[oldItemPosition] == next[newItemPosition]
+        })
         messages = next
-        notifyDataSetChanged()
+        diff.dispatchUpdatesTo(this)
     }
 
     fun markRead(messageId: String, at: Long = System.currentTimeMillis()) {

@@ -120,6 +120,13 @@ export interface MobileRemoteCommand {
   text: string | null;
   permissionId: string | null;
   optionId: string | null;
+  images: Array<{
+    id: string;
+    name: string;
+    mimeType: "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+    dataUrl: string;
+    size: number;
+  }>;
 }
 
 export interface MobileSendResult {
