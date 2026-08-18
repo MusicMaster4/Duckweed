@@ -122,6 +122,7 @@ import {
 import {
   fitMobileWorkspaceSnapshot,
   MOBILE_WORKSPACE_CONVERSATION_BUDGET_BYTES,
+  mobileAgentActivity,
   mobileTerminalStatus,
   truncateUtf8,
   truncateUtf8Tail,
@@ -885,6 +886,7 @@ export default function App() {
               sentAt: number;
               role: "user" | "assistant";
               rawText: string;
+              streaming?: boolean;
             }> = [];
             for (const item of session?.items ?? []) {
               if (item.kind === "user") {
@@ -894,12 +896,13 @@ export default function App() {
                   role: "user",
                   rawText: item.text,
                 });
-              } else if (item.kind === "assistant" && !item.streaming) {
+              } else if (item.kind === "assistant") {
                 conversationSource.push({
                   id: item.id,
                   sentAt: item.at,
                   role: "assistant",
                   rawText: item.text,
+                  streaming: item.streaming,
                 });
               }
             }
@@ -913,7 +916,13 @@ export default function App() {
                 0,
                 remainingConversationBytes - utf8ByteLength(text),
               );
-              return { id: item.id, sentAt: item.sentAt, role: item.role, text };
+              return {
+                id: item.id,
+                sentAt: item.sentAt,
+                role: item.role,
+                text,
+                streaming: item.streaming || undefined,
+              };
             }).filter((item) => item.text.length > 0);
             return [{
               id: node.term,
@@ -929,6 +938,18 @@ export default function App() {
                 ? truncateUtf8Tail(terminals.dumpBufferPlainForMobile(node.term), 16_000)
                 : undefined,
               unreadOnDesktop: unreadTermIdsRef.current.has(node.term),
+              commands: [...(session?.commands ?? [])]
+                .sort((left, right) => {
+                  const priority = (name: string) =>
+                    name === "/new" ? 0 : name === "/model" ? 1 : name === "/effort" ? 2 : 3;
+                  return priority(left.name) - priority(right.name);
+                })
+                .slice(0, 32)
+                .map((command) => ({
+                  name: command.name.slice(0, 80),
+                  description: command.description.slice(0, 180),
+                })),
+              activity: mobileAgentActivity(session?.items ?? []),
               conversation,
               permission: session?.permission && session.permission.kind !== "question"
                 ? {

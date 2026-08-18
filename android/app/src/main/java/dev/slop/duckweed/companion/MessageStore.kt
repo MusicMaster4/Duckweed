@@ -304,9 +304,9 @@ class MessageStore(context: Context) : SQLiteOpenHelper(context, "duckweed-messa
                 project.terminals.forEach { terminal ->
                     val mobileReadAt = conversationReadAt(database, snapshot.pairId, terminal.id)
                     val latestAssistantId = terminal.conversation
-                        .lastOrNull { it.role == "assistant" }
+                        .lastOrNull { it.role == "assistant" && !it.streaming }
                         ?.id
-                    terminal.conversation.forEach { message ->
+                    terminal.conversation.filterNot { it.streaming }.forEach { message ->
                         val id = "workspace:${snapshot.pairId}:${terminal.id}:${message.id}"
                         val unread = MobileSyncPolicy.isSyncedMessageUnread(
                             terminal.unreadOnDesktop,

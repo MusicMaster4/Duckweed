@@ -100,6 +100,8 @@ object Crypto {
                 terminals = (0 until terminalsJson.length()).mapNotNull { terminalIndex ->
                     val terminal = terminalsJson.optJSONObject(terminalIndex) ?: return@mapNotNull null
                     val conversationJson = terminal.optJSONArray("conversation") ?: JSONArray()
+                    val commandsJson = terminal.optJSONArray("commands") ?: JSONArray()
+                    val activityJson = terminal.optJSONArray("activity") ?: JSONArray()
                     val permissionJson = terminal.optJSONObject("permission")
                     val agent = if (terminal.isNull("agent")) null else {
                         terminal.optString("agent").takeIf { it.isNotBlank() }
@@ -125,6 +127,30 @@ object Crypto {
                         } else {
                             null
                         },
+                        commands = (0 until commandsJson.length()).mapNotNull { commandIndex ->
+                            val command = commandsJson.optJSONObject(commandIndex) ?: return@mapNotNull null
+                            val name = command.optString("name").trim()
+                            if (!name.startsWith("/")) return@mapNotNull null
+                            RemoteSlashCommand(name, command.optString("description").trim())
+                        },
+                        activity = (0 until activityJson.length()).mapNotNull { activityIndex ->
+                            val item = activityJson.optJSONObject(activityIndex) ?: return@mapNotNull null
+                            val id = item.optString("id").trim()
+                            val title = item.optString("title").trim()
+                            val kind = item.optString("kind")
+                            val status = item.optString("status")
+                            if (id.isEmpty() || title.isEmpty() || kind !in setOf("thinking", "tool", "plan")) {
+                                return@mapNotNull null
+                            }
+                            RemoteAgentActivity(
+                                id,
+                                item.optLong("at", json.optLong("sentAt")),
+                                kind,
+                                title,
+                                item.optString("detail").trim().takeIf { it.isNotEmpty() },
+                                status.takeIf { it in setOf("pending", "running", "done", "error") } ?: "done",
+                            )
+                        },
                         conversation = (0 until conversationJson.length()).mapNotNull { messageIndex ->
                             val message = conversationJson.optJSONObject(messageIndex) ?: return@mapNotNull null
                             val role = message.optString("role")
@@ -137,6 +163,7 @@ object Crypto {
                                 sentAt = message.optLong("sentAt", json.optLong("sentAt")),
                                 role = role,
                                 text = text,
+                                streaming = message.optBoolean("streaming", false),
                             )
                         },
                         permission = permissionJson?.let { permission ->

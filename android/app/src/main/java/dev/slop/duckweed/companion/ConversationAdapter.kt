@@ -50,7 +50,11 @@ class ConversationAdapter(
         val outgoing = message.kind == "user"
         holder.row.gravity = if (outgoing) Gravity.END else Gravity.START
         holder.bubble.setBackgroundResource(if (outgoing) R.drawable.bubble_user else R.drawable.bubble_agent)
-        holder.author.text = if (outgoing) "YOU" else message.agent.uppercase()
+        holder.author.text = when {
+            outgoing -> "YOU"
+            message.streaming -> "${message.agent.uppercase()}  ·  WRITING"
+            else -> message.agent.uppercase()
+        }
         holder.author.setTextColor(
             ContextCompat.getColor(
                 holder.itemView.context,

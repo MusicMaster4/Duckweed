@@ -72,6 +72,10 @@ class MainActivity : AppCompatActivity() {
     private lateinit var projectDetail: View
     private lateinit var conversationDetail: View
     private lateinit var conversationThinking: View
+    private lateinit var conversationActivity: View
+    private lateinit var conversationActivityRows: LinearLayout
+    private lateinit var conversationCommandsScroll: View
+    private lateinit var conversationCommands: LinearLayout
     private lateinit var conversationComposer: View
     private lateinit var conversationUnavailable: TextView
     private lateinit var conversationInput: EditText
@@ -226,6 +230,10 @@ class MainActivity : AppCompatActivity() {
         projectDetail = findViewById(R.id.project_detail)
         conversationDetail = findViewById(R.id.conversation_detail)
         conversationThinking = findViewById(R.id.conversation_thinking)
+        conversationActivity = findViewById(R.id.conversation_activity)
+        conversationActivityRows = findViewById(R.id.conversation_activity_rows)
+        conversationCommandsScroll = findViewById(R.id.conversation_commands_scroll)
+        conversationCommands = findViewById(R.id.conversation_commands)
         conversationComposer = findViewById(R.id.conversation_composer)
         conversationUnavailable = findViewById(R.id.conversation_unavailable)
         conversationInput = findViewById(R.id.conversation_input)
@@ -313,6 +321,7 @@ class MainActivity : AppCompatActivity() {
             override fun afterTextChanged(value: Editable?) {
                 scheduleDraftPersist()
                 updateComposerActions()
+                updateSlashCommandSuggestions()
             }
         })
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
@@ -1186,6 +1195,8 @@ class MainActivity : AppCompatActivity() {
             conversationList.visibility = View.VISIBLE
             conversationTerminal.visibility = View.GONE
             conversationThinking.visibility = View.GONE
+            conversationActivity.visibility = View.GONE
+            conversationCommandsScroll.visibility = View.GONE
             conversationApproval.visibility = View.GONE
             conversationComposer.visibility = View.GONE
             conversationUnavailable.text =
@@ -1210,10 +1221,15 @@ class MainActivity : AppCompatActivity() {
                 durationMs = null,
                 soundCue = null,
                 workspace = null,
+                streaming = message.streaming,
             )
         }
         val stored = MessageStore(this).conversation(target.pairId, target.terminal.id)
-        val messages = if (terminalMode) emptyList() else mergeConversation(synced, stored)
+        val messages = if (terminalMode) {
+            emptyList()
+        } else {
+            ConversationMergePolicy.merge(synced, stored)
+        }
         val isAgent = target.terminal.agent != null
         val thinking = isAgent && target.terminal.status == "working"
         val desktopOnline = isDesktopOnline(target.pairId)
@@ -1242,9 +1258,10 @@ class MainActivity : AppCompatActivity() {
         conversationList.visibility = if (terminalMode) View.GONE else View.VISIBLE
         conversationTerminal.visibility = if (terminalMode) View.VISIBLE else View.GONE
         if (terminalMode) renderTerminalOutput(target.terminal.terminalOutput)
-        setAnimatedVisibility(conversationThinking, !terminalMode && thinking && desktopOnline)
+        renderAgentActivity(target, thinking && desktopOnline)
         renderApproval(target)
         refreshConversationAvailability()
+        updateSlashCommandSuggestions()
         messages.filter { it.kind == "user" && it.deliveryState == "sent" }
             .takeLast(5)
             .forEach { trackDelivery(it.id, target.pairId) }
@@ -1397,29 +1414,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun mergeConversation(
-        synced: List<CompletionRecord>,
-        stored: List<CompletionRecord>,
-    ): List<CompletionRecord> {
-        val storedById = stored.associateBy { it.id }
-        val merged = synced.map { storedById[it.id] ?: it }.toMutableList()
-        val syncedIds = synced.mapTo(mutableSetOf()) { it.id }
-
-        stored.asSequence()
-            .filter { it.id !in syncedIds }
-            .forEach { candidate ->
-                val duplicate = merged.indexOfFirst { existing ->
-                    isCrossSourceDuplicate(existing, candidate)
-                }
-                if (duplicate < 0) {
-                    merged += candidate
-                } else if (merged[duplicate].id.startsWith("workspace:")) {
-                    merged[duplicate] = candidate
-                }
-            }
-        return merged.sortedBy { it.sentAt }
-    }
-
     private fun showCreateTerminalDialog() {
         val project = selectedProject ?: return
         if (!project.desktopOnline) { showDesktopOffline(); return }
@@ -1442,6 +1436,121 @@ class MainActivity : AppCompatActivity() {
             }.show()
     }
 
+    private fun renderAgentActivity(target: ConversationTarget, thinking: Boolean) {
+        val activity = target.terminal.activity.takeLast(5)
+        conversationActivityRows.removeAllViews()
+        activity.forEach { item ->
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = android.view.Gravity.TOP
+                contentDescription = "${activityStatusLabel(item.status)}. ${item.title}"
+            }
+            val marker = TextView(this).apply {
+                text = when (item.status) {
+                    "running" -> "●"
+                    "done" -> "✓"
+                    "error" -> "×"
+                    else -> "○"
+                }
+                textSize = 12f
+                setTextColor(
+                    ContextCompat.getColor(
+                        this@MainActivity,
+                        when (item.status) {
+                            "running" -> R.color.duckweed_accent
+                            "error" -> R.color.duckweed_error
+                            else -> R.color.duckweed_text_faint
+                        },
+                    ),
+                )
+            }
+            val copy = TextView(this).apply {
+                text = buildString {
+                    append(item.title)
+                    item.detail?.takeIf { it.isNotBlank() }?.let { append("\n").append(it) }
+                }
+                textSize = 12f
+                maxLines = 3
+                ellipsize = android.text.TextUtils.TruncateAt.END
+                setTextColor(ContextCompat.getColor(this@MainActivity, R.color.duckweed_text_dim))
+            }
+            row.addView(marker, LinearLayout.LayoutParams(dp(20), LinearLayout.LayoutParams.WRAP_CONTENT))
+            row.addView(copy, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            conversationActivityRows.addView(
+                row,
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                ).apply { topMargin = dp(5) },
+            )
+        }
+        val showActivity = thinking && activity.isNotEmpty()
+        setAnimatedVisibility(conversationActivity, showActivity)
+        setAnimatedVisibility(conversationThinking, thinking && !showActivity)
+    }
+
+    private fun activityStatusLabel(status: String): String = when (status) {
+        "running" -> "In progress"
+        "done" -> "Completed"
+        "error" -> "Failed"
+        else -> "Pending"
+    }
+
+    private fun updateSlashCommandSuggestions() {
+        if (!::conversationCommands.isInitialized || !::conversationInput.isInitialized) return
+        val target = selectedTarget
+        val value = conversationInput.text.toString()
+        val visible = target != null &&
+            target.terminal.mode == "conversation" &&
+            value.startsWith("/")
+        val commands = if (visible) {
+            SlashCommandPolicy.matches(value, target.terminal.commands)
+        } else {
+            emptyList()
+        }
+        conversationCommands.removeAllViews()
+        commands.forEach { command ->
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                isClickable = true
+                isFocusable = true
+                background = ContextCompat.getDrawable(this@MainActivity, R.drawable.nav_item)
+                setPadding(dp(12), dp(9), dp(12), dp(9))
+                contentDescription = "${command.name}. ${command.description}"
+                setOnClickListener {
+                    val next = SlashCommandPolicy.completion(command)
+                    conversationInput.setText(next)
+                    conversationInput.setSelection(next.length)
+                    conversationInput.requestFocus()
+                }
+            }
+            row.addView(TextView(this).apply {
+                text = command.name
+                textSize = 13f
+                setTextColor(ContextCompat.getColor(this@MainActivity, R.color.duckweed_accent))
+            })
+            if (command.description.isNotBlank()) {
+                row.addView(TextView(this).apply {
+                    text = command.description
+                    textSize = 11f
+                    maxLines = 2
+                    ellipsize = android.text.TextUtils.TruncateAt.END
+                    setTextColor(ContextCompat.getColor(this@MainActivity, R.color.duckweed_text_faint))
+                })
+            }
+            conversationCommands.addView(
+                row,
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                ).apply { bottomMargin = dp(3) },
+            )
+        }
+        conversationCommandsScroll.visibility = if (commands.isEmpty()) View.GONE else View.VISIBLE
+    }
+
+    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
+
     private fun requestCloseTerminal(target: ConversationTarget) {
         if (!target.desktopOnline) { showDesktopOffline(); return }
         AlertDialog.Builder(this)
@@ -1456,26 +1565,6 @@ class MainActivity : AppCompatActivity() {
                         .onSuccess { runOnUiThread { requestRemoteRefresh(showSpinner = false) } }
                 }
             }.show()
-    }
-
-    /**
-     * A workspace row and a stored notification can represent the same event,
-     * but repeated text is not an identity. Exact routing and timestamp are
-     * required before the two transport representations are collapsed.
-     */
-    private fun isCrossSourceDuplicate(
-        first: CompletionRecord,
-        second: CompletionRecord,
-    ): Boolean {
-        val firstIsWorkspace = first.id.startsWith("workspace:")
-        val secondIsWorkspace = second.id.startsWith("workspace:")
-        return firstIsWorkspace != secondIsWorkspace &&
-            first.pairId == second.pairId &&
-            first.projectId == second.projectId &&
-            first.terminalId == second.terminalId &&
-            first.kind == second.kind &&
-            first.response == second.response &&
-            first.sentAt == second.sentAt
     }
 
     private fun requestRemoteRefresh(showSpinner: Boolean = true) {

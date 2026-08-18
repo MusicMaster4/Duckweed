@@ -165,10 +165,32 @@ pub struct WorkspaceTerminal {
     #[serde(default)]
     pub unread_on_desktop: bool,
     #[serde(default)]
+    pub commands: Vec<WorkspaceSlashCommand>,
+    #[serde(default)]
+    pub activity: Vec<WorkspaceAgentActivity>,
+    #[serde(default)]
     pub conversation: Vec<WorkspaceConversationMessage>,
     pub permission: Option<WorkspacePermission>,
     #[serde(default)]
     pub terminal_output: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceSlashCommand {
+    pub name: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceAgentActivity {
+    pub id: String,
+    pub at: i64,
+    pub kind: String,
+    pub title: String,
+    pub detail: Option<String>,
+    pub status: String,
 }
 
 fn default_terminal_mode() -> String {
@@ -200,6 +222,8 @@ pub struct WorkspaceConversationMessage {
     pub sent_at: i64,
     pub role: String,
     pub text: String,
+    #[serde(default)]
+    pub streaming: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

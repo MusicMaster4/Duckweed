@@ -80,9 +80,27 @@ export interface MobileTerminalSnapshot {
   terminalColumns?: number;
   terminalRows?: number;
   unreadOnDesktop: boolean;
+  /** Slash commands currently available in this agent session. */
+  commands: MobileSlashCommandSnapshot[];
+  /** Live reasoning, plan, and tool steps shown while a turn is running. */
+  activity: MobileAgentActivitySnapshot[];
   conversation: MobileConversationSnapshot[];
   permission: MobilePermissionSnapshot | null;
   terminalOutput?: string;
+}
+
+export interface MobileSlashCommandSnapshot {
+  name: string;
+  description: string;
+}
+
+export interface MobileAgentActivitySnapshot {
+  id: string;
+  at: number;
+  kind: "thinking" | "tool" | "plan";
+  title: string;
+  detail: string | null;
+  status: "pending" | "running" | "done" | "error";
 }
 
 export interface MobilePermissionOptionSnapshot {
@@ -104,6 +122,8 @@ export interface MobileConversationSnapshot {
   sentAt: number;
   role: "user" | "assistant";
   text: string;
+  /** True while the assistant response is still arriving from the provider. */
+  streaming?: boolean;
 }
 
 export interface MobileProjectSnapshot {

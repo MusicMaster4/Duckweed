@@ -28,6 +28,7 @@ data class CompletionRecord(
     val deliveryState: String? = null,
     val deliveryError: String? = null,
     val unreadOnDesktop: Boolean? = null,
+    val streaming: Boolean = false,
 )
 
 data class MobileImageAttachment(
@@ -69,12 +70,28 @@ data class RemoteTerminal(
     val terminalColumns: Int? = null,
     val terminalRows: Int? = null,
     val unreadOnDesktop: Boolean? = null,
+    val commands: List<RemoteSlashCommand> = emptyList(),
+    val activity: List<RemoteAgentActivity> = emptyList(),
     val conversation: List<RemoteConversationMessage> = emptyList(),
     val permission: RemotePermission? = null,
     val terminalOutput: String? = null,
 ) {
     val isWorking: Boolean get() = status == "working" || status == "waiting"
 }
+
+data class RemoteSlashCommand(
+    val name: String,
+    val description: String,
+)
+
+data class RemoteAgentActivity(
+    val id: String,
+    val at: Long,
+    val kind: String,
+    val title: String,
+    val detail: String?,
+    val status: String,
+)
 
 data class RemotePermission(
     val id: String,
@@ -95,6 +112,7 @@ data class RemoteConversationMessage(
     val sentAt: Long,
     val role: String,
     val text: String,
+    val streaming: Boolean = false,
 )
 
 data class ConversationTarget(

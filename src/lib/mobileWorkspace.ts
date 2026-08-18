@@ -4,6 +4,8 @@ import type {
   MobileWorkspaceSnapshot,
 } from "./ipc";
 import type { AgentStatus } from "./agents/types";
+import type { AgentItem } from "./agents/types";
+import type { MobileAgentActivitySnapshot } from "./ipc";
 
 // The relay accepts up to 320,000 base64url ciphertext characters. Keeping the
 // serialized workspace below this smaller budget leaves room for AES-GCM,
@@ -86,6 +88,59 @@ export function mobileTerminalStatus(
   return activity.busy ? "working" : "idle";
 }
 
+/**
+ * Flatten the provider's live transcript chrome into a compact phone-friendly
+ * activity feed. Final assistant prose stays in `conversation`; this list is
+ * only the step-by-step work that used to be visible on desktop alone.
+ */
+export function mobileAgentActivity(
+  items: readonly AgentItem[],
+  limit = 8,
+): MobileAgentActivitySnapshot[] {
+  const activity: MobileAgentActivitySnapshot[] = [];
+  for (const item of items) {
+    if (item.kind === "thinking") {
+      const text = item.text.trim();
+      if (text) {
+        activity.push({
+          id: item.id,
+          at: item.at,
+          kind: "thinking",
+          title: "Reasoning",
+          detail: truncateUtf8(text, 1_200),
+          status: item.streaming ? "running" : "done",
+        });
+      }
+    } else if (item.kind === "tool") {
+      activity.push({
+        id: item.id,
+        at: item.at,
+        kind: "tool",
+        title: truncateUtf8(item.title.trim() || item.name, 240),
+        detail: truncateUtf8((item.output || item.command || "").trim(), 1_200) || null,
+        status:
+          item.status === "error"
+            ? "error"
+            : item.status === "running" || item.status === "pending"
+              ? item.status
+              : "done",
+      });
+    } else if (item.kind === "plan") {
+      item.steps.forEach((step, index) => {
+        activity.push({
+          id: `${item.id}:${index}`,
+          at: item.at + index,
+          kind: "plan",
+          title: truncateUtf8(step.text.trim(), 320),
+          detail: null,
+          status: step.status,
+        });
+      });
+    }
+  }
+  return activity.slice(-Math.max(0, limit));
+}
+
 type ConversationRef = {
   terminal: { conversation: MobileConversationSnapshot[] };
   message: MobileConversationSnapshot;
@@ -103,6 +158,10 @@ function terminalOutputRefs(snapshot: MobileWorkspaceSnapshot): MobileTerminalSn
   return snapshot.projects.flatMap((project) =>
     project.terminals.filter((terminal) => Boolean(terminal.terminalOutput)),
   );
+}
+
+function terminalMetadataRefs(snapshot: MobileWorkspaceSnapshot): MobileTerminalSnapshot[] {
+  return snapshot.projects.flatMap((project) => project.terminals);
 }
 
 /**
@@ -143,6 +202,38 @@ export function fitMobileWorkspaceSnapshot(
       );
     }
     serialized = JSON.stringify(snapshot);
+  }
+
+  // Live activity and completion catalogs are reconstructable on the next
+  // publish. If a workspace has many open agents, trim their oldest/lowest
+  // priority rows before allowing the relay envelope to exceed its limit.
+  if (utf8ByteLength(serialized) > MOBILE_WORKSPACE_SNAPSHOT_BUDGET_BYTES) {
+    const terminals = terminalMetadataRefs(snapshot);
+    let changed = true;
+    while (changed && utf8ByteLength(serialized) > MOBILE_WORKSPACE_SNAPSHOT_BUDGET_BYTES) {
+      changed = false;
+      for (const terminal of terminals) {
+        if (terminal.activity.length > 0) {
+          terminal.activity.shift();
+          changed = true;
+        }
+        serialized = JSON.stringify(snapshot);
+        if (utf8ByteLength(serialized) <= MOBILE_WORKSPACE_SNAPSHOT_BUDGET_BYTES) break;
+      }
+    }
+    changed = true;
+    while (changed && utf8ByteLength(serialized) > MOBILE_WORKSPACE_SNAPSHOT_BUDGET_BYTES) {
+      changed = false;
+      for (const terminal of terminals) {
+        // /new, /model, and /effort were sorted to the front by the publisher.
+        if (terminal.commands.length > 3) {
+          terminal.commands.pop();
+          changed = true;
+        }
+        serialized = JSON.stringify(snapshot);
+        if (utf8ByteLength(serialized) <= MOBILE_WORKSPACE_SNAPSHOT_BUDGET_BYTES) break;
+      }
+    }
   }
 
   // If unusually large project metadata remains, drop the oldest conversation

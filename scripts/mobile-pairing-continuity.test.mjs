@@ -106,7 +106,10 @@ describe("mobile pairing continuity", () => {
     expect(desktop).toContain("fitMobileWorkspaceSnapshot(snapshot)");
     expect(desktop).toContain("utf8ByteLength(text)");
     expect(desktop).toContain('.slice(-6)');
-    expect(desktop).toContain('item.kind === "assistant" && !item.streaming');
+    expect(desktop).toContain('item.kind === "assistant"');
+    expect(desktop).toContain("streaming: item.streaming");
+    expect(desktop).toContain("activity: mobileAgentActivity");
+    expect(desktop).toContain("session?.commands ?? []");
     expect(worker).toContain("putSyncedConversation(message.workspace)");
     expect(store).toContain("fun putSyncedConversation(snapshot: WorkspaceSnapshot)");
   });

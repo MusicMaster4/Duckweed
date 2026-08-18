@@ -902,6 +902,54 @@
             </FrameLayout>
 
             <LinearLayout
+                android:id="@+id/conversation_activity"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:layout_marginBottom="8dp"
+                android:background="@drawable/message_card"
+                android:orientation="vertical"
+                android:paddingStart="14dp"
+                android:paddingTop="11dp"
+                android:paddingEnd="14dp"
+                android:paddingBottom="11dp"
+                android:visibility="gone">
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:fontFamily="sans-serif-medium"
+                    android:letterSpacing="0.1"
+                    android:text="LIVE ACTIVITY"
+                    android:textColor="@color/duckweed_accent"
+                    android:textSize="10sp" />
+
+                <LinearLayout
+                    android:id="@+id/conversation_activity_rows"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="7dp"
+                    android:orientation="vertical" />
+            </LinearLayout>
+
+            <ScrollView
+                android:id="@+id/conversation_commands_scroll"
+                android:layout_width="match_parent"
+                android:layout_height="220dp"
+                android:layout_marginBottom="8dp"
+                android:background="@drawable/message_card"
+                android:fillViewport="true"
+                android:visibility="gone">
+
+                <LinearLayout
+                    android:id="@+id/conversation_commands"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:padding="6dp" />
+            </ScrollView>
+
+            <LinearLayout
                 android:id="@+id/conversation_composer"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"

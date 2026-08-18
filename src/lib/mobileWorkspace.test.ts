@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import {
   fitMobileWorkspaceSnapshot,
   MOBILE_WORKSPACE_SNAPSHOT_BUDGET_BYTES,
+  mobileAgentActivity,
   mobileTerminalStatus,
   truncateUtf8,
   truncateUtf8Tail,
@@ -44,6 +45,8 @@ describe("mobile workspace payload bounds", () => {
           status: "idle",
           mode: "conversation",
           unreadOnDesktop: false,
+          commands: [],
+          activity: [],
           conversation: [{
             id: "message",
             sentAt: 1,
@@ -77,6 +80,8 @@ describe("mobile workspace payload bounds", () => {
           status: "idle",
           mode: "terminal",
           unreadOnDesktop: false,
+          commands: [],
+          activity: [],
           terminalOutput: `${"old output\n".repeat(30_000)}LATEST SCREEN`,
           conversation: [],
           permission: null,
@@ -93,6 +98,42 @@ describe("mobile workspace payload bounds", () => {
 });
 
 describe("mobile terminal activity", () => {
+  test("keeps the newest reasoning, plan, and tool progress for the phone", () => {
+    const activity = mobileAgentActivity([
+      { id: "think", at: 1, kind: "thinking", text: "Inspecting the sync path", streaming: true },
+      {
+        id: "plan",
+        at: 2,
+        kind: "plan",
+        steps: [
+          { text: "Inspect state", status: "done" },
+          { text: "Publish progress", status: "running" },
+        ],
+      },
+      {
+        id: "tool",
+        at: 3,
+        kind: "tool",
+        callId: "call",
+        name: "shell_command",
+        tool: "execute",
+        title: "Run mobile tests",
+        status: "running",
+        command: "gradle test",
+        output: "Compiling",
+        changes: [],
+      },
+    ]);
+
+    expect(activity.map((item) => [item.kind, item.title, item.status])).toEqual([
+      ["thinking", "Reasoning", "running"],
+      ["plan", "Inspect state", "done"],
+      ["plan", "Publish progress", "running"],
+      ["tool", "Run mobile tests", "running"],
+    ]);
+    expect(activity.at(-1)?.detail).toBe("Compiling");
+  });
+
   test("does not call a bare raw agent launch working", () => {
     expect(mobileTerminalStatus({
       exited: false,
