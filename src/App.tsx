@@ -113,6 +113,10 @@ import {
 } from "./lib/processActivity";
 import { setCompletionTaskbarBadge } from "./lib/taskbarCompletion";
 import {
+  MOBILE_COMPLETION_DELAY_MS,
+  shouldSendDelayedMobileCompletion,
+} from "./lib/mobileCompletion";
+import {
   adjustSettingsIndexOnAppend,
   adjustSettingsIndexOnClose,
   applyStripReorder,
@@ -410,6 +414,8 @@ export default function App() {
   completionHighlightsRef.current = completionHighlights;
   const completionFlashSeq = useRef(0);
   const completionFlashTimers = useRef(new Map<string, number>());
+  const mobileCompletionTimers = useRef(new Map<string, number>());
+  const lastTerminalInteractionAt = useRef(new Map<string, number>());
   /** Dirty flag for the lifted file editor (file switches confirm through this). */
   const editorDirtyRef = useRef(false);
   const processState = useRef(new Map<string, ProcessState>());
@@ -546,6 +552,25 @@ export default function App() {
     return findLeaf(tab.root, tab.activeLeaf)?.term === termId;
   }, []);
 
+  useEffect(() => {
+    const recordSelectedTerminalInteraction = (event: KeyboardEvent | PointerEvent) => {
+      if (!document.hasFocus() || settingsActiveRef.current) return;
+      if (
+        event instanceof KeyboardEvent &&
+        ["Shift", "Control", "Alt", "Meta"].includes(event.key)
+      ) return;
+      const tab = currentTab();
+      const termId = tab ? (findLeaf(tab.root, tab.activeLeaf)?.term ?? null) : null;
+      if (termId) lastTerminalInteractionAt.current.set(termId, Date.now());
+    };
+    window.addEventListener("keydown", recordSelectedTerminalInteraction, true);
+    window.addEventListener("pointerdown", recordSelectedTerminalInteraction, true);
+    return () => {
+      window.removeEventListener("keydown", recordSelectedTerminalInteraction, true);
+      window.removeEventListener("pointerdown", recordSelectedTerminalInteraction, true);
+    };
+  }, [currentTab]);
+
   /** Selected pane while the user is actually looking at the window (flash vs unread). */
   const isFocusedTerm = useCallback(
     (termId: string): boolean => {
@@ -655,6 +680,12 @@ export default function App() {
       window.clearTimeout(flashTimer);
       completionFlashTimers.current.delete(term);
     }
+    for (const [key, timer] of mobileCompletionTimers.current) {
+      if (!key.startsWith(`${term}:`)) continue;
+      window.clearTimeout(timer);
+      mobileCompletionTimers.current.delete(key);
+    }
+    lastTerminalInteractionAt.current.delete(term);
     setCompletionFlashes((previous) => {
       if (!previous.has(term)) return previous;
       const next = new Map(previous);
@@ -973,8 +1004,9 @@ export default function App() {
         const startedAt = current.completionStartedAt ?? previous.processStartedAt;
         const project = owner?.project?.name ??
           (meta.cwd.trim() ? basename(meta.cwd) : owner?.title ?? "Duckweed");
-        const unreadOnDesktop = !isFocusedTerm(termId);
-        void mobileSendCompletion({
+        const unreadAtCompletion = !isFocusedTerm(termId);
+        const completionKey = `${termId}:${current.completionSeq}`;
+        const message = {
           agent,
           project,
           projectId: owner?.id ?? null,
@@ -986,8 +1018,22 @@ export default function App() {
             details?.durationMs ??
             (startedAt === null ? null : Math.max(0, Date.now() - startedAt)),
           soundCue: completionCue,
-          unreadOnDesktop,
-        }).catch((error) => console.error("mobile completion notification", error));
+          // A completion that survives the desktop grace period is unread on
+          // the phone, including an unattended selected terminal.
+          unreadOnDesktop: true,
+        } as const;
+        const timer = window.setTimeout(() => {
+          mobileCompletionTimers.current.delete(completionKey);
+          if (!shouldSendDelayedMobileCompletion({
+            unreadAtCompletion,
+            unreadNow: unreadTermIdsRef.current.has(termId),
+            lastInteractionAt: lastTerminalInteractionAt.current.get(termId) ?? null,
+            now: Date.now(),
+          })) return;
+          void mobileSendCompletion(message)
+            .catch((error) => console.error("mobile completion notification", error));
+        }, MOBILE_COMPLETION_DELAY_MS);
+        mobileCompletionTimers.current.set(completionKey, timer);
       }
       // Every eligible completion gets one cue. The shared audio player
       // coalesces simultaneous finishes, so several agents returning together
@@ -2369,6 +2415,10 @@ export default function App() {
         window.clearTimeout(timer);
       }
       completionFlashTimers.current.clear();
+      for (const timer of mobileCompletionTimers.current.values()) {
+        window.clearTimeout(timer);
+      }
+      mobileCompletionTimers.current.clear();
     },
     [],
   );

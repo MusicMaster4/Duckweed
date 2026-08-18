@@ -84,6 +84,7 @@ dependencies {
     implementation("androidx.recyclerview:recyclerview:1.4.0")
     implementation("androidx.swiperefreshlayout:swiperefreshlayout:1.2.0")
     implementation("androidx.work:work-runtime-ktx:2.10.5")
+    implementation("io.noties.markwon:core:4.6.2")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20250517")
 }

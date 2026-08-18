@@ -10,11 +10,13 @@ import android.widget.TextView
 import androidx.core.content.ContextCompat
 import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.RecyclerView
+import io.noties.markwon.Markwon
 
 class ConversationAdapter(
     private val onRetry: (CompletionRecord) -> Unit,
 ) : RecyclerView.Adapter<ConversationAdapter.Holder>() {
     private var messages: List<CompletionRecord> = emptyList()
+    private var markdown: Markwon? = null
 
     fun submit(next: List<CompletionRecord>) {
         if (next == messages) return
@@ -34,9 +36,12 @@ class ConversationAdapter(
         diff.dispatchUpdatesTo(this)
     }
 
-    override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): Holder = Holder(
-        LayoutInflater.from(parent.context).inflate(R.layout.item_conversation_message, parent, false),
-    )
+    override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): Holder {
+        val view = LayoutInflater.from(parent.context)
+            .inflate(R.layout.item_conversation_message, parent, false)
+        val renderer = markdown ?: Markwon.create(parent.context).also { markdown = it }
+        return Holder(view, renderer)
+    }
 
     override fun getItemCount(): Int = messages.size
 
@@ -52,8 +57,11 @@ class ConversationAdapter(
                 if (outgoing) R.color.duckweed_text_dim else R.color.duckweed_accent,
             ),
         )
-        holder.text.text = message.response
-            ?: "This terminal session did not expose a structured final response."
+        holder.markdown.setMarkdown(
+            holder.text,
+            message.response
+                ?: "This terminal session did not expose a structured final response.",
+        )
         val attachment = message.attachments.firstOrNull()
         holder.text.visibility = if (message.response.isNullOrBlank() && attachment != null) View.GONE else View.VISIBLE
         holder.attachment.visibility = if (attachment == null) View.GONE else View.VISIBLE
@@ -89,7 +97,7 @@ class ConversationAdapter(
         holder.bubble.setOnClickListener(if (retryable) View.OnClickListener { onRetry(message) } else null)
     }
 
-    class Holder(view: View) : RecyclerView.ViewHolder(view) {
+    class Holder(view: View, val markdown: Markwon) : RecyclerView.ViewHolder(view) {
         val row: LinearLayout = view.findViewById(R.id.conversation_row)
         val bubble: LinearLayout = view.findViewById(R.id.conversation_bubble)
         val author: TextView = view.findViewById(R.id.conversation_author)

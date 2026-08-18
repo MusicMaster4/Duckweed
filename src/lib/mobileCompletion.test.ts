@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 
-import { completionDetailsFromState } from "./mobileCompletion";
+import {
+  completionDetailsFromState,
+  shouldSendDelayedMobileCompletion,
+} from "./mobileCompletion";
 import { emptyUsage, type AgentSessionState } from "./agents/types";
 
 function state(): AgentSessionState {
@@ -64,5 +67,43 @@ describe("mobile completion details", () => {
     const waiting = state();
     waiting.status = "waiting";
     expect(completionDetailsFromState(waiting).needsAttention).toBe(true);
+  });
+});
+
+describe("delayed mobile completion delivery", () => {
+  test("sends a background completion only while its desktop unread mark remains", () => {
+    expect(shouldSendDelayedMobileCompletion({
+      unreadAtCompletion: true,
+      unreadNow: true,
+      lastInteractionAt: null,
+      now: 70_000,
+    })).toBe(true);
+    expect(shouldSendDelayedMobileCompletion({
+      unreadAtCompletion: true,
+      unreadNow: false,
+      lastInteractionAt: null,
+      now: 70_000,
+    })).toBe(false);
+  });
+
+  test("selected terminals notify only after one minute without human interaction", () => {
+    expect(shouldSendDelayedMobileCompletion({
+      unreadAtCompletion: false,
+      unreadNow: false,
+      lastInteractionAt: 10_001,
+      now: 70_000,
+    })).toBe(false);
+    expect(shouldSendDelayedMobileCompletion({
+      unreadAtCompletion: false,
+      unreadNow: false,
+      lastInteractionAt: 10_000,
+      now: 70_000,
+    })).toBe(true);
+    expect(shouldSendDelayedMobileCompletion({
+      unreadAtCompletion: false,
+      unreadNow: false,
+      lastInteractionAt: null,
+      now: 70_000,
+    })).toBe(true);
   });
 });

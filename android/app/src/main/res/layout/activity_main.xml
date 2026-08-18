@@ -998,17 +998,24 @@
         </LinearLayout>
     </FrameLayout>
 
-    <LinearLayout
+    <FrameLayout
         android:id="@+id/bottom_nav"
         android:layout_width="match_parent"
-        android:layout_height="72dp"
-        android:background="@drawable/nav_bar"
-        android:gravity="center"
-        android:orientation="horizontal"
-        android:paddingStart="10dp"
-        android:paddingTop="7dp"
-        android:paddingEnd="10dp"
-        android:paddingBottom="7dp">
+        android:layout_height="84dp"
+        android:clipToPadding="false"
+        android:paddingStart="@dimen/screen_gutter"
+        android:paddingTop="8dp"
+        android:paddingEnd="@dimen/screen_gutter"
+        android:paddingBottom="12dp">
+
+        <LinearLayout
+            android:id="@+id/bottom_nav_pill"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:background="@drawable/nav_bar"
+            android:gravity="center"
+            android:orientation="horizontal"
+            android:padding="6dp">
 
         <TextView
             android:id="@+id/nav_responses"
@@ -1023,9 +1030,11 @@
             android:focusable="true"
             android:fontFamily="sans-serif-medium"
             android:gravity="center"
+            android:includeFontPadding="false"
+            android:maxLines="1"
             android:text="Activity"
             android:textColor="@color/nav_item_color"
-            android:textSize="11sp" />
+            android:textSize="12sp" />
 
         <TextView
             android:id="@+id/nav_projects"
@@ -1041,9 +1050,11 @@
             android:focusable="true"
             android:fontFamily="sans-serif-medium"
             android:gravity="center"
+            android:includeFontPadding="false"
+            android:maxLines="1"
             android:text="Projects"
             android:textColor="@color/nav_item_color"
-            android:textSize="11sp" />
+            android:textSize="12sp" />
 
         <TextView
             android:id="@+id/nav_conversations"
@@ -1059,9 +1070,12 @@
             android:focusable="true"
             android:fontFamily="sans-serif-medium"
             android:gravity="center"
+            android:includeFontPadding="false"
+            android:maxLines="1"
             android:text="Conversations"
             android:textColor="@color/nav_item_color"
-            android:textSize="11sp" />
+            android:textSize="12sp" />
 
-    </LinearLayout>
+        </LinearLayout>
+    </FrameLayout>
 </LinearLayout>

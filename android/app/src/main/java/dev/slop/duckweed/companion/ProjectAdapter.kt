@@ -17,6 +17,9 @@ class ProjectAdapter(
     private val onOpen: (ProjectRow) -> Unit,
 ) : RecyclerView.Adapter<ProjectAdapter.Holder>() {
     private var projects: List<ProjectRow> = emptyList()
+    private var marks: Map<String, String> = emptyMap()
+
+    private fun key(row: ProjectRow): String = "${row.pairId}\u0000${row.project.id}"
 
     fun submit(next: List<ProjectRow>) {
         if (next == projects) return
@@ -31,6 +34,7 @@ class ProjectAdapter(
                 previous[oldItemPosition] == next[newItemPosition]
         })
         projects = next
+        marks = ProjectMarks.assign(next.map { ProjectMarkIdentity(key(it), it.project.name) })
         diff.dispatchUpdatesTo(this)
     }
 
@@ -44,6 +48,7 @@ class ProjectAdapter(
         val row = projects[position]
         val project = row.project
         val working = if (row.desktopOnline) project.terminals.count(RemoteTerminal::isWorking) else 0
+        holder.mark.text = marks[key(row)] ?: "P0"
         holder.name.text = project.name
         holder.meta.text = buildList {
             add("${project.terminals.size} terminal${if (project.terminals.size == 1) "" else "s"}")
@@ -59,6 +64,7 @@ class ProjectAdapter(
     }
 
     class Holder(view: View) : RecyclerView.ViewHolder(view) {
+        val mark: TextView = view.findViewById(R.id.project_mark)
         val name: TextView = view.findViewById(R.id.project_name)
         val meta: TextView = view.findViewById(R.id.project_meta)
         val status: TextView = view.findViewById(R.id.project_status)

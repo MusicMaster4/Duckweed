@@ -8,11 +8,13 @@ import android.widget.TextView
 import androidx.core.content.ContextCompat
 import androidx.recyclerview.widget.RecyclerView
 import androidx.recyclerview.widget.DiffUtil
+import io.noties.markwon.Markwon
 
 class MessageAdapter(
     private val onOpen: (CompletionRecord) -> Unit,
 ) : RecyclerView.Adapter<MessageAdapter.Holder>() {
     private var messages: List<CompletionRecord> = emptyList()
+    private var markdown: Markwon? = null
 
     fun submit(next: List<CompletionRecord>) {
         if (next == messages) return
@@ -53,7 +55,8 @@ class MessageAdapter(
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): Holder {
         val view = LayoutInflater.from(parent.context).inflate(R.layout.item_message, parent, false)
-        return Holder(view)
+        val renderer = markdown ?: Markwon.create(parent.context).also { markdown = it }
+        return Holder(view, renderer)
     }
 
     override fun getItemCount(): Int = messages.size
@@ -80,8 +83,11 @@ class MessageAdapter(
             System.currentTimeMillis(),
             DateUtils.MINUTE_IN_MILLIS,
         )
-        holder.response.text = message.response
-            ?: "This terminal-only session did not expose a structured final response."
+        holder.markdown.setMarkdown(
+            holder.response,
+            message.response
+                ?: "This terminal-only session did not expose a structured final response.",
+        )
         holder.response.maxLines = 5
         holder.expand.visibility = View.VISIBLE
         holder.expand.text = "Open conversation  ›"
@@ -92,7 +98,7 @@ class MessageAdapter(
         }
     }
 
-    class Holder(view: View) : RecyclerView.ViewHolder(view) {
+    class Holder(view: View, val markdown: Markwon) : RecyclerView.ViewHolder(view) {
         val agent: TextView = view.findViewById(R.id.message_agent)
         val project: TextView = view.findViewById(R.id.message_project)
         val time: TextView = view.findViewById(R.id.message_time)
