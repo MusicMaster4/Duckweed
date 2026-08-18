@@ -90,7 +90,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var appUpdater: AppUpdater
     private val messageAdapter = MessageAdapter { openResponse(it) }
     private val projectAdapter = ProjectAdapter { openProject(it) }
-    private val terminalAdapter = TerminalAdapter { openConversation(it, true) }
+    private val terminalAdapter = TerminalAdapter({ openConversation(it, true) }, ::requestCloseTerminal)
     private val conversationsAdapter = TerminalAdapter { openConversation(it, false) }
     private val conversationAdapter = ConversationAdapter(::retryConversationMessage)
     private val executor = Executors.newSingleThreadExecutor()
@@ -279,6 +279,7 @@ class MainActivity : AppCompatActivity() {
         responsesRefresh.setOnRefreshListener { requestRemoteRefresh() }
         projectsRefresh.setOnRefreshListener { requestRemoteRefresh() }
         findViewById<View>(R.id.project_back).setOnClickListener { closeProject() }
+        findViewById<View>(R.id.project_new_terminal).setOnClickListener { showCreateTerminalDialog() }
         findViewById<View>(R.id.conversation_back).setOnClickListener { closeConversation() }
         conversationSend.setOnClickListener { sendConversationMessage() }
         conversationAttach.setOnClickListener {
@@ -1018,6 +1019,7 @@ class MainActivity : AppCompatActivity() {
                     row.pairId,
                     row.project.id,
                     row.project.name,
+                    row.project.color,
                     terminal,
                     Pair(row.pairId, terminal.id) in unreadKeys,
                     row.desktopOnline,
@@ -1051,6 +1053,7 @@ class MainActivity : AppCompatActivity() {
                         row.pairId,
                         row.project.id,
                         row.project.name,
+                        row.project.color,
                         terminal,
                         Pair(row.pairId, terminal.id) in unreadKeys,
                         row.desktopOnline,
@@ -1112,6 +1115,7 @@ class MainActivity : AppCompatActivity() {
                         pairId,
                         project.id,
                         project.name,
+                        project.color,
                         terminal,
                         Pair(pairId, terminal.id) in unreadConversationKeys,
                         isDesktopOnline(pairId),
@@ -1187,12 +1191,33 @@ class MainActivity : AppCompatActivity() {
                 soundCue = null,
                 workspace = null,
             )
+        }.toMutableList().apply {
+            if (target.terminal.agent == null && !target.terminal.terminalOutput.isNullOrBlank()) {
+                add(
+                    CompletionRecord(
+                        id = "terminal-output:${target.pairId}:${target.terminal.id}",
+                        pairId = target.pairId,
+                        sentAt = System.currentTimeMillis(),
+                        agent = target.terminal.title,
+                        project = target.projectName,
+                        projectId = target.projectId,
+                        terminalId = target.terminal.id,
+                        terminalTitle = target.terminal.title,
+                        kind = "completed",
+                        response = target.terminal.terminalOutput,
+                        durationMs = null,
+                        soundCue = null,
+                        workspace = null,
+                    ),
+                )
+            }
         }
         val stored = MessageStore(this).conversation(target.pairId, target.terminal.id)
         val messages = mergeConversation(synced, stored)
         val last = messages.lastOrNull()
-        val thinking = target.terminal.status == "working" ||
-            (last?.kind == "user" && target.terminal.status != "waiting")
+        val isAgent = target.terminal.agent != null
+        val thinking = isAgent && (target.terminal.status == "working" ||
+            (last?.kind == "user" && target.terminal.status != "waiting"))
         val desktopOnline = isDesktopOnline(target.pairId)
         findViewById<TextView>(R.id.conversation_title).text =
             target.terminal.agent ?: target.terminal.title
@@ -1203,6 +1228,7 @@ class MainActivity : AppCompatActivity() {
                 when {
                     !desktopOnline -> "Desktop offline"
                     thinking -> "Thinking"
+                    target.terminal.status == "working" -> "Running"
                     target.terminal.status == "waiting" -> "Needs attention"
                     target.terminal.status == "exited" -> "Closed"
                     else -> "Ready"
@@ -1366,6 +1392,44 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         return merged.sortedBy { it.sentAt }
+    }
+
+    private fun showCreateTerminalDialog() {
+        val project = selectedProject ?: return
+        if (!project.desktopOnline) { showDesktopOffline(); return }
+        val input = EditText(this).apply {
+            hint = "Optional command, e.g. codex or claude"
+            setSingleLine(true)
+        }
+        AlertDialog.Builder(this)
+            .setTitle("New terminal")
+            .setMessage("Open a shell in ${project.project.name}.")
+            .setView(input)
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Open") { _, _ ->
+                val credentials = SecretStore.load(this, project.pairId) ?: return@setPositiveButton
+                executor.execute {
+                    runCatching { RelayClient.createTerminal(credentials, project.project.id, input.text.toString()) }
+                        .onFailure { error -> runOnUiThread { Toast.makeText(this, error.message ?: "Could not open terminal.", Toast.LENGTH_LONG).show() } }
+                        .onSuccess { runOnUiThread { requestRemoteRefresh(showSpinner = false) } }
+                }
+            }.show()
+    }
+
+    private fun requestCloseTerminal(target: ConversationTarget) {
+        if (!target.desktopOnline) { showDesktopOffline(); return }
+        AlertDialog.Builder(this)
+            .setTitle("Close terminal?")
+            .setMessage("Close ${target.terminal.agent ?: target.terminal.title} on the desktop?")
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Close") { _, _ ->
+                val credentials = SecretStore.load(this, target.pairId) ?: return@setPositiveButton
+                executor.execute {
+                    runCatching { RelayClient.closeTerminal(credentials, target.terminal.id) }
+                        .onFailure { error -> runOnUiThread { Toast.makeText(this, error.message ?: "Could not close terminal.", Toast.LENGTH_LONG).show() } }
+                        .onSuccess { runOnUiThread { requestRemoteRefresh(showSpinner = false) } }
+                }
+            }.show()
     }
 
     /**

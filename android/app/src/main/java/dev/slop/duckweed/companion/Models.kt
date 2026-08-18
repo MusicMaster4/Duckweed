@@ -54,6 +54,7 @@ data class RemoteProject(
     val name: String,
     val path: String,
     val branch: String?,
+    val color: String? = null,
     val terminals: List<RemoteTerminal>,
 )
 
@@ -67,6 +68,7 @@ data class RemoteTerminal(
     val unreadOnDesktop: Boolean? = null,
     val conversation: List<RemoteConversationMessage> = emptyList(),
     val permission: RemotePermission? = null,
+    val terminalOutput: String? = null,
 ) {
     val isWorking: Boolean get() = status == "working" || status == "waiting"
 }
@@ -96,6 +98,7 @@ data class ConversationTarget(
     val pairId: String,
     val projectId: String,
     val projectName: String,
+    val projectColor: String? = null,
     val terminal: RemoteTerminal,
     val unread: Boolean = false,
     val desktopOnline: Boolean = true,

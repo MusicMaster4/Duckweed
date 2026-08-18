@@ -706,6 +706,16 @@
                         android:textColor="@color/duckweed_text_faint"
                         android:textSize="11sp" />
                 </LinearLayout>
+
+                <Button
+                    android:id="@+id/project_new_terminal"
+                    android:layout_width="wrap_content"
+                    android:layout_height="42dp"
+                    android:background="@drawable/button_secondary"
+                    android:text="New terminal"
+                    android:textAllCaps="false"
+                    android:textColor="@color/duckweed_text_dim"
+                    android:textSize="12sp" />
             </LinearLayout>
 
             <TextView

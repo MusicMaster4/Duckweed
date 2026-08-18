@@ -170,6 +170,28 @@ object RelayClient {
             .put("optionId", optionId),
     )
 
+    fun createTerminal(
+        credentials: PairCredentials,
+        projectId: String,
+        command: String,
+    ): SentCommand = sendEncryptedCommand(
+        credentials,
+        JSONObject()
+            .put("kind", "create_terminal")
+            .put("projectId", projectId)
+            .put("text", command),
+    )
+
+    fun closeTerminal(
+        credentials: PairCredentials,
+        terminalId: String,
+    ): SentCommand = sendEncryptedCommand(
+        credentials,
+        JSONObject()
+            .put("kind", "close_terminal")
+            .put("terminalId", terminalId),
+    )
+
     private fun sendEncryptedCommand(
         credentials: PairCredentials,
         fields: JSONObject,

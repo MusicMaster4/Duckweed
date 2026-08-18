@@ -159,6 +159,8 @@ pub struct WorkspaceTerminal {
     #[serde(default)]
     pub conversation: Vec<WorkspaceConversationMessage>,
     pub permission: Option<WorkspacePermission>,
+    #[serde(default)]
+    pub terminal_output: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -195,6 +197,8 @@ pub struct WorkspaceProject {
     pub name: String,
     pub path: String,
     pub branch: Option<String>,
+    #[serde(default)]
+    pub color: Option<String>,
     pub terminals: Vec<WorkspaceTerminal>,
 }
 
@@ -240,6 +244,8 @@ struct PlainRemoteCommand {
     #[serde(default)]
     option_id: Option<String>,
     #[serde(default)]
+    agent: Option<String>,
+    #[serde(default)]
     images: Vec<RemoteImageAttachment>,
 }
 
@@ -272,6 +278,14 @@ impl PlainRemoteCommand {
     fn is_valid(&self) -> bool {
         match self.kind.as_str() {
             "refresh" => true,
+            "create_terminal" => self
+                .project_id
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty()),
+            "close_terminal" => self
+                .terminal_id
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty()),
             "input" => {
                 self.terminal_id
                     .as_deref()
@@ -313,6 +327,7 @@ pub struct RemoteCommand {
     pub text: Option<String>,
     pub permission_id: Option<String>,
     pub option_id: Option<String>,
+    pub agent: Option<String>,
     pub images: Vec<RemoteImageAttachment>,
 }
 
@@ -1120,6 +1135,7 @@ fn poll_commands_blocking(app: &AppHandle) -> Result<Vec<RemoteCommand>, String>
                 text: command.text,
                 permission_id: command.permission_id,
                 option_id: command.option_id,
+                agent: command.agent,
                 images: command.images,
             });
         }

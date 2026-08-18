@@ -54,6 +54,12 @@ interface Props {
   termId: string;
   /** The pane holding this surface has the keyboard. */
   active: boolean;
+  /** Return true when an app-level action handled this submission. */
+  onBeforeSubmit?: (
+    text: string,
+    images: AgentImageAttachment[],
+    delivery: "default" | "alternate",
+  ) => boolean;
   /** Close the agent and hand the pane back to its shell. */
   onClose: () => void;
   /** Show copy feedback at the pointer after a right-click selection copy. */
@@ -85,7 +91,13 @@ const EMPTY_ITEMS: AgentSessionState["items"] = [];
  * the agent this renders is a separate headless process speaking a structured
  * protocol, which is the only reason any of this content exists to draw.
  */
-export function AgentSurface({ termId, active, onClose, onSelectionCopied }: Props) {
+export function AgentSurface({
+  termId,
+  active,
+  onBeforeSubmit,
+  onClose,
+  onSelectionCopied,
+}: Props) {
   const session = useSyncExternalStore(
     useCallback((callback) => agents.subscribe(termId, callback), [termId]),
     useCallback(() => agents.get(termId), [termId]),
@@ -372,6 +384,7 @@ export function AgentSurface({ termId, active, onClose, onSelectionCopied }: Pro
     images: AgentImageAttachment[],
     delivery: "default" | "alternate" = "default",
   ) => {
+    if (onBeforeSubmit?.(text, images, delivery) === true) return true;
     if (images.length === 0) {
       const trimmed = text.trim();
       const resumeMatch = /^\/resume(?:\s+(.*))?$/i.exec(trimmed);

@@ -15,6 +15,7 @@ import {
   searchWorkspaceIndex,
   type FileMention,
 } from "../../lib/agentComposer";
+import * as bus from "../../lib/bus";
 import {
   GUIDED_ARG_COMMANDS,
   INLINE_ARG_COMMANDS,
@@ -45,7 +46,7 @@ interface Props {
     text: string,
     images: AgentImageAttachment[],
     delivery?: "default" | "alternate",
-  ) => void;
+  ) => boolean | void;
   onInterrupt: () => void;
 }
 
@@ -178,6 +179,23 @@ export function AgentComposer({ session, active, inputRef, onSubmit, onInterrupt
     agents.setDraft(session.termId, text);
   };
 
+  useEffect(
+    () =>
+      bus.on("term:clear-draft", ({ termId }) => {
+        if (termId !== session.termId) return;
+        setValue("");
+        setCursor(0);
+        setImages([]);
+        imagesRef.current = [];
+        setAttachmentError(null);
+        leaveHistoryBrowse();
+        undoClearRef.current = null;
+        agents.setDraft(session.termId, "");
+        agents.setDraftImages(session.termId, []);
+      }),
+    [session.termId],
+  );
+
   const applyHistoryEntry = (text: string, nextImages: AgentImageAttachment[] = []) => {
     change(text, text.length);
     replaceImages(nextImages);
@@ -257,7 +275,7 @@ export function AgentComposer({ session, active, inputRef, onSubmit, onInterrupt
 
   const commit = (text: string, delivery: "default" | "alternate" = "default") => {
     if (!text.trim() && imagesRef.current.length === 0) return;
-    onSubmit(text, imagesRef.current, delivery);
+    if (onSubmit(text, imagesRef.current, delivery) === true) return;
     undoClearRef.current = null;
     leaveHistoryBrowse();
     setValue("");

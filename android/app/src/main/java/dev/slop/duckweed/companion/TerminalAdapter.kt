@@ -4,12 +4,15 @@ import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.TextView
+import android.graphics.Color
+import android.graphics.drawable.GradientDrawable
 import androidx.core.content.ContextCompat
 import androidx.recyclerview.widget.RecyclerView
 import androidx.recyclerview.widget.DiffUtil
 
 class TerminalAdapter(
     private val onOpen: (ConversationTarget) -> Unit,
+    private val onClose: ((ConversationTarget) -> Unit)? = null,
 ) : RecyclerView.Adapter<TerminalAdapter.Holder>() {
     private var targets: List<ConversationTarget> = emptyList()
 
@@ -23,6 +26,7 @@ class TerminalAdapter(
                     row.pairId,
                     row.project.id,
                     row.project.name,
+                    row.project.color,
                     terminal,
                     Pair(row.pairId, terminal.id) in unreadKeys,
                     row.desktopOnline,
@@ -68,6 +72,11 @@ class TerminalAdapter(
         holder.itemView.setBackgroundResource(
             if (target.unread) R.drawable.message_card_unread else R.drawable.message_card,
         )
+        val accent = target.projectColor?.let { runCatching { Color.parseColor(it) }.getOrNull() }
+        (holder.itemView.background?.mutate() as? GradientDrawable)?.setStroke(
+            if (accent != null) 2 else 0,
+            accent ?: Color.TRANSPARENT,
+        )
         holder.context.text = "Project  ${target.projectName}"
         holder.title.text = terminal.agent ?: terminal.title
         holder.model.text = terminal.model ?: terminal.shell
@@ -75,7 +84,7 @@ class TerminalAdapter(
             "OFFLINE"
         } else {
             when (terminal.status) {
-                "working" -> "THINKING"
+                "working" -> if (terminal.agent != null) "THINKING" else "RUNNING"
                 "waiting" -> "NEEDS YOU"
                 "exited" -> "CLOSED"
                 else -> "READY"
@@ -96,8 +105,12 @@ class TerminalAdapter(
             ),
         )
         holder.shimmer.visibility =
-            if (target.desktopOnline && terminal.status == "working") View.VISIBLE else View.GONE
+            if (target.desktopOnline && terminal.status == "working" && terminal.agent != null) View.VISIBLE else View.GONE
         holder.itemView.setOnClickListener { onOpen(target) }
+        holder.itemView.setOnLongClickListener {
+            onClose?.invoke(target)
+            onClose != null
+        }
         holder.itemView.contentDescription = buildString {
             if (target.unread) append("Unread conversation. ")
             append("${terminal.agent ?: terminal.title}, ${target.projectName}")

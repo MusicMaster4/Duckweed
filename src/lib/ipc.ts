@@ -78,6 +78,7 @@ export interface MobileTerminalSnapshot {
   unreadOnDesktop: boolean;
   conversation: MobileConversationSnapshot[];
   permission: MobilePermissionSnapshot | null;
+  terminalOutput?: string;
 }
 
 export interface MobilePermissionOptionSnapshot {
@@ -106,6 +107,8 @@ export interface MobileProjectSnapshot {
   name: string;
   path: string;
   branch: string | null;
+  /** Desktop tab accent, shared with the companion app. */
+  color?: string | null;
   terminals: MobileTerminalSnapshot[];
 }
 
@@ -116,10 +119,11 @@ export interface MobileWorkspaceSnapshot {
 export interface MobileRemoteCommand {
   deviceId: string;
   commandId: string;
-  kind: "input" | "refresh" | "approval";
+  kind: "input" | "refresh" | "approval" | "create_terminal" | "close_terminal";
   terminalId: string | null;
   projectId: string | null;
   text: string | null;
+  agent?: string | null;
   permissionId: string | null;
   optionId: string | null;
   images: Array<{

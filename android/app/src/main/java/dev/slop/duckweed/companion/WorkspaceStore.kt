@@ -59,7 +59,8 @@ class WorkspaceStore(private val context: Context) {
                         .put("status", terminal.status)
                         .put("unreadOnDesktop", terminal.unreadOnDesktop)
                         .put("conversation", conversation)
-                        .put("permission", permission),
+                        .put("permission", permission)
+                        .put("terminalOutput", terminal.terminalOutput),
                 )
             }
             projects.put(
@@ -68,6 +69,7 @@ class WorkspaceStore(private val context: Context) {
                     .put("name", project.name)
                     .put("path", project.path)
                     .put("branch", project.branch)
+                    .put("color", project.color)
                     .put("terminals", terminals),
             )
         }
@@ -98,6 +100,7 @@ class WorkspaceStore(private val context: Context) {
                         name = project.optString("name", "Project"),
                         path = project.optString("path"),
                         branch = if (project.isNull("branch")) null else project.optString("branch").takeIf { it.isNotBlank() },
+                        color = if (project.isNull("color")) null else project.optString("color").takeIf { it.isNotBlank() },
                         terminals = (0 until terminalsJson.length()).map { terminalIndex ->
                             val terminal = terminalsJson.getJSONObject(terminalIndex)
                             val conversationJson = terminal.optJSONArray("conversation") ?: JSONArray()
@@ -145,6 +148,7 @@ class WorkspaceStore(private val context: Context) {
                                         },
                                     ).takeIf { it.id.isNotBlank() && it.options.isNotEmpty() }
                                 },
+                                terminalOutput = terminal.optString("terminalOutput").takeIf { it.isNotBlank() },
                             )
                         },
                     )

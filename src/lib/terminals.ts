@@ -2052,6 +2052,11 @@ export function getFontSize(): number {
  * Dump the active buffer as plain text (no cell colours). Used when the
  * highlighter toggle flips so scrollback can be redrawn with the new setting.
  */
+export function dumpBufferPlainForMobile(id: string): string {
+  const session = sessions.get(id);
+  return session ? dumpBufferPlain(session.term) : "";
+}
+
 function dumpBufferPlain(term: Terminal): string {
   const buffer = term.buffer.active;
   const lines: string[] = [];

@@ -2,6 +2,8 @@ import { Fragment, memo, useRef, useState } from "react";
 
 import { ALL_EDGES, edgesForChild, resizeSplit } from "../lib/layout";
 import type { CompletionFlash } from "../lib/completionHighlights";
+import type { AgentTarget, ScheduledSend, SubmitDelivery } from "../lib/scheduledSend";
+import type { AgentImageAttachment } from "../lib/agents/types";
 import type { DropZone, LayoutNode, LeafNode, ProjectInfo, SplitNode } from "../lib/types";
 import type { DragState } from "../hooks/useDragPane";
 import { TerminalPane } from "./TerminalPane";
@@ -41,6 +43,16 @@ export interface PaneTreeShared {
   onSplit: (leafId: string, zone: "right" | "bottom") => void;
   onClose: (leafId: string) => void;
   onToggleZoom: (leafId: string) => void;
+  agentTargets: readonly AgentTarget[];
+  scheduledSends: ReadonlyMap<string, ScheduledSend>;
+  onScheduleSend: (termId: string, target: AgentTarget) => void;
+  onCancelSchedule: (termId: string) => void;
+  onBeforeSubmit: (
+    termId: string,
+    text: string,
+    images: AgentImageAttachment[],
+    delivery: SubmitDelivery,
+  ) => boolean;
   onStartDrag: (e: React.PointerEvent, node: LeafNode) => void;
   onResize: (splitId: string, sizes: number[]) => void;
 }
@@ -108,6 +120,11 @@ export const PaneTree = memo(function PaneTree({
         onSplit={(zone) => shared.onSplit(node.id, zone)}
         onClose={() => shared.onClose(node.id)}
         onToggleZoom={() => shared.onToggleZoom(node.id)}
+        agentTargets={shared.agentTargets}
+        scheduledSend={shared.scheduledSends.get(node.term) ?? null}
+        onScheduleSend={shared.onScheduleSend}
+        onCancelSchedule={shared.onCancelSchedule}
+        onBeforeSubmit={shared.onBeforeSubmit}
         onDragHandle={(e) => shared.onStartDrag(e, node)}
       />
     );

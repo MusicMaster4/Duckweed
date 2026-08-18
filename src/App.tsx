@@ -38,6 +38,7 @@ import * as powerWatch from "./lib/powerWatch";
 import type { BusyEntry } from "./lib/powerWatch";
 import { agentHasUnfinishedWork } from "./lib/agents/activity";
 import * as agentSessions from "./lib/agents/session";
+import type { AgentImageAttachment } from "./lib/agents/types";
 import { handleUnattendedPermission } from "./lib/agents/autoApproval";
 import {
   confirmCloseRunning,
@@ -113,6 +114,7 @@ import {
   type ProcessState,
 } from "./lib/processActivity";
 import { setCompletionTaskbarBadge } from "./lib/taskbarCompletion";
+import type { AgentTarget, ScheduledSend, SubmitDelivery } from "./lib/scheduledSend";
 import {
   mobileCompletionDelay,
   shouldSendDelayedMobileCompletion,
@@ -196,6 +198,10 @@ async function confirmUpdateWithRunningProcesses(): Promise<boolean> {
 
 function basename(path: string): string {
   return path.split(/[\\/]/).filter(Boolean).pop() ?? path;
+}
+
+function hasSendablePayload(text: string, images: readonly AgentImageAttachment[]): boolean {
+  return text.trim().length > 0 || images.length > 0;
 }
 
 /**
@@ -387,6 +393,9 @@ export default function App() {
   const [workingAgentTermIds, setWorkingAgentTermIds] = useState<Set<string>>(
     () => new Set(),
   );
+  const [scheduledSends, setScheduledSends] = useState<Map<string, ScheduledSend>>(
+    () => new Map(),
+  );
   const unreadTermIdsRef = useRef(unreadTermIds);
   unreadTermIdsRef.current = unreadTermIds;
   const completionFlashesRef = useRef(completionFlashes);
@@ -423,6 +432,8 @@ export default function App() {
   const completionFlashTimers = useRef(new Map<string, number>());
   const mobileCompletionTimers = useRef(new Map<string, number>());
   const lastTerminalInteractionAt = useRef(new Map<string, number>());
+  const scheduledSendsRef = useRef(scheduledSends);
+  scheduledSendsRef.current = scheduledSends;
   /** Dirty flag for the lifted file editor (file switches confirm through this). */
   const editorDirtyRef = useRef(false);
   const processState = useRef(new Map<string, ProcessState>());
@@ -682,6 +693,16 @@ export default function App() {
     terminals.dispose(term);
     spawnOpts.current.delete(term);
     processState.current.delete(term);
+    const previousSchedules = scheduledSendsRef.current;
+    const nextSchedules = new Map(previousSchedules);
+    for (const [sourceTermId, scheduled] of previousSchedules) {
+      if (sourceTermId !== term && scheduled.targetTermId !== term) continue;
+      nextSchedules.delete(sourceTermId);
+    }
+    if (nextSchedules.size !== previousSchedules.size) {
+      scheduledSendsRef.current = nextSchedules;
+      setScheduledSends(nextSchedules);
+    }
     const flashTimer = completionFlashTimers.current.get(term);
     if (flashTimer !== undefined) {
       window.clearTimeout(flashTimer);
@@ -709,6 +730,115 @@ export default function App() {
   );
   const termIdsKey = termIds.join("\0");
 
+  const scheduleSend = useCallback((termId: string, target: AgentTarget) => {
+    if (termId === target.termId) return;
+    const targetLabel = `${target.label} · ${target.detail}`;
+    const current = scheduledSendsRef.current.get(termId);
+    if (current?.targetTermId === target.termId && current.targetLabel === targetLabel) return;
+    const next = new Map(scheduledSendsRef.current);
+    next.set(termId, { targetTermId: target.termId, targetLabel });
+    scheduledSendsRef.current = next;
+    setScheduledSends(next);
+  }, []);
+
+  const cancelSchedule = useCallback((termId: string) => {
+    if (!scheduledSendsRef.current.has(termId)) return;
+    const next = new Map(scheduledSendsRef.current);
+    next.delete(termId);
+    scheduledSendsRef.current = next;
+    setScheduledSends(next);
+  }, []);
+
+  const sendDraftNow = useCallback(
+    (
+      termId: string,
+      text: string,
+      images: AgentImageAttachment[],
+      delivery: SubmitDelivery = "default",
+    ): boolean => {
+      const agent = agentSessions.get(termId);
+      if (agent) {
+        if (agent.status === "exited" || agent.status === "error") return false;
+        agentSessions.submit(termId, text, images, delivery);
+        bus.emit("term:clear-draft", { termId });
+        return true;
+      }
+
+      const meta = terminals.getMeta(termId);
+      if (!meta || meta.exited || images.length > 0 || !text.trim()) return false;
+      terminals.setDraft(termId, "");
+      if (meta.agent || meta.busy) {
+        terminals.writeRaw(termId, `${text}\r`);
+      } else {
+        terminals.submitCommand(termId, text);
+      }
+      bus.emit("term:clear-draft", { termId });
+      return true;
+    },
+    [],
+  );
+
+  const completeScheduledSendsForTarget = useCallback(
+    (targetTermId: string) => {
+      const targetAgent = agentSessions.get(targetTermId);
+      const targetStillWorking = targetAgent
+        ? agentHasUnfinishedWork(targetAgent.status)
+        : terminals.hasPendingAgentTurn(targetTermId);
+      if (targetStillWorking) return;
+
+      const waiting = [...scheduledSendsRef.current].filter(
+        ([, scheduled]) => scheduled.targetTermId === targetTermId,
+      );
+      for (const [sourceTermId] of waiting) {
+        const sourceAgent = agentSessions.get(sourceTermId);
+        const text = sourceAgent
+          ? agentSessions.getDraft(sourceTermId)
+          : terminals.getDraft(sourceTermId);
+        const images = sourceAgent ? agentSessions.getDraftImages(sourceTermId) : [];
+        const next = new Map(scheduledSendsRef.current);
+        next.delete(sourceTermId);
+        scheduledSendsRef.current = next;
+        setScheduledSends(next);
+        if (hasSendablePayload(text, images)) {
+          sendDraftNow(sourceTermId, text, images);
+        }
+      }
+    },
+    [sendDraftNow],
+  );
+
+  const beforeScheduledSubmit = useCallback(
+    (
+      termId: string,
+      text: string,
+      images: AgentImageAttachment[],
+      delivery: SubmitDelivery,
+    ): boolean => {
+      const scheduled = scheduledSendsRef.current.get(termId);
+      if (!scheduled || !hasSendablePayload(text, images)) return false;
+
+      void confirmCloseRunning({
+        title: "Send scheduled message now?",
+        message: `This terminal is scheduled to send when ${scheduled.targetLabel} finishes. Send the message now instead?`,
+        confirmLabel: "Send now",
+      }).then((ok) => {
+        if (!ok) return;
+        const current = scheduledSendsRef.current.get(termId);
+        if (
+          !current ||
+          current.targetTermId !== scheduled.targetTermId ||
+          current.targetLabel !== scheduled.targetLabel
+        ) {
+          return;
+        }
+        cancelSchedule(termId);
+        sendDraftNow(termId, text, images, delivery);
+      });
+      return true;
+    },
+    [cancelSchedule, sendDraftNow],
+  );
+
   // Keep a compact remote index on paired phones. It contains only open
   // projects, terminal identity, and status, never terminal output or an
   // in-progress agent transcript.
@@ -726,6 +856,7 @@ export default function App() {
           name: tab.project?.name ?? tab.title,
           path: tab.project?.path ?? "",
           branch: tab.project?.branch ?? null,
+          color: tab.color ? tabColorHex(tab.color) : null,
           terminals: leaves(tab.root).flatMap((node) => {
             const meta = terminals.getMeta(node.term);
             if (!meta) return [];
@@ -790,6 +921,9 @@ export default function App() {
               agent: session?.label ?? rawAgent,
               model: session?.model ?? null,
               status,
+              terminalOutput: !session && !meta.agent
+                ? terminals.dumpBufferPlainForMobile(node.term).slice(-8_000)
+                : undefined,
               unreadOnDesktop: unreadTermIdsRef.current.has(node.term),
               conversation,
               permission: session?.permission && session.permission.kind !== "question"
@@ -882,6 +1016,14 @@ export default function App() {
             if (!applied.has(key)) {
               if (command.kind === "refresh") {
                 window.dispatchEvent(new Event("duckweed:mobile-refresh"));
+              } else if (command.kind === "create_terminal" && command.projectId) {
+                window.dispatchEvent(new CustomEvent("duckweed:mobile-create-terminal", {
+                  detail: { projectId: command.projectId, command: command.text ?? command.agent ?? "" },
+                }));
+              } else if (command.kind === "close_terminal" && command.terminalId) {
+                window.dispatchEvent(new CustomEvent("duckweed:mobile-close-terminal", {
+                  detail: { terminalId: command.terminalId },
+                }));
               } else if (
                 command.kind === "approval" &&
                 command.terminalId &&
@@ -997,6 +1139,10 @@ export default function App() {
       processState.current.set(termId, current);
       if (!previous) return;
 
+      if (current.completionSeq > previous.completionSeq) {
+        completeScheduledSendsForTarget(termId);
+      }
+
       if (!shouldSignalCompletion(previous, current)) return;
       const completionCue =
         !dailyLockedRef.current &&
@@ -1077,7 +1223,14 @@ export default function App() {
     };
     // Tab metadata changes must not tear down every terminal subscription.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [termIdsKey, acknowledgeTerm, flashCompletion, isFocusedTerm, isSelectedTerm]);
+  }, [
+    termIdsKey,
+    acknowledgeTerm,
+    completeScheduledSendsForTarget,
+    flashCompletion,
+    isFocusedTerm,
+    isSelectedTerm,
+  ]);
 
   // ---------------------------------------------------------- power watch
 
@@ -3144,6 +3297,23 @@ export default function App() {
       ),
     [tabs, workingAgentTermIds],
   );
+  const agentTargets = useMemo<AgentTarget[]>(() => {
+    if (!activeTab) return [];
+    return leaves(activeTab.root).flatMap((node, index) => {
+      if (!workingAgentTermIds.has(node.term)) return [];
+      const session = agentSessions.get(node.term);
+      const meta = terminals.getMeta(node.term);
+      const rawLabel = session?.label ?? meta?.agent ?? "Agent";
+      const label = rawLabel.charAt(0).toUpperCase() + rawLabel.slice(1);
+      return [
+        {
+          termId: node.term,
+          label,
+          detail: meta?.title || `Pane ${index + 1}`,
+        },
+      ];
+    });
+  }, [activeTab, workingAgentTermIds]);
   const unreadCounts = useMemo(
     () =>
       Object.fromEntries(
@@ -3252,6 +3422,11 @@ export default function App() {
       onSplit: splitAt,
       onClose: closePaneById,
       onToggleZoom: toggleZoom,
+      agentTargets,
+      scheduledSends,
+      onScheduleSend: scheduleSend,
+      onCancelSchedule: cancelSchedule,
+      onBeforeSubmit: beforeScheduledSubmit,
       onStartDrag,
       onResize: resizeSplitSizes,
     }),
@@ -3259,8 +3434,11 @@ export default function App() {
       activeTab?.activeLeaf,
       activeTab?.zoomedLeaf,
       acknowledgeTerm,
+      agentTargets,
       activatePane,
+      beforeScheduledSubmit,
       browseActiveProject,
+      cancelSchedule,
       closePaneById,
       completionFlashes,
       finishPaneMotion,
@@ -3273,6 +3451,8 @@ export default function App() {
       project,
       recents,
       resizeSplitSizes,
+      scheduleSend,
+      scheduledSends,
       spawnFor,
       splitAt,
       toggleZoom,
@@ -3296,6 +3476,35 @@ export default function App() {
     tintWorkspaceWithTabColor && !settingsActive && !dailyLocked
       ? tabColorHex(activeTab?.color)
       : null;
+
+  useEffect(() => {
+    const create = (event: Event) => {
+      const detail = (event as CustomEvent<{ projectId: string; command: string }>).detail;
+      const source = tabsRef.current.find((tab) => tab.id === detail.projectId);
+      const open = source?.project
+        ? applyProject(source.project.path, { newTab: true })
+        : Promise.resolve(newTab(null));
+      void open.then(() => {
+        window.setTimeout(() => {
+          const current = tabsRef.current.find((tab) => tab.id === activeTabIdRef.current);
+          const term = current ? findLeaf(current.root, current.activeLeaf)?.term : null;
+          if (term && detail.command.trim()) terminals.submitCommand(term, detail.command.trim());
+        }, 120);
+      });
+    };
+    const close = (event: Event) => {
+      const terminalId = (event as CustomEvent<{ terminalId: string }>).detail.terminalId;
+      const owner = tabsRef.current.find((tab) => leaves(tab.root).some((node) => node.term === terminalId));
+      const leaf = owner && leaves(owner.root).find((node) => node.term === terminalId);
+      if (leaf) void closePane(leaf.id);
+    };
+    window.addEventListener("duckweed:mobile-create-terminal", create);
+    window.addEventListener("duckweed:mobile-close-terminal", close);
+    return () => {
+      window.removeEventListener("duckweed:mobile-create-terminal", create);
+      window.removeEventListener("duckweed:mobile-close-terminal", close);
+    };
+  }, [applyProject, closePane, newTab]);
 
   return (
     <div

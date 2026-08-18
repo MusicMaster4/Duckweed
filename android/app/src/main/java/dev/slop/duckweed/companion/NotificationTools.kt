@@ -115,7 +115,7 @@ object NotificationTools {
             ?.asSequence()
             ?.mapNotNull { project ->
                 project.terminals.firstOrNull { it.id == terminalId }?.let { terminal ->
-                    ConversationTarget(pairId, project.id, project.name, terminal)
+                    ConversationTarget(pairId, project.id, project.name, project.color, terminal)
                 }
             }
             ?.firstOrNull()
