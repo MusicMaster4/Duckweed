@@ -321,18 +321,6 @@ export const TerminalPane = memo(function TerminalPane({
           <span className="pane-spacer" />
           <button
             type="button"
-            className="pane-btn"
-            title="Split right (Ctrl+Shift+D)"
-            onPointerDown={(e) => e.stopPropagation()}
-            onClick={() => onSplit("right")}
-          >
-            <svg viewBox="0 0 14 14" aria-hidden="true">
-              <rect x="1.5" y="2" width="11" height="10" rx="1.5" />
-              <line x1="7" y1="2" x2="7" y2="12" />
-            </svg>
-          </button>
-          <button
-            type="button"
             className={`pane-btn pane-tools-btn${scheduledSend ? " is-active" : ""}`}
             title="Terminal tools"
             aria-label="Terminal tools"
@@ -354,6 +342,18 @@ export const TerminalPane = memo(function TerminalPane({
             <svg viewBox="0 0 14 14" aria-hidden="true">
               <path d="M8.9 2.1a3 3 0 0 0-3.7 3.7l-3 3a1.4 1.4 0 0 0 2 2l3-3a3 3 0 0 0 3.7-3.7L9 6.1 7.9 5l2.1-1.9z" />
               <path d="m4.1 9.9 1 1" />
+            </svg>
+          </button>
+          <button
+            type="button"
+            className="pane-btn"
+            title="Split right (Ctrl+Shift+D)"
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={() => onSplit("right")}
+          >
+            <svg viewBox="0 0 14 14" aria-hidden="true">
+              <rect x="1.5" y="2" width="11" height="10" rx="1.5" />
+              <line x1="7" y1="2" x2="7" y2="12" />
             </svg>
           </button>
           <button
