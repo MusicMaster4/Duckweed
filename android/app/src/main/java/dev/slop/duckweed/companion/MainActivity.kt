@@ -91,7 +91,7 @@ class MainActivity : AppCompatActivity() {
     private val messageAdapter = MessageAdapter { openResponse(it) }
     private val projectAdapter = ProjectAdapter { openProject(it) }
     private val terminalAdapter = TerminalAdapter({ openConversation(it, true) }, ::requestCloseTerminal)
-    private val conversationsAdapter = TerminalAdapter { openConversation(it, false) }
+    private val conversationsAdapter = TerminalAdapter(onOpen = { openConversation(it, false) })
     private val conversationAdapter = ConversationAdapter(::retryConversationMessage)
     private val executor = Executors.newSingleThreadExecutor()
     private val storageExecutor = Executors.newSingleThreadExecutor()
