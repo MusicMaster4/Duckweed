@@ -8,8 +8,9 @@ mod discord_presence;
 mod fs;
 mod git;
 mod launch;
-mod power;
+mod mobile_push;
 mod ports;
+mod power;
 mod process_tree;
 mod project;
 mod pty;
@@ -45,6 +46,12 @@ use watch::ProjectWatchManager;
 
 #[derive(Default)]
 struct DurableSettings(Mutex<()>);
+
+/// Whether F11 was pressed from a maximized window. Exclusive fullscreen
+/// on a frameless HWND has to drop maximize first or the webview undersizes,
+/// so we put maximize back ourselves on the way out.
+#[derive(Default)]
+struct FullscreenRestore(Mutex<bool>);
 
 const COMMAND_HISTORY_KEY: &str = "duckweed:command-history:v1";
 
@@ -91,7 +98,10 @@ fn merge_history(stored: &str, incoming: &str) -> String {
     let mut merged: Vec<HistoryEntry> = Vec::new();
     let mut index: HashMap<(String, String), usize> = HashMap::new();
 
-    for entry in parse_history(stored).into_iter().chain(parse_history(incoming)) {
+    for entry in parse_history(stored)
+        .into_iter()
+        .chain(parse_history(incoming))
+    {
         if entry.command.trim().is_empty() {
             continue;
         }
@@ -161,7 +171,10 @@ fn settings_save(
     // History accumulates across windows, builds and updates; everything else
     // is a single-writer snapshot that simply replaces the stored copy.
     let value = if key == COMMAND_HISTORY_KEY && !replace.unwrap_or(false) {
-        merge_history(settings.get(&key).map(String::as_str).unwrap_or("[]"), &value)
+        merge_history(
+            settings.get(&key).map(String::as_str).unwrap_or("[]"),
+            &value,
+        )
     } else {
         value
     };
@@ -505,8 +518,129 @@ fn frontend_ready(app: AppHandle) -> Result<(), String> {
     let Some(window) = app.get_webview_window("main") else {
         return Ok(());
     };
+    let _ = disable_browser_accelerator_keys(&window);
     window.show().map_err(|error| error.to_string())?;
     window.set_focus().map_err(|error| error.to_string())
+}
+
+/// Toggle OS fullscreen and stretch the webview to the monitor.
+///
+/// `set_fullscreen` on a frameless Windows window covers the taskbar but
+/// leaves the WebView2 child at the work-area size, which is the black bar
+/// under the status line. We unmaximize first (maximized → fullscreen is
+/// even worse), then force the HWND and the webview onto the monitor.
+/// DWM transitions stay off for the hop so Windows does not animate
+/// restore → fullscreen → restore.
+#[tauri::command]
+fn toggle_window_fullscreen(
+    app: AppHandle,
+    restore: State<'_, FullscreenRestore>,
+) -> Result<bool, String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "main window missing".to_string())?;
+    let next = !window.is_fullscreen().map_err(|error| error.to_string())?;
+    // Stay off for the whole fullscreen stay. Re-enabling here would let
+    // Windows animate the maximize we do on the way out.
+    set_window_transitions(&window, false);
+    if next {
+        let maximized = window.is_maximized().unwrap_or(false);
+        *restore.0.lock().unwrap_or_else(|error| error.into_inner()) = maximized;
+        if maximized {
+            window.unmaximize().map_err(|error| error.to_string())?;
+        }
+    }
+    window
+        .set_fullscreen(next)
+        .map_err(|error| error.to_string())?;
+    if !next {
+        let maximized = std::mem::take(
+            &mut *restore.0.lock().unwrap_or_else(|error| error.into_inner()),
+        );
+        if maximized {
+            window.maximize().map_err(|error| error.to_string())?;
+        }
+        set_window_transitions(&window, true);
+    }
+    fit_webview_to_window(&window, next);
+    window.is_fullscreen().map_err(|error| error.to_string())
+}
+
+/// Second pass after the HWND has actually grown into exclusive fullscreen.
+#[tauri::command]
+fn sync_webview_bounds(app: AppHandle) -> Result<(), String> {
+    let Some(window) = app.get_webview_window("main") else {
+        return Ok(());
+    };
+    let fullscreen = window.is_fullscreen().unwrap_or(false);
+    fit_webview_to_window(&window, fullscreen);
+    Ok(())
+}
+
+fn fit_webview_to_window(window: &tauri::WebviewWindow, fill_monitor: bool) {
+    let size = if fill_monitor {
+        window
+            .current_monitor()
+            .ok()
+            .flatten()
+            .map(|monitor| *monitor.size())
+            .or_else(|| window.inner_size().ok())
+    } else {
+        window.inner_size().ok()
+    };
+    let Some(size) = size else { return };
+    if fill_monitor {
+        if let Some(monitor) = window.current_monitor().ok().flatten() {
+            let _ = window.set_position(*monitor.position());
+        }
+        let _ = window.set_size(size);
+    }
+    set_webview_bounds(window, size.width, size.height);
+}
+
+fn set_window_transitions(window: &tauri::WebviewWindow, enabled: bool) {
+    #[cfg(windows)]
+    {
+        use windows::Win32::Graphics::Dwm::{
+            DwmSetWindowAttribute, DWMWA_TRANSITIONS_FORCEDISABLED,
+        };
+
+        let Ok(hwnd) = window.hwnd() else { return };
+        let disable = i32::from(!enabled);
+        unsafe {
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_TRANSITIONS_FORCEDISABLED,
+                (&raw const disable).cast(),
+                std::mem::size_of::<i32>() as u32,
+            );
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (window, enabled);
+    }
+}
+
+fn set_webview_bounds(window: &tauri::WebviewWindow, width: u32, height: u32) {
+    #[cfg(windows)]
+    {
+        let _ = window.with_webview(move |webview| {
+            use windows::Win32::Foundation::RECT;
+            unsafe {
+                let _ = webview.controller().SetBounds(RECT {
+                    left: 0,
+                    top: 0,
+                    right: width as i32,
+                    bottom: height as i32,
+                });
+            }
+        });
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (window, width, height);
+    }
 }
 
 /// Open an http(s) URL in the user's default browser.
@@ -536,9 +670,12 @@ async fn power_action(action: String) -> Result<(), String> {
 /// audio the WebView starts. Errors are the frontend's cue to fall back to its
 /// own player, so a machine this cannot open a device on still gets sound.
 #[tauri::command]
-async fn play_completion_sound(player: State<'_, SoundPlayer>) -> Result<(), String> {
+async fn play_completion_sound(
+    player: State<'_, SoundPlayer>,
+    cue_index: Option<usize>,
+) -> Result<(), String> {
     let player = player.inner().clone();
-    blocking(move || player.play()).await
+    blocking(move || player.play(cue_index)).await
 }
 
 /// Validate and hand `url` to the OS default handler.
@@ -693,6 +830,30 @@ fn emit_launch_intent(app: &AppHandle, intent: LaunchIntent) {
     focus_main_window(app);
 }
 
+/// WebView2 treats F11 as its own fullscreen accelerator and never delivers
+/// the key to the page. In a frameless window that "fullscreen" is a no-op,
+/// so the JS handler never runs. Turning the browser accelerators off lets
+/// F11 (and F5, which would otherwise reload the shell) reach the app.
+#[cfg(windows)]
+fn disable_browser_accelerator_keys(window: &tauri::WebviewWindow) -> tauri::Result<()> {
+    window.with_webview(|webview| {
+        use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Settings3;
+        use windows_core::Interface;
+
+        unsafe {
+            let Ok(core) = webview.controller().CoreWebView2() else { return };
+            let Ok(settings) = core.Settings() else { return };
+            let Ok(settings3) = settings.cast::<ICoreWebView2Settings3>() else { return };
+            let _ = settings3.SetAreBrowserAcceleratorKeysEnabled(false);
+        }
+    })
+}
+
+#[cfg(not(windows))]
+fn disable_browser_accelerator_keys(_window: &tauri::WebviewWindow) -> tauri::Result<()> {
+    Ok(())
+}
+
 /// Give the dev binary its own WebView2 profile so it can run beside an
 /// installed Duckweed. Both use identifier `dev.slop.duckweed`; sharing one
 /// user-data folder makes the second process exit immediately on Windows.
@@ -776,12 +937,13 @@ fn main() {
         .manage(SearchGeneration::default())
         .manage(SoundPlayer::default())
         .manage(PendingLaunch(Mutex::new(startup_intent)))
+        .manage(FullscreenRestore::default())
         .setup(|app| {
-            if let (Some(window), Some(icon)) = (
-                app.get_webview_window("main"),
-                app.default_window_icon().cloned(),
-            ) {
-                window.set_icon(icon)?;
+            if let Some(window) = app.get_webview_window("main") {
+                if let Some(icon) = app.default_window_icon().cloned() {
+                    window.set_icon(icon)?;
+                }
+                let _ = disable_browser_accelerator_keys(&window);
             }
             pty::start_busy_monitor(app.handle().clone())?;
             agent_activity::start_monitor(app.handle().clone())?;
@@ -831,6 +993,8 @@ fn main() {
             agent_proc_close_stdin,
             agent_proc_stop,
             frontend_ready,
+            toggle_window_fullscreen,
+            sync_webview_bounds,
             open_url,
             play_completion_sound,
             power_action,
@@ -843,6 +1007,16 @@ fn main() {
             usage_set_pricing,
             settings_load,
             settings_save,
+            mobile_push::mobile_status,
+            mobile_push::mobile_pair_start,
+            mobile_push::mobile_pair_poll,
+            mobile_push::mobile_device_remove,
+            mobile_push::mobile_send_completion,
+            mobile_push::mobile_send_workspace,
+            mobile_push::mobile_send_presence,
+            mobile_push::mobile_poll_commands,
+            mobile_push::mobile_ack_command,
+            mobile_push::mobile_send_test,
         ])
         .on_window_event(|window, event| {
             // Make sure we never leave orphaned shells behind.
@@ -877,7 +1051,10 @@ mod tests {
     fn merge_keeps_commands_a_stale_snapshot_never_saw() {
         let stored = r#"[{"command":"cargo build","cwd":"/a","at":1}]"#;
         let incoming = r#"[{"command":"npm test","cwd":"/a","at":2}]"#;
-        assert_eq!(commands(&merge_history(stored, incoming)), ["cargo build", "npm test"]);
+        assert_eq!(
+            commands(&merge_history(stored, incoming)),
+            ["cargo build", "npm test"]
+        );
     }
 
     #[test]

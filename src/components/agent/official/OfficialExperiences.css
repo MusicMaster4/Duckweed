@@ -14,6 +14,19 @@
   padding: 8px 2px 24px;
 }
 
+/* Long transcripts keep their full DOM and accessibility tree, but Chromium
+   can skip layout and paint for turns that are far outside the viewport. The
+   auto size remembers each measured turn and prevents scroll jumps on revisit. */
+.official-transcript > .official-user-turn,
+.official-transcript > .official-answer,
+.official-transcript > .official-answer-layer,
+.official-transcript > .official-notice,
+.official-transcript > .official-plan,
+.official-transcript > .agent-activity-cluster {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 96px;
+}
+
 /* New conversational turns arrive with a short, spatially quiet handoff. */
 [data-message-enter] {
   animation: agent-message-enter 150ms cubic-bezier(0.22, 1, 0.36, 1) both;
@@ -1092,21 +1105,6 @@ strong.agent-activity-history-summary {
   opacity: 0.28;
 }
 
-/**
- * The still motions never scale, so their cells would hold the resting size
- * for the whole cycle while every other matrix opens well past it, which
- * reads as a grid of smaller squares. Size the cell itself up to the lit
- * size of the catalog instead: that keeps the bank still, which is the whole
- * point of it, without leaving it looking undersized next to the others.
- */
-.agent-activity-pulse[data-motion="lamp"],
-.agent-activity-pulse[data-motion="wink"],
-.agent-activity-pulse[data-motion="ember"],
-.agent-activity-pulse[data-motion="morse"],
-.agent-activity-pulse[data-motion="fade"] {
-  --pulse-cell: 2.9px;
-}
-
 .agent-activity-pulse.is-active > span {
   animation-duration: var(--pulse-duration);
   animation-delay: var(--pulse-delay);
@@ -1645,12 +1643,12 @@ strong.agent-activity-history-summary {
   0%,
   100% {
     opacity: 0.16;
-    transform: scale(0.58);
+    transform: scale(0.7);
   }
 
   16% {
     opacity: 1;
-    transform: scale(1.32);
+    transform: scale(1.14);
   }
 
   30% {
@@ -1710,7 +1708,7 @@ strong.agent-activity-history-summary {
   34%,
   50% {
     opacity: 1;
-    transform: scale(1.2);
+    transform: scale(1.1);
   }
 
   74% {
@@ -1747,7 +1745,7 @@ strong.agent-activity-history-summary {
 
   60% {
     opacity: 1;
-    transform: scale(1.16);
+    transform: scale(1.1);
   }
 
   61%,
@@ -1811,12 +1809,12 @@ strong.agent-activity-history-summary {
 @keyframes agent-activity-pop {
   0% {
     opacity: 0.16;
-    transform: scale(0.6);
+    transform: scale(0.7);
   }
 
   14% {
     opacity: 1;
-    transform: scale(1.22);
+    transform: scale(1.14);
   }
 
   30% {
@@ -1917,7 +1915,7 @@ strong.agent-activity-history-summary {
 
   18% {
     opacity: 1;
-    transform: scale(1.3);
+    transform: scale(1.14);
   }
 
   42% {
@@ -1975,12 +1973,12 @@ strong.agent-activity-history-summary {
 
   45% {
     opacity: 0.55;
-    transform: scale(1.28);
+    transform: scale(1.1);
   }
 
   100% {
     opacity: 0.16;
-    transform: scale(1.5);
+    transform: scale(1.14);
   }
 }
 
@@ -2041,7 +2039,7 @@ strong.agent-activity-history-summary {
   35%,
   46% {
     opacity: 1;
-    transform: scale(1.18);
+    transform: scale(1.1);
   }
 
   70%,
@@ -2080,12 +2078,12 @@ strong.agent-activity-history-summary {
 @keyframes agent-activity-sprout {
   0% {
     opacity: 0.1;
-    transform: translateY(1.2px) scale(0.5);
+    transform: translateY(1.2px) scale(0.7);
   }
 
   40% {
     opacity: 1;
-    transform: translateY(-0.6px) scale(1.16);
+    transform: translateY(-0.6px) scale(1.1);
   }
 
   62% {
@@ -2238,7 +2236,7 @@ strong.agent-activity-history-summary {
 
   12% {
     opacity: 1;
-    transform: translate(1.5px, -1.2px) scale(1.18);
+    transform: translate(1.5px, -1.2px) scale(1.1);
   }
 
   46% {
@@ -2281,7 +2279,7 @@ strong.agent-activity-history-summary {
 
   38% {
     opacity: 1;
-    transform: translateY(1.2px) scale(1.16);
+    transform: translateY(1.2px) scale(1.1);
   }
 
   54% {
@@ -2310,7 +2308,7 @@ strong.agent-activity-history-summary {
 
   64% {
     opacity: 1;
-    transform: translate(1.3px, 0.9px) scale(1.16);
+    transform: translate(1.3px, 0.9px) scale(1.1);
   }
 
   84% {
@@ -2341,7 +2339,7 @@ strong.agent-activity-history-summary {
 
   75% {
     opacity: 1;
-    transform: translate(-1.5px, -0.4px) scale(1.18);
+    transform: translate(-1.5px, -0.4px) scale(1.1);
   }
 }
 
@@ -2354,7 +2352,7 @@ strong.agent-activity-history-summary {
 
   50% {
     opacity: 1;
-    transform: translate(0, -1.5px) scale(1.16);
+    transform: translate(0, -1.5px) scale(1.1);
   }
 
   100% {
@@ -2363,8 +2361,8 @@ strong.agent-activity-history-summary {
   }
 }
 
-/* Flip: pinches away to nothing at the halfway point and comes back up on the
-   other side of it, as if the cell had turned edge-on and round again. */
+/* Flip: pinches at the halfway point and comes back up on the other side of
+   it, as if the cell had turned edge-on and round again. */
 @keyframes agent-activity-flip {
   0% {
     opacity: 0.28;
@@ -2373,17 +2371,17 @@ strong.agent-activity-history-summary {
 
   22% {
     opacity: 0.98;
-    transform: scale(1.16);
+    transform: scale(1.1);
   }
 
   50% {
     opacity: 0.12;
-    transform: scale(0.24);
+    transform: scale(0.62);
   }
 
   78% {
     opacity: 0.9;
-    transform: scale(1.1);
+    transform: scale(1.06);
   }
 
   100% {
@@ -2396,7 +2394,7 @@ strong.agent-activity-history-summary {
 @keyframes agent-activity-chime {
   0% {
     opacity: 1;
-    transform: scale(1.26);
+    transform: scale(1.14);
   }
 
   18% {
@@ -2446,7 +2444,7 @@ strong.agent-activity-history-summary {
 
   60% {
     opacity: 1;
-    transform: translateY(-1.2px) scale(1.16);
+    transform: translateY(-1.2px) scale(1.1);
   }
 
   80% {
@@ -2464,12 +2462,12 @@ strong.agent-activity-history-summary {
 
   56% {
     opacity: 0.18;
-    transform: scale(0.6);
+    transform: scale(0.7);
   }
 
   70% {
     opacity: 1;
-    transform: scale(1.3);
+    transform: scale(1.14);
   }
 
   84% {
@@ -2492,7 +2490,7 @@ strong.agent-activity-history-summary {
 
   30% {
     opacity: 1;
-    transform: translate(0.6px, 0) scale(1.18);
+    transform: translate(0.6px, 0) scale(1.1);
   }
 
   46% {
@@ -2522,7 +2520,7 @@ strong.agent-activity-history-summary {
 
   72% {
     opacity: 0.42;
-    transform: translate(-0.6px, -1.4px) scale(1.34);
+    transform: translate(-0.6px, -1.4px) scale(1.14);
   }
 }
 
@@ -2550,7 +2548,7 @@ strong.agent-activity-history-summary {
   72%,
   88% {
     opacity: 1;
-    transform: scale(1.2);
+    transform: scale(1.1);
   }
 
   96%,
@@ -2571,7 +2569,7 @@ strong.agent-activity-history-summary {
   30%,
   52% {
     opacity: 1;
-    transform: translateY(-1.2px) scale(1.2);
+    transform: translateY(-1.2px) scale(1.1);
   }
 
   76% {
@@ -3591,8 +3589,6 @@ button.chatgpt-thinking-row.is-selected {
     animation: none;
   }
 
-  /* With every matrix held still, no bank opens past its resting size, so the
-     still bank has nothing left to make up for. */
   .agent-activity-pulse {
     --pulse-cell: 2.5px;
   }

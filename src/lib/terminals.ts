@@ -35,7 +35,7 @@ import {
   ptyWrite,
 } from "./ipc";
 import { isMetaSlashCommand } from "./agents/events";
-import { cKeyAction } from "./platform";
+import { cKeyAction, isFullscreenKey } from "./platform";
 import {
   detectAgent,
   isAgentPromptSubmission,
@@ -1208,6 +1208,9 @@ function create(id: string, opts: TerminalStartOptions): Session {
   term.attachCustomKeyEventHandler((event) => {
     if (session.exited) return true;
     if (event.type !== "keydown") return true;
+
+    // F11 is the app window, not CSI 23~ for whatever TUI has focus.
+    if (isFullscreenKey(event)) return false;
 
     const ctrl = event.ctrlKey || event.metaKey;
     // C + modifier on the grid: Cmd+C copies on macOS; Ctrl+C interrupts.

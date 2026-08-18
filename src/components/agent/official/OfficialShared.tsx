@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useState, type ReactNode } from "react";
+import { memo, useEffect, useId, useMemo, useState, type ReactNode } from "react";
 
 import type {
   AgentItem,
@@ -283,7 +283,7 @@ function isTableStart(lines: string[], index: number): boolean {
  * Safe, deliberately small Markdown renderer for streamed agent prose. It
  * covers the structures coding agents actually emit without injecting HTML.
  */
-export function AssistantMarkdown({ text }: { text: string }) {
+export const AssistantMarkdown = memo(function AssistantMarkdown({ text }: { text: string }) {
   const lines = text.replace(/\r\n?/g, "\n").split("\n");
   const blocks: ReactNode[] = [];
   let index = 0;
@@ -440,9 +440,9 @@ export function AssistantMarkdown({ text }: { text: string }) {
   }
 
   return <div className="official-markdown">{blocks}</div>;
-}
+});
 
-export function MessageItem({
+export const MessageItem = memo(function MessageItem({
   item,
   variant,
   className,
@@ -492,13 +492,13 @@ export function MessageItem({
     );
   }
   return null;
-}
+});
 
 function completedCount(steps: AgentPlanStep[]): number {
   return steps.reduce((sum, step) => sum + (step.status === "done" ? 1 : 0), 0);
 }
 
-export function PlanTracker({
+export const PlanTracker = memo(function PlanTracker({
   item,
   variant,
   runningSubagents = 0,
@@ -577,7 +577,7 @@ export function PlanTracker({
       </AnimatedDisclosure>
     </section>
   );
-}
+});
 
 function statusText(item: ToolItem): string {
   if (item.status === "error") return "Failed";
@@ -585,7 +585,7 @@ function statusText(item: ToolItem): string {
   return item.tool === "task" ? "Working" : "Running";
 }
 
-export function ToolActivity({
+export const ToolActivity = memo(function ToolActivity({
   item,
   variant,
   compact = false,
@@ -683,7 +683,7 @@ export function ToolActivity({
       </AnimatedDisclosure>
     </section>
   );
-}
+});
 
 function ActivityPulse({
   active,
@@ -934,7 +934,7 @@ function ToolHistory({
  * One compact activity area per user turn. The newest thought and tool call
  * remain visible while their complete histories stay one click away.
  */
-export function ActivityHistory({
+export const ActivityHistory = memo(function ActivityHistory({
   activities,
   variant,
   working = false,
@@ -974,7 +974,20 @@ export function ActivityHistory({
       )}
     </div>
   );
-}
+}, (previous, next) => {
+  if (
+    previous.variant !== next.variant ||
+    previous.working !== next.working ||
+    previous.showLatestThinking !== next.showLatestThinking ||
+    previous.clusterId !== next.clusterId ||
+    previous.activities.length !== next.activities.length
+  ) {
+    return false;
+  }
+  return previous.activities.every(
+    (activity, index) => activity === next.activities[index],
+  );
+});
 
 export function ProviderEmpty({
   agent,
@@ -1042,7 +1055,7 @@ export function shortAssistantUpdatesAsThinking(
   const preserveLastResponse = (start: number, end: number) => {
     for (let index = end - 1; index >= start; index -= 1) {
       const item = items[index];
-      if (item.kind === "assistant" && item.text.trim()) {
+      if (item.kind === "assistant" && hasVisibleText(item.text)) {
         finalResponseIds.add(item.id);
         return;
       }
@@ -1060,13 +1073,41 @@ export function shortAssistantUpdatesAsThinking(
     if (
       item.kind !== "assistant" ||
       finalResponseIds.has(item.id) ||
-      !item.text.trim() ||
-      Array.from(item.text).length > maxCharacters
+      !hasVisibleText(item.text) ||
+      exceedsCodePointLimit(item.text, maxCharacters)
     ) {
       return item;
     }
-    return { ...item, kind: "thinking" };
+    return assistantAsThinking(item);
   });
+}
+
+type AssistantItem = Extract<AgentItem, { kind: "assistant" }>;
+
+const thinkingItemCache = new WeakMap<AssistantItem, ThinkingItem>();
+
+/** Keep settled converted items referentially stable across streaming renders. */
+function assistantAsThinking(item: AssistantItem): ThinkingItem {
+  const cached = thinkingItemCache.get(item);
+  if (cached) return cached;
+  const thinking: ThinkingItem = { ...item, kind: "thinking" };
+  thinkingItemCache.set(item, thinking);
+  return thinking;
+}
+
+/** Check only as far as the threshold instead of allocating every code point. */
+function exceedsCodePointLimit(text: string, limit: number): boolean {
+  let count = 0;
+  for (const _character of text) {
+    count += 1;
+    if (count > limit) return true;
+  }
+  return false;
+}
+
+/** Avoid copying long strings just to decide whether they contain content. */
+function hasVisibleText(text: string): boolean {
+  return /\S/.test(text);
 }
 
 export interface ActivityGroup {
@@ -1109,6 +1150,15 @@ export function activityGroups(items: AgentItem[]): ActivityGroup[] {
       activity = [];
     };
 
+    let lastActivityIndex = -1;
+    for (let index = end - 1; index >= start; index -= 1) {
+      const item = items[index];
+      if (item.kind === "thinking" || item.kind === "tool") {
+        lastActivityIndex = index;
+        break;
+      }
+    }
+
     for (let index = start; index < end; index += 1) {
       const item = items[index];
       if (item.kind === "thinking" || item.kind === "tool") {
@@ -1116,10 +1166,7 @@ export function activityGroups(items: AgentItem[]): ActivityGroup[] {
         continue;
       }
       if (item.kind !== "assistant" || !activity.length) continue;
-      const hasLaterActivity = items
-        .slice(index + 1, end)
-        .some((later) => later.kind === "thinking" || later.kind === "tool");
-      if (hasLaterActivity) {
+      if (index < lastActivityIndex) {
         flush(null, item.id);
       } else {
         flush(item.id);

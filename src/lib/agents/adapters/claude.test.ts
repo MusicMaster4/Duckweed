@@ -1279,6 +1279,42 @@ export const meta = {
     expect(adapter.args({ ...launch, effort: "high" })).toEqual(["--effort", "high"]);
   });
 
+  test("runs /btw through Claude's side-question control channel", () => {
+    const h = harness();
+    expect(h.adapter.commandAvailableDuringTurn?.("/btw which file was that?")).toBe(true);
+    expect(h.adapter.command?.("/btw which file was that?", h.ctx)).toBe("handled");
+
+    const sent = h.sent.at(-1) as {
+      request_id: string;
+      request: { subtype: string; question: string };
+    };
+    expect(sent).toMatchObject({
+      type: "control_request",
+      request: { subtype: "side_question", question: "which file was that?" },
+    });
+    expect(h.state().sideQuestion).toMatchObject({
+      command: "/btw",
+      question: "which file was that?",
+      status: "asking",
+    });
+    expect(h.state().items).toEqual([]);
+
+    h.feed({
+      type: "control_response",
+      response: {
+        subtype: "success",
+        request_id: sent.request_id,
+        response: { response: "It was src/config.ts.", synthetic: false },
+      },
+    });
+
+    expect(h.state().sideQuestion).toMatchObject({
+      answer: "It was src/config.ts.",
+      status: "answered",
+    });
+    expect(h.state().items).toEqual([]);
+  });
+
   test("routes /model through the set_model control request", () => {
     const h = harness();
     expect(h.adapter.command?.("/model opus", h.ctx)).toBe("handled");

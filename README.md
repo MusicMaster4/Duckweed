@@ -245,6 +245,19 @@ switch channels. The beta download URL stays the same while the file behind it i
 replaced on every beta release. macOS and Linux beta packages are attached to
 each [versioned beta release](https://github.com/MusicMaster4/Duckweed/releases?q=prerelease%3Atrue).
 
+### Android companion
+
+Install the [stable Android companion](https://github.com/MusicMaster4/Duckweed/releases/latest/download/duckweed-companion.apk)
+or the [beta Android companion](https://github.com/MusicMaster4/Duckweed/releases/download/channel-testing/duckweed-companion-beta.apk)
+to receive encrypted agent-completion notifications and read the completed
+response on your phone. Pair it from **Settings > Agents > Mobile
+notifications**. See [mobile notifications](docs/mobile-notifications.md) for
+the privacy model and deployment setup.
+
+The desktop download action displays a phone-scannable QR code. After install,
+the companion's **Updates** tab checks its own stable or beta feed, verifies the
+APK checksum, and opens Android's installation confirmation.
+
 The Windows installer is per-user. It does not ask for administrator access, and
 later updates can be installed from the version chip in the status bar or from
 **Check for updates** in the command palette.
@@ -505,6 +518,10 @@ operating system before a release can be published.
 Release builds come from two branches: `main` publishes stable releases and
 `testing` publishes beta releases. The full versioning, signing, and updater
 setup is documented in [docs/releases.md](docs/releases.md).
+
+The Android companion and encrypted notification relay live in `android/` and
+`relay/`. Their free Cloudflare/FCM, signing, and release setup is documented in
+[docs/mobile-notifications.md](docs/mobile-notifications.md).
 
 ## Current scope
 

@@ -19,6 +19,8 @@ export const homeDir = () => invoke<string>("home_dir");
 export const projectInfo = (path: string) => invoke<ProjectInfo>("project_info", { path });
 export const watchProject = (path: string | null) => invoke<void>("watch_project", { path });
 export const frontendReady = () => invoke<void>("frontend_ready");
+export const toggleWindowFullscreen = () => invoke<boolean>("toggle_window_fullscreen");
+export const syncWebviewBounds = () => invoke<void>("sync_webview_bounds");
 
 /** Open an http(s) URL in the system default browser (Ctrl/Cmd-click on links). */
 export const openUrl = (url: string) => invoke<void>("open_url", { url });
@@ -27,7 +29,146 @@ export const openUrl = (url: string) => invoke<void>("open_url", { url });
  * Play one completion cue from the app process instead of the WebView, so the
  * Windows volume mixer lists it as Duckweed. Resolves when the cue starts.
  */
-export const playCompletionCue = () => invoke<void>("play_completion_sound");
+export const playCompletionCue = (cueIndex: number) =>
+  invoke<void>("play_completion_sound", { cueIndex });
+
+export interface MobileDevice {
+  id: string;
+  name: string;
+  pairedAt: number;
+}
+
+export interface PendingMobilePairing {
+  id: string;
+  expiresAt: number;
+}
+
+export interface MobileNotificationStatus {
+  relayUrl: string;
+  devices: MobileDevice[];
+  pending: PendingMobilePairing | null;
+}
+
+export interface MobilePairingStart {
+  id: string;
+  qrPayload: string;
+  expiresAt: number;
+}
+
+export interface MobileCompletionMessage {
+  agent: string;
+  project: string;
+  projectId: string | null;
+  terminalId: string | null;
+  terminalTitle: string | null;
+  kind: "completed" | "attention";
+  response: string | null;
+  durationMs: number | null;
+  soundCue: number | null;
+  unreadOnDesktop: boolean;
+}
+
+export interface MobileTerminalSnapshot {
+  id: string;
+  title: string;
+  shell: string;
+  agent: string | null;
+  model: string | null;
+  status: "idle" | "working" | "waiting" | "exited";
+  unreadOnDesktop: boolean;
+  conversation: MobileConversationSnapshot[];
+  permission: MobilePermissionSnapshot | null;
+}
+
+export interface MobilePermissionOptionSnapshot {
+  id: string;
+  label: string;
+  kind: "allow" | "allow-always" | "reject" | "reject-always";
+}
+
+export interface MobilePermissionSnapshot {
+  id: string;
+  title: string;
+  detail: string | null;
+  command: string | null;
+  options: MobilePermissionOptionSnapshot[];
+}
+
+export interface MobileConversationSnapshot {
+  id: string;
+  sentAt: number;
+  role: "user" | "assistant";
+  text: string;
+}
+
+export interface MobileProjectSnapshot {
+  id: string;
+  name: string;
+  path: string;
+  branch: string | null;
+  terminals: MobileTerminalSnapshot[];
+}
+
+export interface MobileWorkspaceSnapshot {
+  projects: MobileProjectSnapshot[];
+}
+
+export interface MobileRemoteCommand {
+  deviceId: string;
+  commandId: string;
+  kind: "input" | "refresh" | "approval";
+  terminalId: string | null;
+  projectId: string | null;
+  text: string | null;
+  permissionId: string | null;
+  optionId: string | null;
+  images: Array<{
+    id: string;
+    name: string;
+    mimeType: "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+    dataUrl: string;
+    size: number;
+  }>;
+}
+
+export interface MobileSendResult {
+  sent: number;
+  failed: number;
+  errors: string[];
+}
+
+/** Paired phones and any QR code that is still waiting to be scanned. */
+export const mobileStatus = () =>
+  invoke<MobileNotificationStatus>("mobile_status");
+
+/** Create a ten-minute, single-use pairing QR payload. */
+export const mobilePairStart = () =>
+  invoke<MobilePairingStart>("mobile_pair_start");
+
+/** Ask the relay whether the pending phone has finished pairing. */
+export const mobilePairPoll = () =>
+  invoke<MobileNotificationStatus>("mobile_pair_poll");
+
+export const mobileDeviceRemove = (id: string) =>
+  invoke<MobileNotificationStatus>("mobile_device_remove", { id });
+
+export const mobileSendCompletion = (message: MobileCompletionMessage) =>
+  invoke<MobileSendResult>("mobile_send_completion", { message });
+
+export const mobileSendWorkspace = (snapshot: MobileWorkspaceSnapshot) =>
+  invoke<MobileSendResult>("mobile_send_workspace", { snapshot });
+
+export const mobileSendPresence = () =>
+  invoke<MobileSendResult>("mobile_send_presence");
+
+export const mobilePollCommands = () =>
+  invoke<MobileRemoteCommand[]>("mobile_poll_commands");
+
+export const mobileAckCommand = (deviceId: string, commandId: string) =>
+  invoke<void>("mobile_ack_command", { deviceId, commandId });
+
+export const mobileSendTest = () =>
+  invoke<MobileSendResult>("mobile_send_test");
 
 /**
  * Suspend or shut the machine down, for the power watch.

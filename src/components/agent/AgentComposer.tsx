@@ -15,7 +15,10 @@ import {
   searchWorkspaceIndex,
   type FileMention,
 } from "../../lib/agentComposer";
-import { GUIDED_ARG_COMMANDS } from "../../lib/agents/slashCatalog";
+import {
+  GUIDED_ARG_COMMANDS,
+  INLINE_ARG_COMMANDS,
+} from "../../lib/agents/slashCatalog";
 import {
   effortsFor,
   shortModelLabel,
@@ -151,6 +154,7 @@ export function AgentComposer({ session, active, inputRef, onSubmit, onInterrupt
   const [fileDragging, setFileDragging] = useState(false);
 
   const working = session.status === "working";
+  const loadingHistory = session.loadingHistory === true;
   const ended = session.status === "exited" || session.status === "error";
   const exitArmed = session.exitArmed === true;
   const mention = useMemo(() => activeFileMention(value, cursor), [value, cursor]);
@@ -572,10 +576,12 @@ export function AgentComposer({ session, active, inputRef, onSubmit, onInterrupt
           return;
         }
         const selected = rows[highlighted];
-        // Complete the command name (with a trailing space) instead of
-        // submitting bare `/model` / `/effort`, so the options list opens.
+        // Complete commands that expect an argument instead of submitting the
+        // bare name. Guided commands open their picker; side commands leave a
+        // clean insertion point for the question.
         if (
           GUIDED_ARG_COMMANDS.has(selected.value.toLowerCase()) ||
+          INLINE_ARG_COMMANDS.has(selected.value.toLowerCase()) ||
           value.toLowerCase() !== selected.value.toLowerCase()
         ) {
           change(`${selected.value} `);
@@ -785,6 +791,8 @@ export function AgentComposer({ session, active, inputRef, onSubmit, onInterrupt
           placeholder={
             exitArmed
               ? "Ctrl+C again to close"
+              : loadingHistory
+                ? "Queue a message after the conversation loads..."
               : working
                 ? agents.getFollowupMode() === "steer"
                   ? "Steer this turn…"
@@ -812,8 +820,10 @@ export function AgentComposer({ session, active, inputRef, onSubmit, onInterrupt
             type="button"
             className="agent-composer-stop"
             onClick={onInterrupt}
-            title="Stop this turn (Ctrl+C)"
-            aria-label="Stop this turn"
+            title={
+              loadingHistory ? "Cancel loading this conversation" : "Stop this turn (Ctrl+C)"
+            }
+            aria-label={loadingHistory ? "Cancel loading conversation" : "Stop this turn"}
           >
             <span className="agent-stop-glyph" aria-hidden="true" />
           </button>

@@ -570,6 +570,50 @@ fn codex_state_database(home: &Path) -> Option<PathBuf> {
         .map(|(_, path)| path)
 }
 
+/// Canonical rollout paths for active Codex threads in one working directory.
+///
+/// A resumed thread keeps the rollout path from the day it was created. The
+/// raw completion monitor uses this index to find that file without walking
+/// every historical date directory on each discovery pass.
+pub(crate) fn codex_rollout_paths(home: &Path, cwd: &Path) -> Vec<PathBuf> {
+    use rusqlite::{Connection, OpenFlags};
+
+    let Some(database) = codex_state_database(home) else {
+        return Vec::new();
+    };
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let Ok(connection) = Connection::open_with_flags(database, flags) else {
+        return Vec::new();
+    };
+    let Ok(mut statement) = connection.prepare(
+        "SELECT rollout_path, cwd \
+         FROM threads \
+         WHERE archived = 0 \
+         ORDER BY COALESCE(NULLIF(recency_at_ms, 0), \
+                           NULLIF(updated_at_ms, 0), updated_at * 1000) DESC",
+    ) else {
+        return Vec::new();
+    };
+    let Ok(mut rows) = statement.query([]) else {
+        return Vec::new();
+    };
+    let cwd_text = cwd.to_string_lossy();
+    let mut paths = Vec::new();
+
+    while let Ok(Some(row)) = rows.next() {
+        let Ok(path) = row.get::<_, String>(0) else {
+            continue;
+        };
+        let Ok(session_cwd) = row.get::<_, String>(1) else {
+            continue;
+        };
+        if !path.trim().is_empty() && same_path(&session_cwd, &cwd_text) {
+            paths.push(PathBuf::from(path));
+        }
+    }
+    paths
+}
+
 /// Current Codex versions keep the resume picker's canonical rows in SQLite.
 /// Reading this first avoids racing a newly created rollout and uses the same
 /// title and recency values as `codex resume`.

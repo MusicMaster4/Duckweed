@@ -1,10 +1,19 @@
 node_modules
 dist
 src-tauri/target
+relay/dist
+relay/node_modules
+relay/.wrangler
+relay/wrangler.deploy.json
+android/.gradle
+android/local.properties
+android/**/build
+android/app/google-services.json
 *.log
 .DS_Store
 
 # Release build output — the workflow uploads these, they are never committed.
 latest.json
+android-update*.json
 *.key
 *.key.pub

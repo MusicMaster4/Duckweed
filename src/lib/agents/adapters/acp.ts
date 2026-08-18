@@ -97,6 +97,46 @@ function readContentText(value: unknown): string {
   return inner ? (asString(inner.text) ?? "") : "";
 }
 
+/**
+ * Recover only the text the person typed from Grok's stored user messages.
+ *
+ * Grok persists harness context such as `<user_info>` and `<system-reminder>`
+ * as user-role messages. `session/load` then replays those records through the
+ * same `user_message_chunk` channel as real prompts. The custom transcript
+ * must not expose that private protocol plumbing as conversation content.
+ * Goal sessions are the exception: their original prompt is nested inside a
+ * reminder, so extract that prompt instead of dropping the whole record.
+ */
+function visibleGrokReplayText(text: string): string | null {
+  let visible = text.trim();
+  if (!visible) return null;
+
+  const query = /^<user_query>\s*([\s\S]*?)\s*<\/user_query>$/i.exec(visible);
+  if (query) visible = query[1].trim();
+
+  if (/^<system-reminder>/i.test(visible)) {
+    const goal = /^<system-reminder>\s*A goal has been set:\s*([\s\S]*?)(?:\r?\n){2}You are working directly on this goal across multiple turns\./i.exec(
+      visible,
+    );
+    if (goal) return goal[1].trim() || null;
+
+    const reminderEnd = visible.indexOf("</system-reminder>");
+    if (reminderEnd < 0) return null;
+    visible = visible.slice(reminderEnd + "</system-reminder>".length).trim();
+    if (!visible) return null;
+  }
+
+  if (/^<(?:user_info|rules|INSTRUCTIONS|recommended_plugins)>/i.test(visible)) return null;
+  return visible || null;
+}
+
+/** A complete Grok context record starts a new stored user-role message. */
+function startsGrokReplayRecord(text: string): boolean {
+  return /^<(?:user_query|user_info|system-reminder|rules|INSTRUCTIONS|recommended_plugins)>/i.test(
+    text.trimStart(),
+  );
+}
+
 function lastLine(text: string): string | null {
   const lines = text
     .split(/\r?\n/)
@@ -173,9 +213,13 @@ export function createAcpAdapter(): AgentAdapter {
   let turnSeq = 0;
   /**
    * ACP only labels a chunk as message or thought; it does not provide a
-   * content-block id. Keep adjacent chunks together, but open a new block
-   * after the stream crosses a tool call or switches content kind. Without
-   * this, Grok's whole turn collapses into one giant reasoning/message item.
+   * content-block id. Keep one thought stream and one message stream per
+   * tool-bounded phase. Grok interleaves `agent_thought_chunk` with
+   * `agent_message_chunk` at token granularity, and its workflow also emits
+   * `tool_call_update` while prose is still arriving. Opening a new block on
+   * every kind switch (or every tool update) shatters one sentence into a
+   * stack of interim bubbles. A new phase starts only when a tool call id
+   * first appears.
    */
   let activeContent: "assistant" | "thinking" | null = null;
   let assistantSegment = 0;
@@ -184,6 +228,12 @@ export function createAcpAdapter(): AgentAdapter {
   let goalResponsePending = false;
   let goalResponseText = "";
   let thinkingSegment = 0;
+  /** Counts tool-bounded phases so thought/message can resume after a switch. */
+  let contentPhase = 0;
+  let assistantPhase = -1;
+  let thinkingPhase = -1;
+  /** Tool ids already used to open a content phase. */
+  const seenToolCalls = new Set<string>();
   /** Permission id → the JSON-RPC request id ACP is waiting on. */
   const permissionRequests = new Map<string, string | number>();
   /** Tool calls whose content we have already seen, to merge partial updates. */
@@ -239,6 +289,10 @@ export function createAcpAdapter(): AgentAdapter {
     activeContent = null;
     assistantSegment = 0;
     thinkingSegment = 0;
+    contentPhase = 0;
+    assistantPhase = -1;
+    thinkingPhase = -1;
+    seenToolCalls.clear();
   }
 
   function workflowId(update: Record<string, unknown>): string {
@@ -299,12 +353,27 @@ export function createAcpAdapter(): AgentAdapter {
     if (activeContent !== kind) {
       closeActiveContent(ctx);
       activeContent = kind;
-      if (kind === "assistant") assistantSegment += 1;
-      else thinkingSegment += 1;
+    }
+    if (kind === "assistant") {
+      if (assistantPhase !== contentPhase) {
+        assistantPhase = contentPhase;
+        assistantSegment += 1;
+      }
+    } else if (thinkingPhase !== contentPhase) {
+      thinkingPhase = contentPhase;
+      thinkingSegment += 1;
     }
     const segment = kind === "assistant" ? assistantSegment : thinkingSegment;
     const prefix = kind === "assistant" ? "a" : "r";
     return `${prefix}${turnSeq}${segment > 1 ? `-${segment}` : ""}`;
+  }
+
+  /** First sighting of a tool starts a new thought/message phase. */
+  function beginToolContentPhase(callId: string, ctx: AdapterContext) {
+    if (seenToolCalls.has(callId)) return;
+    seenToolCalls.add(callId);
+    closeActiveContent(ctx);
+    contentPhase += 1;
   }
 
   function request(
@@ -620,8 +689,10 @@ export function createAcpAdapter(): AgentAdapter {
    */
   function flushReplayedUser(ctx: AdapterContext) {
     if (!replayedUser) return;
-    const text = replayedUser;
+    const text =
+      ctx.launch.agent === "grok" ? visibleGrokReplayText(replayedUser) : replayedUser.trim();
     replayedUser = "";
+    if (!text) return;
     turnSeq += 1;
     resetContentSegments();
     ctx.emit({ type: "user", text });
@@ -644,7 +715,21 @@ export function createAcpAdapter(): AgentAdapter {
       // The app has already emitted that prompt locally, so accepting the echo
       // would draw the same message twice (and advance `turnSeq` twice). Stored
       // session replay is the one case where no local prompt exists.
-      if (loading) replayedUser += readContentText(update.content);
+      if (loading) {
+        const chunk = readContentText(update.content);
+        // Grok emits its stored context records consecutively, without a
+        // non-user update between them. A new wrapper is therefore also the
+        // only reliable boundary between those messages. Ordinary prompt
+        // chunks still concatenate exactly as ACP intends.
+        if (
+          ctx.launch.agent === "grok" &&
+          replayedUser &&
+          startsGrokReplayRecord(chunk)
+        ) {
+          flushReplayedUser(ctx);
+        }
+        replayedUser += chunk;
+      }
       return;
     }
     if (loading) flushReplayedUser(ctx);
@@ -676,9 +761,9 @@ export function createAcpAdapter(): AgentAdapter {
       }
       case "tool_call":
       case "tool_call_update": {
-        closeActiveContent(ctx);
         const callId = asString(update.toolCallId);
         if (!callId) return;
+        beginToolContentPhase(callId, ctx);
         turnHadContent = true;
         const title = asString(update.title);
         if (title) toolTitles.set(callId, title);

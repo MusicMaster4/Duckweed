@@ -11,6 +11,7 @@ import type {
   AgentPlanStep,
   AgentPlanType,
   AgentSessionState,
+  AgentSideQuestion,
   AgentStatus,
   AgentUsage,
   SubagentMeta,
@@ -48,6 +49,8 @@ export type AgentEvent =
       models?: AgentModelChoice[];
     }
   | { type: "status"; status: AgentStatus; error?: string }
+  /** A provider is loading a stored conversation, not running an agent turn. */
+  | { type: "history-loading"; loading: boolean }
   /** Set, update, finish, or clear the provider's long-running objective. */
   | { type: "goal"; goal: AgentGoal | null }
   /** The user's own message, echoed into the transcript. */
@@ -89,6 +92,8 @@ export type AgentEvent =
     }
   | { type: "plan"; planType?: AgentPlanType; steps: AgentPlanStep[] }
   | { type: "notice"; text: string; tone: "info" | "error"; transient?: boolean }
+  /** Replace or dismiss the ephemeral response shown beside the transcript. */
+  | { type: "side-question"; sideQuestion: AgentSideQuestion | null }
   | { type: "exit-armed"; armed: boolean }
   /** Remove picker confirmations and double-Ctrl+C hints without touching errors. */
   | { type: "dismiss-transient-notices" }
@@ -338,6 +343,17 @@ export function applyEvent(state: AgentSessionState, event: AgentEvent): AgentSe
       };
     }
 
+    case "history-loading":
+      return state.loadingHistory === event.loading
+        ? state
+        : {
+            ...state,
+            loadingHistory: event.loading,
+            ...(!event.loading && state.status !== "working"
+              ? { workStartedAt: null, lastWorkedForMs: null }
+              : {}),
+          };
+
     case "goal":
       return {
         ...state,
@@ -383,7 +399,11 @@ export function applyEvent(state: AgentSessionState, event: AgentEvent): AgentSe
       }
       const items = state.items.slice();
       const current = items[index] as { text: string };
-      items[index] = { ...items[index], text: clampEnd(current.text + event.text, MAX_TEXT) } as never;
+      items[index] = {
+        ...items[index],
+        text: clampEnd(current.text + event.text, MAX_TEXT),
+        streaming: true,
+      } as never;
       return { ...state, items };
     }
 
@@ -425,9 +445,7 @@ export function applyEvent(state: AgentSessionState, event: AgentEvent): AgentSe
     }
 
     case "tool": {
-      const index = state.items.findIndex(
-        (item) => item.kind === "tool" && item.callId === event.callId,
-      );
+      const index = findTool(state, event.callId);
       if (index < 0) {
         const subagent = mergeSubagentMeta(
           undefined,
@@ -534,6 +552,12 @@ export function applyEvent(state: AgentSessionState, event: AgentEvent): AgentSe
         ],
       };
 
+    case "side-question":
+      return {
+        ...state,
+        sideQuestion: event.sideQuestion ? { ...event.sideQuestion } : null,
+      };
+
     case "exit-armed":
       return state.exitArmed === event.armed ? state : { ...state, exitArmed: event.armed };
 
@@ -547,6 +571,7 @@ export function applyEvent(state: AgentSessionState, event: AgentEvent): AgentSe
         ...state,
         started: true,
         goal: null,
+        sideQuestion: null,
         items: event.items ?? [],
         lastWorkedForMs: null,
         pending: [],
@@ -624,6 +649,15 @@ function findStreaming(
   for (let i = state.items.length - 1; i >= 0; i--) {
     const item = state.items[i];
     if (item.kind === kind && item.id === id) return i;
+  }
+  return -1;
+}
+
+/** Live tool updates overwhelmingly target the newest rows in a long transcript. */
+function findTool(state: AgentSessionState, callId: string): number {
+  for (let i = state.items.length - 1; i >= 0; i -= 1) {
+    const item = state.items[i];
+    if (item.kind === "tool" && item.callId === callId) return i;
   }
   return -1;
 }

@@ -25,6 +25,8 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager};
 
+use crate::agent_sessions;
+
 const POLL: Duration = Duration::from_millis(350);
 const DISCOVERY_POLL: Duration = Duration::from_secs(2);
 /// Cadence for a pane that is following a transcript it is not sure about.
@@ -35,6 +37,10 @@ const WEAK_RECHECK_POLL: Duration = Duration::from_secs(15);
 const WEAK_RECHECK_AFTER: Duration = Duration::from_secs(60);
 const DISCOVERY_START_DELAY: Duration = Duration::from_secs(1);
 const START_TOLERANCE: Duration = Duration::from_secs(3);
+/// Only the tail can contain work written after an old session was resumed.
+/// Eight MiB is deliberately generous for the one-second discovery delay and
+/// avoids rereading a potentially huge historical transcript from the start.
+const RESUMED_SESSION_TAIL_BYTES: u64 = 8 * 1024 * 1024;
 /// Codex auto-continues within ~5–10 ms of `task_complete`. A short quiet
 /// window absorbs that hand-off (and OpenCode's premature idle) without
 /// making a real idle turn feel laggy.
@@ -769,17 +775,90 @@ fn initial_offset(path: &Path, started: SystemTime) -> u64 {
             if new_session {
                 0
             } else {
-                meta.len()
+                resumed_session_offset(path, started, meta.len()).unwrap_or(meta.len())
             }
         })
         .unwrap_or(0)
+}
+
+/// Keep events written between launch and transcript discovery.
+///
+/// Codex, Claude, and Grok all timestamp their JSONL rows. Starting at the
+/// current file length loses a fast completion whenever a resumed transcript
+/// is discovered after the first output arrived. Scan only the recent tail and
+/// begin at the first row owned by this watch instead.
+fn resumed_session_offset(path: &Path, started: SystemTime, len: u64) -> Option<u64> {
+    let mut file = File::open(path).ok()?;
+    let tail_start = len.saturating_sub(RESUMED_SESSION_TAIL_BYTES);
+    file.seek(SeekFrom::Start(tail_start)).ok()?;
+    let mut reader = BufReader::new(file);
+    let mut offset = tail_start;
+    let mut line = Vec::new();
+
+    // The seek can land in the middle of a JSON row. Discard that fragment so
+    // its timestamp cannot be mistaken for the start of a complete record.
+    if tail_start > 0 {
+        let read = reader.read_until(b'\n', &mut line).ok()?;
+        offset += read as u64;
+        line.clear();
+    }
+
+    loop {
+        let line_start = offset;
+        let read = reader.read_until(b'\n', &mut line).ok()?;
+        if read == 0 {
+            break;
+        }
+        offset += read as u64;
+        if logged_at(&line).is_some_and(|timestamp| timestamp >= started) {
+            return Some(line_start);
+        }
+        // Keep the start of a row that was still being appended while the
+        // transcript was discovered. Advancing to EOF here would skip the
+        // completion after its closing bytes and newline arrive.
+        if !line.ends_with(b"\n") {
+            return Some(line_start);
+        }
+        line.clear();
+    }
+    None
+}
+
+fn logged_at(line: &[u8]) -> Option<SystemTime> {
+    let value = serde_json::from_slice::<Value>(line).ok()?;
+    let timestamp = value
+        .get("timestamp")
+        .or_else(|| value.pointer("/payload/timestamp"))?;
+    if let Some(text) = timestamp.as_str() {
+        let parsed = DateTime::parse_from_rfc3339(text).ok()?;
+        let millis = parsed.timestamp_millis();
+        return (millis >= 0)
+            .then(|| SystemTime::UNIX_EPOCH + Duration::from_millis(millis as u64));
+    }
+    let numeric = timestamp.as_i64()?;
+    (numeric >= 0).then(|| {
+        let millis = if numeric >= 1_000_000_000_000 {
+            numeric as u64
+        } else {
+            numeric as u64 * 1_000
+        };
+        SystemTime::UNIX_EPOCH + Duration::from_millis(millis)
+    })
 }
 
 /// Returns the transcript to follow and whether the match is a certain one
 /// (see [`Watch::strong`]).
 fn discover_session(watch: &Watch, claimed: &HashSet<PathBuf>) -> Option<(PathBuf, bool)> {
     let home = home_dir()?;
-    let roots = discovery_roots(watch, &home);
+    discover_session_in_home(watch, claimed, &home)
+}
+
+fn discover_session_in_home(
+    watch: &Watch,
+    claimed: &HashSet<PathBuf>,
+    home: &Path,
+) -> Option<(PathBuf, bool)> {
+    let roots = discovery_roots(watch, home);
     if roots.is_empty() {
         return None;
     }
@@ -788,6 +867,34 @@ fn discover_session(watch: &Watch, claimed: &HashSet<PathBuf>) -> Option<(PathBu
         .checked_sub(START_TOLERANCE)
         .unwrap_or(SystemTime::UNIX_EPOCH);
     let mut candidates = Vec::new();
+
+    // A resumed Codex thread remains under its original YYYY/MM/DD directory.
+    // The state database is the CLI's canonical resume index, so consult it
+    // before the small current-day directory scan. Other log-backed agents do
+    // not partition their project/session stores by creation date.
+    if watch.agent == "codex" {
+        for path in agent_sessions::codex_rollout_paths(home, &watch.cwd) {
+            if claimed.contains(&path)
+                || candidates
+                    .iter()
+                    .any(|candidate: &SessionCandidate| candidate.path == path)
+                || !is_session_file(&watch.agent, &path)
+            {
+                continue;
+            }
+            let Ok(metadata) = fs::metadata(&path) else {
+                continue;
+            };
+            let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+            if modified >= earliest {
+                candidates.push(SessionCandidate {
+                    path,
+                    modified,
+                    created: metadata.created().ok(),
+                });
+            }
+        }
+    }
     for root in roots {
         collect_recent(&root, &watch.agent, earliest, claimed, &mut candidates);
     }
@@ -1133,12 +1240,14 @@ fn is_completion_line(agent: &str, line: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_line_signal, claude_project_slug, classify_session_line, discovery_roots,
-        gemini_defaults, ingest_session_lines, install_antigravity_plugin, install_copilot_hook,
-        install_opencode_plugin, is_completion_line, nearest_new_session, parse_hook_event,
-        qwen_defaults, read_appended_lines, write_hook_script, LineSignal, SessionCandidate, Watch,
-        START_TOLERANCE,
+        apply_line_signal, claude_project_slug, classify_session_line, discover_session_in_home,
+        discovery_roots, gemini_defaults, ingest_session_lines, initial_offset,
+        install_antigravity_plugin, install_copilot_hook, install_opencode_plugin,
+        is_completion_line, nearest_new_session, parse_hook_event, qwen_defaults,
+        read_appended_lines, write_hook_script, LineSignal, SessionCandidate, Watch, START_TOLERANCE,
     };
+    use chrono::{DateTime, Utc};
+    use rusqlite::{params, Connection};
     use std::fs::{self, OpenOptions};
     use std::io::Write;
     use std::path::{Path, PathBuf};
@@ -1291,6 +1400,159 @@ mod tests {
         assert!(discovery_roots(&claude, home)
             .iter()
             .all(|path| path.ends_with("H--Python-Slop-duckweed")));
+    }
+
+    #[test]
+    fn codex_discovery_finds_a_resumed_goal_in_its_original_day() {
+        let home = std::env::temp_dir().join(format!(
+            "duckweed-agent-activity-resumed-goal-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&home);
+        let rollout = home
+            .join(".codex/sessions/2025/01/02")
+            .join("rollout-old-goal.jsonl");
+        fs::create_dir_all(rollout.parent().unwrap()).unwrap();
+        fs::write(
+            &rollout,
+            concat!(
+                r#"{"timestamp":"2025-01-02T12:00:00Z","type":"session_meta","payload":{"id":"old-goal","cwd":"H:\\work"}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+
+        let database = home.join(".codex/state_5.sqlite");
+        let connection = Connection::open(&database).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE threads (
+                    id TEXT PRIMARY KEY,
+                    rollout_path TEXT NOT NULL,
+                    cwd TEXT NOT NULL,
+                    archived INTEGER NOT NULL DEFAULT 0,
+                    updated_at INTEGER NOT NULL DEFAULT 0,
+                    updated_at_ms INTEGER,
+                    recency_at_ms INTEGER
+                );",
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO threads (
+                    id, rollout_path, cwd, archived, updated_at, updated_at_ms, recency_at_ms
+                 ) VALUES ('old-goal', ?1, ?2, 0, 1, 1, 1)",
+                params![rollout.to_string_lossy().as_ref(), r"H:\work"],
+            )
+            .unwrap();
+        drop(connection);
+
+        let watch = bare_watch("codex", None, 0);
+        let found = discover_session_in_home(&watch, &Default::default(), &home)
+            .map(|(path, _)| path);
+        assert_eq!(found.as_deref(), Some(rollout.as_path()));
+
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn resumed_log_harnesses_keep_events_written_before_discovery() {
+        let dir = std::env::temp_dir().join(format!(
+            "duckweed-agent-activity-resumed-offset-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        // A future watch time makes these freshly-created fixtures behave like
+        // old resumed files without relying on platform-specific ctime edits.
+        let started = SystemTime::now() + Duration::from_secs(10);
+        let completed_at = DateTime::<Utc>::from(started + Duration::from_secs(1)).to_rfc3339();
+        let cases = [
+            (
+                "codex",
+                format!(
+                    r#"{{"timestamp":"{completed_at}","type":"event_msg","payload":{{"type":"task_complete"}}}}"#,
+                ),
+            ),
+            (
+                "claude",
+                format!(
+                    r#"{{"timestamp":"{completed_at}","type":"system","subtype":"turn_duration"}}"#,
+                ),
+            ),
+            (
+                "grok",
+                format!(
+                    r#"{{"timestamp":"{completed_at}","params":{{"update":{{"sessionUpdate":"turn_completed","prompt_id":"root-turn"}}}}}}"#,
+                ),
+            ),
+        ];
+
+        for (agent, completion) in cases {
+            let path = dir.join(format!("{agent}.jsonl"));
+            let history = "{\"timestamp\":\"2025-01-02T12:00:00Z\"}\n";
+            fs::write(&path, format!("{history}{completion}\n")).unwrap();
+            let offset = initial_offset(&path, started);
+            assert_eq!(offset, history.len() as u64, "{agent}");
+
+            let mut watch = Watch {
+                agent: agent.into(),
+                cwd: PathBuf::from(r"H:\work"),
+                started,
+                next_discovery: Instant::now(),
+                file: Some(path),
+                offset,
+                strong: true,
+                pending_complete: None,
+            };
+            assert_eq!(ingest_session_lines(&mut watch), LineSignal::Completed, "{agent}");
+        }
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn resumed_log_discovery_keeps_a_half_written_completion() {
+        let dir = std::env::temp_dir().join(format!(
+            "duckweed-agent-activity-partial-offset-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("codex.jsonl");
+        let history = "{\"timestamp\":\"2025-01-02T12:00:00Z\"}\n";
+        let started = SystemTime::now() + Duration::from_secs(10);
+        let completed_at = DateTime::<Utc>::from(started + Duration::from_secs(1)).to_rfc3339();
+        let partial = format!(
+            r#"{{"timestamp":"{completed_at}","type":"event_msg","payload":{{"type":"task_complete""#,
+        );
+        fs::write(&path, format!("{history}{partial}")).unwrap();
+
+        let offset = initial_offset(&path, started);
+        assert_eq!(offset, history.len() as u64);
+        let mut watch = Watch {
+            agent: "codex".into(),
+            cwd: PathBuf::from(r"H:\work"),
+            started,
+            next_discovery: Instant::now(),
+            file: Some(path.clone()),
+            offset,
+            strong: true,
+            pending_complete: None,
+        };
+        assert_eq!(ingest_session_lines(&mut watch), LineSignal::None);
+        assert_eq!(watch.offset, offset);
+
+        OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"}}\n")
+            .unwrap();
+        assert_eq!(ingest_session_lines(&mut watch), LineSignal::Completed);
+
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

@@ -10,6 +10,10 @@ import {
 } from "../ipc";
 import type { AdapterContext, AgentAdapter } from "./adapter";
 import {
+  completionDetailsFromState,
+  type AgentCompletionDetails,
+} from "../mobileCompletion";
+import {
   isAuthenticationFailure,
   nativeAuthCommand,
   type AgentAuthAction,
@@ -24,6 +28,7 @@ import {
   isAnnounceableTurn,
   isTurnEnd,
   type AgentEvent,
+  type TurnAnnounceInput,
 } from "./events";
 import { latest as latestSession, transcript as sessionTranscript } from "./history";
 import { AGENT_PROGRAMS, type AgentLaunch } from "./launch";
@@ -95,11 +100,17 @@ interface Session {
    */
   interrupted: boolean;
   /**
-   * A user prompt opened the current working stretch. Cleared when the turn
-   * returns to idle so a later synthetic working→idle (resume, load) cannot
-   * reuse the flag and fire a completion for work nobody asked for.
+   * A user action owns the current working stretch: a new prompt, a steer, or
+   * rejoining live work. Cleared on idle so a later synthetic transition
+   * cannot reuse it and announce work nobody requested.
    */
   userInitiatedTurn: boolean;
+  /**
+   * An authoritative turn end received while resume history was still being
+   * hydrated. Announce it when loading finishes instead of confusing it with
+   * the resume handshake's own synthetic idle transition.
+   */
+  deferredTurnEnd: TurnAnnounceInput | null;
   /** A picker command is negotiating with the CLI without becoming a chat turn. */
   configuring: boolean;
   /** Tracks whether a provider-native config turn such as Claude `/effort` worked. */
@@ -115,6 +126,8 @@ interface Session {
   exitArmedUntil: number;
   /** Prevent late protocol frames from requesting the same native handoff. */
   authHandoff: boolean;
+  /** Side responses the user already dismissed while their request was in flight. */
+  dismissedSideQuestions: Set<string>;
   disposed: boolean;
 }
 
@@ -253,6 +266,13 @@ export function subscribe(termId: string, callback: () => void): () => void {
 
 export function get(termId: string): AgentSessionState | null {
   return sessions.get(termId)?.state ?? null;
+}
+
+/** Content safe to hand to the encrypted mobile-notification transport. */
+export function completionDetails(termId: string): AgentCompletionDetails | null {
+  const state = sessions.get(termId)?.state;
+  if (!state) return null;
+  return completionDetailsFromState(state);
 }
 
 export function isActive(termId: string): boolean {
@@ -412,14 +432,19 @@ function dispatchNow(session: Session, prompt: AgentPrompt, echoUser = true): vo
     });
     return;
   }
-  if (
-    prompt.images.length === 0 &&
-    prompt.text.startsWith("/") &&
-    session.adapter.command?.(prompt.text, context) === "handled"
-  ) {
-    // Local answer only (notice, model switch over RPC). No working stretch,
-    // so nothing to announce when it "finishes".
-    return;
+  if (prompt.images.length === 0 && prompt.text.startsWith("/")) {
+    const previousModel = session.state.model;
+    if (session.adapter.command?.(prompt.text, context) === "handled") {
+      // Codex may report temporary or provider-selected models in ordinary
+      // session events. Only a successful user /model command belongs in its
+      // durable preference.
+      if (session.launch.agent === "codex" && session.state.model !== previousModel) {
+        rememberPreferences(session.launch, { model: session.state.model });
+      }
+      // Local answer only (notice, model switch over RPC). No working stretch,
+      // so nothing to announce when it "finishes".
+      return;
+    }
   }
   // Everything that reaches `prompt` is a user-opened turn, including slash
   // text the CLI will interpret (`/effort high` on Claude, advertised ACP
@@ -541,6 +566,13 @@ function dispatch(session: Session, prompt: AgentPrompt, echoUser = true): void 
 
 function emit(session: Session, event: AgentEvent): void {
   if (session.disposed) return;
+  if (
+    event.type === "side-question" &&
+    event.sideQuestion &&
+    session.dismissedSideQuestions.has(event.sideQuestion.id)
+  ) {
+    return;
+  }
 
   // Browser and device authentication cannot finish over these headless
   // streams. Reveal the PTY and launch the provider's own flow instead.
@@ -593,7 +625,9 @@ function emit(session: Session, event: AgentEvent): void {
       next.accessMode !== session.state.accessMode)
   ) {
     rememberPreferences(session.launch, {
-      model: next.model,
+      // Codex's wire state can temporarily name an internal reviewer or a
+      // rerouted model. Its preference is recorded only at user selection.
+      ...(session.launch.agent !== "codex" ? { model: next.model } : {}),
       effort: next.effort,
       accessMode: next.accessMode ?? "default",
     });
@@ -614,7 +648,8 @@ function emit(session: Session, event: AgentEvent): void {
   // answering a permission prompt mid-turn, not a new job.
   if (
     next.status === "working" &&
-    (before === "idle" || before === "starting")
+    (before === "idle" || before === "starting") &&
+    !next.loadingHistory
   ) {
     announceTurnStart(session);
   }
@@ -624,16 +659,27 @@ function emit(session: Session, event: AgentEvent): void {
   // protocol we speak runs one turn at a time, so pushing the whole backlog
   // would just make the agent reject the rest.
   const releasingQueued = next.status === "idle" && session.queued.length > 0;
-  const turnEnd = {
+  const turnEndState = {
     before,
     after: next.status,
     permission: next.permission !== null,
     releasingQueued,
     interrupted: session.interrupted,
-    userInitiated: session.userInitiatedTurn,
-    ...inspectTurn(next.items),
   };
-  const ended = isTurnEnd(turnEnd);
+  const ended = isTurnEnd(turnEndState);
+  const turnEnd: TurnAnnounceInput = {
+    ...turnEndState,
+    userInitiated: session.userInitiatedTurn,
+    ...(ended
+      ? inspectTurn(next.items)
+      : { usedTools: false, userText: null }),
+  };
+  let deferredToAnnounce: TurnAnnounceInput | null = null;
+
+  if (event.type === "history-loading" && !event.loading && session.deferredTurnEnd) {
+    deferredToAnnounce = session.deferredTurnEnd;
+    session.deferredTurnEnd = null;
+  }
 
   // Spend the flags that belonged to the turn which just became idle before
   // releasing a queued prompt. `dispatch` starts the next turn synchronously
@@ -659,7 +705,19 @@ function emit(session: Session, event: AgentEvent): void {
 
   // Config slash commands and synthetic idles still end the turn for the
   // protocol — they just do not earn a sound or unread flash.
-  if (ended && isAnnounceableTurn(turnEnd)) {
+  if (
+    ended &&
+    next.loadingHistory &&
+    event.type === "turn-end" &&
+    isAnnounceableTurn(turnEnd)
+  ) {
+    // Codex can finish the live resumed turn while transcript pages are still
+    // loading. Keep that authoritative end until the synthetic load is over.
+    session.deferredTurnEnd = turnEnd;
+  } else if (ended && !next.loadingHistory && isAnnounceableTurn(turnEnd)) {
+    announceTurnEnd(session);
+  }
+  if (deferredToAnnounce && isAnnounceableTurn(deferredToAnnounce)) {
     announceTurnEnd(session);
   }
 }
@@ -757,11 +815,13 @@ export async function start(
     notifyHandle: null,
     interrupted: false,
     userInitiatedTurn: false,
+    deferredTurnEnd: null,
     configuring: false,
     configurationTurn: null,
     interactionEpoch: 0,
     exitArmedUntil: 0,
     authHandoff: false,
+    dismissedSideQuestions: new Set(),
     disposed: false,
     state: {
       termId,
@@ -923,6 +983,11 @@ function steerPrompt(session: Session, prompt: AgentPrompt): void {
     restoreAfterFailedSteer(session, prompt);
     return;
   }
+  // A rejoined background turn was not opened by dispatchNow. Once the user
+  // steers it, its eventual completion is user-owned and must still announce.
+  session.interrupted = false;
+  session.userInitiatedTurn = true;
+  session.interactionEpoch += 1;
   void Promise.resolve(session.adapter.steer(prompt, session.context))
     .then((accepted) => {
       if (!accepted) restoreAfterFailedSteer(session, prompt);
@@ -1127,6 +1192,9 @@ export function configure(
 
   const clean = value.trim();
   if (kind === "model") {
+    if (session.launch.agent === "codex") {
+      rememberPreferences(session.launch, { model: clean });
+    }
     session.state = {
       ...session.state,
       nextModel: clean === session.state.model ? null : clean,
@@ -1146,8 +1214,14 @@ export function configure(
  * one. Emits the transcript marker only once the agent has taken it.
  */
 async function applyResume(session: Session, sessionId: string, title: string): Promise<void> {
+  // Rejoining is an explicit request. Idle history stays silent because its
+  // working -> idle transition occurs under `loadingHistory`; a live turn
+  // keeps ownership until its real completion arrives.
+  session.interrupted = false;
+  session.userInitiatedTurn = true;
   const attempt = session.adapter.resume?.(sessionId, session.context);
   if (attempt === false || attempt === undefined) {
+    session.userInitiatedTurn = false;
     // An ACP agent that never advertised `loadSession`, and no CLI flag to fall
     // back on in its headless mode. Saying so beats a picker that does nothing.
     emit(session, {
@@ -1159,6 +1233,8 @@ async function applyResume(session: Session, sessionId: string, title: string): 
   }
   if (await attempt) {
     emit(session, { type: "resumed", sessionId, title });
+  } else if (session.state.status !== "working" && session.state.status !== "waiting") {
+    session.userInitiatedTurn = false;
   }
 }
 
@@ -1297,6 +1373,18 @@ export function interrupt(termId: string): void {
   if (!session || session.disposed) return;
   session.interrupted = true;
   session.adapter.interrupt(session.context);
+}
+
+/** Hide the ephemeral side response without changing the main conversation. */
+export function dismissSideQuestion(termId: string): void {
+  const session = sessions.get(termId);
+  if (!session || session.disposed || !session.state.sideQuestion) return;
+  session.dismissedSideQuestions.add(session.state.sideQuestion.id);
+  if (session.dismissedSideQuestions.size > 32) {
+    const oldest = session.dismissedSideQuestions.values().next().value;
+    if (oldest) session.dismissedSideQuestions.delete(oldest);
+  }
+  emit(session, { type: "side-question", sideQuestion: null });
 }
 
 /**

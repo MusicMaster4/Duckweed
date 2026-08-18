@@ -1260,15 +1260,28 @@ fn read_tail(path: &Path, bytes: u64) -> Option<String> {
     Some(String::from_utf8_lossy(&buffer).into_owned())
 }
 
-/// Whether a Codex `rate_limits` object has at least one window we can meter.
+/// Whether a Codex `rate_limits` object describes the shared account pool and
+/// has at least one window we can meter.
 ///
-/// After the account is exhausted, newer sessions often still write a
-/// `rate_limits` event, but with `primary`/`secondary` null (sometimes only a
-/// credits stub). Those must be skipped so we keep the last usable snapshot
-/// instead of showing "unavailable".
+/// Codex now writes separate pools for some models (for example
+/// `codex_bengalfox` for GPT-5.3-Codex-Spark). Those percentages do not
+/// describe the shared Codex and Work allowance shown by the account usage
+/// page, so presenting one in the Codex CLI card can incorrectly show 100%
+/// remaining while the shared pool is partly consumed. Legacy snapshots did
+/// not include `limit_id`; those are still the shared pool.
+///
+/// After the account is exhausted, newer sessions may also write a
+/// `rate_limits` event with `primary`/`secondary` null (sometimes only a
+/// credits stub). Those must be skipped so we keep the last usable shared
+/// snapshot instead of showing "unavailable".
 fn codex_rate_limits_usable(limits: &Value) -> bool {
     if limits.is_null() {
         return false;
+    }
+    match limits.get("limit_id") {
+        None | Some(Value::Null) => {}
+        Some(Value::String(id)) if id == "codex" => {}
+        _ => return false,
     }
     for key in ["primary", "secondary"] {
         if limits
@@ -2162,6 +2175,32 @@ mod tests {
         assert_eq!(quota.limits.len(), 1);
         assert!((quota.limits[0].percent - 88.0).abs() < 1e-9);
         assert_eq!(quota.limits[0].label, "5-hour limit");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn codex_uses_shared_pool_instead_of_a_model_specific_pool() {
+        let root =
+            std::env::temp_dir().join(format!("duckweed-quota-model-pool-{}", std::process::id()));
+        let dir = root.join(".codex/sessions/2026/08/16");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let shared = r#"{"timestamp":"2026-08-16T23:04:19.626Z","type":"event_msg","payload":{"type":"token_count","info":null,"rate_limits":{"limit_id":"codex","limit_name":null,"primary":{"used_percent":54.0,"window_minutes":10080,"resets_at":1787523553},"secondary":null,"plan_type":"pro"}}}"#;
+        let spark = r#"{"timestamp":"2026-08-16T23:05:00.000Z","type":"event_msg","payload":{"type":"token_count","info":null,"rate_limits":{"limit_id":"codex_bengalfox","limit_name":"GPT-5.3-Codex-Spark","primary":{"used_percent":0.0,"window_minutes":10080,"resets_at":1787523553},"secondary":null,"plan_type":"pro"}}}"#;
+
+        let shared_session = dir.join("rollout-shared.jsonl");
+        let spark_session = dir.join("rollout-spark.jsonl");
+        std::fs::write(&shared_session, format!("{shared}\n")).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&spark_session, format!("{spark}\n")).unwrap();
+
+        let quota = reported_for_with_codex_session("codex", &root, Some(&spark_session))
+            .expect("shared Codex quota");
+        assert_eq!(quota.plan.as_deref(), Some("pro"));
+        assert_eq!(quota.limits.len(), 1);
+        assert!((quota.limits[0].percent - 54.0).abs() < f64::EPSILON);
+        assert_eq!(quota.limits[0].label, "7-day limit");
 
         let _ = std::fs::remove_dir_all(&root);
     }

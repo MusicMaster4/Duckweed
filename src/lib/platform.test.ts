@@ -1,6 +1,13 @@
 import { describe, expect, test } from "bun:test";
 
-import { cKeyAction, isApplePlatform, isAppModifier, isControlChord } from "./platform";
+import {
+  cKeyAction,
+  isApplePlatform,
+  isAppModifier,
+  isControlChord,
+  isFullscreenHotkey,
+  isFullscreenKey,
+} from "./platform";
 
 describe("isApplePlatform", () => {
   test("detects classic Mac platform strings", () => {
@@ -58,5 +65,20 @@ describe("isAppModifier", () => {
     expect(isAppModifier({ ctrlKey: false, metaKey: true }, true)).toBe(true);
     expect(isAppModifier({ ctrlKey: true, metaKey: false }, false)).toBe(true);
     expect(isAppModifier({ ctrlKey: false, metaKey: true }, false)).toBe(true);
+  });
+});
+
+describe("isFullscreenHotkey", () => {
+  test("matches F11 by key or physical code", () => {
+    expect(isFullscreenKey({ key: "F11" })).toBe(true);
+    expect(isFullscreenHotkey({ key: "F11" })).toBe(true);
+    expect(isFullscreenHotkey({ key: "Unidentified", code: "F11" })).toBe(true);
+  });
+
+  test("ignores other function keys; repeat still counts as the key", () => {
+    expect(isFullscreenHotkey({ key: "F10" })).toBe(false);
+    expect(isFullscreenHotkey({ key: "F12", code: "F12" })).toBe(false);
+    expect(isFullscreenKey({ key: "F11" })).toBe(true);
+    expect(isFullscreenHotkey({ key: "F11", repeat: true })).toBe(false);
   });
 });

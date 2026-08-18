@@ -155,6 +155,82 @@ describe("acp adapter", () => {
     expect(h.state().items[2]).toMatchObject({ text: "Done.", streaming: true });
   });
 
+  test("keeps interleaved thought and message tokens in one block each", async () => {
+    const h = harness();
+    await h.handshake();
+    h.adapter.prompt({ text: "inspect", images: [] }, h.ctx);
+
+    h.update({
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "The repo is " },
+    });
+    h.update({
+      sessionUpdate: "agent_thought_chunk",
+      content: { type: "text", text: "Expo first. " },
+    });
+    h.update({
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "Expo/" },
+    });
+    h.update({
+      sessionUpdate: "agent_thought_chunk",
+      content: { type: "text", text: "Then RN." },
+    });
+    h.update({
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "RN." },
+    });
+
+    expect(
+      h.state().items
+        .filter((item) => item.kind === "thinking" || item.kind === "assistant")
+        .map((item) => ({ id: item.id, kind: item.kind, text: item.text })),
+    ).toEqual([
+      { id: "a1", kind: "assistant", text: "The repo is Expo/RN." },
+      { id: "r1", kind: "thinking", text: "Expo first. Then RN." },
+    ]);
+  });
+
+  test("does not split a message when an existing tool reports progress", async () => {
+    const h = harness();
+    await h.handshake();
+    h.adapter.prompt({ text: "inspect", images: [] }, h.ctx);
+
+    h.update({
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "and the existing implement" },
+    });
+    h.update({
+      sessionUpdate: "tool_call",
+      toolCallId: "call_1",
+      title: "Read notes",
+      kind: "read",
+      status: "in_progress",
+    });
+    h.update({
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "er notes so the feature " },
+    });
+    h.update({
+      sessionUpdate: "tool_call_update",
+      toolCallId: "call_1",
+      status: "in_progress",
+    });
+    h.update({
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "map cites real symbols." },
+    });
+
+    expect(
+      h.state().items
+        .filter((item) => item.kind === "assistant")
+        .map((item) => ({ id: item.id, text: item.text })),
+    ).toEqual([
+      { id: "a1", text: "and the existing implement" },
+      { id: "a1-2", text: "er notes so the feature map cites real symbols." },
+    ]);
+  });
+
   test("opens new thought and message segments around tool calls", async () => {
     const h = harness();
     await h.handshake();
@@ -1050,6 +1126,85 @@ describe("acp adapter", () => {
     );
     expect(items.at(-1)).toMatchObject({ kind: "assistant", text: "Done." });
     expect(h.state().status).toBe("idle");
+  });
+
+  test("hides Grok harness reminders while restoring the real goal prompt", async () => {
+    const h = harness();
+    await h.handshake({ agentCapabilities: { loadSession: true } });
+
+    const resumed = h.adapter.resume?.("goal-session", h.ctx);
+    h.update({
+      sessionUpdate: "user_message_chunk",
+      content: {
+        type: "text",
+        text: "<user_info>\nOS Version: windows\nWorkspace Path: H:/project\n</user_info>",
+      },
+    });
+    h.update({
+      sessionUpdate: "user_message_chunk",
+      content: {
+        type: "text",
+        text: "<system-reminder>\nMCP servers connected:\n- tasks\n</system-reminder>",
+      },
+    });
+    h.update({
+      sessionUpdate: "user_message_chunk",
+      content: {
+        type: "text",
+        text: [
+          "<user_query>",
+          "<system-reminder>",
+          "A goal has been set: Build the audio normalizer.",
+          "Keep the interface in dark mode.",
+          "",
+          "You are working directly on this goal across multiple turns. Deliver everything.",
+          "Plan: C:/private/session/goal/plan.md",
+          "</system-reminder>",
+          "</user_query>",
+        ].join("\n"),
+      },
+    });
+    h.update({
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "The app is ready." },
+    });
+    h.feed({ jsonrpc: "2.0", id: 3, result: {} });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(await resumed).toBe(true);
+
+    expect(h.state().items.filter((item) => item.kind === "user")).toEqual([
+      expect.objectContaining({
+        text: "Build the audio normalizer.\nKeep the interface in dark mode.",
+      }),
+    ]);
+    const transcript = JSON.stringify(h.state().items);
+    expect(transcript).not.toContain("system-reminder");
+    expect(transcript).not.toContain("user_info");
+    expect(transcript).not.toContain("C:/private/session");
+  });
+
+  test("unwraps ordinary Grok user queries during session replay", async () => {
+    const h = harness();
+    await h.handshake({ agentCapabilities: { loadSession: true } });
+
+    const resumed = h.adapter.resume?.("ordinary-session", h.ctx);
+    h.update({
+      sessionUpdate: "user_message_chunk",
+      content: { type: "text", text: "<user_query>\nFix the parser\n</user_query>" },
+    });
+    h.update({
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "Fixed." },
+    });
+    h.feed({ jsonrpc: "2.0", id: 3, result: {} });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(await resumed).toBe(true);
+
+    expect(h.state().items.filter((item) => item.kind === "user")).toEqual([
+      expect.objectContaining({ text: "Fix the parser" }),
+    ]);
   });
 
   test("lets Stop cancel a session replay that never answered", async () => {

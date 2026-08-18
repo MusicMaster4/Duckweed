@@ -50,13 +50,22 @@ import {
   shouldFlashCompletionReview,
   type CompletionFlash,
 } from "./lib/completionHighlights";
-import { playCompletionSound, preloadCompletionSound } from "./lib/completionSound";
+import {
+  chooseCompletionCue,
+  playCompletionSound,
+  preloadCompletionSound,
+} from "./lib/completionSound";
 import * as commandHistory from "./lib/commandHistory";
 import { clearGreetings } from "./lib/greetings";
 import * as suggestFeedback from "./lib/suggestFeedback";
 import {
   frontendReady,
   listShells,
+  mobileAckCommand,
+  mobilePollCommands,
+  mobileSendCompletion,
+  mobileSendPresence,
+  mobileSendWorkspace,
   powerAction,
   projectInfo,
   shellIntegrationSet,
@@ -66,7 +75,7 @@ import {
   type LaunchIntent,
   type ShellIntegrationStatus,
 } from "./lib/ipc";
-import { cKeyAction } from "./lib/platform";
+import { cKeyAction, isFullscreenHotkey } from "./lib/platform";
 import {
   balance,
   findLeaf,
@@ -104,6 +113,16 @@ import {
   type ProcessState,
 } from "./lib/processActivity";
 import { setCompletionTaskbarBadge } from "./lib/taskbarCompletion";
+import {
+  mobileCompletionDelay,
+  shouldSendDelayedMobileCompletion,
+} from "./lib/mobileCompletion";
+import {
+  fitMobileWorkspaceSnapshot,
+  MOBILE_WORKSPACE_CONVERSATION_BUDGET_BYTES,
+  truncateUtf8,
+  utf8ByteLength,
+} from "./lib/mobileWorkspace";
 import {
   adjustSettingsIndexOnAppend,
   adjustSettingsIndexOnClose,
@@ -402,9 +421,12 @@ export default function App() {
   completionHighlightsRef.current = completionHighlights;
   const completionFlashSeq = useRef(0);
   const completionFlashTimers = useRef(new Map<string, number>());
+  const mobileCompletionTimers = useRef(new Map<string, number>());
+  const lastTerminalInteractionAt = useRef(new Map<string, number>());
   /** Dirty flag for the lifted file editor (file switches confirm through this). */
   const editorDirtyRef = useRef(false);
   const processState = useRef(new Map<string, ProcessState>());
+  const mobileWorkspaceSnapshotRef = useRef("");
   /** Last folder opened in any tab — only ever used to seed the folder picker. */
   const lastProject = useRef<string | null>(initial.lastProject);
 
@@ -537,6 +559,25 @@ export default function App() {
     return findLeaf(tab.root, tab.activeLeaf)?.term === termId;
   }, []);
 
+  useEffect(() => {
+    const recordSelectedTerminalInteraction = (event: KeyboardEvent | PointerEvent) => {
+      if (!document.hasFocus() || settingsActiveRef.current) return;
+      if (
+        event instanceof KeyboardEvent &&
+        ["Shift", "Control", "Alt", "Meta"].includes(event.key)
+      ) return;
+      const tab = currentTab();
+      const termId = tab ? (findLeaf(tab.root, tab.activeLeaf)?.term ?? null) : null;
+      if (termId) lastTerminalInteractionAt.current.set(termId, Date.now());
+    };
+    window.addEventListener("keydown", recordSelectedTerminalInteraction, true);
+    window.addEventListener("pointerdown", recordSelectedTerminalInteraction, true);
+    return () => {
+      window.removeEventListener("keydown", recordSelectedTerminalInteraction, true);
+      window.removeEventListener("pointerdown", recordSelectedTerminalInteraction, true);
+    };
+  }, [currentTab]);
+
   /** Selected pane while the user is actually looking at the window (flash vs unread). */
   const isFocusedTerm = useCallback(
     (termId: string): boolean => {
@@ -646,6 +687,12 @@ export default function App() {
       window.clearTimeout(flashTimer);
       completionFlashTimers.current.delete(term);
     }
+    for (const [key, timer] of mobileCompletionTimers.current) {
+      if (!key.startsWith(`${term}:`)) continue;
+      window.clearTimeout(timer);
+      mobileCompletionTimers.current.delete(key);
+    }
+    lastTerminalInteractionAt.current.delete(term);
     setCompletionFlashes((previous) => {
       if (!previous.has(term)) return previous;
       const next = new Map(previous);
@@ -661,6 +708,233 @@ export default function App() {
     [tabs],
   );
   const termIdsKey = termIds.join("\0");
+
+  // Keep a compact remote index on paired phones. It contains only open
+  // projects, terminal identity, and status, never terminal output or an
+  // in-progress agent transcript.
+  useEffect(() => {
+    if (!TAURI_RUNTIME) return;
+    let timer = 0;
+    let stopped = false;
+
+    const publish = () => {
+      timer = 0;
+      let remainingConversationBytes = MOBILE_WORKSPACE_CONVERSATION_BUDGET_BYTES;
+      const snapshot = {
+        projects: tabsRef.current.map((tab) => ({
+          id: tab.id,
+          name: tab.project?.name ?? tab.title,
+          path: tab.project?.path ?? "",
+          branch: tab.project?.branch ?? null,
+          terminals: leaves(tab.root).flatMap((node) => {
+            const meta = terminals.getMeta(node.term);
+            if (!meta) return [];
+            const session = agentSessions.get(node.term);
+            const status = session
+              ? session.status === "working" || session.status === "starting"
+                ? "working" as const
+                : session.status === "waiting"
+                  ? "waiting" as const
+                  : session.status === "exited" || session.status === "error"
+                    ? "exited" as const
+                    : "idle" as const
+              : meta.exited
+                ? "exited" as const
+                : meta.agent && terminals.hasPendingAgentTurn(node.term)
+                  ? "working" as const
+                  : meta.busy
+                    ? "working" as const
+                    : "idle" as const;
+            const rawAgent = meta.agent
+              ? meta.agent.charAt(0).toUpperCase() + meta.agent.slice(1)
+              : null;
+            const conversationSource: Array<{
+              id: string;
+              sentAt: number;
+              role: "user" | "assistant";
+              rawText: string;
+            }> = [];
+            for (const item of session?.items ?? []) {
+              if (item.kind === "user") {
+                conversationSource.push({
+                  id: item.id,
+                  sentAt: item.at,
+                  role: "user",
+                  rawText: item.text,
+                });
+              } else if (item.kind === "assistant" && !item.streaming) {
+                conversationSource.push({
+                  id: item.id,
+                  sentAt: item.at,
+                  role: "assistant",
+                  rawText: item.text,
+                });
+              }
+            }
+            const conversation = conversationSource.slice(-6).map((item) => {
+              const rawText = item.rawText.trim();
+              const text = truncateUtf8(
+                rawText,
+                Math.min(4_000, remainingConversationBytes),
+              );
+              remainingConversationBytes = Math.max(
+                0,
+                remainingConversationBytes - utf8ByteLength(text),
+              );
+              return { id: item.id, sentAt: item.sentAt, role: item.role, text };
+            }).filter((item) => item.text.length > 0);
+            return [{
+              id: node.term,
+              title: meta.title || session?.label || meta.shellLabel || "Terminal",
+              shell: meta.shellLabel || "Terminal",
+              agent: session?.label ?? rawAgent,
+              model: session?.model ?? null,
+              status,
+              unreadOnDesktop: unreadTermIdsRef.current.has(node.term),
+              conversation,
+              permission: session?.permission && session.permission.kind !== "question"
+                ? {
+                    id: session.permission.id,
+                    title: session.permission.title.slice(0, 240),
+                    detail: session.permission.detail?.slice(0, 4_000) ?? null,
+                    command: session.permission.command?.slice(0, 8_000) ?? null,
+                    options: session.permission.options.map((option) => ({
+                      id: option.id,
+                      label: option.label.slice(0, 120),
+                      kind: option.kind,
+                    })),
+                  }
+                : null,
+            }];
+          }),
+        })),
+      };
+      const boundedSnapshot = fitMobileWorkspaceSnapshot(snapshot);
+      const serialized = JSON.stringify(boundedSnapshot);
+      if (serialized === mobileWorkspaceSnapshotRef.current) return;
+      mobileWorkspaceSnapshotRef.current = serialized;
+      void mobileSendWorkspace(boundedSnapshot).then((result) => {
+        if (result.failed > 0) throw new Error(result.errors.join("; "));
+      }).catch((error) => {
+        if (!stopped) {
+          if (mobileWorkspaceSnapshotRef.current === serialized) {
+            mobileWorkspaceSnapshotRef.current = "";
+          }
+          console.error("mobile workspace sync", error);
+          timer = window.setTimeout(publish, 5_000);
+        }
+      });
+    };
+
+    const schedule = () => {
+      if (stopped || timer) return;
+      timer = window.setTimeout(publish, 250);
+    };
+    const offAgents = agentSessions.subscribeAll(schedule);
+    const offTerminals = termIds.map((termId) => terminals.subscribeSession(termId, schedule));
+    const paired = () => {
+      mobileWorkspaceSnapshotRef.current = "";
+      schedule();
+    };
+    window.addEventListener("duckweed:mobile-paired", paired);
+    window.addEventListener("duckweed:mobile-refresh", paired);
+    const presence = window.setInterval(() => {
+      void mobileSendPresence().then((result) => {
+        if (result.failed > 0) throw new Error(result.errors.join("; "));
+      }).catch((error) => {
+        if (!stopped) console.error("mobile presence sync", error);
+      });
+    }, 30_000);
+    schedule();
+    return () => {
+      stopped = true;
+      if (timer) window.clearTimeout(timer);
+      window.clearInterval(presence);
+      window.removeEventListener("duckweed:mobile-paired", paired);
+      window.removeEventListener("duckweed:mobile-refresh", paired);
+      offAgents();
+      offTerminals.forEach((off) => off());
+    };
+  }, [tabs, termIds, termIdsKey, unreadTermIds]);
+
+  // The relay cannot open an inbound connection through a user's router, so
+  // the desktop checks the small encrypted command queue while Duckweed runs.
+  useEffect(() => {
+    if (!TAURI_RUNTIME) return;
+    let stopped = false;
+    let timer = 0;
+    let polling = false;
+    let pollDelay = 1_800;
+    const handling = new Set<string>();
+    const applied = new Set<string>();
+
+    const poll = async () => {
+      if (stopped || polling) return;
+      polling = true;
+      try {
+        const commands = await mobilePollCommands();
+        pollDelay = commands.length > 0 ? 1_800 : Math.min(30_000, pollDelay * 2);
+        for (const command of commands) {
+          const key = `${command.deviceId}:${command.commandId}`;
+          if (handling.has(key)) continue;
+          handling.add(key);
+          try {
+            if (!applied.has(key)) {
+              if (command.kind === "refresh") {
+                window.dispatchEvent(new Event("duckweed:mobile-refresh"));
+              } else if (
+                command.kind === "approval" &&
+                command.terminalId &&
+                command.permissionId &&
+                command.optionId
+              ) {
+                const permission = agentSessions.get(command.terminalId)?.permission;
+                if (
+                  permission?.id === command.permissionId &&
+                  permission.kind !== "question" &&
+                  permission.options.some((option) => option.id === command.optionId)
+                ) {
+                  agentSessions.respond(command.terminalId, command.permissionId, command.optionId);
+                }
+              } else if (
+                command.kind === "input" &&
+                command.terminalId &&
+                (command.text || command.images.length > 0)
+              ) {
+                const meta = terminals.getMeta(command.terminalId);
+                if (meta && !meta.exited) {
+                  const session = agentSessions.get(command.terminalId);
+                  if (session) {
+                    agentSessions.submit(command.terminalId, command.text ?? "", command.images);
+                  } else if (command.text && (meta.agent || meta.busy)) {
+                    terminals.writeRaw(command.terminalId, `${command.text}\r`);
+                  } else if (command.text) {
+                    terminals.submitCommand(command.terminalId, command.text);
+                  }
+                }
+              }
+              applied.add(key);
+            }
+            await mobileAckCommand(command.deviceId, command.commandId);
+            applied.delete(key);
+          } finally {
+            handling.delete(key);
+          }
+        }
+      } catch (error) {
+        if (!stopped) console.error("mobile command sync", error);
+      } finally {
+        polling = false;
+        if (!stopped) timer = window.setTimeout(poll, pollDelay);
+      }
+    };
+
+    void poll();
+    return () => {
+      stopped = true;
+      if (timer) window.clearTimeout(timer);
+    };
+  }, []);
 
   // Agent sessions can stay open after a turn finishes, so the tab activity
   // indicator follows outstanding work rather than the lifetime of the CLI.
@@ -724,16 +998,63 @@ export default function App() {
       if (!previous) return;
 
       if (!shouldSignalCompletion(previous, current)) return;
-      // Every eligible completion gets one cue. The shared audio player
-      // coalesces simultaneous finishes, so several agents returning together
-      // do not stack copies of the effect.
-      if (
+      const completionCue =
         !dailyLockedRef.current &&
         completionSoundEnabledRef.current &&
         shouldPlayCompletionSound(previous, current)
-      ) {
-        playCompletionSound();
+          ? chooseCompletionCue()
+          : null;
+      // Agent turns are also delivered to paired phones. The transport runs in
+      // Rust so encryption keys never enter the WebView; structured sessions
+      // contribute their settled assistant prose, while terminal-only agents
+      // still produce an honest project-level completion without scraping ANSI.
+      if (current.completionSeq > previous.completionSeq) {
+        const owner = tabsRef.current.find((tab) =>
+          leaves(tab.root).some((node) => node.term === termId),
+        );
+        const details = agentSessions.completionDetails(termId);
+        const rawAgent = current.agent ?? previous.agent;
+        const agent = details?.label ??
+          (rawAgent ? rawAgent.charAt(0).toUpperCase() + rawAgent.slice(1) : "Agent");
+        const startedAt = current.completionStartedAt ?? previous.processStartedAt;
+        const project = owner?.project?.name ??
+          (meta.cwd.trim() ? basename(meta.cwd) : owner?.title ?? "Duckweed");
+        const unreadAtCompletion = !isFocusedTerm(termId);
+        const completedAt = Date.now();
+        const completionKey = `${termId}:${current.completionSeq}`;
+        const message = {
+          agent,
+          project,
+          projectId: owner?.id ?? null,
+          terminalId: termId,
+          terminalTitle: meta.title || null,
+          kind: details?.needsAttention ? "attention" : "completed",
+          response: details?.response ?? null,
+          durationMs:
+            details?.durationMs ??
+            (startedAt === null ? null : Math.max(0, Date.now() - startedAt)),
+          soundCue: completionCue,
+          // A completion that survives the desktop grace period is unread on
+          // the phone, including an unattended selected terminal.
+          unreadOnDesktop: true,
+        } as const;
+        const timer = window.setTimeout(() => {
+          mobileCompletionTimers.current.delete(completionKey);
+          if (!shouldSendDelayedMobileCompletion({
+            unreadAtCompletion,
+            unreadNow: unreadTermIdsRef.current.has(termId),
+            lastInteractionAt: lastTerminalInteractionAt.current.get(termId) ?? null,
+            completedAt,
+          })) return;
+          void mobileSendCompletion(message)
+            .catch((error) => console.error("mobile completion notification", error));
+        }, mobileCompletionDelay(unreadAtCompletion));
+        mobileCompletionTimers.current.set(completionKey, timer);
       }
+      // Every eligible completion gets one cue. The shared audio player
+      // coalesces simultaneous finishes, so several agents returning together
+      // do not stack copies of the effect.
+      if (completionCue !== null) playCompletionSound(completionCue);
       if (isFocusedTerm(termId)) {
         if (completionHighlightsRef.current) flashCompletion(termId, "focused");
         return;
@@ -2110,6 +2431,10 @@ export default function App() {
         window.clearTimeout(timer);
       }
       completionFlashTimers.current.clear();
+      for (const timer of mobileCompletionTimers.current.values()) {
+        window.clearTimeout(timer);
+      }
+      mobileCompletionTimers.current.clear();
     },
     [],
   );
@@ -2321,15 +2646,17 @@ export default function App() {
         e.stopPropagation();
       };
 
+      // OS window fullscreen. Pane zoom is Ctrl+Shift+Z. Handle this before
+      // the daily lockout swallows keys, and keep it out of the terminal.
+      if (isFullscreenHotkey(e)) {
+        void toggleFullscreen();
+        return take();
+      }
+
       if (dailyLockedRef.current) {
         const lockoutControl =
           e.target instanceof Element && e.target.closest(".daily-lockout");
         if (lockoutControl) return;
-        return take();
-      }
-
-      if (e.key === "F11") {
-        void toggleFullscreen();
         return take();
       }
 
@@ -3077,6 +3404,7 @@ export default function App() {
                 shell={shell}
                 shells={shells}
                 updateLabel={`${updater.channel === "testing" ? "Beta" : "Stable"}${updater.version ? ` · v${updater.version}` : ""}`}
+                updateChannel={updater.channel}
                 onFontSize={applyFontSize}
                 onToggleInputMode={toggleInputMode}
                 onToggleHighlight={toggleHighlight}

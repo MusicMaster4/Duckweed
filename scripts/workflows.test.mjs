@@ -13,6 +13,7 @@ const yaml = (file) => Bun.YAML.parse(read(file));
 const release = yaml(".github/workflows/release.yml");
 const releaseText = read(".github/workflows/release.yml");
 const ci = yaml(".github/workflows/ci.yml");
+const relay = yaml(".github/workflows/relay.yml");
 const tauriConfig = JSON.parse(read("src-tauri/tauri.conf.json"));
 
 /** Every `run:` script in a workflow, flattened. */
@@ -137,6 +138,7 @@ describe("AI-written stable changelogs", () => {
 
 describe("the build job", () => {
   const build = release.jobs.build;
+  const android = release.jobs.android;
   const validate = release.jobs.validate;
   const manifest = release.jobs.manifest;
   const matrix = build.strategy.matrix.include;
@@ -172,6 +174,7 @@ describe("the build job", () => {
   test("validates the frontend and Linux backend before the native build matrix", () => {
     const validationCommands = runSteps({ jobs: { validate } }).map((step) => step.run);
     expect(validationCommands.some((run) => run.includes("bun run typecheck") && run.includes("bun test"))).toBe(true);
+    expect(validationCommands.some((run) => run.includes("npm test --prefix relay") && run.includes("npm run --prefix relay build"))).toBe(true);
     expect(validationCommands.some((run) => run.includes("cargo check --locked"))).toBe(true);
     expect(build.needs).toContain("validate");
   });
@@ -214,6 +217,36 @@ describe("the build job", () => {
     expect(upload.run).toContain("latest.json");
     expect(upload.run).toContain("needs.version.outputs.tag");
     expect(release.jobs.publish.needs).toContain("manifest");
+    expect(manifest.needs).toContain("android");
+  });
+
+  test("builds a signed companion APK for stable and beta releases", () => {
+    const configure = android.steps.find((step) => step.run?.includes("google-services.json"));
+    const compile = android.steps.find((step) => step.run?.includes(":app:assembleRelease"));
+    const artifact = android.steps.find((step) => step.uses?.startsWith("actions/upload-artifact"));
+    expect(android.needs).toContain("validate");
+    expect(configure.env.FIREBASE_CONFIG).toContain("secrets.FIREBASE_ANDROID_GOOGLE_SERVICES_JSON");
+    expect(configure.env.KEYSTORE).toContain("secrets.ANDROID_KEYSTORE_BASE64");
+    expect(compile.run).toContain(":app:testDebugUnitTest");
+    expect(compile.run).toContain("duckweed-companion-beta.apk");
+    expect(compile.run).toContain("duckweed-companion.apk");
+    expect(compile.run).toContain("-PduckweedChannel");
+    expect(artifact.with.name).toBe("duckweed-release-android");
+  });
+
+  test("publishes a channel-bound Android update feed beside each APK", () => {
+    const generate = manifest.steps.find((step) => step.run?.includes("android-update-manifest.mjs"));
+    const upload = manifest.steps.find((step) => step.run?.includes("release upload"));
+    expect(generate.run).toContain("--channel");
+    expect(generate.run).toContain("--version-code");
+    expect(upload.run).toContain("android-update*.json");
+  });
+
+  test("keeps a permanent APK URL for the newest beta", () => {
+    const pointer = runSteps(release).find((step) => step.run.includes("BETA_POINTER_TAG") && step.run.includes("companion"));
+    expect(pointer.run).toContain("duckweed-companion-beta.apk");
+    expect(pointer.run).toContain("android-update-beta.json");
+    expect(pointer.run).toContain("--pattern \"*companion*.apk\"");
   });
 
   test("a test build publishes nothing", () => {
@@ -249,6 +282,49 @@ describe("CI workflow", () => {
     expect(rust.strategy["fail-fast"]).toBe(false);
     const linuxDeps = rust.steps.find((step) => step.if?.includes("ubuntu-22.04"));
     expect(linuxDeps.run).toContain("libwebkit2gtk-4.1-dev");
+  });
+
+  test("builds and retains an installable Android APK", () => {
+    const android = ci.jobs.android;
+    const compile = android.steps.find((step) => step.run?.includes(":app:assembleDebug"));
+    const upload = android.steps.find((step) => step.uses?.startsWith("actions/upload-artifact"));
+    expect(compile.run).toContain("gradle -p android");
+    expect(compile.run).toContain(":app:testDebugUnitTest");
+    expect(upload.with.path).toContain("app-debug.apk");
+    expect(upload.with["if-no-files-found"]).toBe("error");
+  });
+
+  test("tests and builds the encrypted notification relay", () => {
+    const commands = runSteps({ jobs: { relay: ci.jobs.relay } }).map((step) => step.run);
+    expect(commands).toContain("npm ci --prefix relay");
+    expect(commands).toContain("npm test --prefix relay");
+    expect(commands).toContain("npm run --prefix relay build");
+  });
+});
+
+describe("notification relay deployment", () => {
+  test("deploys through the official Cloudflare action with scoped repository secrets", () => {
+    const deploy = relay.jobs.deploy.steps.find((step) => step.uses?.startsWith("cloudflare/wrangler-action"));
+    expect(relay.permissions).toEqual({ contents: "read" });
+    expect(deploy.with.apiToken).toContain("secrets.CLOUDFLARE_API_TOKEN");
+    expect(deploy.with.accountId).toContain("vars.CLOUDFLARE_ACCOUNT_ID");
+    expect(deploy.with.secrets).toContain("FCM_SERVICE_ACCOUNT_JSON");
+    expect(deploy.env.FCM_SERVICE_ACCOUNT_JSON).toContain("secrets.FCM_SERVICE_ACCOUNT_JSON");
+  });
+
+  test("applies D1 migrations before deploying the Worker", () => {
+    const steps = relay.jobs.deploy.steps;
+    const migration = steps.findIndex((step) => step.run?.includes("d1 migrations apply"));
+    const deploy = steps.findIndex((step) => step.uses?.startsWith("cloudflare/wrangler-action"));
+    expect(migration).toBeGreaterThan(-1);
+    expect(deploy).toBeGreaterThan(migration);
+    expect(steps[migration].run).toContain("--remote");
+    expect(steps[migration].env.CLOUDFLARE_API_TOKEN).toContain("secrets.CLOUDFLARE_API_TOKEN");
+  });
+
+  test("injects the real D1 id without committing an account-specific deploy config", () => {
+    const configure = relay.jobs.deploy.steps.find((step) => step.run?.includes("configure-deploy.mjs"));
+    expect(configure.env.CLOUDFLARE_D1_DATABASE_ID).toContain("vars.CLOUDFLARE_D1_DATABASE_ID");
   });
 });
 

@@ -18,8 +18,10 @@ import {
   type AgentAccessMode,
   type AgentFileChange,
   type AgentGoalStatus,
+  type AgentImageAttachment,
   type AgentItem,
   type AgentSessionState,
+  type AgentSideQuestion,
   type AgentStatus,
   type ToolStatus,
 } from "../types";
@@ -49,6 +51,7 @@ interface CodexModel {
   displayName: string;
   efforts: string[];
   serviceTiers: string[];
+  hidden: boolean;
   isDefault: boolean;
 }
 
@@ -61,7 +64,19 @@ interface CodexGoal {
 }
 
 const MAX_GOAL_OBJECTIVE_CHARS = 4_000;
+const RESUME_PAGE_SIZE = 100;
+const MAX_RESUMED_TURNS = 500;
 const FAST_SERVICE_TIER = "priority";
+const DEFAULT_SERVICE_TIER = "default";
+/** Matches the native log monitor's guard for Codex auto-continuations. */
+const ROOT_COMPLETION_QUIET_MS = 800;
+const SIDE_DEVELOPER_INSTRUCTIONS = `You are in an ephemeral side conversation, not the main thread.
+Use the inherited conversation only as reference context. Answer only the question submitted after the fork. Do not continue tasks, plans, or tool calls inherited from the parent thread. Keep the response focused and do not modify files or workspace state.`;
+
+interface CodexAdapterOptions {
+  /** Test seam; production uses the same 800 ms quiet window as raw Codex. */
+  completionQuietMs?: number;
+}
 
 const EXEC_STATUS: Record<string, ToolStatus> = {
   inProgress: "running",
@@ -192,6 +207,13 @@ interface ChildThread {
   state: AgentSessionState;
 }
 
+interface CodexSideThread {
+  threadId: string | null;
+  currentTurnId: string | null;
+  streamedItems: Set<string>;
+  sideQuestion: AgentSideQuestion;
+}
+
 /** Codex sends a unified patch per changed file. */
 function readFileChanges(raw: unknown): AgentFileChange[] {
   return asArray(raw)
@@ -204,13 +226,36 @@ function readFileChanges(raw: unknown): AgentFileChange[] {
     .filter((change) => change.path);
 }
 
-export function createCodexAdapter(): AgentAdapter {
+export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdapter {
+  const completionQuietMs = options.completionQuietMs ?? ROOT_COMPLETION_QUIET_MS;
   let nextId = 1;
   const pending = new Map<RequestKey, Pending>();
   let threadId: string | null = null;
   let currentTurnId: string | null = null;
+  /**
+   * True from the moment Duckweed asks Codex to start/rejoin root work until
+   * either completion channel settles it. `turn/started` is normally first,
+   * but app-server notifications and RPC responses use separate paths, so a
+   * fast or resumed turn can complete before that notification is observed.
+   */
+  let rootTurnMayBeActive = false;
+  /** A start response/notification or active status proved root work exists. */
+  let rootTurnStatusConfirmed = false;
+  /** Invalidates late `turn/start` responses after the represented turn ended. */
+  let rootTurnGeneration = 0;
+  /** Advances when a live root completion beats an in-flight resume snapshot. */
+  let rootCompletionVersion = 0;
+  /** Bounded memory of completions used to reject stale RPC/resume snapshots. */
+  const completedRootTurnIds = new Set<string>();
+  let rootCompletionTimer: ReturnType<typeof setTimeout> | null = null;
   /** The resume RPC currently occupying the pane, so Stop can cancel it too. */
   let resumeRequestId: RequestKey | null = null;
+  /**
+   * True from the first resume emit until `thread/resume` and its transcript
+   * pages have settled. `threadId` is claimed earlier so a live completion
+   * cannot be misrouted; side forks must still wait for that hydration.
+   */
+  let hydratingResume = false;
   /**
    * The model and effort turns run with. Seeded from the launch flags,
    * corrected by the `thread/start` response, and moved by /model and
@@ -220,6 +265,13 @@ export function createCodexAdapter(): AgentAdapter {
   let currentModel: string | null = null;
   let currentEffort: string | null = null;
   let currentServiceTier: string | null = null;
+  /**
+   * `/fast` only changes the service tier. Codex still announces the thread's
+   * stored effort in `thread/settings/updated`, and that value is often the
+   * model default (`low`) because `/effort` is a local `turn/start` override.
+   * While a Fast Mode write is in flight, keep the effort the user already has.
+   */
+  let preserveEffortDuringFastToggle = false;
   let currentAccess: AgentAccessMode = "default";
   /** `model/list`, once it lands; empty until then, so validation is lenient. */
   let models: CodexModel[] = [];
@@ -236,6 +288,45 @@ export function createCodexAdapter(): AgentAdapter {
   const children = new Map<string, ChildThread>();
   /** Avoid issuing the same final transcript reconciliation more than once. */
   const hydratedChildren = new Set<string>();
+  /** Ephemeral `/side` and `/btw` forks, kept outside the main transcript. */
+  const sideThreads = new Map<string, CodexSideThread>();
+  let pendingSideThread: CodexSideThread | null = null;
+  let activeSideThreadId: string | null = null;
+  let sideSequence = 0;
+
+  function rememberRootTurnCompleted(turnId: string | null): void {
+    if (!turnId) return;
+    completedRootTurnIds.add(turnId);
+    if (completedRootTurnIds.size > 64) {
+      const oldest = completedRootTurnIds.values().next().value;
+      if (oldest) completedRootTurnIds.delete(oldest);
+    }
+  }
+
+  function settleRootTurn(turnId: string | null): void {
+    rememberRootTurnCompleted(turnId ?? currentTurnId);
+    currentTurnId = null;
+    rootTurnMayBeActive = false;
+    rootTurnStatusConfirmed = false;
+  }
+
+  function cancelPendingRootCompletion(): void {
+    if (rootCompletionTimer === null) return;
+    clearTimeout(rootCompletionTimer);
+    rootCompletionTimer = null;
+  }
+
+  function scheduleRootCompletion(ctx: AdapterContext): void {
+    cancelPendingRootCompletion();
+    if (completionQuietMs <= 0) {
+      ctx.emit({ type: "turn-end" });
+      return;
+    }
+    rootCompletionTimer = setTimeout(() => {
+      rootCompletionTimer = null;
+      ctx.emit({ type: "turn-end" });
+    }, completionQuietMs);
+  }
 
   function newChildState(childThreadId: string): AgentSessionState {
     return {
@@ -423,17 +514,7 @@ export function createCodexAdapter(): AgentAdapter {
           for (const rawItem of asArray(turn.items)) {
             const item = asRecord(rawItem);
             if (!item) continue;
-            if (asString(item.type) === "userMessage") {
-              const text = asArray(item.content)
-                .map((entry) => asRecord(entry))
-                .filter((entry): entry is Record<string, unknown> => entry !== null)
-                .filter((entry) => asString(entry.type) === "text")
-                .map((entry) => asString(entry.text) ?? "")
-                .filter(Boolean)
-                .join("\n");
-              if (text) nested.emit({ type: "user", text });
-              continue;
-            }
+            if (replayUserMessage(item, nested)) continue;
             handleItem(item, true, nested);
           }
         }
@@ -474,6 +555,188 @@ export function createCodexAdapter(): AgentAdapter {
 
   function notify(ctx: AdapterContext, method: string, params: unknown) {
     ctx.send({ jsonrpc: "2.0", method, params });
+  }
+
+  function emitSide(side: CodexSideThread, ctx: AdapterContext): void {
+    ctx.emit({ type: "side-question", sideQuestion: { ...side.sideQuestion } });
+  }
+
+  function finishSide(
+    sideThreadId: string,
+    status: "answered" | "error",
+    ctx: AdapterContext,
+    fallback?: string,
+  ): void {
+    const side = sideThreads.get(sideThreadId);
+    if (!side) return;
+    side.currentTurnId = null;
+    side.sideQuestion.status = status;
+    if (!side.sideQuestion.answer.trim() && fallback) side.sideQuestion.answer = fallback;
+    if (status === "answered" && !side.sideQuestion.answer.trim()) {
+      side.sideQuestion.status = "error";
+      side.sideQuestion.answer = "Codex did not return a side-conversation response.";
+    }
+    emitSide(side, ctx);
+    if (activeSideThreadId === sideThreadId) activeSideThreadId = null;
+    void request(ctx, "thread/unsubscribe", { threadId: sideThreadId })
+      .catch(() => {
+        // Ephemeral threads are in-memory only. A failed unsubscribe does not
+        // affect the parent conversation or make the side reply persistent.
+      })
+      .finally(() => sideThreads.delete(sideThreadId));
+  }
+
+  function handleSideNotification(
+    sideThreadId: string,
+    method: string,
+    params: Record<string, unknown>,
+    ctx: AdapterContext,
+  ): void {
+    const side = sideThreads.get(sideThreadId);
+    if (!side) return;
+    switch (method) {
+      case "turn/started":
+        side.currentTurnId = asString(asRecord(params.turn)?.id);
+        return;
+      case "item/agentMessage/delta": {
+        const itemId = asString(params.itemId);
+        const delta = asString(params.delta);
+        if (!itemId || !delta) return;
+        side.streamedItems.add(itemId);
+        side.sideQuestion.answer += delta;
+        emitSide(side, ctx);
+        return;
+      }
+      case "item/completed": {
+        const item = asRecord(params.item);
+        const itemId = asString(item?.id);
+        if (asString(item?.type) !== "agentMessage" || !itemId) return;
+        const text = asString(item?.text) ?? "";
+        if (text && !side.streamedItems.has(itemId)) {
+          side.sideQuestion.answer += text;
+          emitSide(side, ctx);
+        }
+        return;
+      }
+      case "turn/completed": {
+        const error = asRecord(asRecord(params.turn)?.error);
+        if (error) {
+          finishSide(
+            sideThreadId,
+            "error",
+            ctx,
+            asString(error.message) ?? "The side conversation failed.",
+          );
+        } else {
+          finishSide(sideThreadId, "answered", ctx);
+        }
+        return;
+      }
+      case "thread/status/changed": {
+        const status = threadStatus(params.status);
+        if (status === "error") {
+          finishSide(sideThreadId, "error", ctx, "The side conversation failed.");
+        } else if (
+          status === "idle" &&
+          (side.currentTurnId || side.sideQuestion.answer.trim())
+        ) {
+          // Thread-level idle is Codex's reconciliation channel. Side forks
+          // often receive this without a matching turn/completed, which would
+          // otherwise leave the card asking and reject later /side and /btw.
+          finishSide(sideThreadId, "answered", ctx);
+        }
+        return;
+      }
+      default:
+        return;
+    }
+  }
+
+  function startSideQuestion(
+    command: "/side" | "/btw",
+    question: string,
+    ctx: AdapterContext,
+  ): void {
+    if (!question) {
+      ctx.emit({
+        type: "notice",
+        tone: "error",
+        text: `Usage: ${command} <your question>`,
+      });
+      return;
+    }
+    if (!threadId) {
+      ctx.emit({
+        type: "notice",
+        tone: "error",
+        text: "A side conversation is not available until the Codex thread is ready.",
+      });
+      return;
+    }
+    if (pendingSideThread || activeSideThreadId) {
+      ctx.emit({
+        type: "notice",
+        tone: "error",
+        text: "A side conversation is already in progress.",
+      });
+      return;
+    }
+
+    sideSequence += 1;
+    const side: CodexSideThread = {
+      threadId: null,
+      currentTurnId: null,
+      streamedItems: new Set(),
+      sideQuestion: {
+        id: `codex-side-${sideSequence}`,
+        command,
+        question,
+        answer: "",
+        status: "asking",
+      },
+    };
+    pendingSideThread = side;
+    emitSide(side, ctx);
+    const parentThreadId = threadId;
+    void request(ctx, "thread/fork", {
+      threadId: parentThreadId,
+      ephemeral: true,
+      developerInstructions: SIDE_DEVELOPER_INSTRUCTIONS,
+      ...threadAccessParams("read-only"),
+      ...(currentModel ? { model: currentModel } : {}),
+    })
+      .then(async (result) => {
+        const forked = asRecord(result.thread) ?? result;
+        const sideThreadId = asString(forked.id);
+        if (!sideThreadId) throw new Error("Codex did not return a side thread id.");
+        side.threadId = sideThreadId;
+        pendingSideThread = null;
+        activeSideThreadId = sideThreadId;
+        sideThreads.set(sideThreadId, side);
+        const started = await request(ctx, "turn/start", {
+          threadId: sideThreadId,
+          input: [{ type: "text", text: question }],
+          approvalPolicy: "never",
+          sandboxPolicy: { type: "readOnly" },
+          ...(currentModel ? { model: currentModel } : {}),
+          ...(currentEffort ? { effort: currentEffort } : {}),
+          ...(currentServiceTier ? { serviceTier: currentServiceTier } : {}),
+        });
+        side.currentTurnId = asString(asRecord(started.turn)?.id) ?? side.currentTurnId;
+      })
+      .catch((error: unknown) => {
+        pendingSideThread = null;
+        if (side.threadId && activeSideThreadId === side.threadId) activeSideThreadId = null;
+        if (side.threadId) sideThreads.delete(side.threadId);
+        const record = asRecord(error);
+        side.sideQuestion.status = "error";
+        side.sideQuestion.answer =
+          asString(record?.message) ?? "Codex could not start the side conversation.";
+        emitSide(side, ctx);
+        if (side.threadId) {
+          void request(ctx, "thread/unsubscribe", { threadId: side.threadId }).catch(() => {});
+        }
+      });
   }
 
   async function handshake(ctx: AdapterContext) {
@@ -548,7 +811,7 @@ export function createCodexAdapter(): AgentAdapter {
       // Not awaited: /model and /effort validate leniently until this lands.
       void request(ctx, "model/list", {})
         .then((result) => {
-          models = asArray(result.data)
+          const advertisedModels = asArray(result.data)
             .map((raw) => asRecord(raw))
             .filter((model): model is Record<string, unknown> => model !== null)
             .map((model) => ({
@@ -566,12 +829,25 @@ export function createCodexAdapter(): AgentAdapter {
                   .map((tier) => asString(tier.id) ?? ""),
                 ...asArray(model.additionalSpeedTiers).map((tier) => asString(tier) ?? ""),
               ].filter((tier, index, all) => Boolean(tier) && all.indexOf(tier) === index),
+              hidden: model.hidden === true,
               isDefault: model.isDefault === true,
             }))
             .filter((model) => model.id);
+          models = advertisedModels.filter((model) => !model.hidden);
           if (models.length) {
+            const hiddenCurrent = advertisedModels.some(
+              (model) =>
+                model.hidden &&
+                (model.id === currentModel || model.displayName === currentModel),
+            );
+            let repairedModel: string | undefined;
+            if (hiddenCurrent) {
+              repairedModel = (models.find((model) => model.isDefault) ?? models[0]).id;
+              currentModel = repairedModel;
+            }
             ctx.emit({
               type: "session",
+              ...(repairedModel ? { model: repairedModel } : {}),
               models: models.map((model) => ({
                 id: model.id,
                 label: model.displayName || model.id,
@@ -845,34 +1121,73 @@ export function createCodexAdapter(): AgentAdapter {
     }
   }
 
-  /** Rebuild the visible transcript returned inside `thread/resume`. */
-  function replayThread(thread: Record<string, unknown>, ctx: AdapterContext) {
+  function replayImage(
+    part: Record<string, unknown>,
+    itemId: string,
+    index: number,
+  ): AgentImageAttachment | null {
+    if (asString(part.type) !== "image") return null;
+    const dataUrl = asString(part.url);
+    const match = dataUrl?.match(/^data:(image\/(?:png|jpeg|gif|webp));base64,(.*)$/is);
+    if (!dataUrl || !match) return null;
+    const mimeType = match[1].toLowerCase() as AgentImageAttachment["mimeType"];
+    const encoded = match[2];
+    const padding = encoded.endsWith("==") ? 2 : encoded.endsWith("=") ? 1 : 0;
+    const extension = mimeType === "image/jpeg" ? "jpg" : mimeType.slice("image/".length);
+    return {
+      id: `history-${itemId}-${index}`,
+      name: `image-${index + 1}.${extension}`,
+      mimeType,
+      dataUrl,
+      size: Math.max(0, Math.floor((encoded.length * 3) / 4) - padding),
+    };
+  }
+
+  function replayUserMessage(item: Record<string, unknown>, ctx: AdapterContext): boolean {
+    if (asString(item.type) !== "userMessage") return false;
+    const itemId = asString(item.id) ?? "user";
+    const content = asArray(item.content)
+      .map((entry) => asRecord(entry))
+      .filter((entry): entry is Record<string, unknown> => entry !== null);
+    const text = content
+      .filter((entry) => asString(entry.type) === "text")
+      .map((entry) => asString(entry.text) ?? "")
+      .filter(Boolean)
+      .join("\n");
+    const images = content
+      .map((entry, index) => replayImage(entry, itemId, index))
+      .filter((image): image is AgentImageAttachment => image !== null);
+    if (text || images.length) ctx.emit({ type: "user", text, images });
+    return true;
+  }
+
+  /** Rebuild the visible transcript returned by Codex's resume pagination. */
+  function replayTurns(turns: unknown[], ctx: AdapterContext) {
     ctx.emit({ type: "transcript" });
     streamed.clear();
 
-    for (const rawTurn of asArray(thread.turns)) {
+    for (const rawTurn of turns) {
       const turn = asRecord(rawTurn);
       if (!turn) continue;
       for (const rawItem of asArray(turn.items)) {
         const item = asRecord(rawItem);
         if (!item) continue;
-        if (asString(item.type) === "userMessage") {
-          const text = asArray(item.content)
-            .map((entry) => asRecord(entry))
-            .filter((entry): entry is Record<string, unknown> => entry !== null)
-            .filter((entry) => asString(entry.type) === "text")
-            .map((entry) => asString(entry.text) ?? "")
-            .filter(Boolean)
-            .join("\n");
-          if (text) ctx.emit({ type: "user", text });
-          continue;
-        }
+        if (replayUserMessage(item, ctx)) continue;
         handleItem(item, true, ctx);
       }
     }
   }
 
   function handleNotification(method: string, params: Record<string, unknown>, ctx: AdapterContext) {
+    if (
+      rootTurnMayBeActive &&
+      (method.startsWith("item/") || method === "turn/plan/updated")
+    ) {
+      // Live root output proves that an uncertain resume really rejoined work.
+      // It lets the later thread-idle fallback finish the turn even if both
+      // turn boundary notifications were the frames that went missing.
+      rootTurnStatusConfirmed = true;
+    }
     switch (method) {
       case "thread/goal/updated": {
         const goal = readGoal(params.goal);
@@ -897,13 +1212,19 @@ export function createCodexAdapter(): AgentAdapter {
         return;
       }
       case "turn/started": {
+        // Codex goals can auto-continue a few milliseconds after the previous
+        // turn completed. Keep the original user-owned stretch open.
+        cancelPendingRootCompletion();
         const turn = asRecord(params.turn);
         currentTurnId = asString(turn?.id);
+        rootTurnMayBeActive = true;
+        rootTurnStatusConfirmed = true;
         ctx.emit({ type: "status", status: "working" });
         return;
       }
       case "turn/completed": {
         const turn = asRecord(params.turn);
+        const completedTurnId = asString(turn?.id);
         const error = asRecord(turn?.error);
         if (error) {
           ctx.emit({
@@ -912,16 +1233,54 @@ export function createCodexAdapter(): AgentAdapter {
             text: asString(error.message) ?? "The turn failed.",
           });
         }
-        currentTurnId = null;
-        ctx.emit({ type: "turn-end" });
+        rootCompletionVersion += 1;
+        settleRootTurn(completedTurnId);
+        scheduleRootCompletion(ctx);
+        return;
+      }
+      case "thread/status/changed": {
+        const status = threadStatus(params.status);
+        if (status === "working") {
+          cancelPendingRootCompletion();
+          rootTurnMayBeActive = true;
+          rootTurnStatusConfirmed = true;
+          ctx.emit({ type: "status", status: "working" });
+        } else if (status === "idle") {
+          // This is Codex's thread-level reconciliation channel. It closes the
+          // turn when a start/completed notification was lost or reordered.
+          const wasActive = rootTurnStatusConfirmed || currentTurnId !== null;
+          if (wasActive) rootCompletionVersion += 1;
+          settleRootTurn(null);
+          if (wasActive) scheduleRootCompletion(ctx);
+          else if (rootCompletionTimer === null) ctx.emit({ type: "status", status: "idle" });
+        } else if (status === "error") {
+          cancelPendingRootCompletion();
+          settleRootTurn(null);
+          ctx.emit({ type: "status", status: "error" });
+        }
         return;
       }
       case "item/started":
         handleItem(asRecord(params.item) ?? {}, false, ctx);
         return;
-      case "item/completed":
-        handleItem(asRecord(params.item) ?? {}, true, ctx);
+      case "item/completed": {
+        const item = asRecord(params.item) ?? {};
+        handleItem(item, true, ctx);
+        if (
+          rootTurnMayBeActive &&
+          asString(item.type) === "agentMessage" &&
+          asString(item.phase) === "final_answer"
+        ) {
+          // `final_answer` is a semantic terminal signal in the Codex schema.
+          // Use it when the visible answer arrives but the turn-completed and
+          // thread-idle frames are missing, which would otherwise strand the
+          // pane in working and suppress both completion effects.
+          rootCompletionVersion += 1;
+          settleRootTurn(asString(params.turnId));
+          scheduleRootCompletion(ctx);
+        }
         return;
+      }
       case "item/agentMessage/delta": {
         const itemId = asString(params.itemId);
         const delta = asString(params.delta);
@@ -1003,14 +1362,15 @@ export function createCodexAdapter(): AgentAdapter {
         const hasServiceTier = Boolean(
           settings && Object.prototype.hasOwnProperty.call(settings, "serviceTier"),
         );
+        const applyEffort = Boolean(effort) && !preserveEffortDuringFastToggle;
         if (model) currentModel = model;
-        if (effort) currentEffort = effort;
+        if (applyEffort) currentEffort = effort;
         if (hasServiceTier) currentServiceTier = asString(settings?.serviceTier);
-        if (model || effort || hasServiceTier) {
+        if (model || applyEffort || hasServiceTier) {
           ctx.emit({
             type: "session",
             ...(model ? { model } : {}),
-            ...(effort ? { effort } : {}),
+            ...(applyEffort ? { effort } : {}),
             ...(hasServiceTier ? { serviceTier: currentServiceTier } : {}),
           });
         }
@@ -1042,7 +1402,12 @@ export function createCodexAdapter(): AgentAdapter {
       return !currentTurnId || eventTurnId === currentTurnId;
     }
     if (currentTurnId && eventTurnId && eventTurnId !== currentTurnId) return false;
-    if (method === "turn/completed" && !currentTurnId && eventTurnId) return false;
+    if (method === "turn/completed" && !currentTurnId && eventTurnId) {
+      // The RPC response and notifications travel independently. Accept a
+      // root completion without its start ID only while this adapter knows it
+      // asked for or rejoined live work. Once settled, duplicates stay out.
+      return rootTurnMayBeActive && !completedRootTurnIds.has(eventTurnId);
+    }
     return true;
   }
 
@@ -1381,11 +1746,39 @@ export function createCodexAdapter(): AgentAdapter {
       return;
     }
 
-    const serviceTier = shouldEnable ? FAST_SERVICE_TIER : null;
-    void request(ctx, "thread/settings/update", { threadId, serviceTier })
+    // Match Codex's native /fast behavior: update this thread and persist the
+    // selection for chats opened later. `default` is an explicit off state;
+    // clearing only the thread override would expose an older global `priority`
+    // value again as soon as a new chat starts. Send the current effort with
+    // the tier so a config reload cannot put the model default back.
+    const serviceTier = shouldEnable ? FAST_SERVICE_TIER : DEFAULT_SERVICE_TIER;
+    const effortToKeep = currentEffort;
+    preserveEffortDuringFastToggle = true;
+    void Promise.all([
+      request(ctx, "thread/settings/update", {
+        threadId,
+        serviceTier,
+        ...(effortToKeep ? { effort: effortToKeep } : {}),
+      }),
+      request(ctx, "config/batchWrite", {
+        edits: [
+          {
+            keyPath: "service_tier",
+            value: shouldEnable ? "fast" : DEFAULT_SERVICE_TIER,
+            mergeStrategy: "replace",
+          },
+        ],
+        reloadUserConfig: true,
+      }),
+    ])
       .then(() => {
         currentServiceTier = serviceTier;
-        ctx.emit({ type: "session", serviceTier });
+        if (effortToKeep) currentEffort = effortToKeep;
+        ctx.emit({
+          type: "session",
+          serviceTier,
+          ...(effortToKeep ? { effort: effortToKeep } : {}),
+        });
         ctx.emit({
           type: "notice",
           tone: "info",
@@ -1399,6 +1792,9 @@ export function createCodexAdapter(): AgentAdapter {
           tone: "error",
           text: asString(record?.message) ?? "Codex could not change Fast Mode.",
         });
+      })
+      .finally(() => {
+        preserveEffortDuringFastToggle = false;
       });
   }
 
@@ -1406,6 +1802,10 @@ export function createCodexAdapter(): AgentAdapter {
     const space = text.search(/\s/);
     const name = (space < 0 ? text : text.slice(0, space)).toLowerCase();
     const arg = space < 0 ? "" : text.slice(space + 1).trim();
+    if (name === "/side" || name === "/btw") {
+      startSideQuestion(name, arg, ctx);
+      return "handled";
+    }
     ctx.emit({ type: "user", text });
 
     if (name === "/model") {
@@ -1506,7 +1906,7 @@ export function createCodexAdapter(): AgentAdapter {
     ctx.emit({
       type: "notice",
       tone: "error",
-      text: `Unknown command ${name}. Codex knows /model, /effort, /fast, /compact, /goal.`,
+      text: `Unknown command ${name}. Codex knows /model, /effort, /fast, /compact, /goal, /side, and /btw.`,
     });
     return "handled";
   }
@@ -1578,26 +1978,37 @@ export function createCodexAdapter(): AgentAdapter {
       }
 
       const eventThreadId = notificationThreadId(method, params);
+      if (eventThreadId && sideThreads.has(eventThreadId)) {
+        handleSideNotification(eventThreadId, method, params, ctx);
+        return;
+      }
       const nestedThread =
         method === "thread/started" ? asRecord(params.thread) : null;
       const parentThreadId = asString(nestedThread?.parentThreadId);
       const isChildThread =
         Boolean(eventThreadId) &&
-        Boolean(threadId) &&
-        (eventThreadId !== threadId || parentThreadId === threadId);
+        eventThreadId !== threadId &&
+        (children.has(eventThreadId as string) || parentThreadId === threadId);
       if (eventThreadId && isChildThread) {
         handleChildNotification(eventThreadId, method, params, ctx);
         return;
       }
+      // A notification from the conversation Duckweed just switched away
+      // from is neither the new root nor one of its children.
+      if (eventThreadId && threadId && eventThreadId !== threadId) return;
       if (!notificationBelongsToRoot(method, params)) return;
       handleNotification(method, params, ctx);
     },
 
     prompt: (prompt, ctx) => {
       if (!threadId) return;
+      cancelPendingRootCompletion();
       ctx.emit({ type: "user", text: prompt.text, images: prompt.images });
       ctx.emit({ type: "status", status: "working" });
-      request(ctx, "turn/start", {
+      rootTurnMayBeActive = true;
+      rootTurnStatusConfirmed = true;
+      const generation = ++rootTurnGeneration;
+      void request(ctx, "turn/start", {
         threadId,
         input: [
           ...(prompt.text ? [{ type: "text", text: prompt.text }] : []),
@@ -1612,15 +2023,36 @@ export function createCodexAdapter(): AgentAdapter {
         // discipline: `effort` is the exact field name in TurnStartParams.
         ...(currentEffort ? { effort: currentEffort } : {}),
         ...(currentServiceTier ? { serviceTier: currentServiceTier } : {}),
-      }).catch((error: unknown) => {
-        const record = asRecord(error);
-        ctx.emit({
-          type: "notice",
-          tone: "error",
-          text: asString(record?.message) ?? "Codex could not start the turn.",
+      })
+        .then((result) => {
+          const responseTurnId = asString(asRecord(result.turn)?.id);
+          if (!responseTurnId) return;
+          if (generation !== rootTurnGeneration || !rootTurnMayBeActive) {
+            // A completion/status fallback won the race. Remember the late
+            // response's id so it cannot be mistaken for a later fast turn.
+            rememberRootTurnCompleted(responseTurnId);
+            return;
+          }
+          if (!completedRootTurnIds.has(responseTurnId)) {
+            // The response is a second authoritative source for the ID. This
+            // keeps interrupt and completion matching correct if the matching
+            // `turn/started` notification was missed.
+            currentTurnId ??= responseTurnId;
+            rootTurnStatusConfirmed = true;
+          }
+        })
+        .catch((error: unknown) => {
+          if (generation !== rootTurnGeneration) return;
+          cancelPendingRootCompletion();
+          settleRootTurn(null);
+          const record = asRecord(error);
+          ctx.emit({
+            type: "notice",
+            tone: "error",
+            text: asString(record?.message) ?? "Codex could not start the turn.",
+          });
+          ctx.emit({ type: "turn-end" });
         });
-        ctx.emit({ type: "turn-end" });
-      });
     },
 
     steer: async (prompt, ctx) => {
@@ -1694,7 +2126,15 @@ export function createCodexAdapter(): AgentAdapter {
 
     command: handleCommand,
 
-    commandAvailableDuringTurn: (text) => /^\/goal(?:\s|$)/i.test(text.trim()),
+    commandAvailableDuringTurn: (text) => {
+      const trimmed = text.trim();
+      // `/goal pause` has to land while the provider is working. `/side` and
+      // `/btw` also run during a turn, but not while resume is still hydrating:
+      // the session is `working` then, and a fork would race `thread/resume`.
+      if (/^\/goal(?:\s|$)/i.test(trimmed)) return true;
+      if (hydratingResume) return false;
+      return /^\/(?:side|btw)(?:\s|$)/i.test(trimmed);
+    },
 
     configureAccess: (mode, ctx) => {
       currentAccess = mode;
@@ -1719,54 +2159,139 @@ export function createCodexAdapter(): AgentAdapter {
     },
 
     /**
-     * `thread/resume` keeps the running process and returns the selected
-     * thread's complete turn list, which is replayed into the shared timeline.
+     * `thread/resume` keeps the running process. Newer app-server builds page
+     * the transcript, so hydrate bounded full-detail pages before replaying it.
      */
     resume: (sessionId, ctx) => {
+      cancelPendingRootCompletion();
+      hydratingResume = true;
+      ctx.emit({ type: "history-loading", loading: true });
       ctx.emit({ type: "status", status: "working" });
       ctx.emit({ type: "goal", goal: null });
-      const requestId = nextId++;
-      resumeRequestId = requestId;
-      return requestWithId(ctx, requestId, "thread/resume", { threadId: sessionId })
-        .then((result) => {
-          const thread = asRecord(result.thread) ?? result;
-          threadId = asString(thread.id) ?? sessionId;
-          replayThread(thread, ctx);
-          const hydratedStatus = threadStatus(thread.status);
-          currentTurnId = hydratedStatus === "working" ? hydratedTurnId(thread) : null;
-          // `thread/start` reports the model beside the thread, `thread/resume`
-          // inside it; neither is guaranteed, so take whichever is there.
-          const model = asString(result.model) ?? asString(thread.model);
-          if (model) currentModel = model;
-          currentServiceTier = asString(result.serviceTier);
-          ctx.emit({
-            type: "session",
-            sessionId: asString(thread.sessionId) ?? threadId,
-            ...(model ? { model } : {}),
-            serviceTier: currentServiceTier,
+      const previousThreadId = threadId;
+      // Claim the target before awaiting `thread/resume`. A live resumed turn
+      // can finish while that request or its transcript pages are in flight;
+      // leaving the old id here used to route the real completion as a child.
+      threadId = sessionId;
+      currentTurnId = null;
+      rootTurnMayBeActive = true;
+      rootTurnStatusConfirmed = false;
+      const resumeGeneration = ++rootTurnGeneration;
+      const resumeCompletionVersion = rootCompletionVersion;
+
+      const load = async (): Promise<boolean> => {
+        const requestId = nextId++;
+        resumeRequestId = requestId;
+        const result = await requestWithId(ctx, requestId, "thread/resume", {
+          threadId: sessionId,
+          excludeTurns: true,
+          initialTurnsPage: {
+            limit: RESUME_PAGE_SIZE,
+            sortDirection: "desc",
+            itemsView: "full",
+          },
+        });
+        const thread = asRecord(result.thread) ?? result;
+        threadId = asString(thread.id) ?? sessionId;
+
+        const initialPage = asRecord(result.initialTurnsPage);
+        const paginated = initialPage !== null;
+        const turns = paginated ? asArray(initialPage.data) : asArray(thread.turns);
+        let cursor = asString(initialPage?.nextCursor);
+        while (cursor && turns.length < MAX_RESUMED_TURNS) {
+          const pageRequestId = nextId++;
+          resumeRequestId = pageRequestId;
+          const page = await requestWithId(ctx, pageRequestId, "thread/turns/list", {
+            threadId,
+            cursor,
+            limit: Math.min(RESUME_PAGE_SIZE, MAX_RESUMED_TURNS - turns.length),
+            sortDirection: "desc",
+            itemsView: "full",
           });
-          ctx.emit({ type: "goal", goal: null });
-          void request(ctx, "thread/goal/get", { threadId })
-            .then((goalResult) => {
-              const goal = readGoal(goalResult.goal);
-              ctx.emit({
-                type: "goal",
-                goal: goal ? { objective: goal.objective, status: goal.status } : null,
-              });
-            })
-            .catch(() => {
-              // Older app-server builds can resume threads without goal support.
+          turns.push(...asArray(page.data));
+          cursor = asString(page.nextCursor);
+        }
+
+        // Descending pagination starts at the newest turn. The transcript
+        // renderer expects natural conversation order from oldest to newest.
+        const chronologicalTurns = paginated ? turns.reverse() : turns;
+        replayTurns(chronologicalTurns, ctx);
+        const hydrated = hydratedTurnId({ ...thread, turns: chronologicalTurns });
+        const hydratedActiveTurn =
+          hydrated && !completedRootTurnIds.has(hydrated) ? hydrated : null;
+        const completionAlreadyObserved = rootCompletionTimer !== null;
+        const completionBeatSnapshot = rootCompletionVersion !== resumeCompletionVersion;
+        if (completionBeatSnapshot) {
+          // A live notification is newer than the resume snapshot. In
+          // particular, do not let a hydrated idle consume the user-owned
+          // working stretch before its quiet-window turn end is emitted, or
+          // resurrect a finished turn after that turn end has fired.
+          if (!rootTurnMayBeActive) {
+            currentTurnId = null;
+            rootTurnStatusConfirmed = false;
+          }
+        } else if (rootTurnGeneration !== resumeGeneration) {
+          currentTurnId = null;
+          rootTurnMayBeActive = false;
+          rootTurnStatusConfirmed = false;
+        } else if (rootTurnStatusConfirmed) {
+          // Preserve activity observed while pages were loading, including a
+          // working status that did not carry a turn id.
+          currentTurnId ??= hydratedActiveTurn;
+          rootTurnMayBeActive = true;
+        } else {
+          currentTurnId = hydratedActiveTurn;
+          // The persisted thread status can lag behind its turns. Only an
+          // unfinished hydrated turn proves background work is still live.
+          rootTurnMayBeActive = currentTurnId !== null;
+          rootTurnStatusConfirmed = rootTurnMayBeActive;
+        }
+        // `thread/start` reports the model beside the thread, `thread/resume`
+        // inside it; neither is guaranteed, so take whichever is there.
+        const model = asString(result.model) ?? asString(thread.model);
+        if (model) currentModel = model;
+        currentServiceTier = asString(result.serviceTier);
+        ctx.emit({
+          type: "session",
+          sessionId: asString(thread.sessionId) ?? threadId,
+          ...(model ? { model } : {}),
+          serviceTier: currentServiceTier,
+        });
+        ctx.emit({ type: "goal", goal: null });
+        void request(ctx, "thread/goal/get", { threadId })
+          .then((goalResult) => {
+            const goal = readGoal(goalResult.goal);
+            ctx.emit({
+              type: "goal",
+              goal: goal ? { objective: goal.objective, status: goal.status } : null,
             });
-          // A thread can still own a live background turn when it is resumed.
-          // Preserve that turn id so follow-ups steer the resumed work instead
-          // of being rejected and queued against the temporary blank thread.
+          })
+          .catch(() => {
+            // Older app-server builds can resume threads without goal support.
+          });
+        // A thread can still own a live background turn when it is resumed.
+        // Preserve that turn id so follow-ups steer the resumed work instead
+        // of being rejected and queued against the temporary blank thread.
+        // Drop the hydration gate before the status emit so a queued `/side`
+        // released on idle, or one typed against a live resumed turn, can
+        // fork the now-complete thread instead of racing it.
+        hydratingResume = false;
+        if (!completionAlreadyObserved) {
           ctx.emit({
             type: "status",
-            status: currentTurnId ? "working" : "idle",
+            status: rootTurnMayBeActive ? "working" : "idle",
           });
-          return true;
-        })
+        }
+        return true;
+      };
+
+      return load()
         .catch((error: unknown) => {
+          hydratingResume = false;
+          if (rootTurnGeneration === resumeGeneration) {
+            threadId = previousThreadId;
+            settleRootTurn(null);
+          }
           const record = asRecord(error);
           if (asString(record?.code) !== RESUME_CANCELLED) {
             ctx.emit({
@@ -1779,11 +2304,14 @@ export function createCodexAdapter(): AgentAdapter {
           return false;
         })
         .finally(() => {
-          if (resumeRequestId === requestId) resumeRequestId = null;
+          resumeRequestId = null;
+          hydratingResume = false;
+          ctx.emit({ type: "history-loading", loading: false });
         });
     },
 
     interrupt: (ctx) => {
+      cancelPendingRootCompletion();
       if (resumeRequestId !== null) {
         const requestId = resumeRequestId;
         resumeRequestId = null;

@@ -317,6 +317,30 @@ describe("work duration", () => {
   });
 });
 
+describe("streaming resume", () => {
+  test("marks a settled stream as live again when more deltas arrive", () => {
+    let state = applyEvent(blank(), {
+      type: "assistant-delta",
+      id: "a1",
+      text: "The repo is ",
+    });
+    state = applyEvent(state, { type: "assistant-end", id: "a1" });
+    expect(state.items[0]).toMatchObject({ text: "The repo is ", streaming: false });
+
+    state = applyEvent(state, {
+      type: "assistant-delta",
+      id: "a1",
+      text: "Expo/RN.",
+    });
+    expect(state.items[0]).toMatchObject({
+      kind: "assistant",
+      text: "The repo is Expo/RN.",
+      streaming: true,
+    });
+    expect(state.items).toHaveLength(1);
+  });
+});
+
 describe("assistant snapshots", () => {
   test("replaces a partial stream with the provider's complete text", () => {
     let state = applyEvent(blank(), {

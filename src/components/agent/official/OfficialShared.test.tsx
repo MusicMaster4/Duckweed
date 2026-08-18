@@ -902,6 +902,34 @@ describe("official agent presentation", () => {
     expect(presented[2]).toMatchObject({ id: "long", kind: "assistant" });
   });
 
+  test("keeps transformed historical updates stable across streaming renders", () => {
+    const items: AgentItem[] = [
+      { kind: "user", id: "user", at: 1, text: "Inspect" },
+      { kind: "assistant", id: "update", at: 2, text: "Checking files", streaming: false },
+      { kind: "assistant", id: "live", at: 3, text: "Working", streaming: true },
+    ];
+
+    const first = shortAssistantUpdatesAsThinking(items, true, 250);
+    const second = shortAssistantUpdatesAsThinking(items, true, 250);
+
+    expect(first[1]).toBe(second[1]);
+    expect(first[1]).not.toBe(items[1]);
+  });
+
+  test("keeps the character limit based on Unicode code points", () => {
+    const withinLimit: AgentItem[] = [
+      { kind: "user", id: "user", at: 1, text: "Inspect" },
+      { kind: "assistant", id: "emoji", at: 2, text: "🦆🦆", streaming: true },
+    ];
+    const overLimit: AgentItem[] = [
+      withinLimit[0],
+      { kind: "assistant", id: "emoji-long", at: 3, text: "🦆🦆🦆", streaming: true },
+    ];
+
+    expect(shortAssistantUpdatesAsThinking(withinLimit, true, 2)[1].kind).toBe("thinking");
+    expect(shortAssistantUpdatesAsThinking(overLimit, true, 2)[1].kind).toBe("assistant");
+  });
+
   test("shows Still working after a long Codex update until fresh activity arrives", () => {
     const interimItems: AgentItem[] = [
       { kind: "user", id: "user", at: 1, text: "Inspect" },

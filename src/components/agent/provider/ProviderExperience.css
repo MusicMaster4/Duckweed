@@ -2356,3 +2356,11 @@ button.oc-sub-head:hover {
     display: none;
   }
 }
+/* Each provider keeps the complete transcript mounted for search, selection,
+   and history navigation. Offscreen containment makes long rails cheap to
+   keep without changing what the user can reach. */
+.cx-rail > .cx-node,
+.oc-lanes > .oc-mod {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 88px;
+}

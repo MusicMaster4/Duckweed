@@ -1,0 +1,18 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "duckweed-notification-relay",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-16",
+  "workers_dev": true,
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "duckweed-notification-relay",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "triggers": {
+    "crons": ["17 4 * * *"]
+  }
+}

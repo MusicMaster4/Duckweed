@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { UsagePanel } from "./UsagePanel";
+import { MobileNotificationsSettings } from "./MobileNotificationsSettings";
 import {
   formatDailyLimit,
   formatUsageDuration,
@@ -10,6 +11,7 @@ import type { ShellIntegrationStatus } from "../lib/ipc";
 import type { InputMode } from "../lib/terminals";
 import type { ShellInfo } from "../lib/types";
 import type { AgentFollowupMode } from "../lib/agents/types";
+import type { Channel } from "../lib/version";
 
 interface Props {
   /** False while the settings tab exists but another tab is selected. */
@@ -33,6 +35,7 @@ interface Props {
   shell: string | null;
   shells: ShellInfo[];
   updateLabel: string;
+  updateChannel: Channel;
   onFontSize: (size: number) => void;
   onToggleInputMode: () => void;
   onToggleHighlight: () => void;
@@ -167,6 +170,7 @@ export function SettingsMenu({
   shell,
   shells,
   updateLabel,
+  updateChannel,
   onFontSize,
   onToggleInputMode,
   onToggleHighlight,
@@ -255,6 +259,9 @@ export function SettingsMenu({
     ) ||
       matches(
         "active turn messages follow-up queue steer send now alt shift enter agent delivery",
+      ) ||
+      matches(
+        "mobile notifications android companion phone pair qr apk encrypted response project",
       ));
   const showAbout =
     (section === "General" || section === "About" || searching) &&
@@ -593,6 +600,7 @@ export function SettingsMenu({
           )}
 
           {showAgents && (
+            <>
             <section className="settings-section">
               <h2>Agents</h2>
               {matches(
@@ -635,6 +643,10 @@ export function SettingsMenu({
                 </label>
               )}
             </section>
+            {matches(
+              "mobile notifications android companion phone pair qr apk encrypted response project",
+            ) && <MobileNotificationsSettings channel={updateChannel} />}
+            </>
           )}
 
           {showTerminal && (

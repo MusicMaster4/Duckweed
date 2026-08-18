@@ -63,3 +63,56 @@ jobs:
           key: ci-${{ matrix.os }}
 
       - run: cargo check --locked --manifest-path src-tauri/Cargo.toml
+
+  relay:
+    name: Notification relay
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: relay/package-lock.json
+
+      - run: npm ci --prefix relay
+
+      - run: npm test --prefix relay
+
+      - run: npm run --prefix relay build
+
+  android:
+    name: Android companion APK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.13"
+
+      - name: Configure Firebase
+        env:
+          FIREBASE_CONFIG: ${{ secrets.FIREBASE_ANDROID_GOOGLE_SERVICES_JSON }}
+        run: |
+          if [ -n "$FIREBASE_CONFIG" ]; then
+            printf '%s' "$FIREBASE_CONFIG" | base64 --decode > android/app/google-services.json
+          else
+            cp android/app/google-services.example.json android/app/google-services.json
+          fi
+
+      - name: Build installable debug APK
+        run: gradle -p android :app:testDebugUnitTest :app:assembleDebug -PduckweedVersionName="0.1.0-ci.${GITHUB_RUN_NUMBER}" -PduckweedVersionCode="$GITHUB_RUN_NUMBER" -PduckweedChannel="stable"
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: duckweed-companion-ci-${{ github.run_number }}
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14

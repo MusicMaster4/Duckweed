@@ -45,6 +45,10 @@ const FALLBACKS: Record<AgentId, { name: string; description: string }[]> = {
     { name: "/compact", description: "Compact the conversation to free context" },
     { name: "/clear", description: "Clear the conversation" },
     { name: "/context", description: "Show context window usage" },
+    {
+      name: "/btw",
+      description: "Ask a quick side question without interrupting the main conversation",
+    },
     { name: "/review", description: "Review a pull request or change" },
     { name: "/init", description: "Create or refresh the project memory file" },
     { name: "/mcp", description: "Manage MCP servers" },
@@ -62,6 +66,8 @@ const FALLBACKS: Record<AgentId, { name: string; description: string }[]> = {
     { name: "/model", description: "Change the model for later turns" },
     { name: "/effort", description: "Set reasoning effort for later turns" },
     { name: "/compact", description: "Compact the conversation to free context" },
+    { name: "/side", description: "Start a side conversation in an ephemeral fork" },
+    { name: "/btw", description: "Start a side conversation in an ephemeral fork" },
   ],
   grok: [
     { name: "/resume", description: "Continue a past Grok Build session in this folder" },
@@ -242,6 +248,9 @@ export function fallbackModels(agent: AgentId, program?: string): AgentModelChoi
 
 /** Slash commands whose next token is chosen from a guided menu. */
 export const GUIDED_ARG_COMMANDS = new Set(["/model", "/effort"]);
+
+/** Slash commands whose autocomplete should leave room for a free-form argument. */
+export const INLINE_ARG_COMMANDS = new Set(["/btw", "/side"]);
 
 /**
  * Fold live-advertised commands into the current list. A live name replaces
