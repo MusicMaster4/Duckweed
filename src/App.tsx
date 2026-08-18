@@ -113,7 +113,7 @@ import {
 } from "./lib/processActivity";
 import { setCompletionTaskbarBadge } from "./lib/taskbarCompletion";
 import {
-  MOBILE_COMPLETION_DELAY_MS,
+  mobileCompletionDelay,
   shouldSendDelayedMobileCompletion,
 } from "./lib/mobileCompletion";
 import {
@@ -1005,6 +1005,7 @@ export default function App() {
         const project = owner?.project?.name ??
           (meta.cwd.trim() ? basename(meta.cwd) : owner?.title ?? "Duckweed");
         const unreadAtCompletion = !isFocusedTerm(termId);
+        const completedAt = Date.now();
         const completionKey = `${termId}:${current.completionSeq}`;
         const message = {
           agent,
@@ -1028,11 +1029,11 @@ export default function App() {
             unreadAtCompletion,
             unreadNow: unreadTermIdsRef.current.has(termId),
             lastInteractionAt: lastTerminalInteractionAt.current.get(termId) ?? null,
-            now: Date.now(),
+            completedAt,
           })) return;
           void mobileSendCompletion(message)
             .catch((error) => console.error("mobile completion notification", error));
-        }, MOBILE_COMPLETION_DELAY_MS);
+        }, mobileCompletionDelay(unreadAtCompletion));
         mobileCompletionTimers.current.set(completionKey, timer);
       }
       // Every eligible completion gets one cue. The shared audio player

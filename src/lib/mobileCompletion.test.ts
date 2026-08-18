@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import {
   completionDetailsFromState,
+  mobileCompletionDelay,
   shouldSendDelayedMobileCompletion,
 } from "./mobileCompletion";
 import { emptyUsage, type AgentSessionState } from "./agents/types";
@@ -76,34 +77,39 @@ describe("delayed mobile completion delivery", () => {
       unreadAtCompletion: true,
       unreadNow: true,
       lastInteractionAt: null,
-      now: 70_000,
+      completedAt: 60_000,
     })).toBe(true);
     expect(shouldSendDelayedMobileCompletion({
       unreadAtCompletion: true,
       unreadNow: false,
       lastInteractionAt: null,
-      now: 70_000,
+      completedAt: 60_000,
     })).toBe(false);
   });
 
-  test("selected terminals notify only after one minute without human interaction", () => {
+  test("uses ten seconds for unread marks and one minute for selected terminals", () => {
+    expect(mobileCompletionDelay(true)).toBe(10_000);
+    expect(mobileCompletionDelay(false)).toBe(60_000);
+  });
+
+  test("selected terminals notify only when the minute passes without new interaction", () => {
     expect(shouldSendDelayedMobileCompletion({
       unreadAtCompletion: false,
       unreadNow: false,
-      lastInteractionAt: 10_001,
-      now: 70_000,
+      lastInteractionAt: 60_001,
+      completedAt: 60_000,
     })).toBe(false);
     expect(shouldSendDelayedMobileCompletion({
       unreadAtCompletion: false,
       unreadNow: false,
-      lastInteractionAt: 10_000,
-      now: 70_000,
+      lastInteractionAt: 59_999,
+      completedAt: 60_000,
     })).toBe(true);
     expect(shouldSendDelayedMobileCompletion({
       unreadAtCompletion: false,
       unreadNow: false,
       lastInteractionAt: null,
-      now: 70_000,
+      completedAt: 60_000,
     })).toBe(true);
   });
 });
