@@ -4,9 +4,10 @@
 //! the encryption secret on the phone through the QR code and keeps desktop
 //! credentials in the operating-system credential store.
 
+use std::error::Error as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aes_gcm::aead::{Aead, Payload};
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
@@ -14,7 +15,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
-use reqwest::blocking::{Client, Response};
+use reqwest::blocking::{Client, RequestBuilder, Response};
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -31,6 +32,7 @@ const MAX_PREVIEW_CIPHERTEXT: usize = 3_000;
 const MAX_WORKSPACE_PLAINTEXT_BYTES: usize = 225_000;
 
 static FILE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static HTTP_CLIENT: OnceLock<Result<Client, String>> = OnceLock::new();
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -154,6 +156,12 @@ pub struct WorkspaceTerminal {
     pub agent: Option<String>,
     pub model: Option<String>,
     pub status: String,
+    #[serde(default = "default_terminal_mode")]
+    pub mode: String,
+    #[serde(default)]
+    pub terminal_columns: Option<u16>,
+    #[serde(default)]
+    pub terminal_rows: Option<u16>,
     #[serde(default)]
     pub unread_on_desktop: bool,
     #[serde(default)]
@@ -161,6 +169,10 @@ pub struct WorkspaceTerminal {
     pub permission: Option<WorkspacePermission>,
     #[serde(default)]
     pub terminal_output: Option<String>,
+}
+
+fn default_terminal_mode() -> String {
+    "terminal".to_string()
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -453,13 +465,51 @@ fn remove_secret(id: &str) {
     }
 }
 
-fn client() -> Result<Client, String> {
-    let _ = rustls::crypto::ring::default_provider().install_default();
-    Client::builder()
-        .user_agent(concat!("Duckweed/", env!("CARGO_PKG_VERSION")))
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .map_err(|error| error.to_string())
+fn client() -> Result<&'static Client, String> {
+    HTTP_CLIENT
+        .get_or_init(|| {
+            let _ = rustls::crypto::ring::default_provider().install_default();
+            Client::builder()
+                .user_agent(concat!("Duckweed/", env!("CARGO_PKG_VERSION")))
+                .connect_timeout(Duration::from_secs(5))
+                .timeout(Duration::from_secs(15))
+                .pool_idle_timeout(Duration::from_secs(60))
+                .pool_max_idle_per_host(4)
+                .build()
+                .map_err(|error| error.to_string())
+        })
+        .as_ref()
+        .map_err(Clone::clone)
+}
+
+fn send_request(request: RequestBuilder) -> Result<Response, reqwest::Error> {
+    let mut attempt = request;
+    for retry_delay in [Some(150), Some(500), None] {
+        let retry = attempt.try_clone();
+        match attempt.send() {
+            Ok(response) => return Ok(response),
+            Err(error) if error.is_connect() && retry_delay.is_some() && retry.is_some() => {
+                std::thread::sleep(Duration::from_millis(retry_delay.unwrap_or_default()));
+                attempt = retry.expect("retryable request was cloned");
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!("the final request attempt always returns")
+}
+
+fn request_error(context: &str, error: &reqwest::Error) -> String {
+    let mut detail = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        let cause_text = cause.to_string();
+        if !detail.ends_with(&cause_text) {
+            detail.push_str(": ");
+            detail.push_str(&cause_text);
+        }
+        source = cause.source();
+    }
+    format!("{context}: {detail}")
 }
 
 fn checked(response: Response) -> Result<Response, String> {
@@ -712,16 +762,17 @@ fn pair_start_blocking(app: &AppHandle) -> Result<PairingStart, String> {
     let relay = relay_url();
 
     checked(
-        client()?
-            .post(format!("{relay}/v1/pairings"))
-            .json(&CreatePairing {
-                pair_id: &pair_id,
-                registration_token_hash: &sha256(&registration_token),
-                send_token_hash: &sha256(&send_token),
-                expires_at,
-            })
-            .send()
-            .map_err(|error| format!("could not reach notification relay: {error}"))?,
+        send_request(
+            client()?
+                .post(format!("{relay}/v1/pairings"))
+                .json(&CreatePairing {
+                    pair_id: &pair_id,
+                    registration_token_hash: &sha256(&registration_token),
+                    send_token_hash: &sha256(&send_token),
+                    expires_at,
+                }),
+        )
+        .map_err(|error| request_error("could not reach notification relay", &error))?,
     )?;
 
     save_secret(
@@ -773,11 +824,12 @@ fn pair_poll_blocking(app: &AppHandle) -> Result<MobileStatus, String> {
     let secret = load_secret(&pending.id)?;
     let relay = relay_url();
     let poll: PairingPoll = checked(
-        client()?
-            .get(format!("{relay}/v1/pairings/{}", pending.id))
-            .bearer_auth(&secret.send_token)
-            .send()
-            .map_err(|error| format!("could not reach notification relay: {error}"))?,
+        send_request(
+            client()?
+                .get(format!("{relay}/v1/pairings/{}", pending.id))
+                .bearer_auth(&secret.send_token),
+        )
+        .map_err(|error| request_error("could not reach notification relay", &error))?,
     )?
     .json()
     .map_err(|error| error.to_string())?;
@@ -810,10 +862,11 @@ fn remove_device_blocking(app: &AppHandle, id: &str) -> Result<MobileStatus, Str
     // deleted the relay row, the sender credential necessarily returns 401.
     // A missing keyring item must not leave an undeletable row in Settings.
     if let Ok(secret) = load_secret(id) {
-        let _ = client()?
-            .delete(format!("{}/v1/pairings/{id}", relay_url()))
-            .bearer_auth(secret.send_token)
-            .send();
+        let _ = send_request(
+            client()?
+                .delete(format!("{}/v1/pairings/{id}", relay_url()))
+                .bearer_auth(secret.send_token),
+        );
     }
     let _guard = FILE_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
     let mut state = read_state(&path);
@@ -903,18 +956,19 @@ fn send_to_device(
     )?;
     let relay = relay_url();
     checked(
-        client()?
-            .post(format!("{relay}/v1/pairings/{}/messages", device.id))
-            .bearer_auth(secret.send_token)
-            .json(&SendMessage {
-                message_id,
-                sent_at,
-                collapse_key: None,
-                preview: &preview,
-                payload: &payload,
-            })
-            .send()
-            .map_err(|error| format!("could not send mobile notification: {error}"))?,
+        send_request(
+            client()?
+                .post(format!("{relay}/v1/pairings/{}/messages", device.id))
+                .bearer_auth(secret.send_token)
+                .json(&SendMessage {
+                    message_id,
+                    sent_at,
+                    collapse_key: None,
+                    preview: &preview,
+                    payload: &payload,
+                }),
+        )
+        .map_err(|error| request_error("could not send mobile notification", &error))?,
     )?;
     Ok(())
 }
@@ -962,30 +1016,28 @@ fn send_workspace_to_device(
         &full_plain,
     )?;
     checked(
-        client()?
-            .post(format!(
-                "{}/v1/pairings/{}/messages",
-                relay_url(),
-                device.id
-            ))
-            .bearer_auth(secret.send_token)
-            .json(&SendMessage {
-                message_id,
-                sent_at,
-                collapse_key: None,
-                preview: &preview,
-                payload: &payload,
-            })
-            .send()
-            .map_err(|error| format!("could not send mobile workspace: {error}"))?,
+        send_request(
+            client()?
+                .post(format!(
+                    "{}/v1/pairings/{}/messages",
+                    relay_url(),
+                    device.id
+                ))
+                .bearer_auth(secret.send_token)
+                .json(&SendMessage {
+                    message_id,
+                    sent_at,
+                    collapse_key: None,
+                    preview: &preview,
+                    payload: &payload,
+                }),
+        )
+        .map_err(|error| request_error("could not send mobile workspace", &error))?,
     )?;
     Ok(())
 }
 
-fn send_presence_to_device(
-    device: &MobileDevice,
-    sent_at: i64,
-) -> Result<(), String> {
+fn send_presence_to_device(device: &MobileDevice, sent_at: i64) -> Result<(), String> {
     let secret = load_secret(&device.id)?;
     // Reusing one id makes the relay replace an unacknowledged heartbeat, so
     // an offline phone keeps only the latest presence payload.
@@ -1013,22 +1065,23 @@ fn send_presence_to_device(
         &plain,
     )?;
     checked(
-        client()?
-            .post(format!(
-                "{}/v1/pairings/{}/messages",
-                relay_url(),
-                device.id
-            ))
-            .bearer_auth(secret.send_token)
-            .json(&SendMessage {
-                message_id,
-                sent_at,
-                collapse_key: Some(message_id),
-                preview: &preview,
-                payload: &payload,
-            })
-            .send()
-            .map_err(|error| format!("could not send mobile presence: {error}"))?,
+        send_request(
+            client()?
+                .post(format!(
+                    "{}/v1/pairings/{}/messages",
+                    relay_url(),
+                    device.id
+                ))
+                .bearer_auth(secret.send_token)
+                .json(&SendMessage {
+                    message_id,
+                    sent_at,
+                    collapse_key: Some(message_id),
+                    preview: &preview,
+                    payload: &payload,
+                }),
+        )
+        .map_err(|error| request_error("could not send mobile presence", &error))?,
     )?;
     Ok(())
 }
@@ -1092,15 +1145,16 @@ fn poll_commands_blocking(app: &AppHandle) -> Result<Vec<RemoteCommand>, String>
         let Ok(secret) = load_secret(&device.id) else {
             continue;
         };
-        let response = client()?
-            .get(format!(
-                "{}/v1/pairings/{}/commands",
-                relay_url(),
-                device.id
-            ))
-            .bearer_auth(&secret.send_token)
-            .send()
-            .map_err(|error| format!("could not poll mobile commands: {error}"))?;
+        let response = send_request(
+            client()?
+                .get(format!(
+                    "{}/v1/pairings/{}/commands",
+                    relay_url(),
+                    device.id
+                ))
+                .bearer_auth(&secret.send_token),
+        )
+        .map_err(|error| request_error("could not poll mobile commands", &error))?;
         if pairing_is_gone(response.status()) {
             // The phone may have removed the relay row, or the relay may be
             // between deployments. Keep the local credential until the user
@@ -1146,14 +1200,15 @@ fn poll_commands_blocking(app: &AppHandle) -> Result<Vec<RemoteCommand>, String>
 fn ack_command_blocking(device_id: &str, command_id: &str) -> Result<(), String> {
     let secret = load_secret(device_id)?;
     checked(
-        client()?
-            .delete(format!(
-                "{}/v1/pairings/{device_id}/commands/{command_id}",
-                relay_url()
-            ))
-            .bearer_auth(secret.send_token)
-            .send()
-            .map_err(|error| format!("could not acknowledge mobile command: {error}"))?,
+        send_request(
+            client()?
+                .delete(format!(
+                    "{}/v1/pairings/{device_id}/commands/{command_id}",
+                    relay_url()
+                ))
+                .bearer_auth(secret.send_token),
+        )
+        .map_err(|error| request_error("could not acknowledge mobile command", &error))?,
     )?;
     Ok(())
 }
@@ -1270,10 +1325,15 @@ pub async fn mobile_send_test(app: AppHandle) -> Result<SendResult, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        bounded_preview_plaintext, decrypt, encrypt, encrypt_with_nonce, encrypted_ciphertext_len,
-        pairing_is_gone, pairing_proof, truncate_utf8, PlainRemoteCommand, MAX_PREVIEW_CIPHERTEXT,
-        MAX_WORKSPACE_PLAINTEXT_BYTES,
+        bounded_preview_plaintext, client, decrypt, encrypt, encrypt_with_nonce,
+        encrypted_ciphertext_len, pairing_is_gone, pairing_proof, truncate_utf8,
+        PlainRemoteCommand, MAX_PREVIEW_CIPHERTEXT, MAX_WORKSPACE_PLAINTEXT_BYTES,
     };
+
+    #[test]
+    fn mobile_requests_reuse_one_connection_pool() {
+        assert!(std::ptr::eq(client().unwrap(), client().unwrap()));
+    }
 
     #[test]
     fn pairing_proof_binds_the_phone_identity() {

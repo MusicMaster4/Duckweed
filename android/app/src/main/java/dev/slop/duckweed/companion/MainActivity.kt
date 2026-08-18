@@ -13,6 +13,7 @@ import android.os.Bundle
 import android.text.Editable
 import android.text.TextWatcher
 import android.text.format.DateUtils
+import android.text.method.ScrollingMovementMethod
 import android.view.HapticFeedbackConstants
 import android.view.View
 import android.view.ViewGroup
@@ -80,6 +81,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var conversationAttachmentImage: ImageView
     private lateinit var conversationAttachmentName: TextView
     private lateinit var conversationList: RecyclerView
+    private lateinit var conversationTerminal: TextView
     private lateinit var conversationApproval: View
     private lateinit var approvalTitle: TextView
     private lateinit var approvalDetail: TextView
@@ -108,6 +110,7 @@ class MainActivity : AppCompatActivity() {
     private var legacyResponse: CompletionRecord? = null
     private var conversationReturnsToProject = false
     private var conversationShouldStickToBottom = true
+    private var terminalShouldStickToBottom = true
     private var selectedDraftAttachment: MobileImageAttachment? = null
     private val deliveryChecks = mutableSetOf<String>()
     private val draftPersistRunnable = Runnable { writeCurrentDraft() }
@@ -232,6 +235,7 @@ class MainActivity : AppCompatActivity() {
         conversationAttachmentImage = findViewById(R.id.conversation_attachment_image)
         conversationAttachmentName = findViewById(R.id.conversation_attachment_name)
         conversationList = findViewById(R.id.conversation_list)
+        conversationTerminal = findViewById(R.id.conversation_terminal)
         conversationApproval = findViewById(R.id.conversation_approval)
         approvalTitle = findViewById(R.id.approval_title)
         approvalDetail = findViewById(R.id.approval_detail)
@@ -269,6 +273,17 @@ class MainActivity : AppCompatActivity() {
                     conversationShouldStickToBottom = !recyclerView.canScrollVertically(1)
                 }
             })
+        }
+        conversationTerminal.apply {
+            movementMethod = ScrollingMovementMethod.getInstance()
+            setHorizontallyScrolling(true)
+            setOnScrollChangeListener { _, _, scrollY, _, _ ->
+                val contentHeight = layout?.height ?: 0
+                val viewportHeight = height - compoundPaddingTop - compoundPaddingBottom
+                val bottom = maxOf(0, contentHeight - viewportHeight)
+                terminalShouldStickToBottom =
+                    scrollY >= bottom - (24 * resources.displayMetrics.density).toInt()
+            }
         }
         responsesRefresh.setOnChildScrollUpCallback { _, _ ->
             findViewById<RecyclerView>(R.id.message_list).canScrollVertically(-1)
@@ -1136,8 +1151,10 @@ class MainActivity : AppCompatActivity() {
         legacyResponse = null
         conversationReturnsToProject = returnToProject
         conversationShouldStickToBottom = true
+        terminalShouldStickToBottom = true
+        conversationTerminal.scrollTo(0, 0)
         val draft = draftStore.load(target.pairId, target.terminal.id)
-        selectedDraftAttachment = draft.attachment
+        selectedDraftAttachment = draft.attachment.takeIf { target.terminal.mode == "conversation" }
         conversationInput.setText(draft.text)
         conversationInput.setSelection(conversationInput.text.length)
         renderDraftAttachment()
@@ -1166,6 +1183,8 @@ class MainActivity : AppCompatActivity() {
             findViewById<TextView>(R.id.conversation_title).text = legacy.agent
             findViewById<TextView>(R.id.conversation_status).text = legacy.project
             conversationAdapter.submit(listOf(legacy))
+            conversationList.visibility = View.VISIBLE
+            conversationTerminal.visibility = View.GONE
             conversationThinking.visibility = View.GONE
             conversationApproval.visibility = View.GONE
             conversationComposer.visibility = View.GONE
@@ -1175,6 +1194,7 @@ class MainActivity : AppCompatActivity() {
             return
         }
         val target = selectedTarget ?: return
+        val terminalMode = target.terminal.mode == "terminal"
         val synced = target.terminal.conversation.map { message ->
             CompletionRecord(
                 id = "workspace:${target.pairId}:${target.terminal.id}:${message.id}",
@@ -1191,42 +1211,24 @@ class MainActivity : AppCompatActivity() {
                 soundCue = null,
                 workspace = null,
             )
-        }.toMutableList().apply {
-            if (target.terminal.agent == null && !target.terminal.terminalOutput.isNullOrBlank()) {
-                add(
-                    CompletionRecord(
-                        id = "terminal-output:${target.pairId}:${target.terminal.id}",
-                        pairId = target.pairId,
-                        sentAt = System.currentTimeMillis(),
-                        agent = target.terminal.title,
-                        project = target.projectName,
-                        projectId = target.projectId,
-                        terminalId = target.terminal.id,
-                        terminalTitle = target.terminal.title,
-                        kind = "completed",
-                        response = target.terminal.terminalOutput,
-                        durationMs = null,
-                        soundCue = null,
-                        workspace = null,
-                    ),
-                )
-            }
         }
         val stored = MessageStore(this).conversation(target.pairId, target.terminal.id)
-        val messages = mergeConversation(synced, stored)
-        val last = messages.lastOrNull()
+        val messages = if (terminalMode) emptyList() else mergeConversation(synced, stored)
         val isAgent = target.terminal.agent != null
-        val thinking = isAgent && (target.terminal.status == "working" ||
-            (last?.kind == "user" && target.terminal.status != "waiting"))
+        val thinking = isAgent && target.terminal.status == "working"
         val desktopOnline = isDesktopOnline(target.pairId)
         findViewById<TextView>(R.id.conversation_title).text =
             target.terminal.agent ?: target.terminal.title
         findViewById<TextView>(R.id.conversation_status).text = buildList {
             add(target.projectName)
             target.terminal.model?.let { add(it) }
+            if (terminalMode && target.terminal.terminalColumns != null && target.terminal.terminalRows != null) {
+                add("${target.terminal.terminalColumns}×${target.terminal.terminalRows}")
+            }
             add(
                 when {
                     !desktopOnline -> "Desktop offline"
+                    target.terminal.status == "starting" -> "Opening agent"
                     thinking -> "Thinking"
                     target.terminal.status == "working" -> "Running"
                     target.terminal.status == "waiting" -> "Needs attention"
@@ -1237,7 +1239,10 @@ class MainActivity : AppCompatActivity() {
         }.joinToString("  •  ")
         val shouldScrollToBottom = conversationShouldStickToBottom
         conversationAdapter.submit(messages)
-        setAnimatedVisibility(conversationThinking, thinking && desktopOnline)
+        conversationList.visibility = if (terminalMode) View.GONE else View.VISIBLE
+        conversationTerminal.visibility = if (terminalMode) View.VISIBLE else View.GONE
+        if (terminalMode) renderTerminalOutput(target.terminal.terminalOutput)
+        setAnimatedVisibility(conversationThinking, !terminalMode && thinking && desktopOnline)
         renderApproval(target)
         refreshConversationAvailability()
         messages.filter { it.kind == "user" && it.deliveryState == "sent" }
@@ -1247,6 +1252,22 @@ class MainActivity : AppCompatActivity() {
             conversationList.post {
                 conversationList.scrollToPosition(messages.lastIndex)
             }
+        }
+    }
+
+    private fun renderTerminalOutput(output: String?) {
+        val rendered = output?.takeIf { it.isNotBlank() } ?: "Waiting for terminal output..."
+        if (conversationTerminal.text.toString() == rendered) return
+        val followOutput = terminalShouldStickToBottom
+        val horizontal = conversationTerminal.scrollX
+        conversationTerminal.text = rendered
+        conversationTerminal.post {
+            if (!followOutput) return@post
+            val contentHeight = conversationTerminal.layout?.height ?: 0
+            val viewportHeight = conversationTerminal.height -
+                conversationTerminal.compoundPaddingTop - conversationTerminal.compoundPaddingBottom
+            conversationTerminal.scrollTo(horizontal, maxOf(0, contentHeight - viewportHeight))
+            terminalShouldStickToBottom = true
         }
     }
 
@@ -1310,7 +1331,12 @@ class MainActivity : AppCompatActivity() {
         val canCompose = paired && open
         conversationComposer.visibility = if (canCompose) View.VISIBLE else View.GONE
         conversationAttach.visibility =
-            if (canCompose && target.terminal.agent != null) View.VISIBLE else View.GONE
+            if (canCompose && target.terminal.mode == "conversation") View.VISIBLE else View.GONE
+        conversationInput.hint = if (target.terminal.mode == "terminal") {
+            "Send input to terminal"
+        } else {
+            "Message this agent"
+        }
         conversationUnavailable.text = when {
             !paired -> "Pair this desktop again before sending messages."
             !open -> "This terminal is closed and cannot receive messages."
@@ -1402,11 +1428,11 @@ class MainActivity : AppCompatActivity() {
             setSingleLine(true)
         }
         AlertDialog.Builder(this)
-            .setTitle("New terminal")
-            .setMessage("Open a shell in ${project.project.name}.")
+            .setTitle("New terminal split")
+            .setMessage("Open a new pane in ${project.project.name}.")
             .setView(input)
             .setNegativeButton("Cancel", null)
-            .setPositiveButton("Open") { _, _ ->
+            .setPositiveButton("Open split") { _, _ ->
                 val credentials = SecretStore.load(this, project.pairId) ?: return@setPositiveButton
                 executor.execute {
                     runCatching { RelayClient.createTerminal(credentials, project.project.id, input.text.toString()) }
@@ -1492,8 +1518,8 @@ class MainActivity : AppCompatActivity() {
         val text = conversationInput.text.toString().trim().take(32_000)
         val attachments = listOfNotNull(selectedDraftAttachment)
         if (text.isEmpty() && attachments.isEmpty()) return
-        if (attachments.isNotEmpty() && target.terminal.agent == null) {
-            Toast.makeText(this, "Images require an active agent session.", Toast.LENGTH_LONG).show()
+        if (attachments.isNotEmpty() && target.terminal.mode != "conversation") {
+            Toast.makeText(this, "Images require the structured agent view.", Toast.LENGTH_LONG).show()
             return
         }
         if (!isDesktopOnline(target.pairId)) {
@@ -1518,6 +1544,9 @@ class MainActivity : AppCompatActivity() {
         renderDraftAttachment()
         conversationShouldStickToBottom = true
         refreshConversation()
+        if (target.terminal.mode == "terminal") {
+            findViewById<TextView>(R.id.conversation_status).text = "Sending input securely..."
+        }
         executor.execute {
             runCatching {
                 RelayClient.sendCommand(
@@ -1532,7 +1561,12 @@ class MainActivity : AppCompatActivity() {
             }.onSuccess {
                 MessageStore(this).updateOutgoingState(commandId, "sent")
                 runOnUiThread {
-                    refreshConversation()
+                    if (target.terminal.mode == "terminal") {
+                        findViewById<TextView>(R.id.conversation_status).text =
+                            "Input delivered. Waiting for terminal output..."
+                    } else {
+                        refreshConversation()
+                    }
                     trackDelivery(commandId, target.pairId)
                 }
             }.onFailure { error ->

@@ -84,6 +84,7 @@ class TerminalAdapter(
             "OFFLINE"
         } else {
             when (terminal.status) {
+                "starting" -> "OPENING"
                 "working" -> if (terminal.agent != null) "THINKING" else "RUNNING"
                 "waiting" -> "NEEDS YOU"
                 "exited" -> "CLOSED"

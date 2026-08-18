@@ -681,7 +681,7 @@ describe("codex adapter", () => {
     await h.handshake();
 
     expect(h.adapter.command?.("/goal Finish the migration and keep tests green", h.ctx)).toBe(
-      "handled",
+      "handled-turn",
     );
     expect(h.sent.at(-1)).toMatchObject({
       id: 4,
@@ -743,6 +743,19 @@ describe("codex adapter", () => {
 
     h.notify("thread/goal/cleared", { threadId: "thread_1" });
     expect(h.state().goal).toBeNull();
+  });
+
+  test("distinguishes goal work from goal-only control commands", async () => {
+    const h = harness();
+    await h.handshake();
+
+    expect(h.adapter.command?.("/goal", h.ctx)).toBe("handled");
+    expect(h.adapter.command?.("/goal pause", h.ctx)).toBe("handled");
+    expect(h.adapter.command?.("/goal clear", h.ctx)).toBe("handled");
+    expect(h.adapter.command?.("/goal resume", h.ctx)).toBe("handled-turn");
+    expect(h.adapter.command?.("/goal edit Finish the regression test", h.ctx)).toBe(
+      "handled-turn",
+    );
   });
 
   test("views, pauses, resumes, clears, and edits the current goal", async () => {

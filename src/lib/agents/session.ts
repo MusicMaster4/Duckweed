@@ -420,6 +420,12 @@ function contextWithoutUserEcho(session: Session): AdapterContext {
   };
 }
 
+/** Preserve completion ownership when a provider-side slash RPC starts work. */
+function claimHandledTurn(session: Session): void {
+  session.userInitiatedTurn = true;
+  session.interactionEpoch += 1;
+}
+
 function dispatchNow(session: Session, prompt: AgentPrompt, echoUser = true): void {
   // Whatever the last turn's ending was, this one is the user's own request.
   session.interrupted = false;
@@ -434,15 +440,18 @@ function dispatchNow(session: Session, prompt: AgentPrompt, echoUser = true): vo
   }
   if (prompt.images.length === 0 && prompt.text.startsWith("/")) {
     const previousModel = session.state.model;
-    if (session.adapter.command?.(prompt.text, context) === "handled") {
+    const result = session.adapter.command?.(prompt.text, context);
+    if (result === "handled" || result === "handled-turn") {
+      if (result === "handled-turn") claimHandledTurn(session);
       // Codex may report temporary or provider-selected models in ordinary
       // session events. Only a successful user /model command belongs in its
       // durable preference.
       if (session.launch.agent === "codex" && session.state.model !== previousModel) {
         rememberPreferences(session.launch, { model: session.state.model });
       }
-      // Local answer only (notice, model switch over RPC). No working stretch,
-      // so nothing to announce when it "finishes".
+      // A plain handled command is only a local answer or setting change. A
+      // handled-turn has already claimed the provider-side work above, so its
+      // eventual turn-end still earns completion effects.
       return;
     }
   }
@@ -1035,13 +1044,16 @@ export function submit(
     images.length === 0 &&
     session.state.status !== "idle" &&
     session.state.status !== "starting" &&
-    session.adapter.commandAvailableDuringTurn?.(trimmed) &&
-    session.adapter.command?.(trimmed, session.context) === "handled"
+    session.adapter.commandAvailableDuringTurn?.(trimmed)
   ) {
-    // Control-plane commands such as `/goal pause` must take effect while the
-    // provider is working. Sending them through the normal follow-up queue can
-    // strand them behind the automatic continuation they are meant to stop.
-    return;
+    const result = session.adapter.command?.(trimmed, session.context);
+    if (result === "handled-turn") claimHandledTurn(session);
+    if (result === "handled" || result === "handled-turn") {
+      // Control-plane commands such as `/goal pause` must take effect while the
+      // provider is working. Sending them through the normal follow-up queue can
+      // strand them behind the automatic continuation they are meant to stop.
+      return;
+    }
   }
   if (session.state.status === "starting") {
     // Show the opening prompt immediately. The handshake still owns when it

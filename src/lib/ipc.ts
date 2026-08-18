@@ -74,7 +74,11 @@ export interface MobileTerminalSnapshot {
   shell: string;
   agent: string | null;
   model: string | null;
-  status: "idle" | "working" | "waiting" | "exited";
+  status: "starting" | "idle" | "working" | "waiting" | "exited";
+  /** Raw PTY grid or the structured agent conversation surface. */
+  mode: "terminal" | "conversation";
+  terminalColumns?: number;
+  terminalRows?: number;
   unreadOnDesktop: boolean;
   conversation: MobileConversationSnapshot[];
   permission: MobilePermissionSnapshot | null;

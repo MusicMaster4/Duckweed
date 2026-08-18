@@ -85,7 +85,7 @@ object Crypto {
         return EncryptedEnvelope(encode(nonce), encode(cipher.doFinal(plain)))
     }
 
-    private fun parseWorkspace(pairId: String, json: JSONObject): WorkspaceSnapshot? {
+    internal fun parseWorkspace(pairId: String, json: JSONObject): WorkspaceSnapshot? {
         if (json.optString("kind") != "workspace" || !json.has("projects")) return null
         val projectsJson = json.optJSONArray("projects") ?: JSONArray()
         val projects = (0 until projectsJson.length()).mapNotNull { projectIndex ->
@@ -96,17 +96,30 @@ object Crypto {
                 name = project.optString("name", "Project"),
                 path = project.optString("path"),
                 branch = if (project.isNull("branch")) null else project.optString("branch").takeIf { it.isNotBlank() },
+                color = if (project.isNull("color")) null else project.optString("color").takeIf { it.isNotBlank() },
                 terminals = (0 until terminalsJson.length()).mapNotNull { terminalIndex ->
                     val terminal = terminalsJson.optJSONObject(terminalIndex) ?: return@mapNotNull null
                     val conversationJson = terminal.optJSONArray("conversation") ?: JSONArray()
                     val permissionJson = terminal.optJSONObject("permission")
+                    val agent = if (terminal.isNull("agent")) null else {
+                        terminal.optString("agent").takeIf { it.isNotBlank() }
+                    }
+                    val terminalOutput = if (terminal.isNull("terminalOutput")) null else {
+                        terminal.optString("terminalOutput").takeIf { it.isNotBlank() }
+                    }
+                    val mode = terminal.optString("mode").takeIf {
+                        it == "terminal" || it == "conversation"
+                    } ?: if (terminalOutput != null || agent == null) "terminal" else "conversation"
                     RemoteTerminal(
                         id = terminal.optString("id"),
                         title = terminal.optString("title", "Terminal"),
                         shell = terminal.optString("shell", "Terminal"),
-                        agent = if (terminal.isNull("agent")) null else terminal.optString("agent").takeIf { it.isNotBlank() },
+                        agent = agent,
                         model = if (terminal.isNull("model")) null else terminal.optString("model").takeIf { it.isNotBlank() },
                         status = terminal.optString("status", "idle"),
+                        mode = mode,
+                        terminalColumns = terminal.optInt("terminalColumns").takeIf { it > 0 },
+                        terminalRows = terminal.optInt("terminalRows").takeIf { it > 0 },
                         unreadOnDesktop = if (terminal.has("unreadOnDesktop")) {
                             terminal.optBoolean("unreadOnDesktop")
                         } else {
@@ -147,6 +160,7 @@ object Crypto {
                                 options = options,
                             ).takeIf { it.id.isNotBlank() && it.options.isNotEmpty() }
                         },
+                        terminalOutput = terminalOutput,
                     )
                 }.filter { it.id.isNotBlank() },
             )

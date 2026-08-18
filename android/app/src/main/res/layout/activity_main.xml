@@ -805,6 +805,26 @@
                 android:paddingTop="8dp"
                 android:paddingBottom="8dp" />
 
+            <TextView
+                android:id="@+id/conversation_terminal"
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_marginTop="8dp"
+                android:layout_marginBottom="8dp"
+                android:layout_weight="1"
+                android:background="@drawable/terminal_surface"
+                android:fadeScrollbars="false"
+                android:fontFamily="monospace"
+                android:gravity="top|start"
+                android:includeFontPadding="false"
+                android:lineSpacingExtra="2dp"
+                android:padding="14dp"
+                android:scrollbars="horizontal|vertical"
+                android:textColor="@color/duckweed_text"
+                android:textIsSelectable="true"
+                android:textSize="11sp"
+                android:visibility="gone" />
+
             <LinearLayout
                 android:id="@+id/conversation_approval"
                 android:layout_width="match_parent"

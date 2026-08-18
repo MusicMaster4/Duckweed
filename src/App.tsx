@@ -122,7 +122,9 @@ import {
 import {
   fitMobileWorkspaceSnapshot,
   MOBILE_WORKSPACE_CONVERSATION_BUDGET_BYTES,
+  mobileTerminalStatus,
   truncateUtf8,
+  truncateUtf8Tail,
   utf8ByteLength,
 } from "./lib/mobileWorkspace";
 import {
@@ -839,16 +841,23 @@ export default function App() {
     [cancelSchedule, sendDraftNow],
   );
 
-  // Keep a compact remote index on paired phones. It contains only open
-  // projects, terminal identity, and status, never terminal output or an
-  // in-progress agent transcript.
+  // Keep a compact remote workspace on paired phones. Structured agents send
+  // conversation rows; ordinary shells and raw agent TUIs send a bounded tail
+  // of their painted terminal grid.
   useEffect(() => {
     if (!TAURI_RUNTIME) return;
     let timer = 0;
     let stopped = false;
+    let publishing = false;
+    let publishQueued = false;
+    let publishDelay = 250;
 
     const publish = () => {
       timer = 0;
+      if (publishing) {
+        publishQueued = true;
+        return;
+      }
       let remainingConversationBytes = MOBILE_WORKSPACE_CONVERSATION_BUDGET_BYTES;
       const snapshot = {
         projects: tabsRef.current.map((tab) => ({
@@ -861,21 +870,13 @@ export default function App() {
             const meta = terminals.getMeta(node.term);
             if (!meta) return [];
             const session = agentSessions.get(node.term);
-            const status = session
-              ? session.status === "working" || session.status === "starting"
-                ? "working" as const
-                : session.status === "waiting"
-                  ? "waiting" as const
-                  : session.status === "exited" || session.status === "error"
-                    ? "exited" as const
-                    : "idle" as const
-              : meta.exited
-                ? "exited" as const
-                : meta.agent && terminals.hasPendingAgentTurn(node.term)
-                  ? "working" as const
-                  : meta.busy
-                    ? "working" as const
-                    : "idle" as const;
+            const status = mobileTerminalStatus({
+              exited: meta.exited,
+              agent: meta.agent,
+              busy: meta.busy,
+              pendingAgentTurn: terminals.hasPendingAgentTurn(node.term),
+              structuredStatus: session?.status ?? null,
+            });
             const rawAgent = meta.agent
               ? meta.agent.charAt(0).toUpperCase() + meta.agent.slice(1)
               : null;
@@ -921,8 +922,11 @@ export default function App() {
               agent: session?.label ?? rawAgent,
               model: session?.model ?? null,
               status,
-              terminalOutput: !session && !meta.agent
-                ? terminals.dumpBufferPlainForMobile(node.term).slice(-8_000)
+              mode: session ? "conversation" as const : "terminal" as const,
+              terminalColumns: meta.cols,
+              terminalRows: meta.rows,
+              terminalOutput: !session
+                ? truncateUtf8Tail(terminals.dumpBufferPlainForMobile(node.term), 16_000)
                 : undefined,
               unreadOnDesktop: unreadTermIdsRef.current.has(node.term),
               conversation,
@@ -947,6 +951,7 @@ export default function App() {
       const serialized = JSON.stringify(boundedSnapshot);
       if (serialized === mobileWorkspaceSnapshotRef.current) return;
       mobileWorkspaceSnapshotRef.current = serialized;
+      publishing = true;
       void mobileSendWorkspace(boundedSnapshot).then((result) => {
         if (result.failed > 0) throw new Error(result.errors.join("; "));
       }).catch((error) => {
@@ -955,17 +960,39 @@ export default function App() {
             mobileWorkspaceSnapshotRef.current = "";
           }
           console.error("mobile workspace sync", error);
-          timer = window.setTimeout(publish, 5_000);
+          publishQueued = true;
+          publishDelay = 5_000;
+        }
+      }).finally(() => {
+        publishing = false;
+        if (!stopped && publishQueued) {
+          const delay = publishDelay;
+          publishQueued = false;
+          publishDelay = 250;
+          schedule(delay);
         }
       });
     };
 
-    const schedule = () => {
-      if (stopped || timer) return;
-      timer = window.setTimeout(publish, 250);
+    const schedule = (delay = 250) => {
+      if (stopped) return;
+      if (publishing) {
+        publishQueued = true;
+        publishDelay = Math.max(publishDelay, delay);
+        return;
+      }
+      if (timer) return;
+      timer = window.setTimeout(publish, delay);
     };
     const offAgents = agentSessions.subscribeAll(schedule);
     const offTerminals = termIds.map((termId) => terminals.subscribeSession(termId, schedule));
+    const offTerminalOutput = termIds.map((termId) =>
+      terminals.subscribeOutput(termId, () => {
+        // PTYs can repaint dozens of times per second. A short coalescing
+        // window stays live on a phone without flooding the encrypted relay.
+        schedule(600);
+      }),
+    );
     const paired = () => {
       mobileWorkspaceSnapshotRef.current = "";
       schedule();
@@ -988,6 +1015,7 @@ export default function App() {
       window.removeEventListener("duckweed:mobile-refresh", paired);
       offAgents();
       offTerminals.forEach((off) => off());
+      offTerminalOutput.forEach((off) => off());
     };
   }, [tabs, termIds, termIdsKey, unreadTermIds]);
 
@@ -998,7 +1026,7 @@ export default function App() {
     let stopped = false;
     let timer = 0;
     let polling = false;
-    let pollDelay = 1_800;
+    let pollDelay = 1_200;
     const handling = new Set<string>();
     const applied = new Set<string>();
 
@@ -1007,7 +1035,9 @@ export default function App() {
       polling = true;
       try {
         const commands = await mobilePollCommands();
-        pollDelay = commands.length > 0 ? 1_800 : Math.min(30_000, pollDelay * 2);
+        // Mobile input is interactive. A 30-second idle backoff made a send
+        // look broken even when it was merely waiting in the relay queue.
+        pollDelay = commands.length > 0 ? 1_200 : Math.min(4_000, pollDelay * 1.5);
         for (const command of commands) {
           const key = `${command.deviceId}:${command.commandId}`;
           if (handling.has(key)) continue;
@@ -1048,10 +1078,8 @@ export default function App() {
                   const session = agentSessions.get(command.terminalId);
                   if (session) {
                     agentSessions.submit(command.terminalId, command.text ?? "", command.images);
-                  } else if (command.text && (meta.agent || meta.busy)) {
-                    terminals.writeRaw(command.terminalId, `${command.text}\r`);
                   } else if (command.text) {
-                    terminals.submitCommand(command.terminalId, command.text);
+                    terminals.submitRemoteInput(command.terminalId, command.text);
                   }
                 }
               }
@@ -1728,30 +1756,60 @@ export default function App() {
   // --------------------------------------------------------------- panes
 
   const splitPane = useCallback(
-    (leafId: string, zone: "left" | "right" | "top" | "bottom") => {
-      const tab = currentTab();
-      if (!tab || paneMotionRef.current) return;
-      const node = leaf(createTerm());
+    (
+      leafId: string,
+      zone: "left" | "right" | "top" | "bottom",
+      options: {
+        tabId?: string;
+        cwd?: string | null;
+        command?: string | null;
+        immediate?: boolean;
+        revealSplit?: boolean;
+      } = {},
+    ): string | null => {
+      const tab = options.tabId
+        ? tabsRef.current.find((candidate) => candidate.id === options.tabId) ?? null
+        : currentTab();
+      if (!tab || paneMotionRef.current) return null;
+      const target = findLeaf(tab.root, leafId);
+      if (!target) return null;
+      const targetMeta = terminals.getMeta(target.term);
+      const cwd = options.cwd !== undefined
+        ? options.cwd
+        : targetMeta?.cwd || tab.project?.path || null;
+      const node = leaf(createTerm({ cwd, command: options.command ?? null }));
       const nextRoot = insertBeside(tab.root, leafId, node, zone);
 
       // Fullscreen is a mode, not a one-off: splitting inside it opens the new
       // terminal fullscreen too, and the switcher on the right is where the
       // pane it was split from went. Only the user leaves fullscreen. The
       // split animation is skipped because the split itself is not on screen.
-      if (tab.zoomedLeaf) {
+      if (tab.zoomedLeaf && !options.revealSplit) {
         updateTab(tab.id, (t) => ({
           ...t,
           root: nextRoot,
           activeLeaf: node.id,
           zoomedLeaf: node.id,
         }));
-        return;
+        return node.term;
+      }
+
+      // Remote mobile actions do not need a transition on a possibly hidden
+      // tab. Commit the real split first, then let the caller reveal its tab.
+      if (options.immediate) {
+        updateTab(tab.id, (t) => ({
+          ...t,
+          root: nextRoot,
+          activeLeaf: node.id,
+          zoomedLeaf: null,
+        }));
+        return node.term;
       }
 
       const owner = findLeafOwner(nextRoot, node.id);
       if (!owner) {
         releaseTerm(node.term);
-        return;
+        return null;
       }
       const previousSplit = findSplit(tab.root, owner.split.id);
       const fromSizes = owner.split.children.map((child) => {
@@ -1784,6 +1842,7 @@ export default function App() {
             zoomedLeaf: null,
           })),
       );
+      return node.term;
     },
     [createTerm, currentTab, releaseTerm, runPaneTransition, updateTab],
   );
@@ -3480,17 +3539,24 @@ export default function App() {
   useEffect(() => {
     const create = (event: Event) => {
       const detail = (event as CustomEvent<{ projectId: string; command: string }>).detail;
-      const source = tabsRef.current.find((tab) => tab.id === detail.projectId);
-      const open = source?.project
-        ? applyProject(source.project.path, { newTab: true })
-        : Promise.resolve(newTab(null));
-      void open.then(() => {
-        window.setTimeout(() => {
-          const current = tabsRef.current.find((tab) => tab.id === activeTabIdRef.current);
-          const term = current ? findLeaf(current.root, current.activeLeaf)?.term : null;
-          if (term && detail.command.trim()) terminals.submitCommand(term, detail.command.trim());
-        }, 120);
-      });
+      const openSplit = (attempt = 0) => {
+        const source = tabsRef.current.find((tab) => tab.id === detail.projectId);
+        if (!source?.project) return;
+        const term = splitPane(source.activeLeaf, "right", {
+          tabId: source.id,
+          cwd: source.project.path,
+          command: detail.command.trim() || null,
+          immediate: true,
+          // A phone asked for a visible split, so leave pane fullscreen mode.
+          revealSplit: true,
+        });
+        if (!term && paneMotionRef.current && attempt < 3) {
+          window.setTimeout(() => openSplit(attempt + 1), PANE_MOTION_MS + 100);
+          return;
+        }
+        if (term) selectTab(source.id);
+      };
+      openSplit();
     };
     const close = (event: Event) => {
       const terminalId = (event as CustomEvent<{ terminalId: string }>).detail.terminalId;
@@ -3504,7 +3570,7 @@ export default function App() {
       window.removeEventListener("duckweed:mobile-create-terminal", create);
       window.removeEventListener("duckweed:mobile-close-terminal", close);
     };
-  }, [applyProject, closePane, newTab]);
+  }, [closePane, selectTab, splitPane]);
 
   return (
     <div

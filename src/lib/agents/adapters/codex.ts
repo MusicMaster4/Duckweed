@@ -7,6 +7,7 @@ import {
   parseJson,
   type AdapterContext,
   type AgentAdapter,
+  type AgentCommandResult,
 } from "../adapter";
 import { isAuthenticationFailure } from "../auth";
 import { applyEvent, type AgentEvent } from "../events";
@@ -1660,23 +1661,23 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       .catch((error: unknown) => goalError(error, "Codex could not set the goal.", ctx));
   }
 
-  function handleGoalCommand(arg: string, ctx: AdapterContext): void {
+  function handleGoalCommand(arg: string, ctx: AdapterContext): boolean {
     if (!arg) {
       getGoal(ctx);
-      return;
+      return false;
     }
     const action = arg.toLowerCase();
     if (action === "clear") {
       clearGoal(ctx);
-      return;
+      return false;
     }
     if (action === "pause") {
       setGoalStatus("paused", ctx);
-      return;
+      return false;
     }
     if (action === "resume") {
       setGoalStatus("active", ctx);
-      return;
+      return true;
     }
     if (action === "edit" || action === "help") {
       ctx.emit({
@@ -1685,7 +1686,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         text:
           "Usage: /goal <objective>, /goal edit <objective>, /goal pause, /goal resume, or /goal clear.",
       });
-      return;
+      return false;
     }
 
     const edit = /^edit\s+([\s\S]+)$/i.exec(arg);
@@ -1696,10 +1697,14 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         tone: "error",
         text: `Goal objectives can be at most ${MAX_GOAL_OBJECTIVE_CHARS.toLocaleString("en-US")} characters. Put longer instructions in a file and refer to it from the goal.`,
       });
-      return;
+      return false;
     }
     if (edit) editGoal(objective, ctx);
     else replaceGoal(objective, ctx);
+    // An active goal is provider-owned work: Codex starts its turn from the
+    // goal RPC rather than from adapter.prompt(), so the session must retain
+    // completion ownership until that turn settles.
+    return true;
   }
 
   /** Codex TUI controls that Duckweed maps onto app-server requests. */
@@ -1798,7 +1803,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       });
   }
 
-  function handleCommand(text: string, ctx: AdapterContext): "handled" | "prompt" {
+  function handleCommand(text: string, ctx: AdapterContext): AgentCommandResult {
     const space = text.search(/\s/);
     const name = (space < 0 ? text : text.slice(0, space)).toLowerCase();
     const arg = space < 0 ? "" : text.slice(space + 1).trim();
@@ -1899,8 +1904,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     }
 
     if (name === "/goal") {
-      handleGoalCommand(arg, ctx);
-      return "handled";
+      return handleGoalCommand(arg, ctx) ? "handled-turn" : "handled";
     }
 
     ctx.emit({

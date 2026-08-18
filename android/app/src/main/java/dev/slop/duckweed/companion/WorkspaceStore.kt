@@ -57,6 +57,9 @@ class WorkspaceStore(private val context: Context) {
                         .put("agent", terminal.agent)
                         .put("model", terminal.model)
                         .put("status", terminal.status)
+                        .put("mode", terminal.mode)
+                        .put("terminalColumns", terminal.terminalColumns)
+                        .put("terminalRows", terminal.terminalRows)
                         .put("unreadOnDesktop", terminal.unreadOnDesktop)
                         .put("conversation", conversation)
                         .put("permission", permission)
@@ -105,13 +108,25 @@ class WorkspaceStore(private val context: Context) {
                             val terminal = terminalsJson.getJSONObject(terminalIndex)
                             val conversationJson = terminal.optJSONArray("conversation") ?: JSONArray()
                             val permissionJson = terminal.optJSONObject("permission")
+                            val agent = if (terminal.isNull("agent")) null else {
+                                terminal.optString("agent").takeIf { it.isNotBlank() }
+                            }
+                            val terminalOutput = if (terminal.isNull("terminalOutput")) null else {
+                                terminal.optString("terminalOutput").takeIf { it.isNotBlank() }
+                            }
+                            val mode = terminal.optString("mode").takeIf {
+                                it == "terminal" || it == "conversation"
+                            } ?: if (terminalOutput != null || agent == null) "terminal" else "conversation"
                             RemoteTerminal(
                                 id = terminal.getString("id"),
                                 title = terminal.optString("title", "Terminal"),
                                 shell = terminal.optString("shell", "Terminal"),
-                                agent = if (terminal.isNull("agent")) null else terminal.optString("agent").takeIf { it.isNotBlank() },
+                                agent = agent,
                                 model = if (terminal.isNull("model")) null else terminal.optString("model").takeIf { it.isNotBlank() },
                                 status = terminal.optString("status", "idle"),
+                                mode = mode,
+                                terminalColumns = terminal.optInt("terminalColumns").takeIf { it > 0 },
+                                terminalRows = terminal.optInt("terminalRows").takeIf { it > 0 },
                                 unreadOnDesktop = if (terminal.has("unreadOnDesktop") && !terminal.isNull("unreadOnDesktop")) {
                                     terminal.optBoolean("unreadOnDesktop")
                                 } else {
@@ -148,7 +163,7 @@ class WorkspaceStore(private val context: Context) {
                                         },
                                     ).takeIf { it.id.isNotBlank() && it.options.isNotEmpty() }
                                 },
-                                terminalOutput = terminal.optString("terminalOutput").takeIf { it.isNotBlank() },
+                                terminalOutput = terminalOutput,
                             )
                         },
                     )
