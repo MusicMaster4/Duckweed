@@ -64,6 +64,7 @@ import {
   mobileAckCommand,
   mobilePollCommands,
   mobileSendCompletion,
+  mobileSendPresence,
   mobileSendWorkspace,
   powerAction,
   projectInfo,
@@ -116,6 +117,12 @@ import {
   mobileCompletionDelay,
   shouldSendDelayedMobileCompletion,
 } from "./lib/mobileCompletion";
+import {
+  fitMobileWorkspaceSnapshot,
+  MOBILE_WORKSPACE_CONVERSATION_BUDGET_BYTES,
+  truncateUtf8,
+  utf8ByteLength,
+} from "./lib/mobileWorkspace";
 import {
   adjustSettingsIndexOnAppend,
   adjustSettingsIndexOnClose,
@@ -712,7 +719,7 @@ export default function App() {
 
     const publish = () => {
       timer = 0;
-      let remainingConversationChars = 120_000;
+      let remainingConversationBytes = MOBILE_WORKSPACE_CONVERSATION_BUDGET_BYTES;
       const snapshot = {
         projects: tabsRef.current.map((tab) => ({
           id: tab.id,
@@ -765,12 +772,14 @@ export default function App() {
               }
             }
             const conversation = conversationSource.slice(-6).map((item) => {
-              const text = item.rawText
-                .trim()
-                .slice(0, Math.min(4_000, remainingConversationChars));
-              remainingConversationChars = Math.max(
+              const rawText = item.rawText.trim();
+              const text = truncateUtf8(
+                rawText,
+                Math.min(4_000, remainingConversationBytes),
+              );
+              remainingConversationBytes = Math.max(
                 0,
-                remainingConversationChars - text.length,
+                remainingConversationBytes - utf8ByteLength(text),
               );
               return { id: item.id, sentAt: item.sentAt, role: item.role, text };
             }).filter((item) => item.text.length > 0);
@@ -800,10 +809,11 @@ export default function App() {
           }),
         })),
       };
-      const serialized = JSON.stringify(snapshot);
+      const boundedSnapshot = fitMobileWorkspaceSnapshot(snapshot);
+      const serialized = JSON.stringify(boundedSnapshot);
       if (serialized === mobileWorkspaceSnapshotRef.current) return;
       mobileWorkspaceSnapshotRef.current = serialized;
-      void mobileSendWorkspace(snapshot).then((result) => {
+      void mobileSendWorkspace(boundedSnapshot).then((result) => {
         if (result.failed > 0) throw new Error(result.errors.join("; "));
       }).catch((error) => {
         if (!stopped) {
@@ -828,15 +838,18 @@ export default function App() {
     };
     window.addEventListener("duckweed:mobile-paired", paired);
     window.addEventListener("duckweed:mobile-refresh", paired);
-    const heartbeat = window.setInterval(() => {
-      mobileWorkspaceSnapshotRef.current = "";
-      schedule();
+    const presence = window.setInterval(() => {
+      void mobileSendPresence().then((result) => {
+        if (result.failed > 0) throw new Error(result.errors.join("; "));
+      }).catch((error) => {
+        if (!stopped) console.error("mobile presence sync", error);
+      });
     }, 30_000);
     schedule();
     return () => {
       stopped = true;
       if (timer) window.clearTimeout(timer);
-      window.clearInterval(heartbeat);
+      window.clearInterval(presence);
       window.removeEventListener("duckweed:mobile-paired", paired);
       window.removeEventListener("duckweed:mobile-refresh", paired);
       offAgents();
@@ -851,6 +864,7 @@ export default function App() {
     let stopped = false;
     let timer = 0;
     let polling = false;
+    let pollDelay = 1_800;
     const handling = new Set<string>();
     const applied = new Set<string>();
 
@@ -859,6 +873,7 @@ export default function App() {
       polling = true;
       try {
         const commands = await mobilePollCommands();
+        pollDelay = commands.length > 0 ? 1_800 : Math.min(30_000, pollDelay * 2);
         for (const command of commands) {
           const key = `${command.deviceId}:${command.commandId}`;
           if (handling.has(key)) continue;
@@ -910,7 +925,7 @@ export default function App() {
         if (!stopped) console.error("mobile command sync", error);
       } finally {
         polling = false;
-        if (!stopped) timer = window.setTimeout(poll, 1_800);
+        if (!stopped) timer = window.setTimeout(poll, pollDelay);
       }
     };
 

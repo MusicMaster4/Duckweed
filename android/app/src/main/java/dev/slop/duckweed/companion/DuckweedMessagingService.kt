@@ -41,7 +41,7 @@ class DuckweedMessagingService : FirebaseMessagingService() {
                 EncryptedEnvelope(nonce, ciphertext),
             )
         }.getOrNull() ?: return
-        if (preview.kind != "workspace") {
+        if (preview.kind != "workspace" && preview.kind != "presence") {
             val store = MessageStore(this)
             store.put(preview)
             if (!NotificationPreference.isEnabled(this) || preview.unreadOnDesktop == false) {

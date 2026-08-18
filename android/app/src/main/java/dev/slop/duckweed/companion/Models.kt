@@ -44,7 +44,10 @@ data class WorkspaceSnapshot(
     val pairId: String,
     val updatedAt: Long,
     val projects: List<RemoteProject>,
-)
+    val presenceAt: Long? = null,
+) {
+    val lastSeenAt: Long get() = presenceAt ?: updatedAt
+}
 
 data class RemoteProject(
     val id: String,

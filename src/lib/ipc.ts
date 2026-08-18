@@ -158,6 +158,9 @@ export const mobileSendCompletion = (message: MobileCompletionMessage) =>
 export const mobileSendWorkspace = (snapshot: MobileWorkspaceSnapshot) =>
   invoke<MobileSendResult>("mobile_send_workspace", { snapshot });
 
+export const mobileSendPresence = () =>
+  invoke<MobileSendResult>("mobile_send_presence");
+
 export const mobilePollCommands = () =>
   invoke<MobileRemoteCommand[]>("mobile_poll_commands");
 

@@ -12,7 +12,9 @@ class MessageFetchWorker(context: Context, parameters: WorkerParameters) : Worke
         return try {
             val envelope = RelayClient.fetch(credentials, messageId)
             val message = Crypto.decrypt(credentials, messageId, "payload", envelope)
-            if (message.workspace != null) {
+            if (message.kind == "presence") {
+                message.pairId?.let { WorkspaceStore(applicationContext).markPresence(it, message.sentAt) }
+            } else if (message.workspace != null) {
                 if (WorkspaceStore(applicationContext).put(message.workspace)) {
                     val cleared = MessageStore(applicationContext)
                         .putSyncedConversation(message.workspace)

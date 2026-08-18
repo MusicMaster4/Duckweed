@@ -880,9 +880,9 @@ class MainActivity : AppCompatActivity() {
         if (!::connectionHealth.isInitialized) return
         val credentials = SecretStore.loadAll(this)
         val now = System.currentTimeMillis()
-        val latest = snapshots.maxOfOrNull { it.updatedAt }
+        val latest = snapshots.maxOfOrNull { it.lastSeenAt }
         val freshPairings = snapshots
-            .filter { MobileSyncPolicy.isDesktopOnline(it.updatedAt, now, CONNECTION_FRESH_MS) }
+            .filter { MobileSyncPolicy.isDesktopOnline(it.lastSeenAt, now, CONNECTION_FRESH_MS) }
             .map { it.pairId }
             .toSet()
         val color: Int
@@ -1003,7 +1003,7 @@ class MainActivity : AppCompatActivity() {
     ) {
         val now = System.currentTimeMillis()
         val onlinePairIds = snapshots
-            .filter { MobileSyncPolicy.isDesktopOnline(it.updatedAt, now, CONNECTION_FRESH_MS) }
+            .filter { MobileSyncPolicy.isDesktopOnline(it.lastSeenAt, now, CONNECTION_FRESH_MS) }
             .mapTo(mutableSetOf()) { it.pairId }
         val rows = snapshots.flatMap { snapshot ->
             snapshot.projects.map {
@@ -1270,7 +1270,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun isDesktopOnline(pairId: String, now: Long = System.currentTimeMillis()): Boolean =
         MobileSyncPolicy.isDesktopOnline(
-            cachedSnapshots.firstOrNull { it.pairId == pairId }?.updatedAt,
+            cachedSnapshots.firstOrNull { it.pairId == pairId }?.lastSeenAt,
             now,
             CONNECTION_FRESH_MS,
         )
@@ -1349,20 +1349,43 @@ class MainActivity : AppCompatActivity() {
         synced: List<CompletionRecord>,
         stored: List<CompletionRecord>,
     ): List<CompletionRecord> {
-        val merged = mutableListOf<CompletionRecord>()
-        (synced + stored).sortedBy { it.sentAt }.forEach { candidate ->
-            val duplicate = merged.indexOfLast { existing ->
-                existing.kind == candidate.kind &&
-                    existing.response == candidate.response &&
-                    kotlin.math.abs(existing.sentAt - candidate.sentAt) <= 2 * 60_000
+        val storedById = stored.associateBy { it.id }
+        val merged = synced.map { storedById[it.id] ?: it }.toMutableList()
+        val syncedIds = synced.mapTo(mutableSetOf()) { it.id }
+
+        stored.asSequence()
+            .filter { it.id !in syncedIds }
+            .forEach { candidate ->
+                val duplicate = merged.indexOfFirst { existing ->
+                    isCrossSourceDuplicate(existing, candidate)
+                }
+                if (duplicate < 0) {
+                    merged += candidate
+                } else if (merged[duplicate].id.startsWith("workspace:")) {
+                    merged[duplicate] = candidate
+                }
             }
-            if (duplicate < 0) {
-                merged += candidate
-            } else if (!candidate.id.startsWith("workspace:")) {
-                merged[duplicate] = candidate
-            }
-        }
-        return merged
+        return merged.sortedBy { it.sentAt }
+    }
+
+    /**
+     * A workspace row and a stored notification can represent the same event,
+     * but repeated text is not an identity. Exact routing and timestamp are
+     * required before the two transport representations are collapsed.
+     */
+    private fun isCrossSourceDuplicate(
+        first: CompletionRecord,
+        second: CompletionRecord,
+    ): Boolean {
+        val firstIsWorkspace = first.id.startsWith("workspace:")
+        val secondIsWorkspace = second.id.startsWith("workspace:")
+        return firstIsWorkspace != secondIsWorkspace &&
+            first.pairId == second.pairId &&
+            first.projectId == second.projectId &&
+            first.terminalId == second.terminalId &&
+            first.kind == second.kind &&
+            first.response == second.response &&
+            first.sentAt == second.sentAt
     }
 
     private fun requestRemoteRefresh(showSpinner: Boolean = true) {

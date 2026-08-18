@@ -14,7 +14,12 @@ export interface Env {
 }
 
 type Json = Record<string, unknown>;
-type PushSender = (env: Env, token: string, data: Record<string, string>) => Promise<void>;
+type PushSender = (
+  env: Env,
+  token: string,
+  data: Record<string, string>,
+  collapseKey?: string | null,
+) => Promise<void>;
 
 interface PairingRow {
   pair_id: string;
@@ -227,7 +232,12 @@ async function accessToken(env: Env): Promise<{ projectId: string; token: string
   return { projectId: account.project_id, token };
 }
 
-async function sendFcm(env: Env, token: string, data: Record<string, string>): Promise<void> {
+async function sendFcm(
+  env: Env,
+  token: string,
+  data: Record<string, string>,
+  collapseKey?: string | null,
+): Promise<void> {
   const auth = await accessToken(env);
   const result = await fetch(`https://fcm.googleapis.com/v1/projects/${encodeURIComponent(auth.projectId)}/messages:send`, {
     method: "POST",
@@ -239,7 +249,11 @@ async function sendFcm(env: Env, token: string, data: Record<string, string>): P
       message: {
         token,
         data,
-        android: { priority: "high", ttl: "604800s" },
+        android: {
+          priority: "high",
+          ttl: "604800s",
+          ...(collapseKey ? { collapse_key: collapseKey } : {}),
+        },
       },
     }),
   });
@@ -382,6 +396,7 @@ export async function handleRequest(request: Request, env: Env, push: PushSender
       if (!input) return fail(400, "invalid encrypted message");
       const messageId = text(input.messageId, 64);
       const sentAt = typeof input.sentAt === "number" ? input.sentAt : 0;
+      const collapseKey = text(input.collapseKey, 128);
       const preview = envelope(input.preview, MAX_PREVIEW_CIPHERTEXT);
       const payload = envelope(input.payload, MAX_CIPHERTEXT);
       if (!messageId || !UUID_PATTERN.test(messageId) || !preview || !payload || Math.abs(Date.now() - sentAt) > 10 * 60 * 1000) {
@@ -390,7 +405,7 @@ export async function handleRequest(request: Request, env: Env, push: PushSender
 
       const now = Date.now();
       await env.DB.prepare(`
-        INSERT INTO messages (
+        INSERT OR REPLACE INTO messages (
           pair_id, message_id, payload_nonce, payload_ciphertext,
           sent_at, created_at, expires_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -410,7 +425,7 @@ export async function handleRequest(request: Request, env: Env, push: PushSender
           message_id: messageId,
           preview_nonce: preview.nonce,
           preview_ciphertext: preview.ciphertext,
-        });
+        }, collapseKey);
       } catch (error) {
         await env.DB.prepare("DELETE FROM messages WHERE pair_id = ? AND message_id = ?")
           .bind(pairId, messageId).run();

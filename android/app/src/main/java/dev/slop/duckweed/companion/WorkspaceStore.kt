@@ -74,6 +74,7 @@ class WorkspaceStore(private val context: Context) {
         val raw = JSONObject()
             .put("pairId", snapshot.pairId)
             .put("updatedAt", snapshot.updatedAt)
+            .put("presenceAt", snapshot.presenceAt ?: snapshot.updatedAt)
             .put("projects", projects)
             .toString()
             .toByteArray(Charsets.UTF_8)
@@ -148,9 +149,32 @@ class WorkspaceStore(private val context: Context) {
                         },
                     )
                 },
+                presenceAt = if (json.has("presenceAt") && !json.isNull("presenceAt")) {
+                    json.optLong("presenceAt")
+                } else {
+                    null
+                },
             )
         }.getOrNull()
     }.sortedByDescending { it.updatedAt }
+
+    fun markPresence(pairId: String, at: Long): Boolean {
+        val stored = preferences.getString(pairId, null) ?: return false
+        val json = runCatching {
+            JSONObject(String(SecretStore.decryptLocal(stored), Charsets.UTF_8))
+        }.getOrNull() ?: return false
+        val previous = if (json.has("presenceAt") && !json.isNull("presenceAt")) {
+            json.optLong("presenceAt")
+        } else {
+            json.optLong("updatedAt")
+        }
+        if (at <= previous) return false
+        json.put("presenceAt", at)
+        preferences.edit()
+            .putString(pairId, SecretStore.encryptLocal(json.toString().toByteArray(Charsets.UTF_8)))
+            .apply()
+        return true
+    }
 
     fun remove(pairId: String) {
         preferences.edit().remove(pairId).apply()

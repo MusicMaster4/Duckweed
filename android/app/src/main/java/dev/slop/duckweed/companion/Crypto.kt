@@ -52,7 +52,7 @@ object Crypto {
         }
         return CompletionRecord(
             id = messageId,
-            pairId = credentials.pairId,
+            pairId = json.optString("pairId").takeIf { it.isNotBlank() } ?: credentials.pairId,
             sentAt = json.getLong("sentAt"),
             agent = json.optString("agent", "Agent"),
             project = json.optString("project", "Duckweed"),

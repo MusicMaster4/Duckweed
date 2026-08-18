@@ -84,7 +84,9 @@ describe("mobile pairing continuity", () => {
     const build = read("android/app/build.gradle.kts");
 
     expect(desktop).toContain('window.addEventListener("duckweed:mobile-refresh", paired)');
-    expect(desktop).toContain("}, 30_000);");
+    expect(desktop).toContain("pollDelay = commands.length > 0 ? 1_800 : Math.min(30_000, pollDelay * 2)");
+    expect(desktop).toContain("const presence = window.setInterval");
+    expect(desktop).toContain("mobileSendPresence()");
     expect(desktop).toContain('command.kind === "refresh"');
     expect(activity).toContain("setOnRefreshListener { requestRemoteRefresh() }");
     expect(relay).toContain('put("kind", "refresh")');
@@ -100,7 +102,9 @@ describe("mobile pairing continuity", () => {
       "android/app/src/main/java/dev/slop/duckweed/companion/MessageStore.kt",
     );
 
-    expect(desktop).toContain("remainingConversationChars = 120_000");
+    expect(desktop).toContain("MOBILE_WORKSPACE_CONVERSATION_BUDGET_BYTES");
+    expect(desktop).toContain("fitMobileWorkspaceSnapshot(snapshot)");
+    expect(desktop).toContain("utf8ByteLength(text)");
     expect(desktop).toContain('.slice(-6)');
     expect(desktop).toContain('item.kind === "assistant" && !item.streaming');
     expect(worker).toContain("putSyncedConversation(message.workspace)");

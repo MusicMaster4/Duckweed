@@ -26,6 +26,9 @@ const KEYRING_SERVICE: &str = "dev.slop.duckweed.mobile";
 const PAIRING_LIFETIME_MS: i64 = 10 * 60 * 1000;
 const MAX_RESPONSE_BYTES: usize = 180_000;
 const MAX_PREVIEW_CIPHERTEXT: usize = 3_000;
+// Keep the plaintext below the relay's 320,000-character base64url ciphertext
+// limit, with room for AES-GCM overhead and the JSON request envelope.
+const MAX_WORKSPACE_PLAINTEXT_BYTES: usize = 225_000;
 
 static FILE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
@@ -211,6 +214,16 @@ struct PlainWorkspace<'a> {
     projects: &'a [WorkspaceProject],
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PlainPresence<'a> {
+    version: u8,
+    id: &'a str,
+    sent_at: i64,
+    pair_id: &'a str,
+    kind: &'static str,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PlainRemoteCommand {
@@ -315,6 +328,8 @@ struct EncryptedEnvelope {
 struct SendMessage<'a> {
     message_id: &'a str,
     sent_at: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    collapse_key: Option<&'a str>,
     preview: &'a EncryptedEnvelope,
     payload: &'a EncryptedEnvelope,
 }
@@ -879,6 +894,7 @@ fn send_to_device(
             .json(&SendMessage {
                 message_id,
                 sent_at,
+                collapse_key: None,
                 preview: &preview,
                 payload: &payload,
             })
@@ -910,6 +926,12 @@ fn send_workspace_to_device(
         projects: &snapshot.projects,
     })
     .map_err(|error| error.to_string())?;
+    if full_plain.len() > MAX_WORKSPACE_PLAINTEXT_BYTES {
+        return Err(format!(
+            "mobile workspace exceeds the encrypted payload limit ({} bytes)",
+            full_plain.len()
+        ));
+    }
     let preview = encrypt(
         &secret.master_key,
         &device.id,
@@ -935,11 +957,63 @@ fn send_workspace_to_device(
             .json(&SendMessage {
                 message_id,
                 sent_at,
+                collapse_key: None,
                 preview: &preview,
                 payload: &payload,
             })
             .send()
             .map_err(|error| format!("could not send mobile workspace: {error}"))?,
+    )?;
+    Ok(())
+}
+
+fn send_presence_to_device(
+    device: &MobileDevice,
+    sent_at: i64,
+) -> Result<(), String> {
+    let secret = load_secret(&device.id)?;
+    // Reusing one id makes the relay replace an unacknowledged heartbeat, so
+    // an offline phone keeps only the latest presence payload.
+    let message_id = &device.id;
+    let plain = serde_json::to_vec(&PlainPresence {
+        version: 1,
+        id: message_id,
+        sent_at,
+        pair_id: &device.id,
+        kind: "presence",
+    })
+    .map_err(|error| error.to_string())?;
+    let preview = encrypt(
+        &secret.master_key,
+        &device.id,
+        message_id,
+        "preview",
+        &plain,
+    )?;
+    let payload = encrypt(
+        &secret.master_key,
+        &device.id,
+        message_id,
+        "payload",
+        &plain,
+    )?;
+    checked(
+        client()?
+            .post(format!(
+                "{}/v1/pairings/{}/messages",
+                relay_url(),
+                device.id
+            ))
+            .bearer_auth(secret.send_token)
+            .json(&SendMessage {
+                message_id,
+                sent_at,
+                collapse_key: Some(message_id),
+                preview: &preview,
+                payload: &payload,
+            })
+            .send()
+            .map_err(|error| format!("could not send mobile presence: {error}"))?,
     )?;
     Ok(())
 }
@@ -958,6 +1032,29 @@ fn workspace_blocking(app: &AppHandle, snapshot: WorkspaceSnapshot) -> Result<Se
     };
     for device in &state.devices {
         match send_workspace_to_device(device, &snapshot, sent_at, &message_id) {
+            Ok(()) => result.sent += 1,
+            Err(error) => {
+                result.failed += 1;
+                result.errors.push(format!("{}: {error}", device.name));
+            }
+        }
+    }
+    Ok(result)
+}
+
+fn presence_blocking(app: &AppHandle) -> Result<SendResult, String> {
+    let state = {
+        let _guard = FILE_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        read_state(&state_path(app)?)
+    };
+    let sent_at = now_ms();
+    let mut result = SendResult {
+        sent: 0,
+        failed: 0,
+        errors: Vec::new(),
+    };
+    for device in &state.devices {
+        match send_presence_to_device(device, sent_at) {
             Ok(()) => result.sent += 1,
             Err(error) => {
                 result.failed += 1;
@@ -1116,6 +1213,11 @@ pub async fn mobile_send_workspace(
 }
 
 #[tauri::command]
+pub async fn mobile_send_presence(app: AppHandle) -> Result<SendResult, String> {
+    blocking(move || presence_blocking(&app)).await
+}
+
+#[tauri::command]
 pub async fn mobile_poll_commands(app: AppHandle) -> Result<Vec<RemoteCommand>, String> {
     blocking(move || poll_commands_blocking(&app)).await
 }
@@ -1154,6 +1256,7 @@ mod tests {
     use super::{
         bounded_preview_plaintext, decrypt, encrypt, encrypt_with_nonce, encrypted_ciphertext_len,
         pairing_is_gone, pairing_proof, truncate_utf8, PlainRemoteCommand, MAX_PREVIEW_CIPHERTEXT,
+        MAX_WORKSPACE_PLAINTEXT_BYTES,
     };
 
     #[test]
@@ -1299,5 +1402,10 @@ mod tests {
             encrypted_ciphertext_len(plain.len())
         );
         assert!(envelope.ciphertext.len() <= MAX_PREVIEW_CIPHERTEXT);
+    }
+
+    #[test]
+    fn workspace_plaintext_budget_stays_inside_the_relay_ciphertext_limit() {
+        assert!(encrypted_ciphertext_len(MAX_WORKSPACE_PLAINTEXT_BYTES) <= 320_000);
     }
 }

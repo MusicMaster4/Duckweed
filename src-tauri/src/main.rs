@@ -1013,6 +1013,7 @@ fn main() {
             mobile_push::mobile_device_remove,
             mobile_push::mobile_send_completion,
             mobile_push::mobile_send_workspace,
+            mobile_push::mobile_send_presence,
             mobile_push::mobile_poll_commands,
             mobile_push::mobile_ack_command,
             mobile_push::mobile_send_test,
