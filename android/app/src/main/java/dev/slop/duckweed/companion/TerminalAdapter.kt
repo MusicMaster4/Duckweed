@@ -4,8 +4,6 @@ import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.TextView
-import android.graphics.Color
-import android.graphics.drawable.GradientDrawable
 import androidx.core.content.ContextCompat
 import androidx.recyclerview.widget.RecyclerView
 import androidx.recyclerview.widget.DiffUtil
@@ -69,14 +67,8 @@ class TerminalAdapter(
     override fun onBindViewHolder(holder: Holder, position: Int) {
         val target = targets[position]
         val terminal = target.terminal
-        holder.itemView.setBackgroundResource(
-            if (target.unread) R.drawable.message_card_unread else R.drawable.message_card,
-        )
-        val accent = target.projectColor?.let { runCatching { Color.parseColor(it) }.getOrNull() }
-        (holder.itemView.background?.mutate() as? GradientDrawable)?.setStroke(
-            if (accent != null) 2 else 0,
-            accent ?: Color.TRANSPARENT,
-        )
+        val accent = MobileTabColorStyle.parse(target.projectColor)
+        MobileTabColorStyle.apply(holder.itemView, accent, unread = target.unread)
         holder.context.text = "Project  ${target.projectName}"
         holder.title.text = terminal.agent ?: terminal.title
         holder.model.text = terminal.model ?: terminal.shell

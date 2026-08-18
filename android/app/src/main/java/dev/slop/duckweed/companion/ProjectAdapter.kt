@@ -4,8 +4,6 @@ import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.TextView
-import android.graphics.Color
-import android.graphics.drawable.GradientDrawable
 import androidx.recyclerview.widget.RecyclerView
 import androidx.recyclerview.widget.DiffUtil
 import androidx.core.content.ContextCompat
@@ -50,11 +48,8 @@ class ProjectAdapter(
     override fun onBindViewHolder(holder: Holder, position: Int) {
         val row = projects[position]
         val project = row.project
-        val accent = project.color?.let { runCatching { Color.parseColor(it) }.getOrNull() }
-        (holder.itemView.background?.mutate() as? GradientDrawable)?.setStroke(
-            if (accent != null) 2 else 0,
-            accent ?: Color.TRANSPARENT,
-        )
+        val accent = MobileTabColorStyle.parse(project.color)
+        MobileTabColorStyle.apply(holder.itemView, accent)
         holder.mark.setTextColor(accent ?: ContextCompat.getColor(holder.itemView.context, R.color.duckweed_accent))
         val working = if (row.desktopOnline) project.terminals.count(RemoteTerminal::isWorking) else 0
         holder.mark.text = marks[key(row)] ?: "P0"
