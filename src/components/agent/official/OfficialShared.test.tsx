@@ -13,6 +13,7 @@ import { OpenCodeExperience } from "../provider/OpenCodeExperience";
 import { ChatGPTExperience } from "./ChatGPTExperience";
 import { ClaudeExperience } from "./ClaudeExperience";
 import { GrokDotMatrix, GrokExperience } from "./GrokExperience";
+import { PREPARING_MESSAGES } from "./preparingMessages";
 import {
   activeAssistantId,
   activityGroups,
@@ -930,7 +931,7 @@ describe("official agent presentation", () => {
     expect(shortAssistantUpdatesAsThinking(overLimit, true, 2)[1].kind).toBe("assistant");
   });
 
-  test("shows Still working after a long Codex update until fresh activity arrives", () => {
+  test("shows a varied waiting message after a long Codex update until fresh activity arrives", () => {
     const interimItems: AgentItem[] = [
       { kind: "user", id: "user", at: 1, text: "Inspect" },
       {
@@ -950,10 +951,13 @@ describe("official agent presentation", () => {
     ];
 
     const waitingHtml = renderAgentActivity("codex", interimItems);
+    const waitingMessage = PREPARING_MESSAGES.find((message) =>
+      waitingHtml.includes(`>${message}<`),
+    );
 
     expect(waitingHtml).toContain("I found the relevant section");
     expect(waitingHtml).toContain("agent-still-working");
-    expect(waitingHtml).toContain(">Still working<");
+    expect(waitingMessage).toBeDefined();
     expect(waitingHtml).toContain("agent-activity-pulse is-active");
     expect(waitingHtml).not.toContain("Reviewing the existing documentation.");
 
@@ -982,7 +986,7 @@ describe("official agent presentation", () => {
     ]);
 
     expect(resumedHtml).not.toContain("agent-still-working");
-    expect(resumedHtml).not.toContain(">Still working<");
+    expect(resumedHtml).not.toContain(`>${waitingMessage}<`);
     expect(resumedHtml).toContain("Checking the remaining references.");
     expect(resumedHtml).toContain("Find remaining references");
   });

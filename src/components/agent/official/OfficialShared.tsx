@@ -733,17 +733,19 @@ export function StillWorking({
   variant: ActivityVariant;
   clusterId: string;
 }) {
+  const message = preparingMessageFor(clusterId);
+
   return (
     <div
       className="agent-activity-cluster agent-still-working"
       data-variant={variant}
       role="status"
-      aria-label="Still working"
+      aria-label={message}
     >
       <div className="agent-activity-history is-thinking is-active">
         <div className="agent-activity-history-head">
           <ActivityPulse active clusterId={clusterId} />
-          <span className="agent-activity-history-label">Still working</span>
+          <span className="agent-activity-history-label">{message}</span>
         </div>
       </div>
     </div>
