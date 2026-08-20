@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type CSSProperties,
+} from "react";
 import { flushSync } from "react-dom";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { exit } from "@tauri-apps/plugin-process";
@@ -67,12 +75,14 @@ import {
   mobileSendCompletion,
   mobileSendPresence,
   mobileSendWorkspace,
+  portsList,
   powerAction,
   projectInfo,
   shellIntegrationSet,
   shellIntegrationStatus,
   takeLaunchIntent,
   watchProject,
+  type AppPort,
   type LaunchIntent,
   type ShellIntegrationStatus,
 } from "./lib/ipc";
@@ -378,6 +388,20 @@ export default function App() {
   const [changesOpen, setChangesOpen] = useState(false);
   const [toolsOpen, setToolsOpen] = useState(initial.toolsOpen);
   const [toolsMounted, setToolsMounted] = useState(initial.toolsOpen);
+  const [sharedPortActive, setSharedPortActive] = useState(false);
+  const openChecklistItems = useSyncExternalStore(
+    checklist.subscribe,
+    checklist.totalOpenCount,
+    checklist.totalOpenCount,
+  );
+  const powerScheduleActive = useSyncExternalStore(
+    powerWatch.subscribe,
+    () => {
+      const phase = powerWatch.getState().phase;
+      return phase === "armed" || phase === "countdown";
+    },
+    () => false,
+  );
   /** Keeps the fullscreen switcher on screen while it slides shut. */
   const [zoomRailMounted, setZoomRailMounted] = useState(false);
   const [paneMotion, setPaneMotion] = useState<PaneLayoutMotion | null>(null);
@@ -2694,6 +2718,32 @@ export default function App() {
 
   const toolsVisible = toolsOpen && !settingsActive;
 
+  const observePorts = useCallback((ports: readonly AppPort[]) => {
+    setSharedPortActive(ports.some((port) => port.forward !== null));
+  }, []);
+
+  useEffect(() => {
+    if (!TAURI_RUNTIME) return;
+    let disposed = false;
+    const refresh = () => {
+      void portsList().then(
+        (snapshot) => {
+          if (!disposed) observePorts(snapshot.ports);
+        },
+        () => {
+          // Keep the last known state if a scan fails. A public share should
+          // not look inactive merely because one background poll was refused.
+        },
+      );
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 2500);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+    };
+  }, [observePorts]);
+
   useEffect(() => {
     if (toolsVisible) {
       setToolsMounted(true);
@@ -3608,6 +3658,7 @@ export default function App() {
         settingsActive={settingsActive}
         onOpenSettings={openSettings}
         toolsOpen={toolsOpen}
+        toolsActive={openChecklistItems > 0 || powerScheduleActive || sharedPortActive}
         onToggleTools={() => setToolsOpen((open) => !open)}
         locked={dailyLocked}
       >
@@ -3667,6 +3718,7 @@ export default function App() {
               onOpenLayout={openLayoutTemplate}
               stats={toolStats}
               ownerNames={portOwnerNames}
+              onPortsSnapshot={observePorts}
               section={toolsSection}
               onSection={setToolsSection}
             />

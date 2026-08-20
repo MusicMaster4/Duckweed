@@ -8,6 +8,7 @@ import type { AppPort } from "../lib/ipc";
 import { PowerWatchTool } from "./PowerWatchTool";
 import { PromptsTool } from "./PromptsTool";
 import { StatisticsTool } from "./StatisticsTool";
+import { TitleBar } from "./TitleBar";
 import * as checklist from "../lib/checklist";
 import * as layouts from "../lib/layouts";
 import * as powerWatch from "../lib/powerWatch";
@@ -244,5 +245,31 @@ describe("statistics and ports panels", () => {
   test("ports labels its scope as the visible tab", () => {
     const html = renderToStaticMarkup(<PortsTool ownerNames={new Map()} />);
     expect(html).toContain("This tab&#x27;s servers");
+  });
+});
+
+describe("tools activity indicator", () => {
+  const renderTitleBar = (toolsOpen: boolean, toolsActive: boolean) =>
+    renderToStaticMarkup(
+      <TitleBar
+        settingsActive={false}
+        onOpenSettings={() => undefined}
+        toolsOpen={toolsOpen}
+        toolsActive={toolsActive}
+        onToggleTools={() => undefined}
+      >
+        <span>Tabs</span>
+      </TitleBar>,
+    );
+
+  test("shows activity on the closed tools trigger", () => {
+    const html = renderTitleBar(false, true);
+    expect(html).toContain("tools-trigger-activity");
+    expect(html).toContain("activity running");
+  });
+
+  test("hides the activity dot as soon as the panel is open", () => {
+    expect(renderTitleBar(true, true)).not.toContain("tools-trigger-activity");
+    expect(renderTitleBar(false, false)).not.toContain("tools-trigger-activity");
   });
 });

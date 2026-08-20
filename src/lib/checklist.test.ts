@@ -1,13 +1,17 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 
 import {
   DONE_RETENTION_MS,
   becameAllClear,
   hoursUntilSweep,
   ordered,
+  resetForTests,
   sweep,
+  totalOpenCount,
   type ChecklistItem,
 } from "./checklist";
+
+afterEach(() => resetForTests());
 
 const item = (id: string, doneAt: number | null = null, createdAt = 0): ChecklistItem => ({
   id,
@@ -99,5 +103,16 @@ describe("becameAllClear", () => {
     expect(becameAllClear(2, 1, 3)).toBe(false);
     expect(becameAllClear(0, 1, 1)).toBe(false);
     expect(becameAllClear(1, 1, 1)).toBe(false);
+  });
+});
+
+describe("totalOpenCount", () => {
+  test("counts open work across tabs and ignores completed items", () => {
+    resetForTests({
+      tab1: [item("open-a"), item("done", Date.now())],
+      tab2: [item("open-b"), item("open-c")],
+    });
+
+    expect(totalOpenCount()).toBe(3);
   });
 });

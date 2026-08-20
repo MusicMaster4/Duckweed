@@ -11,6 +11,7 @@ import { Tooltip } from "./Tooltip";
 import * as checklist from "../lib/checklist";
 import type { LayoutDraft, LayoutTemplate } from "../lib/layouts";
 import * as powerWatch from "../lib/powerWatch";
+import type { AppPort } from "../lib/ipc";
 import type { EditorReveal, ProjectInfo, ProjectSearchTarget } from "../lib/types";
 
 interface Props {
@@ -36,6 +37,8 @@ interface Props {
   };
   /** Port-process owners belonging to the visible tab only. */
   ownerNames: ReadonlyMap<string, string>;
+  /** Keep app-wide activity chrome current when the Ports tool scans or acts. */
+  onPortsSnapshot: (ports: readonly AppPort[]) => void;
   /** Owned by App: the dock unmounts while Settings is up, and the tool the
       user was reading has to still be there when they come back. */
   section: SectionId;
@@ -156,6 +159,7 @@ export function ToolsPanel({
   onOpenLayout,
   stats,
   ownerNames,
+  onPortsSnapshot,
   section,
   onSection,
 }: Props) {
@@ -273,7 +277,9 @@ export function ToolsPanel({
         {section === "checklist" && <ChecklistTool scope={tabId} scopeLabel={tabTitle} />}
         {section === "prompts" && <PromptsTool />}
         {section === "statistics" && <StatisticsTool {...stats} />}
-        {section === "ports" && <PortsTool ownerNames={ownerNames} />}
+        {section === "ports" && (
+          <PortsTool ownerNames={ownerNames} onSnapshot={onPortsSnapshot} />
+        )}
         {section === "power" && <PowerWatchTool />}
         {section === "layouts" && (
           <LayoutsTool
