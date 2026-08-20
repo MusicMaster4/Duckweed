@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import type { AgentImageAttachment } from "../../lib/agents/types";
-import { AgentImageAttachments } from "./AgentImageAttachments";
+import { AgentImageAttachments, fitLightboxImage } from "./AgentImageAttachments";
 
 const image: AgentImageAttachment = {
   id: "image-1",
@@ -28,5 +28,12 @@ describe("agent image attachments", () => {
     );
 
     expect(html).toContain(`src="${image.dataUrl}"`);
+  });
+
+  test("fits the lightbox image to the viewport and keeps small images native size", () => {
+    const viewport = { width: 1600, height: 900 };
+    expect(fitLightboxImage(400, 300, viewport)).toEqual({ width: 400, height: 300 });
+    expect(fitLightboxImage(4000, 3000, viewport)).toEqual({ width: 1040, height: 780 });
+    expect(fitLightboxImage(4000, 1000, viewport)).toEqual({ width: 1500, height: 375 });
   });
 });

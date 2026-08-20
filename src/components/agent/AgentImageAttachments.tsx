@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 import type { AgentImageAttachment } from "../../lib/agents/types";
@@ -11,6 +11,25 @@ interface Props {
 }
 
 const IMAGE_REMOVE_FALLBACK_MS = 220;
+const LIGHTBOX_MAX_WIDTH = 1500;
+const LIGHTBOX_HEIGHT_CHROME_PX = 120;
+
+export function fitLightboxImage(
+  naturalWidth: number,
+  naturalHeight: number,
+  viewport: { width: number; height: number } = {
+    width: window.innerWidth,
+    height: window.innerHeight,
+  },
+) {
+  const maxWidth = Math.min(viewport.width * 0.94, LIGHTBOX_MAX_WIDTH);
+  const maxHeight = Math.max(80, viewport.height - LIGHTBOX_HEIGHT_CHROME_PX);
+  const scale = Math.min(1, maxWidth / naturalWidth, maxHeight / naturalHeight);
+  return {
+    width: Math.max(1, Math.round(naturalWidth * scale)),
+    height: Math.max(1, Math.round(naturalHeight * scale)),
+  };
+}
 
 interface ImageContextMenu {
   x: number;
@@ -30,6 +49,8 @@ export function AgentImageAttachments({
   const [enteringIds, setEnteringIds] = useState<Set<string>>(() => new Set());
   const removalTimers = useRef<Map<string, number>>(new Map());
   const contextMenuRef = useRef<HTMLDivElement>(null);
+  const previewImgRef = useRef<HTMLImageElement>(null);
+  const [previewSize, setPreviewSize] = useState<{ width: number; height: number } | null>(null);
   /**
    * Attachment ids already painted in this mount. Seeded on the first layout so
    * remounts (inactive tabs unmount their panes) do not replay paste-in for
@@ -37,6 +58,14 @@ export function AgentImageAttachments({
    */
   const knownIdsRef = useRef<Set<string> | null>(null);
   const open = images.find((image) => image.id === openId) ?? null;
+
+  const applyPreviewSize = useCallback((img: HTMLImageElement) => {
+    if (!img.naturalWidth || !img.naturalHeight) return;
+    const next = fitLightboxImage(img.naturalWidth, img.naturalHeight);
+    setPreviewSize((current) =>
+      current?.width === next.width && current?.height === next.height ? current : next,
+    );
+  }, []);
 
   useLayoutEffect(() => {
     // Messages are history; only the composer paste strip should enter-animate.
@@ -80,6 +109,23 @@ export function AgentImageAttachments({
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
   }, [contextMenu, open]);
+
+  useLayoutEffect(() => {
+    if (!open) {
+      setPreviewSize(null);
+      return;
+    }
+
+    const img = previewImgRef.current;
+    if (!img) return;
+
+    const onResize = () => applyPreviewSize(img);
+    window.addEventListener("resize", onResize);
+    if (img.complete && img.naturalWidth) applyPreviewSize(img);
+    else setPreviewSize(null);
+
+    return () => window.removeEventListener("resize", onResize);
+  }, [applyPreviewSize, openId, open?.dataUrl]);
 
   useLayoutEffect(() => {
     const menu = contextMenuRef.current;
@@ -191,10 +237,18 @@ export function AgentImageAttachments({
             aria-modal="true"
             aria-label={`Image preview: ${open.name}`}
             onMouseDown={(event) => {
-              if (event.target === event.currentTarget) {
-                setContextMenu(null);
-                setOpenId(null);
+              const target = event.target;
+              if (!(target instanceof Element)) return;
+              if (
+                target.closest(".agent-image-lightbox figure img") ||
+                target.closest(".agent-image-lightbox-close") ||
+                target.closest(".agent-image-context-menu") ||
+                target.closest(".agent-image-context-backdrop")
+              ) {
+                return;
               }
+              setContextMenu(null);
+              setOpenId(null);
             }}
           >
             <button
@@ -213,8 +267,11 @@ export function AgentImageAttachments({
             </button>
             <figure>
               <img
+                ref={previewImgRef}
                 src={open.dataUrl}
                 alt={open.name}
+                style={previewSize ?? undefined}
+                onLoad={(event) => applyPreviewSize(event.currentTarget)}
                 onContextMenu={(event) => {
                   event.preventDefault();
                   event.stopPropagation();

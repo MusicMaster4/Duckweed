@@ -175,14 +175,6 @@ export function openCount(scope: string): number {
   return (store.lists[scope] ?? EMPTY).filter((item) => item.doneAt === null).length;
 }
 
-/** Open work across every tab, used by app-wide activity chrome. */
-export function totalOpenCount(): number {
-  return Object.values(store.lists).reduce(
-    (total, list) => total + list.filter((item) => item.doneAt === null).length,
-    0,
-  );
-}
-
 export function add(scope: string, text: string): void {
   const trimmed = text.trim().slice(0, MAX_TEXT_LENGTH);
   if (!trimmed) return;

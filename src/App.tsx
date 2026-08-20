@@ -390,11 +390,6 @@ export default function App() {
   const [toolsOpen, setToolsOpen] = useState(initial.toolsOpen);
   const [toolsMounted, setToolsMounted] = useState(initial.toolsOpen);
   const [sharedPortActive, setSharedPortActive] = useState(false);
-  const openChecklistItems = useSyncExternalStore(
-    checklist.subscribe,
-    checklist.totalOpenCount,
-    checklist.totalOpenCount,
-  );
   const powerScheduleActive = useSyncExternalStore(
     powerWatch.subscribe,
     () => {
@@ -473,6 +468,16 @@ export default function App() {
   const spawnOpts = useRef(new Map<string, SpawnOpts>(initial.startupSpawns));
 
   const activeTab = tabs.find((t) => t.id === activeTabId) ?? tabs[0];
+  const activeChecklistScope = activeTab?.id ?? null;
+  const readActiveChecklistItems = useCallback(
+    () => (activeChecklistScope ? checklist.openCount(activeChecklistScope) : 0),
+    [activeChecklistScope],
+  );
+  const openChecklistItems = useSyncExternalStore(
+    checklist.subscribe,
+    readActiveChecklistItems,
+    readActiveChecklistItems,
+  );
   const project = activeTab?.project ?? null;
   const toolStats = useMemo(
     () => ({

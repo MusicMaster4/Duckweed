@@ -4,10 +4,10 @@ import {
   DONE_RETENTION_MS,
   becameAllClear,
   hoursUntilSweep,
+  openCount,
   ordered,
   resetForTests,
   sweep,
-  totalOpenCount,
   type ChecklistItem,
 } from "./checklist";
 
@@ -106,13 +106,15 @@ describe("becameAllClear", () => {
   });
 });
 
-describe("totalOpenCount", () => {
-  test("counts open work across tabs and ignores completed items", () => {
+describe("openCount", () => {
+  test("counts only open work in the requested tab", () => {
     resetForTests({
       tab1: [item("open-a"), item("done", Date.now())],
       tab2: [item("open-b"), item("open-c")],
     });
 
-    expect(totalOpenCount()).toBe(3);
+    expect(openCount("tab1")).toBe(1);
+    expect(openCount("tab2")).toBe(2);
+    expect(openCount("missing-tab")).toBe(0);
   });
 });
