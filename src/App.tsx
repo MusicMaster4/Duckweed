@@ -1968,8 +1968,10 @@ export default function App() {
   );
 
   const closePane = useCallback(
-    async (leafId: string) => {
-      const tab = currentTab();
+    async (leafId: string, options: { tabId?: string } = {}) => {
+      const tab = options.tabId
+        ? tabsRef.current.find((candidate) => candidate.id === options.tabId) ?? null
+        : currentTab();
       if (!tab || paneMotionRef.current) return;
       const node = findLeaf(tab.root, leafId);
       if (!node) return;
@@ -1988,8 +1990,8 @@ export default function App() {
       }
 
       // Re-read after the dialog — the layout may have changed while it was open.
-      const tabNow = currentTab();
-      if (!tabNow || tabNow.id !== tab.id) return;
+      const tabNow = tabsRef.current.find((candidate) => candidate.id === tab.id) ?? null;
+      if (!tabNow) return;
       const nodeNow = findLeaf(tabNow.root, leafId);
       if (!nodeNow) return;
 
@@ -3708,7 +3710,7 @@ export default function App() {
       const terminalId = (event as CustomEvent<{ terminalId: string }>).detail.terminalId;
       const owner = tabsRef.current.find((tab) => leaves(tab.root).some((node) => node.term === terminalId));
       const leaf = owner && leaves(owner.root).find((node) => node.term === terminalId);
-      if (leaf) void closePane(leaf.id);
+      if (owner && leaf) void closePane(leaf.id, { tabId: owner.id });
     };
     window.addEventListener("duckweed:mobile-create-terminal", create);
     window.addEventListener("duckweed:mobile-close-terminal", close);

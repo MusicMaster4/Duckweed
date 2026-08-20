@@ -97,6 +97,67 @@ describe("mobile workspace payload bounds", () => {
     );
     expect(bounded.projects[0].terminals[0].terminalOutput).toEndWith("LATEST SCREEN");
   });
+
+  test("fits verbose permission questions while preserving answer choices", () => {
+    const permission = (terminal: string) => ({
+      id: `permission-${terminal}`,
+      kind: "question" as const,
+      title: "Choose an option",
+      detail: null,
+      command: null,
+      options: [],
+      questions: Array.from({ length: 3 }, (_, questionIndex) => ({
+        id: `question-${terminal}-${questionIndex}`,
+        header: `Question ${questionIndex + 1}`,
+        question: "Explain the preferred approach ".repeat(40),
+        multiSelect: false,
+        options: Array.from({ length: 12 }, (_, optionIndex) => ({
+          id: `option-${terminal}-${questionIndex}-${optionIndex}`,
+          label: `Option ${optionIndex + 1}`,
+          description: "Detailed option description ".repeat(40),
+          preview: "Large preview payload ".repeat(200),
+        })),
+      })),
+    });
+    const snapshot: MobileWorkspaceSnapshot = {
+      projects: [{
+        id: "project",
+        name: "Project",
+        path: "C:/project",
+        branch: null,
+        terminals: ["one", "two"].map((id) => ({
+          id,
+          title: "Codex",
+          shell: "PowerShell",
+          agent: "Codex",
+          model: null,
+          status: "waiting" as const,
+          mode: "conversation" as const,
+          unreadOnDesktop: false,
+          completionSeq: 0,
+          commands: [],
+          activity: [],
+          conversation: [],
+          permission: permission(id),
+        })),
+      }],
+    };
+
+    expect(utf8ByteLength(JSON.stringify(snapshot))).toBeGreaterThan(
+      MOBILE_WORKSPACE_SNAPSHOT_BUDGET_BYTES,
+    );
+    const bounded = fitMobileWorkspaceSnapshot(snapshot);
+    expect(utf8ByteLength(JSON.stringify(bounded))).toBeLessThanOrEqual(
+      MOBILE_WORKSPACE_SNAPSHOT_BUDGET_BYTES,
+    );
+    for (const terminal of bounded.projects[0].terminals) {
+      expect(terminal.permission?.questions).toHaveLength(3);
+      expect(
+        terminal.permission?.questions.every((question) => question.options.length === 12),
+      ).toBe(true);
+      expect(terminal.permission?.questions[0].options[0].label).toBe("Option 1");
+    }
+  });
 });
 
 describe("mobile terminal activity", () => {

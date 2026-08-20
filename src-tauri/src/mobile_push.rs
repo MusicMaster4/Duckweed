@@ -1116,6 +1116,9 @@ fn send_workspace_to_device(
     message_id: &str,
 ) -> Result<(), String> {
     let secret = load_secret(&device.id)?;
+    // Workspace snapshots replace one another. Keep the identity stable for
+    // this pairing so an offline phone retains only the newest pending state.
+    let collapse_key = workspace_collapse_key(&device.id);
     let preview_plain = serde_json::to_vec(&serde_json::json!({
         "version": 1,
         "id": message_id,
@@ -1163,7 +1166,7 @@ fn send_workspace_to_device(
                 .json(&SendMessage {
                     message_id,
                     sent_at,
-                    collapse_key: None,
+                    collapse_key: Some(&collapse_key),
                     preview: &preview,
                     payload: &payload,
                 }),
@@ -1171,6 +1174,10 @@ fn send_workspace_to_device(
         .map_err(|error| request_error("could not send mobile workspace", &error))?,
     )?;
     Ok(())
+}
+
+fn workspace_collapse_key(device_id: &str) -> String {
+    format!("workspace:{device_id}")
 }
 
 fn send_presence_to_device(device: &MobileDevice, sent_at: i64) -> Result<(), String> {
@@ -1466,7 +1473,8 @@ mod tests {
     use super::{
         bounded_preview_plaintext, client, decrypt, encrypt, encrypt_with_nonce,
         encrypted_ciphertext_len, pairing_is_gone, pairing_proof, truncate_utf8,
-        PlainRemoteCommand, MAX_PREVIEW_CIPHERTEXT, MAX_WORKSPACE_PLAINTEXT_BYTES,
+        workspace_collapse_key, PlainRemoteCommand, MAX_PREVIEW_CIPHERTEXT,
+        MAX_WORKSPACE_PLAINTEXT_BYTES,
     };
 
     #[test]
@@ -1663,5 +1671,17 @@ mod tests {
     #[test]
     fn workspace_plaintext_budget_stays_inside_the_relay_ciphertext_limit() {
         assert!(encrypted_ciphertext_len(MAX_WORKSPACE_PLAINTEXT_BYTES) <= 320_000);
+    }
+
+    #[test]
+    fn workspace_snapshots_collapse_per_pairing() {
+        assert_eq!(
+            workspace_collapse_key("phone-one"),
+            workspace_collapse_key("phone-one")
+        );
+        assert_ne!(
+            workspace_collapse_key("phone-one"),
+            workspace_collapse_key("phone-two")
+        );
     }
 }

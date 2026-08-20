@@ -229,6 +229,21 @@ function terminalMetadataRefs(snapshot: MobileWorkspaceSnapshot): MobileTerminal
   return snapshot.projects.flatMap((project) => project.terminals);
 }
 
+function fitTextField(
+  serialized: string,
+  get: () => string | null,
+  set: (value: string) => void,
+  snapshot: MobileWorkspaceSnapshot,
+): string {
+  if (utf8ByteLength(serialized) <= MOBILE_WORKSPACE_SNAPSHOT_BUDGET_BYTES) return serialized;
+  const value = get();
+  if (!value) return serialized;
+  const excess = utf8ByteLength(serialized) - MOBILE_WORKSPACE_SNAPSHOT_BUDGET_BYTES;
+  const nextValue = truncateUtf8(value, Math.max(0, utf8ByteLength(value) - excess));
+  set(nextValue);
+  return JSON.stringify(snapshot);
+}
+
 /**
  * Keep the snapshot below the encrypted payload budget after JSON escaping.
  * The snapshot is freshly built by the sync effect, so trimming it in place
@@ -269,6 +284,30 @@ export function fitMobileWorkspaceSnapshot(
     serialized = JSON.stringify(snapshot);
   }
 
+  // Pending questions are part of the workspace envelope too. Preserve their
+  // identities and answer labels, but let verbose previews and explanations
+  // yield space so one large permission cannot block every mobile update.
+  for (const terminal of terminalMetadataRefs(snapshot)) {
+    const permission = terminal.permission;
+    if (!permission) continue;
+    for (const question of permission.questions) {
+      for (const option of question.options) {
+        serialized = fitTextField(
+          serialized,
+          () => option.preview,
+          (value) => { option.preview = value; },
+          snapshot,
+        );
+        serialized = fitTextField(
+          serialized,
+          () => option.description,
+          (value) => { option.description = value; },
+          snapshot,
+        );
+      }
+    }
+  }
+
   // Agent activity and completion catalogs are reconstructable on the next
   // publish. If a workspace has many open agents, trim their oldest/lowest
   // priority rows before allowing the relay envelope to exceed its limit.
@@ -301,6 +340,47 @@ export function fitMobileWorkspaceSnapshot(
     }
   }
 
+
+  // Keep permission controls actionable as a last resort by retaining ids,
+  // labels, and option structure while shortening their remaining prose.
+  if (utf8ByteLength(serialized) > MOBILE_WORKSPACE_SNAPSHOT_BUDGET_BYTES) {
+    for (const terminal of terminalMetadataRefs(snapshot)) {
+      const permission = terminal.permission;
+      if (!permission) continue;
+      serialized = fitTextField(
+        serialized,
+        () => permission.detail,
+        (value) => { permission.detail = value; },
+        snapshot,
+      );
+      serialized = fitTextField(
+        serialized,
+        () => permission.command,
+        (value) => { permission.command = value; },
+        snapshot,
+      );
+      serialized = fitTextField(
+        serialized,
+        () => permission.title,
+        (value) => { permission.title = value; },
+        snapshot,
+      );
+      for (const question of permission.questions) {
+        serialized = fitTextField(
+          serialized,
+          () => question.question,
+          (value) => { question.question = value; },
+          snapshot,
+        );
+        serialized = fitTextField(
+          serialized,
+          () => question.header,
+          (value) => { question.header = value; },
+          snapshot,
+        );
+      }
+    }
+  }
   // If unusually large project metadata remains, drop the oldest conversation
   // rows as a final safeguard. Normal snapshots fit in the first pass.
   if (utf8ByteLength(serialized) > MOBILE_WORKSPACE_SNAPSHOT_BUDGET_BYTES) {
