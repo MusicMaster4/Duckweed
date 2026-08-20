@@ -27,7 +27,14 @@ object ConversationMergePolicy {
                 } else if (merged[duplicate].id.startsWith("workspace:")) {
                     // Keep the phone record because it owns delivery state and
                     // attachment metadata that is not part of the snapshot.
-                    merged[duplicate] = candidate
+                    merged[duplicate] = candidate.copy(
+                        deliveryState = if (candidate.kind == "user") {
+                            "delivered"
+                        } else {
+                            candidate.deliveryState
+                        },
+                        deliveryError = null,
+                    )
                 }
             }
         return merged.sortedBy { it.sentAt }

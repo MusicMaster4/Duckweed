@@ -93,6 +93,7 @@ data class RemoteTerminal(
     val conversation: List<RemoteConversationMessage> = emptyList(),
     val permission: RemotePermission? = null,
     val terminalOutput: String? = null,
+    val pendingAction: PendingMobileAction? = null,
 ) {
     val isWorking: Boolean get() = status == "working" || status == "waiting"
 }

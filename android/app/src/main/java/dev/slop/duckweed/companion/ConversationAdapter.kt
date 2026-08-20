@@ -20,6 +20,7 @@ import io.noties.markwon.Markwon
 
 class ConversationAdapter(
     private val onRetry: (CompletionRecord) -> Unit,
+    private val onPending: () -> Unit,
 ) : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
     private var rows: List<ConversationTimelineItem> = emptyList()
     private var markdown: Markwon? = null
@@ -113,11 +114,15 @@ class ConversationAdapter(
             attachment.text = messageAttachment?.name
             time.text = relativeTime(message.sentAt)
             val deliveryState = if (outgoing) message.deliveryState else null
+            val pending = deliveryState == "sending" ||
+                deliveryState == "sent" || deliveryState == "received"
+            bubble.alpha = if (pending) PENDING_ALPHA else 1f
             delivery.visibility = if (deliveryState == null) View.GONE else View.VISIBLE
             delivery.text = when (deliveryState) {
                 "sending" -> "Sending securely..."
-                "sent" -> "Sent securely"
-                "delivered" -> "Received by desktop"
+                "sent" -> "Waiting for desktop..."
+                "received" -> "Desktop is updating..."
+                "delivered" -> "Updated on desktop"
                 "failed" -> "Not sent. Tap to retry"
                 else -> deliveryState
             }
@@ -128,14 +133,20 @@ class ConversationAdapter(
                 ),
             )
             val retryable = outgoing && deliveryState == "failed"
-            bubble.isClickable = retryable
-            bubble.isFocusable = retryable
-            bubble.contentDescription = if (retryable) {
-                "Message not sent. Double tap to retry."
-            } else {
-                null
+            bubble.isClickable = retryable || pending
+            bubble.isFocusable = retryable || pending
+            bubble.contentDescription = when {
+                retryable -> "Message not sent. Double tap to retry."
+                pending -> "Message sent. Waiting for the desktop to update."
+                else -> null
             }
-            bubble.setOnClickListener(if (retryable) View.OnClickListener { onRetry(message) } else null)
+            bubble.setOnClickListener(
+                when {
+                    retryable -> View.OnClickListener { onRetry(message) }
+                    pending -> View.OnClickListener { onPending() }
+                    else -> null
+                },
+            )
         }
 
         private fun dp(value: Int): Int =
@@ -321,5 +332,6 @@ class ConversationAdapter(
         private const val VIEW_MESSAGE = 0
         private const val VIEW_ACTIVITY = 1
         private const val EXPANDED_DIFF_LINES = 80
+        private const val PENDING_ALPHA = 0.48f
     }
 }

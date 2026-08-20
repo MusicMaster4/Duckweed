@@ -16,6 +16,7 @@ import android.text.TextWatcher
 import android.text.format.DateUtils
 import android.text.method.ScrollingMovementMethod
 import android.view.HapticFeedbackConstants
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.animation.DecelerateInterpolator
@@ -79,6 +80,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var retryConnectionButton: Button
     private lateinit var usageLimitsContent: LinearLayout
     private lateinit var usageLimitsEmpty: TextView
+    private lateinit var pendingNotice: TextView
     private lateinit var projectDetail: View
     private lateinit var conversationDetail: View
     private lateinit var conversationCommandsScroll: View
@@ -111,12 +113,24 @@ class MainActivity : AppCompatActivity() {
     private lateinit var appUpdater: AppUpdater
     private val messageAdapter = MessageAdapter { openResponse(it) }
     private val projectAdapter = ProjectAdapter { openProject(it) }
-    private val terminalAdapter = TerminalAdapter({ openConversation(it, true) }, ::requestCloseTerminal)
-    private val conversationsAdapter = TerminalAdapter(onOpen = { openConversation(it, false) })
-    private val conversationAdapter = ConversationAdapter(::retryConversationMessage)
+    private val terminalAdapter = TerminalAdapter(
+        { openConversation(it, true) },
+        ::requestCloseTerminal,
+        ::showPendingNotice,
+    )
+    private val conversationsAdapter = TerminalAdapter(
+        onOpen = { openConversation(it, false) },
+        onPending = ::showPendingNotice,
+    )
+    private val conversationAdapter = ConversationAdapter(
+        ::retryConversationMessage,
+        ::showPendingNotice,
+    )
     private val executor = Executors.newSingleThreadExecutor()
     private val storageExecutor = Executors.newSingleThreadExecutor()
     private lateinit var draftStore: DraftStore
+    private lateinit var pendingActionStore: PendingMobileActionStore
+    private var pendingMobileActions: List<PendingMobileAction> = emptyList()
     private var receiverRegistered = false
     private var syncingNotificationsToggle = false
     private var syncingAppLockToggle = false
@@ -234,6 +248,8 @@ class MainActivity : AppCompatActivity() {
         NotificationTools.createChannel(this)
         appUpdater = AppUpdater(this)
         draftStore = DraftStore(this)
+        pendingActionStore = PendingMobileActionStore(this)
+        pendingMobileActions = pendingActionStore.all()
         storageExecutor.execute { MessageStore(this).recoverInterruptedSends() }
         ReadSyncScheduler.enqueue(this)
 
@@ -255,6 +271,8 @@ class MainActivity : AppCompatActivity() {
         retryConnectionButton = findViewById(R.id.retry_connection_button)
         usageLimitsContent = findViewById(R.id.usage_limits_content)
         usageLimitsEmpty = findViewById(R.id.usage_limits_empty)
+        pendingNotice = findViewById(R.id.pending_notice)
+        pendingNotice.accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
         projectDetail = findViewById(R.id.project_detail)
         conversationDetail = findViewById(R.id.conversation_detail)
         conversationCommandsScroll = findViewById(R.id.conversation_commands_scroll)
@@ -933,6 +951,7 @@ class MainActivity : AppCompatActivity() {
                                 SecretStore.remove(this, pairing.pairId)
                                 WorkspaceStore(this).remove(pairing.pairId)
                                 MessageStore(this).discardReadSyncs(pairing.pairId)
+                                PendingMobileActionStore(this).removePair(pairing.pairId)
                             }
                             .onFailure { failures += it.message ?: pairing.pairId }
                     }
@@ -1071,6 +1090,15 @@ class MainActivity : AppCompatActivity() {
         messages: List<CompletionRecord>,
         unreadKeys: Set<Pair<String, String>>,
     ) {
+        val reconciliation = PendingMobileActionPolicy.reconcile(
+            pendingMobileActions,
+            snapshots,
+            System.currentTimeMillis(),
+        )
+        if (reconciliation.pending != pendingMobileActions) {
+            pendingMobileActions = reconciliation.pending
+            pendingActionStore.replace(pendingMobileActions)
+        }
         cachedSnapshots = snapshots
         unreadConversationKeys = unreadKeys
         if (refreshRequestedAt > 0 && snapshots.any { it.updatedAt > refreshSnapshotVersion }) {
@@ -1097,8 +1125,12 @@ class MainActivity : AppCompatActivity() {
             .filter { MobileSyncPolicy.isDesktopOnline(it.lastSeenAt, now, CONNECTION_FRESH_MS) }
             .mapTo(mutableSetOf()) { it.pairId }
         val rows = snapshots.flatMap { snapshot ->
-            snapshot.projects.map {
-                ProjectRow(snapshot.pairId, it, snapshot.pairId in onlinePairIds)
+            snapshot.projects.map { project ->
+                ProjectRow(
+                    snapshot.pairId,
+                    projectWithPendingActions(snapshot.pairId, project),
+                    snapshot.pairId in onlinePairIds,
+                )
             }
         }
         projectAdapter.submit(rows)
@@ -1318,6 +1350,14 @@ class MainActivity : AppCompatActivity() {
         } else {
             ConversationMergePolicy.merge(synced, stored)
         }
+        if (!terminalMode) {
+            val storedById = stored.associateBy { it.id }
+            messages.asSequence()
+                .filter { it.kind == "user" && it.deliveryState == "delivered" }
+                .mapNotNull { storedById[it.id] }
+                .filter { it.deliveryState == "sent" || it.deliveryState == "received" }
+                .forEach { MessageStore(this).updateOutgoingState(it.id, "delivered") }
+        }
         val isAgent = target.terminal.agent != null
         val thinking = isAgent && target.terminal.status == "working"
         val desktopOnline = isDesktopOnline(target.pairId)
@@ -1332,6 +1372,7 @@ class MainActivity : AppCompatActivity() {
             add(
                 when {
                     !desktopOnline -> "Desktop offline"
+                    pendingDecision(target) != null -> "Updating desktop"
                     target.terminal.status == "starting" -> "Opening agent"
                     thinking -> "Thinking"
                     target.terminal.status == "working" -> "Running"
@@ -1358,12 +1399,45 @@ class MainActivity : AppCompatActivity() {
         updateSlashCommandSuggestions()
         messages.filter { it.kind == "user" && it.deliveryState == "sent" }
             .takeLast(5)
-            .forEach { trackDelivery(it.id, target.pairId) }
+            .forEach {
+                trackDelivery(
+                    it.id,
+                    target.pairId,
+                    awaitWorkspaceConfirmation = !terminalMode,
+                )
+            }
         if (shouldScrollToBottom && timeline.isNotEmpty()) {
             conversationList.post {
                 conversationList.scrollToPosition(timeline.lastIndex)
             }
         }
+    }
+
+    private fun projectWithPendingActions(pairId: String, project: RemoteProject): RemoteProject {
+        val actions = pendingMobileActions.filter {
+            it.pairId == pairId && it.projectId == project.id
+        }
+        if (actions.isEmpty()) return project
+        val closingByTerminal = actions
+            .filter { it.kind == PendingMobileAction.CLOSE_TERMINAL }
+            .associateBy { it.terminalId }
+        val terminals = project.terminals.map { terminal ->
+            terminal.copy(pendingAction = closingByTerminal[terminal.id])
+        }.toMutableList()
+        actions.filter { it.kind == PendingMobileAction.CREATE_TERMINAL }
+            .sortedBy { it.createdAt }
+            .forEach { action ->
+                terminals += RemoteTerminal(
+                    id = "pending:${action.id}",
+                    title = action.label ?: "New terminal",
+                    shell = "Waiting for desktop",
+                    agent = null,
+                    model = null,
+                    status = "starting",
+                    pendingAction = action,
+                )
+            }
+        return project.copy(terminals = terminals)
     }
 
     private fun refreshUsageLimits(snapshots: List<WorkspaceSnapshot> = cachedSnapshots) {
@@ -1587,6 +1661,8 @@ class MainActivity : AppCompatActivity() {
             questionControls.clear()
             questionSendButton = null
             questionSubmitting = false
+            conversationApproval.alpha = 1f
+            conversationApproval.setOnTouchListener(null)
             setAnimatedVisibility(conversationApproval, false)
             approvalActions.removeAllViews()
             return
@@ -1594,8 +1670,11 @@ class MainActivity : AppCompatActivity() {
         val permissionKey = "${target.pairId}:${target.terminal.id}:${permission.id}"
         setAnimatedVisibility(conversationApproval, true)
         if (permission.kind == "question" && renderedPermissionKey == permissionKey) {
-            setQuestionControlsEnabled(isDesktopOnline(target.pairId))
+            setQuestionControlsEnabled(
+                isDesktopOnline(target.pairId) && pendingDecision(target) == null,
+            )
             updateQuestionSubmitState(permission, target)
+            applyPendingDecisionState(target)
             return
         }
         renderedPermissionKey = permissionKey
@@ -1618,6 +1697,7 @@ class MainActivity : AppCompatActivity() {
         approvalActions.removeAllViews()
         if (permission.kind == "question") {
             renderQuestions(target, permission)
+            applyPendingDecisionState(target)
             return
         }
         permission.options.forEach { option ->
@@ -1647,6 +1727,41 @@ class MainActivity : AppCompatActivity() {
                     resources.getDimensionPixelSize(R.dimen.mobile_action_height),
                 ).apply { topMargin = resources.getDimensionPixelSize(R.dimen.mobile_action_gap) },
             )
+        }
+        applyPendingDecisionState(target)
+    }
+
+    private fun pendingDecision(target: ConversationTarget): PendingMobileAction? =
+        pendingMobileActions.firstOrNull {
+            it.kind == PendingMobileAction.DECISION &&
+                it.pairId == target.pairId &&
+                it.terminalId == target.terminal.id &&
+                it.permissionId == target.terminal.permission?.id
+        }
+
+    private fun applyPendingDecisionState(target: ConversationTarget) {
+        val pending = pendingDecision(target) != null
+        conversationApproval.alpha = if (pending) PENDING_ALPHA else 1f
+        conversationApproval.contentDescription = if (pending) {
+            "Decision sent. Waiting for the desktop to update."
+        } else {
+            null
+        }
+        conversationApproval.setOnTouchListener(
+            if (pending) {
+                View.OnTouchListener { _, event ->
+                    if (event.action == MotionEvent.ACTION_UP) showPendingNotice()
+                    true
+                }
+            } else {
+                null
+            },
+        )
+        if (pending) {
+            for (index in 0 until approvalActions.childCount) {
+                approvalActions.getChildAt(index).isEnabled = false
+            }
+            setQuestionControlsEnabled(false)
         }
     }
 
@@ -1843,7 +1958,8 @@ class MainActivity : AppCompatActivity() {
                 !questionNotes[question.id]?.text.isNullOrBlank()
         }
         questionSendButton?.apply {
-            isEnabled = complete && isDesktopOnline(target.pairId) && !questionSubmitting
+            isEnabled = complete && isDesktopOnline(target.pairId) &&
+                !questionSubmitting && pendingDecision(target) == null
             alpha = if (isEnabled) 1f else 0.45f
         }
     }
@@ -1869,6 +1985,7 @@ class MainActivity : AppCompatActivity() {
         val open = target.terminal.status != "exited"
         val online = isDesktopOnline(target.pairId)
         val waitingForDecision = target.terminal.permission != null
+        val decisionPending = pendingDecision(target) != null
         val canCompose = paired && open && !waitingForDecision
         conversationComposer.visibility = if (canCompose) View.VISIBLE else View.GONE
         conversationAttach.visibility =
@@ -1891,9 +2008,9 @@ class MainActivity : AppCompatActivity() {
             View.VISIBLE
         }
         for (index in 0 until approvalActions.childCount) {
-            approvalActions.getChildAt(index).isEnabled = online
+            approvalActions.getChildAt(index).isEnabled = online && !decisionPending
         }
-        setQuestionControlsEnabled(online)
+        setQuestionControlsEnabled(online && !decisionPending)
         target.terminal.permission?.takeIf { it.kind == "question" }?.let {
             updateQuestionSubmitState(it, target)
         }
@@ -1908,6 +2025,45 @@ class MainActivity : AppCompatActivity() {
         updateComposerActions()
     }
 
+    private fun beginPendingAction(action: PendingMobileAction) {
+        pendingMobileActions = pendingMobileActions.filterNot { it.id == action.id } + action
+        pendingActionStore.put(action)
+        refreshWorkspaces()
+        if (conversationDetail.visibility == View.VISIBLE) refreshConversation()
+    }
+
+    private fun removePendingAction(id: String) {
+        pendingMobileActions = pendingMobileActions.filterNot { it.id == id }
+        pendingActionStore.remove(id)
+        refreshWorkspaces()
+        if (conversationDetail.visibility == View.VISIBLE) refreshConversation()
+    }
+
+    private fun showPendingNotice() {
+        if (!::pendingNotice.isInitialized) return
+        pendingNotice.removeCallbacks(hidePendingNotice)
+        pendingNotice.text = "Please wait. The desktop is still updating."
+        pendingNotice.visibility = View.VISIBLE
+        pendingNotice.alpha = 0f
+        pendingNotice.translationY = dp(10).toFloat()
+        pendingNotice.animate()
+            .alpha(1f)
+            .translationY(0f)
+            .setDuration(160L)
+            .start()
+        pendingNotice.postDelayed(hidePendingNotice, 2_800L)
+    }
+
+    private val hidePendingNotice = Runnable {
+        if (!::pendingNotice.isInitialized) return@Runnable
+        pendingNotice.animate()
+            .alpha(0f)
+            .translationY(dp(8).toFloat())
+            .setDuration(140L)
+            .withEndAction { pendingNotice.visibility = View.GONE }
+            .start()
+    }
+
     private fun sendApproval(
         target: ConversationTarget,
         permission: RemotePermission,
@@ -1918,6 +2074,16 @@ class MainActivity : AppCompatActivity() {
             return
         }
         val credentials = SecretStore.load(this, target.pairId) ?: return
+        val action = PendingMobileAction(
+            id = UUID.randomUUID().toString(),
+            kind = PendingMobileAction.DECISION,
+            pairId = target.pairId,
+            projectId = target.projectId,
+            terminalId = target.terminal.id,
+            permissionId = permission.id,
+            createdAt = System.currentTimeMillis(),
+        )
+        beginPendingAction(action)
         for (index in 0 until approvalActions.childCount) {
             approvalActions.getChildAt(index).isEnabled = false
         }
@@ -1939,6 +2105,7 @@ class MainActivity : AppCompatActivity() {
                 }
             }.onFailure { error ->
                 runOnUiThread {
+                    removePendingAction(action.id)
                     findViewById<TextView>(R.id.conversation_status).text =
                         error.message ?: "Could not send this decision."
                     renderApproval(target)
@@ -1960,7 +2127,17 @@ class MainActivity : AppCompatActivity() {
             return
         }
         val credentials = SecretStore.load(this, target.pairId) ?: return
+        val action = PendingMobileAction(
+            id = UUID.randomUUID().toString(),
+            kind = PendingMobileAction.DECISION,
+            pairId = target.pairId,
+            projectId = target.projectId,
+            terminalId = target.terminal.id,
+            permissionId = permission.id,
+            createdAt = System.currentTimeMillis(),
+        )
         questionSubmitting = true
+        beginPendingAction(action)
         setQuestionControlsEnabled(false)
         questionSendButton?.isEnabled = false
         findViewById<TextView>(R.id.conversation_status).text = "Sending answer securely..."
@@ -1985,6 +2162,7 @@ class MainActivity : AppCompatActivity() {
                 }
             }.onFailure { error ->
                 runOnUiThread {
+                    removePendingAction(action.id)
                     questionSubmitting = false
                     findViewById<TextView>(R.id.conversation_status).text =
                         error.message ?: "Could not send this answer."
@@ -2009,9 +2187,25 @@ class MainActivity : AppCompatActivity() {
             .setNegativeButton("Cancel", null)
             .setPositiveButton("Open split") { _, _ ->
                 val credentials = SecretStore.load(this, project.pairId) ?: return@setPositiveButton
+                val command = input.text.toString()
+                val action = PendingMobileAction(
+                    id = UUID.randomUUID().toString(),
+                    kind = PendingMobileAction.CREATE_TERMINAL,
+                    pairId = project.pairId,
+                    projectId = project.project.id,
+                    label = command.trim().takeIf { it.isNotEmpty() } ?: "New terminal",
+                    baselineTerminalIds = project.project.terminals
+                        .filter { it.pendingAction == null }
+                        .mapTo(mutableSetOf()) { it.id },
+                    createdAt = System.currentTimeMillis(),
+                )
+                beginPendingAction(action)
                 executor.execute {
-                    runCatching { RelayClient.createTerminal(credentials, project.project.id, input.text.toString()) }
-                        .onFailure { error -> runOnUiThread { Toast.makeText(this, error.message ?: "Could not open terminal.", Toast.LENGTH_LONG).show() } }
+                    runCatching { RelayClient.createTerminal(credentials, project.project.id, command) }
+                        .onFailure { error -> runOnUiThread {
+                            removePendingAction(action.id)
+                            Toast.makeText(this, error.message ?: "Could not open terminal.", Toast.LENGTH_LONG).show()
+                        } }
                         .onSuccess { runOnUiThread { requestRemoteRefresh(showSpinner = false) } }
                 }
             }.show()
@@ -2080,9 +2274,22 @@ class MainActivity : AppCompatActivity() {
             .setNegativeButton("Cancel", null)
             .setPositiveButton("Close") { _, _ ->
                 val credentials = SecretStore.load(this, target.pairId) ?: return@setPositiveButton
+                val action = PendingMobileAction(
+                    id = UUID.randomUUID().toString(),
+                    kind = PendingMobileAction.CLOSE_TERMINAL,
+                    pairId = target.pairId,
+                    projectId = target.projectId,
+                    terminalId = target.terminal.id,
+                    label = target.terminal.agent ?: target.terminal.title,
+                    createdAt = System.currentTimeMillis(),
+                )
+                beginPendingAction(action)
                 executor.execute {
                     runCatching { RelayClient.closeTerminal(credentials, target.terminal.id) }
-                        .onFailure { error -> runOnUiThread { Toast.makeText(this, error.message ?: "Could not close terminal.", Toast.LENGTH_LONG).show() } }
+                        .onFailure { error -> runOnUiThread {
+                            removePendingAction(action.id)
+                            Toast.makeText(this, error.message ?: "Could not close terminal.", Toast.LENGTH_LONG).show()
+                        } }
                         .onSuccess { runOnUiThread { requestRemoteRefresh(showSpinner = false) } }
                 }
             }.show()
@@ -2177,7 +2384,11 @@ class MainActivity : AppCompatActivity() {
                     } else {
                         refreshConversation()
                     }
-                    trackDelivery(commandId, target.pairId)
+                    trackDelivery(
+                        commandId,
+                        target.pairId,
+                        awaitWorkspaceConfirmation = target.terminal.mode == "conversation",
+                    )
                 }
             }.onFailure { error ->
                 MessageStore(this).updateOutgoingState(
@@ -2225,7 +2436,13 @@ class MainActivity : AppCompatActivity() {
                 MessageStore(this).updateOutgoingState(message.id, "sent")
                 runOnUiThread {
                     refreshConversation()
-                    trackDelivery(message.id, pairId)
+                    trackDelivery(
+                        message.id,
+                        pairId,
+                        awaitWorkspaceConfirmation = selectedTarget?.terminal?.let {
+                            it.id == terminalId && it.mode == "conversation"
+                        } ?: true,
+                    )
                 }
             }.onFailure { error ->
                 MessageStore(this).updateOutgoingState(
@@ -2238,12 +2455,21 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun trackDelivery(messageId: String, pairId: String) {
+    private fun trackDelivery(
+        messageId: String,
+        pairId: String,
+        awaitWorkspaceConfirmation: Boolean,
+    ) {
         if (!deliveryChecks.add(messageId)) return
-        scheduleDeliveryCheck(messageId, pairId, 0)
+        scheduleDeliveryCheck(messageId, pairId, awaitWorkspaceConfirmation, 0)
     }
 
-    private fun scheduleDeliveryCheck(messageId: String, pairId: String, attempt: Int) {
+    private fun scheduleDeliveryCheck(
+        messageId: String,
+        pairId: String,
+        awaitWorkspaceConfirmation: Boolean,
+        attempt: Int,
+    ) {
         conversationList.postDelayed({
             if (isFinishing || isDestroyed) {
                 deliveryChecks.remove(messageId)
@@ -2257,12 +2483,20 @@ class MainActivity : AppCompatActivity() {
                 runOnUiThread {
                     when {
                         delivered == true -> {
-                            MessageStore(this).updateOutgoingState(messageId, "delivered")
+                            MessageStore(this).updateOutgoingState(
+                                messageId,
+                                if (awaitWorkspaceConfirmation) "received" else "delivered",
+                            )
                             deliveryChecks.remove(messageId)
                             if (conversationDetail.visibility == View.VISIBLE) refreshConversation()
                         }
                         attempt >= 20 -> deliveryChecks.remove(messageId)
-                        else -> scheduleDeliveryCheck(messageId, pairId, attempt + 1)
+                        else -> scheduleDeliveryCheck(
+                            messageId,
+                            pairId,
+                            awaitWorkspaceConfirmation,
+                            attempt + 1,
+                        )
                     }
                 }
             }
@@ -2413,6 +2647,7 @@ class MainActivity : AppCompatActivity() {
     companion object {
         private const val STATE_PAGE = "selected-page"
         private const val CONNECTION_FRESH_MS = 75_000L
+        private const val PENDING_ALPHA = 0.48f
         private const val APP_LOCK_PREFERENCES = "app-lock"
         private const val APP_LOCK_ENABLED = "enabled"
         private val APP_LOCK_AUTHENTICATORS =

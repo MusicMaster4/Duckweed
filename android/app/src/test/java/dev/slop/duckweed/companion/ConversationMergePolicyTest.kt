@@ -6,6 +6,30 @@ import org.junit.Test
 
 class ConversationMergePolicyTest {
     @Test
+    fun syncedOutgoingMessageClearsItsPendingPresentation() {
+        val phone = message(
+            id = "command-1",
+            sentAt = 1_000L,
+            text = "Run tests",
+            deliveryState = "received",
+            kind = "user",
+        )
+        val desktop = message(
+            id = "workspace:pair-1:terminal-1:user-1",
+            sentAt = 1_400L,
+            text = "Run tests",
+            deliveryState = null,
+            kind = "user",
+        )
+
+        val merged = ConversationMergePolicy.merge(listOf(desktop), listOf(phone))
+
+        assertEquals(1, merged.size)
+        assertEquals("command-1", merged.single().id)
+        assertEquals("delivered", merged.single().deliveryState)
+    }
+
+    @Test
     fun outgoingImageMessageMergesWithDelayedWorkspaceConfirmation() {
         val image = MobileImageAttachment("image-1", "photo.jpg", "image/jpeg", null, 42)
         val workspace = message("workspace:pair:term:turn-1", 14_000L, "Check this", null)
