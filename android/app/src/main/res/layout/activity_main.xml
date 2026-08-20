@@ -795,6 +795,17 @@
                 </LinearLayout>
             </LinearLayout>
 
+            <!-- Keep the composer outside this flexible region. When the IME
+                 reduces the window, conversation content gives up height first
+                 instead of pushing the text field below the keyboard. -->
+            <LinearLayout
+                android:id="@+id/conversation_content"
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="1"
+                android:clipChildren="true"
+                android:orientation="vertical">
+
             <androidx.recyclerview.widget.RecyclerView
                 android:id="@+id/conversation_list"
                 android:layout_width="match_parent"
@@ -948,6 +959,8 @@
                     android:orientation="vertical"
                     android:padding="6dp" />
             </ScrollView>
+
+            </LinearLayout>
 
             <LinearLayout
                 android:id="@+id/conversation_composer"

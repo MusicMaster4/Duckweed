@@ -36,6 +36,7 @@ import androidx.biometric.BiometricPrompt
 import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsAnimationCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.updatePadding
 import androidx.recyclerview.widget.LinearLayoutManager
@@ -456,19 +457,43 @@ class MainActivity : AppCompatActivity() {
     private fun configureSystemBarInsets() {
         val root = findViewById<View>(R.id.app_root)
         ViewCompat.setOnApplyWindowInsetsListener(root) { view, insets ->
-            val systemArea = insets.getInsets(
-                WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout(),
-            )
-            val keyboardArea = insets.getInsets(WindowInsetsCompat.Type.ime())
+            applyWindowInsets(view, insets)
+            insets
+        }
+        ViewCompat.setWindowInsetsAnimationCallback(
+            root,
+            object : WindowInsetsAnimationCompat.Callback(DISPATCH_MODE_CONTINUE_ON_SUBTREE) {
+                override fun onProgress(
+                    insets: WindowInsetsCompat,
+                    runningAnimations: MutableList<WindowInsetsAnimationCompat>,
+                ): WindowInsetsCompat {
+                    applyWindowInsets(root, insets)
+                    return insets
+                }
+            },
+        )
+        ViewCompat.requestApplyInsets(root)
+    }
+
+    private fun applyWindowInsets(view: View, insets: WindowInsetsCompat) {
+        val systemArea = insets.getInsets(
+            WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout(),
+        )
+        val keyboardArea = insets.getInsets(WindowInsetsCompat.Type.ime())
+        val bottom = maxOf(systemArea.bottom, keyboardArea.bottom)
+        if (
+            view.paddingLeft != systemArea.left ||
+            view.paddingTop != systemArea.top ||
+            view.paddingRight != systemArea.right ||
+            view.paddingBottom != bottom
+        ) {
             view.updatePadding(
                 left = systemArea.left,
                 top = systemArea.top,
                 right = systemArea.right,
-                bottom = maxOf(systemArea.bottom, keyboardArea.bottom),
+                bottom = bottom,
             )
-            insets
         }
-        ViewCompat.requestApplyInsets(root)
     }
 
     private fun showPage(page: Page) {
