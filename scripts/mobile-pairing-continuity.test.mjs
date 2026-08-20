@@ -83,7 +83,8 @@ describe("mobile pairing continuity", () => {
     );
     const build = read("android/app/build.gradle.kts");
 
-    expect(desktop).toContain('window.addEventListener("duckweed:mobile-refresh", paired)');
+    expect(desktop).toContain('window.addEventListener("duckweed:mobile-refresh", refreshed)');
+    expect(desktop).toContain("refreshUsageLimits(0)");
     expect(desktop).toContain("pollDelay = commands.length > 0 ? 1_200 : Math.min(4_000, pollDelay * 1.5)");
     expect(desktop).toContain("const presence = window.setInterval");
     expect(desktop).toContain("mobileSendPresence()");

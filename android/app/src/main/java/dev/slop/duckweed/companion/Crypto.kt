@@ -93,6 +93,7 @@ object Crypto {
     internal fun parseWorkspace(pairId: String, json: JSONObject): WorkspaceSnapshot? {
         if (json.optString("kind") != "workspace" || !json.has("projects")) return null
         val projectsJson = json.optJSONArray("projects") ?: JSONArray()
+        val usageLimitsJson = json.optJSONArray("usageLimits") ?: JSONArray()
         val projects = (0 until projectsJson.length()).mapNotNull { projectIndex ->
             val project = projectsJson.optJSONObject(projectIndex) ?: return@mapNotNull null
             val terminalsJson = project.optJSONArray("terminals") ?: JSONArray()
@@ -161,7 +162,45 @@ object Crypto {
                 }.filter { it.id.isNotBlank() },
             )
         }.filter { it.id.isNotBlank() }
-        return WorkspaceSnapshot(pairId, json.optLong("sentAt", System.currentTimeMillis()), projects)
+        val usageLimits = (0 until usageLimitsJson.length()).mapNotNull { quotaIndex ->
+            val quota = usageLimitsJson.optJSONObject(quotaIndex) ?: return@mapNotNull null
+            val limitsJson = quota.optJSONArray("limits") ?: JSONArray()
+            val limits = (0 until limitsJson.length()).mapNotNull { limitIndex ->
+                val limit = limitsJson.optJSONObject(limitIndex) ?: return@mapNotNull null
+                val percent = limit.optDouble("percent", Double.NaN)
+                if (!percent.isFinite()) return@mapNotNull null
+                RemoteUsageLimit(
+                    id = limit.optString("id", "limit-$limitIndex"),
+                    label = limit.optString("label", "Usage limit"),
+                    percent = percent.coerceIn(0.0, 100.0),
+                    resetsAt = if (limit.has("resetsAt") && !limit.isNull("resetsAt")) {
+                        limit.optLong("resetsAt")
+                    } else {
+                        null
+                    },
+                    usageHoursLeft = if (
+                        limit.has("usageHoursLeft") && !limit.isNull("usageHoursLeft")
+                    ) {
+                        limit.optDouble("usageHoursLeft").takeIf { it.isFinite() && it >= 0.0 }
+                    } else {
+                        null
+                    },
+                )
+            }
+            if (limits.isEmpty()) return@mapNotNull null
+            RemoteUsageQuota(
+                agent = quota.optString("agent"),
+                label = quota.optString("label", "Agent"),
+                plan = if (quota.isNull("plan")) null else quota.optString("plan").takeIf { it.isNotBlank() },
+                limits = limits,
+            )
+        }
+        return WorkspaceSnapshot(
+            pairId = pairId,
+            updatedAt = json.optLong("sentAt", System.currentTimeMillis()),
+            projects = projects,
+            usageLimits = usageLimits,
+        )
     }
 
     internal fun decryptBytes(

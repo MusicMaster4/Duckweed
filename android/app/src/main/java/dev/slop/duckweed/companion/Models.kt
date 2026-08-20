@@ -46,10 +46,26 @@ data class WorkspaceSnapshot(
     val pairId: String,
     val updatedAt: Long,
     val projects: List<RemoteProject>,
+    val usageLimits: List<RemoteUsageQuota> = emptyList(),
     val presenceAt: Long? = null,
 ) {
     val lastSeenAt: Long get() = presenceAt ?: updatedAt
 }
+
+data class RemoteUsageQuota(
+    val agent: String,
+    val label: String,
+    val plan: String?,
+    val limits: List<RemoteUsageLimit>,
+)
+
+data class RemoteUsageLimit(
+    val id: String,
+    val label: String,
+    val percent: Double,
+    val resetsAt: Long?,
+    val usageHoursLeft: Double?,
+)
 
 data class RemoteProject(
     val id: String,

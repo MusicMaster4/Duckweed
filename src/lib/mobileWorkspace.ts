@@ -1,11 +1,13 @@
 import type {
   MobileConversationSnapshot,
   MobileTerminalSnapshot,
+  MobileUsageQuotaSnapshot,
   MobileWorkspaceSnapshot,
 } from "./ipc";
 import type { AgentStatus } from "./agents/types";
 import type { AgentItem } from "./agents/types";
 import type { MobileAgentActivitySnapshot } from "./ipc";
+import type { Quota } from "./usage";
 
 // The relay accepts up to 320,000 base64url ciphertext characters. Keeping the
 // serialized workspace below this smaller budget leaves room for AES-GCM,
@@ -62,6 +64,24 @@ export interface MobileTerminalActivity {
   busy: boolean;
   pendingAgentTurn: boolean;
   structuredStatus: AgentStatus | null;
+}
+
+/** Keep the phone payload focused on limits a provider actually reported. */
+export function mobileUsageLimits(quotas: readonly Quota[]): MobileUsageQuotaSnapshot[] {
+  return quotas
+    .filter((quota) => quota.source === "reported" && quota.limits.length > 0)
+    .map((quota) => ({
+      agent: quota.agent,
+      label: quota.label,
+      plan: quota.plan,
+      limits: quota.limits.map((limit) => ({
+        id: limit.id,
+        label: limit.label,
+        percent: Math.max(0, Math.min(100, limit.percent)),
+        resetsAt: limit.resets_at,
+        usageHoursLeft: limit.forecast?.usage_hours_left ?? null,
+      })),
+    }));
 }
 
 /** Rebuild the compact unified diff used when a provider sent before/after text. */

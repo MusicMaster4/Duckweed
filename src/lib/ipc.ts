@@ -182,8 +182,27 @@ export interface MobileProjectSnapshot {
   terminals: MobileTerminalSnapshot[];
 }
 
+export interface MobileUsageLimitSnapshot {
+  id: string;
+  label: string;
+  /** Provider-reported utilization, where 100 means the window is exhausted. */
+  percent: number;
+  resetsAt: number | null;
+  /** Estimated hours of active use left, when the provider history supports it. */
+  usageHoursLeft: number | null;
+}
+
+export interface MobileUsageQuotaSnapshot {
+  agent: string;
+  label: string;
+  plan: string | null;
+  limits: MobileUsageLimitSnapshot[];
+}
+
 export interface MobileWorkspaceSnapshot {
   projects: MobileProjectSnapshot[];
+  /** Compact provider-reported limits for the companion Settings page. */
+  usageLimits?: MobileUsageQuotaSnapshot[];
 }
 
 export interface MobileRemoteCommand {

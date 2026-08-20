@@ -76,6 +76,7 @@ import {
   mobileSendCompletion,
   mobileSendPresence,
   mobileSendWorkspace,
+  mobileStatus,
   portsList,
   powerAction,
   projectInfo,
@@ -136,6 +137,7 @@ import {
   MOBILE_WORKSPACE_CONVERSATION_BUDGET_BYTES,
   mobileAgentActivity,
   mobileTerminalStatus,
+  mobileUsageLimits,
   truncateUtf8,
   truncateUtf8Tail,
   utf8ByteLength,
@@ -146,7 +148,11 @@ import {
   applyStripReorder,
 } from "./lib/tabReorder";
 import * as terminals from "./lib/terminals";
-import { loadSettings as loadUsageSettings, prefetchUsage } from "./lib/usage";
+import {
+  cachedUsage,
+  loadSettings as loadUsageSettings,
+  prefetchUsage,
+} from "./lib/usage";
 import type {
   EditorReveal,
   LeafNode,
@@ -895,6 +901,8 @@ export default function App() {
     let publishing = false;
     let publishQueued = false;
     let publishDelay = 250;
+    const usageDays = loadUsageSettings().days;
+    let usageLimits = mobileUsageLimits(cachedUsage(usageDays)?.quotas ?? []);
 
     const publish = () => {
       timer = 0;
@@ -904,6 +912,7 @@ export default function App() {
       }
       let remainingConversationBytes = MOBILE_WORKSPACE_CONVERSATION_BUDGET_BYTES;
       const snapshot = {
+        usageLimits,
         projects: tabsRef.current.map((tab) => ({
           id: tab.id,
           name: tab.project?.name ?? tab.title,
@@ -1062,6 +1071,15 @@ export default function App() {
       if (timer) return;
       timer = window.setTimeout(publish, delay);
     };
+    const refreshUsageLimits = (maxAgeMs = 60_000) => {
+      void prefetchUsage(usageDays, maxAgeMs).then((snapshot) => {
+        if (stopped) return;
+        usageLimits = mobileUsageLimits(snapshot.quotas);
+        schedule();
+      }).catch((error) => {
+        if (!stopped) console.error("mobile usage limits sync", error);
+      });
+    };
     const offAgents = agentSessions.subscribeAll(schedule);
     const offTerminals = termIds.map((termId) => terminals.subscribeSession(termId, schedule));
     const offTerminalOutput = termIds.map((termId) =>
@@ -1073,10 +1091,16 @@ export default function App() {
     );
     const paired = () => {
       mobileWorkspaceSnapshotRef.current = "";
+      refreshUsageLimits();
+      schedule();
+    };
+    const refreshed = () => {
+      mobileWorkspaceSnapshotRef.current = "";
+      refreshUsageLimits(0);
       schedule();
     };
     window.addEventListener("duckweed:mobile-paired", paired);
-    window.addEventListener("duckweed:mobile-refresh", paired);
+    window.addEventListener("duckweed:mobile-refresh", refreshed);
     const presence = window.setInterval(() => {
       void mobileSendPresence().then((result) => {
         if (result.failed > 0) throw new Error(result.errors.join("; "));
@@ -1084,13 +1108,18 @@ export default function App() {
         if (!stopped) console.error("mobile presence sync", error);
       });
     }, 30_000);
+    void mobileStatus().then((status) => {
+      if (!stopped && status.devices.length > 0) refreshUsageLimits();
+    }).catch((error) => {
+      if (!stopped) console.error("mobile usage limits status", error);
+    });
     schedule();
     return () => {
       stopped = true;
       if (timer) window.clearTimeout(timer);
       window.clearInterval(presence);
       window.removeEventListener("duckweed:mobile-paired", paired);
-      window.removeEventListener("duckweed:mobile-refresh", paired);
+      window.removeEventListener("duckweed:mobile-refresh", refreshed);
       offAgents();
       offTerminals.forEach((off) => off());
       offTerminalOutput.forEach((off) => off());

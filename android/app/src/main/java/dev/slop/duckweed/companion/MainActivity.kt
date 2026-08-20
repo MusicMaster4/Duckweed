@@ -53,7 +53,9 @@ import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
 import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
 import java.util.concurrent.Executors
+import java.util.Locale
 import java.util.UUID
+import kotlin.math.roundToInt
 
 class MainActivity : AppCompatActivity() {
     private enum class Page { ACTIVITY, PROJECTS, CONVERSATIONS, SETTINGS }
@@ -75,6 +77,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var connectionHealth: TextView
     private lateinit var connectionLastSync: TextView
     private lateinit var retryConnectionButton: Button
+    private lateinit var usageLimitsContent: LinearLayout
+    private lateinit var usageLimitsEmpty: TextView
     private lateinit var projectDetail: View
     private lateinit var conversationDetail: View
     private lateinit var conversationCommandsScroll: View
@@ -148,6 +152,7 @@ class MainActivity : AppCompatActivity() {
         override fun run() {
             refreshConnectionHealth()
             refreshWorkspaces()
+            refreshUsageLimits()
             refreshConversationAvailability()
             connectionDot.postDelayed(this, 30_000)
         }
@@ -248,6 +253,8 @@ class MainActivity : AppCompatActivity() {
         connectionHealth = findViewById(R.id.connection_health)
         connectionLastSync = findViewById(R.id.connection_last_sync)
         retryConnectionButton = findViewById(R.id.retry_connection_button)
+        usageLimitsContent = findViewById(R.id.usage_limits_content)
+        usageLimitsEmpty = findViewById(R.id.usage_limits_empty)
         projectDetail = findViewById(R.id.project_detail)
         conversationDetail = findViewById(R.id.conversation_detail)
         conversationCommandsScroll = findViewById(R.id.conversation_commands_scroll)
@@ -1076,6 +1083,7 @@ class MainActivity : AppCompatActivity() {
         emptyState.visibility = if (messages.isEmpty()) View.VISIBLE else View.GONE
         refreshWorkspaces(snapshots, unreadKeys)
         refreshConnectionHealth(snapshots)
+        refreshUsageLimits(snapshots)
         if (conversationDetail.visibility == View.VISIBLE) refreshConversation()
         openIntentResponse()
     }
@@ -1355,6 +1363,104 @@ class MainActivity : AppCompatActivity() {
             conversationList.post {
                 conversationList.scrollToPosition(timeline.lastIndex)
             }
+        }
+    }
+
+    private fun refreshUsageLimits(snapshots: List<WorkspaceSnapshot> = cachedSnapshots) {
+        if (!::usageLimitsContent.isInitialized || !::usageLimitsEmpty.isInitialized) return
+        val quotas = snapshots.firstOrNull { it.usageLimits.isNotEmpty() }?.usageLimits.orEmpty()
+        usageLimitsContent.removeAllViews()
+        usageLimitsEmpty.visibility = if (quotas.isEmpty()) View.VISIBLE else View.GONE
+        if (quotas.isEmpty()) return
+
+        val now = System.currentTimeMillis()
+        quotas.forEachIndexed { quotaIndex, quota ->
+            val card = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(16), dp(16), dp(16), dp(16))
+                setBackgroundResource(R.drawable.message_card)
+            }
+            val header = LinearLayout(this).apply {
+                gravity = android.view.Gravity.CENTER_VERTICAL
+                orientation = LinearLayout.HORIZONTAL
+            }
+            header.addView(TextView(this).apply {
+                text = quota.label
+                textSize = 15f
+                setTextColor(ContextCompat.getColor(this@MainActivity, R.color.duckweed_text))
+                typeface = android.graphics.Typeface.DEFAULT_BOLD
+            }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            quota.plan?.let { plan ->
+                header.addView(TextView(this).apply {
+                    text = plan.uppercase(Locale.US)
+                    textSize = 10f
+                    setTextColor(ContextCompat.getColor(this@MainActivity, R.color.duckweed_accent))
+                    setBackgroundResource(R.drawable.chip_accent)
+                    setPadding(dp(10), dp(5), dp(10), dp(5))
+                })
+            }
+            card.addView(header)
+
+            quota.limits.forEach { limit ->
+                val block = LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                }
+                val labelRow = LinearLayout(this).apply {
+                    gravity = android.view.Gravity.CENTER_VERTICAL
+                    orientation = LinearLayout.HORIZONTAL
+                }
+                labelRow.addView(TextView(this).apply {
+                    text = limit.label
+                    textSize = 13f
+                    setTextColor(ContextCompat.getColor(this@MainActivity, R.color.duckweed_text_dim))
+                }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+                labelRow.addView(TextView(this).apply {
+                    text = UsageLimitCopy.percentUsed(limit.percent)
+                    textSize = 13f
+                    setTextColor(ContextCompat.getColor(this@MainActivity, R.color.duckweed_text))
+                    typeface = android.graphics.Typeface.DEFAULT_BOLD
+                })
+                block.addView(labelRow)
+                block.addView(ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+                    max = 100
+                    progress = limit.percent.roundToInt().coerceIn(0, 100)
+                    progressDrawable = ContextCompat.getDrawable(this@MainActivity, R.drawable.plan_progress)
+                    contentDescription = "${limit.label}, ${UsageLimitCopy.percentUsed(limit.percent)}"
+                }, LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    dp(4),
+                ).apply {
+                    topMargin = dp(8)
+                })
+                val details = listOfNotNull(
+                    UsageLimitCopy.activeTimeLeft(limit.usageHoursLeft),
+                    UsageLimitCopy.resetTime(limit.resetsAt, now),
+                )
+                if (details.isNotEmpty()) {
+                    block.addView(TextView(this).apply {
+                        text = details.joinToString(" · ")
+                        textSize = 12f
+                        setTextColor(ContextCompat.getColor(this@MainActivity, R.color.duckweed_text_faint))
+                    }, LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT,
+                    ).apply {
+                        topMargin = dp(7)
+                    })
+                }
+                card.addView(block, LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                ).apply {
+                    topMargin = dp(16)
+                })
+            }
+            usageLimitsContent.addView(card, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ).apply {
+                if (quotaIndex > 0) topMargin = dp(10)
+            })
         }
     }
 

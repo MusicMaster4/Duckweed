@@ -5,6 +5,7 @@ import {
   MOBILE_WORKSPACE_SNAPSHOT_BUDGET_BYTES,
   mobileAgentActivity,
   mobileTerminalStatus,
+  mobileUsageLimits,
   truncateUtf8,
   truncateUtf8Tail,
   utf8ByteLength,
@@ -157,6 +158,60 @@ describe("mobile workspace payload bounds", () => {
       ).toBe(true);
       expect(terminal.permission?.questions[0].options[0].label).toBe("Option 1");
     }
+  });
+});
+
+describe("mobile usage limits", () => {
+  test("keeps reported windows and only the fields needed by Settings", () => {
+    const limits = mobileUsageLimits([
+      {
+        agent: "codex",
+        label: "Codex",
+        source: "reported",
+        plan: "pro",
+        message: null,
+        limits: [{
+          id: "weekly",
+          label: "7-day limit",
+          used: 142,
+          limit: null,
+          percent: 142,
+          unit: "percent",
+          resets_at: 1_800_000_000_000,
+          window_ms: 7 * 24 * 60 * 60 * 1000,
+          forecast: {
+            per_hour: 2,
+            basis: "recent",
+            confidence: 0.8,
+            usage_hours_left: 12.5,
+            runs_out_at: null,
+            projected_percent: 88,
+            duty: 0.25,
+          },
+        }],
+      },
+      {
+        agent: "future-agent",
+        label: "Future Agent",
+        source: "unavailable",
+        plan: null,
+        message: "No provider data",
+        limits: [],
+      },
+    ]);
+
+    expect(limits).toEqual([{
+      agent: "codex",
+      label: "Codex",
+      plan: "pro",
+      limits: [{
+        id: "weekly",
+        label: "7-day limit",
+        percent: 100,
+        resetsAt: 1_800_000_000_000,
+        usageHoursLeft: 12.5,
+      }],
+    }]);
   });
 });
 

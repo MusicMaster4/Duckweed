@@ -297,6 +297,27 @@ pub struct WorkspaceProject {
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceSnapshot {
     pub projects: Vec<WorkspaceProject>,
+    #[serde(default)]
+    pub usage_limits: Vec<WorkspaceUsageQuota>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceUsageQuota {
+    pub agent: String,
+    pub label: String,
+    pub plan: Option<String>,
+    pub limits: Vec<WorkspaceUsageLimit>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceUsageLimit {
+    pub id: String,
+    pub label: String,
+    pub percent: f64,
+    pub resets_at: Option<i64>,
+    pub usage_hours_left: Option<f64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -307,6 +328,7 @@ struct PlainWorkspace<'a> {
     sent_at: i64,
     kind: &'static str,
     projects: &'a [WorkspaceProject],
+    usage_limits: &'a [WorkspaceUsageQuota],
 }
 
 #[derive(Debug, Serialize)]
@@ -1132,6 +1154,7 @@ fn send_workspace_to_device(
         sent_at,
         kind: "workspace",
         projects: &snapshot.projects,
+        usage_limits: &snapshot.usage_limits,
     })
     .map_err(|error| error.to_string())?;
     if full_plain.len() > MAX_WORKSPACE_PLAINTEXT_BYTES {

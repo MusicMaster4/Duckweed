@@ -33,6 +33,18 @@ class CryptoTest {
                 {
                   "kind":"workspace",
                   "sentAt":42,
+                  "usageLimits":[{
+                    "agent":"codex",
+                    "label":"Codex",
+                    "plan":"pro",
+                    "limits":[{
+                      "id":"weekly",
+                      "label":"7-day limit",
+                      "percent":47.4,
+                      "resetsAt":1800000000000,
+                      "usageHoursLeft":12.5
+                    }]
+                  }],
                   "projects":[{
                     "id":"project",
                     "name":"Duckweed",
@@ -67,6 +79,13 @@ class CryptoTest {
         assertEquals(120, terminal.terminalColumns)
         assertEquals(32, terminal.terminalRows)
         assertEquals("Codex ready", terminal.terminalOutput)
+        val usage = snapshot.usageLimits.single()
+        assertEquals("Codex", usage.label)
+        assertEquals("pro", usage.plan)
+        assertEquals("7-day limit", usage.limits.single().label)
+        assertEquals(47.4, usage.limits.single().percent, 0.001)
+        assertEquals(1_800_000_000_000L, usage.limits.single().resetsAt)
+        assertEquals(12.5, usage.limits.single().usageHoursLeft!!, 0.001)
     }
 
     @Test
