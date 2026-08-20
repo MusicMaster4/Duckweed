@@ -16,7 +16,7 @@ import { AgentImageAttachments } from "../AgentImageAttachments";
 import { MessageCopyButton } from "../MessageCopyButton";
 import { AgentProviderIcon } from "../AgentProviderIcon";
 import { useSubagentUi } from "../subagents/SubagentUiContext";
-import { preparingMessageFor } from "./preparingMessages";
+import { preparingMessageFor, thinkingHeadlineFor } from "./preparingMessages";
 import { thinkingPulsePatternFor } from "./thinkingPulsePatterns";
 
 export interface ExperienceProps {
@@ -772,14 +772,19 @@ function ThinkingHistory({
   clusterId: string;
 }) {
   const [open, setOpen] = useState(false);
-  // Registry-backed like the pulse: a fresh preparing cluster gets a new line;
-  // remounts during the same wait keep the same stand-in text.
-  const preparingMessage = preparingMessageFor(clusterId);
   const panelId = useId();
   const latest = showLatestFull ? thoughts[thoughts.length - 1] : undefined;
   const active = working;
   const earlierThoughts = showLatestFull ? thoughts.slice(0, -1) : thoughts;
   const expandable = earlierThoughts.length > 0;
+  const showPreparingSummary = !latest && thoughts.length === 0;
+  // Registry-backed like the pulse: a fresh preparing cluster gets a new line;
+  // remounts during the same wait keep the same stand-in text.
+  const preparingMessage = showPreparingSummary ? preparingMessageFor(clusterId) : null;
+  const headline = thinkingHeadlineFor(clusterId, {
+    working: active,
+    hasLatest: Boolean(latest),
+  });
 
   return (
     <section
@@ -796,13 +801,13 @@ function ThinkingHistory({
         aria-controls={expandable ? panelId : undefined}
         aria-label={
           latest
-            ? `Thinking: ${traceSummary(latest.text)}`
-            : "Thinking"
+            ? `${headline}: ${traceSummary(latest.text)}`
+            : headline
         }
       >
         <ActivityPulse active={active} clusterId={clusterId} />
-        <span className="agent-activity-history-label">Thinking</span>
-        {!latest && thoughts.length === 0 && (
+        <span className="agent-activity-history-label">{headline}</span>
+        {showPreparingSummary && preparingMessage && (
           <span className="agent-activity-history-summary agent-thinking-shimmer">
             {preparingMessage}
           </span>

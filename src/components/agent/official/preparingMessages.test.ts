@@ -1,14 +1,22 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 
 import {
+  FUNNY_THINKING_LABEL_CHANCE,
   PREPARING_MESSAGES,
   nextPreparingMessage,
   preparingMessageFor,
+  resetPreparingMessageAssignmentsForTests,
+  setFunnyThinkingLabelRandomForTests,
+  thinkingHeadlineFor,
 } from "./preparingMessages";
 
+afterEach(() => {
+  resetPreparingMessageAssignmentsForTests();
+});
+
 describe("preparingMessages", () => {
-  test("the pool has one hundred short lines", () => {
-    expect(PREPARING_MESSAGES).toHaveLength(100);
+  test("the pool has six hundred short lines", () => {
+    expect(PREPARING_MESSAGES).toHaveLength(600);
     for (const line of PREPARING_MESSAGES) {
       expect(line.length).toBeGreaterThan(0);
       expect(line.length).toBeLessThanOrEqual(24);
@@ -23,7 +31,7 @@ describe("preparingMessages", () => {
       expect(PREPARING_MESSAGES).toContain(line);
       seen.add(line);
     }
-    // 70% pool cooldown should force real variety across many picks.
+    // Half-pool cooldown should force real variety across many picks.
     expect(seen.size).toBeGreaterThan(20);
   });
 
@@ -36,5 +44,34 @@ describe("preparingMessages", () => {
     expect(PREPARING_MESSAGES).toContain(first);
     // Distinct clusters draw independently; with cooldown they usually differ.
     expect(typeof other).toBe("string");
+  });
+
+  test("keeps Thinking as the headline except for a rare live swap", () => {
+    expect(FUNNY_THINKING_LABEL_CHANCE).toBe(0.02);
+
+    expect(
+      thinkingHeadlineFor("term-a:live:idle", { working: false, hasLatest: true }),
+    ).toBe("Thinking");
+    expect(
+      thinkingHeadlineFor("term-a:live:empty", { working: true, hasLatest: false }),
+    ).toBe("Thinking");
+
+    setFunnyThinkingLabelRandomForTests(() => 1);
+    expect(
+      thinkingHeadlineFor("term-a:live:miss", { working: true, hasLatest: true }),
+    ).toBe("Thinking");
+
+    setFunnyThinkingLabelRandomForTests(() => 0);
+    const swapped = thinkingHeadlineFor("term-a:live:hit", {
+      working: true,
+      hasLatest: true,
+    });
+    expect(PREPARING_MESSAGES).toContain(swapped);
+    expect(
+      thinkingHeadlineFor("term-a:live:hit", { working: true, hasLatest: true }),
+    ).toBe(swapped);
+    expect(
+      thinkingHeadlineFor("term-a:live:hit", { working: false, hasLatest: true }),
+    ).toBe("Thinking");
   });
 });

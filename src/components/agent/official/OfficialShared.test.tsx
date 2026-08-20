@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import type {
@@ -13,7 +13,11 @@ import { OpenCodeExperience } from "../provider/OpenCodeExperience";
 import { ChatGPTExperience } from "./ChatGPTExperience";
 import { ClaudeExperience } from "./ClaudeExperience";
 import { GrokDotMatrix, GrokExperience } from "./GrokExperience";
-import { PREPARING_MESSAGES } from "./preparingMessages";
+import {
+  PREPARING_MESSAGES,
+  resetPreparingMessageAssignmentsForTests,
+  setFunnyThinkingLabelRandomForTests,
+} from "./preparingMessages";
 import {
   activeAssistantId,
   activityGroups,
@@ -86,6 +90,16 @@ function renderAgentActivity(agent: AgentId, items: AgentItem[]): string {
 }
 
 describe("official agent presentation", () => {
+  beforeEach(() => {
+    resetPreparingMessageAssignmentsForTests();
+    // Pin the rare Thinking-label swap off so presentation tests stay stable.
+    setFunnyThinkingLabelRandomForTests(() => 1);
+  });
+
+  afterEach(() => {
+    resetPreparingMessageAssignmentsForTests();
+  });
+
   test("uses an animated arrow only for the running workflow step", () => {
     const plan: PlanItem = {
       kind: "plan",
@@ -989,6 +1003,28 @@ describe("official agent presentation", () => {
     expect(resumedHtml).not.toContain(`>${waitingMessage}<`);
     expect(resumedHtml).toContain("Checking the remaining references.");
     expect(resumedHtml).toContain("Find remaining references");
+  });
+
+  test("rarely swaps the live Thinking label for a stand-in line while working", () => {
+    setFunnyThinkingLabelRandomForTests(() => 0);
+
+    const html = renderAgentActivity("codex", [
+      { kind: "user", id: "user", at: 1, text: "Inspect" },
+      {
+        kind: "thinking",
+        id: "thinking-live",
+        at: 2,
+        text: "Looking through the current files.",
+        streaming: true,
+      },
+    ]);
+
+    const funnyLabel = PREPARING_MESSAGES.find((message) =>
+      html.includes(`>${message}<`),
+    );
+    expect(funnyLabel).toBeDefined();
+    expect(html).not.toContain(">Thinking<");
+    expect(html).toContain("Looking through the current files.");
   });
 
   test("keeps a completed turn's final response even when it is short", () => {
