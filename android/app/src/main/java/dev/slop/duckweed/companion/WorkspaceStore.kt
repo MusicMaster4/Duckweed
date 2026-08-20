@@ -44,6 +44,30 @@ class WorkspaceStore(private val context: Context) {
                                 .put("kind", item.kind)
                                 .put("title", item.title)
                                 .put("detail", item.detail)
+                                .put("command", item.command)
+                                .put(
+                                    "changes",
+                                    JSONArray().apply {
+                                        item.changes.forEach { change ->
+                                            put(
+                                                JSONObject()
+                                                    .put("path", change.path)
+                                                    .put("insertions", change.insertions)
+                                                    .put("deletions", change.deletions)
+                                                    .put("diff", change.diff),
+                                            )
+                                        }
+                                    },
+                                )
+                                .put("planType", item.planType)
+                                .put(
+                                    "steps",
+                                    JSONArray().apply {
+                                        item.steps.forEach { step ->
+                                            put(JSONObject().put("text", step.text).put("status", step.status))
+                                        }
+                                    },
+                                )
                                 .put("status", item.status),
                         )
                     }
@@ -51,6 +75,7 @@ class WorkspaceStore(private val context: Context) {
                 val permission = terminal.permission?.let { pending ->
                     JSONObject()
                         .put("id", pending.id)
+                        .put("kind", pending.kind)
                         .put("title", pending.title)
                         .put("detail", pending.detail)
                         .put("command", pending.command)
@@ -63,6 +88,34 @@ class WorkspaceStore(private val context: Context) {
                                             .put("id", option.id)
                                             .put("label", option.label)
                                             .put("kind", option.kind),
+                                    )
+                                }
+                            },
+                        )
+                        .put(
+                            "questions",
+                            JSONArray().apply {
+                                pending.questions.forEach { question ->
+                                    put(
+                                        JSONObject()
+                                            .put("id", question.id)
+                                            .put("header", question.header)
+                                            .put("question", question.question)
+                                            .put("multiSelect", question.multiSelect)
+                                            .put(
+                                                "options",
+                                                JSONArray().apply {
+                                                    question.options.forEach { option ->
+                                                        put(
+                                                            JSONObject()
+                                                                .put("id", option.id)
+                                                                .put("label", option.label)
+                                                                .put("description", option.description)
+                                                                .put("preview", option.preview),
+                                                        )
+                                                    }
+                                                },
+                                            ),
                                     )
                                 }
                             },
@@ -161,26 +214,7 @@ class WorkspaceStore(private val context: Context) {
                                     if (!name.startsWith("/")) return@mapNotNull null
                                     RemoteSlashCommand(name, command.optString("description").trim())
                                 },
-                                activity = (0 until activityJson.length()).mapNotNull { activityIndex ->
-                                    val item = activityJson.optJSONObject(activityIndex) ?: return@mapNotNull null
-                                    val id = item.optString("id").trim()
-                                    val title = item.optString("title").trim()
-                                    val kind = item.optString("kind")
-                                    val status = item.optString("status")
-                                    if (id.isEmpty() || title.isEmpty() || kind !in setOf("thinking", "tool", "plan")) {
-                                        return@mapNotNull null
-                                    }
-                                    RemoteAgentActivity(
-                                        id,
-                                        item.optLong("at", json.optLong("updatedAt")),
-                                        kind,
-                                        title,
-                                        item.optString("detail").trim().takeIf { it.isNotEmpty() },
-                                        item.optString("command").trim().takeIf { it.isNotEmpty() },
-                                        parseFileChanges(item.optJSONArray("changes")),
-                                        status.takeIf { it in setOf("pending", "running", "done", "error") } ?: "done",
-                                    )
-                                },
+                                activity = parseAgentActivities(activityJson, json.optLong("updatedAt")),
                                 conversation = (0 until conversationJson.length()).mapNotNull { messageIndex ->
                                     val message = conversationJson.optJSONObject(messageIndex) ?: return@mapNotNull null
                                     val role = message.optString("role")
@@ -196,23 +230,7 @@ class WorkspaceStore(private val context: Context) {
                                         streaming = message.optBoolean("streaming", false),
                                     )
                                 },
-                                permission = permissionJson?.let { permission ->
-                                    val optionsJson = permission.optJSONArray("options") ?: JSONArray()
-                                    RemotePermission(
-                                        id = permission.optString("id"),
-                                        title = permission.optString("title", "Approval required"),
-                                        detail = permission.optString("detail").takeIf { it.isNotBlank() },
-                                        command = permission.optString("command").takeIf { it.isNotBlank() },
-                                        options = (0 until optionsJson.length()).mapNotNull { optionIndex ->
-                                            val option = optionsJson.optJSONObject(optionIndex) ?: return@mapNotNull null
-                                            val id = option.optString("id")
-                                            val label = option.optString("label")
-                                            val kind = option.optString("kind")
-                                            if (id.isBlank() || label.isBlank()) return@mapNotNull null
-                                            RemotePermissionOption(id, label, kind)
-                                        },
-                                    ).takeIf { it.id.isNotBlank() && it.options.isNotEmpty() }
-                                },
+                                permission = parseRemotePermission(permissionJson),
                                 terminalOutput = terminalOutput,
                             )
                         },

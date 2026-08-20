@@ -134,10 +134,16 @@ describe("mobile terminal activity", () => {
 
     expect(activity.map((item) => [item.kind, item.title, item.status])).toEqual([
       ["thinking", "Reasoning", "running"],
-      ["plan", "Inspect state", "done"],
       ["plan", "Publish progress", "running"],
       ["tool", "Run mobile tests", "running"],
     ]);
+    expect(activity[1]).toMatchObject({
+      planType: "tasks",
+      steps: [
+        { text: "Inspect state", status: "done" },
+        { text: "Publish progress", status: "running" },
+      ],
+    });
     expect(activity.at(-1)?.detail).toBe("Compiling");
     expect(activity.at(-1)?.command).toBe("gradle test");
     expect(activity.at(-1)?.changes).toEqual([{
@@ -176,5 +182,33 @@ describe("mobile terminal activity", () => {
       pendingAgentTurn: true,
       structuredStatus: null,
     })).toBe("working");
+  });
+
+  test("keeps the active plan tracker when newer tool rows reach the activity limit", () => {
+    const tools = Array.from({ length: 24 }, (_, index) => ({
+      id: `tool-${index}`,
+      at: index + 2,
+      kind: "tool" as const,
+      callId: `call-${index}`,
+      name: "read",
+      tool: "read" as const,
+      title: `Read file ${index}`,
+      status: "done" as const,
+      command: null,
+      output: "",
+      changes: [],
+    }));
+    const activity = mobileAgentActivity([
+      {
+        id: "plan",
+        at: 1,
+        kind: "plan",
+        steps: [{ text: "Keep tracking", status: "running" }],
+      },
+      ...tools,
+    ], 20);
+
+    expect(activity).toHaveLength(20);
+    expect(activity.some((item) => item.id === "plan" && item.kind === "plan")).toBe(true);
   });
 });

@@ -981,9 +981,10 @@ export default function App() {
                 })),
               activity: mobileAgentActivity(session?.items ?? []),
               conversation,
-              permission: session?.permission && session.permission.kind !== "question"
+              permission: session?.permission
                 ? {
                     id: session.permission.id,
+                    kind: session.permission.kind ?? "approval",
                     title: session.permission.title.slice(0, 240),
                     detail: session.permission.detail?.slice(0, 4_000) ?? null,
                     command: session.permission.command?.slice(0, 8_000) ?? null,
@@ -991,6 +992,18 @@ export default function App() {
                       id: option.id,
                       label: option.label.slice(0, 120),
                       kind: option.kind,
+                    })),
+                    questions: (session.permission.questions ?? []).slice(0, 3).map((question) => ({
+                      id: question.id.slice(0, 160),
+                      header: question.header.slice(0, 120),
+                      question: question.question.slice(0, 1_000),
+                      multiSelect: question.multiSelect,
+                      options: question.options.slice(0, 12).map((option) => ({
+                        id: option.id.slice(0, 160),
+                        label: option.label.slice(0, 240),
+                        description: option.description.slice(0, 1_000),
+                        preview: option.preview?.slice(0, 4_000) ?? null,
+                      })),
                     })),
                   }
                 : null,
@@ -1118,6 +1131,40 @@ export default function App() {
                   permission.options.some((option) => option.id === command.optionId)
                 ) {
                   agentSessions.respond(command.terminalId, command.permissionId, command.optionId);
+                }
+              } else if (
+                command.kind === "question" &&
+                command.terminalId &&
+                command.permissionId
+              ) {
+                const permission = agentSessions.get(command.terminalId)?.permission;
+                if (permission?.id === command.permissionId && permission.kind === "question") {
+                  if (command.answers.length === 0) {
+                    const reject = permission.options.find((option) => option.kind === "reject");
+                    agentSessions.respond(
+                      command.terminalId,
+                      command.permissionId,
+                      reject?.id ?? "deny",
+                    );
+                  } else {
+                    const asked = new Map(
+                      (permission.questions ?? []).map((question) => [question.id, question]),
+                    );
+                    const uniqueIds = new Set(command.answers.map((answer) => answer.questionId));
+                    const valid = uniqueIds.size === asked.size && command.answers.length === asked.size &&
+                      command.answers.every((answer) => {
+                        const question = asked.get(answer.questionId);
+                        if (!question) return false;
+                        const labels = new Set(question.options.map((option) => option.label));
+                        return (question.multiSelect || answer.labels.length <= 1) &&
+                          new Set(answer.labels).size === answer.labels.length &&
+                          answer.labels.every((label) => labels.has(label)) &&
+                          (answer.labels.length > 0 || Boolean(answer.custom?.trim()));
+                      });
+                    if (valid) {
+                      agentSessions.answer(command.terminalId, command.permissionId, command.answers);
+                    }
+                  }
                 }
               } else if (
                 command.kind === "input" &&

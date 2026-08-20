@@ -1,5 +1,6 @@
 package dev.slop.duckweed.companion
 
+import android.content.res.ColorStateList
 import android.graphics.Typeface
 import android.text.Spannable
 import android.text.SpannableStringBuilder
@@ -9,6 +10,7 @@ import android.view.Gravity
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.core.content.ContextCompat
@@ -79,6 +81,16 @@ class ConversationAdapter(
             val outgoing = message.kind == "user"
             row.gravity = if (outgoing) Gravity.END else Gravity.START
             bubble.setBackgroundResource(if (outgoing) R.drawable.bubble_user else R.drawable.bubble_agent)
+            (bubble.layoutParams as LinearLayout.LayoutParams).apply {
+                width = if (outgoing) {
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                } else {
+                    LinearLayout.LayoutParams.MATCH_PARENT
+                }
+                marginStart = if (outgoing) dp(48) else 0
+                marginEnd = 0
+                bubble.layoutParams = this
+            }
             author.text = when {
                 outgoing -> "YOU"
                 message.streaming -> "${message.agent.uppercase()}  ·  WRITING"
@@ -125,73 +137,91 @@ class ConversationAdapter(
             }
             bubble.setOnClickListener(if (retryable) View.OnClickListener { onRetry(message) } else null)
         }
+
+        private fun dp(value: Int): Int =
+            (value * itemView.resources.displayMetrics.density).toInt()
     }
 
     private inner class ActivityHolder(view: View) : RecyclerView.ViewHolder(view) {
-        private val card: LinearLayout = view.findViewById(R.id.activity_card)
-        private val kind: TextView = view.findViewById(R.id.activity_kind)
-        private val status: TextView = view.findViewById(R.id.activity_status)
+        private val container: LinearLayout = view.findViewById(R.id.activity_container)
+        private val row: View = view.findViewById(R.id.activity_row)
+        private val icon: ImageView = view.findViewById(R.id.activity_icon)
         private val title: TextView = view.findViewById(R.id.activity_title)
+        private val status: TextView = view.findViewById(R.id.activity_status)
+        private val expand: ImageView = view.findViewById(R.id.activity_expand)
+        private val details: LinearLayout = view.findViewById(R.id.activity_details)
         private val detail: TextView = view.findViewById(R.id.activity_detail)
         private val command: TextView = view.findViewById(R.id.activity_command)
         private val changes: LinearLayout = view.findViewById(R.id.activity_changes)
         private val time: TextView = view.findViewById(R.id.activity_time)
-        private val expand: TextView = view.findViewById(R.id.activity_expand)
 
         fun bind(activity: RemoteAgentActivity, expanded: Boolean) {
-            kind.text = when (activity.kind) {
-                "thinking" -> "THINKING"
-                "plan" -> "PLAN"
-                else -> "TOOL CALL"
-            }
-            status.text = when (activity.status) {
-                "running" -> "In progress"
-                "pending" -> "Pending"
-                "error" -> "Failed"
-                else -> "Completed"
-            }
-            status.setTextColor(
-                ContextCompat.getColor(
-                    itemView.context,
-                    when (activity.status) {
-                        "running" -> R.color.duckweed_accent
-                        "error" -> R.color.duckweed_error
-                        else -> R.color.duckweed_text_faint
-                    },
-                ),
+            val reasoning = activity.kind == "thinking"
+            val hasDiff = activity.changes.isNotEmpty()
+            icon.setImageResource(
+                when {
+                    reasoning -> R.drawable.ic_reasoning_activity
+                    hasDiff -> R.drawable.ic_diff_activity
+                    else -> R.drawable.ic_tool_activity
+                },
             )
-            title.text = activity.title
-            bindOptionalText(detail, activity.detail, if (expanded) Int.MAX_VALUE else 4)
-            bindOptionalText(command, activity.command, if (expanded) Int.MAX_VALUE else 4)
-            bindChanges(activity.changes, expanded)
-            time.text = relativeTime(activity.at)
+            val tint = ContextCompat.getColor(
+                itemView.context,
+                when (activity.status) {
+                    "running" -> R.color.duckweed_accent
+                    "error" -> R.color.duckweed_error
+                    else -> R.color.duckweed_text_faint
+                },
+            )
+            icon.imageTintList = ColorStateList.valueOf(tint)
+            title.text = if (reasoning) "Reasoning..." else activity.title
+            status.text = when (activity.status) {
+                "running" -> "Running"
+                "pending" -> "Queued"
+                "error" -> "Failed"
+                else -> ""
+            }
+            status.visibility = if (status.text.isEmpty()) View.GONE else View.VISIBLE
+            status.setTextColor(tint)
 
-            val expandable = activity.detail.orEmpty().lineSequence().count() > 4 ||
-                activity.command.orEmpty().lineSequence().count() > 4 ||
-                activity.changes.any { it.diff.orEmpty().lineSequence().count() > COLLAPSED_DIFF_LINES }
-            expand.visibility = if (expandable) View.VISIBLE else View.GONE
-            expand.text = if (expanded) "Show less" else "Show more"
-            card.isClickable = expandable
-            card.isFocusable = expandable
-            card.setOnClickListener(if (expandable) View.OnClickListener {
+            val expandable = if (reasoning) {
+                !activity.detail.isNullOrBlank()
+            } else {
+                !activity.detail.isNullOrBlank() || !activity.command.isNullOrBlank() || hasDiff
+            }
+            details.visibility = if (expanded && expandable) View.VISIBLE else View.GONE
+            bindOptionalText(detail, activity.detail)
+            bindOptionalText(command, activity.command)
+            if (expanded) {
+                bindChanges(activity.changes)
+            } else {
+                changes.removeAllViews()
+                changes.visibility = View.GONE
+            }
+            time.text = relativeTime(activity.at)
+            expand.visibility = if (expandable) View.VISIBLE else View.INVISIBLE
+            expand.rotation = if (expanded) 90f else 0f
+            row.isClickable = expandable
+            row.isFocusable = expandable
+            row.setOnClickListener(if (expandable) View.OnClickListener {
                 val position = bindingAdapterPosition
                 val rowId = rows.getOrNull(position)?.id ?: return@OnClickListener
                 if (!expandedActivity.add(rowId)) expandedActivity.remove(rowId)
                 notifyItemChanged(position)
             } else null)
-            card.contentDescription = buildString {
-                append(kind.text).append(". ").append(status.text).append(". ").append(activity.title)
+            container.contentDescription = buildString {
+                append(if (reasoning) "Reasoning" else "Tool. ${activity.title}")
+                if (status.text.isNotEmpty()) append(". ").append(status.text)
                 if (expandable) append(if (expanded) ". Expanded" else ". Collapsed. Double tap to expand")
             }
         }
 
-        private fun bindOptionalText(view: TextView, value: String?, maxLines: Int) {
+        private fun bindOptionalText(view: TextView, value: String?) {
             view.visibility = if (value.isNullOrBlank()) View.GONE else View.VISIBLE
             view.text = value
-            view.maxLines = maxLines
         }
 
-        private fun bindChanges(fileChanges: List<RemoteFileChange>, expanded: Boolean) {
+        private fun bindChanges(fileChanges: List<RemoteFileChange>) {
             changes.removeAllViews()
             changes.visibility = if (fileChanges.isEmpty()) View.GONE else View.VISIBLE
             fileChanges.forEach { change ->
@@ -209,7 +239,7 @@ class ConversationAdapter(
                 })
                 if (!change.diff.isNullOrBlank()) {
                     block.addView(TextView(itemView.context).apply {
-                        text = styledDiff(change.diff, expanded)
+                        text = styledDiff(change.diff)
                         textSize = 10f
                         typeface = Typeface.MONOSPACE
                         setLineSpacing(0f, 1.08f)
@@ -237,12 +267,11 @@ class ConversationAdapter(
             return copy
         }
 
-        private fun styledDiff(value: String, expanded: Boolean): SpannableStringBuilder {
+        private fun styledDiff(value: String): SpannableStringBuilder {
             val clean = value.lineSequence()
                 .filterNot { it.startsWith("diff ") || it.startsWith("---") || it.startsWith("+++") }
                 .toList()
-            val limit = if (expanded) EXPANDED_DIFF_LINES else COLLAPSED_DIFF_LINES
-            val visible = clean.take(limit)
+            val visible = clean.take(EXPANDED_DIFF_LINES)
             val copy = SpannableStringBuilder()
             visible.forEachIndexed { index, line ->
                 if (index > 0) copy.append('\n')
@@ -262,7 +291,7 @@ class ConversationAdapter(
                 )
             }
             if (clean.size > visible.size) {
-                copy.append("\n… ${clean.size - visible.size} more lines")
+                copy.append("\n... ${clean.size - visible.size} more lines")
             }
             return copy
         }
@@ -291,7 +320,6 @@ class ConversationAdapter(
     companion object {
         private const val VIEW_MESSAGE = 0
         private const val VIEW_ACTIVITY = 1
-        private const val COLLAPSED_DIFF_LINES = 12
         private const val EXPANDED_DIFF_LINES = 80
     }
 }

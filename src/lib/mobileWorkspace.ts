@@ -166,21 +166,44 @@ export function mobileAgentActivity(
               : "done",
       });
     } else if (item.kind === "plan") {
-      item.steps.forEach((step, index) => {
-        activity.push({
-          id: `${item.id}:${index}`,
-          at: item.at + index,
-          kind: "plan",
-          title: truncateUtf8(step.text.trim(), 320),
-          detail: null,
-          command: null,
-          changes: [],
-          status: step.status,
-        });
+      const steps = item.steps.map((step) => ({
+        text: truncateUtf8(step.text.trim(), 320),
+        status: step.status,
+      })).filter((step) => step.text.length > 0);
+      const current = steps.find((step) => step.status === "running");
+      const allDone = steps.length > 0 && steps.every((step) => step.status === "done");
+      activity.push({
+        id: item.id,
+        at: item.at,
+        kind: "plan",
+        title: current?.text ?? (allDone ? "Tasks completed" : "Task plan"),
+        detail: null,
+        command: null,
+        changes: [],
+        planType: item.planType ?? "tasks",
+        steps,
+        status: current ? "running" : allDone ? "done" : "pending",
       });
     }
   }
-  return activity.slice(-Math.max(0, limit));
+  const boundedLimit = Math.max(0, limit);
+  const bounded = activity.slice(-boundedLimit);
+  let latestPlan: MobileAgentActivitySnapshot | undefined;
+  for (let index = activity.length - 1; index >= 0; index -= 1) {
+    if (activity[index].kind === "plan") {
+      latestPlan = activity[index];
+      break;
+    }
+  }
+  if (
+    boundedLimit > 0 &&
+    latestPlan &&
+    !bounded.some((item) => item.id === latestPlan.id)
+  ) {
+    bounded.shift();
+    bounded.unshift(latestPlan);
+  }
+  return bounded;
 }
 
 type ConversationRef = {

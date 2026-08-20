@@ -194,6 +194,17 @@ pub struct WorkspaceAgentActivity {
     pub command: Option<String>,
     #[serde(default)]
     pub changes: Vec<WorkspaceFileChange>,
+    #[serde(default)]
+    pub plan_type: Option<String>,
+    #[serde(default)]
+    pub steps: Vec<WorkspacePlanStep>,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspacePlanStep {
+    pub text: String,
     pub status: String,
 }
 
@@ -222,10 +233,37 @@ pub struct WorkspacePermissionOption {
 #[serde(rename_all = "camelCase")]
 pub struct WorkspacePermission {
     pub id: String,
+    #[serde(default = "default_permission_kind")]
+    pub kind: String,
     pub title: String,
     pub detail: Option<String>,
     pub command: Option<String>,
     pub options: Vec<WorkspacePermissionOption>,
+    #[serde(default)]
+    pub questions: Vec<WorkspaceQuestion>,
+}
+
+fn default_permission_kind() -> String {
+    "approval".to_string()
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceQuestion {
+    pub id: String,
+    pub header: String,
+    pub question: String,
+    pub multi_select: bool,
+    pub options: Vec<WorkspaceQuestionOption>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceQuestionOption {
+    pub id: String,
+    pub label: String,
+    pub description: String,
+    pub preview: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -293,9 +331,40 @@ struct PlainRemoteCommand {
     #[serde(default)]
     option_id: Option<String>,
     #[serde(default)]
+    answers: Vec<RemoteQuestionAnswer>,
+    #[serde(default)]
     agent: Option<String>,
     #[serde(default)]
     images: Vec<RemoteImageAttachment>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteQuestionAnswer {
+    question_id: String,
+    labels: Vec<String>,
+    custom: Option<String>,
+}
+
+impl RemoteQuestionAnswer {
+    fn is_valid(&self) -> bool {
+        !self.question_id.trim().is_empty()
+            && self.question_id.len() <= 160
+            && self.labels.len() <= 12
+            && self
+                .labels
+                .iter()
+                .all(|label| !label.trim().is_empty() && label.len() <= 240)
+            && self
+                .custom
+                .as_deref()
+                .map_or(true, |custom| custom.len() <= 4_000)
+            && (!self.labels.is_empty()
+                || self
+                    .custom
+                    .as_deref()
+                    .is_some_and(|custom| !custom.trim().is_empty()))
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -360,6 +429,18 @@ impl PlainRemoteCommand {
                         .as_deref()
                         .is_some_and(|value| !value.trim().is_empty())
             }
+            "question" => {
+                self.terminal_id
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty())
+                    && self
+                        .permission_id
+                        .as_deref()
+                        .is_some_and(|value| !value.trim().is_empty())
+                    && self.answers.len() <= 3
+                    && (self.answers.is_empty()
+                        || self.answers.iter().all(RemoteQuestionAnswer::is_valid))
+            }
             _ => false,
         }
     }
@@ -376,6 +457,7 @@ pub struct RemoteCommand {
     pub text: Option<String>,
     pub permission_id: Option<String>,
     pub option_id: Option<String>,
+    pub answers: Vec<RemoteQuestionAnswer>,
     pub agent: Option<String>,
     pub images: Vec<RemoteImageAttachment>,
 }
@@ -1226,6 +1308,7 @@ fn poll_commands_blocking(app: &AppHandle) -> Result<Vec<RemoteCommand>, String>
                 text: command.text,
                 permission_id: command.permission_id,
                 option_id: command.option_id,
+                answers: command.answers,
                 agent: command.agent,
                 images: command.images,
             });
@@ -1429,6 +1512,27 @@ mod tests {
         )
         .unwrap();
         assert!(!missing_option.is_valid());
+    }
+
+    #[test]
+    fn question_commands_carry_structured_answers_or_an_explicit_skip() {
+        let answered: PlainRemoteCommand = serde_json::from_str(
+            r#"{"version":1,"id":"00000000-0000-4000-8000-000000000001","kind":"question","terminalId":"term-1","permissionId":"permission-1","answers":[{"questionId":"q0","labels":["PostgreSQL"],"custom":"Use the existing cluster"}]}"#,
+        )
+        .unwrap();
+        assert!(answered.is_valid());
+
+        let skipped: PlainRemoteCommand = serde_json::from_str(
+            r#"{"version":1,"id":"00000000-0000-4000-8000-000000000001","kind":"question","terminalId":"term-1","permissionId":"permission-1","answers":[]}"#,
+        )
+        .unwrap();
+        assert!(skipped.is_valid());
+
+        let empty_answer: PlainRemoteCommand = serde_json::from_str(
+            r#"{"version":1,"id":"00000000-0000-4000-8000-000000000001","kind":"question","terminalId":"term-1","permissionId":"permission-1","answers":[{"questionId":"q0","labels":[],"custom":"  "}]}"#,
+        )
+        .unwrap();
+        assert!(!empty_answer.is_valid());
     }
 
     #[test]

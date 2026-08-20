@@ -816,6 +816,95 @@
                 android:paddingTop="8dp"
                 android:paddingBottom="8dp" />
 
+            <LinearLayout
+                android:id="@+id/conversation_plan"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:layout_marginBottom="8dp"
+                android:background="@drawable/plan_tracker_surface"
+                android:orientation="vertical"
+                android:paddingStart="12dp"
+                android:paddingTop="8dp"
+                android:paddingEnd="8dp"
+                android:paddingBottom="9dp"
+                android:visibility="gone">
+
+                <LinearLayout
+                    android:id="@+id/conversation_plan_head"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:background="?attr/selectableItemBackground"
+                    android:gravity="center_vertical"
+                    android:minHeight="42dp"
+                    android:orientation="horizontal">
+
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:orientation="vertical">
+
+                        <TextView
+                            android:id="@+id/conversation_plan_label"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:fontFamily="sans-serif-medium"
+                            android:letterSpacing="0.08"
+                            android:text="Tasks"
+                            android:textColor="@color/duckweed_accent"
+                            android:textSize="11sp" />
+
+                        <TextView
+                            android:id="@+id/conversation_plan_current"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="3dp"
+                            android:ellipsize="end"
+                            android:fontFamily="sans-serif-medium"
+                            android:maxLines="1"
+                            android:textColor="@color/duckweed_text"
+                            android:textSize="12sp" />
+                    </LinearLayout>
+
+                    <TextView
+                        android:id="@+id/conversation_plan_count"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="10dp"
+                        android:fontFamily="sans-serif-medium"
+                        android:textColor="@color/duckweed_text_dim"
+                        android:textSize="11sp" />
+
+                    <ImageView
+                        android:id="@+id/conversation_plan_expand"
+                        android:layout_width="32dp"
+                        android:layout_height="32dp"
+                        android:contentDescription="@null"
+                        android:importantForAccessibility="no"
+                        android:padding="9dp"
+                        android:src="@drawable/ic_chevron_right"
+                        app:tint="@color/duckweed_text_faint" />
+                </LinearLayout>
+
+                <ProgressBar
+                    android:id="@+id/conversation_plan_progress"
+                    style="?android:attr/progressBarStyleHorizontal"
+                    android:layout_width="match_parent"
+                    android:layout_height="4dp"
+                    android:layout_marginTop="4dp"
+                    android:max="100"
+                    android:progressDrawable="@drawable/plan_progress" />
+
+                <LinearLayout
+                    android:id="@+id/conversation_plan_steps"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="9dp"
+                    android:orientation="vertical"
+                    android:visibility="gone" />
+            </LinearLayout>
+
             <TextView
                 android:id="@+id/conversation_terminal"
                 android:layout_width="match_parent"
@@ -836,16 +925,21 @@
                 android:textSize="11sp"
                 android:visibility="gone" />
 
-            <LinearLayout
+            <dev.slop.duckweed.companion.MaxHeightScrollView
                 android:id="@+id/conversation_approval"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="6dp"
                 android:layout_marginBottom="8dp"
                 android:background="@drawable/approval_card"
-                android:orientation="vertical"
+                android:fillViewport="true"
                 android:padding="16dp"
                 android:visibility="gone">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical">
 
                 <TextView
                     android:id="@+id/approval_title"
@@ -883,7 +977,8 @@
                     android:layout_height="wrap_content"
                     android:layout_marginTop="12dp"
                     android:orientation="vertical" />
-            </LinearLayout>
+                </LinearLayout>
+            </dev.slop.duckweed.companion.MaxHeightScrollView>
 
             <ScrollView
                 android:id="@+id/conversation_commands_scroll"

@@ -55,6 +55,28 @@ class ConversationTimelinePolicyTest {
         assertTrue(rows.single() is ConversationTimelineItem.Activity)
     }
 
+    @Test
+    fun `keeps a plan out of the timeline because it has a docked tracker`() {
+        val rows = ConversationTimelinePolicy.build(
+            messages = listOf(message("user", 10, "user")),
+            activity = listOf(
+                RemoteAgentActivity(
+                    id = "plan",
+                    at = 20,
+                    kind = "plan",
+                    title = "Implement mobile UI",
+                    detail = null,
+                    status = "running",
+                    steps = listOf(RemotePlanStep("Implement mobile UI", "running")),
+                ),
+            ),
+            agentWorking = true,
+            thinkingId = "terminal",
+        )
+
+        assertEquals(listOf("message:user"), rows.map { it.id })
+    }
+
     private fun message(id: String, at: Long, kind: String) = CompletionRecord(
         id = id,
         sentAt = at,

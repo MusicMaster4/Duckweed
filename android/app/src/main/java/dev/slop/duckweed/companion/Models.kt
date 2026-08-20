@@ -93,6 +93,13 @@ data class RemoteAgentActivity(
     val command: String? = null,
     val changes: List<RemoteFileChange> = emptyList(),
     val status: String,
+    val planType: String? = null,
+    val steps: List<RemotePlanStep> = emptyList(),
+)
+
+data class RemotePlanStep(
+    val text: String,
+    val status: String,
 )
 
 data class RemoteFileChange(
@@ -108,6 +115,8 @@ data class RemotePermission(
     val detail: String?,
     val command: String?,
     val options: List<RemotePermissionOption>,
+    val kind: String = "approval",
+    val questions: List<RemoteQuestion> = emptyList(),
 )
 
 data class RemotePermissionOption(
@@ -122,6 +131,27 @@ data class RemoteConversationMessage(
     val role: String,
     val text: String,
     val streaming: Boolean = false,
+)
+
+data class RemoteQuestion(
+    val id: String,
+    val header: String,
+    val question: String,
+    val multiSelect: Boolean,
+    val options: List<RemoteQuestionOption>,
+)
+
+data class RemoteQuestionOption(
+    val id: String,
+    val label: String,
+    val description: String,
+    val preview: String?,
+)
+
+data class RemoteQuestionAnswer(
+    val questionId: String,
+    val labels: List<String>,
+    val custom: String?,
 )
 
 data class ConversationTarget(

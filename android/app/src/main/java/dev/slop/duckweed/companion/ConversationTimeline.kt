@@ -22,8 +22,12 @@ object ConversationTimelinePolicy {
         agentWorking: Boolean,
         thinkingId: String,
     ): List<ConversationTimelineItem> {
-        val activityRows = activity.distinctBy { it.id }.toMutableList()
-        if (agentWorking && activityRows.none { it.status == "running" || it.status == "pending" }) {
+        val hasLiveActivity = activity.any { it.status == "running" || it.status == "pending" }
+        val activityRows = activity
+            .filterNot { it.kind == "plan" }
+            .distinctBy { it.id }
+            .toMutableList()
+        if (agentWorking && !hasLiveActivity) {
             val newestAt = maxOf(
                 messages.maxOfOrNull { it.sentAt } ?: 0L,
                 activityRows.maxOfOrNull { it.at } ?: 0L,

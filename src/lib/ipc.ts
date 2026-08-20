@@ -104,7 +104,15 @@ export interface MobileAgentActivitySnapshot {
   command: string | null;
   /** File edits attached to this tool call, including a bounded diff preview. */
   changes: MobileFileChangeSnapshot[];
+  /** A plan stays one docked tracker on mobile instead of one timeline row per step. */
+  planType?: "tasks" | "workflow";
+  steps?: MobilePlanStepSnapshot[];
   status: "pending" | "running" | "done" | "error";
+}
+
+export interface MobilePlanStepSnapshot {
+  text: string;
+  status: "pending" | "running" | "done";
 }
 
 export interface MobileFileChangeSnapshot {
@@ -122,10 +130,33 @@ export interface MobilePermissionOptionSnapshot {
 
 export interface MobilePermissionSnapshot {
   id: string;
+  kind: "approval" | "question";
   title: string;
   detail: string | null;
   command: string | null;
   options: MobilePermissionOptionSnapshot[];
+  questions: MobileQuestionSnapshot[];
+}
+
+export interface MobileQuestionOptionSnapshot {
+  id: string;
+  label: string;
+  description: string;
+  preview: string | null;
+}
+
+export interface MobileQuestionSnapshot {
+  id: string;
+  header: string;
+  question: string;
+  multiSelect: boolean;
+  options: MobileQuestionOptionSnapshot[];
+}
+
+export interface MobileQuestionAnswerSnapshot {
+  questionId: string;
+  labels: string[];
+  custom: string | null;
 }
 
 export interface MobileConversationSnapshot {
@@ -154,13 +185,14 @@ export interface MobileWorkspaceSnapshot {
 export interface MobileRemoteCommand {
   deviceId: string;
   commandId: string;
-  kind: "input" | "refresh" | "approval" | "create_terminal" | "close_terminal";
+  kind: "input" | "refresh" | "approval" | "question" | "create_terminal" | "close_terminal";
   terminalId: string | null;
   projectId: string | null;
   text: string | null;
   agent?: string | null;
   permissionId: string | null;
   optionId: string | null;
+  answers: MobileQuestionAnswerSnapshot[];
   images: Array<{
     id: string;
     name: string;

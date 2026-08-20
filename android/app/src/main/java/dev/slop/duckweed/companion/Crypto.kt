@@ -133,26 +133,7 @@ object Crypto {
                             if (!name.startsWith("/")) return@mapNotNull null
                             RemoteSlashCommand(name, command.optString("description").trim())
                         },
-                        activity = (0 until activityJson.length()).mapNotNull { activityIndex ->
-                            val item = activityJson.optJSONObject(activityIndex) ?: return@mapNotNull null
-                            val id = item.optString("id").trim()
-                            val title = item.optString("title").trim()
-                            val kind = item.optString("kind")
-                            val status = item.optString("status")
-                            if (id.isEmpty() || title.isEmpty() || kind !in setOf("thinking", "tool", "plan")) {
-                                return@mapNotNull null
-                            }
-                            RemoteAgentActivity(
-                                id,
-                                item.optLong("at", json.optLong("sentAt")),
-                                kind,
-                                title,
-                                item.optString("detail").trim().takeIf { it.isNotEmpty() },
-                                item.optString("command").trim().takeIf { it.isNotEmpty() },
-                                parseFileChanges(item.optJSONArray("changes")),
-                                status.takeIf { it in setOf("pending", "running", "done", "error") } ?: "done",
-                            )
-                        },
+                        activity = parseAgentActivities(activityJson, json.optLong("sentAt")),
                         conversation = (0 until conversationJson.length()).mapNotNull { messageIndex ->
                             val message = conversationJson.optJSONObject(messageIndex) ?: return@mapNotNull null
                             val role = message.optString("role")
@@ -168,27 +149,7 @@ object Crypto {
                                 streaming = message.optBoolean("streaming", false),
                             )
                         },
-                        permission = permissionJson?.let { permission ->
-                            val optionsJson = permission.optJSONArray("options") ?: JSONArray()
-                            val options = (0 until optionsJson.length()).mapNotNull { optionIndex ->
-                                val option = optionsJson.optJSONObject(optionIndex) ?: return@mapNotNull null
-                                val id = option.optString("id")
-                                val label = option.optString("label")
-                                val kind = option.optString("kind")
-                                if (id.isBlank() || label.isBlank() || kind !in setOf(
-                                        "allow", "allow-always", "reject", "reject-always",
-                                    )
-                                ) return@mapNotNull null
-                                RemotePermissionOption(id, label, kind)
-                            }
-                            RemotePermission(
-                                id = permission.optString("id"),
-                                title = permission.optString("title", "Approval required"),
-                                detail = permission.optString("detail").takeIf { it.isNotBlank() },
-                                command = permission.optString("command").takeIf { it.isNotBlank() },
-                                options = options,
-                            ).takeIf { it.id.isNotBlank() && it.options.isNotEmpty() }
-                        },
+                        permission = parseRemotePermission(permissionJson),
                         terminalOutput = terminalOutput,
                     )
                 }.filter { it.id.isNotBlank() },

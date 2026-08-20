@@ -170,6 +170,34 @@ object RelayClient {
             .put("optionId", optionId),
     )
 
+    fun sendQuestionAnswers(
+        credentials: PairCredentials,
+        projectId: String,
+        terminalId: String,
+        permissionId: String,
+        answers: List<RemoteQuestionAnswer>,
+    ): SentCommand = sendEncryptedCommand(
+        credentials,
+        JSONObject()
+            .put("kind", "question")
+            .put("projectId", projectId)
+            .put("terminalId", terminalId)
+            .put("permissionId", permissionId)
+            .put(
+                "answers",
+                JSONArray().apply {
+                    answers.forEach { answer ->
+                        put(
+                            JSONObject()
+                                .put("questionId", answer.questionId)
+                                .put("labels", JSONArray(answer.labels))
+                                .put("custom", answer.custom),
+                        )
+                    }
+                },
+            ),
+    )
+
     fun createTerminal(
         credentials: PairCredentials,
         projectId: String,
