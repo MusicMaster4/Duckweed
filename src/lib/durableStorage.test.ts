@@ -2,7 +2,11 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 
-import { COMMAND_HISTORY_KEY, DURABLE_KEYS } from "./durableStorage";
+import {
+  COMMAND_HISTORY_KEY,
+  DURABLE_KEYS,
+  createDurableWriteQueue,
+} from "./durableStorage";
 
 /** Pull every `duckweed:…` string literal from the Rust allowlist block. */
 function rustDurableKeys(source: string): string[] {
@@ -30,5 +34,39 @@ describe("durable settings keys", () => {
     for (const key of DURABLE_KEYS) {
       expect(allowed.has(key)).toBe(true);
     }
+  });
+});
+
+describe("durable settings writes", () => {
+  test("flush waits for queued writes and preserves their order", async () => {
+    let releaseFirst = () => {};
+    const firstCanFinish = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const events: string[] = [];
+    const queue = createDurableWriteQueue(() => {});
+
+    queue.enqueue(async () => {
+      events.push("first started");
+      await firstCanFinish;
+      events.push("first finished");
+    });
+    queue.enqueue(async () => {
+      events.push("second finished");
+    });
+
+    let flushed = false;
+    const flush = queue.flush().then(() => {
+      flushed = true;
+    });
+    await Promise.resolve();
+
+    expect(events).toEqual(["first started"]);
+    expect(flushed).toBe(false);
+
+    releaseFirst();
+    await flush;
+    expect(events).toEqual(["first started", "first finished", "second finished"]);
+    expect(flushed).toBe(true);
   });
 });

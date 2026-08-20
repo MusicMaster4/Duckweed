@@ -34,6 +34,7 @@ import { latest as latestSession, transcript as sessionTranscript } from "./hist
 import { AGENT_PROGRAMS, type AgentLaunch } from "./launch";
 import { loadClaudeSettingsDefaults } from "./claudeSettings";
 import {
+  rememberConfigurationChoice,
   rememberPreferences,
   withRememberedPreferences,
 } from "./preferences";
@@ -1203,10 +1204,12 @@ export function configure(
   }
 
   const clean = value.trim();
+  // Picker choices are defaults for future sessions even though applying them
+  // to this live process is staged until the next turn. Persist at selection
+  // time so closing the app, including an automatic shutdown after the current
+  // turn, cannot bring the previous choice back.
+  rememberConfigurationChoice(session.launch, kind, clean);
   if (kind === "model") {
-    if (session.launch.agent === "codex") {
-      rememberPreferences(session.launch, { model: clean });
-    }
     session.state = {
       ...session.state,
       nextModel: clean === session.state.model ? null : clean,

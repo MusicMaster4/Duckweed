@@ -3,6 +3,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import type { AgentLaunch } from "./launch";
 import {
   preferenceScope,
+  rememberConfigurationChoice,
   rememberPreferences,
   resetForTests,
   withRememberedPreferences,
@@ -91,6 +92,17 @@ describe("custom agent model preferences", () => {
     expect(withRememberedPreferences(grok)).toMatchObject({
       model: "grok-4.6",
       effort: "high",
+    });
+  });
+
+  test("remembers composer choices before the staged turn runs", () => {
+    const codex = launch("codex", "codex");
+    rememberConfigurationChoice(codex, "model", "gpt-5.6-sol");
+    rememberConfigurationChoice(codex, "effort", "xhigh");
+
+    expect(withRememberedPreferences(codex)).toMatchObject({
+      model: "gpt-5.6-sol",
+      effort: "xhigh",
     });
   });
 

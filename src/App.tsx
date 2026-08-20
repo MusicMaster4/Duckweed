@@ -118,6 +118,7 @@ import {
 } from "./lib/zoomRail";
 import { toggleFullscreen } from "./lib/window";
 import { DEFAULT_TOOLS_WIDTH, load, pushRecent, rehydrate, save } from "./lib/persist";
+import { flushDurableStorage } from "./lib/durableStorage";
 import {
   shouldPlayCompletionSound,
   shouldSignalCompletion,
@@ -1361,9 +1362,14 @@ export default function App() {
     return entries;
   }, []);
 
+  const firePowerAction = useCallback(async (action: powerWatch.PowerAction) => {
+    await flushDurableStorage();
+    await powerAction(action);
+  }, []);
+
   useEffect(
-    () => powerWatch.connect({ probe: probeActivity, fire: powerAction }),
-    [probeActivity],
+    () => powerWatch.connect({ probe: probeActivity, fire: firePowerAction }),
+    [firePowerAction, probeActivity],
   );
 
   // Power watch (and anything else that lists panes) can jump the UI to a

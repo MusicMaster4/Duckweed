@@ -31,6 +31,48 @@ export const DURABLE_KEYS = [
 
 export type DurableKey = (typeof DURABLE_KEYS)[number];
 
+export interface DurableWriteQueue {
+  enqueue(write: () => Promise<unknown>): void;
+  flush(): Promise<void>;
+}
+
+/**
+ * Serialize native settings writes and expose a barrier for destructive power
+ * actions. WebView localStorage is synchronous, but the app-data mirror is an
+ * IPC write. Without the barrier, shutdown can stop Duckweed while that newer
+ * value is still in flight, and the older mirror wins during the next restore.
+ */
+export function createDurableWriteQueue(
+  reportError: (error: unknown) => void,
+): DurableWriteQueue {
+  let tail = Promise.resolve();
+
+  return {
+    enqueue(write) {
+      tail = tail.then(async () => {
+        try {
+          await write();
+        } catch (error) {
+          reportError(error);
+        }
+      });
+    },
+    async flush() {
+      // A write can be queued while an earlier one is settling. Keep taking a
+      // new snapshot until the tail remains stable across the await.
+      while (true) {
+        const pending = tail;
+        await pending;
+        if (pending === tail) return;
+      }
+    },
+  };
+}
+
+const durableWrites = createDurableWriteQueue((error) => {
+  console.error("failed to save durable settings", error);
+});
+
 /**
  * Restore Duckweed-owned localStorage from the native app-data copy before
  * modules read their initial state. On the first run after this feature is
@@ -91,9 +133,12 @@ export function saveDurably(
   options?: { replace?: boolean },
 ): void {
   if (!TAURI_RUNTIME) return;
-  void invoke("settings_save", { key, value, replace: options?.replace ?? false }).catch(
-    (error) => {
-      console.error("failed to save durable settings", error);
-    },
+  durableWrites.enqueue(() =>
+    invoke("settings_save", { key, value, replace: options?.replace ?? false }),
   );
+}
+
+/** Wait until every app-data settings write queued so far is on disk. */
+export function flushDurableStorage(): Promise<void> {
+  return durableWrites.flush();
 }
