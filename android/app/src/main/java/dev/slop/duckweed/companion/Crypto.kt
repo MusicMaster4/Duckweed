@@ -64,6 +64,11 @@ object Crypto {
             durationMs = if (json.isNull("durationMs")) null else json.getLong("durationMs"),
             soundCue = if (json.isNull("soundCue")) null else json.optInt("soundCue").takeIf { it in 0..5 },
             unreadOnDesktop = if (json.has("unreadOnDesktop")) json.optBoolean("unreadOnDesktop") else null,
+            completionSeq = if (json.has("completionSeq") && !json.isNull("completionSeq")) {
+                json.optLong("completionSeq")
+            } else {
+                null
+            },
             workspace = parseWorkspace(credentials.pairId, json),
         )
     }
@@ -127,6 +132,7 @@ object Crypto {
                         } else {
                             null
                         },
+                        completionSeq = terminal.optLong("completionSeq"),
                         commands = (0 until commandsJson.length()).mapNotNull { commandIndex ->
                             val command = commandsJson.optJSONObject(commandIndex) ?: return@mapNotNull null
                             val name = command.optString("name").trim()

@@ -45,6 +45,7 @@ describe("mobile workspace payload bounds", () => {
           status: "idle",
           mode: "conversation",
           unreadOnDesktop: false,
+          completionSeq: 0,
           commands: [],
           activity: [],
           conversation: [{
@@ -80,6 +81,7 @@ describe("mobile workspace payload bounds", () => {
           status: "idle",
           mode: "terminal",
           unreadOnDesktop: false,
+          completionSeq: 0,
           commands: [],
           activity: [],
           terminalOutput: `${"old output\n".repeat(30_000)}LATEST SCREEN`,

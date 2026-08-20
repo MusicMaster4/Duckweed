@@ -92,6 +92,7 @@ object NotificationTools {
             .setContentIntent(pending)
             .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
             .setPublicVersion(publicVersion)
+        readAction(context, message)?.let(builder::addAction)
         approvalActions(context, message).forEach(builder::addAction)
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
             message.soundCue?.let { completionSounds.getOrNull(it) }
@@ -100,6 +101,27 @@ object NotificationTools {
         val notification = builder.build()
         NotificationManagerCompat.from(context).notify(message.id.hashCode(), notification)
         return true
+    }
+
+    private fun readAction(
+        context: Context,
+        message: CompletionRecord,
+    ): NotificationCompat.Action? {
+        if (message.pairId == null || message.terminalId == null) return null
+        val intent = Intent(context, ReadActionReceiver::class.java).apply {
+            action = ReadActionReceiver.ACTION_MARK_READ
+            putExtra(ReadActionReceiver.EXTRA_MESSAGE_ID, message.id)
+        }
+        val pending = PendingIntent.getBroadcast(
+            context,
+            "read:${message.id}".hashCode(),
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        return NotificationCompat.Action.Builder(0, "Mark as read", pending)
+            .setSemanticAction(NotificationCompat.Action.SEMANTIC_ACTION_MARK_AS_READ)
+            .setShowsUserInterface(false)
+            .build()
     }
 
     private fun approvalActions(

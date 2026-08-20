@@ -127,6 +127,7 @@ pub struct CompletionMessage {
     pub duration_ms: Option<u64>,
     pub sound_cue: Option<u8>,
     pub unread_on_desktop: bool,
+    pub completion_seq: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -145,6 +146,7 @@ struct PlainMessage<'a> {
     duration_ms: Option<u64>,
     sound_cue: Option<u8>,
     unread_on_desktop: bool,
+    completion_seq: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -164,6 +166,8 @@ pub struct WorkspaceTerminal {
     pub terminal_rows: Option<u16>,
     #[serde(default)]
     pub unread_on_desktop: bool,
+    #[serde(default)]
+    pub completion_seq: u64,
     #[serde(default)]
     pub commands: Vec<WorkspaceSlashCommand>,
     #[serde(default)]
@@ -331,6 +335,8 @@ struct PlainRemoteCommand {
     #[serde(default)]
     option_id: Option<String>,
     #[serde(default)]
+    completion_seq: Option<u64>,
+    #[serde(default)]
     answers: Vec<RemoteQuestionAnswer>,
     #[serde(default)]
     agent: Option<String>,
@@ -404,6 +410,10 @@ impl PlainRemoteCommand {
                 .terminal_id
                 .as_deref()
                 .is_some_and(|value| !value.trim().is_empty()),
+            "read" => self
+                .terminal_id
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty()),
             "input" => {
                 self.terminal_id
                     .as_deref()
@@ -457,6 +467,7 @@ pub struct RemoteCommand {
     pub text: Option<String>,
     pub permission_id: Option<String>,
     pub option_id: Option<String>,
+    pub completion_seq: Option<u64>,
     pub answers: Vec<RemoteQuestionAnswer>,
     pub agent: Option<String>,
     pub images: Vec<RemoteImageAttachment>,
@@ -775,6 +786,8 @@ fn bounded_preview_plaintext(
     duration_ms: Option<u64>,
     sound_cue: Option<u8>,
     unread_on_desktop: bool,
+    terminal_id: Option<&str>,
+    completion_seq: Option<u64>,
 ) -> Result<Vec<u8>, String> {
     let serialize = |preview_response: Option<&str>| {
         serde_json::to_vec(&PlainMessage {
@@ -784,13 +797,14 @@ fn bounded_preview_plaintext(
             agent,
             project,
             project_id: None,
-            terminal_id: None,
+            terminal_id,
             terminal_title: None,
             kind,
             response: preview_response,
             duration_ms,
             sound_cue,
             unread_on_desktop,
+            completion_seq,
         })
         .map_err(|error| error.to_string())
     };
@@ -1042,6 +1056,8 @@ fn send_to_device(
         message.duration_ms,
         message.sound_cue,
         message.unread_on_desktop,
+        message.terminal_id.as_deref(),
+        message.completion_seq,
     )?;
     let full_plain = serde_json::to_vec(&PlainMessage {
         version: 1,
@@ -1057,6 +1073,7 @@ fn send_to_device(
         duration_ms: message.duration_ms,
         sound_cue: message.sound_cue.filter(|cue| *cue < 6),
         unread_on_desktop: message.unread_on_desktop,
+        completion_seq: message.completion_seq,
     })
     .map_err(|error| error.to_string())?;
     let preview = encrypt(
@@ -1308,6 +1325,7 @@ fn poll_commands_blocking(app: &AppHandle) -> Result<Vec<RemoteCommand>, String>
                 text: command.text,
                 permission_id: command.permission_id,
                 option_id: command.option_id,
+                completion_seq: command.completion_seq,
                 answers: command.answers,
                 agent: command.agent,
                 images: command.images,
@@ -1436,6 +1454,7 @@ pub async fn mobile_send_test(app: AppHandle) -> Result<SendResult, String> {
                 duration_ms: None,
                 sound_cue: None,
                 unread_on_desktop: true,
+                completion_seq: None,
             },
         )
     })
@@ -1512,6 +1531,22 @@ mod tests {
         )
         .unwrap();
         assert!(!missing_option.is_valid());
+    }
+
+    #[test]
+    fn read_commands_target_one_terminal_completion() {
+        let valid: PlainRemoteCommand = serde_json::from_str(
+            r#"{"version":1,"id":"00000000-0000-4000-8000-000000000001","kind":"read","terminalId":"term-1","completionSeq":7}"#,
+        )
+        .unwrap();
+        assert!(valid.is_valid());
+        assert_eq!(valid.completion_seq, Some(7));
+
+        let missing_terminal: PlainRemoteCommand = serde_json::from_str(
+            r#"{"version":1,"id":"00000000-0000-4000-8000-000000000001","kind":"read","completionSeq":7}"#,
+        )
+        .unwrap();
+        assert!(!missing_terminal.is_valid());
     }
 
     #[test]
@@ -1599,11 +1634,15 @@ mod tests {
             Some(42),
             Some(3),
             true,
+            Some("term-1"),
+            Some(7),
         )
         .unwrap();
         let decoded: serde_json::Value = serde_json::from_slice(&plain).unwrap();
         let preview_response = decoded["response"].as_str().unwrap();
         assert_eq!(decoded["unreadOnDesktop"], true);
+        assert_eq!(decoded["terminalId"], "term-1");
+        assert_eq!(decoded["completionSeq"], 7);
         let envelope = encrypt(
             "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
             "pair",

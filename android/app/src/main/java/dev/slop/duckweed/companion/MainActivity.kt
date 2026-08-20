@@ -230,6 +230,7 @@ class MainActivity : AppCompatActivity() {
         appUpdater = AppUpdater(this)
         draftStore = DraftStore(this)
         storageExecutor.execute { MessageStore(this).recoverInterruptedSends() }
+        ReadSyncScheduler.enqueue(this)
 
         pairingStatus = findViewById(R.id.pairing_status)
         scanButton = findViewById(R.id.scan_button)
@@ -924,6 +925,7 @@ class MainActivity : AppCompatActivity() {
                             .onSuccess {
                                 SecretStore.remove(this, pairing.pairId)
                                 WorkspaceStore(this).remove(pairing.pairId)
+                                MessageStore(this).discardReadSyncs(pairing.pairId)
                             }
                             .onFailure { failures += it.message ?: pairing.pairId }
                     }
@@ -1165,12 +1167,25 @@ class MainActivity : AppCompatActivity() {
 
     private fun openResponse(message: CompletionRecord) {
         persistCurrentDraft()
-        MessageStore(this).markRead(message.id)
-        messageAdapter.markRead(message.id)
         val target = findConversationTarget(message)
         if (target != null) {
-            openConversation(target, false)
+            openConversation(target, false, message.completionSeq ?: target.terminal.completionSeq)
             return
+        }
+        val pairId = message.pairId
+        val terminalId = message.terminalId
+        if (pairId != null && terminalId != null) {
+            val cleared = MessageStore(this).markConversationRead(
+                pairId,
+                terminalId,
+                message.completionSeq,
+            )
+            NotificationTools.cancelIds(this, cleared)
+            if (cleared.isNotEmpty()) ReadSyncScheduler.enqueue(this)
+            messageAdapter.markConversationRead(pairId, terminalId)
+        } else {
+            MessageStore(this).markRead(message.id)
+            messageAdapter.markRead(message.id)
         }
         selectedTarget = null
         legacyResponse = message
@@ -1205,9 +1220,19 @@ class MainActivity : AppCompatActivity() {
             ?.firstOrNull()
     }
 
-    private fun openConversation(target: ConversationTarget, returnToProject: Boolean) {
+    private fun openConversation(
+        target: ConversationTarget,
+        returnToProject: Boolean,
+        readCompletionSeq: Long? = target.terminal.completionSeq,
+    ) {
         persistCurrentDraft()
-        MessageStore(this).markConversationRead(target.pairId, target.terminal.id)
+        val cleared = MessageStore(this).markConversationRead(
+            target.pairId,
+            target.terminal.id,
+            readCompletionSeq,
+        )
+        NotificationTools.cancelIds(this, cleared)
+        if (cleared.isNotEmpty()) ReadSyncScheduler.enqueue(this)
         messageAdapter.markConversationRead(target.pairId, target.terminal.id)
         unreadConversationKeys = unreadConversationKeys - Pair(target.pairId, target.terminal.id)
         terminalAdapter.markRead(target.pairId, target.terminal.id)

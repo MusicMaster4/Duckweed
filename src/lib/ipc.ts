@@ -66,6 +66,8 @@ export interface MobileCompletionMessage {
   durationMs: number | null;
   soundCue: number | null;
   unreadOnDesktop: boolean;
+  /** Identifies the exact terminal completion this notification represents. */
+  completionSeq: number | null;
 }
 
 export interface MobileTerminalSnapshot {
@@ -80,6 +82,8 @@ export interface MobileTerminalSnapshot {
   terminalColumns?: number;
   terminalRows?: number;
   unreadOnDesktop: boolean;
+  /** Current terminal completion identity, used to reject stale read receipts. */
+  completionSeq: number;
   /** Slash commands currently available in this agent session. */
   commands: MobileSlashCommandSnapshot[];
   /** Recent reasoning, plan, and tool steps shown inline with the conversation. */
@@ -185,13 +189,14 @@ export interface MobileWorkspaceSnapshot {
 export interface MobileRemoteCommand {
   deviceId: string;
   commandId: string;
-  kind: "input" | "refresh" | "approval" | "question" | "create_terminal" | "close_terminal";
+  kind: "input" | "refresh" | "approval" | "question" | "read" | "create_terminal" | "close_terminal";
   terminalId: string | null;
   projectId: string | null;
   text: string | null;
   agent?: string | null;
   permissionId: string | null;
   optionId: string | null;
+  completionSeq: number | null;
   answers: MobileQuestionAnswerSnapshot[];
   images: Array<{
     id: string;

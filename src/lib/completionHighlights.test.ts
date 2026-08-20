@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import {
   acknowledgeCompletion,
+  shouldAcknowledgeMobileCompletion,
   shouldFlashCompletionReview,
 } from "./completionHighlights";
 
@@ -19,6 +20,12 @@ describe("completion highlights", () => {
     const unread = new Set(["other-terminal"]);
 
     expect(acknowledgeCompletion(unread, "plain-terminal")).toBe(unread);
+  });
+
+  test("accepts only a read receipt for the current mobile completion", () => {
+    expect(shouldAcknowledgeMobileCompletion(7, 7)).toBe(true);
+    expect(shouldAcknowledgeMobileCompletion(8, 7)).toBe(false);
+    expect(shouldAcknowledgeMobileCompletion(8, null)).toBe(true);
   });
 
   test("keeps an unread selected terminal visible when its tab is opened", () => {

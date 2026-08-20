@@ -56,6 +56,7 @@ import {
 } from "./lib/confirmClose";
 import {
   acknowledgeCompletion,
+  shouldAcknowledgeMobileCompletion,
   shouldFlashCompletionReview,
   type CompletionFlash,
 } from "./lib/completionHighlights";
@@ -569,6 +570,18 @@ export default function App() {
     });
   }, []);
 
+  const acknowledgeTermFromMobile = useCallback((termId: string, completionSeq: number | null) => {
+    const meta = terminals.getMeta(termId);
+    // A delayed receipt for an older notification must not clear a newer
+    // completion that arrived before the desktop drained the relay queue.
+    if (!shouldAcknowledgeMobileCompletion(meta?.completionSeq ?? null, completionSeq)) return;
+    const unread = unreadTermIdsRef.current;
+    if (!unread.has(termId)) return;
+    const clearsLastBackgroundBadge = unread.size === 1 && completionFlashesRef.current.size === 0;
+    acknowledgeTerm(termId);
+    if (clearsLastBackgroundBadge) setCompletionTaskbarBadge(false);
+  }, [acknowledgeTerm]);
+
   const flashCompletion = useCallback((termId: string, kind: CompletionFlash["kind"]) => {
     const previousTimer = completionFlashTimers.current.get(termId);
     if (previousTimer !== undefined) window.clearTimeout(previousTimer);
@@ -968,6 +981,7 @@ export default function App() {
                 ? truncateUtf8Tail(terminals.dumpBufferPlainForMobile(node.term), 16_000)
                 : undefined,
               unreadOnDesktop: unreadTermIdsRef.current.has(node.term),
+              completionSeq: meta.completionSeq,
               commands: [...(session?.commands ?? [])]
                 .sort((left, right) => {
                   const priority = (name: string) =>
@@ -1118,6 +1132,8 @@ export default function App() {
                 window.dispatchEvent(new CustomEvent("duckweed:mobile-close-terminal", {
                   detail: { terminalId: command.terminalId },
                 }));
+              } else if (command.kind === "read" && command.terminalId) {
+                acknowledgeTermFromMobile(command.terminalId, command.completionSeq);
               } else if (
                 command.kind === "approval" &&
                 command.terminalId &&
@@ -1309,6 +1325,7 @@ export default function App() {
           // A completion that survives the desktop grace period is unread on
           // the phone, including an unattended selected terminal.
           unreadOnDesktop: true,
+          completionSeq: current.completionSeq,
         } as const;
         const timer = window.setTimeout(() => {
           mobileCompletionTimers.current.delete(completionKey);
@@ -1417,7 +1434,7 @@ export default function App() {
   const firePowerAction = useCallback(async (action: powerWatch.PowerAction) => {
     await flushDurableStorage();
     await powerAction(action);
-  }, []);
+  }, [acknowledgeTermFromMobile]);
 
   useEffect(
     () => powerWatch.connect({ probe: probeActivity, fire: firePowerAction }),

@@ -22,6 +22,17 @@ export function acknowledgeCompletion(
 }
 
 /**
+ * Read receipts from older companions have no completion identity. Newer
+ * receipts must match exactly so an offline phone cannot review later work.
+ */
+export function shouldAcknowledgeMobileCompletion(
+  currentCompletionSeq: number | null,
+  receiptCompletionSeq: number | null,
+): boolean {
+  return receiptCompletionSeq === null || currentCompletionSeq === receiptCompletionSeq;
+}
+
+/**
  * Switching to a tab reviews its selected terminal, but an unread completion
  * there must remain visible long enough for the newly rendered pane to show it.
  */

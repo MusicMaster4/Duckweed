@@ -198,6 +198,22 @@ object RelayClient {
             ),
     )
 
+    fun sendRead(
+        credentials: PairCredentials,
+        terminalId: String,
+        completionSeq: Long?,
+        commandId: String,
+    ): SentCommand = sendEncryptedCommand(
+        credentials,
+        JSONObject()
+            .put("kind", "read")
+            .put("terminalId", terminalId)
+            .apply {
+                if (completionSeq != null) put("completionSeq", completionSeq)
+            },
+        commandId,
+    )
+
     fun createTerminal(
         credentials: PairCredentials,
         projectId: String,

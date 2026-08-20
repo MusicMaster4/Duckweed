@@ -35,6 +35,10 @@
             android:name=".ApprovalActionReceiver"
             android:exported="false" />
 
+        <receiver
+            android:name=".ReadActionReceiver"
+            android:exported="false" />
+
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.files"

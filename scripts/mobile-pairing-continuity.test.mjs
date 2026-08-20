@@ -148,6 +148,32 @@ describe("mobile pairing continuity", () => {
     expect(adapter).toContain("message.readAt == null");
   });
 
+  test("notification read actions clear mobile and desktop unread state", () => {
+    const notifications = read(
+      "android/app/src/main/java/dev/slop/duckweed/companion/NotificationTools.kt",
+    );
+    const receiver = read(
+      "android/app/src/main/java/dev/slop/duckweed/companion/ReadActionReceiver.kt",
+    );
+    const worker = read(
+      "android/app/src/main/java/dev/slop/duckweed/companion/ReadSyncWorker.kt",
+    );
+    const relay = read(
+      "android/app/src/main/java/dev/slop/duckweed/companion/RelayClient.kt",
+    );
+    const desktop = read("src/App.tsx");
+    const manifest = read("android/app/src/main/AndroidManifest.xml");
+
+    expect(notifications).toContain('Action.Builder(0, "Mark as read", pending)');
+    expect(receiver).toContain("store.markConversationRead(");
+    expect(receiver).toContain("message.completionSeq");
+    expect(worker).toContain("RelayClient.sendRead(");
+    expect(relay).toContain('.put("kind", "read")');
+    expect(desktop).toContain('command.kind === "read"');
+    expect(desktop).toContain("acknowledgeTermFromMobile(command.terminalId, command.completionSeq)");
+    expect(manifest).toContain('android:name=".ReadActionReceiver"');
+  });
+
   test("mobile approvals are encrypted and revalidated against the live permission", () => {
     const desktop = read("src/App.tsx");
     const relay = read(

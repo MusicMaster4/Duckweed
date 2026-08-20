@@ -28,6 +28,7 @@ data class CompletionRecord(
     val deliveryState: String? = null,
     val deliveryError: String? = null,
     val unreadOnDesktop: Boolean? = null,
+    val completionSeq: Long? = null,
     val streaming: Boolean = false,
 )
 
@@ -70,6 +71,7 @@ data class RemoteTerminal(
     val terminalColumns: Int? = null,
     val terminalRows: Int? = null,
     val unreadOnDesktop: Boolean? = null,
+    val completionSeq: Long = 0,
     val commands: List<RemoteSlashCommand> = emptyList(),
     val activity: List<RemoteAgentActivity> = emptyList(),
     val conversation: List<RemoteConversationMessage> = emptyList(),
@@ -78,6 +80,13 @@ data class RemoteTerminal(
 ) {
     val isWorking: Boolean get() = status == "working" || status == "waiting"
 }
+
+data class PendingReadSync(
+    val pairId: String,
+    val terminalId: String,
+    val completionSeq: Long?,
+    val commandId: String,
+)
 
 data class RemoteSlashCommand(
     val name: String,

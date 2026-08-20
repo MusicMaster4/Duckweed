@@ -57,7 +57,12 @@ while alerts are off are still saved, but they are never replayed as alerts
 when notifications are enabled again. **Activity** shows the newest response
 from each currently open agent, up to 50 agents. A new response uses the same
 red outline as an unread desktop terminal and loses it when its conversation is
-opened.
+opened. Completion and attention notifications also include **Mark as read**.
+Using it clears the conversation on the phone immediately and sends an
+encrypted read receipt through the relay, which removes the red unread marker
+from the matching desktop terminal. If the phone is temporarily offline, the
+companion keeps the receipt locally and retries it when connectivity returns.
+Opening the notification or conversation performs the same synchronized read.
 
 The main companion navigation contains **Activity**, **Projects**, and
 **Conversations**. Connection management, sync health, and updates live in
