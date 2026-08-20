@@ -90,7 +90,16 @@ data class RemoteAgentActivity(
     val kind: String,
     val title: String,
     val detail: String?,
+    val command: String? = null,
+    val changes: List<RemoteFileChange> = emptyList(),
     val status: String,
+)
+
+data class RemoteFileChange(
+    val path: String,
+    val insertions: Int,
+    val deletions: Int,
+    val diff: String?,
 )
 
 data class RemotePermission(

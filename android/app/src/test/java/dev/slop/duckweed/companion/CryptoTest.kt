@@ -68,4 +68,55 @@ class CryptoTest {
         assertEquals(32, terminal.terminalRows)
         assertEquals("Codex ready", terminal.terminalOutput)
     }
+
+    @Test
+    fun keepsCommandsAndDiffsFromAgentActivity() {
+        val snapshot = Crypto.parseWorkspace(
+            "pair",
+            JSONObject(
+                """
+                {
+                  "kind":"workspace",
+                  "sentAt":42,
+                  "projects":[{
+                    "id":"project",
+                    "name":"Duckweed",
+                    "path":"C:/duckweed",
+                    "terminals":[{
+                      "id":"terminal",
+                      "title":"Codex",
+                      "shell":"PowerShell",
+                      "agent":"Codex",
+                      "status":"working",
+                      "mode":"conversation",
+                      "activity":[{
+                        "id":"tool",
+                        "at":40,
+                        "kind":"tool",
+                        "title":"Update the mobile timeline",
+                        "detail":"Applied patch",
+                        "command":"git diff -- app.kt",
+                        "changes":[{
+                          "path":"app.kt",
+                          "insertions":2,
+                          "deletions":1,
+                          "diff":"@@\n-old\n+new"
+                        }],
+                        "status":"done"
+                      }],
+                      "conversation":[],
+                      "permission":null
+                    }]
+                  }]
+                }
+                """.trimIndent(),
+            ),
+        )
+
+        val activity = snapshot!!.projects.single().terminals.single().activity.single()
+        assertEquals("git diff -- app.kt", activity.command)
+        assertEquals("app.kt", activity.changes.single().path)
+        assertEquals(2, activity.changes.single().insertions)
+        assertEquals("@@\n-old\n+new", activity.changes.single().diff)
+    }
 }

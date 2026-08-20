@@ -82,7 +82,7 @@ export interface MobileTerminalSnapshot {
   unreadOnDesktop: boolean;
   /** Slash commands currently available in this agent session. */
   commands: MobileSlashCommandSnapshot[];
-  /** Live reasoning, plan, and tool steps shown while a turn is running. */
+  /** Recent reasoning, plan, and tool steps shown inline with the conversation. */
   activity: MobileAgentActivitySnapshot[];
   conversation: MobileConversationSnapshot[];
   permission: MobilePermissionSnapshot | null;
@@ -100,7 +100,18 @@ export interface MobileAgentActivitySnapshot {
   kind: "thinking" | "tool" | "plan";
   title: string;
   detail: string | null;
+  /** Shell command kept separate from output so the phone can style it as code. */
+  command: string | null;
+  /** File edits attached to this tool call, including a bounded diff preview. */
+  changes: MobileFileChangeSnapshot[];
   status: "pending" | "running" | "done" | "error";
+}
+
+export interface MobileFileChangeSnapshot {
+  path: string;
+  insertions: number;
+  deletions: number;
+  diff: string | null;
 }
 
 export interface MobilePermissionOptionSnapshot {

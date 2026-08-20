@@ -176,6 +176,8 @@ class WorkspaceStore(private val context: Context) {
                                         kind,
                                         title,
                                         item.optString("detail").trim().takeIf { it.isNotEmpty() },
+                                        item.optString("command").trim().takeIf { it.isNotEmpty() },
+                                        parseFileChanges(item.optJSONArray("changes")),
                                         status.takeIf { it in setOf("pending", "running", "done", "error") } ?: "done",
                                     )
                                 },

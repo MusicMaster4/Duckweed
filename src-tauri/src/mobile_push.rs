@@ -190,7 +190,20 @@ pub struct WorkspaceAgentActivity {
     pub kind: String,
     pub title: String,
     pub detail: Option<String>,
+    #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default)]
+    pub changes: Vec<WorkspaceFileChange>,
     pub status: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceFileChange {
+    pub path: String,
+    pub insertions: u64,
+    pub deletions: u64,
+    pub diff: Option<String>,
 }
 
 fn default_terminal_mode() -> String {

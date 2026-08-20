@@ -64,6 +64,37 @@ export interface MobileTerminalActivity {
   structuredStatus: AgentStatus | null;
 }
 
+/** Rebuild the compact unified diff used when a provider sent before/after text. */
+function mobileChangeDiff(change: Extract<AgentItem, { kind: "tool" }>["changes"][number]): string {
+  if (change.diff?.trim()) return change.diff.trim();
+  const { before, after } = change;
+  if (before === null && after === null) return "";
+  if (before === null) return (after ?? "").split("\n").map((line) => `+${line}`).join("\n");
+  if (after === null) return before.split("\n").map((line) => `-${line}`).join("\n");
+
+  const oldLines = before.split("\n");
+  const newLines = after.split("\n");
+  let head = 0;
+  while (head < oldLines.length && head < newLines.length && oldLines[head] === newLines[head]) {
+    head += 1;
+  }
+  let tail = 0;
+  while (
+    tail < oldLines.length - head &&
+    tail < newLines.length - head &&
+    oldLines[oldLines.length - 1 - tail] === newLines[newLines.length - 1 - tail]
+  ) {
+    tail += 1;
+  }
+  return [
+    "@@",
+    ...oldLines.slice(Math.max(0, head - 2), head).map((line) => ` ${line}`),
+    ...oldLines.slice(head, oldLines.length - tail).map((line) => `-${line}`),
+    ...newLines.slice(head, newLines.length - tail).map((line) => `+${line}`),
+    ...oldLines.slice(oldLines.length - tail, oldLines.length - Math.max(0, tail - 2)).map((line) => ` ${line}`),
+  ].join("\n");
+}
+
 /**
  * Translate desktop process state into honest mobile language.
  *
@@ -95,7 +126,7 @@ export function mobileTerminalStatus(
  */
 export function mobileAgentActivity(
   items: readonly AgentItem[],
-  limit = 8,
+  limit = 20,
 ): MobileAgentActivitySnapshot[] {
   const activity: MobileAgentActivitySnapshot[] = [];
   for (const item of items) {
@@ -108,6 +139,8 @@ export function mobileAgentActivity(
           kind: "thinking",
           title: "Reasoning",
           detail: truncateUtf8(text, 1_200),
+          command: null,
+          changes: [],
           status: item.streaming ? "running" : "done",
         });
       }
@@ -117,7 +150,14 @@ export function mobileAgentActivity(
         at: item.at,
         kind: "tool",
         title: truncateUtf8(item.title.trim() || item.name, 240),
-        detail: truncateUtf8((item.output || item.command || "").trim(), 1_200) || null,
+        detail: truncateUtf8(item.output.trim(), 1_200) || null,
+        command: truncateUtf8((item.command || "").trim(), 1_200) || null,
+        changes: item.changes.slice(-3).map((change) => ({
+          path: truncateUtf8(change.path, 360),
+          insertions: change.insertions,
+          deletions: change.deletions,
+          diff: truncateUtf8(mobileChangeDiff(change), 2_400) || null,
+        })),
         status:
           item.status === "error"
             ? "error"
@@ -133,6 +173,8 @@ export function mobileAgentActivity(
           kind: "plan",
           title: truncateUtf8(step.text.trim(), 320),
           detail: null,
+          command: null,
+          changes: [],
           status: step.status,
         });
       });
@@ -204,7 +246,7 @@ export function fitMobileWorkspaceSnapshot(
     serialized = JSON.stringify(snapshot);
   }
 
-  // Live activity and completion catalogs are reconstructable on the next
+  // Agent activity and completion catalogs are reconstructable on the next
   // publish. If a workspace has many open agents, trim their oldest/lowest
   // priority rows before allowing the relay envelope to exceed its limit.
   if (utf8ByteLength(serialized) > MOBILE_WORKSPACE_SNAPSHOT_BUDGET_BYTES) {

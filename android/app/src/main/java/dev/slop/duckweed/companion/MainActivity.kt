@@ -72,9 +72,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var retryConnectionButton: Button
     private lateinit var projectDetail: View
     private lateinit var conversationDetail: View
-    private lateinit var conversationThinking: View
-    private lateinit var conversationActivity: View
-    private lateinit var conversationActivityRows: LinearLayout
     private lateinit var conversationCommandsScroll: View
     private lateinit var conversationCommands: LinearLayout
     private lateinit var conversationComposer: View
@@ -230,9 +227,6 @@ class MainActivity : AppCompatActivity() {
         retryConnectionButton = findViewById(R.id.retry_connection_button)
         projectDetail = findViewById(R.id.project_detail)
         conversationDetail = findViewById(R.id.conversation_detail)
-        conversationThinking = findViewById(R.id.conversation_thinking)
-        conversationActivity = findViewById(R.id.conversation_activity)
-        conversationActivityRows = findViewById(R.id.conversation_activity_rows)
         conversationCommandsScroll = findViewById(R.id.conversation_commands_scroll)
         conversationCommands = findViewById(R.id.conversation_commands)
         conversationComposer = findViewById(R.id.conversation_composer)
@@ -1216,11 +1210,9 @@ class MainActivity : AppCompatActivity() {
         if (legacy != null) {
             findViewById<TextView>(R.id.conversation_title).text = legacy.agent
             findViewById<TextView>(R.id.conversation_status).text = legacy.project
-            conversationAdapter.submit(listOf(legacy))
+            conversationAdapter.submit(listOf(ConversationTimelineItem.Message(legacy)))
             conversationList.visibility = View.VISIBLE
             conversationTerminal.visibility = View.GONE
-            conversationThinking.visibility = View.GONE
-            conversationActivity.visibility = View.GONE
             conversationCommandsScroll.visibility = View.GONE
             conversationApproval.visibility = View.GONE
             conversationComposer.visibility = View.GONE
@@ -1279,20 +1271,25 @@ class MainActivity : AppCompatActivity() {
             )
         }.joinToString("  •  ")
         val shouldScrollToBottom = conversationShouldStickToBottom
-        conversationAdapter.submit(messages)
+        val timeline = ConversationTimelinePolicy.build(
+            messages = messages,
+            activity = target.terminal.activity,
+            agentWorking = thinking && desktopOnline,
+            thinkingId = target.terminal.id,
+        )
+        conversationAdapter.submit(timeline)
         conversationList.visibility = if (terminalMode) View.GONE else View.VISIBLE
         conversationTerminal.visibility = if (terminalMode) View.VISIBLE else View.GONE
         if (terminalMode) renderTerminalOutput(target.terminal.terminalOutput)
-        renderAgentActivity(target, thinking && desktopOnline)
         renderApproval(target)
         refreshConversationAvailability()
         updateSlashCommandSuggestions()
         messages.filter { it.kind == "user" && it.deliveryState == "sent" }
             .takeLast(5)
             .forEach { trackDelivery(it.id, target.pairId) }
-        if (shouldScrollToBottom && messages.isNotEmpty()) {
+        if (shouldScrollToBottom && timeline.isNotEmpty()) {
             conversationList.post {
-                conversationList.scrollToPosition(messages.lastIndex)
+                conversationList.scrollToPosition(timeline.lastIndex)
             }
         }
     }
@@ -1459,66 +1456,6 @@ class MainActivity : AppCompatActivity() {
                         .onSuccess { runOnUiThread { requestRemoteRefresh(showSpinner = false) } }
                 }
             }.show()
-    }
-
-    private fun renderAgentActivity(target: ConversationTarget, thinking: Boolean) {
-        val activity = target.terminal.activity.takeLast(5)
-        conversationActivityRows.removeAllViews()
-        activity.forEach { item ->
-            val row = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = android.view.Gravity.TOP
-                contentDescription = "${activityStatusLabel(item.status)}. ${item.title}"
-            }
-            val marker = TextView(this).apply {
-                text = when (item.status) {
-                    "running" -> "●"
-                    "done" -> "✓"
-                    "error" -> "×"
-                    else -> "○"
-                }
-                textSize = 12f
-                setTextColor(
-                    ContextCompat.getColor(
-                        this@MainActivity,
-                        when (item.status) {
-                            "running" -> R.color.duckweed_accent
-                            "error" -> R.color.duckweed_error
-                            else -> R.color.duckweed_text_faint
-                        },
-                    ),
-                )
-            }
-            val copy = TextView(this).apply {
-                text = buildString {
-                    append(item.title)
-                    item.detail?.takeIf { it.isNotBlank() }?.let { append("\n").append(it) }
-                }
-                textSize = 12f
-                maxLines = 3
-                ellipsize = android.text.TextUtils.TruncateAt.END
-                setTextColor(ContextCompat.getColor(this@MainActivity, R.color.duckweed_text_dim))
-            }
-            row.addView(marker, LinearLayout.LayoutParams(dp(20), LinearLayout.LayoutParams.WRAP_CONTENT))
-            row.addView(copy, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-            conversationActivityRows.addView(
-                row,
-                LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT,
-                ).apply { topMargin = dp(5) },
-            )
-        }
-        val showActivity = thinking && activity.isNotEmpty()
-        setAnimatedVisibility(conversationActivity, showActivity)
-        setAnimatedVisibility(conversationThinking, thinking && !showActivity)
-    }
-
-    private fun activityStatusLabel(status: String): String = when (status) {
-        "running" -> "In progress"
-        "done" -> "Completed"
-        "error" -> "Failed"
-        else -> "Pending"
     }
 
     private fun updateSlashCommandSuggestions() {

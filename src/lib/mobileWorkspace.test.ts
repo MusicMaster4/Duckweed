@@ -121,7 +121,14 @@ describe("mobile terminal activity", () => {
         status: "running",
         command: "gradle test",
         output: "Compiling",
-        changes: [],
+        changes: [{
+          path: "android/app.kt",
+          before: "old",
+          after: "new",
+          diff: null,
+          insertions: 1,
+          deletions: 1,
+        }],
       },
     ]);
 
@@ -132,6 +139,13 @@ describe("mobile terminal activity", () => {
       ["tool", "Run mobile tests", "running"],
     ]);
     expect(activity.at(-1)?.detail).toBe("Compiling");
+    expect(activity.at(-1)?.command).toBe("gradle test");
+    expect(activity.at(-1)?.changes).toEqual([{
+      path: "android/app.kt",
+      insertions: 1,
+      deletions: 1,
+      diff: "@@\n-old\n+new",
+    }]);
   });
 
   test("does not call a bare raw agent launch working", () => {
