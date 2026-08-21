@@ -190,6 +190,14 @@ export interface MobileUsageLimitSnapshot {
   resetsAt: number | null;
   /** Estimated hours of active use left, when the provider history supports it. */
   usageHoursLeft: number | null;
+  /** Utilization points consumed per hour of continued use. */
+  perHour: number | null;
+  /** Utilization projected for the moment the window resets. */
+  projectedPercent: number | null;
+  /** Epoch ms this limit would hit 100%; null when the pace never gets there. */
+  runsOutAt: number | null;
+  /** Forecast basis from the desktop scan, including `exhausted`. */
+  basis: "recent" | "blended" | "window" | "exhausted" | null;
 }
 
 export interface MobileUsageQuotaSnapshot {

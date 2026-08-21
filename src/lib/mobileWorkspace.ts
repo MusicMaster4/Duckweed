@@ -80,6 +80,10 @@ export function mobileUsageLimits(quotas: readonly Quota[]): MobileUsageQuotaSna
         percent: Math.max(0, Math.min(100, limit.percent)),
         resetsAt: limit.resets_at,
         usageHoursLeft: limit.forecast?.usage_hours_left ?? null,
+        perHour: limit.forecast?.per_hour ?? null,
+        projectedPercent: limit.forecast?.projected_percent ?? null,
+        runsOutAt: limit.forecast?.runs_out_at ?? null,
+        basis: limit.forecast?.basis ?? null,
       })),
     }));
 }

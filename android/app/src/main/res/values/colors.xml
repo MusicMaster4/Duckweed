@@ -13,4 +13,9 @@
     <color name="duckweed_attention">#F0C052</color>
     <color name="duckweed_error">#FF8A80</color>
     <color name="duckweed_unread">#F2686F</color>
+    <color name="duckweed_usage_ok">#0CA30C</color>
+    <color name="duckweed_usage_warning">#FAB219</color>
+    <color name="duckweed_usage_critical">#D03B3B</color>
+    <color name="duckweed_usage_forecast_warning">#E8A33D</color>
+    <color name="duckweed_usage_forecast_critical">#F07178</color>
 </resources>

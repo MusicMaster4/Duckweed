@@ -210,6 +210,10 @@ describe("mobile usage limits", () => {
         percent: 100,
         resetsAt: 1_800_000_000_000,
         usageHoursLeft: 12.5,
+        perHour: 2,
+        projectedPercent: 88,
+        runsOutAt: null,
+        basis: "recent",
       }],
     }]);
   });

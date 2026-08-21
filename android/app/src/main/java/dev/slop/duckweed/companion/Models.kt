@@ -65,6 +65,10 @@ data class RemoteUsageLimit(
     val percent: Double,
     val resetsAt: Long?,
     val usageHoursLeft: Double?,
+    val perHour: Double? = null,
+    val projectedPercent: Double? = null,
+    val runsOutAt: Long? = null,
+    val basis: String? = null,
 )
 
 data class RemoteProject(

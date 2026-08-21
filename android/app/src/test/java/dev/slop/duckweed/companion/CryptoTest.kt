@@ -42,7 +42,11 @@ class CryptoTest {
                       "label":"7-day limit",
                       "percent":47.4,
                       "resetsAt":1800000000000,
-                      "usageHoursLeft":12.5
+                      "usageHoursLeft":12.5,
+                      "perHour":0.3,
+                      "projectedPercent":88,
+                      "runsOutAt":1803600000000,
+                      "basis":"recent"
                     }]
                   }],
                   "projects":[{
@@ -86,6 +90,10 @@ class CryptoTest {
         assertEquals(47.4, usage.limits.single().percent, 0.001)
         assertEquals(1_800_000_000_000L, usage.limits.single().resetsAt)
         assertEquals(12.5, usage.limits.single().usageHoursLeft!!, 0.001)
+        assertEquals(0.3, usage.limits.single().perHour!!, 0.001)
+        assertEquals(88.0, usage.limits.single().projectedPercent!!, 0.001)
+        assertEquals(1_803_600_000_000L, usage.limits.single().runsOutAt)
+        assertEquals("recent", usage.limits.single().basis)
     }
 
     @Test

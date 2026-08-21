@@ -162,39 +162,7 @@ object Crypto {
                 }.filter { it.id.isNotBlank() },
             )
         }.filter { it.id.isNotBlank() }
-        val usageLimits = (0 until usageLimitsJson.length()).mapNotNull { quotaIndex ->
-            val quota = usageLimitsJson.optJSONObject(quotaIndex) ?: return@mapNotNull null
-            val limitsJson = quota.optJSONArray("limits") ?: JSONArray()
-            val limits = (0 until limitsJson.length()).mapNotNull { limitIndex ->
-                val limit = limitsJson.optJSONObject(limitIndex) ?: return@mapNotNull null
-                val percent = limit.optDouble("percent", Double.NaN)
-                if (!percent.isFinite()) return@mapNotNull null
-                RemoteUsageLimit(
-                    id = limit.optString("id", "limit-$limitIndex"),
-                    label = limit.optString("label", "Usage limit"),
-                    percent = percent.coerceIn(0.0, 100.0),
-                    resetsAt = if (limit.has("resetsAt") && !limit.isNull("resetsAt")) {
-                        limit.optLong("resetsAt")
-                    } else {
-                        null
-                    },
-                    usageHoursLeft = if (
-                        limit.has("usageHoursLeft") && !limit.isNull("usageHoursLeft")
-                    ) {
-                        limit.optDouble("usageHoursLeft").takeIf { it.isFinite() && it >= 0.0 }
-                    } else {
-                        null
-                    },
-                )
-            }
-            if (limits.isEmpty()) return@mapNotNull null
-            RemoteUsageQuota(
-                agent = quota.optString("agent"),
-                label = quota.optString("label", "Agent"),
-                plan = if (quota.isNull("plan")) null else quota.optString("plan").takeIf { it.isNotBlank() },
-                limits = limits,
-            )
-        }
+        val usageLimits = UsageLimitsJson.parse(usageLimitsJson)
         return WorkspaceSnapshot(
             pairId = pairId,
             updatedAt = json.optLong("sentAt", System.currentTimeMillis()),

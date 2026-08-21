@@ -151,31 +151,7 @@ class WorkspaceStore(private val context: Context) {
                     .put("terminals", terminals),
             )
         }
-        val usageLimits = JSONArray().apply {
-            snapshot.usageLimits.forEach { quota ->
-                put(
-                    JSONObject()
-                        .put("agent", quota.agent)
-                        .put("label", quota.label)
-                        .put("plan", quota.plan)
-                        .put(
-                            "limits",
-                            JSONArray().apply {
-                                quota.limits.forEach { limit ->
-                                    put(
-                                        JSONObject()
-                                            .put("id", limit.id)
-                                            .put("label", limit.label)
-                                            .put("percent", limit.percent)
-                                            .put("resetsAt", limit.resetsAt)
-                                            .put("usageHoursLeft", limit.usageHoursLeft),
-                                    )
-                                }
-                            },
-                        ),
-                )
-            }
-        }
+        val usageLimits = UsageLimitsJson.write(snapshot.usageLimits)
         val raw = JSONObject()
             .put("pairId", snapshot.pairId)
             .put("updatedAt", snapshot.updatedAt)
@@ -264,7 +240,7 @@ class WorkspaceStore(private val context: Context) {
                         },
                     )
                 },
-                usageLimits = parseUsageLimits(json.optJSONArray("usageLimits")),
+                usageLimits = UsageLimitsJson.parse(json.optJSONArray("usageLimits")),
                 presenceAt = if (json.has("presenceAt") && !json.isNull("presenceAt")) {
                     json.optLong("presenceAt")
                 } else {
@@ -273,43 +249,6 @@ class WorkspaceStore(private val context: Context) {
             )
         }.getOrNull()
     }.sortedByDescending { it.updatedAt }
-
-    private fun parseUsageLimits(quotasJson: JSONArray?): List<RemoteUsageQuota> {
-        val quotas = quotasJson ?: return emptyList()
-        return (0 until quotas.length()).mapNotNull { quotaIndex ->
-            val quota = quotas.optJSONObject(quotaIndex) ?: return@mapNotNull null
-            val limitsJson = quota.optJSONArray("limits") ?: JSONArray()
-            val limits = (0 until limitsJson.length()).mapNotNull { limitIndex ->
-                val limit = limitsJson.optJSONObject(limitIndex) ?: return@mapNotNull null
-                val percent = limit.optDouble("percent", Double.NaN)
-                if (!percent.isFinite()) return@mapNotNull null
-                RemoteUsageLimit(
-                    id = limit.optString("id", "limit-$limitIndex"),
-                    label = limit.optString("label", "Usage limit"),
-                    percent = percent.coerceIn(0.0, 100.0),
-                    resetsAt = if (limit.has("resetsAt") && !limit.isNull("resetsAt")) {
-                        limit.optLong("resetsAt")
-                    } else {
-                        null
-                    },
-                    usageHoursLeft = if (
-                        limit.has("usageHoursLeft") && !limit.isNull("usageHoursLeft")
-                    ) {
-                        limit.optDouble("usageHoursLeft").takeIf { it.isFinite() && it >= 0.0 }
-                    } else {
-                        null
-                    },
-                )
-            }
-            if (limits.isEmpty()) return@mapNotNull null
-            RemoteUsageQuota(
-                agent = quota.optString("agent"),
-                label = quota.optString("label", "Agent"),
-                plan = if (quota.isNull("plan")) null else quota.optString("plan").takeIf { it.isNotBlank() },
-                limits = limits,
-            )
-        }
-    }
 
     fun markPresence(pairId: String, at: Long): Boolean {
         val stored = preferences.getString(pairId, null) ?: return false

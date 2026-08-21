@@ -8,6 +8,9 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.res.ColorStateList
 import android.content.pm.PackageManager
+import android.graphics.drawable.ClipDrawable
+import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.LayerDrawable
 import android.os.Build
 import android.os.Bundle
 import android.text.Editable
@@ -15,6 +18,7 @@ import android.text.InputFilter
 import android.text.TextWatcher
 import android.text.format.DateUtils
 import android.text.method.ScrollingMovementMethod
+import android.view.Gravity
 import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
 import android.view.View
@@ -56,7 +60,6 @@ import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
 import java.util.concurrent.Executors
 import java.util.Locale
 import java.util.UUID
-import kotlin.math.roundToInt
 
 class MainActivity : AppCompatActivity() {
     private enum class Page { ACTIVITY, PROJECTS, CONVERSATIONS, SETTINGS }
@@ -1478,9 +1481,12 @@ class MainActivity : AppCompatActivity() {
                 setBackgroundResource(R.drawable.message_card)
             }
             val header = LinearLayout(this).apply {
-                gravity = android.view.Gravity.CENTER_VERTICAL
+                gravity = Gravity.CENTER_VERTICAL
                 orientation = LinearLayout.HORIZONTAL
             }
+            header.addView(usageSwatch(UsageLimitCopy.agentSwatch(quota.agent), 9, 2), LinearLayout.LayoutParams(dp(9), dp(9)).apply {
+                marginEnd = dp(8)
+            })
             header.addView(TextView(this).apply {
                 text = quota.label
                 textSize = 15f
@@ -1489,7 +1495,9 @@ class MainActivity : AppCompatActivity() {
             }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
             quota.plan?.let { plan ->
                 header.addView(TextView(this).apply {
-                    text = plan.uppercase(Locale.US)
+                    text = plan.replaceFirstChar { letter ->
+                        if (letter.isLowerCase()) letter.titlecase(Locale.US) else letter.toString()
+                    }
                     textSize = 10f
                     setTextColor(ContextCompat.getColor(this@MainActivity, R.color.duckweed_accent))
                     setBackgroundResource(R.drawable.chip_accent)
@@ -1499,11 +1507,20 @@ class MainActivity : AppCompatActivity() {
             card.addView(header)
 
             quota.limits.forEach { limit ->
+                val remaining = UsageLimitCopy.remainingPercent(limit.percent)
+                val remainingLabel = UsageLimitCopy.remainingLabel(limit.percent)
+                val resetHint = UsageLimitCopy.resetHint(limit.resetsAt, now)
+                val forecast = UsageLimitCopy.describeForecast(limit, now)
+                val meterColor = when (UsageLimitCopy.meterLevel(limit.percent)) {
+                    UsageLimitCopy.MeterLevel.Critical -> R.color.duckweed_usage_critical
+                    UsageLimitCopy.MeterLevel.Warning -> R.color.duckweed_usage_warning
+                    UsageLimitCopy.MeterLevel.Ok -> R.color.duckweed_usage_ok
+                }
                 val block = LinearLayout(this).apply {
                     orientation = LinearLayout.VERTICAL
                 }
                 val labelRow = LinearLayout(this).apply {
-                    gravity = android.view.Gravity.CENTER_VERTICAL
+                    gravity = Gravity.CENTER_VERTICAL
                     orientation = LinearLayout.HORIZONTAL
                 }
                 labelRow.addView(TextView(this).apply {
@@ -1511,40 +1528,90 @@ class MainActivity : AppCompatActivity() {
                     textSize = 13f
                     setTextColor(ContextCompat.getColor(this@MainActivity, R.color.duckweed_text_dim))
                 }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-                labelRow.addView(TextView(this).apply {
-                    text = UsageLimitCopy.percentUsed(limit.percent)
+                val valueCluster = LinearLayout(this).apply {
+                    gravity = Gravity.CENTER_VERTICAL
+                    orientation = LinearLayout.HORIZONTAL
+                }
+                valueCluster.addView(TextView(this).apply {
+                    text = remainingLabel
                     textSize = 13f
                     setTextColor(ContextCompat.getColor(this@MainActivity, R.color.duckweed_text))
                     typeface = android.graphics.Typeface.DEFAULT_BOLD
                 })
+                resetHint?.let { hint ->
+                    valueCluster.addView(TextView(this).apply {
+                        text = hint
+                        textSize = 11f
+                        setTextColor(ContextCompat.getColor(this@MainActivity, R.color.duckweed_text_faint))
+                    }, LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.WRAP_CONTENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT,
+                    ).apply {
+                        marginStart = dp(6)
+                    })
+                }
+                labelRow.addView(valueCluster)
                 block.addView(labelRow)
                 block.addView(ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
                     max = 100
-                    progress = limit.percent.roundToInt().coerceIn(0, 100)
-                    progressDrawable = ContextCompat.getDrawable(this@MainActivity, R.drawable.plan_progress)
-                    contentDescription = "${limit.label}, ${UsageLimitCopy.percentUsed(limit.percent)}"
+                    progress = remaining
+                    progressDrawable = usageMeterDrawable(
+                        ContextCompat.getColor(this@MainActivity, meterColor),
+                    )
+                    contentDescription = listOfNotNull(
+                        "${limit.label} remaining $remainingLabel",
+                        resetHint,
+                        forecast.text,
+                    ).joinToString(", ")
                 }, LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.MATCH_PARENT,
-                    dp(4),
+                    dp(7),
                 ).apply {
                     topMargin = dp(8)
                 })
-                val details = listOfNotNull(
-                    UsageLimitCopy.activeTimeLeft(limit.usageHoursLeft),
-                    UsageLimitCopy.resetTime(limit.resetsAt, now),
+                val forecastRow = LinearLayout(this).apply {
+                    gravity = Gravity.CENTER_VERTICAL
+                    orientation = LinearLayout.HORIZONTAL
+                }
+                val forecastColor = when (forecast.tone) {
+                    UsageLimitCopy.Tone.Critical -> R.color.duckweed_usage_forecast_critical
+                    UsageLimitCopy.Tone.Warning -> R.color.duckweed_text_dim
+                    UsageLimitCopy.Tone.Ok -> R.color.duckweed_text_dim
+                    UsageLimitCopy.Tone.Muted -> R.color.duckweed_text_faint
+                }
+                val forecastDot = when (forecast.tone) {
+                    UsageLimitCopy.Tone.Critical -> R.color.duckweed_usage_forecast_critical
+                    UsageLimitCopy.Tone.Warning -> R.color.duckweed_usage_forecast_warning
+                    UsageLimitCopy.Tone.Ok -> R.color.duckweed_usage_ok
+                    UsageLimitCopy.Tone.Muted -> R.color.duckweed_text_faint
+                }
+                forecastRow.addView(
+                    usageSwatch(ContextCompat.getColor(this, forecastDot), 5, 3),
+                    LinearLayout.LayoutParams(dp(5), dp(5)).apply { marginEnd = dp(6) },
                 )
-                if (details.isNotEmpty()) {
-                    block.addView(TextView(this).apply {
-                        text = details.joinToString(" · ")
-                        textSize = 12f
+                forecastRow.addView(TextView(this).apply {
+                    text = forecast.text
+                    textSize = 12f
+                    setTextColor(ContextCompat.getColor(this@MainActivity, forecastColor))
+                })
+                forecast.detail?.let { detail ->
+                    forecastRow.addView(TextView(this).apply {
+                        text = detail
+                        textSize = 11f
                         setTextColor(ContextCompat.getColor(this@MainActivity, R.color.duckweed_text_faint))
                     }, LinearLayout.LayoutParams(
-                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT,
                         LinearLayout.LayoutParams.WRAP_CONTENT,
                     ).apply {
-                        topMargin = dp(7)
+                        marginStart = dp(6)
                     })
                 }
+                block.addView(forecastRow, LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                ).apply {
+                    topMargin = dp(7)
+                })
                 card.addView(block, LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.MATCH_PARENT,
                     LinearLayout.LayoutParams.WRAP_CONTENT,
@@ -2296,6 +2363,36 @@ class MainActivity : AppCompatActivity() {
             )
         }
         conversationCommandsScroll.visibility = if (commands.isEmpty()) View.GONE else View.VISIBLE
+    }
+
+    private fun usageSwatch(color: Int, sizeDp: Int, cornerDp: Int): View {
+        return View(this).apply {
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dp(cornerDp).toFloat()
+                setColor(color)
+            }
+            minimumWidth = dp(sizeDp)
+            minimumHeight = dp(sizeDp)
+        }
+    }
+
+    private fun usageMeterDrawable(fillColor: Int): LayerDrawable {
+        val radius = dp(4).toFloat()
+        val track = GradientDrawable().apply {
+            cornerRadius = radius
+            setColor(ContextCompat.getColor(this@MainActivity, R.color.duckweed_border))
+        }
+        val fill = GradientDrawable().apply {
+            cornerRadius = radius
+            setColor(fillColor)
+        }
+        val clip = ClipDrawable(fill, Gravity.START, ClipDrawable.HORIZONTAL)
+        return LayerDrawable(arrayOf(track, clip)).apply {
+            setId(0, android.R.id.background)
+            setId(1, android.R.id.progress)
+        }
     }
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
