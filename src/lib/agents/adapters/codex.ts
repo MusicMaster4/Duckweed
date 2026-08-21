@@ -81,6 +81,23 @@ const RESUME_RPC_TIMEOUT_MS = 10_000;
 const SIDE_DEVELOPER_INSTRUCTIONS = `You are in an ephemeral side conversation, not the main thread.
 Use the inherited conversation only as reference context. Answer only the question submitted after the fork. Do not continue tasks, plans, or tool calls inherited from the parent thread. Keep the response focused and do not modify files or workspace state.`;
 
+/** Side cards show the reply, not Codex commentary or reasoning traces. */
+function pickSideAnswer(messages: Map<string, CodexSideMessage>): string {
+  let lastAnswer = "";
+  let lastFinal = "";
+  let sawFinal = false;
+  for (const item of messages.values()) {
+    if (item.phase === "commentary") continue;
+    if (item.phase === "final_answer") {
+      lastFinal = item.text;
+      sawFinal = true;
+      continue;
+    }
+    if (!item.phase) lastAnswer = item.text;
+  }
+  return sawFinal ? lastFinal : lastAnswer;
+}
+
 interface CodexAdapterOptions {
   /** Test seam; production uses the same 800 ms quiet window as raw Codex. */
   completionQuietMs?: number;
@@ -222,10 +239,16 @@ interface ChildThread {
   state: AgentSessionState;
 }
 
+interface CodexSideMessage {
+  text: string;
+  /** Codex `commentary` is a thinking trace; `final_answer` is the reply. */
+  phase: string | null;
+}
+
 interface CodexSideThread {
   threadId: string | null;
   currentTurnId: string | null;
-  streamedItems: Set<string>;
+  messages: Map<string, CodexSideMessage>;
   sideQuestion: AgentSideQuestion;
 }
 
@@ -638,6 +661,27 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     ctx.emit({ type: "side-question", sideQuestion: { ...side.sideQuestion } });
   }
 
+  function noteSideMessage(
+    side: CodexSideThread,
+    itemId: string,
+    patch: { text?: string; phase?: string | null; append?: boolean },
+  ): CodexSideMessage {
+    const current = side.messages.get(itemId) ?? { text: "", phase: null };
+    if (patch.phase) current.phase = patch.phase;
+    if (patch.text) {
+      current.text = patch.append ? current.text + patch.text : patch.text;
+    }
+    side.messages.set(itemId, current);
+    return current;
+  }
+
+  function publishSideAnswer(side: CodexSideThread, ctx: AdapterContext): void {
+    const next = pickSideAnswer(side.messages);
+    if (next === side.sideQuestion.answer) return;
+    side.sideQuestion.answer = next;
+    emitSide(side, ctx);
+  }
+
   function finishSide(
     sideThreadId: string,
     status: "answered" | "error",
@@ -648,6 +692,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     if (!side) return;
     side.currentTurnId = null;
     side.sideQuestion.status = status;
+    side.sideQuestion.answer = pickSideAnswer(side.messages);
     if (!side.sideQuestion.answer.trim() && fallback) side.sideQuestion.answer = fallback;
     if (status === "answered" && !side.sideQuestion.answer.trim()) {
       side.sideQuestion.status = "error";
@@ -675,24 +720,35 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       case "turn/started":
         side.currentTurnId = asString(asRecord(params.turn)?.id);
         return;
+      case "item/started": {
+        const item = asRecord(params.item);
+        const itemId = asString(item?.id);
+        if (asString(item?.type) !== "agentMessage" || !itemId) return;
+        noteSideMessage(side, itemId, { phase: asString(item.phase) });
+        publishSideAnswer(side, ctx);
+        return;
+      }
       case "item/agentMessage/delta": {
         const itemId = asString(params.itemId);
         const delta = asString(params.delta);
         if (!itemId || !delta) return;
-        side.streamedItems.add(itemId);
-        side.sideQuestion.answer += delta;
-        emitSide(side, ctx);
+        noteSideMessage(side, itemId, {
+          text: delta,
+          phase: asString(params.phase),
+          append: true,
+        });
+        publishSideAnswer(side, ctx);
         return;
       }
       case "item/completed": {
         const item = asRecord(params.item);
         const itemId = asString(item?.id);
         if (asString(item?.type) !== "agentMessage" || !itemId) return;
-        const text = asString(item?.text) ?? "";
-        if (text && !side.streamedItems.has(itemId)) {
-          side.sideQuestion.answer += text;
-          emitSide(side, ctx);
-        }
+        noteSideMessage(side, itemId, {
+          text: asString(item.text) ?? "",
+          phase: asString(item.phase),
+        });
+        publishSideAnswer(side, ctx);
         return;
       }
       case "turn/completed": {
@@ -715,7 +771,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
           finishSide(sideThreadId, "error", ctx, "The side conversation failed.");
         } else if (
           status === "idle" &&
-          (side.currentTurnId || side.sideQuestion.answer.trim())
+          (side.currentTurnId || side.sideQuestion.answer.trim() || side.messages.size > 0)
         ) {
           // Thread-level idle is Codex's reconciliation channel. Side forks
           // often receive this without a matching turn/completed, which would
@@ -763,7 +819,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     const side: CodexSideThread = {
       threadId: null,
       currentTurnId: null,
-      streamedItems: new Set(),
+      messages: new Map(),
       sideQuestion: {
         id: `codex-side-${sideSequence}`,
         command,

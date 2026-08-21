@@ -1315,6 +1315,47 @@ export const meta = {
     expect(h.state().items).toEqual([]);
   });
 
+  test("does not mix main-turn thinking into a /btw side answer", () => {
+    const h = harness();
+    expect(h.adapter.command?.("/btw which file was that?", h.ctx)).toBe("handled");
+    const sent = h.sent.at(-1) as { request_id: string };
+
+    for (const frame of streamBlock(0, { type: "thinking" }, [
+      { type: "thinking_delta", thinking: "I should keep this out of the side card." },
+    ])) {
+      h.feed(frame);
+    }
+    for (const frame of streamBlock(1, { type: "text" }, [
+      { type: "text_delta", text: "Working on the main task." },
+    ])) {
+      h.feed(frame);
+    }
+
+    expect(h.state().sideQuestion).toMatchObject({
+      status: "asking",
+      answer: "",
+    });
+    expect(h.state().items.find((item) => item.kind === "thinking")).toMatchObject({
+      text: "I should keep this out of the side card.",
+    });
+
+    h.feed({
+      type: "control_response",
+      response: {
+        subtype: "success",
+        request_id: sent.request_id,
+        response: { response: "It was src/config.ts.", synthetic: false },
+      },
+    });
+
+    expect(h.state().sideQuestion).toMatchObject({
+      answer: "It was src/config.ts.",
+      status: "answered",
+    });
+    expect(h.state().sideQuestion?.answer).not.toContain("keep this out of the side card");
+    expect(h.state().sideQuestion?.answer).not.toContain("Working on the main task.");
+  });
+
   test("routes /model through the set_model control request", () => {
     const h = harness();
     expect(h.adapter.command?.("/model opus", h.ctx)).toBe("handled");

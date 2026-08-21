@@ -616,6 +616,242 @@ describe("codex adapter", () => {
     });
   });
 
+  test("keeps Codex commentary and reasoning out of the side-question answer", async () => {
+    const h = harness();
+    await h.handshake();
+
+    expect(h.adapter.command?.("/side what changed?", h.ctx)).toBe("handled");
+    h.feed({ jsonrpc: "2.0", id: 4, result: { thread: { id: "side_1" } } });
+    await Promise.resolve();
+    await Promise.resolve();
+    h.feed({ jsonrpc: "2.0", id: 5, result: { turn: { id: "side_turn_1" } } });
+
+    h.notify("item/started", {
+      threadId: "side_1",
+      turnId: "side_turn_1",
+      item: { id: "side_think_1", type: "reasoning" },
+    });
+    h.notify("item/reasoning/textDelta", {
+      threadId: "side_1",
+      turnId: "side_turn_1",
+      itemId: "side_think_1",
+      delta: "The user asked about the parser. I should inspect the last edit.",
+    });
+    h.notify("item/completed", {
+      threadId: "side_1",
+      turnId: "side_turn_1",
+      item: {
+        id: "side_think_1",
+        type: "reasoning",
+        content: ["The user asked about the parser. I should inspect the last edit."],
+      },
+    });
+    h.notify("item/started", {
+      threadId: "side_1",
+      turnId: "side_turn_1",
+      item: { id: "side_comment_1", type: "agentMessage", phase: "commentary" },
+    });
+    h.notify("item/agentMessage/delta", {
+      threadId: "side_1",
+      turnId: "side_turn_1",
+      itemId: "side_comment_1",
+      phase: "commentary",
+      delta: "Checking the last parser commit.",
+    });
+    h.notify("item/completed", {
+      threadId: "side_1",
+      turnId: "side_turn_1",
+      item: {
+        id: "side_comment_1",
+        type: "agentMessage",
+        phase: "commentary",
+        text: "Checking the last parser commit.",
+      },
+    });
+
+    expect(h.state().sideQuestion).toMatchObject({
+      status: "asking",
+      answer: "",
+    });
+    expect(h.state().items).toEqual([]);
+
+    h.notify("item/started", {
+      threadId: "side_1",
+      turnId: "side_turn_1",
+      item: { id: "side_answer_1", type: "agentMessage", phase: "final_answer" },
+    });
+    h.notify("item/agentMessage/delta", {
+      threadId: "side_1",
+      turnId: "side_turn_1",
+      itemId: "side_answer_1",
+      phase: "final_answer",
+      delta: "Only the parser changed.",
+    });
+    h.notify("item/completed", {
+      threadId: "side_1",
+      turnId: "side_turn_1",
+      item: {
+        id: "side_answer_1",
+        type: "agentMessage",
+        phase: "final_answer",
+        text: "Only the parser changed.",
+      },
+    });
+    h.notify("turn/completed", {
+      threadId: "side_1",
+      turn: { id: "side_turn_1", status: "completed", items: [] },
+    });
+
+    expect(h.state().sideQuestion).toMatchObject({
+      answer: "Only the parser changed.",
+      status: "answered",
+    });
+    expect(h.state().sideQuestion?.answer).not.toContain("inspect the last edit");
+    expect(h.state().sideQuestion?.answer).not.toContain("Checking the last parser commit.");
+    expect(h.state().items).toEqual([]);
+  });
+
+  test("does not treat unphased thinking-then-answer side messages as one blob", async () => {
+    const h = harness();
+    await h.handshake();
+
+    expect(h.adapter.command?.("/btw what changed?", h.ctx)).toBe("handled");
+    h.feed({ jsonrpc: "2.0", id: 4, result: { thread: { id: "side_1" } } });
+    await Promise.resolve();
+    await Promise.resolve();
+    h.feed({ jsonrpc: "2.0", id: 5, result: { turn: { id: "side_turn_1" } } });
+
+    h.notify("item/agentMessage/delta", {
+      threadId: "side_1",
+      itemId: "side_trace_1",
+      delta: "Let me think about the last diff.",
+    });
+    h.notify("item/completed", {
+      threadId: "side_1",
+      item: {
+        id: "side_trace_1",
+        type: "agentMessage",
+        text: "Let me think about the last diff.",
+      },
+    });
+    h.notify("item/agentMessage/delta", {
+      threadId: "side_1",
+      itemId: "side_trace_2",
+      delta: "Only the parser changed.",
+    });
+    h.notify("item/completed", {
+      threadId: "side_1",
+      item: {
+        id: "side_trace_2",
+        type: "agentMessage",
+        text: "Only the parser changed.",
+      },
+    });
+    h.notify("turn/completed", {
+      threadId: "side_1",
+      turn: { id: "side_turn_1", status: "completed", items: [] },
+    });
+
+    expect(h.state().sideQuestion).toMatchObject({
+      answer: "Only the parser changed.",
+      status: "answered",
+    });
+    expect(h.state().sideQuestion?.answer).not.toContain("Let me think");
+  });
+
+  test("drops side commentary whose phase arrives only on item completion", async () => {
+    const h = harness();
+    await h.handshake();
+
+    expect(h.adapter.command?.("/side what changed?", h.ctx)).toBe("handled");
+    h.feed({ jsonrpc: "2.0", id: 4, result: { thread: { id: "side_1" } } });
+    await Promise.resolve();
+    await Promise.resolve();
+    h.feed({ jsonrpc: "2.0", id: 5, result: { turn: { id: "side_turn_1" } } });
+
+    h.notify("item/agentMessage/delta", {
+      threadId: "side_1",
+      itemId: "side_comment_late",
+      delta: "Checking the last parser commit.",
+    });
+    expect(h.state().sideQuestion?.answer).toBe("Checking the last parser commit.");
+
+    h.notify("item/completed", {
+      threadId: "side_1",
+      item: {
+        id: "side_comment_late",
+        type: "agentMessage",
+        phase: "commentary",
+        text: "Checking the last parser commit.",
+      },
+    });
+    expect(h.state().sideQuestion).toMatchObject({
+      status: "asking",
+      answer: "",
+    });
+
+    h.notify("item/agentMessage/delta", {
+      threadId: "side_1",
+      itemId: "side_answer_late",
+      delta: "Only the parser changed.",
+    });
+    h.notify("item/completed", {
+      threadId: "side_1",
+      item: {
+        id: "side_answer_late",
+        type: "agentMessage",
+        phase: "final_answer",
+        text: "Only the parser changed.",
+      },
+    });
+    h.notify("turn/completed", {
+      threadId: "side_1",
+      turn: { id: "side_turn_1", status: "completed", items: [] },
+    });
+
+    expect(h.state().sideQuestion).toMatchObject({
+      answer: "Only the parser changed.",
+      status: "answered",
+    });
+    expect(h.state().sideQuestion?.answer).not.toContain("Checking the last parser commit.");
+  });
+
+  test("does not settle a commentary-only side thread as an answer", async () => {
+    const h = harness();
+    await h.handshake();
+
+    expect(h.adapter.command?.("/side what changed?", h.ctx)).toBe("handled");
+    h.feed({ jsonrpc: "2.0", id: 4, result: { thread: { id: "side_1" } } });
+    await Promise.resolve();
+    await Promise.resolve();
+    h.feed({ jsonrpc: "2.0", id: 5, result: { turn: { id: "side_turn_1" } } });
+
+    h.notify("item/agentMessage/delta", {
+      threadId: "side_1",
+      itemId: "side_comment_only",
+      delta: "Still thinking about the parser.",
+    });
+    h.notify("item/completed", {
+      threadId: "side_1",
+      item: {
+        id: "side_comment_only",
+        type: "agentMessage",
+        phase: "commentary",
+        text: "Still thinking about the parser.",
+      },
+    });
+    h.notify("turn/completed", {
+      threadId: "side_1",
+      turn: { id: "side_turn_1", status: "completed", items: [] },
+    });
+
+    expect(h.state().sideQuestion).toMatchObject({
+      status: "error",
+      answer: "Codex did not return a side-conversation response.",
+    });
+    expect(h.state().sideQuestion?.answer).not.toContain("Still thinking");
+  });
+
   test("holds /side and /btw out of the same-turn path until resume hydration finishes", async () => {
     const h = harness();
     await h.handshake();
