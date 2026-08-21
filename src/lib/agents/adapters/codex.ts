@@ -71,12 +71,25 @@ const FAST_SERVICE_TIER = "priority";
 const DEFAULT_SERVICE_TIER = "default";
 /** Matches the native log monitor's guard for Codex auto-continuations. */
 const ROOT_COMPLETION_QUIET_MS = 800;
+/**
+ * Codex `thread/resume` has no server-side timeout. A thread left `active`
+ * with no running turn never answers, which used to leave the pane loading
+ * forever. Ten seconds is long enough for a real page and short enough to
+ * recover before the composer looks wedged.
+ */
+const RESUME_RPC_TIMEOUT_MS = 10_000;
 const SIDE_DEVELOPER_INSTRUCTIONS = `You are in an ephemeral side conversation, not the main thread.
 Use the inherited conversation only as reference context. Answer only the question submitted after the fork. Do not continue tasks, plans, or tool calls inherited from the parent thread. Keep the response focused and do not modify files or workspace state.`;
 
 interface CodexAdapterOptions {
   /** Test seam; production uses the same 800 ms quiet window as raw Codex. */
   completionQuietMs?: number;
+  /**
+   * How long `thread/resume` and history pages may sit unanswered before
+   * Duckweed cancels them. Codex can hang forever on a stale-active thread;
+   * production recovers by forking. `0` disables the timer (interrupt-only).
+   */
+  resumeTimeoutMs?: number;
 }
 
 const EXEC_STATUS: Record<string, ToolStatus> = {
@@ -196,6 +209,7 @@ interface Pending {
 type RequestKey = string | number;
 
 const RESUME_CANCELLED = "duckweed_resume_cancelled";
+const RESUME_TIMEOUT = "duckweed_resume_timeout";
 
 interface ChildThread {
   callId: string | null;
@@ -229,6 +243,7 @@ function readFileChanges(raw: unknown): AgentFileChange[] {
 
 export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdapter {
   const completionQuietMs = options.completionQuietMs ?? ROOT_COMPLETION_QUIET_MS;
+  const resumeTimeoutMs = options.resumeTimeoutMs ?? RESUME_RPC_TIMEOUT_MS;
   let nextId = 1;
   const pending = new Map<RequestKey, Pending>();
   let threadId: string | null = null;
@@ -257,6 +272,8 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
    * cannot be misrouted; side forks must still wait for that hydration.
    */
   let hydratingResume = false;
+  /** Stop pressed while resume RPCs were in flight or between recovery steps. */
+  let resumeAborted = false;
   /**
    * The model and effort turns run with. Seeded from the launch flags,
    * corrected by the `thread/start` response, and moved by /model and
@@ -552,6 +569,65 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       pending.set(id, { resolve, reject });
       ctx.send({ jsonrpc: "2.0", id, method, params });
     });
+  }
+
+  function resumeErrorCode(error: unknown): string | null {
+    return asString(asRecord(error)?.code);
+  }
+
+  function throwIfResumeAborted(): void {
+    if (!resumeAborted) return;
+    throw { code: RESUME_CANCELLED };
+  }
+
+  /**
+   * Same as `requestWithId`, but a silent Codex hang cannot occupy the pane
+   * forever. The timer is a client watchdog: app-server has none for resume.
+   */
+  function requestWithTimeout(
+    ctx: AdapterContext,
+    id: RequestKey,
+    method: string,
+    params: unknown,
+  ): Promise<Record<string, unknown>> {
+    if (resumeTimeoutMs <= 0) return requestWithId(ctx, id, method, params);
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      const finish = (action: () => void) => {
+        if (settled) return;
+        settled = true;
+        if (timer !== null) clearTimeout(timer);
+        pending.delete(id);
+        action();
+      };
+      timer = setTimeout(() => {
+        finish(() => {
+          notify(ctx, "$/cancelRequest", { id });
+          reject({
+            code: RESUME_TIMEOUT,
+            message: "Codex did not resume that conversation.",
+          });
+        });
+      }, resumeTimeoutMs);
+      pending.set(id, {
+        resolve: (result) => finish(() => resolve(result)),
+        reject: (error) => finish(() => reject(error)),
+      });
+      ctx.send({ jsonrpc: "2.0", id, method, params });
+    });
+  }
+
+  function resumeThreadParams(targetId: string): Record<string, unknown> {
+    return {
+      threadId: targetId,
+      excludeTurns: true,
+      initialTurnsPage: {
+        limit: RESUME_PAGE_SIZE,
+        sortDirection: "desc",
+        itemsView: "full",
+      },
+    };
   }
 
   function notify(ctx: AdapterContext, method: string, params: unknown) {
@@ -2165,61 +2241,110 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     /**
      * `thread/resume` keeps the running process. Newer app-server builds page
      * the transcript, so hydrate bounded full-detail pages before replaying it.
+     *
+     * Codex can leave a thread `active` with no running turn after an aborted
+     * session. `thread/resume` then never answers. Time out, fork a copy (the
+     * idle fork resumes immediately), and still paint whatever history pages
+     * arrived so the composer does not sit on "Loading conversation" forever.
      */
     resume: (sessionId, ctx) => {
       cancelPendingRootCompletion();
       hydratingResume = true;
+      resumeAborted = false;
       ctx.emit({ type: "history-loading", loading: true });
       ctx.emit({ type: "status", status: "working" });
       ctx.emit({ type: "goal", goal: null });
       const previousThreadId = threadId;
+      let targetId = sessionId;
       // Claim the target before awaiting `thread/resume`. A live resumed turn
       // can finish while that request or its transcript pages are in flight;
       // leaving the old id here used to route the real completion as a child.
-      threadId = sessionId;
+      threadId = targetId;
       currentTurnId = null;
       rootTurnMayBeActive = true;
       rootTurnStatusConfirmed = false;
       const resumeGeneration = ++rootTurnGeneration;
       const resumeCompletionVersion = rootCompletionVersion;
 
-      const load = async (): Promise<boolean> => {
+      const callResume = (id: string): Promise<Record<string, unknown>> => {
+        throwIfResumeAborted();
         const requestId = nextId++;
         resumeRequestId = requestId;
-        const result = await requestWithId(ctx, requestId, "thread/resume", {
-          threadId: sessionId,
-          excludeTurns: true,
-          initialTurnsPage: {
-            limit: RESUME_PAGE_SIZE,
-            sortDirection: "desc",
-            itemsView: "full",
-          },
+        return requestWithTimeout(ctx, requestId, "thread/resume", resumeThreadParams(id));
+      };
+
+      const recoverHungResume = async (hungId: string): Promise<Record<string, unknown>> => {
+        throwIfResumeAborted();
+        const forkRequestId = nextId++;
+        resumeRequestId = forkRequestId;
+        const forked = await requestWithTimeout(ctx, forkRequestId, "thread/fork", {
+          threadId: hungId,
+          cwd: ctx.cwd,
+          ...threadAccessParams(currentAccess),
+          ...(currentModel ? { model: currentModel } : {}),
         });
+        const copyId =
+          asString(asRecord(forked.thread)?.id) ?? asString(forked.id);
+        if (!copyId) throw { message: "Codex could not copy that thread." };
+        threadId = copyId;
+        targetId = copyId;
+        return callResume(copyId);
+      };
+
+      const load = async (): Promise<boolean> => {
+        let result: Record<string, unknown>;
+        let recoveredFromHang = false;
+        try {
+          result = await callResume(targetId);
+        } catch (error: unknown) {
+          if (resumeErrorCode(error) !== RESUME_TIMEOUT) throw error;
+          result = await recoverHungResume(targetId);
+          recoveredFromHang = true;
+        }
+        throwIfResumeAborted();
         const thread = asRecord(result.thread) ?? result;
-        threadId = asString(thread.id) ?? sessionId;
+        threadId = asString(thread.id) ?? targetId;
 
         const initialPage = asRecord(result.initialTurnsPage);
         const paginated = initialPage !== null;
         const turns = paginated ? asArray(initialPage.data) : asArray(thread.turns);
-        let cursor = asString(initialPage?.nextCursor);
+        let cursor = paginated
+          ? asString(initialPage?.nextCursor)
+          : asString(result.turnsBackwardsCursor);
+        const descending = paginated || cursor !== null;
         while (cursor && turns.length < MAX_RESUMED_TURNS) {
+          throwIfResumeAborted();
           const pageRequestId = nextId++;
           resumeRequestId = pageRequestId;
-          const page = await requestWithId(ctx, pageRequestId, "thread/turns/list", {
-            threadId,
-            cursor,
-            limit: Math.min(RESUME_PAGE_SIZE, MAX_RESUMED_TURNS - turns.length),
-            sortDirection: "desc",
-            itemsView: "full",
-          });
-          turns.push(...asArray(page.data));
-          cursor = asString(page.nextCursor);
+          try {
+            const page = await requestWithTimeout(ctx, pageRequestId, "thread/turns/list", {
+              threadId,
+              cursor,
+              limit: Math.min(RESUME_PAGE_SIZE, MAX_RESUMED_TURNS - turns.length),
+              sortDirection: "desc",
+              itemsView: "full",
+            });
+            turns.push(...asArray(page.data));
+            cursor = asString(page.nextCursor);
+          } catch (error: unknown) {
+            if (resumeErrorCode(error) === RESUME_CANCELLED) throw error;
+            // A hung or unsupported page must not keep the composer locked.
+            // Replay whatever already arrived.
+            cursor = null;
+          }
         }
 
         // Descending pagination starts at the newest turn. The transcript
         // renderer expects natural conversation order from oldest to newest.
-        const chronologicalTurns = paginated ? turns.reverse() : turns;
+        const chronologicalTurns = descending ? turns.reverse() : turns;
         replayTurns(chronologicalTurns, ctx);
+        if (recoveredFromHang) {
+          ctx.emit({
+            type: "notice",
+            tone: "info",
+            text: "Codex did not resume that conversation, so Duckweed opened a copy of it.",
+          });
+        }
         const hydrated = hydratedTurnId({ ...thread, turns: chronologicalTurns });
         const hydratedActiveTurn =
           hydrated && !completedRootTurnIds.has(hydrated) ? hydrated : null;
@@ -2297,11 +2422,14 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
             settleRootTurn(null);
           }
           const record = asRecord(error);
-          if (asString(record?.code) !== RESUME_CANCELLED) {
+          if (resumeErrorCode(error) !== RESUME_CANCELLED) {
             ctx.emit({
               type: "notice",
               tone: "error",
-              text: asString(record?.message) ?? "Codex could not resume that thread.",
+              text:
+                resumeErrorCode(error) === RESUME_TIMEOUT
+                  ? "Codex did not resume that conversation."
+                  : asString(record?.message) ?? "Codex could not resume that thread.",
             });
           }
           ctx.emit({ type: "status", status: "idle" });
@@ -2316,6 +2444,9 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
 
     interrupt: (ctx) => {
       cancelPendingRootCompletion();
+      if (resumeRequestId !== null || hydratingResume) {
+        resumeAborted = true;
+      }
       if (resumeRequestId !== null) {
         const requestId = resumeRequestId;
         resumeRequestId = null;
@@ -2323,6 +2454,11 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         pending.delete(requestId);
         inFlight?.reject({ code: RESUME_CANCELLED });
         notify(ctx, "$/cancelRequest", { id: requestId });
+        return;
+      }
+      if (hydratingResume) {
+        // Gap between a timed-out resume RPC and the fork that recovers it.
+        // load() sees `resumeAborted` on the next step and settles.
         return;
       }
       if (!threadId || !currentTurnId) {

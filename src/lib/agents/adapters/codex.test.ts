@@ -2154,6 +2154,153 @@ describe("codex adapter", () => {
     ).toBe(false);
   });
 
+  test("times out a silent thread/resume, then hydrates a forked copy", async () => {
+    const h = harness({}, { completionQuietMs: 0, resumeTimeoutMs: 40 });
+    await h.handshake();
+
+    const resumed = h.adapter.resume?.("thread_stuck_active", h.ctx);
+    expect(h.state()).toMatchObject({ status: "working", loadingHistory: true });
+    await new Promise((resolve) => setTimeout(resolve, 70));
+
+    const fork = h.sent.find((message) => message.method === "thread/fork") as {
+      id: number;
+      params: Record<string, unknown>;
+    };
+    expect(fork.params).toMatchObject({ threadId: "thread_stuck_active" });
+    h.feed({ jsonrpc: "2.0", id: fork.id, result: { thread: { id: "thread_copy" } } });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const resumes = h.sent.filter((message) => message.method === "thread/resume") as {
+      id: number;
+      params: Record<string, unknown>;
+    }[];
+    expect(resumes).toHaveLength(2);
+    expect(resumes[1]?.params.threadId).toBe("thread_copy");
+    h.feed({
+      jsonrpc: "2.0",
+      id: resumes[1]!.id,
+      result: {
+        thread: {
+          id: "thread_copy",
+          sessionId: "sess_copy",
+          status: { type: "idle" },
+          turns: [],
+        },
+        initialTurnsPage: {
+          data: [
+            {
+              id: "turn-copy",
+              status: "completed",
+              items: [
+                {
+                  type: "userMessage",
+                  id: "user-copy",
+                  content: [{ type: "text", text: "Keep going from the copy" }],
+                },
+                { type: "agentMessage", id: "answer-copy", text: "Copied." },
+              ],
+            },
+          ],
+          nextCursor: null,
+        },
+      },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(await resumed).toBe(true);
+    expect(h.state()).toMatchObject({
+      status: "idle",
+      loadingHistory: false,
+      sessionId: "sess_copy",
+    });
+    expect(h.state().items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "notice",
+          tone: "info",
+          text: "Codex did not resume that conversation, so Duckweed opened a copy of it.",
+        }),
+        expect.objectContaining({ kind: "user", text: "Keep going from the copy" }),
+        expect.objectContaining({ kind: "assistant", text: "Copied." }),
+      ]),
+    );
+  });
+
+  test("keeps the first history page when later transcript pages never answer", async () => {
+    const h = harness({}, { completionQuietMs: 0, resumeTimeoutMs: 40 });
+    await h.handshake();
+
+    const resumed = h.adapter.resume?.("thread_paged_hang", h.ctx);
+    const resumeCall = h.sent.find((message) => message.method === "thread/resume") as {
+      id: number;
+    };
+    h.feed({
+      jsonrpc: "2.0",
+      id: resumeCall.id,
+      result: {
+        thread: {
+          id: "thread_paged_hang",
+          sessionId: "sess_paged_hang",
+          status: { type: "idle" },
+          turns: [],
+        },
+        initialTurnsPage: {
+          data: [
+            {
+              id: "turn-new",
+              status: "completed",
+              items: [
+                {
+                  type: "userMessage",
+                  id: "user-new",
+                  content: [{ type: "text", text: "Inspect the latest layout" }],
+                },
+                { type: "agentMessage", id: "answer-new", text: "The latest layout is fine." },
+              ],
+            },
+          ],
+          nextCursor: "older-turns",
+        },
+      },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(h.sent.some((message) => message.method === "thread/turns/list")).toBe(true);
+
+    await new Promise((resolve) => setTimeout(resolve, 70));
+    expect(await resumed).toBe(true);
+    expect(h.state()).toMatchObject({
+      status: "idle",
+      loadingHistory: false,
+      sessionId: "sess_paged_hang",
+    });
+    expect(h.state().items).toEqual([
+      expect.objectContaining({ kind: "user", text: "Inspect the latest layout" }),
+      expect.objectContaining({ kind: "assistant", text: "The latest layout is fine." }),
+    ]);
+    expect(h.sent.some((message) => message.method === "thread/fork")).toBe(false);
+  });
+
+  test("does not fork when thread/resume returns an application error", async () => {
+    const h = harness({}, { completionQuietMs: 0, resumeTimeoutMs: 40 });
+    await h.handshake();
+    const resumed = h.adapter.resume?.("gone", h.ctx);
+    const call = h.sent.find((message) => message.method === "thread/resume") as { id: number };
+    h.feed({ jsonrpc: "2.0", id: call.id, error: { message: "thread not found" } });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(await resumed).toBe(false);
+    expect(h.sent.some((message) => message.method === "thread/fork")).toBe(false);
+    expect(h.state().items.at(-1)).toMatchObject({
+      kind: "notice",
+      tone: "error",
+      text: "thread not found",
+    });
+    expect(h.state()).toMatchObject({ status: "idle", loadingHistory: false });
+  });
+
   test("says so when a thread cannot be resumed", async () => {
     const h = harness();
     await h.handshake();
