@@ -13,7 +13,6 @@ import {
   secondsLeft,
   setAction,
   setGrace,
-  setRedshiftEnabled,
   subscribe,
   type BusyReason,
   type PowerAction,
@@ -102,12 +101,6 @@ export function PowerWatchTool() {
         {state.phase === "failed" && (
           <p className="power-error">
             <strong>The OS refused.</strong> {state.error}
-          </p>
-        )}
-
-        {state.redshiftError && (
-          <p className="power-error">
-            <strong>Redshift unavailable.</strong> {state.redshiftError}
           </p>
         )}
 
@@ -234,30 +227,6 @@ export function PowerWatchTool() {
               ))}
             </div>
           </Tooltip>
-        </article>
-
-        <article className="power-card power-redshift-card">
-          <header>
-            <span className="power-card-title">While Power watch is armed</span>
-          </header>
-          <button
-            type="button"
-            className={`power-redshift ${state.redshiftEnabled ? "is-active" : ""}`}
-            role="switch"
-            aria-checked={state.redshiftEnabled}
-            onClick={() => setRedshiftEnabled(!state.redshiftEnabled)}
-          >
-            <span className="power-redshift-copy">
-              <strong>Redshift</strong>
-              <span>Render the entire screen using red light only.</span>
-            </span>
-            <span className="power-switch" aria-hidden="true">
-              <span />
-            </span>
-          </button>
-          <p className="power-card-note">
-            Restores your previous screen colors when you cancel or the power action starts.
-          </p>
         </article>
 
         {!armed && (

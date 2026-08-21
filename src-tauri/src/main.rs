@@ -14,7 +14,6 @@ mod power;
 mod process_tree;
 mod project;
 mod pty;
-mod redshift;
 mod shell_integration;
 mod shells;
 mod sound;
@@ -664,12 +663,6 @@ async fn power_action(action: String) -> Result<(), String> {
     blocking(move || power::run(action)).await
 }
 
-/// Apply or restore Power Watch's full-screen red-only color effect.
-#[tauri::command]
-fn power_redshift(enabled: bool) -> Result<(), String> {
-    redshift::set_enabled(enabled)
-}
-
 /// Play one completion cue from this process.
 ///
 /// Playing it in the WebView instead would file the sound under "Microsoft Edge
@@ -1005,7 +998,6 @@ fn main() {
             open_url,
             play_completion_sound,
             power_action,
-            power_redshift,
             take_launch_intent,
             shell_integration_status,
             shell_integration_set,
@@ -1041,8 +1033,6 @@ fn main() {
                 if let Some(presence) = window.app_handle().try_state::<DiscordPresence>() {
                     presence.stop();
                 }
-                // A global screen effect must never outlive Duckweed.
-                let _ = redshift::set_enabled(false);
             }
         })
         .run(tauri::generate_context!())

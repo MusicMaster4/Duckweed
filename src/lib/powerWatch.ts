@@ -46,8 +46,6 @@ export interface BusyEntry {
 
 export interface PowerWatchState {
   action: PowerAction;
-  /** Whether arming should turn the entire desktop red-only. */
-  redshiftEnabled: boolean;
   phase: PowerWatchPhase;
   /** Uninterrupted quiet required before firing. */
   graceMs: number;
@@ -56,7 +54,6 @@ export interface PowerWatchState {
   /** What is keeping the watch waiting, as of the last poll. */
   busy: BusyEntry[];
   error: string | null;
-  redshiftError: string | null;
 }
 
 export const GRACE_CHOICES = [
@@ -135,26 +132,17 @@ export function formatCountdown(seconds: number): string {
 
 // -------------------------------------------------------------------- store
 
-function loadPrefs(): { action: PowerAction; graceMs: number; redshiftEnabled: boolean } {
-  const fallback = {
-    action: "suspend" as PowerAction,
-    graceMs: DEFAULT_GRACE_MS,
-    redshiftEnabled: false,
-  };
+function loadPrefs(): { action: PowerAction; graceMs: number } {
+  const fallback = { action: "suspend" as PowerAction, graceMs: DEFAULT_GRACE_MS };
   try {
     const raw = localStorage.getItem(PREFS_KEY);
     if (!raw) return fallback;
-    const parsed = JSON.parse(raw) as {
-      action?: unknown;
-      graceMs?: unknown;
-      redshiftEnabled?: unknown;
-    };
+    const parsed = JSON.parse(raw) as { action?: unknown; graceMs?: unknown };
     return {
       action: parsed.action === "shutdown" ? "shutdown" : "suspend",
       graceMs: GRACE_CHOICES.some((choice) => choice.ms === parsed.graceMs)
         ? (parsed.graceMs as number)
         : DEFAULT_GRACE_MS,
-      redshiftEnabled: parsed.redshiftEnabled === true,
     };
   } catch {
     return fallback;
@@ -163,14 +151,7 @@ function loadPrefs(): { action: PowerAction; graceMs: number; redshiftEnabled: b
 
 function savePrefs(state: PowerWatchState): void {
   try {
-    localStorage.setItem(
-      PREFS_KEY,
-      JSON.stringify({
-        action: state.action,
-        graceMs: state.graceMs,
-        redshiftEnabled: state.redshiftEnabled,
-      }),
-    );
+    localStorage.setItem(PREFS_KEY, JSON.stringify({ action: state.action, graceMs: state.graceMs }));
   } catch {
     // A remembered dropdown position is not worth failing over.
   }
@@ -180,13 +161,11 @@ const initial = loadPrefs();
 
 let state: PowerWatchState = {
   action: initial.action,
-  redshiftEnabled: initial.redshiftEnabled,
   phase: "off",
   graceMs: initial.graceMs,
   firesAt: null,
   busy: [],
   error: null,
-  redshiftError: null,
 };
 
 const listeners = new Set<() => void>();
@@ -215,7 +194,6 @@ export function subscribe(callback: () => void): () => void {
 export interface PowerWatchRuntime {
   probe: () => BusyEntry[];
   fire: (action: PowerAction) => Promise<void>;
-  setRedshift: (enabled: boolean) => Promise<void>;
 }
 
 let runtime: PowerWatchRuntime | null = null;
@@ -224,10 +202,7 @@ let timer: ReturnType<typeof setInterval> | null = null;
 /** Hand the watch its view of the app. Returns a disconnect for unmount. */
 export function connect(next: PowerWatchRuntime): () => void {
   runtime = next;
-  if (state.phase !== "off") {
-    startPolling();
-    syncRedshift();
-  }
+  if (state.phase !== "off") startPolling();
   return () => {
     if (runtime === next) {
       runtime = null;
@@ -247,21 +222,6 @@ function stopPolling(): void {
   timer = null;
 }
 
-function redshiftShouldBeActive(): boolean {
-  return (
-    state.redshiftEnabled && (state.phase === "armed" || state.phase === "countdown")
-  );
-}
-
-function syncRedshift(forceOff = false): void {
-  if (!runtime) return;
-  const enabled = forceOff ? false : redshiftShouldBeActive();
-  void runtime
-    .setRedshift(enabled)
-    .then(() => set({ redshiftError: null }))
-    .catch((error: unknown) => set({ redshiftError: String(error) }));
-}
-
 /**
  * One tick: re-read activity, advance the machine, and fire if it says so.
  *
@@ -277,7 +237,6 @@ export function poll(now = Date.now()): void {
   if (timing.phase !== "firing") return;
 
   stopPolling();
-  syncRedshift(true);
   const action = state.action;
   void runtime
     .fire(action)
@@ -294,7 +253,6 @@ export function poll(now = Date.now()): void {
 export function arm(): void {
   if (state.phase === "armed" || state.phase === "countdown") return;
   set({ phase: "armed", firesAt: null, error: null, busy: runtime?.probe() ?? [] });
-  syncRedshift();
   startPolling();
   // Evaluate immediately so arming with nothing running shows its countdown at
   // once rather than a second of blank "waiting".
@@ -303,7 +261,6 @@ export function arm(): void {
 
 export function disarm(): void {
   stopPolling();
-  syncRedshift(true);
   set({ phase: "off", firesAt: null, busy: [], error: null });
 }
 
@@ -322,26 +279,17 @@ export function setGrace(graceMs: number): void {
   savePrefs(state);
 }
 
-export function setRedshiftEnabled(enabled: boolean): void {
-  if (state.redshiftEnabled === enabled) return;
-  set({ redshiftEnabled: enabled, redshiftError: null });
-  savePrefs(state);
-  syncRedshift();
-}
-
 /** Test seam: drop every scrap of state between cases. */
 export function resetForTests(next?: Partial<PowerWatchState>): void {
   stopPolling();
   runtime = null;
   state = {
     action: "suspend",
-    redshiftEnabled: false,
     phase: "off",
     graceMs: DEFAULT_GRACE_MS,
     firesAt: null,
     busy: [],
     error: null,
-    redshiftError: null,
     ...next,
   };
 }
