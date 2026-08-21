@@ -149,6 +149,10 @@ describe("power watch panel", () => {
     expect(html).toContain("Shut down");
     expect(html).toContain("still here when the machine wakes");
     expect(html).toContain("Arm sleep");
+    expect(html).toContain("Redshift");
+    expect(html).toContain("Render the entire screen using red light only");
+    expect(html).toContain('role="switch"');
+    expect(html).toContain('aria-checked="false"');
     // The one thing a user must know before walking away.
     expect(html).toContain("session only");
   });

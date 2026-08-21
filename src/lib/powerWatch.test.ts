@@ -1,9 +1,14 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  arm,
+  connect,
+  disarm,
   formatCountdown,
   nextTiming,
+  resetForTests,
   secondsLeft,
+  setRedshiftEnabled,
   type PowerWatchPhase,
   type PowerWatchState,
 } from "./powerWatch";
@@ -69,11 +74,13 @@ describe("nextTiming", () => {
 describe("countdown readout", () => {
   const state = (firesAt: number | null): PowerWatchState => ({
     action: "suspend",
+    redshiftEnabled: false,
     phase: "countdown",
     graceMs: GRACE,
     firesAt,
     busy: [],
     error: null,
+    redshiftError: null,
   });
 
   test("rounds up so the last second is shown rather than skipped", () => {
@@ -90,5 +97,51 @@ describe("countdown readout", () => {
     expect(formatCountdown(9)).toBe("0:09");
     expect(formatCountdown(75)).toBe("1:15");
     expect(formatCountdown(900)).toBe("15:00");
+  });
+});
+
+describe("Redshift lifecycle", () => {
+  test("applies only while an opted-in watch is armed", async () => {
+    resetForTests();
+    const calls: boolean[] = [];
+    const disconnect = connect({
+      probe: () => [{ termId: "t1", label: "Terminal", reason: "process" }],
+      fire: async () => undefined,
+      setRedshift: async (enabled) => {
+        calls.push(enabled);
+      },
+    });
+
+    setRedshiftEnabled(true);
+    arm();
+    await Promise.resolve();
+    expect(calls).toEqual([false, true]);
+
+    disarm();
+    await Promise.resolve();
+    expect(calls).toEqual([false, true, false]);
+
+    disconnect();
+    resetForTests();
+  });
+
+  test("does not apply when the preference is off", async () => {
+    resetForTests();
+    const calls: boolean[] = [];
+    const disconnect = connect({
+      probe: () => [{ termId: "t1", label: "Terminal", reason: "process" }],
+      fire: async () => undefined,
+      setRedshift: async (enabled) => {
+        calls.push(enabled);
+      },
+    });
+
+    arm();
+    await Promise.resolve();
+    expect(calls).toEqual([false]);
+
+    disarm();
+    disconnect();
+    resetForTests();
   });
 });
