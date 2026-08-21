@@ -89,6 +89,15 @@ function renderAgentActivity(agent: AgentId, items: AgentItem[]): string {
   }
 }
 
+function escapeHtmlText(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll(">", "&gt;")
+    .replaceAll("<", "&lt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#x27;");
+}
+
 describe("official agent presentation", () => {
   beforeEach(() => {
     resetPreparingMessageAssignmentsForTests();
@@ -1020,7 +1029,7 @@ describe("official agent presentation", () => {
     ]);
 
     const funnyLabel = PREPARING_MESSAGES.find((message) =>
-      html.includes(`>${message}<`),
+      html.includes(`>${escapeHtmlText(message)}<`),
     );
     expect(funnyLabel).toBeDefined();
     expect(html).not.toContain(">Thinking<");
