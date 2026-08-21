@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import worker, { handleRequest, type Env } from "../src/index";
 
@@ -258,12 +258,17 @@ describe("encrypted notification relay", () => {
   });
 
   it("rate limits pairing creation by source address", async () => {
-    for (let attempt = 0; attempt < 12; attempt += 1) {
-      const invalid = await handleRequest(request("/v1/pairings", "POST", undefined, {}, "198.51.100.9"), env);
-      expect(invalid.status).toBe(400);
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_750_000_000_000);
+    try {
+      for (let attempt = 0; attempt < 12; attempt += 1) {
+        const invalid = await handleRequest(request("/v1/pairings", "POST", undefined, {}, "198.51.100.9"), env);
+        expect(invalid.status).toBe(400);
+      }
+      const limited = await handleRequest(request("/v1/pairings", "POST", undefined, {}, "198.51.100.9"), env);
+      expect(limited.status).toBe(429);
+    } finally {
+      now.mockRestore();
     }
-    const limited = await handleRequest(request("/v1/pairings", "POST", undefined, {}, "198.51.100.9"), env);
-    expect(limited.status).toBe(429);
   });
 
   it("reports the D1-backed health endpoint without touching FCM", async () => {
