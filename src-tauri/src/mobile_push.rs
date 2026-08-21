@@ -317,7 +317,16 @@ pub struct WorkspaceUsageLimit {
     pub label: String,
     pub percent: f64,
     pub resets_at: Option<i64>,
+    #[serde(default)]
     pub usage_hours_left: Option<f64>,
+    #[serde(default)]
+    pub per_hour: Option<f64>,
+    #[serde(default)]
+    pub projected_percent: Option<f64>,
+    #[serde(default)]
+    pub runs_out_at: Option<i64>,
+    #[serde(default)]
+    pub basis: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1496,9 +1505,38 @@ mod tests {
     use super::{
         bounded_preview_plaintext, client, decrypt, encrypt, encrypt_with_nonce,
         encrypted_ciphertext_len, pairing_is_gone, pairing_proof, truncate_utf8,
-        workspace_collapse_key, PlainRemoteCommand, MAX_PREVIEW_CIPHERTEXT,
+        workspace_collapse_key, PlainRemoteCommand, WorkspaceUsageLimit, MAX_PREVIEW_CIPHERTEXT,
         MAX_WORKSPACE_PLAINTEXT_BYTES,
     };
+
+    #[test]
+    fn workspace_usage_limits_keep_the_desktop_forecast() {
+        let limit: WorkspaceUsageLimit = serde_json::from_str(
+            r#"{
+                "id":"weekly",
+                "label":"7-day limit",
+                "percent":16.0,
+                "resetsAt":1800000000000,
+                "usageHoursLeft":12.5,
+                "perHour":0.3,
+                "projectedPercent":40.0,
+                "runsOutAt":1803600000000,
+                "basis":"recent"
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(limit.usage_hours_left, Some(12.5));
+        assert_eq!(limit.per_hour, Some(0.3));
+        assert_eq!(limit.projected_percent, Some(40.0));
+        assert_eq!(limit.runs_out_at, Some(1_803_600_000_000));
+        assert_eq!(limit.basis.as_deref(), Some("recent"));
+
+        let encoded = serde_json::to_value(&limit).unwrap();
+        assert_eq!(encoded["perHour"], 0.3);
+        assert_eq!(encoded["projectedPercent"], 40.0);
+        assert_eq!(encoded["runsOutAt"], 1_803_600_000_000i64);
+        assert_eq!(encoded["basis"], "recent");
+    }
 
     #[test]
     fn mobile_requests_reuse_one_connection_pool() {

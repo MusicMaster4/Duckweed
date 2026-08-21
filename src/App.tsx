@@ -903,6 +903,7 @@ export default function App() {
     let publishDelay = 250;
     const usageDays = loadUsageSettings().days;
     let usageLimits = mobileUsageLimits(cachedUsage(usageDays)?.quotas ?? []);
+    let hasPairedDevice = false;
 
     const publish = () => {
       timer = 0;
@@ -1091,11 +1092,13 @@ export default function App() {
     );
     const paired = () => {
       mobileWorkspaceSnapshotRef.current = "";
+      hasPairedDevice = true;
       refreshUsageLimits();
       schedule();
     };
     const refreshed = () => {
       mobileWorkspaceSnapshotRef.current = "";
+      hasPairedDevice = true;
       refreshUsageLimits(0);
       schedule();
     };
@@ -1108,8 +1111,15 @@ export default function App() {
         if (!stopped) console.error("mobile presence sync", error);
       });
     }, 30_000);
+    // Keep phone meters on the same live provider reading as the desktop Usage
+    // panel, not the snapshot from when the pairing was first opened.
+    const usagePoll = window.setInterval(() => {
+      if (hasPairedDevice) refreshUsageLimits(0);
+    }, 60_000);
     void mobileStatus().then((status) => {
-      if (!stopped && status.devices.length > 0) refreshUsageLimits();
+      if (stopped || status.devices.length === 0) return;
+      hasPairedDevice = true;
+      refreshUsageLimits();
     }).catch((error) => {
       if (!stopped) console.error("mobile usage limits status", error);
     });
@@ -1118,6 +1128,7 @@ export default function App() {
       stopped = true;
       if (timer) window.clearTimeout(timer);
       window.clearInterval(presence);
+      window.clearInterval(usagePoll);
       window.removeEventListener("duckweed:mobile-paired", paired);
       window.removeEventListener("duckweed:mobile-refresh", refreshed);
       offAgents();
