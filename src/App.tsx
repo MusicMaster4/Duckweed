@@ -79,6 +79,7 @@ import {
   mobileStatus,
   portsList,
   powerAction,
+  powerRedshift,
   projectInfo,
   shellIntegrationSet,
   shellIntegrationStatus,
@@ -1466,7 +1467,12 @@ export default function App() {
   }, [acknowledgeTermFromMobile]);
 
   useEffect(
-    () => powerWatch.connect({ probe: probeActivity, fire: firePowerAction }),
+    () =>
+      powerWatch.connect({
+        probe: probeActivity,
+        fire: firePowerAction,
+        setRedshift: powerRedshift,
+      }),
     [firePowerAction, probeActivity],
   );
 

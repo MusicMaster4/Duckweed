@@ -274,6 +274,10 @@ export const mobileSendTest = () =>
 export const powerAction = (action: "suspend" | "shutdown") =>
   invoke<void>("power_action", { action });
 
+/** Apply or restore Power Watch's red-only full-screen color filter. */
+export const powerRedshift = (enabled: boolean) =>
+  invoke<void>("power_redshift", { enabled });
+
 export interface PortForward {
   id: string;
   target_pid: number;
