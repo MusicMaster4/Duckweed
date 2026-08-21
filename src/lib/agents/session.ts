@@ -21,7 +21,7 @@ import {
 import { createAcpAdapter } from "./adapters/acp";
 import { createClaudeAdapter } from "./adapters/claude";
 import { createCodexAdapter } from "./adapters/codex";
-import { AGENTS, agentPresentation } from "./catalog";
+import { AGENTS, agentPresentation, agentSpawnEnv } from "./catalog";
 import {
   applyEvent,
   didStatusEnterIdle,
@@ -66,7 +66,9 @@ import {
  * arrangement `terminals.ts` uses for xterm, for the same reason.
  */
 
-const TAURI_RUNTIME = "__TAURI_INTERNALS__" in window;
+const runtimeWindow = globalThis.window;
+const TAURI_RUNTIME =
+  typeof runtimeWindow !== "undefined" && "__TAURI_INTERNALS__" in runtimeWindow;
 
 interface Session {
   termId: string;
@@ -334,7 +336,7 @@ function announce(termId: string): void {
 
 function notify(session: Session): void {
   if (session.notifyHandle !== null) return;
-  session.notifyHandle = window.requestAnimationFrame(() => {
+  session.notifyHandle = runtimeWindow.requestAnimationFrame(() => {
     session.notifyHandle = null;
     announce(session.termId);
   });
@@ -343,7 +345,7 @@ function notify(session: Session): void {
 /** Flush any pending notification immediately — used when a session ends. */
 function notifyNow(session: Session): void {
   if (session.notifyHandle !== null) {
-    window.cancelAnimationFrame(session.notifyHandle);
+    runtimeWindow.cancelAnimationFrame(session.notifyHandle);
     session.notifyHandle = null;
   }
   announce(session.termId);
@@ -356,7 +358,7 @@ function createAdapter(agent: AgentId): AgentAdapter {
     case "codex-app-server":
       return createCodexAdapter();
     case "acp":
-      return createAcpAdapter();
+      return createAcpAdapter(agent);
   }
 }
 
@@ -900,7 +902,7 @@ export async function start(
           ...adapter.args(launch),
         ],
         cwd,
-        env: Object.keys(launch.env).length ? launch.env : null,
+        env: agentSpawnEnv(launch.env),
       },
       channel,
     );
@@ -1420,7 +1422,7 @@ export function requestExit(termId: string): "armed" | "close" | "none" {
 
   session.exitArmedUntil = now + 1800;
   emit(session, { type: "exit-armed", armed: true });
-  window.setTimeout(() => {
+  runtimeWindow.setTimeout(() => {
     if (session.disposed || session.exitArmedUntil > Date.now()) return;
     session.exitArmedUntil = 0;
     emit(session, { type: "exit-armed", armed: false });

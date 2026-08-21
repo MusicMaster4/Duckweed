@@ -1,8 +1,10 @@
 import { useMemo } from "react";
 
+import { SubagentBoardForActivities } from "../subagents/SubagentBoard";
 import {
   ActivityHistory,
   activeAssistantId,
+  activityClusterHiddenByComment,
   activityGroups,
   continuedAssistantIds,
   MessageItem,
@@ -95,13 +97,14 @@ export function ChatGPTExperience(props: ExperienceProps) {
         {transcriptItems.map((item) => {
           if (item.kind === "thinking" || item.kind === "tool") {
             const group = groupByActivity.get(item.id);
-            if (
-              !group ||
-              item.id !== group.firstId ||
-              group.replacedByCommentId ||
-              (status === "working" && group === liveGroup && group.answerId)
-            ) {
-              return null;
+            if (!group || item.id !== group.firstId) return null;
+            if (activityClusterHiddenByComment(group, status === "working", liveGroup)) {
+              return (
+                <SubagentBoardForActivities
+                  key={`chatgpt-roster-${group.firstId}`}
+                  activities={group.activities}
+                />
+              );
             }
             return (
               <ActivityHistory

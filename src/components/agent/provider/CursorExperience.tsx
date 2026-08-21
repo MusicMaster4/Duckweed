@@ -4,10 +4,12 @@ import type { AgentItem, ToolItem, ToolStatus } from "../../../lib/agents/types"
 import { AgentAsciiLoader } from "../AgentAsciiLoader";
 import { AgentImageAttachments } from "../AgentImageAttachments";
 import { MessageCopyButton } from "../MessageCopyButton";
+import { SubagentBoardAnchor, SubagentBoardForActivities } from "../subagents/SubagentBoard";
 import { useSubagentUi } from "../subagents/SubagentUiContext";
 import {
   ActivityHistory,
   activeAssistantId,
+  activityClusterHiddenByComment,
   activityGroups,
   AssistantMarkdown,
   continuedAssistantIds,
@@ -159,7 +161,9 @@ function CursorTracker({ plan }: { plan: PlanSummary }) {
  * its own live marker, and the sub-agent's output folded behind it.
  */
 function CursorSubagent({ item, elapsed }: { item: ToolItem; elapsed: string | null }) {
-  const { selectedCallId, selectSubagent } = useSubagentUi();
+  const { absorbedCallIds, rosterAnchorIds, peekedCallId, peekSubagent } = useSubagentUi();
+  if (rosterAnchorIds.has(item.id)) return <SubagentBoardAnchor itemId={item.id} />;
+  if (absorbedCallIds.has(item.callId)) return null;
   const head = (
     <>
       <span className="cx-sub-tag">Subagent</span>
@@ -170,14 +174,14 @@ function CursorSubagent({ item, elapsed }: { item: ToolItem; elapsed: string | n
   return (
     <div
       className={`cx-sub is-${item.status}${
-        selectedCallId === item.callId ? " is-selected" : ""
+        peekedCallId === item.callId ? " is-selected" : ""
       }`}
       data-subagent-call-id={item.callId}
     >
       <button
         type="button"
         className="cx-sub-head"
-        onClick={() => selectSubagent(item.callId)}
+        onClick={() => peekSubagent(item.callId)}
         aria-label={`Inspect subagent: ${item.title}`}
       >
         {head}
@@ -346,7 +350,7 @@ const CursorNode = memo(function CursorNode({
 });
 
 export function CursorExperience({ session, items, className }: ProviderExperienceProps) {
-  const { selectSubagent } = useSubagentUi();
+  const { peekSubagent } = useSubagentUi();
   const list = items ?? session.items;
   const plan = useMemo(() => planSummary(list), [list]);
   const activity = useMemo(() => activitySummary(list), [list]);
@@ -428,7 +432,7 @@ export function CursorExperience({ session, items, className }: ProviderExperien
                 className="cx-metric is-agent"
                 title="Inspect delegated turns"
                 onClick={() =>
-                  selectSubagent(
+                  peekSubagent(
                     activity.subagents.find(
                       (subagent) =>
                         subagent.status === "running" || subagent.status === "pending",
@@ -461,13 +465,26 @@ export function CursorExperience({ session, items, className }: ProviderExperien
           {list.map((item) => {
             if (item.kind === "thinking" || item.kind === "tool") {
               const group = groupByActivity.get(item.id);
-            if (
-              !group ||
-              item.id !== group.firstId ||
-              group.replacedByCommentId ||
-              (session.status === "working" && group === liveGroup && group.answerId)
-            ) {
-                return null;
+              if (!group || item.id !== group.firstId) return null;
+              if (
+                activityClusterHiddenByComment(
+                  group,
+                  session.status === "working",
+                  liveGroup,
+                )
+              ) {
+                return (
+                  <SubagentBoardForActivities
+                    key={`cursor-roster-${group.firstId}`}
+                    activities={group.activities}
+                    wrap={(board) => (
+                      <li className="cx-node is-activity" data-mark="tool">
+                        <span className="cx-mark" aria-hidden="true" />
+                        <div className="cx-body">{board}</div>
+                      </li>
+                    )}
+                  />
+                );
               }
               const hasThoughts = group.activities.some((activityItem) => activityItem.kind === "thinking");
               const working = session.status === "working" && group === liveGroup;

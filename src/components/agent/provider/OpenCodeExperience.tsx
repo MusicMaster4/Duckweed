@@ -3,10 +3,12 @@ import { memo, useMemo, useState } from "react";
 import type { AgentItem, AgentPlanStep, ToolItem, ToolStatus } from "../../../lib/agents/types";
 import { AgentImageAttachments } from "../AgentImageAttachments";
 import { MessageCopyButton } from "../MessageCopyButton";
+import { SubagentBoardAnchor, SubagentBoardForActivities } from "../subagents/SubagentBoard";
 import { useSubagentUi } from "../subagents/SubagentUiContext";
 import {
   ActivityHistory,
   activeAssistantId,
+  activityClusterHiddenByComment,
   activityGroups,
   AssistantMarkdown,
   continuedAssistantIds,
@@ -243,7 +245,9 @@ function OpenCodePlan({ steps }: { steps: AgentPlanStep[] }) {
 
 /** A turn OpenCode handed to another agent — its `task` calls. */
 function OpenCodeSubagent({ item, elapsed }: { item: ToolItem; elapsed: string | null }) {
-  const { selectedCallId, selectSubagent } = useSubagentUi();
+  const { absorbedCallIds, rosterAnchorIds, peekedCallId, peekSubagent } = useSubagentUi();
+  if (rosterAnchorIds.has(item.id)) return <SubagentBoardAnchor itemId={item.id} />;
+  if (absorbedCallIds.has(item.callId)) return null;
   const head = (
     <>
       <span className="oc-sub-bracket" aria-hidden="true">
@@ -256,14 +260,14 @@ function OpenCodeSubagent({ item, elapsed }: { item: ToolItem; elapsed: string |
   return (
     <div
       className={`oc-sub is-${item.status}${
-        selectedCallId === item.callId ? " is-selected" : ""
+        peekedCallId === item.callId ? " is-selected" : ""
       }`}
       data-subagent-call-id={item.callId}
     >
       <button
         type="button"
         className="oc-sub-head"
-        onClick={() => selectSubagent(item.callId)}
+        onClick={() => peekSubagent(item.callId)}
         aria-label={`Inspect subagent: ${item.title}`}
       >
         {head}
@@ -523,13 +527,28 @@ export function OpenCodeExperience({ session, items, className }: ProviderExperi
             const first = module.items[0];
             if (first.kind === "thinking" || first.kind === "tool") {
               const group = groupByActivity.get(first.id);
+              if (!group || module.key !== group.firstId) return null;
               if (
-                !group ||
-                module.key !== group.firstId ||
-                group.replacedByCommentId ||
-                (session.status === "working" && group === liveGroup && group.answerId)
+                activityClusterHiddenByComment(
+                  group,
+                  session.status === "working",
+                  liveGroup,
+                )
               ) {
-                return null;
+                return (
+                  <SubagentBoardForActivities
+                    key={`opencode-roster-${group.firstId}`}
+                    activities={group.activities}
+                    wrap={(board) => (
+                      <section className="oc-mod is-activity" data-lane="activity">
+                        <div className="oc-mod-gutter">
+                          <span className="oc-mod-tag">activity</span>
+                        </div>
+                        <div className="oc-mod-body">{board}</div>
+                      </section>
+                    )}
+                  />
+                );
               }
               const working = session.status === "working" && group === liveGroup;
               return (

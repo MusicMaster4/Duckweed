@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import {
   runningSubagentCount,
   subagentForCallId,
+  subagentRosters,
   subagentsForTurn,
 } from "../../lib/agents/subagents";
 import type { AgentId, AgentItem, AgentSessionState, PlanItem } from "../../lib/agents/types";
@@ -14,8 +15,7 @@ import { AgentTimeline } from "./AgentTimeline";
 import { copySelectedTextFromContextMenu } from "./selectionCopy";
 import { Tooltip } from "../Tooltip";
 import { PlanTracker, type OfficialVariant } from "./official/OfficialShared";
-import { SubagentFleet } from "./subagents/SubagentFleet";
-import { SubagentInspector } from "./subagents/SubagentInspector";
+import { SubagentFocus } from "./subagents/SubagentFocus";
 import { SubagentUiProvider } from "./subagents/SubagentUiContext";
 import "./subagents/subagents.css";
 import "./AgentExperiencePreview.css";
@@ -128,12 +128,12 @@ function previewItems(): AgentItem[] {
       title: "Check narrow pane layout",
       status: "running",
       command: null,
-      output: "Testing fleet overflow and bottom-docked inspector behavior",
+      output: "Testing roster overflow and pin behavior",
       changes: [],
       subagent: {
         label: "Check narrow pane layout",
         role: "UI reviewer",
-        prompt: "Verify the fleet and inspector in a half-width terminal pane.",
+        prompt: "Verify the roster and pin in a half-width terminal pane.",
         activity: "Testing the half-width pane",
       },
     },
@@ -228,7 +228,8 @@ export function AgentExperiencePreview() {
     PROVIDERS.some((provider) => provider.id === requested) && requested ? requested : "codex",
   );
   const [visibleCount, setVisibleCount] = useState(playTurn ? 1 : Number.POSITIVE_INFINITY);
-  const [selectedSubagentCallId, setSelectedSubagentCallId] = useState<string | null>(null);
+  const [peekedCallId, setPeekedCallId] = useState<string | null>(null);
+  const [focusedCallId, setFocusedCallId] = useState<string | null>(null);
   const provider = PROVIDERS.find((entry) => entry.id === agent) ?? PROVIDERS[0];
   const allItems = useMemo(
     () => (stillWorking ? stillWorkingPreviewItems() : previewItems()),
@@ -270,8 +271,9 @@ export function AgentExperiencePreview() {
       : "working";
   const visibleItems = starting ? [] : items;
   const fleet = subagentsForTurn(visibleItems);
-  const selectedSubagent = selectedSubagentCallId
-    ? subagentForCallId(visibleItems, selectedSubagentCallId)
+  const rosters = subagentRosters(visibleItems);
+  const focusedSubagent = focusedCallId
+    ? subagentForCallId(visibleItems, focusedCallId)
     : null;
   let workflow: PlanItem | null = null;
   for (let index = visibleItems.length - 1; index >= 0; index -= 1) {
@@ -372,32 +374,47 @@ export function AgentExperiencePreview() {
         </header>
         <div className="agent-scroll">
           <SubagentUiProvider
-            selectedCallId={selectedSubagentCallId}
-            onSelect={setSelectedSubagentCallId}
+            agent={provider.id}
+            now={Date.now()}
+            rosters={rosters}
+            peekedCallId={peekedCallId}
+            focusedCallId={focusedCallId}
+            onPeek={setPeekedCallId}
+            onOpen={(callId) => {
+              setPeekedCallId(null);
+              setFocusedCallId(callId);
+            }}
+            onClosePeek={() => setPeekedCallId(null)}
+            onLeaveFocus={() => setFocusedCallId(null)}
           >
-            <AgentTimeline
-              session={session}
-              items={timelineItems}
-              /* Per provider, so switching the preview draws a new animation. */
-              termId={`${session.termId}:${provider.id}`}
-              agent={provider.id}
-              status={status}
-              started={!starting}
-              label={provider.label}
-              mark={provider.mark}
-              program={provider.id}
-              cwd="H:\\Python\\Slop\\duckweed"
-            />
+            {focusedSubagent ? (
+              <SubagentFocus
+                agent={provider.id}
+                parentLabel={provider.label}
+                parentWorking={status === "working"}
+                subagent={focusedSubagent}
+                now={Date.now()}
+                onBack={() => setFocusedCallId(null)}
+              />
+            ) : (
+              <AgentTimeline
+                session={session}
+                items={timelineItems}
+                /* Per provider, so switching the preview draws a new animation. */
+                termId={`${session.termId}:${provider.id}`}
+                agent={provider.id}
+                status={status}
+                started={!starting}
+                label={provider.label}
+                mark={provider.mark}
+                program={provider.id}
+                cwd="H:\\Python\\Slop\\duckweed"
+              />
+            )}
           </SubagentUiProvider>
         </div>
         {!starting && (
           <div className="agent-composer-shell">
-            <SubagentFleet
-              agent={agent}
-              subagents={fleet}
-              selectedCallId={selectedSubagentCallId}
-              onSelect={setSelectedSubagentCallId}
-            />
             {workflow && (
               <div className="agent-workflow-dock">
                 <PlanTracker
@@ -412,23 +429,17 @@ export function AgentExperiencePreview() {
               active
               onSubmit={() => {}}
               onInterrupt={() => {}}
+              target={
+                focusedSubagent
+                  ? {
+                      kind: "subagent",
+                      label: focusedSubagent.label,
+                      canMessage: Boolean(focusedSubagent.threadId),
+                    }
+                  : undefined
+              }
             />
           </div>
-        )}
-        {selectedSubagent && (
-          <SubagentInspector
-            agent={agent}
-            subagent={selectedSubagent}
-            canMessage={false}
-            onMessage={async () => false}
-            onClose={() => setSelectedSubagentCallId(null)}
-            onShowInTimeline={(callId) => {
-              const target = Array.from(
-                document.querySelectorAll<HTMLElement>("[data-subagent-call-id]"),
-              ).find((element) => element.dataset.subagentCallId === callId);
-              target?.scrollIntoView({ block: "center", behavior: "smooth" });
-            }}
-          />
         )}
       </section>
     </main>

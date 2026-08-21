@@ -14,10 +14,12 @@ import { canResume } from "../../lib/agents/history";
 import * as agents from "../../lib/agents/session";
 import { isNewChatCommand } from "../../lib/agents/slashCatalog";
 import {
-  COMPLETED_SUBAGENT_FLEET_TTL_MS,
   runningSubagentCount,
   subagentForCallId,
-  subagentFleetIsComplete,
+  subagentPinShouldShow,
+  subagentRosterNodeInView,
+  subagentRosters,
+  subagentStatusLabel,
   subagentsForTurn,
 } from "../../lib/agents/subagents";
 import type { AgentImageAttachment, AgentSessionState } from "../../lib/agents/types";
@@ -45,8 +47,8 @@ import { AgentSideQuestion } from "./AgentSideQuestion";
 import { AgentTimeline } from "./AgentTimeline";
 import { copySelectedTextFromContextMenu } from "./selectionCopy";
 import { PlanTracker, type OfficialVariant } from "./official/OfficialShared";
-import { SubagentFleet } from "./subagents/SubagentFleet";
-import { SubagentInspector } from "./subagents/SubagentInspector";
+import { SubagentPin } from "./subagents/SubagentBoard";
+import { SubagentFocus } from "./subagents/SubagentFocus";
 import { SubagentUiProvider } from "./subagents/SubagentUiContext";
 import "./subagents/subagents.css";
 
@@ -122,38 +124,47 @@ export function AgentSurface({
   const workflowComplete = workflowIsComplete(workflow, session?.status);
   const [expiredWorkflowId, setExpiredWorkflowId] = useState<string | null>(null);
   const [clockNow, setClockNow] = useState(() => Date.now());
-  const [selectedSubagentCallId, setSelectedSubagentCallId] = useState<string | null>(
-    null,
-  );
+  const [peekedCallId, setPeekedCallId] = useState<string | null>(null);
+  const [focusedCallId, setFocusedCallId] = useState<string | null>(null);
+  const [rosterInView, setRosterInView] = useState(true);
+  const autoPeekedRef = useRef<string | null>(null);
   const fleet = useMemo(() => subagentsForTurn(items), [items]);
-  const fleetKey = useMemo(
-    () => fleet.map((subagent) => subagent.callId).join("\u001f"),
-    [fleet],
+  const rosters = useMemo(() => subagentRosters(items), [items]);
+  const focusedSubagent = useMemo(
+    () => (focusedCallId ? subagentForCallId(items, focusedCallId) : null),
+    [focusedCallId, items],
   );
-  const fleetComplete = subagentFleetIsComplete(fleet, session?.status);
-  const [expiredFleetKey, setExpiredFleetKey] = useState<string | null>(null);
-  const selectedSubagent = useMemo(
-    () =>
-      selectedSubagentCallId
-        ? subagentForCallId(items, selectedSubagentCallId)
-        : null,
-    [items, selectedSubagentCallId],
-  );
-  const dockedFleet =
-    fleetComplete && expiredFleetKey === fleetKey ? [] : fleet;
-  const visibleFleet =
-    selectedSubagent &&
-    !dockedFleet.some((subagent) => subagent.callId === selectedSubagent.callId)
-      ? [...dockedFleet, selectedSubagent]
-      : dockedFleet;
+  const showPin =
+    !focusedSubagent &&
+    subagentPinShouldShow(rosterInView, fleet, session?.status);
   const timelineItems = useMemo(
     () => (workflow ? items.filter((item) => item.kind !== "plan") : items),
     [items, workflow],
   );
+  const canMessageFocused = Boolean(
+    focusedSubagent?.threadId &&
+      session &&
+      agents.canPromptSubagent(termId) &&
+      (focusedSubagent.status === "running" || focusedSubagent.status === "done"),
+  );
 
-  const closeSubagentInspector = useCallback(() => {
-    setSelectedSubagentCallId(null);
+  const closePeek = useCallback(() => {
+    setPeekedCallId(null);
+  }, []);
+
+  const leaveFocus = useCallback(() => {
+    setFocusedCallId(null);
     window.requestAnimationFrame(() => composerRef.current?.focus());
+  }, []);
+
+  const peekSubagent = useCallback((callId: string) => {
+    setFocusedCallId(null);
+    setPeekedCallId(callId);
+  }, []);
+
+  const openSubagent = useCallback((callId: string) => {
+    setPeekedCallId(null);
+    setFocusedCallId(callId);
   }, []);
 
   useEffect(() => {
@@ -183,85 +194,136 @@ export function AgentSurface({
   }, [conversationCopied]);
 
   useEffect(() => {
-    if (!active || !selectedSubagentCallId) return;
-    if (!selectedSubagent) {
-      setSelectedSubagentCallId(null);
+    if (!active) return;
+    if (focusedCallId && !focusedSubagent) {
+      setFocusedCallId(null);
+      return;
+    }
+    if (peekedCallId && !subagentForCallId(items, peekedCallId)) {
+      setPeekedCallId(null);
       return;
     }
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
-      event.preventDefault();
-      closeSubagentInspector();
+      if (focusedCallId) {
+        event.preventDefault();
+        leaveFocus();
+        return;
+      }
+      if (peekedCallId) {
+        event.preventDefault();
+        closePeek();
+      }
     };
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [active, closeSubagentInspector, selectedSubagent, selectedSubagentCallId]);
-
-  useEffect(() => {
-    if (!fleetComplete) {
-      if (expiredFleetKey === fleetKey) setExpiredFleetKey(null);
-      return;
-    }
-    if (!fleetKey || expiredFleetKey === fleetKey || selectedSubagentCallId) return;
-    const timer = window.setTimeout(
-      () => setExpiredFleetKey(fleetKey),
-      COMPLETED_SUBAGENT_FLEET_TTL_MS,
-    );
-    return () => window.clearTimeout(timer);
   }, [
-    expiredFleetKey,
-    fleetComplete,
-    fleetKey,
-    selectedSubagentCallId,
+    active,
+    closePeek,
+    focusedCallId,
+    focusedSubagent,
+    items,
+    leaveFocus,
+    peekedCallId,
   ]);
 
   useEffect(() => {
-    if (!active || !visibleFleet.length) return;
-    const navigateFleet = (event: KeyboardEvent) => {
+    const live = fleet.filter(
+      (subagent) => subagent.status === "running" || subagent.status === "pending",
+    );
+    if (live.length === 1 && autoPeekedRef.current !== live[0].callId && !focusedCallId) {
+      autoPeekedRef.current = live[0].callId;
+      setPeekedCallId(live[0].callId);
+    }
+    if (live.length !== 1) autoPeekedRef.current = null;
+  }, [fleet, focusedCallId]);
+
+  useEffect(() => {
+    if (!active || fleet.length === 0) return;
+    const navigateRoster = (event: KeyboardEvent) => {
       if (!event.altKey || event.ctrlKey || event.metaKey) return;
       if (event.code === "Backslash") {
         event.preventDefault();
-        if (selectedSubagentCallId) {
-          closeSubagentInspector();
+        if (focusedCallId) {
+          leaveFocus();
         } else {
           const first =
-            visibleFleet.find(
+            fleet.find(
               (subagent) =>
                 subagent.status === "running" || subagent.status === "pending",
-            ) ?? visibleFleet[0];
-          setSelectedSubagentCallId(first.callId);
+            ) ?? fleet[0];
+          openSubagent(first.callId);
         }
         return;
       }
       if (event.code !== "BracketLeft" && event.code !== "BracketRight") return;
       event.preventDefault();
-      const current = visibleFleet.findIndex(
-        (subagent) => subagent.callId === selectedSubagentCallId,
-      );
+      const currentId = focusedCallId ?? peekedCallId;
+      const current = fleet.findIndex((subagent) => subagent.callId === currentId);
       const direction = event.code === "BracketRight" ? 1 : -1;
       const next =
         current < 0
           ? direction > 0
             ? 0
-            : visibleFleet.length - 1
-          : (current + direction + visibleFleet.length) % visibleFleet.length;
-      setSelectedSubagentCallId(visibleFleet[next].callId);
+            : fleet.length - 1
+          : (current + direction + fleet.length) % fleet.length;
+      if (focusedCallId) openSubagent(fleet[next].callId);
+      else peekSubagent(fleet[next].callId);
     };
-    window.addEventListener("keydown", navigateFleet);
-    return () => window.removeEventListener("keydown", navigateFleet);
+    window.addEventListener("keydown", navigateRoster);
+    return () => window.removeEventListener("keydown", navigateRoster);
   }, [
     active,
-    closeSubagentInspector,
-    selectedSubagentCallId,
-    visibleFleet,
+    fleet,
+    focusedCallId,
+    leaveFocus,
+    openSubagent,
+    peekedCallId,
+    peekSubagent,
   ]);
 
   useEffect(() => {
-    if (session?.status !== "working" || session.workStartedAt === null) return;
+    const root = scrollRef.current;
+    const surface = surfaceRef.current;
+    if (!root || !surface || focusedSubagent) {
+      setRosterInView(true);
+      return;
+    }
+    const liveRoster = rosters[rosters.length - 1];
+    if (!liveRoster || fleet.length === 0) {
+      setRosterInView(true);
+      return;
+    }
+    const node = surface.querySelector(
+      `[data-subagent-roster="${liveRoster.anchorItemId}"]`,
+    );
+    if (!node) {
+      setRosterInView(subagentRosterNodeInView(null, false));
+      return;
+    }
+    const observer = new IntersectionObserver(
+      ([entry]) =>
+        setRosterInView(subagentRosterNodeInView(node, entry.isIntersecting)),
+      { root, threshold: 0.01 },
+    );
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [fleet.length, focusedSubagent, items, rosters]);
+
+  useEffect(() => {
+    const childrenLive = fleet.some(
+      (subagent) => subagent.status === "running" || subagent.status === "pending",
+    );
+    if (
+      (session?.status !== "working" || session.workStartedAt === null) &&
+      !childrenLive
+    ) {
+      return;
+    }
     setClockNow(Date.now());
     const timer = window.setInterval(() => setClockNow(Date.now()), 1_000);
     return () => window.clearInterval(timer);
-  }, [session?.status, session?.workStartedAt]);
+  }, [fleet, session?.status, session?.workStartedAt]);
 
   useEffect(() => {
     if (!workflow || !workflowComplete) {
@@ -385,6 +447,11 @@ export function AgentSurface({
     delivery: "default" | "alternate" = "default",
   ) => {
     if (onBeforeSubmit?.(text, images, delivery) === true) return true;
+    if (focusedSubagent) {
+      if (!canMessageFocused || !focusedSubagent.threadId) return true;
+      void agents.promptSubagent(termId, focusedSubagent.threadId, text);
+      return false;
+    }
     if (images.length === 0) {
       const trimmed = text.trim();
       const resumeMatch = /^\/resume(?:\s+(.*))?$/i.exec(trimmed);
@@ -425,19 +492,6 @@ export function AgentSurface({
     window.requestAnimationFrame(() => composerRef.current?.focus());
   };
 
-  const showSubagentInTimeline = (callId: string) => {
-    const target = Array.from(
-      surfaceRef.current?.querySelectorAll<HTMLElement>("[data-subagent-call-id]") ?? [],
-    ).find((element) => element.dataset.subagentCallId === callId);
-    if (!target) return;
-    target.scrollIntoView({ block: "center", behavior: "smooth" });
-    target.classList.remove("agent-sub-timeline-selected");
-    window.requestAnimationFrame(() => {
-      target.classList.add("agent-sub-timeline-selected");
-      window.setTimeout(() => target.classList.remove("agent-sub-timeline-selected"), 1_050);
-    });
-  };
-
   /**
    * Clicking anywhere quiet in the transcript hands the keyboard back to the
    * composer, the way a chat pane does. A drag that selected text is exempt —
@@ -476,12 +530,37 @@ export function AgentSurface({
         <span className="agent-badge" aria-hidden="true">
           <AgentProviderIcon agent={session.agent} program={session.program} />
         </span>
-        <span className="agent-name">{session.label}</span>
-        <span className={`agent-state is-${session.status}`}>
-          {session.status === "working" && !session.loadingHistory && (
+        {focusedSubagent && (
+          <button
+            type="button"
+            className="agent-head-btn is-quiet"
+            onClick={leaveFocus}
+            aria-label="Back to parent"
+            title="Back to parent (Esc)"
+          >
+            <svg viewBox="0 0 14 14" aria-hidden="true">
+              <path d="M8.5 3.5 4 7l4.5 3.5" />
+            </svg>
+          </button>
+        )}
+        <span className="agent-name">
+          {focusedSubagent
+            ? `${session.label} / ${focusedSubagent.label}`
+            : session.label}
+        </span>
+        <span
+          className={`agent-state is-${
+            focusedSubagent ? focusedSubagent.status : session.status
+          }`}
+        >
+          {session.status === "working" && !session.loadingHistory && !focusedSubagent && (
             <span className="agent-pulse" aria-hidden="true" />
           )}
-          {session.loadingHistory ? "Loading conversation" : workStatusLabel(session, clockNow)}
+          {session.loadingHistory
+            ? "Loading conversation"
+            : focusedSubagent
+              ? subagentStatusLabel(focusedSubagent.status)
+              : workStatusLabel(session, clockNow)}
         </span>
         <span className="agent-head-spacer" />
         {tokens > 0 && (
@@ -593,21 +672,39 @@ export function AgentSurface({
         ref={scrollRef}
       >
         <SubagentUiProvider
-          selectedCallId={selectedSubagentCallId}
-          onSelect={setSelectedSubagentCallId}
+          agent={session.agent}
+          now={clockNow}
+          rosters={rosters}
+          peekedCallId={peekedCallId}
+          focusedCallId={focusedCallId}
+          onPeek={peekSubagent}
+          onOpen={openSubagent}
+          onClosePeek={closePeek}
+          onLeaveFocus={leaveFocus}
         >
-          <AgentTimeline
-            session={session}
-            items={timelineItems}
-            termId={termId}
-            agent={session.agent}
-            status={session.loadingHistory ? "idle" : session.status}
-            started={session.started}
-            label={session.label}
-            mark={session.mark}
-            program={session.program}
-            cwd={session.cwd}
-          />
+          {focusedSubagent ? (
+            <SubagentFocus
+              agent={session.agent}
+              parentLabel={session.label}
+              parentWorking={session.status === "working"}
+              subagent={focusedSubagent}
+              now={clockNow}
+              onBack={leaveFocus}
+            />
+          ) : (
+            <AgentTimeline
+              session={session}
+              items={timelineItems}
+              termId={termId}
+              agent={session.agent}
+              status={session.loadingHistory ? "idle" : session.status}
+              started={session.started}
+              label={session.label}
+              mark={session.mark}
+              program={session.program}
+              cwd={session.cwd}
+            />
+          )}
         </SubagentUiProvider>
 
         {session.pending.map((prompt) => (
@@ -716,12 +813,22 @@ export function AgentSurface({
               <span>Jump to bottom</span>
             </button>
           )}
-          <SubagentFleet
-            agent={session.agent}
-            subagents={visibleFleet}
-            selectedCallId={selectedSubagentCallId}
-            onSelect={setSelectedSubagentCallId}
-          />
+          {showPin && (
+            <SubagentPin
+              agent={session.agent}
+              subagents={fleet}
+              onPeek={(callId) => {
+                peekSubagent(callId);
+                const liveRoster = rosters[rosters.length - 1];
+                const node = liveRoster
+                  ? surfaceRef.current?.querySelector<HTMLElement>(
+                      `[data-subagent-roster="${liveRoster.anchorItemId}"]`,
+                    )
+                  : null;
+                node?.scrollIntoView({ block: "nearest" });
+              }}
+            />
+          )}
           {visibleWorkflow && (
             <div className="agent-workflow-dock">
               <PlanTracker
@@ -745,27 +852,17 @@ export function AgentSurface({
             inputRef={composerRef}
             onSubmit={submit}
             onInterrupt={() => agents.interrupt(termId)}
+            target={
+              focusedSubagent
+                ? {
+                    kind: "subagent",
+                    label: focusedSubagent.label,
+                    canMessage: canMessageFocused,
+                  }
+                : undefined
+            }
           />
         </div>
-      )}
-
-      {selectedSubagent && (
-        <SubagentInspector
-          agent={session.agent}
-          subagent={selectedSubagent}
-          canMessage={
-            Boolean(selectedSubagent.threadId) &&
-            agents.canPromptSubagent(termId) &&
-            (selectedSubagent.status === "running" || selectedSubagent.status === "done")
-          }
-          onMessage={(text) =>
-            selectedSubagent.threadId
-              ? agents.promptSubagent(termId, selectedSubagent.threadId, text)
-              : Promise.resolve(false)
-          }
-          onClose={closeSubagentInspector}
-          onShowInTimeline={showSubagentInTimeline}
-        />
       )}
 
       {resumeQuery !== null && (
