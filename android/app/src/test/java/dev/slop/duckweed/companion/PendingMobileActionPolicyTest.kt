@@ -26,9 +26,28 @@ class PendingMobileActionPolicyTest {
             "create-1" in PendingMobileActionPolicy.reconcile(
                 listOf(action),
                 listOf(snapshot("terminal-1", "terminal-2")),
-                now = 2_000L,
+                now = 3_000L,
             ).completedIds,
         )
+    }
+
+    @Test
+    fun newTerminalStaysPendingLongEnoughToShowItsTransition() {
+        val action = action(
+            id = "create-1",
+            kind = PendingMobileAction.CREATE_TERMINAL,
+            projectId = "project-1",
+            baselineTerminalIds = setOf("terminal-1"),
+        )
+
+        val result = PendingMobileActionPolicy.reconcile(
+            listOf(action),
+            listOf(snapshot("terminal-1", "terminal-2")),
+            now = action.createdAt + PendingMobileActionPolicy.MIN_CREATE_PENDING_MS - 1,
+        )
+
+        assertEquals(listOf(action), result.pending)
+        assertTrue(result.completedIds.isEmpty())
     }
 
     @Test
@@ -44,7 +63,7 @@ class PendingMobileActionPolicyTest {
         val result = PendingMobileActionPolicy.reconcile(
             listOf(first, second),
             listOf(snapshot("terminal-1", "terminal-2")),
-            now = 2_000L,
+            now = 3_000L,
         )
 
         assertEquals(setOf("create-1"), result.completedIds)
@@ -56,7 +75,7 @@ class PendingMobileActionPolicyTest {
             PendingMobileActionPolicy.reconcile(
                 result.pending,
                 listOf(snapshot("terminal-1", "terminal-2")),
-                now = 2_100L,
+                now = 3_100L,
             ).completedIds.isEmpty(),
         )
     }

@@ -30,6 +30,7 @@ data class PendingMobileActionReconciliation(
 
 object PendingMobileActionPolicy {
     const val MAX_PENDING_AGE_MS = 10 * 60 * 1_000L
+    const val MIN_CREATE_PENDING_MS = 1_500L
 
     fun reconcile(
         actions: List<PendingMobileAction>,
@@ -67,21 +68,25 @@ object PendingMobileActionPolicy {
                     ?: return@forEach
                 val currentIds = project.terminals.mapTo(linkedSetOf()) { it.id }
                 val claimedIds = mutableSetOf<String>()
+                val completedTerminalIds = mutableSetOf<String>()
                 scopedActions.sortedBy { it.createdAt }.forEach { action ->
                     val createdTerminal = currentIds.firstOrNull {
                         it !in action.baselineTerminalIds && it !in claimedIds
                     }
                     if (createdTerminal != null) {
                         claimedIds += createdTerminal
-                        completed += action.id
+                        if (now - action.createdAt >= MIN_CREATE_PENDING_MS) {
+                            completedTerminalIds += createdTerminal
+                            completed += action.id
+                        }
                     }
                 }
-                if (claimedIds.isNotEmpty()) {
+                if (completedTerminalIds.isNotEmpty()) {
                     scopedActions
                         .filterNot { it.id in completed }
                         .forEach { action ->
                             updatedActions[action.id] = action.copy(
-                                baselineTerminalIds = action.baselineTerminalIds + claimedIds,
+                                baselineTerminalIds = action.baselineTerminalIds + completedTerminalIds,
                             )
                         }
                 }

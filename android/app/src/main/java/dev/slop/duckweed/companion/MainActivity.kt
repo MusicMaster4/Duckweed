@@ -1090,15 +1090,7 @@ class MainActivity : AppCompatActivity() {
         messages: List<CompletionRecord>,
         unreadKeys: Set<Pair<String, String>>,
     ) {
-        val reconciliation = PendingMobileActionPolicy.reconcile(
-            pendingMobileActions,
-            snapshots,
-            System.currentTimeMillis(),
-        )
-        if (reconciliation.pending != pendingMobileActions) {
-            pendingMobileActions = reconciliation.pending
-            pendingActionStore.replace(pendingMobileActions)
-        }
+        reconcilePendingActions(snapshots)
         cachedSnapshots = snapshots
         unreadConversationKeys = unreadKeys
         if (refreshRequestedAt > 0 && snapshots.any { it.updatedAt > refreshSnapshotVersion }) {
@@ -1114,6 +1106,21 @@ class MainActivity : AppCompatActivity() {
         refreshUsageLimits(snapshots)
         if (conversationDetail.visibility == View.VISIBLE) refreshConversation()
         openIntentResponse()
+    }
+
+    private fun reconcilePendingActions(
+        snapshots: List<WorkspaceSnapshot>,
+        now: Long = System.currentTimeMillis(),
+    ): Boolean {
+        val reconciliation = PendingMobileActionPolicy.reconcile(
+            pendingMobileActions,
+            snapshots,
+            now,
+        )
+        if (reconciliation.pending == pendingMobileActions) return false
+        pendingMobileActions = reconciliation.pending
+        pendingActionStore.replace(pendingMobileActions)
+        return true
     }
 
     private fun refreshWorkspaces(
@@ -1421,11 +1428,27 @@ class MainActivity : AppCompatActivity() {
         val closingByTerminal = actions
             .filter { it.kind == PendingMobileAction.CLOSE_TERMINAL }
             .associateBy { it.terminalId }
-        val terminals = project.terminals.map { terminal ->
-            terminal.copy(pendingAction = closingByTerminal[terminal.id])
-        }.toMutableList()
-        actions.filter { it.kind == PendingMobileAction.CREATE_TERMINAL }
+        val createActions = actions
+            .filter { it.kind == PendingMobileAction.CREATE_TERMINAL }
             .sortedBy { it.createdAt }
+        val claimedTerminalIds = mutableSetOf<String>()
+        val creatingByTerminal = mutableMapOf<String, PendingMobileAction>()
+        createActions.forEach { action ->
+            project.terminals.firstOrNull {
+                it.id !in action.baselineTerminalIds && it.id !in claimedTerminalIds
+            }?.let { terminal ->
+                claimedTerminalIds += terminal.id
+                creatingByTerminal[terminal.id] = action
+            }
+        }
+        val terminals = project.terminals.map { terminal ->
+            terminal.copy(
+                pendingAction = closingByTerminal[terminal.id] ?: creatingByTerminal[terminal.id],
+            )
+        }.toMutableList()
+        val matchedCreateActionIds = creatingByTerminal.values.mapTo(mutableSetOf()) { it.id }
+        createActions
+            .filterNot { it.id in matchedCreateActionIds }
             .forEach { action ->
                 terminals += RemoteTerminal(
                     id = "pending:${action.id}",
@@ -2030,6 +2053,17 @@ class MainActivity : AppCompatActivity() {
         pendingActionStore.put(action)
         refreshWorkspaces()
         if (conversationDetail.visibility == View.VISIBLE) refreshConversation()
+        if (action.kind == PendingMobileAction.CREATE_TERMINAL) {
+            projectDetail.postDelayed({
+                if (pendingMobileActions.none { it.id == action.id }) {
+                    return@postDelayed
+                }
+                if (reconcilePendingActions(cachedSnapshots)) {
+                    refreshWorkspaces()
+                    if (conversationDetail.visibility == View.VISIBLE) refreshConversation()
+                }
+            }, PendingMobileActionPolicy.MIN_CREATE_PENDING_MS + 50L)
+        }
     }
 
     private fun removePendingAction(id: String) {
