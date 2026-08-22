@@ -1083,13 +1083,6 @@ export default function App() {
     };
     window.addEventListener("duckweed:mobile-paired", paired);
     window.addEventListener("duckweed:mobile-refresh", refreshed);
-    const presence = window.setInterval(() => {
-      void mobileSendPresence().then((result) => {
-        if (result.failed > 0) throw new Error(result.errors.join("; "));
-      }).catch((error) => {
-        if (!stopped) console.error("mobile presence sync", error);
-      });
-    }, 30_000);
     // Keep phone meters on the same live provider reading as the desktop Usage
     // panel, not the snapshot from when the pairing was first opened.
     const usagePoll = window.setInterval(() => {
@@ -1106,7 +1099,6 @@ export default function App() {
     return () => {
       stopped = true;
       if (timer) window.clearTimeout(timer);
-      window.clearInterval(presence);
       window.clearInterval(usagePoll);
       window.removeEventListener("duckweed:mobile-paired", paired);
       window.removeEventListener("duckweed:mobile-refresh", refreshed);
@@ -1115,6 +1107,28 @@ export default function App() {
       offTerminalOutput.forEach((off) => off());
     };
   }, [tabs, termIds, termIdsKey, unreadTermIds]);
+
+  // Presence must not share the workspace effect lifecycle. Workspace changes
+  // restart that effect frequently enough to postpone a 30-second interval
+  // indefinitely while Duckweed is busy, which makes a reachable desktop look
+  // offline on the phone.
+  useEffect(() => {
+    if (!TAURI_RUNTIME) return;
+    let stopped = false;
+    const sendPresence = () => {
+      void mobileSendPresence().then((result) => {
+        if (result.failed > 0) throw new Error(result.errors.join("; "));
+      }).catch((error) => {
+        if (!stopped) console.error("mobile presence sync", error);
+      });
+    };
+    sendPresence();
+    const presence = window.setInterval(sendPresence, 30_000);
+    return () => {
+      stopped = true;
+      window.clearInterval(presence);
+    };
+  }, []);
 
   // The relay cannot open an inbound connection through a user's router, so
   // the desktop checks the small encrypted command queue while Duckweed runs.

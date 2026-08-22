@@ -41,6 +41,10 @@ class DuckweedMessagingService : FirebaseMessagingService() {
                 EncryptedEnvelope(nonce, ciphertext),
             )
         }.getOrNull() ?: return
+        // A successfully decrypted push proves that this desktop pairing is
+        // reachable. Use the phone's clock so clock skew cannot turn a message
+        // that just arrived into an "offline" state.
+        WorkspaceStore(this).markPresence(pairId, System.currentTimeMillis())
         if (preview.kind != "workspace" && preview.kind != "presence") {
             val store = MessageStore(this)
             store.put(preview)

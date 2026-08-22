@@ -12,16 +12,21 @@ class MessageFetchWorker(context: Context, parameters: WorkerParameters) : Worke
         return try {
             val envelope = RelayClient.fetch(credentials, messageId)
             val message = Crypto.decrypt(credentials, messageId, "payload", envelope)
+            val receivedAt = System.currentTimeMillis()
+            val workspaceStore = WorkspaceStore(applicationContext)
             if (message.kind == "presence") {
-                message.pairId?.let { WorkspaceStore(applicationContext).markPresence(it, message.sentAt) }
+                workspaceStore.markPresence(pairId, receivedAt)
             } else if (message.workspace != null) {
-                if (WorkspaceStore(applicationContext).put(message.workspace)) {
+                if (workspaceStore.put(message.workspace, receivedAt)) {
                     val cleared = MessageStore(applicationContext)
                         .putSyncedConversation(message.workspace)
                     NotificationTools.cancelIds(applicationContext, cleared)
                     NotificationTools.refreshApprovalActions(applicationContext)
                 }
             } else {
+                // Tests, completions, and attention messages are authenticated
+                // desktop traffic too, so they also renew the connection.
+                workspaceStore.markPresence(pairId, receivedAt)
                 val store = MessageStore(applicationContext)
                 store.put(message)
                 val unread = store.message(message.id)?.readAt == null

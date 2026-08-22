@@ -7,14 +7,29 @@ import org.json.JSONObject
 class WorkspaceStore(private val context: Context) {
     private val preferences = context.getSharedPreferences("duckweed-workspaces", Context.MODE_PRIVATE)
 
-    fun put(snapshot: WorkspaceSnapshot): Boolean {
-        val currentUpdatedAt = preferences.getString(snapshot.pairId, null)?.let { stored ->
+    fun put(snapshot: WorkspaceSnapshot, receivedAt: Long = System.currentTimeMillis()): Boolean =
+        synchronized(STORE_LOCK) { putLocked(snapshot, receivedAt) }
+
+    private fun putLocked(snapshot: WorkspaceSnapshot, receivedAt: Long): Boolean {
+        val currentState = preferences.getString(snapshot.pairId, null)?.let { stored ->
             runCatching {
-                JSONObject(String(SecretStore.decryptLocal(stored), Charsets.UTF_8))
-                    .optLong("updatedAt")
+                val json = JSONObject(String(SecretStore.decryptLocal(stored), Charsets.UTF_8))
+                val updatedAt = json.optLong("updatedAt")
+                val presenceAt = if (json.has("presenceAt") && !json.isNull("presenceAt")) {
+                    json.optLong("presenceAt")
+                } else {
+                    updatedAt
+                }
+                Pair(updatedAt, presenceAt)
             }.getOrNull()
-        } ?: 0L
+        }
+        val currentUpdatedAt = currentState?.first ?: 0L
         if (currentUpdatedAt > snapshot.updatedAt) return false
+        val presenceAt = maxOf(
+            currentState?.second ?: 0L,
+            snapshot.presenceAt ?: 0L,
+            receivedAt,
+        )
         val projects = JSONArray()
         snapshot.projects.forEach { project ->
             val terminals = JSONArray()
@@ -155,7 +170,10 @@ class WorkspaceStore(private val context: Context) {
         val raw = JSONObject()
             .put("pairId", snapshot.pairId)
             .put("updatedAt", snapshot.updatedAt)
-            .put("presenceAt", snapshot.presenceAt ?: snapshot.updatedAt)
+            // Preserve a newer heartbeat if FCM delivers an older workspace
+            // snapshot after it. The receipt time is local to Android and is
+            // therefore unaffected by desktop/phone clock skew.
+            .put("presenceAt", presenceAt)
             .put("projects", projects)
             .put("usageLimits", usageLimits)
             .toString()
@@ -250,7 +268,10 @@ class WorkspaceStore(private val context: Context) {
         }.getOrNull()
     }.sortedByDescending { it.updatedAt }
 
-    fun markPresence(pairId: String, at: Long): Boolean {
+    fun markPresence(pairId: String, at: Long): Boolean =
+        synchronized(STORE_LOCK) { markPresenceLocked(pairId, at) }
+
+    private fun markPresenceLocked(pairId: String, at: Long): Boolean {
         val stored = preferences.getString(pairId, null) ?: return false
         val json = runCatching {
             JSONObject(String(SecretStore.decryptLocal(stored), Charsets.UTF_8))
@@ -269,6 +290,15 @@ class WorkspaceStore(private val context: Context) {
     }
 
     fun remove(pairId: String) {
-        preferences.edit().remove(pairId).apply()
+        synchronized(STORE_LOCK) {
+            preferences.edit().remove(pairId).apply()
+        }
+    }
+
+    companion object {
+        // Firebase callbacks and WorkManager can update the same pairing on
+        // different threads. Serialize their read-modify-write operations so
+        // an older snapshot cannot win a race against a fresh heartbeat.
+        private val STORE_LOCK = Any()
     }
 }

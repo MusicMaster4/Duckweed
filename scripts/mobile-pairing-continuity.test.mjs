@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 
-const read = (path) => readFileSync(path, "utf8");
+const read = (path) => readFileSync(path, "utf8").replaceAll("\r\n", "\n");
 
 describe("mobile pairing continuity", () => {
   test("updates keep the Android package and encrypted credential locations stable", () => {
@@ -87,11 +87,32 @@ describe("mobile pairing continuity", () => {
     expect(desktop).toContain("refreshUsageLimits(0)");
     expect(desktop).toContain("pollDelay = commands.length > 0 ? 1_200 : Math.min(4_000, pollDelay * 1.5)");
     expect(desktop).toContain("const presence = window.setInterval");
+    expect(desktop).toContain("sendPresence();");
     expect(desktop).toContain("mobileSendPresence()");
     expect(desktop).toContain('command.kind === "refresh"');
     expect(activity).toContain("setOnRefreshListener { requestRemoteRefresh() }");
     expect(relay).toContain('put("kind", "refresh")');
     expect(build).toContain("androidx.swiperefreshlayout:swiperefreshlayout:1.2.0");
+  });
+
+  test("authenticated desktop traffic renews presence using the phone clock", () => {
+    const service = read(
+      "android/app/src/main/java/dev/slop/duckweed/companion/DuckweedMessagingService.kt",
+    );
+    const worker = read(
+      "android/app/src/main/java/dev/slop/duckweed/companion/MessageFetchWorker.kt",
+    );
+    const store = read(
+      "android/app/src/main/java/dev/slop/duckweed/companion/WorkspaceStore.kt",
+    );
+
+    expect(service.indexOf("Crypto.decrypt(")).toBeLessThan(
+      service.indexOf("markPresence(pairId, System.currentTimeMillis())"),
+    );
+    expect(worker).toContain("workspaceStore.markPresence(pairId, receivedAt)");
+    expect(worker).toContain("workspaceStore.put(message.workspace, receivedAt)");
+    expect(store).toContain("currentState?.second ?: 0L");
+    expect(store).toContain("receivedAt,");
   });
 
   test("workspace snapshots retain compact readable conversation history", () => {
