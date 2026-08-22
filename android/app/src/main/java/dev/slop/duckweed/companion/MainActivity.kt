@@ -142,6 +142,7 @@ class MainActivity : AppCompatActivity() {
     private var appLockPromptVisible = false
     private var updateAvailable: AndroidUpdateManifest? = null
     private var selectedPage = Page.ACTIVITY
+    private val pageHistory = ArrayDeque<Page>()
     private var selectedProject: ProjectRow? = null
     private var selectedTarget: ConversationTarget? = null
     private var legacyResponse: CompletionRecord? = null
@@ -359,9 +360,9 @@ class MainActivity : AppCompatActivity() {
         }
         responsesRefresh.setOnRefreshListener { requestRemoteRefresh() }
         projectsRefresh.setOnRefreshListener { requestRemoteRefresh() }
-        findViewById<View>(R.id.project_back).setOnClickListener { closeProject() }
+        findViewById<View>(R.id.project_back).setOnClickListener { navigateBack() }
         findViewById<View>(R.id.project_new_terminal).setOnClickListener { showCreateTerminalDialog() }
-        findViewById<View>(R.id.conversation_back).setOnClickListener { closeConversation() }
+        findViewById<View>(R.id.conversation_back).setOnClickListener { navigateBack() }
         conversationPlanHead.setOnClickListener { view ->
             displayedPlan ?: return@setOnClickListener
             view.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
@@ -390,14 +391,10 @@ class MainActivity : AppCompatActivity() {
         })
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
-                when {
-                    conversationDetail.visibility == View.VISIBLE -> closeConversation()
-                    projectDetail.visibility == View.VISIBLE -> closeProject()
-                    selectedPage == Page.SETTINGS -> showPage(Page.ACTIVITY)
-                    else -> {
-                        isEnabled = false
-                        onBackPressedDispatcher.onBackPressed()
-                    }
+                if (!navigateBack()) {
+                    isEnabled = false
+                    onBackPressedDispatcher.onBackPressed()
+                    isEnabled = true
                 }
             }
         })
@@ -409,6 +406,9 @@ class MainActivity : AppCompatActivity() {
         savedInstanceState?.getString(STATE_PAGE)
             ?.let { runCatching { Page.valueOf(it) }.getOrNull() }
             ?.let(::showPage)
+        savedInstanceState?.getStringArrayList(STATE_PAGE_HISTORY)
+            ?.mapNotNull { runCatching { Page.valueOf(it) }.getOrNull() }
+            ?.forEach(pageHistory::addLast)
         configureUpdater()
         resumePendingUpdate()
         scanButton.setOnClickListener { scanPairingCode() }
@@ -476,6 +476,10 @@ class MainActivity : AppCompatActivity() {
     override fun onSaveInstanceState(outState: Bundle) {
         persistCurrentDraft()
         outState.putString(STATE_PAGE, selectedPage.name)
+        outState.putStringArrayList(
+            STATE_PAGE_HISTORY,
+            ArrayList(pageHistory.map(Page::name)),
+        )
         super.onSaveInstanceState(outState)
     }
 
@@ -491,7 +495,7 @@ class MainActivity : AppCompatActivity() {
             findViewById<View>(id).setOnClickListener { view ->
                 if (selectedPage != page) {
                     view.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
-                    showPage(page)
+                    navigateToPage(page)
                 }
             }
         }
@@ -500,6 +504,30 @@ class MainActivity : AppCompatActivity() {
         bind(R.id.nav_conversations, Page.CONVERSATIONS)
         bind(R.id.settings_button, Page.SETTINGS)
         showPage(Page.ACTIVITY)
+    }
+
+    private fun navigateToPage(page: Page) {
+        if (selectedPage == page) return
+        pageHistory.addLast(selectedPage)
+        showPage(page)
+    }
+
+    private fun navigateBack(): Boolean {
+        when {
+            conversationDetail.visibility == View.VISIBLE -> closeConversation()
+            projectDetail.visibility == View.VISIBLE -> closeProject()
+            else -> {
+                while (pageHistory.isNotEmpty()) {
+                    val previousPage = pageHistory.removeLast()
+                    if (previousPage != selectedPage) {
+                        showPage(previousPage)
+                        return true
+                    }
+                }
+                return false
+            }
+        }
+        return true
     }
 
     private fun tuneListMotion(list: RecyclerView) {
@@ -2720,7 +2748,7 @@ class MainActivity : AppCompatActivity() {
         val messageId = intent.getStringExtra("message_id") ?: return
         val message = MessageStore(this).response(messageId) ?: return
         intent.removeExtra("message_id")
-        showPage(Page.ACTIVITY)
+        navigateToPage(Page.ACTIVITY)
         openResponse(message)
     }
 
@@ -2812,6 +2840,7 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val STATE_PAGE = "selected-page"
+        private const val STATE_PAGE_HISTORY = "page-history"
         private const val CONNECTION_FRESH_MS = 75_000L
         private const val PENDING_ALPHA = 0.48f
         private const val APP_LOCK_PREFERENCES = "app-lock"
