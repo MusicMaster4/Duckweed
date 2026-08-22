@@ -74,7 +74,6 @@ import {
   mobileAckCommand,
   mobilePollCommands,
   mobileSendCompletion,
-  mobileSendPresence,
   mobileSendWorkspace,
   mobileStatus,
   portsList,
@@ -879,15 +878,17 @@ export default function App() {
     let stopped = false;
     let publishing = false;
     let publishQueued = false;
+    let urgentPublishQueued = false;
     let publishDelay = 250;
     const usageDays = loadUsageSettings().days;
     let usageLimits = mobileUsageLimits(cachedUsage(usageDays)?.quotas ?? []);
     let hasPairedDevice = false;
 
-    const publish = () => {
+    const publish = (urgent = false) => {
       timer = 0;
       if (publishing) {
         publishQueued = true;
+        urgentPublishQueued ||= urgent;
         return;
       }
       let remainingConversationBytes = MOBILE_WORKSPACE_CONVERSATION_BUDGET_BYTES;
@@ -1022,21 +1023,32 @@ export default function App() {
       void mobileSendWorkspace(boundedSnapshot).then((result) => {
         if (result.failed > 0) throw new Error(result.errors.join("; "));
       }).catch((error) => {
+        if (mobileWorkspaceSnapshotRef.current === serialized) {
+          mobileWorkspaceSnapshotRef.current = "";
+        }
         if (!stopped) {
-          if (mobileWorkspaceSnapshotRef.current === serialized) {
-            mobileWorkspaceSnapshotRef.current = "";
-          }
           console.error("mobile workspace sync", error);
           publishQueued = true;
           publishDelay = 5_000;
+        } else {
+          // A failed request can outlive the React effect that started it. Ask
+          // the current effect to retry instead of leaving its dedupe marker
+          // permanently suppressing this snapshot.
+          window.dispatchEvent(new Event("duckweed:mobile-sync-retry"));
         }
       }).finally(() => {
         publishing = false;
         if (!stopped && publishQueued) {
           const delay = publishDelay;
+          const queuedUrgently = urgentPublishQueued;
           publishQueued = false;
+          urgentPublishQueued = false;
           publishDelay = 250;
-          schedule(delay);
+          if (queuedUrgently) {
+            queueMicrotask(() => publish(true));
+          } else {
+            schedule(delay);
+          }
         }
       });
     };
@@ -1081,8 +1093,14 @@ export default function App() {
       refreshUsageLimits(0);
       schedule();
     };
+    const retry = () => schedule(1_000);
     window.addEventListener("duckweed:mobile-paired", paired);
     window.addEventListener("duckweed:mobile-refresh", refreshed);
+    window.addEventListener("duckweed:mobile-sync-retry", retry);
+    // Turn completion is a data synchronization boundary. Send the settled
+    // state directly from the protocol event, even when browser timers and
+    // animation frames are paused by a minimized desktop window.
+    const offTurnEnds = agentSessions.subscribeTurnEnd(() => publish(true));
     // Keep phone meters on the same live provider reading as the desktop Usage
     // panel, not the snapshot from when the pairing was first opened.
     const usagePoll = window.setInterval(() => {
@@ -1102,33 +1120,13 @@ export default function App() {
       window.clearInterval(usagePoll);
       window.removeEventListener("duckweed:mobile-paired", paired);
       window.removeEventListener("duckweed:mobile-refresh", refreshed);
+      window.removeEventListener("duckweed:mobile-sync-retry", retry);
+      offTurnEnds();
       offAgents();
       offTerminals.forEach((off) => off());
       offTerminalOutput.forEach((off) => off());
     };
   }, [tabs, termIds, termIdsKey, unreadTermIds]);
-
-  // Presence must not share the workspace effect lifecycle. Workspace changes
-  // restart that effect frequently enough to postpone a 30-second interval
-  // indefinitely while Duckweed is busy, which makes a reachable desktop look
-  // offline on the phone.
-  useEffect(() => {
-    if (!TAURI_RUNTIME) return;
-    let stopped = false;
-    const sendPresence = () => {
-      void mobileSendPresence().then((result) => {
-        if (result.failed > 0) throw new Error(result.errors.join("; "));
-      }).catch((error) => {
-        if (!stopped) console.error("mobile presence sync", error);
-      });
-    };
-    sendPresence();
-    const presence = window.setInterval(sendPresence, 30_000);
-    return () => {
-      stopped = true;
-      window.clearInterval(presence);
-    };
-  }, []);
 
   // The relay cannot open an inbound connection through a user's router, so
   // the desktop checks the small encrypted command queue while Duckweed runs.

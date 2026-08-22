@@ -82,6 +82,24 @@ describe("encrypted notification relay", () => {
     }]);
     expect(JSON.stringify(pushed)).not.toContain(payload.ciphertext);
 
+    // FCM is a wake-up hint, not the only recovery path. A phone that missed
+    // the push can list opaque pending ids when it returns to the foreground.
+    const pending = await handleRequest(
+      request(`/v1/pairings/${pairId}/messages`, "GET", receiveToken),
+      env,
+      push,
+    );
+    expect(await pending.json()).toMatchObject({
+      messages: [{ messageId }],
+    });
+
+    const unauthorizedPending = await handleRequest(
+      request(`/v1/pairings/${pairId}/messages`, "GET", sendToken),
+      env,
+      push,
+    );
+    expect(unauthorizedPending.status).toBe(401);
+
     const fetched = await handleRequest(
       request(`/v1/pairings/${pairId}/messages/${messageId}`, "GET", receiveToken),
       env,
@@ -95,6 +113,13 @@ describe("encrypted notification relay", () => {
       push,
     );
     expect(acknowledged.status).toBe(204);
+
+    const emptyPending = await handleRequest(
+      request(`/v1/pairings/${pairId}/messages`, "GET", receiveToken),
+      env,
+      push,
+    );
+    expect(await emptyPending.json()).toEqual({ messages: [] });
 
     const gone = await handleRequest(
       request(`/v1/pairings/${pairId}/messages/${messageId}`, "GET", receiveToken),

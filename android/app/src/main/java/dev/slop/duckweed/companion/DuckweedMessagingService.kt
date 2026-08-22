@@ -1,9 +1,5 @@
 package dev.slop.duckweed.companion
 
-import androidx.work.Data
-import androidx.work.ExistingWorkPolicy
-import androidx.work.OneTimeWorkRequestBuilder
-import androidx.work.WorkManager
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
 import java.util.concurrent.Executors
@@ -56,17 +52,6 @@ class DuckweedMessagingService : FirebaseMessagingService() {
         }
         NotificationTools.announceChanged(this)
 
-        val input = Data.Builder()
-            .putString(MessageFetchWorker.PAIR_ID, pairId)
-            .putString(MessageFetchWorker.MESSAGE_ID, messageId)
-            .build()
-        val work = OneTimeWorkRequestBuilder<MessageFetchWorker>()
-            .setInputData(input)
-            .build()
-        WorkManager.getInstance(this).enqueueUniqueWork(
-            "duckweed-message-$messageId",
-            ExistingWorkPolicy.KEEP,
-            work,
-        )
+        MessageFetchScheduler.enqueue(this, pairId, messageId)
     }
 }

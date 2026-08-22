@@ -713,7 +713,22 @@ function emit(session: Session, event: AgentEvent): void {
     }
     dispatch(session, queued.prompt, !queued.echoed);
   }
-  notify(session);
+  // Browser animation frames can stop while the desktop window is minimized.
+  // Settled states are also synchronization boundaries for the mobile
+  // companion, so publish them immediately instead of waiting for a paint that
+  // may never happen until the user restores Duckweed.
+  if (
+    event.type === "turn-end" ||
+    (event.type === "status" &&
+      (event.status === "idle" ||
+        event.status === "waiting" ||
+        event.status === "exited" ||
+        event.status === "error"))
+  ) {
+    notifyNow(session);
+  } else {
+    notify(session);
+  }
 
   // Config slash commands and synthetic idles still end the turn for the
   // protocol — they just do not earn a sound or unread flash.

@@ -105,6 +105,24 @@ object RelayClient {
         )
     }
 
+    data class PendingMessage(val id: String, val sentAt: Long)
+
+    /** Recover relay payloads even when Android or FCM dropped the wake-up push. */
+    fun pendingMessages(credentials: PairCredentials): List<PendingMessage> {
+        val result = request(
+            method = "GET",
+            url = "${credentials.relayUrl}/v1/pairings/${credentials.pairId}/messages",
+            bearer = credentials.receiveToken,
+        )
+        val messages = result.optJSONArray("messages") ?: JSONArray()
+        return (0 until messages.length()).mapNotNull { index ->
+            val message = messages.optJSONObject(index) ?: return@mapNotNull null
+            val id = message.optString("messageId")
+            if (runCatching { UUID.fromString(id) }.isFailure) return@mapNotNull null
+            PendingMessage(id, message.optLong("sentAt"))
+        }
+    }
+
     fun acknowledge(credentials: PairCredentials, messageId: String) {
         request(
             method = "DELETE",

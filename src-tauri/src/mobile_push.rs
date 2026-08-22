@@ -30,6 +30,7 @@ const MAX_PREVIEW_CIPHERTEXT: usize = 3_000;
 // Keep the plaintext below the relay's 320,000-character base64url ciphertext
 // limit, with room for AES-GCM overhead and the JSON request envelope.
 const MAX_WORKSPACE_PLAINTEXT_BYTES: usize = 225_000;
+const PRESENCE_INTERVAL: Duration = Duration::from_secs(30);
 
 static FILE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static HTTP_CLIENT: OnceLock<Result<Client, String>> = OnceLock::new();
@@ -1306,6 +1307,24 @@ fn presence_blocking(app: &AppHandle) -> Result<SendResult, String> {
         }
     }
     Ok(result)
+}
+
+/// Keep mobile presence independent from WebView timers. Windows can suspend
+/// animation frames and JavaScript intervals while the app is minimized, but
+/// the native process remains responsible for the paired desktop connection.
+pub fn start_presence_monitor(app: AppHandle) -> std::io::Result<()> {
+    std::thread::Builder::new()
+        .name("mobile-presence".into())
+        .spawn(move || loop {
+            let started = std::time::Instant::now();
+            if let Ok(result) = presence_blocking(&app) {
+                if result.failed > 0 {
+                    eprintln!("mobile presence sync: {}", result.errors.join("; "));
+                }
+            }
+            std::thread::sleep(PRESENCE_INTERVAL.saturating_sub(started.elapsed()));
+        })?;
+    Ok(())
 }
 
 fn poll_commands_blocking(app: &AppHandle) -> Result<Vec<RemoteCommand>, String> {

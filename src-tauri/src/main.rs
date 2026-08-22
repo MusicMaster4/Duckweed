@@ -948,6 +948,7 @@ fn main() {
             pty::start_busy_monitor(app.handle().clone())?;
             agent_activity::start_monitor(app.handle().clone())?;
             watch::start_monitor(app.handle().clone())?;
+            mobile_push::start_presence_monitor(app.handle().clone())?;
             // Heal context-menu entries left pointing at a development binary.
             shell_integration::repair_enabled_verbs();
             // Register "Open Duckweed in new tab" on first Windows run.

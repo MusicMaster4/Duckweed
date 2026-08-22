@@ -258,8 +258,18 @@ export const mobileDeviceRemove = (id: string) =>
 export const mobileSendCompletion = (message: MobileCompletionMessage) =>
   invoke<MobileSendResult>("mobile_send_completion", { message });
 
-export const mobileSendWorkspace = (snapshot: MobileWorkspaceSnapshot) =>
-  invoke<MobileSendResult>("mobile_send_workspace", { snapshot });
+// React effects can restart while a previous encrypted snapshot is still in
+// flight. Keep sends ordered across effect lifetimes so an older "working"
+// snapshot cannot reach the relay after the newer settled state.
+let mobileWorkspaceSendQueue: Promise<void> = Promise.resolve();
+
+export const mobileSendWorkspace = (snapshot: MobileWorkspaceSnapshot) => {
+  const send = mobileWorkspaceSendQueue
+    .catch(() => undefined)
+    .then(() => invoke<MobileSendResult>("mobile_send_workspace", { snapshot }));
+  mobileWorkspaceSendQueue = send.then(() => undefined, () => undefined);
+  return send;
+};
 
 export const mobileSendPresence = () =>
   invoke<MobileSendResult>("mobile_send_presence");

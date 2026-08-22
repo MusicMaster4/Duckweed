@@ -1,8 +1,12 @@
 package dev.slop.duckweed.companion
 
 import android.content.Context
+import androidx.work.Data
+import androidx.work.ExistingWorkPolicy
+import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.Worker
 import androidx.work.WorkerParameters
+import androidx.work.WorkManager
 
 class MessageFetchWorker(context: Context, parameters: WorkerParameters) : Worker(context, parameters) {
     override fun doWork(): Result {
@@ -50,5 +54,22 @@ class MessageFetchWorker(context: Context, parameters: WorkerParameters) : Worke
     companion object {
         const val PAIR_ID = "pair_id"
         const val MESSAGE_ID = "message_id"
+    }
+}
+
+object MessageFetchScheduler {
+    fun enqueue(context: Context, pairId: String, messageId: String) {
+        val input = Data.Builder()
+            .putString(MessageFetchWorker.PAIR_ID, pairId)
+            .putString(MessageFetchWorker.MESSAGE_ID, messageId)
+            .build()
+        val work = OneTimeWorkRequestBuilder<MessageFetchWorker>()
+            .setInputData(input)
+            .build()
+        WorkManager.getInstance(context.applicationContext).enqueueUniqueWork(
+            "duckweed-message-$pairId-$messageId",
+            ExistingWorkPolicy.KEEP,
+            work,
+        )
     }
 }

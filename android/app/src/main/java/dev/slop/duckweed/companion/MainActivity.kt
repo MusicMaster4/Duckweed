@@ -58,6 +58,7 @@ import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
 import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.Locale
 import java.util.UUID
 
@@ -165,8 +166,10 @@ class MainActivity : AppCompatActivity() {
     private var unreadConversationKeys: Set<Pair<String, String>> = emptySet()
     private var remoteStateLoading = false
     private var remoteStateReloadPending = false
+    private val relayRecoveryRunning = AtomicBoolean(false)
     private val connectionTicker = object : Runnable {
         override fun run() {
+            recoverPendingRelayMessages()
             refreshConnectionHealth()
             refreshWorkspaces()
             refreshUsageLimits()
@@ -460,6 +463,7 @@ class MainActivity : AppCompatActivity() {
         requestAppUnlockIfNeeded()
         syncNotificationToggle()
         refreshRemoteState()
+        recoverPendingRelayMessages()
         requestRemoteRefresh(showSpinner = false)
     }
 
@@ -1084,6 +1088,37 @@ class MainActivity : AppCompatActivity() {
                     remoteStateReloadPending = false
                     refreshRemoteState()
                 }
+            }
+        }
+    }
+
+    /**
+     * FCM only wakes the app. The encrypted relay remains the source of truth,
+     * so foreground recovery lists and downloads any payload whose wake-up was
+     * delayed or dropped by Android battery management.
+     */
+    private fun recoverPendingRelayMessages() {
+        if (!relayRecoveryRunning.compareAndSet(false, true)) return
+        val credentials = SecretStore.loadAll(this)
+        if (credentials.isEmpty()) {
+            relayRecoveryRunning.set(false)
+            return
+        }
+        executor.execute {
+            try {
+                credentials.forEach { pairing ->
+                    runCatching { RelayClient.pendingMessages(pairing) }
+                        .getOrDefault(emptyList())
+                        .forEach { pending ->
+                            MessageFetchScheduler.enqueue(
+                                applicationContext,
+                                pairing.pairId,
+                                pending.id,
+                            )
+                        }
+                }
+            } finally {
+                relayRecoveryRunning.set(false)
             }
         }
     }
