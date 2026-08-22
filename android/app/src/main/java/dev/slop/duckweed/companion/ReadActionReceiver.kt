@@ -25,7 +25,7 @@ class ReadActionReceiver : BroadcastReceiver() {
                     at = message.sentAt,
                 )
                 NotificationTools.cancelIds(context, cleared.ifEmpty { listOf(messageId) })
-                if (cleared.isNotEmpty()) ReadSyncScheduler.enqueue(context)
+                ReadSyncScheduler.enqueue(context)
                 NotificationTools.announceChanged(context)
             }
             Handler(Looper.getMainLooper()).post {

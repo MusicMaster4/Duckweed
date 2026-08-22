@@ -168,19 +168,21 @@ class MessageStore(context: Context) : SQLiteOpenHelper(context, "duckweed-messa
         try {
             messageIds = unreadMessageIds(database, pairId, terminalId, at)
             markConversationReadThrough(database, pairId, terminalId, at)
-            if (messageIds.isNotEmpty()) {
-                database.insertWithOnConflict(
-                    "pending_read_syncs",
-                    null,
-                    ContentValues().apply {
-                        put("pair_id", pairId)
-                        put("terminal_id", terminalId)
-                        if (completionSeq != null) put("completion_seq", completionSeq) else putNull("completion_seq")
-                        put("command_id", UUID.randomUUID().toString())
-                    },
-                    SQLiteDatabase.CONFLICT_REPLACE,
-                )
-            }
+            // Explicit reads are idempotent and must always reach the desktop.
+            // The local row may already be read when a full payload or workspace
+            // update races the notification action, but the desktop can still
+            // have the unread outline that this receipt is meant to clear.
+            database.insertWithOnConflict(
+                "pending_read_syncs",
+                null,
+                ContentValues().apply {
+                    put("pair_id", pairId)
+                    put("terminal_id", terminalId)
+                    if (completionSeq != null) put("completion_seq", completionSeq) else putNull("completion_seq")
+                    put("command_id", UUID.randomUUID().toString())
+                },
+                SQLiteDatabase.CONFLICT_REPLACE,
+            )
             database.setTransactionSuccessful()
         } finally {
             database.endTransaction()

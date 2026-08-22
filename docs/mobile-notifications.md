@@ -63,6 +63,9 @@ encrypted read receipt through the relay, which removes the red unread marker
 from the matching desktop terminal. If the phone is temporarily offline, the
 companion keeps the receipt locally and retries it when connectivity returns.
 Opening the notification or conversation performs the same synchronized read.
+For a completion outside the visible desktop pane, Duckweed waits 30 seconds
+before sending the phone notification. If the red unread outline is cleared
+during that interval, no notification is sent.
 
 The main companion navigation contains **Activity**, **Projects**, and
 **Conversations**. Connection management, sync health, and updates live in

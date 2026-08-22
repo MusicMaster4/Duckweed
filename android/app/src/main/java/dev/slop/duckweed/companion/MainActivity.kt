@@ -1231,7 +1231,7 @@ class MainActivity : AppCompatActivity() {
                 message.completionSeq,
             )
             NotificationTools.cancelIds(this, cleared)
-            if (cleared.isNotEmpty()) ReadSyncScheduler.enqueue(this)
+            ReadSyncScheduler.enqueue(this)
             messageAdapter.markConversationRead(pairId, terminalId)
         } else {
             MessageStore(this).markRead(message.id)
@@ -1282,7 +1282,7 @@ class MainActivity : AppCompatActivity() {
             readCompletionSeq,
         )
         NotificationTools.cancelIds(this, cleared)
-        if (cleared.isNotEmpty()) ReadSyncScheduler.enqueue(this)
+        ReadSyncScheduler.enqueue(this)
         messageAdapter.markConversationRead(target.pairId, target.terminal.id)
         unreadConversationKeys = unreadConversationKeys - Pair(target.pairId, target.terminal.id)
         terminalAdapter.markRead(target.pairId, target.terminal.id)

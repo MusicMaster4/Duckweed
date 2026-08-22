@@ -461,7 +461,6 @@ export default function App() {
   const completionFlashSeq = useRef(0);
   const completionFlashTimers = useRef(new Map<string, number>());
   const mobileCompletionTimers = useRef(new Map<string, number>());
-  const lastTerminalInteractionAt = useRef(new Map<string, number>());
   const scheduledSendsRef = useRef(scheduledSends);
   scheduledSendsRef.current = scheduledSends;
   /** Dirty flag for the lifted file editor (file switches confirm through this). */
@@ -622,25 +621,6 @@ export default function App() {
     return findLeaf(tab.root, tab.activeLeaf)?.term === termId;
   }, []);
 
-  useEffect(() => {
-    const recordSelectedTerminalInteraction = (event: KeyboardEvent | PointerEvent) => {
-      if (!document.hasFocus() || settingsActiveRef.current) return;
-      if (
-        event instanceof KeyboardEvent &&
-        ["Shift", "Control", "Alt", "Meta"].includes(event.key)
-      ) return;
-      const tab = currentTab();
-      const termId = tab ? (findLeaf(tab.root, tab.activeLeaf)?.term ?? null) : null;
-      if (termId) lastTerminalInteractionAt.current.set(termId, Date.now());
-    };
-    window.addEventListener("keydown", recordSelectedTerminalInteraction, true);
-    window.addEventListener("pointerdown", recordSelectedTerminalInteraction, true);
-    return () => {
-      window.removeEventListener("keydown", recordSelectedTerminalInteraction, true);
-      window.removeEventListener("pointerdown", recordSelectedTerminalInteraction, true);
-    };
-  }, [currentTab]);
-
   /** Selected pane while the user is actually looking at the window (flash vs unread). */
   const isFocusedTerm = useCallback(
     (termId: string): boolean => {
@@ -765,7 +745,6 @@ export default function App() {
       window.clearTimeout(timer);
       mobileCompletionTimers.current.delete(key);
     }
-    lastTerminalInteractionAt.current.delete(term);
     setCompletionFlashes((previous) => {
       if (!previous.has(term)) return previous;
       const next = new Map(previous);
@@ -1348,7 +1327,6 @@ export default function App() {
         const project = owner?.project?.name ??
           (meta.cwd.trim() ? basename(meta.cwd) : owner?.title ?? "Duckweed");
         const unreadAtCompletion = !isFocusedTerm(termId);
-        const completedAt = Date.now();
         const completionKey = `${termId}:${current.completionSeq}`;
         const message = {
           agent,
@@ -1372,12 +1350,10 @@ export default function App() {
           if (!shouldSendDelayedMobileCompletion({
             unreadAtCompletion,
             unreadNow: unreadTermIdsRef.current.has(termId),
-            lastInteractionAt: lastTerminalInteractionAt.current.get(termId) ?? null,
-            completedAt,
           })) return;
           void mobileSendCompletion(message)
             .catch((error) => console.error("mobile completion notification", error));
-        }, mobileCompletionDelay(unreadAtCompletion));
+        }, mobileCompletionDelay());
         mobileCompletionTimers.current.set(completionKey, timer);
       }
       // Every eligible completion gets one cue. The shared audio player
