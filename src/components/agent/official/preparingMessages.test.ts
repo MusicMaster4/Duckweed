@@ -47,7 +47,7 @@ describe("preparingMessages", () => {
   });
 
   test("keeps Thinking as the headline except for a rare live swap", () => {
-    expect(FUNNY_THINKING_LABEL_CHANCE).toBe(0.02);
+    expect(FUNNY_THINKING_LABEL_CHANCE).toBe(0.01);
 
     expect(
       thinkingHeadlineFor("term-a:live:idle", { working: false, hasLatest: true }),

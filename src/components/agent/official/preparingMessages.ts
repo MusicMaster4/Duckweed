@@ -332,7 +332,7 @@ export const PREPARING_MESSAGES: readonly string[] = [
   "Prompt needs a rewrite",
   "Prompt needs a priest",
   "Exorcising the bug",
-  "Banishing the race",
+  "Sorting the signals",
   "Summoning a stack trace",
   "Ritual in progress",
   "Candles for the build",
@@ -652,12 +652,12 @@ export function preparingMessageFor(clusterId: string): string {
 }
 
 /** Chance that a live Thinking headline uses a stand-in line instead. */
-export const FUNNY_THINKING_LABEL_CHANCE = 0.02;
+export const FUNNY_THINKING_LABEL_CHANCE = 0.01;
 
 const funnyLabelAssignments = new Map<string, boolean>();
 let funnyLabelRandom = Math.random;
 
-/** Test-only: pin the 2% Thinking-label roll. */
+/** Test-only: pin the 1% Thinking-label roll. */
 export function setFunnyThinkingLabelRandomForTests(random: () => number): void {
   funnyLabelRandom = random;
 }
