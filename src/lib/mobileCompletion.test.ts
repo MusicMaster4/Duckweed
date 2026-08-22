@@ -76,25 +76,49 @@ describe("delayed mobile completion delivery", () => {
     expect(shouldSendDelayedMobileCompletion({
       unreadAtCompletion: true,
       unreadNow: true,
+      lastInteractionAt: null,
+      completedAt: 60_000,
     })).toBe(true);
     expect(shouldSendDelayedMobileCompletion({
       unreadAtCompletion: true,
       unreadNow: false,
+      lastInteractionAt: null,
+      completedAt: 60_000,
     })).toBe(false);
   });
 
-  test("waits thirty seconds before checking the unread mark", () => {
-    expect(mobileCompletionDelay()).toBe(30_000);
+  test("uses thirty seconds for unread marks and one minute for selected terminals", () => {
+    expect(mobileCompletionDelay(true)).toBe(30_000);
+    expect(mobileCompletionDelay(false)).toBe(60_000);
   });
 
-  test("does not notify for a completion that was already visible", () => {
+  test("notifies an unattended selected terminal after one minute", () => {
     expect(shouldSendDelayedMobileCompletion({
       unreadAtCompletion: false,
       unreadNow: false,
+      lastInteractionAt: 59_999,
+      completedAt: 60_000,
+    })).toBe(true);
+    expect(shouldSendDelayedMobileCompletion({
+      unreadAtCompletion: false,
+      unreadNow: false,
+      lastInteractionAt: null,
+      completedAt: 60_000,
+    })).toBe(true);
+  });
+
+  test("does not notify after interaction in the selected terminal", () => {
+    expect(shouldSendDelayedMobileCompletion({
+      unreadAtCompletion: false,
+      unreadNow: false,
+      lastInteractionAt: 60_001,
+      completedAt: 60_000,
     })).toBe(false);
     expect(shouldSendDelayedMobileCompletion({
       unreadAtCompletion: false,
-      unreadNow: true,
+      unreadNow: false,
+      lastInteractionAt: 60_000,
+      completedAt: 60_000,
     })).toBe(false);
   });
 });

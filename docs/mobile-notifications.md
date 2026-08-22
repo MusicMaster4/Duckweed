@@ -66,6 +66,9 @@ Opening the notification or conversation performs the same synchronized read.
 For a completion outside the visible desktop pane, Duckweed waits 30 seconds
 before sending the phone notification. If the red unread outline is cleared
 during that interval, no notification is sent.
+For a completion in the selected pane, Duckweed waits one minute and sends the
+notification only if there has been no keyboard or pointer interaction since
+the completion.
 
 The main companion navigation contains **Activity**, **Projects**, and
 **Conversations**. Connection management, sync health, and updates live in

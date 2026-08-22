@@ -9,27 +9,35 @@ export interface AgentCompletionDetails {
 }
 
 export const MOBILE_COMPLETION_DELAY_MS = 30_000;
+export const SELECTED_TERMINAL_IDLE_MS = 60_000;
 
 export interface DelayedMobileCompletionState {
   /** Whether the completion created a visible unread mark on desktop. */
   unreadAtCompletion: boolean;
   /** Whether that mark still exists when the grace period ends. */
   unreadNow: boolean;
+  /** Last deliberate keyboard or pointer interaction in this terminal. */
+  lastInteractionAt: number | null;
+  /** Time when this completion was observed by the desktop. */
+  completedAt: number;
 }
 
-export function mobileCompletionDelay(): number {
-  return MOBILE_COMPLETION_DELAY_MS;
+export function mobileCompletionDelay(unreadAtCompletion: boolean): number {
+  return unreadAtCompletion ? MOBILE_COMPLETION_DELAY_MS : SELECTED_TERMINAL_IDLE_MS;
 }
 
 /**
- * Completion notifications are reserved for work the user has not reviewed.
- * The desktop unread mark is the single source of truth: it must be created by
- * the completion and still be present when the grace period ends.
+ * Background completions notify only while their unread mark survives the
+ * grace period. A completion in the already-selected terminal has no mark to
+ * clear, so interaction after it completes is the evidence that it was seen
+ * rather than merely open on an unattended desktop.
  */
 export function shouldSendDelayedMobileCompletion(
   state: DelayedMobileCompletionState,
 ): boolean {
-  return state.unreadAtCompletion && state.unreadNow;
+  if (state.unreadAtCompletion) return state.unreadNow;
+  if (state.lastInteractionAt === null) return true;
+  return state.lastInteractionAt < state.completedAt;
 }
 
 /** Select the final settled prose from the newest user turn for mobile history. */
