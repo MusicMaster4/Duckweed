@@ -975,7 +975,7 @@ describe("official agent presentation", () => {
 
     const waitingHtml = renderAgentActivity("codex", interimItems);
     const waitingMessage = PREPARING_MESSAGES.find((message) =>
-      waitingHtml.includes(`>${message}<`),
+      waitingHtml.includes(`>${escapeHtmlText(message)}<`),
     );
 
     expect(waitingHtml).toContain("I found the relevant section");
@@ -1009,7 +1009,7 @@ describe("official agent presentation", () => {
     ]);
 
     expect(resumedHtml).not.toContain("agent-still-working");
-    expect(resumedHtml).not.toContain(`>${waitingMessage}<`);
+    expect(resumedHtml).not.toContain(`>${escapeHtmlText(waitingMessage ?? "")}<`);
     expect(resumedHtml).toContain("Checking the remaining references.");
     expect(resumedHtml).toContain("Find remaining references");
   });
