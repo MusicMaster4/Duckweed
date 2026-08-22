@@ -723,7 +723,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       case "item/started": {
         const item = asRecord(params.item);
         const itemId = asString(item?.id);
-        if (asString(item?.type) !== "agentMessage" || !itemId) return;
+        if (!item || asString(item.type) !== "agentMessage" || !itemId) return;
         noteSideMessage(side, itemId, { phase: asString(item.phase) });
         publishSideAnswer(side, ctx);
         return;
@@ -743,7 +743,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       case "item/completed": {
         const item = asRecord(params.item);
         const itemId = asString(item?.id);
-        if (asString(item?.type) !== "agentMessage" || !itemId) return;
+        if (!item || asString(item.type) !== "agentMessage" || !itemId) return;
         noteSideMessage(side, itemId, {
           text: asString(item.text) ?? "",
           phase: asString(item.phase),
