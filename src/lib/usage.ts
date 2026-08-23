@@ -460,6 +460,18 @@ export function describeForecast(limit: QuotaLimit, now: number): ForecastCopy {
   }
 
   const pace = describePace(forecast);
+
+  // A window average describes everything consumed since the reset. It is not
+  // a measurement of what the user is spending now, so do not turn it into a
+  // countdown that reads like a live run-out prediction.
+  if (forecast.basis === "window") {
+    return {
+      tone: "muted",
+      text: `${Math.round(Math.max(0, 100 - limit.percent))}% left`,
+      detail: `${pace} window avg`,
+    };
+  }
+
   const runsOut = forecast.runs_out_at;
 
   if (runsOut != null && (resets == null || runsOut < resets)) {

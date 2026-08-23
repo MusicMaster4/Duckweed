@@ -293,9 +293,14 @@ fn apply_estimate(quota: &mut Quota, history: &mut QuotaHistory, now: i64, duty:
 }
 
 fn record_samples(quota: &Quota, history: &mut QuotaHistory, now: i64) {
-    history
-        .samples
-        .retain(|sample| now - sample.at <= HISTORY_RETENTION_MS);
+    history.samples.retain(|sample| {
+        now - sample.at <= HISTORY_RETENTION_MS
+            // Codex previously reused `primary` and `secondary` for whichever
+            // pool happened to write the newest rollout. Those samples can mix
+            // the default and Spark limits and must never feed a forecast.
+            && !(sample.agent == "codex"
+                && matches!(sample.limit_id.as_str(), "primary" | "secondary"))
+    });
 
     let observed_at = quota.observed_at.unwrap_or(now).min(now);
     for limit in &quota.limits {
@@ -991,8 +996,8 @@ fn codex_quota_from_buckets(observed_at: Option<i64>, buckets: &[Value]) -> Opti
                 None if multiple_buckets => format!("Codex | {window_label}"),
                 None => window_label,
             };
-            let id = if bucket_id == "codex" {
-                key.to_string()
+            let id = if minutes > 0 {
+                format!("{bucket_id}:{key}:{minutes}")
             } else {
                 format!("{bucket_id}:{key}")
             };
@@ -2374,15 +2379,94 @@ mod tests {
             .expect("multi-bucket Codex quota");
         assert_eq!(quota.plan.as_deref(), Some("pro"));
         assert_eq!(quota.limits.len(), 3);
-        assert_eq!(quota.limits[0].id, "primary");
+        assert_eq!(quota.limits[0].id, "codex:primary:10080");
         assert_eq!(quota.limits[0].label, "Codex | 7-day limit");
         assert!((quota.limits[0].percent - 50.0).abs() < f64::EPSILON);
-        assert_eq!(quota.limits[1].id, "codex_bengalfox:primary");
+        assert_eq!(quota.limits[1].id, "codex_bengalfox:primary:300");
         assert_eq!(quota.limits[1].label, "GPT-5.3-Codex-Spark | 5-hour limit");
         assert!((quota.limits[1].percent - 12.0).abs() < f64::EPSILON);
-        assert_eq!(quota.limits[2].id, "codex_bengalfox:secondary");
+        assert_eq!(quota.limits[2].id, "codex_bengalfox:secondary:10080");
         assert_eq!(quota.limits[2].label, "GPT-5.3-Codex-Spark | 7-day limit");
         assert!((quota.limits[2].percent - 30.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn codex_forecast_discards_history_from_the_old_ambiguous_pool_ids() {
+        let now = 1_787_502_400_000i64;
+        let result = json!({
+            "rateLimitsByLimitId": {
+                "codex": {
+                    "limitId": "codex",
+                    "limitName": null,
+                    "primary": {
+                        "usedPercent": 51,
+                        "windowDurationMins": 10080,
+                        "resetsAt": now / 1000 + 4 * 24 * 60 * 60
+                    },
+                    "secondary": null,
+                    "planType": "pro"
+                },
+                "codex_bengalfox": {
+                    "limitId": "codex_bengalfox",
+                    "limitName": "GPT-5.3-Codex-Spark",
+                    "primary": {
+                        "usedPercent": 0,
+                        "windowDurationMins": 300,
+                        "resetsAt": now / 1000 + 5 * 60 * 60
+                    },
+                    "secondary": {
+                        "usedPercent": 30,
+                        "windowDurationMins": 10080,
+                        "resetsAt": now / 1000 + 5 * 24 * 60 * 60
+                    },
+                    "planType": "pro"
+                }
+            }
+        });
+        let buckets = codex_buckets_from_live_result(&result);
+        let mut quota = codex_quota_from_buckets(Some(now), &buckets).expect("Codex quota");
+        let mut history = QuotaHistory {
+            samples: vec![
+                QuotaSample {
+                    at: now - 3 * HOUR,
+                    agent: "codex".into(),
+                    limit_id: "primary".into(),
+                    percent: 50.0,
+                },
+                QuotaSample {
+                    at: now - 2 * HOUR,
+                    agent: "codex".into(),
+                    limit_id: "primary".into(),
+                    percent: 10.0,
+                },
+                QuotaSample {
+                    at: now - HOUR,
+                    agent: "codex".into(),
+                    limit_id: "primary".into(),
+                    percent: 11.0,
+                },
+                QuotaSample {
+                    at: now - 30 * 60 * 1000,
+                    agent: "codex".into(),
+                    limit_id: "primary".into(),
+                    percent: 50.0,
+                },
+            ],
+        };
+
+        apply_estimate(&mut quota, &mut history, now, None);
+
+        assert!(history
+            .samples
+            .iter()
+            .all(|sample| sample.limit_id != "primary"));
+        assert_eq!(quota.limits[0].id, "codex:primary:10080");
+        assert_ne!(
+            quota.limits[0].forecast.as_ref().map(|forecast| forecast.basis.as_str()),
+            Some("recent")
+        );
+        assert_eq!(quota.limits[1].id, "codex_bengalfox:primary:300");
+        assert_eq!(quota.limits[2].id, "codex_bengalfox:secondary:10080");
     }
 
     #[test]
