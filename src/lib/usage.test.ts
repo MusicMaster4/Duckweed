@@ -184,7 +184,8 @@ describe("quota forecasts", () => {
     expect(copy.text).toBe("5% by reset");
   });
 
-  test("a window average is labelled and never presented as a live countdown", () => {
+  // The old panel printed "stable" here, which told you nothing at all.
+  test("an idle hour still reports the window's own average pace", () => {
     const copy = usage.describeForecast(
       limit(40, 1, {
         per_hour: 10,
@@ -194,12 +195,11 @@ describe("quota forecasts", () => {
       }),
       NOW,
     );
-    expect(copy.tone).toBe("muted");
-    expect(copy.detail).toBe("10%/h window avg");
-    expect(copy.text).toBe("60% left");
+    expect(copy.detail).toBe("10%/h");
+    expect(copy.text).toBe("50% by reset");
   });
 
-  test("an averaged run-out does not claim the user is spending at that pace now", () => {
+  test("an averaged run-out uses the same compact format", () => {
     const averaged = usage.describeForecast(
       limit(70, 4, {
         per_hour: 30,
@@ -209,8 +209,8 @@ describe("quota forecasts", () => {
       }),
       NOW,
     );
-    expect(averaged.text).toBe("30% left");
-    expect(averaged.detail).toBe("30%/h window avg");
+    expect(averaged.text).toBe("1h left");
+    expect(averaged.detail).toBe("30%/h");
   });
 
   // A weekly limit burning hard right now really is running out faster — but
