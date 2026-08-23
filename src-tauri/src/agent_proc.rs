@@ -170,7 +170,7 @@ impl AgentProcManager {
 /// Every supported agent is a launcher: npm shims re-exec node, Codex spawns
 /// sandboxed children, and ACP agents keep worker processes. Killing only the
 /// process we hold leaves those running with an orphaned pipe.
-fn kill_tree(pid: u32) {
+pub(crate) fn kill_tree(pid: u32) {
     #[cfg(windows)]
     {
         let mut command = Command::new("taskkill");
@@ -191,7 +191,7 @@ fn kill_tree(pid: u32) {
 }
 
 #[cfg(windows)]
-fn hide_console(command: &mut Command) {
+pub(crate) fn hide_console(command: &mut Command) {
     use std::os::windows::process::CommandExt;
     /// CREATE_NO_WINDOW — an npm shim would otherwise flash a console window.
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -199,7 +199,7 @@ fn hide_console(command: &mut Command) {
 }
 
 #[cfg(not(windows))]
-fn hide_console(_command: &mut Command) {}
+pub(crate) fn hide_console(_command: &mut Command) {}
 
 /// Every suffix Windows will treat as executable, most specific first.
 #[cfg(windows)]
@@ -274,7 +274,7 @@ pub fn probe(names: Vec<String>) -> Vec<AgentAvailability> {
 ///
 /// `claude`, `codex`, and `opencode` all install as `.cmd` shims on Windows,
 /// and CreateProcess cannot execute those directly.
-fn build_command(resolved: &Path) -> Command {
+pub(crate) fn build_command(resolved: &Path) -> Command {
     #[cfg(windows)]
     {
         let batch = resolved
