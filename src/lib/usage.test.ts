@@ -52,6 +52,15 @@ describe("usage formatting", () => {
     expect(usage.formatQuotaValue(1_500_000, "tokens")).toBe("1.5M");
   });
 
+  test("separates open sessions from agent CLIs found in usage history", () => {
+    expect(usage.agentTrackingSummary(3, 10)).toBe(
+      "3 agent sessions open \u00b7 usage history found for 10 agent CLIs",
+    );
+    expect(usage.agentTrackingSummary(1, 1)).toBe(
+      "1 agent session open \u00b7 usage history found for 1 agent CLI",
+    );
+  });
+
   test("quota remaining inverts utilization for the meter label", () => {
     expect(usage.quotaRemaining({ used: 2, limit: 100, percent: 2, unit: "percent" })).toBe(98);
     expect(usage.quotaRemaining({ used: 77, limit: 100, percent: 77, unit: "percent" })).toBe(23);

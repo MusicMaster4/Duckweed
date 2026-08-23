@@ -5,6 +5,7 @@ import { BarList, Legend, Meter, StackedColumns, StatTile, TableView } from "./U
 import type { BarRow, Column, Series } from "./UsageCharts";
 import {
   RANGES,
+  agentTrackingSummary,
   agentColor,
   dayFull,
   dayTick,
@@ -41,7 +42,12 @@ const totalOf = (row: {
  * meters may query a provider's official endpoint with the CLI's existing
  * local OAuth session; transcript contents never leave the machine.
  */
-export function UsagePanel() {
+interface Props {
+  /** Recognised agent sessions currently occupying terminal panes. */
+  openAgentCount: number;
+}
+
+export function UsagePanel({ openAgentCount }: Props) {
   const [settings, setSettings] = useState<UsageSettings>(loadSettings);
   const [snapshot, setSnapshot] = useState<Snapshot | null>(() => cachedUsage(settings.days));
   const [error, setError] = useState<string | null>(null);
@@ -236,7 +242,7 @@ export function UsagePanel() {
     totals && totalTokens > 0 ? Math.round((totals.cache_read / totalTokens) * 100) : 0;
 
   const catalogue = snapshot?.agents ?? [];
-  const installedCount = catalogue.filter((agent) => agent.installed).length;
+  const historyAgentCount = catalogue.filter((agent) => agent.installed).length;
 
   // ---- render ----------------------------------------------------------
   if (error) {
@@ -438,10 +444,7 @@ export function UsagePanel() {
           <div className="usage-empty">No agent activity in this period.</div>
         )}
         <div className="usage-index-status">
-          <span>
-            Automatically tracking {formatExact(installedCount)} detected agent
-            {installedCount === 1 ? "" : "s"}
-          </span>
+          <span>{agentTrackingSummary(openAgentCount, historyAgentCount)}</span>
           <span className="usage-scan-note">
             {formatExact(snapshot.scan.files_seen)} files indexed
             {snapshot.scan.files_read > 0

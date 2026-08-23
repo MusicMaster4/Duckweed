@@ -25,6 +25,8 @@ interface Props {
   wellbeingEnabled: boolean;
   dailyLimitMinutes: number;
   dailyUsedMs: number;
+  /** Recognised agent sessions currently open across all workspace panes. */
+  openAgentCount: number;
   /** Draw Duckweed's own interface over a recognised coding-agent CLI. */
   customAgentUi: boolean;
   agentFollowupMode: AgentFollowupMode;
@@ -162,6 +164,7 @@ export function SettingsMenu({
   wellbeingEnabled,
   dailyLimitMinutes,
   dailyUsedMs,
+  openAgentCount,
   customAgentUi,
   agentFollowupMode,
   autoApproveLockedRequests,
@@ -407,7 +410,7 @@ export function SettingsMenu({
             </section>
           )}
 
-          {showUsage && <UsagePanel />}
+          {showUsage && <UsagePanel openAgentCount={openAgentCount} />}
 
           {showWellbeing && (
             <>

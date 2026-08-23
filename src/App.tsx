@@ -422,6 +422,7 @@ export default function App() {
   const [workingAgentTermIds, setWorkingAgentTermIds] = useState<Set<string>>(
     () => new Set(),
   );
+  const [openAgentCount, setOpenAgentCount] = useState(0);
   const [scheduledSends, setScheduledSends] = useState<Map<string, ScheduledSend>>(
     () => new Map(),
   );
@@ -1278,6 +1279,10 @@ export default function App() {
   // use the turn credits maintained by the terminal registry.
   useEffect(() => {
     const syncWorkingAgents = () => {
+      const openCount = termIds.filter((termId) => {
+        const meta = terminals.getMeta(termId);
+        return agentSessions.isActive(termId) || meta?.agent != null || meta?.agentUi != null;
+      }).length;
       const next = new Set(
         termIds.filter((termId) => {
           const agent = agentSessions.get(termId);
@@ -1294,6 +1299,7 @@ export default function App() {
         }
         return next;
       });
+      setOpenAgentCount((previous) => (previous === openCount ? previous : openCount));
     };
 
     syncWorkingAgents();
@@ -3873,6 +3879,7 @@ export default function App() {
                 wellbeingEnabled={dailyUsage.state.enabled}
                 dailyLimitMinutes={dailyUsage.state.limitMinutes}
                 dailyUsedMs={dailyUsage.state.usedMs}
+                openAgentCount={openAgentCount}
                 customAgentUi={customAgentUi}
                 agentFollowupMode={agentFollowupMode}
                 autoApproveLockedRequests={autoApproveLockedRequests}
