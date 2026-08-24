@@ -11,6 +11,7 @@ import { ClaudeExperience } from "../official/ClaudeExperience";
 import { ActivityHistory } from "../official/OfficialShared";
 import { SubagentBoard, SubagentPin } from "./SubagentBoard";
 import { SubagentFocus } from "./SubagentFocus";
+import { SubagentMultiPane, SubagentNavigator } from "./SubagentNavigator";
 import { SubagentUiProvider } from "./SubagentUiContext";
 
 const items: AgentItem[] = [
@@ -284,7 +285,7 @@ describe("subagent focus UI", () => {
     expect(html).not.toContain("only reports a summary");
   });
 
-  test("says so honestly when the child has no nested transcript", () => {
+  test("renders a provider result as a readable transcript when nested events are unavailable", () => {
     const html = renderToStaticMarkup(
       <SubagentFocus
         agent="claude"
@@ -296,7 +297,7 @@ describe("subagent focus UI", () => {
       />,
     );
 
-    expect(html).toContain("This provider did not expose a child transcript.");
+    expect(html).toContain("Reported result");
     expect(html).toContain("Half-width layout passed");
     expect(html).toContain('aria-label="Back to parent"');
   });
@@ -321,15 +322,87 @@ describe("subagent pin and composer retarget", () => {
     expect(source).toContain("disabled");
   });
 
-  test("mounts the roster in the agent surface instead of a fleet overlay", async () => {
+  test("mounts the navigator and multi-pane workspace without the old floating pin", async () => {
     const surface = await Bun.file(`${import.meta.dir}/../AgentSurface.tsx`).text();
-    expect(surface).toContain("SubagentPin");
+    expect(surface).toContain("SubagentNavigator");
+    expect(surface).toContain("SubagentMultiPane");
     expect(surface).toContain("SubagentFocus");
-    expect(surface).toContain("subagentPinShouldShow");
-    expect(surface).toContain("subagentRosterNodeInView");
+    expect(surface).not.toContain("SubagentPin");
+    expect(surface).not.toContain("subagentPinShouldShow");
+    expect(surface).not.toContain("subagentRosterNodeInView");
     expect(surface).not.toContain("SubagentFleet");
     expect(surface).not.toContain("SubagentInspector");
     expect(surface).not.toContain("Show in timeline");
     expect(surface).not.toContain("COMPLETED_SUBAGENT_FLEET_TTL_MS");
+  });
+});
+
+describe("subagent navigator and multi-pane UI", () => {
+  test("keeps fleet status inside the selected Agents navigator", () => {
+    const html = renderToStaticMarkup(
+      <SubagentNavigator
+        agent="codex"
+        parentLabel="Codex"
+        parentWorking
+        subagents={live}
+        now={26_000}
+        selectedId="task-parser"
+        multiPane
+        paneIds={["task-parser"]}
+        onSelectParent={() => {}}
+        onSelectSubagent={() => {}}
+        onToggleMultiPane={() => {}}
+        onClose={() => {}}
+      />,
+    );
+
+    expect(html).toContain('aria-label="Subagents navigator"');
+    expect(html).toContain("1 running · 1 completed");
+    expect(html).toContain("1 working");
+    expect(html).toContain('aria-pressed="true"');
+    expect(html).toContain("Open in workspace");
+    expect(html).not.toContain("agent-sub-pin");
+  });
+
+  test("renders parent and child conversations together in multi-pane", () => {
+    const html = renderToStaticMarkup(
+      <SubagentMultiPane
+        agent="claude"
+        parentLabel="Claude Code"
+        parentWorking
+        parent={<p>Parent conversation</p>}
+        subagents={live}
+        now={26_000}
+        activeId="task-parser"
+        onActivate={() => {}}
+        onFocus={() => {}}
+        onClosePane={() => {}}
+      />,
+    );
+
+    expect(html).toContain('aria-label="Multi-pane subagent workspace"');
+    expect(html).toContain("Parent conversation");
+    expect(html).toContain("The legacy fixture is the likely failure.");
+    expect(html).toContain("Reported result");
+    expect(html).toContain("Half-width layout passed");
+    expect(html).toContain('aria-label="Focus Parent thread"');
+    expect(html).toContain('aria-label="Close Inspect parser tests pane"');
+  });
+
+  test("uses the same readable conversation surface for Codex, Claude, and Grok", () => {
+    for (const agent of ["codex", "claude", "grok"] as const) {
+      const html = renderToStaticMarkup(
+        <SubagentFocus
+          agent={agent}
+          parentLabel={agent}
+          parentWorking={false}
+          subagent={live[agent === "grok" ? 1 : 0]!}
+          now={26_000}
+          onBack={() => {}}
+        />,
+      );
+      expect(html).toContain(`agent-sub--${agent}`);
+      expect(html).toContain(agent === "grok" ? "Reported result" : "legacy fixture");
+    }
   });
 });

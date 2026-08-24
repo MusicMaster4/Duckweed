@@ -66,6 +66,8 @@ export function SubagentFocus({
   subagent,
   now,
   onBack,
+  showBack = true,
+  compact = false,
 }: {
   agent: AgentId;
   parentLabel: string;
@@ -73,6 +75,8 @@ export function SubagentFocus({
   subagent: SubagentSummary;
   now: number;
   onBack: () => void;
+  showBack?: boolean;
+  compact?: boolean;
 }) {
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [promptOpen, setPromptOpen] = useState(false);
@@ -83,19 +87,21 @@ export function SubagentFocus({
 
   return (
     <div
-      className={`agent-sub-focus agent-sub--${agent} is-${subagent.status}`}
+      className={`agent-sub-focus agent-sub--${agent} is-${subagent.status}${compact ? " is-compact" : ""}`}
       aria-label={`Subagent: ${subagent.label}`}
     >
       <header className="agent-sub-focus-head">
-        <button
-          type="button"
-          className="agent-sub-back"
-          onClick={onBack}
-          aria-label="Back to parent"
-        >
-          <span aria-hidden="true">←</span>
-          <span>{parentLabel}</span>
-        </button>
+        {showBack && (
+          <button
+            type="button"
+            className="agent-sub-back"
+            onClick={onBack}
+            aria-label="Back to parent"
+          >
+            <span aria-hidden="true">←</span>
+            <span>{parentLabel}</span>
+          </button>
+        )}
         <strong className="agent-sub-focus-title">{subagent.label}</strong>
         <span className={`agent-sub-focus-status is-${subagent.status}`}>
           {status}
@@ -171,17 +177,15 @@ export function SubagentFocus({
       ) : (
         <div className="agent-sub-focus-empty">
           {subagent.output ? (
-            <pre className="agent-sub-output">{subagent.output}</pre>
+            <article className="agent-sub-reported-result">
+              <span>Reported result</span>
+              <AssistantMarkdown text={subagent.output} />
+            </article>
           ) : (
             <p className="agent-sub-empty-output">
               {waiting
                 ? "Waiting for the first message from this subagent."
                 : "This provider did not expose a child transcript."}
-            </p>
-          )}
-          {!waiting && subagent.output.length > 0 && (
-            <p className="agent-sub-empty-output">
-              This provider did not expose a child transcript.
             </p>
           )}
         </div>

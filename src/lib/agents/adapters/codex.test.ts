@@ -1312,6 +1312,321 @@ describe("codex adapter", () => {
     });
   });
 
+  test("links a spawn when the child thread id arrives in thread/started", async () => {
+    const h = harness();
+    await h.handshake();
+    h.notify("item/started", {
+      threadId: "thread_1",
+      item: {
+        id: "sub-late-id",
+        type: "collabAgentToolCall",
+        tool: "spawnAgent",
+        status: "inProgress",
+        receiverThreadIds: [],
+        prompt: "Audit the repository structure",
+        agentsStates: {},
+      },
+    });
+
+    expect(h.state().items[0]).toMatchObject({
+      kind: "tool",
+      subagent: {
+        prompt: "Audit the repository structure",
+      },
+    });
+    expect(h.state().items[0]?.subagent?.threadId).toBeUndefined();
+
+    const discovery = h.sent.findLast((message) => message.method === "thread/list") as {
+      id: number;
+      params: unknown;
+    };
+    expect(discovery.params).toMatchObject({ parentThreadId: "thread_1" });
+
+    h.notify("thread/started", {
+      thread: {
+        id: "thread_child_late",
+        parentThreadId: "thread_1",
+        preview: "Audit the repository structure",
+        agentNickname: "Pauli",
+        agentRole: "explorer",
+        status: { type: "active" },
+      },
+    });
+    const read = h.sent.findLast((message) => message.method === "thread/read") as {
+      id: number;
+    };
+    h.feed({
+      jsonrpc: "2.0",
+      id: read.id,
+      result: {
+        thread: {
+          id: "thread_child_late",
+          status: { type: "active" },
+          turns: [
+            {
+              id: "child-turn",
+              items: [
+                {
+                  id: "child-commentary",
+                  type: "agentMessage",
+                  text: "I found the main entrypoints and am checking their dependencies.",
+                  phase: "commentary",
+                },
+                {
+                  id: "child-command",
+                  type: "commandExecution",
+                  command: "rg --files",
+                  cwd: "H:/project",
+                  status: "completed",
+                  aggregatedOutput: "src/index.ts\n",
+                },
+              ],
+            },
+          ],
+        },
+      },
+    });
+    h.feed({ jsonrpc: "2.0", id: discovery.id, result: { data: [] } });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(h.state().items[0]).toMatchObject({
+      kind: "tool",
+      status: "running",
+      subagent: {
+        threadId: "thread_child_late",
+        label: "Pauli",
+        role: "explorer",
+        items: expect.arrayContaining([
+          expect.objectContaining({
+            kind: "assistant",
+            text: "I found the main entrypoints and am checking their dependencies.",
+          }),
+          expect.objectContaining({
+            kind: "tool",
+            title: "rg --files",
+            status: "done",
+          }),
+        ]),
+      },
+    });
+  });
+
+  test("recovers a missed child start from the parent thread listing", async () => {
+    const h = harness();
+    await h.handshake();
+    h.notify("item/started", {
+      threadId: "thread_1",
+      item: {
+        id: "sub-discovered",
+        type: "collabAgentToolCall",
+        tool: "spawnAgent",
+        status: "inProgress",
+        receiverThreadIds: [],
+        prompt: "Review the data flow",
+        agentsStates: {},
+      },
+    });
+
+    const discovery = h.sent.findLast((message) => message.method === "thread/list") as {
+      id: number;
+    };
+    h.feed({
+      jsonrpc: "2.0",
+      id: discovery.id,
+      result: {
+        data: [
+          {
+            id: "thread_child_discovered",
+            parentThreadId: "thread_1",
+            preview: "Review the data flow",
+            agentNickname: "Dirac",
+            agentRole: "explorer",
+            status: { type: "active" },
+          },
+        ],
+      },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const read = h.sent.findLast((message) => message.method === "thread/read") as {
+      id: number;
+    };
+    h.feed({
+      jsonrpc: "2.0",
+      id: read.id,
+      result: {
+        thread: {
+          id: "thread_child_discovered",
+          status: { type: "active" },
+          turns: [
+            {
+              id: "child-turn",
+              items: [
+                {
+                  id: "child-answer",
+                  type: "agentMessage",
+                  text: "The request crosses the API boundary twice.",
+                },
+              ],
+            },
+          ],
+        },
+      },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(h.state().items[0]).toMatchObject({
+      subagent: {
+        threadId: "thread_child_discovered",
+        label: "Dirac",
+        items: [
+          expect.objectContaining({
+            kind: "assistant",
+            text: "The request crosses the API boundary twice.",
+          }),
+        ],
+      },
+    });
+  });
+
+  test("refreshes persisted child messages when the subagent is inspected", async () => {
+    const h = harness();
+    await h.handshake();
+    h.notify("item/started", {
+      threadId: "thread_1",
+      item: {
+        id: "sub-inspected",
+        type: "collabAgentToolCall",
+        tool: "spawnAgent",
+        status: "inProgress",
+        receiverThreadIds: ["thread_child_inspected"],
+        prompt: "Inspect the parser",
+        agentsStates: { thread_child_inspected: { status: "running" } },
+      },
+    });
+    const initialRead = h.sent.findLast((message) => message.method === "thread/read") as {
+      id: number;
+    };
+    h.feed({
+      jsonrpc: "2.0",
+      id: initialRead.id,
+      result: {
+        thread: {
+          id: "thread_child_inspected",
+          status: { type: "active" },
+          turns: [],
+        },
+      },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const inspection = h.adapter.inspectSubagent?.(
+      "sub-inspected",
+      "thread_child_inspected",
+      h.ctx,
+    );
+    for (let attempt = 0; attempt < 5; attempt += 1) await Promise.resolve();
+    const refreshedRead = h.sent.findLast((message) => message.method === "thread/read") as {
+      id: number;
+    };
+    expect(refreshedRead.id).not.toBe(initialRead.id);
+    h.feed({
+      jsonrpc: "2.0",
+      id: refreshedRead.id,
+      result: {
+        thread: {
+          id: "thread_child_inspected",
+          status: { type: "active" },
+          turns: [
+            {
+              id: "child-turn",
+              items: [
+                {
+                  id: "persisted-message",
+                  type: "agentMessage",
+                  text: "This message was loaded when the panel opened.",
+                },
+              ],
+            },
+          ],
+        },
+      },
+    });
+    expect(await inspection).toBe(true);
+
+    expect(h.state().items[0]?.subagent?.items).toContainEqual(
+      expect.objectContaining({
+        kind: "assistant",
+        text: "This message was loaded when the panel opened.",
+      }),
+    );
+  });
+
+  test("keeps streamed item ids isolated between parent and child threads", async () => {
+    const h = harness();
+    await h.handshake();
+    h.notify("item/agentMessage/delta", {
+      threadId: "thread_1",
+      itemId: "shared-message-id",
+      delta: "Parent message.",
+    });
+    h.notify("item/completed", {
+      threadId: "thread_1",
+      item: { id: "shared-message-id", type: "agentMessage", text: "Parent message." },
+    });
+    h.notify("item/started", {
+      threadId: "thread_1",
+      item: {
+        id: "sub-shared-id",
+        type: "collabAgentToolCall",
+        tool: "spawnAgent",
+        status: "inProgress",
+        receiverThreadIds: ["thread_child_shared"],
+        prompt: "Inspect shared ids",
+        agentsStates: { thread_child_shared: { status: "running" } },
+      },
+    });
+
+    const read = h.sent.findLast((message) => message.method === "thread/read") as {
+      id: number;
+    };
+    h.feed({
+      jsonrpc: "2.0",
+      id: read.id,
+      result: {
+        thread: {
+          id: "thread_child_shared",
+          status: { type: "active" },
+          turns: [
+            {
+              id: "child-turn",
+              items: [
+                {
+                  id: "shared-message-id",
+                  type: "agentMessage",
+                  text: "Child message with the same provider item id.",
+                },
+              ],
+            },
+          ],
+        },
+      },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(h.state().items[1]?.subagent?.items).toContainEqual(
+      expect.objectContaining({
+        kind: "assistant",
+        text: "Child message with the same provider item id.",
+      }),
+    );
+  });
+
   test("starts a direct follow-up turn in a completed child thread", async () => {
     const h = harness();
     await h.handshake();

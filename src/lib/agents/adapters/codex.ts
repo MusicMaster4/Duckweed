@@ -236,7 +236,16 @@ interface ChildThread {
   prompt: string | null;
   activity: string | null;
   currentTurnId: string | null;
+  streamed: Set<string>;
   state: AgentSessionState;
+}
+
+interface PendingChildSpawn {
+  callId: string;
+  prompt: string | null;
+  label: string;
+  model: string | null;
+  activity: string | null;
 }
 
 interface CodexSideMessage {
@@ -327,8 +336,17 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
   const approvals = new Map<string, { id: string | number; kind: "command" | "file" }>();
   /** Child thread id to its live, independently reduced transcript. */
   const children = new Map<string, ChildThread>();
-  /** Avoid issuing the same final transcript reconciliation more than once. */
+  /** Spawn rows that arrived before app-server exposed their child thread id. */
+  const pendingChildSpawns = new Map<string, PendingChildSpawn>();
+  /** Avoid issuing the same automatic transcript reconciliation more than once. */
   const hydratedChildren = new Set<string>();
+  /** Coalesce focus, discovery, and completion reads for the same child. */
+  const hydratingChildren = new Map<string, Promise<boolean>>();
+  /** Queue one explicit refresh when focus arrives during an automatic read. */
+  const queuedChildRefreshes = new Map<string, Promise<boolean>>();
+  let childDiscoveryInFlight: Promise<void> | null = null;
+  let childDiscoveryRequested = false;
+  let childDiscoveryShouldSynthesize = false;
   /** Ephemeral `/side` and `/btw` forks, kept outside the main transcript. */
   const sideThreads = new Map<string, CodexSideThread>();
   let pendingSideThread: CodexSideThread | null = null;
@@ -410,6 +428,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       prompt: null,
       activity: null,
       currentTurnId: null,
+      streamed: new Set<string>(),
       state: newChildState(childThreadId),
     };
     children.set(childThreadId, child);
@@ -527,10 +546,30 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       : null;
   }
 
-  function hydrateChild(childThreadId: string, ctx: AdapterContext): void {
-    if (hydratedChildren.has(childThreadId)) return;
-    hydratedChildren.add(childThreadId);
-    void request(ctx, "thread/read", { threadId: childThreadId, includeTurns: true })
+  function hydrateChild(
+    childThreadId: string,
+    ctx: AdapterContext,
+    force = false,
+  ): Promise<boolean> {
+    if (!force && hydratedChildren.has(childThreadId)) return Promise.resolve(true);
+    const active = hydratingChildren.get(childThreadId);
+    if (active) {
+      if (!force) return active;
+      const queued = queuedChildRefreshes.get(childThreadId);
+      if (queued) return queued;
+      const refresh = active
+        .then(() => hydrateChild(childThreadId, ctx, true))
+        .finally(() => {
+          queuedChildRefreshes.delete(childThreadId);
+        });
+      queuedChildRefreshes.set(childThreadId, refresh);
+      return refresh;
+    }
+
+    const hydration = request(ctx, "thread/read", {
+      threadId: childThreadId,
+      includeTurns: true,
+    })
       .then((result) => {
         const thread = asRecord(result.thread) ?? result;
         const child = childFor(childThreadId);
@@ -548,7 +587,6 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         }
 
         const nested = childContext(childThreadId, ctx);
-        emitChild(childThreadId, { type: "transcript" }, ctx);
         for (const rawTurn of asArray(thread.turns)) {
           const turn = asRecord(rawTurn);
           if (!turn) continue;
@@ -556,7 +594,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
             const item = asRecord(rawItem);
             if (!item) continue;
             if (replayUserMessage(item, nested)) continue;
-            handleItem(item, true, nested);
+            handleItem(item, true, nested, child.streamed);
           }
         }
         emitChild(
@@ -567,11 +605,148 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
           },
           ctx,
         );
+        hydratedChildren.add(childThreadId);
+        return true;
       })
       .catch(() => {
         // Live child notifications remain the source of truth when this
         // app-server build does not expose thread/read for delegated threads.
+        return false;
+      })
+      .finally(() => {
+        hydratingChildren.delete(childThreadId);
       });
+    hydratingChildren.set(childThreadId, hydration);
+    return hydration;
+  }
+
+  function childPromptKey(value: string | null): string {
+    return value?.trim().replace(/\s+/g, " ").toLowerCase() ?? "";
+  }
+
+  function pendingSpawnForPrompt(prompt: string | null): PendingChildSpawn | null {
+    const key = childPromptKey(prompt);
+    if (key) {
+      const exact = [...pendingChildSpawns.values()].find(
+        (spawn) => childPromptKey(spawn.prompt) === key,
+      );
+      if (exact) return exact;
+    }
+    return pendingChildSpawns.size === 1
+      ? (pendingChildSpawns.values().next().value ?? null)
+      : null;
+  }
+
+  function unboundChildForPrompt(prompt: string | null): [string, ChildThread] | null {
+    const key = childPromptKey(prompt);
+    if (!key) return null;
+    return (
+      [...children.entries()].find(
+        ([, child]) => !child.callId && childPromptKey(child.prompt) === key,
+      ) ?? null
+    );
+  }
+
+  function adoptChildThread(
+    rawThread: Record<string, unknown>,
+    ctx: AdapterContext,
+    synthesizeMissing: boolean,
+  ): string | null {
+    const childThreadId = asString(rawThread.id);
+    if (!childThreadId || childThreadId === threadId) return null;
+
+    const child = childFor(childThreadId);
+    const preview = asString(rawThread.preview);
+    child.label =
+      asString(rawThread.agentNickname) ??
+      asString(rawThread.nickname) ??
+      child.label ??
+      (preview ? oneLine(preview, 80) : null);
+    child.role = asString(rawThread.agentRole) ?? asString(rawThread.role) ?? child.role;
+    child.model = asString(rawThread.model) ?? child.model;
+    child.prompt = preview ?? child.prompt;
+
+    const status = threadStatus(rawThread.status);
+    if (status) {
+      child.state = applyEvent(child.state, { type: "status", status });
+    }
+
+    if (!child.callId) {
+      const pendingSpawn = pendingSpawnForPrompt(child.prompt);
+      if (pendingSpawn) {
+        child.callId = pendingSpawn.callId;
+        child.label ??= pendingSpawn.label;
+        child.prompt ??= pendingSpawn.prompt;
+        child.model ??= pendingSpawn.model;
+        child.activity ??= pendingSpawn.activity;
+        pendingChildSpawns.delete(pendingSpawn.callId);
+      } else if (synthesizeMissing) {
+        child.callId = `codex-child:${childThreadId}`;
+        const label = child.label ?? child.prompt ?? "Subagent";
+        ctx.emit({
+          type: "tool",
+          callId: child.callId,
+          name: "subagent",
+          tool: "task",
+          title: `Subagent: ${oneLine(label, 80)}`,
+          status: childToolStatus(child.state.status),
+          subagent: {
+            threadId: childThreadId,
+            label: oneLine(label, 80),
+            ...(child.role ? { role: child.role } : {}),
+            ...(child.model ? { model: child.model } : {}),
+            ...(child.prompt ? { prompt: child.prompt } : {}),
+            activity: child.activity ?? "Loading conversation",
+          },
+        });
+      }
+    }
+
+    if (child.callId) {
+      syncChild(childThreadId, ctx);
+      void hydrateChild(childThreadId, ctx);
+    }
+    return childThreadId;
+  }
+
+  function discoverChildThreads(
+    ctx: AdapterContext,
+    synthesizeMissing = false,
+  ): Promise<void> {
+    if (!threadId) return Promise.resolve();
+    childDiscoveryRequested = true;
+    childDiscoveryShouldSynthesize ||= synthesizeMissing;
+    if (childDiscoveryInFlight) return childDiscoveryInFlight;
+
+    const discover = async () => {
+      while (childDiscoveryRequested && threadId) {
+        childDiscoveryRequested = false;
+        const synthesize = childDiscoveryShouldSynthesize;
+        childDiscoveryShouldSynthesize = false;
+        const parentThreadId = threadId;
+        try {
+          const result = await request(ctx, "thread/list", {
+            parentThreadId,
+            limit: 100,
+            sortKey: "created_at",
+            sortDirection: "asc",
+          });
+          for (const rawThread of asArray(result.data)) {
+            const childThread = asRecord(rawThread);
+            if (!childThread) continue;
+            adoptChildThread(childThread, ctx, synthesize);
+          }
+        } catch {
+          // Older app-server builds can stream child events without supporting
+          // the experimental parentThreadId filter.
+        }
+      }
+    };
+
+    childDiscoveryInFlight = discover().finally(() => {
+      childDiscoveryInFlight = null;
+    });
+    return childDiscoveryInFlight;
   }
 
   function request(
@@ -1003,7 +1178,12 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
   }
 
   /** One thread item, in whichever state it arrived. */
-  function handleItem(item: Record<string, unknown>, settled: boolean, ctx: AdapterContext) {
+  function handleItem(
+    item: Record<string, unknown>,
+    settled: boolean,
+    ctx: AdapterContext,
+    streamedItems = streamed,
+  ) {
     const id = asString(item.id);
     const type = asString(item.type);
     if (!id || !type) return;
@@ -1012,7 +1192,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       case "agentMessage": {
         if (!settled) return;
         const text = asString(item.text) ?? "";
-        if (text && !streamed.has(`am-${id}`)) {
+        if (text && !streamedItems.has(`am-${id}`)) {
           ctx.emit({ type: "assistant-delta", id: `am-${id}`, text });
         }
         ctx.emit({ type: "assistant-end", id: `am-${id}` });
@@ -1024,7 +1204,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
           .map((part) => asString(part) ?? "")
           .filter(Boolean)
           .join("\n");
-        if (text && !streamed.has(`rs-${id}`)) {
+        if (text && !streamedItems.has(`rs-${id}`)) {
           ctx.emit({ type: "thinking-delta", id: `rs-${id}`, text });
         }
         ctx.emit({ type: "thinking-end", id: `rs-${id}` });
@@ -1092,11 +1272,21 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         const prompt = asString(item.prompt);
         const model = asString(item.model);
         const effort = asString(item.reasoningEffort);
-        const receiverIds = asArray(item.receiverThreadIds)
+        const explicitReceiverIds = asArray(item.receiverThreadIds)
           .map((entry) => asString(entry) ?? "")
           .filter(Boolean);
         const states = asRecord(item.agentsStates);
         const stateEntries = states ? Object.entries(states) : [];
+        let receiverIds = [
+          ...new Set([
+            ...explicitReceiverIds,
+            ...(isSpawn ? stateEntries.map(([agentId]) => agentId) : []),
+          ]),
+        ];
+        if (isSpawn && receiverIds.length === 0) {
+          const unboundChild = unboundChildForPrompt(prompt);
+          if (unboundChild) receiverIds = [unboundChild[0]];
+        }
         const stateLines = stateEntries.length
           ? stateEntries.map(([agentId, raw]) => {
               const state = asRecord(raw);
@@ -1154,6 +1344,17 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
                   ? "error"
                   : null;
         if (isSpawn) {
+          if (receiverIds.length === 0) {
+            pendingChildSpawns.set(id, {
+              callId: id,
+              prompt,
+              label: prompt ? oneLine(prompt, 80) : operation,
+              model,
+              activity: activity ? oneLine(activity, 120) : null,
+            });
+          } else {
+            pendingChildSpawns.delete(id);
+          }
           for (const receiverId of receiverIds) {
             const child = childFor(receiverId);
             child.callId = id;
@@ -1201,8 +1402,9 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         if (isSpawn) {
           for (const receiverId of receiverIds) {
             syncChild(receiverId, ctx);
-            if (settled) hydrateChild(receiverId, ctx);
+            void hydrateChild(receiverId, ctx, settled);
           }
+          if (receiverIds.length === 0) void discoverChildThreads(ctx);
         }
         return;
       }
@@ -1210,6 +1412,27 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         const kind = asString(item.kind) ?? "interacted";
         const agentPath = asString(item.agentPath);
         const agentThreadId = asString(item.agentThreadId);
+        if (agentThreadId) {
+          adoptChildThread(
+            {
+              id: agentThreadId,
+              ...(agentPath ? { agentRole: agentPath } : {}),
+            },
+            ctx,
+            false,
+          );
+          const child = childFor(agentThreadId);
+          child.activity = kind.replace(/([a-z])([A-Z])/g, "$1 $2");
+          child.state = applyEvent(child.state, {
+            type: "status",
+            status: kind === "interrupted" ? "error" : kind === "started" ? "working" : "idle",
+          });
+          if (child.callId) {
+            syncChild(agentThreadId, ctx);
+            void hydrateChild(agentThreadId, ctx);
+            return;
+          }
+        }
         ctx.emit({
           type: "tool",
           callId: id,
@@ -1554,12 +1777,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     switch (method) {
       case "thread/started": {
         const thread = asRecord(params.thread);
-        const child = childFor(childThreadId);
-        child.label =
-          asString(thread?.agentNickname) ?? asString(thread?.nickname) ?? child.label;
-        child.role = asString(thread?.agentRole) ?? asString(thread?.role) ?? child.role;
-        child.model = asString(thread?.model) ?? child.model;
-        syncChild(childThreadId, ctx);
+        if (thread) adoptChildThread(thread, ctx, false);
         return;
       }
       case "turn/started": {
@@ -1586,7 +1804,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         } else {
           emitChild(childThreadId, { type: "turn-end" }, ctx);
         }
-        hydrateChild(childThreadId, ctx);
+        void hydrateChild(childThreadId, ctx, true);
         return;
       }
       case "thread/status/changed": {
@@ -1596,20 +1814,32 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
           childFor(childThreadId).currentTurnId = null;
         }
         if (status) emitChild(childThreadId, { type: "status", status }, ctx);
-        if (status === "idle" || status === "error") hydrateChild(childThreadId, ctx);
+        if (status === "idle" || status === "error") {
+          void hydrateChild(childThreadId, ctx, true);
+        }
         return;
       }
       case "item/started":
-        handleItem(asRecord(params.item) ?? {}, false, nested);
+        handleItem(
+          asRecord(params.item) ?? {},
+          false,
+          nested,
+          childFor(childThreadId).streamed,
+        );
         return;
       case "item/completed":
-        handleItem(asRecord(params.item) ?? {}, true, nested);
+        handleItem(
+          asRecord(params.item) ?? {},
+          true,
+          nested,
+          childFor(childThreadId).streamed,
+        );
         return;
       case "item/agentMessage/delta": {
         const itemId = asString(params.itemId);
         const delta = asString(params.delta);
         if (!itemId || !delta) return;
-        streamed.add(`am-${itemId}`);
+        childFor(childThreadId).streamed.add(`am-${itemId}`);
         emitChild(childThreadId, { type: "assistant-delta", id: `am-${itemId}`, text: delta }, ctx);
         return;
       }
@@ -1618,7 +1848,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         const itemId = asString(params.itemId);
         const delta = asString(params.delta);
         if (!itemId || !delta) return;
-        streamed.add(`rs-${itemId}`);
+        childFor(childThreadId).streamed.add(`rs-${itemId}`);
         emitChild(childThreadId, { type: "thinking-delta", id: `rs-${itemId}`, text: delta }, ctx);
         return;
       }
@@ -2217,6 +2447,20 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       }
     },
 
+    inspectSubagent: async (callId, childThreadId, ctx) => {
+      if (childThreadId) {
+        const child = childFor(childThreadId);
+        child.callId ??= callId;
+        syncChild(childThreadId, ctx);
+        return hydrateChild(childThreadId, ctx, true);
+      }
+
+      await discoverChildThreads(ctx);
+      const linked = [...children.entries()].find(([, child]) => child.callId === callId);
+      if (!linked) return false;
+      return hydrateChild(linked[0], ctx, true);
+    },
+
     promptSubagent: async (childThreadId, prompt, ctx) => {
       const child = children.get(childThreadId);
       if (!child || !prompt.text.trim()) return false;
@@ -2394,6 +2638,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         // renderer expects natural conversation order from oldest to newest.
         const chronologicalTurns = descending ? turns.reverse() : turns;
         replayTurns(chronologicalTurns, ctx);
+        void discoverChildThreads(ctx, true);
         if (recoveredFromHang) {
           ctx.emit({
             type: "notice",

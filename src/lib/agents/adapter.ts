@@ -60,6 +60,12 @@ export interface AgentAdapter {
     prompt: AgentPrompt,
     ctx: AdapterContext,
   ) => Promise<boolean> | boolean;
+  /** Resolve and hydrate a provider-owned child before its focused UI opens. */
+  inspectSubagent?: (
+    callId: string,
+    threadId: string | null,
+    ctx: AdapterContext,
+  ) => Promise<boolean> | boolean;
   /**
    * The user submitted text starting with `/`. Returning `"handled"` means
    * the adapter ran a local-only command; `"handled-turn"` means its RPC also

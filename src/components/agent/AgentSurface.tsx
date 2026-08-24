@@ -16,11 +16,10 @@ import { isNewChatCommand } from "../../lib/agents/slashCatalog";
 import {
   runningSubagentCount,
   subagentForCallId,
-  subagentPinShouldShow,
-  subagentRosterNodeInView,
   subagentRosters,
   subagentStatusLabel,
   subagentsForTurn,
+  type SubagentSummary,
 } from "../../lib/agents/subagents";
 import type { AgentImageAttachment, AgentSessionState } from "../../lib/agents/types";
 import {
@@ -47,8 +46,11 @@ import { AgentSideQuestion } from "./AgentSideQuestion";
 import { AgentTimeline } from "./AgentTimeline";
 import { copySelectedTextFromContextMenu } from "./selectionCopy";
 import { PlanTracker, type OfficialVariant } from "./official/OfficialShared";
-import { SubagentPin } from "./subagents/SubagentBoard";
 import { SubagentFocus } from "./subagents/SubagentFocus";
+import {
+  SubagentMultiPane,
+  SubagentNavigator,
+} from "./subagents/SubagentNavigator";
 import { SubagentUiProvider } from "./subagents/SubagentUiContext";
 import "./subagents/subagents.css";
 
@@ -126,7 +128,11 @@ export function AgentSurface({
   const [clockNow, setClockNow] = useState(() => Date.now());
   const [peekedCallId, setPeekedCallId] = useState<string | null>(null);
   const [focusedCallId, setFocusedCallId] = useState<string | null>(null);
-  const [rosterInView, setRosterInView] = useState(true);
+  const [subagentNavigatorOpen, setSubagentNavigatorOpen] = useState(false);
+  const [multiPane, setMultiPane] = useState(false);
+  const [multiPaneCallIds, setMultiPaneCallIds] = useState<string[]>([]);
+  const [activePaneId, setActivePaneId] = useState("parent");
+  const subagentNavigatorId = `agent-subagent-navigator-${termId}`;
   const autoPeekedRef = useRef<string | null>(null);
   const fleet = useMemo(() => subagentsForTurn(items), [items]);
   const rosters = useMemo(() => subagentRosters(items), [items]);
@@ -134,25 +140,49 @@ export function AgentSurface({
     () => (focusedCallId ? subagentForCallId(items, focusedCallId) : null),
     [focusedCallId, items],
   );
-  const showPin =
-    !focusedSubagent &&
-    subagentPinShouldShow(rosterInView, fleet, session?.status);
+  const multiPaneSubagents = useMemo(
+    () =>
+      multiPaneCallIds
+        .map((callId) => subagentForCallId(items, callId))
+        .filter((subagent): subagent is SubagentSummary => Boolean(subagent)),
+    [items, multiPaneCallIds],
+  );
+  const composerSubagent = useMemo(
+    () =>
+      multiPane && activePaneId !== "parent"
+        ? subagentForCallId(items, activePaneId)
+        : focusedSubagent,
+    [activePaneId, focusedSubagent, items, multiPane],
+  );
   const timelineItems = useMemo(
     () => (workflow ? items.filter((item) => item.kind !== "plan") : items),
     [items, workflow],
   );
   const canMessageFocused = Boolean(
-    focusedSubagent?.threadId &&
+    composerSubagent?.threadId &&
       session &&
       agents.canPromptSubagent(termId) &&
-      (focusedSubagent.status === "running" || focusedSubagent.status === "done"),
+      (composerSubagent.status === "running" || composerSubagent.status === "done"),
   );
 
   const closePeek = useCallback(() => {
     setPeekedCallId(null);
   }, []);
 
+  const closeNavigatorIfCompact = useCallback(() => {
+    if ((surfaceRef.current?.getBoundingClientRect().width ?? window.innerWidth) <= 760) {
+      setSubagentNavigatorOpen(false);
+    }
+  }, []);
+
+  const inspectSubagent = useCallback((callId: string) => {
+    const subagent = subagentForCallId(items, callId);
+    void agents.inspectSubagent(termId, callId, subagent?.threadId ?? null);
+  }, [items, termId]);
+
   const leaveFocus = useCallback(() => {
+    setMultiPane(false);
+    setActivePaneId("parent");
     setFocusedCallId(null);
     window.requestAnimationFrame(() => composerRef.current?.focus());
   }, []);
@@ -163,8 +193,68 @@ export function AgentSurface({
   }, []);
 
   const openSubagent = useCallback((callId: string) => {
+    inspectSubagent(callId);
+    setMultiPane(false);
+    setActivePaneId(callId);
     setPeekedCallId(null);
     setFocusedCallId(callId);
+    closeNavigatorIfCompact();
+  }, [closeNavigatorIfCompact, inspectSubagent]);
+
+  const enterMultiPane = useCallback(() => {
+    const preferred = focusedCallId ?? peekedCallId;
+    const initial = [preferred, ...fleet.map((subagent) => subagent.callId)]
+      .filter((callId): callId is string => Boolean(callId))
+      .filter((callId, index, all) => all.indexOf(callId) === index)
+      .slice(0, 3);
+    setMultiPaneCallIds(initial);
+    for (const callId of initial) inspectSubagent(callId);
+    setActivePaneId(preferred ?? "parent");
+    setFocusedCallId(null);
+    setPeekedCallId(null);
+    setMultiPane(true);
+    closeNavigatorIfCompact();
+  }, [closeNavigatorIfCompact, fleet, focusedCallId, inspectSubagent, peekedCallId]);
+
+  const leaveMultiPane = useCallback(() => {
+    setMultiPane(false);
+    if (activePaneId === "parent") {
+      setFocusedCallId(null);
+    } else {
+      setFocusedCallId(activePaneId);
+    }
+  }, [activePaneId]);
+
+  const selectNavigatorSubagent = useCallback((callId: string) => {
+    if (!multiPane) {
+      openSubagent(callId);
+      return;
+    }
+    setMultiPaneCallIds((current) => {
+      if (current.includes(callId)) return current;
+      if (current.length < 3) return [...current, callId];
+      const replaceAt = current.findIndex((id) => id !== activePaneId);
+      if (replaceAt < 0) return [...current.slice(1), callId];
+      const next = [...current];
+      next[replaceAt] = callId;
+      return next;
+    });
+    setActivePaneId(callId);
+    inspectSubagent(callId);
+    closeNavigatorIfCompact();
+  }, [activePaneId, closeNavigatorIfCompact, inspectSubagent, multiPane, openSubagent]);
+
+  const focusWorkspacePane = useCallback((id: string) => {
+    if (id !== "parent") inspectSubagent(id);
+    setMultiPane(false);
+    setActivePaneId(id);
+    setFocusedCallId(id === "parent" ? null : id);
+    window.requestAnimationFrame(() => composerRef.current?.focus());
+  }, [inspectSubagent]);
+
+  const closeWorkspacePane = useCallback((callId: string) => {
+    setMultiPaneCallIds((current) => current.filter((id) => id !== callId));
+    setActivePaneId((current) => (current === callId ? "parent" : current));
   }, []);
 
   useEffect(() => {
@@ -205,6 +295,11 @@ export function AgentSurface({
     }
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
+      if (multiPane) {
+        event.preventDefault();
+        leaveMultiPane();
+        return;
+      }
       if (focusedCallId) {
         event.preventDefault();
         leaveFocus();
@@ -224,6 +319,8 @@ export function AgentSurface({
     focusedSubagent,
     items,
     leaveFocus,
+    leaveMultiPane,
+    multiPane,
     peekedCallId,
   ]);
 
@@ -237,6 +334,20 @@ export function AgentSurface({
     }
     if (live.length !== 1) autoPeekedRef.current = null;
   }, [fleet, focusedCallId]);
+
+  useEffect(() => {
+    const available = new Set(fleet.map((subagent) => subagent.callId));
+    setMultiPaneCallIds((current) => current.filter((callId) => available.has(callId)));
+    if (fleet.length === 0) {
+      setSubagentNavigatorOpen(false);
+      setMultiPane(false);
+      setActivePaneId("parent");
+      return;
+    }
+    if (activePaneId !== "parent" && !available.has(activePaneId)) {
+      setActivePaneId("parent");
+    }
+  }, [activePaneId, fleet]);
 
   useEffect(() => {
     if (!active || fleet.length === 0) return;
@@ -281,34 +392,6 @@ export function AgentSurface({
     peekedCallId,
     peekSubagent,
   ]);
-
-  useEffect(() => {
-    const root = scrollRef.current;
-    const surface = surfaceRef.current;
-    if (!root || !surface || focusedSubagent) {
-      setRosterInView(true);
-      return;
-    }
-    const liveRoster = rosters[rosters.length - 1];
-    if (!liveRoster || fleet.length === 0) {
-      setRosterInView(true);
-      return;
-    }
-    const node = surface.querySelector(
-      `[data-subagent-roster="${liveRoster.anchorItemId}"]`,
-    );
-    if (!node) {
-      setRosterInView(subagentRosterNodeInView(null, false));
-      return;
-    }
-    const observer = new IntersectionObserver(
-      ([entry]) =>
-        setRosterInView(subagentRosterNodeInView(node, entry.isIntersecting)),
-      { root, threshold: 0.01 },
-    );
-    observer.observe(node);
-    return () => observer.disconnect();
-  }, [fleet.length, focusedSubagent, items, rosters]);
 
   useEffect(() => {
     const childrenLive = fleet.some(
@@ -447,9 +530,9 @@ export function AgentSurface({
     delivery: "default" | "alternate" = "default",
   ) => {
     if (onBeforeSubmit?.(text, images, delivery) === true) return true;
-    if (focusedSubagent) {
-      if (!canMessageFocused || !focusedSubagent.threadId) return true;
-      void agents.promptSubagent(termId, focusedSubagent.threadId, text);
+    if (composerSubagent) {
+      if (!canMessageFocused || !composerSubagent.threadId) return true;
+      void agents.promptSubagent(termId, composerSubagent.threadId, text);
       return false;
     }
     if (images.length === 0) {
@@ -519,7 +602,9 @@ export function AgentSurface({
   return (
     <div
       ref={surfaceRef}
-      className={`agent-surface is-${session.status}`}
+      className={`agent-surface is-${session.status}${
+        subagentNavigatorOpen ? " has-subagent-navigator" : ""
+      }${multiPane ? " is-subagent-multi-pane" : ""}`}
       style={{ ["--agent-accent" as string]: session.accent }}
       data-agent={session.agent}
       data-program={session.program}
@@ -544,7 +629,9 @@ export function AgentSurface({
           </button>
         )}
         <span className="agent-name">
-          {focusedSubagent
+          {multiPane
+            ? `${session.label} / ${multiPaneSubagents.length + 1} panes`
+            : focusedSubagent
             ? `${session.label} / ${focusedSubagent.label}`
             : session.label}
         </span>
@@ -553,15 +640,37 @@ export function AgentSurface({
             focusedSubagent ? focusedSubagent.status : session.status
           }`}
         >
-          {session.status === "working" && !session.loadingHistory && !focusedSubagent && (
+          {session.status === "working" && !session.loadingHistory && !focusedSubagent && !multiPane && (
             <span className="agent-pulse" aria-hidden="true" />
           )}
           {session.loadingHistory
             ? "Loading conversation"
-            : focusedSubagent
+            : multiPane
+              ? `${multiPaneSubagents.length + 1} panes`
+              : focusedSubagent
               ? subagentStatusLabel(focusedSubagent.status)
               : workStatusLabel(session, clockNow)}
         </span>
+        {fleet.length > 0 && (
+          <button
+            type="button"
+            className={`agent-sub-tab${subagentNavigatorOpen ? " is-active" : ""}`}
+            onClick={() => setSubagentNavigatorOpen((open) => !open)}
+            aria-controls={subagentNavigatorId}
+            aria-expanded={subagentNavigatorOpen}
+            aria-label={`Agents, ${fleet.length} subagents`}
+            title="Subagents"
+          >
+            <svg viewBox="0 0 16 16" aria-hidden="true">
+              <circle cx="4" cy="5" r="1.5" />
+              <circle cx="12" cy="5" r="1.5" />
+              <circle cx="8" cy="12" r="1.5" />
+              <path d="M5.3 5.8 7.1 10M10.7 5.8 8.9 10" />
+            </svg>
+            <span>Agents</span>
+            <i>{fleet.length}</i>
+          </button>
+        )}
         <span className="agent-head-spacer" />
         {tokens > 0 && (
           <span className="agent-usage" title="Tokens used this session">
@@ -664,7 +773,7 @@ export function AgentSurface({
       </header>
 
       <div
-        className={`agent-scroll${
+        className={`agent-scroll${multiPane ? " is-subagent-workspace" : ""}${
           session.permission && session.permission.kind !== "question"
             ? " has-permission"
             : ""
@@ -682,7 +791,33 @@ export function AgentSurface({
           onClosePeek={closePeek}
           onLeaveFocus={leaveFocus}
         >
-          {focusedSubagent ? (
+          {multiPane ? (
+            <SubagentMultiPane
+              agent={session.agent}
+              parentLabel={session.label}
+              parentWorking={session.status === "working"}
+              parent={
+                <AgentTimeline
+                  session={session}
+                  items={timelineItems}
+                  termId={termId}
+                  agent={session.agent}
+                  status={session.loadingHistory ? "idle" : session.status}
+                  started={session.started}
+                  label={session.label}
+                  mark={session.mark}
+                  program={session.program}
+                  cwd={session.cwd}
+                />
+              }
+              subagents={multiPaneSubagents}
+              now={clockNow}
+              activeId={activePaneId}
+              onActivate={setActivePaneId}
+              onFocus={focusWorkspacePane}
+              onClosePane={closeWorkspacePane}
+            />
+          ) : focusedSubagent ? (
             <SubagentFocus
               agent={session.agent}
               parentLabel={session.label}
@@ -790,6 +925,29 @@ export function AgentSurface({
           ))}
       </div>
 
+      {subagentNavigatorOpen && fleet.length > 0 && (
+        <div className="agent-sub-navigator-shell" id={subagentNavigatorId}>
+          <SubagentNavigator
+            agent={session.agent}
+            parentLabel={session.label}
+            parentWorking={session.status === "working"}
+            subagents={fleet}
+            now={clockNow}
+            selectedId={multiPane ? activePaneId : focusedCallId ?? "parent"}
+            multiPane={multiPane}
+            paneIds={multiPaneCallIds}
+            onSelectParent={() => {
+              if (multiPane) setActivePaneId("parent");
+              else leaveFocus();
+              closeNavigatorIfCompact();
+            }}
+            onSelectSubagent={selectNavigatorSubagent}
+            onToggleMultiPane={multiPane ? leaveMultiPane : enterMultiPane}
+            onClose={() => setSubagentNavigatorOpen(false)}
+          />
+        </div>
+      )}
+
       {session.status === "starting" && session.exitArmed && (
         <div className="agent-exit-hint is-surface" role="status" aria-live="polite">
           <kbd>Ctrl+C</kbd>
@@ -812,22 +970,6 @@ export function AgentSurface({
               </svg>
               <span>Jump to bottom</span>
             </button>
-          )}
-          {showPin && (
-            <SubagentPin
-              agent={session.agent}
-              subagents={fleet}
-              onPeek={(callId) => {
-                peekSubagent(callId);
-                const liveRoster = rosters[rosters.length - 1];
-                const node = liveRoster
-                  ? surfaceRef.current?.querySelector<HTMLElement>(
-                      `[data-subagent-roster="${liveRoster.anchorItemId}"]`,
-                    )
-                  : null;
-                node?.scrollIntoView({ block: "nearest" });
-              }}
-            />
           )}
           {visibleWorkflow && (
             <div className="agent-workflow-dock">
@@ -853,10 +995,10 @@ export function AgentSurface({
             onSubmit={submit}
             onInterrupt={() => agents.interrupt(termId)}
             target={
-              focusedSubagent
+              composerSubagent
                 ? {
                     kind: "subagent",
-                    label: focusedSubagent.label,
+                    label: composerSubagent.label,
                     canMessage: canMessageFocused,
                   }
                 : undefined

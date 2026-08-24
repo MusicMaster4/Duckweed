@@ -1112,6 +1112,21 @@ export function canPromptSubagent(termId: string): boolean {
   return Boolean(session && !session.disposed && session.adapter.promptSubagent);
 }
 
+/** Resolve and load one provider-owned child transcript for focused inspection. */
+export async function inspectSubagent(
+  termId: string,
+  callId: string,
+  threadId: string | null,
+): Promise<boolean> {
+  const session = sessions.get(termId);
+  if (!session || session.disposed || !session.adapter.inspectSubagent) return false;
+  try {
+    return await session.adapter.inspectSubagent(callId, threadId, session.context);
+  } catch {
+    return false;
+  }
+}
+
 /** Deliver text to one child without adding it to the parent conversation. */
 export async function promptSubagent(
   termId: string,
