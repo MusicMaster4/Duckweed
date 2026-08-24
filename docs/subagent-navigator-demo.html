@@ -1,0 +1,1381 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Duckweed Subagent Navigator Demo</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0e120f;
+      --pane: #121713;
+      --raised: #181f19;
+      --hover: #202921;
+      --selected: #253027;
+      --border: #303a32;
+      --border-soft: #252d27;
+      --text: #e7eee8;
+      --dim: #a3aea5;
+      --faint: #727e75;
+      --green: #8ecf72;
+      --green-soft: #263825;
+      --success: #7fc98a;
+      --danger: #d77d83;
+      --warning: #d7b56d;
+      --mono: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+      --sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      min-width: 320px;
+      min-height: 100%;
+      margin: 0;
+      background: #090c0a;
+      color: var(--text);
+      font-family: var(--sans);
+    }
+
+    button {
+      color: inherit;
+      font: inherit;
+    }
+
+    button:focus-visible {
+      outline: 1px solid var(--green);
+      outline-offset: 2px;
+    }
+
+    .demo-page {
+      min-height: 100vh;
+      padding: 18px;
+      background:
+        linear-gradient(90deg, rgba(142, 207, 114, 0.018) 1px, transparent 1px),
+        linear-gradient(rgba(142, 207, 114, 0.018) 1px, transparent 1px),
+        #090c0a;
+      background-size: 24px 24px;
+    }
+
+    .demo-note {
+      display: flex;
+      max-width: 1440px;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin: 0 auto 10px;
+      color: var(--faint);
+      font-family: var(--mono);
+      font-size: 11px;
+    }
+
+    .demo-note strong {
+      color: var(--dim);
+      font-weight: 500;
+    }
+
+    .app-window {
+      overflow: hidden;
+      width: min(100%, 1440px);
+      min-height: 760px;
+      margin: 0 auto;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: var(--bg);
+    }
+
+    .app-titlebar {
+      display: flex;
+      height: 42px;
+      align-items: center;
+      gap: 12px;
+      padding: 0 12px;
+      border-bottom: 1px solid var(--border);
+      background: #101511;
+      font-family: var(--mono);
+      font-size: 11px;
+    }
+
+    .duck-mark {
+      display: grid;
+      width: 22px;
+      height: 22px;
+      place-items: center;
+      border: 1px solid color-mix(in srgb, var(--green) 55%, var(--border));
+      border-radius: 5px;
+      color: var(--green);
+      font-weight: 700;
+    }
+
+    .app-name {
+      font-weight: 600;
+    }
+
+    .project-name {
+      padding-left: 12px;
+      border-left: 1px solid var(--border);
+      color: var(--faint);
+    }
+
+    .app-status {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      margin-left: auto;
+      color: var(--faint);
+    }
+
+    .dot {
+      display: inline-block;
+      width: 7px;
+      height: 7px;
+      flex: none;
+      border-radius: 50%;
+      background: var(--faint);
+    }
+
+    .dot.working {
+      background: var(--green);
+    }
+
+    .dot.waiting {
+      background: var(--warning);
+    }
+
+    .dot.completed {
+      background: var(--success);
+    }
+
+    .app-layout {
+      position: relative;
+      display: grid;
+      min-height: 718px;
+      grid-template-columns: minmax(0, 1fr) 286px;
+    }
+
+    .thread-pane {
+      display: grid;
+      min-width: 0;
+      min-height: 718px;
+      grid-template-rows: 40px minmax(0, 1fr) auto auto;
+      background: var(--pane);
+    }
+
+    .thread-header {
+      display: flex;
+      min-width: 0;
+      align-items: center;
+      gap: 9px;
+      padding: 0 12px;
+      border-bottom: 1px solid var(--border-soft);
+      font-family: var(--mono);
+      font-size: 11px;
+    }
+
+    .breadcrumb {
+      display: inline-flex;
+      overflow: hidden;
+      min-width: 0;
+      align-items: center;
+      gap: 7px;
+      padding: 4px 6px;
+      border: 0;
+      border-radius: 5px;
+      background: transparent;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .breadcrumb:hover {
+      background: var(--hover);
+    }
+
+    .breadcrumb-arrow {
+      color: var(--green);
+      font-size: 15px;
+    }
+
+    .thread-status {
+      margin-left: auto;
+      color: var(--faint);
+      white-space: nowrap;
+    }
+
+    .navigator-toggle {
+      display: none;
+      min-height: 27px;
+      align-items: center;
+      gap: 6px;
+      padding: 0 8px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--raised);
+      color: var(--dim);
+      font-family: var(--mono);
+      font-size: 10px;
+    }
+
+    .navigator-toggle[aria-expanded="true"] {
+      border-color: color-mix(in srgb, var(--green) 45%, var(--border));
+      background: var(--green-soft);
+      color: var(--text);
+    }
+
+    .app-layout.panel-closed .navigator-toggle {
+      display: inline-flex;
+    }
+
+    .mode-toggle {
+      display: inline-flex;
+      min-height: 27px;
+      align-items: center;
+      gap: 6px;
+      padding: 0 8px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: transparent;
+      color: var(--dim);
+      font-family: var(--mono);
+      font-size: 10px;
+      white-space: nowrap;
+    }
+
+    .mode-toggle:hover,
+    .mode-toggle[aria-pressed="true"] {
+      border-color: color-mix(in srgb, var(--green) 45%, var(--border));
+      background: var(--green-soft);
+      color: var(--text);
+    }
+
+    .thread-scroll {
+      overflow: auto;
+      min-height: 0;
+    }
+
+    .multi-pane-board {
+      display: grid;
+      min-width: 860px;
+      min-height: 100%;
+      grid-template-columns: repeat(3, minmax(280px, 1fr));
+      gap: 8px;
+      padding: 10px;
+      background: #0d110e;
+    }
+
+    .multi-pane-board[hidden] {
+      display: none;
+    }
+
+    .work-pane {
+      display: grid;
+      overflow: hidden;
+      min-width: 0;
+      min-height: 510px;
+      grid-template-rows: auto minmax(0, 1fr) auto;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--pane);
+    }
+
+    .work-pane.active {
+      border-color: color-mix(in srgb, var(--green) 48%, var(--border));
+    }
+
+    .work-pane-head {
+      display: grid;
+      grid-template-columns: 28px minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 8px;
+      min-height: 48px;
+      padding: 8px 9px;
+      border-bottom: 1px solid var(--border-soft);
+    }
+
+    .pane-mark {
+      display: grid;
+      width: 28px;
+      height: 28px;
+      place-items: center;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--green);
+      font-family: var(--mono);
+      font-size: 10px;
+    }
+
+    .pane-title {
+      display: flex;
+      overflow: hidden;
+      min-width: 0;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .pane-title strong,
+    .pane-title small {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .pane-title strong {
+      font-size: 11px;
+      font-weight: 600;
+    }
+
+    .pane-title small {
+      color: var(--faint);
+      font-family: var(--mono);
+      font-size: 9px;
+    }
+
+    .focus-pane {
+      display: grid;
+      width: 26px;
+      height: 26px;
+      place-items: center;
+      border: 0;
+      border-radius: 5px;
+      background: transparent;
+      color: var(--faint);
+    }
+
+    .focus-pane:hover {
+      background: var(--hover);
+      color: var(--text);
+    }
+
+    .pane-body {
+      overflow: auto;
+      padding: 16px 13px;
+    }
+
+    .pane-user {
+      margin: 0 0 18px;
+      padding: 9px 10px;
+      border-radius: 8px;
+      background: var(--raised);
+      font-size: 11px;
+      line-height: 1.45;
+    }
+
+    .pane-copy {
+      margin: 7px 0 16px;
+      color: var(--dim);
+      font-size: 11px;
+      line-height: 1.5;
+    }
+
+    .pane-event {
+      margin-top: 9px;
+      padding: 9px 10px;
+      border: 1px solid var(--border-soft);
+      border-radius: 6px;
+      color: var(--dim);
+      font-size: 10px;
+      line-height: 1.45;
+    }
+
+    .pane-event strong {
+      display: block;
+      margin-bottom: 4px;
+      color: var(--text);
+      font-family: var(--mono);
+      font-size: 9px;
+      font-weight: 500;
+      text-transform: uppercase;
+    }
+
+    .pane-composer {
+      overflow: hidden;
+      padding: 11px;
+      border-top: 1px solid var(--border-soft);
+      color: var(--faint);
+      font-family: var(--mono);
+      font-size: 9px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .timeline,
+    .agent-detail {
+      width: min(100%, 820px);
+      margin: 0 auto;
+      padding: 28px 24px 34px;
+    }
+
+    .user-message {
+      width: fit-content;
+      max-width: min(85%, 640px);
+      margin: 0 0 28px auto;
+      padding: 10px 13px;
+      border-radius: 13px 13px 4px 13px;
+      background: var(--raised);
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
+    .thinking-label,
+    .event-label {
+      color: var(--green);
+      font-family: var(--mono);
+      font-size: 9px;
+      font-weight: 600;
+      letter-spacing: 0.55px;
+      text-transform: uppercase;
+    }
+
+    .assistant-copy {
+      margin: 8px 0 16px 20px;
+      color: var(--dim);
+      font-size: 13px;
+      line-height: 1.55;
+    }
+
+    .spawn-cta {
+      display: grid;
+      width: calc(100% - 20px);
+      grid-template-columns: auto 24px minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 9px;
+      margin: 0 0 22px 20px;
+      padding: 10px 11px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--raised);
+      text-align: left;
+    }
+
+    .spawn-cta:hover {
+      background: var(--hover);
+    }
+
+    .spawn-icon {
+      display: grid;
+      width: 24px;
+      height: 24px;
+      place-items: center;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--green);
+      font-family: var(--mono);
+      font-size: 11px;
+    }
+
+    .spawn-copy {
+      display: flex;
+      min-width: 0;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .spawn-copy strong {
+      font-family: var(--mono);
+      font-size: 11px;
+      font-weight: 600;
+    }
+
+    .spawn-copy small {
+      overflow: hidden;
+      color: var(--faint);
+      font-family: var(--mono);
+      font-size: 10px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .spawn-action {
+      color: var(--green);
+      font-family: var(--mono);
+      font-size: 10px;
+      white-space: nowrap;
+    }
+
+    .tool-heading {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      margin-left: 20px;
+      color: var(--faint);
+      font-family: var(--mono);
+      font-size: 10px;
+    }
+
+    code {
+      color: var(--text);
+      font-family: var(--mono);
+    }
+
+    .diff {
+      margin: 9px 0 0 20px;
+      padding: 10px 12px;
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      background: var(--bg);
+      font-family: var(--mono);
+      font-size: 11px;
+      line-height: 1.55;
+      white-space: pre-wrap;
+    }
+
+    .diff span {
+      display: block;
+    }
+
+    .diff .removed {
+      color: var(--danger);
+    }
+
+    .diff .added {
+      color: var(--success);
+    }
+
+    .workflow-dock {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 7px 12px;
+      margin: 0 12px;
+      padding: 9px 11px;
+      border: 1px solid var(--border);
+      border-radius: 8px 8px 0 0;
+      background: var(--raised);
+      font-family: var(--mono);
+      font-size: 10px;
+    }
+
+    .workflow-copy {
+      display: flex;
+      overflow: hidden;
+      align-items: baseline;
+      gap: 8px;
+      white-space: nowrap;
+    }
+
+    .workflow-copy small {
+      color: var(--green);
+      text-transform: uppercase;
+    }
+
+    .workflow-copy strong {
+      overflow: hidden;
+      font-weight: 500;
+      text-overflow: ellipsis;
+    }
+
+    .workflow-count {
+      color: var(--faint);
+    }
+
+    .progress-track {
+      overflow: hidden;
+      grid-column: 1 / -1;
+      height: 2px;
+      background: var(--border);
+    }
+
+    .progress-fill {
+      width: 38%;
+      height: 100%;
+      background: var(--green);
+    }
+
+    .composer {
+      display: flex;
+      min-height: 58px;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 13px;
+      border-top: 1px solid var(--border);
+      color: var(--faint);
+      font-family: var(--mono);
+      font-size: 11px;
+    }
+
+    .composer-target {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .stop-button {
+      display: grid;
+      width: 30px;
+      height: 30px;
+      margin-left: auto;
+      place-items: center;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--raised);
+    }
+
+    .stop-glyph {
+      width: 9px;
+      height: 9px;
+      border-radius: 2px;
+      background: var(--dim);
+    }
+
+    .agents-panel {
+      display: grid;
+      min-width: 0;
+      grid-template-rows: auto auto minmax(0, 1fr) auto;
+      border-left: 1px solid var(--border);
+      background: var(--bg);
+    }
+
+    .agents-header {
+      display: flex;
+      min-height: 54px;
+      align-items: center;
+      gap: 8px;
+      padding: 9px 11px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .agents-heading {
+      display: flex;
+      min-width: 0;
+      flex-direction: column;
+      gap: 3px;
+    }
+
+    .agents-heading strong {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+    }
+
+    .agents-heading span {
+      color: var(--faint);
+      font-family: var(--mono);
+      font-size: 9px;
+    }
+
+    .panel-close {
+      display: grid;
+      width: 28px;
+      height: 28px;
+      margin-left: auto;
+      place-items: center;
+      border: 0;
+      border-radius: 5px;
+      background: transparent;
+      color: var(--faint);
+      font-size: 17px;
+    }
+
+    .panel-close:hover {
+      background: var(--hover);
+      color: var(--text);
+    }
+
+    .agent-row {
+      position: relative;
+      display: grid;
+      width: 100%;
+      min-width: 0;
+      grid-template-columns: 24px minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 10px;
+      border: 0;
+      border-radius: 0;
+      background: transparent;
+      text-align: left;
+    }
+
+    .agent-row:hover,
+    .agent-row.selected {
+      background: var(--selected);
+    }
+
+    .agent-row.parent {
+      border-bottom: 1px solid var(--border);
+    }
+
+    .agent-mark {
+      display: grid;
+      width: 22px;
+      height: 22px;
+      place-items: center;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--green);
+      font-family: var(--mono);
+      font-size: 9px;
+      font-weight: 600;
+    }
+
+    .agent-row-copy {
+      display: flex;
+      overflow: hidden;
+      min-width: 0;
+      flex-direction: column;
+      gap: 3px;
+    }
+
+    .agent-row-copy strong {
+      overflow: hidden;
+      font-size: 11px;
+      font-weight: 550;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .agent-row-copy small {
+      overflow: hidden;
+      color: var(--faint);
+      font-family: var(--mono);
+      font-size: 9px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .agent-list {
+      position: relative;
+      overflow: auto;
+      padding: 5px 0 0 15px;
+    }
+
+    .agent-list::before {
+      position: absolute;
+      top: 0;
+      bottom: 12px;
+      left: 25px;
+      width: 1px;
+      background: var(--border);
+      content: "";
+    }
+
+    .agent-list .agent-row {
+      padding-left: 13px;
+    }
+
+    .agent-list .agent-row::before {
+      position: absolute;
+      top: 19px;
+      left: 5px;
+      width: 8px;
+      height: 1px;
+      background: var(--border);
+      content: "";
+    }
+
+    .agent-duration {
+      color: var(--faint);
+      font-family: var(--mono);
+      font-size: 9px;
+    }
+
+    .agents-footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 8px 10px;
+      border-top: 1px solid var(--border);
+      color: var(--faint);
+      font-family: var(--mono);
+      font-size: 9px;
+    }
+
+    .agents-footer-live {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      color: var(--green);
+    }
+
+    .agent-detail-head {
+      display: grid;
+      grid-template-columns: 38px minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 11px;
+      padding-bottom: 15px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .detail-mark {
+      display: grid;
+      width: 36px;
+      height: 36px;
+      place-items: center;
+      border: 1px solid color-mix(in srgb, var(--green) 55%, var(--border));
+      border-radius: 8px;
+      color: var(--green);
+      font-family: var(--mono);
+      font-size: 12px;
+    }
+
+    .agent-identity {
+      display: flex;
+      overflow: hidden;
+      min-width: 0;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .agent-identity strong {
+      overflow: hidden;
+      font-size: 14px;
+      font-weight: 600;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .agent-identity small {
+      overflow: hidden;
+      color: var(--faint);
+      font-family: var(--mono);
+      font-size: 9px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .detail-state {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--faint);
+      font-family: var(--mono);
+      font-size: 9px;
+      white-space: nowrap;
+    }
+
+    .prompt-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      margin-top: 16px;
+      padding: 2px 0;
+      border: 0;
+      background: transparent;
+      color: var(--dim);
+      font-family: var(--mono);
+      font-size: 9px;
+      letter-spacing: 0.45px;
+      text-transform: uppercase;
+    }
+
+    .delegated-prompt {
+      margin: 8px 0 0;
+      color: var(--dim);
+      font-size: 12px;
+      line-height: 1.55;
+    }
+
+    .child-timeline {
+      margin-top: 20px;
+      padding-left: 11px;
+      border-left: 1px solid var(--border);
+    }
+
+    .child-event {
+      padding: 0 0 19px 2px;
+    }
+
+    .child-event:last-child {
+      padding-bottom: 0;
+    }
+
+    .child-event p {
+      margin: 7px 0 0;
+      color: var(--dim);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+
+    .child-tool {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      font-family: var(--mono);
+      font-size: 10px;
+    }
+
+    .child-tool-status {
+      margin-left: auto;
+      color: var(--faint);
+      font-size: 9px;
+      text-transform: uppercase;
+    }
+
+    .screen-reader-status {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip: rect(0 0 0 0);
+      white-space: nowrap;
+    }
+
+    @media (max-width: 900px) {
+      .app-layout {
+        grid-template-columns: 1fr;
+      }
+
+      .agents-panel {
+        position: absolute;
+        inset: 0 0 0 auto;
+        z-index: 4;
+        width: min(88%, 300px);
+        border-left: 1px solid var(--border);
+      }
+
+      .agents-panel.closed {
+        display: none;
+      }
+
+      .navigator-toggle {
+        display: inline-flex;
+      }
+
+      .thread-status {
+        display: none;
+      }
+    }
+
+    @media (min-width: 901px) {
+      .agents-panel.closed {
+        display: none;
+      }
+
+      .app-layout.panel-closed {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    @media (max-width: 580px) {
+      .demo-page {
+        padding: 0;
+      }
+
+      .demo-note {
+        display: none;
+      }
+
+      .app-window {
+        min-height: 100vh;
+        border: 0;
+        border-radius: 0;
+      }
+
+      .app-layout,
+      .thread-pane {
+        min-height: calc(100vh - 42px);
+      }
+
+      .project-name {
+        display: none;
+      }
+
+      .timeline,
+      .agent-detail {
+        padding: 22px 14px 28px;
+      }
+
+      .user-message {
+        max-width: 94%;
+      }
+
+      .spawn-action {
+        display: none;
+      }
+
+      .spawn-cta {
+        grid-template-columns: auto 24px minmax(0, 1fr);
+      }
+
+      .workflow-copy small {
+        display: none;
+      }
+
+      .mode-toggle span:last-child {
+        display: none;
+      }
+
+      .multi-pane-board {
+        width: max-content;
+        min-width: 0;
+        grid-template-columns: repeat(3, calc(100vw - 42px));
+        scroll-snap-type: x mandatory;
+      }
+
+      .work-pane {
+        scroll-snap-align: start;
+      }
+
+      .agent-detail-head {
+        grid-template-columns: 38px minmax(0, 1fr);
+      }
+
+      .detail-state {
+        grid-column: 2;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="demo-page">
+    <div class="demo-note">
+      <strong>Interactive product smoke</strong>
+      <span>Switch between focused and multi-pane views, collapse the navigator, and resize the window.</span>
+    </div>
+
+    <section class="app-window" aria-label="Duckweed subagent navigator concept">
+      <header class="app-titlebar">
+        <span class="duck-mark" aria-hidden="true">D</span>
+        <span class="app-name">Duckweed</span>
+        <span class="project-name">duckweed</span>
+        <span class="app-status"><span class="dot working" aria-hidden="true"></span> working</span>
+      </header>
+
+      <div class="app-layout" id="app-layout">
+        <main class="thread-pane">
+          <header class="thread-header">
+            <button class="breadcrumb" id="parent-button" type="button" aria-label="Return to parent thread">
+              <span class="breadcrumb-arrow" aria-hidden="true">‹</span>
+              <span id="breadcrumb-label">Codex</span>
+            </button>
+            <button class="mode-toggle" id="multi-toggle" type="button" aria-label="Toggle multi-pane workspace" aria-pressed="false" aria-controls="multi-pane-board">
+              <span aria-hidden="true">▥</span>
+              <span>Multi-pane</span>
+            </button>
+            <span class="thread-status" id="thread-status">Parent working</span>
+            <button class="navigator-toggle" id="navigator-toggle" type="button" aria-controls="agents-panel" aria-expanded="true">
+              <span aria-hidden="true">⑂</span>
+              <span>Agents</span>
+              <span class="dot working" aria-hidden="true"></span>
+            </button>
+          </header>
+
+          <div class="thread-scroll">
+            <section class="timeline" id="parent-view">
+              <div class="user-message">Refactor the session parser, keep backwards compatibility, and verify the change.</div>
+
+              <div class="thinking-label">Thinking</div>
+              <p class="assistant-copy">I mapped the event paths and split independent checks across three focused workers.</p>
+
+              <button class="spawn-cta" id="spawn-cta" type="button" aria-controls="agents-panel">
+                <span class="dot working" aria-hidden="true"></span>
+                <span class="spawn-icon" aria-hidden="true">⑂</span>
+                <span class="spawn-copy">
+                  <strong>3 subagents</strong>
+                  <small>2 working, 1 completed</small>
+                </span>
+                <span class="spawn-action">Open agents ›</span>
+              </button>
+
+              <div class="tool-heading"><span aria-hidden="true">◇</span> Updated <code>src/lib/agents/parser.ts</code></div>
+              <pre class="diff"><span class="removed">- return JSON.parse(frame);</span><span class="added">+ const value = JSON.parse(frame);</span><span class="added">+ return normalizeFrame(value);</span></pre>
+            </section>
+
+            <section class="agent-detail" id="agent-view" hidden>
+              <div class="agent-detail-head">
+                <span class="detail-mark" id="detail-mark" aria-hidden="true">R</span>
+                <span class="agent-identity">
+                  <strong id="detail-title">Review protocol compatibility</strong>
+                  <small id="detail-meta">Reviewer · GPT-5.6 Luna · 4.1k tokens · 3 tools</small>
+                </span>
+                <span class="detail-state"><span class="dot working" id="detail-dot" aria-hidden="true"></span><span id="detail-status">Working · 1m 24s</span></span>
+              </div>
+
+              <button class="prompt-toggle" id="prompt-toggle" type="button" aria-expanded="false" aria-controls="delegated-prompt">
+                Delegated prompt <span aria-hidden="true">⌄</span>
+              </button>
+              <p class="delegated-prompt" id="delegated-prompt" hidden></p>
+
+              <div class="child-timeline">
+                <article class="child-event">
+                  <span class="event-label">Update</span>
+                  <p id="detail-update">I found the compatibility boundary and am checking the replay fixtures.</p>
+                </article>
+                <article class="child-event">
+                  <span class="event-label">Tool</span>
+                  <p class="child-tool"><span aria-hidden="true">⌕</span> Searched adapter fixtures <span class="child-tool-status">Completed</span></p>
+                </article>
+                <article class="child-event">
+                  <span class="event-label">Tool</span>
+                  <p class="child-tool"><span aria-hidden="true">□</span> <span id="detail-tool">Reading event normalization tests</span> <span class="child-tool-status" id="detail-tool-status">Running</span></p>
+                </article>
+              </div>
+            </section>
+
+            <section class="multi-pane-board" id="multi-pane-board" aria-label="Open work panes" hidden>
+              <article class="work-pane" data-work-pane="parent">
+                <header class="work-pane-head">
+                  <span class="pane-mark" aria-hidden="true">P</span>
+                  <span class="pane-title"><strong>Parent thread</strong><small><span class="dot working" aria-hidden="true"></span> Synthesizing work</small></span>
+                  <button class="focus-pane" type="button" data-focus-agent="parent" aria-label="Focus Parent thread">↗</button>
+                </header>
+                <div class="pane-body">
+                  <p class="pane-user">Refactor the session parser, keep backwards compatibility, and verify the change.</p>
+                  <span class="thinking-label">Thinking</span>
+                  <p class="pane-copy">I split compatibility, layout, and selector coverage into focused checks.</p>
+                  <div class="pane-event"><strong>Updated parser.ts</strong>Normalized the frame before returning it to the adapter.</div>
+                  <div class="pane-event"><strong>3 subagents</strong>2 working, 1 completed, 1 permission request.</div>
+                </div>
+                <footer class="pane-composer">Queue a follow-up...</footer>
+              </article>
+
+              <article class="work-pane active" data-work-pane="protocol">
+                <header class="work-pane-head">
+                  <span class="pane-mark" aria-hidden="true">R</span>
+                  <span class="pane-title"><strong>Protocol compatibility</strong><small><span class="dot working" aria-hidden="true"></span> Working · 1m 24s</small></span>
+                  <button class="focus-pane" type="button" data-focus-agent="protocol" aria-label="Focus Review protocol compatibility">↗</button>
+                </header>
+                <div class="pane-body">
+                  <span class="event-label">Update</span>
+                  <p class="pane-copy">I found the compatibility boundary and am checking replay fixtures.</p>
+                  <div class="pane-event"><strong>Search completed</strong>Adapter fixtures and historical frame variants.</div>
+                  <div class="pane-event"><strong>Reading now</strong>Event normalization tests.</div>
+                </div>
+                <footer class="pane-composer">Message Review protocol compatibility...</footer>
+              </article>
+
+              <article class="work-pane" data-work-pane="layout">
+                <header class="work-pane-head">
+                  <span class="pane-mark" aria-hidden="true">U</span>
+                  <span class="pane-title"><strong>Narrow pane layout</strong><small><span class="dot working" aria-hidden="true"></span> Working · 58s</small></span>
+                  <button class="focus-pane" type="button" data-focus-agent="layout" aria-label="Focus Check narrow pane layout">↗</button>
+                </header>
+                <div class="pane-body">
+                  <span class="event-label">Update</span>
+                  <p class="pane-copy">Each work pane keeps its own context, status, scroll position, and composer target.</p>
+                  <div class="pane-event"><strong>Desktop</strong>Three readable columns with a persistent agent navigator.</div>
+                  <div class="pane-event"><strong>Narrow width</strong>Panels become a horizontal, snap-aligned strip instead of shrinking.</div>
+                </div>
+                <footer class="pane-composer">Message Check narrow pane layout...</footer>
+              </article>
+            </section>
+          </div>
+
+          <section class="workflow-dock" aria-label="Workflow progress">
+            <span class="workflow-copy"><small>Workflow</small><strong>Refactor parser and verify compatibility</strong></span>
+            <span class="workflow-count">1 / 3</span>
+            <span class="progress-track" role="progressbar" aria-label="Workflow progress" aria-valuemin="0" aria-valuemax="3" aria-valuenow="1"><span class="progress-fill"></span></span>
+          </section>
+
+          <footer class="composer">
+            <span class="composer-target" id="composer-target">Queue a follow-up...</span>
+            <button class="stop-button" type="button" aria-label="Stop current turn"><span class="stop-glyph" aria-hidden="true"></span></button>
+          </footer>
+        </main>
+
+        <aside class="agents-panel" id="agents-panel" aria-label="Agents navigator">
+          <header class="agents-header">
+            <span class="agents-heading"><strong>Agents</strong><span>2 working · 1 completed</span></span>
+            <button class="panel-close" id="panel-close" type="button" aria-label="Collapse agents navigator">‹</button>
+          </header>
+
+          <button class="agent-row parent selected" type="button" data-agent="parent">
+            <span class="agent-mark" aria-hidden="true">P</span>
+            <span class="agent-row-copy"><strong>Parent thread</strong><small>Synthesizing delegated work</small></span>
+            <span class="dot working" aria-hidden="true"></span>
+          </button>
+
+          <div class="agent-list">
+            <button class="agent-row" type="button" data-agent="protocol">
+              <span class="agent-mark" aria-hidden="true">R</span>
+              <span class="agent-row-copy"><strong>Review protocol compatibility</strong><small>Checking replay fixtures</small></span>
+              <span class="agent-duration">1m 24s</span>
+            </button>
+            <button class="agent-row" type="button" data-agent="layout">
+              <span class="agent-mark" aria-hidden="true">U</span>
+              <span class="agent-row-copy"><strong>Check narrow pane layout</strong><small>Testing compact breakpoint</small></span>
+              <span class="agent-duration">58s</span>
+            </button>
+            <button class="agent-row" type="button" data-agent="tests">
+              <span class="agent-mark" aria-hidden="true">T</span>
+              <span class="agent-row-copy"><strong>Review selector tests</strong><small>Selector coverage passed</small></span>
+              <span class="agent-duration">✓ 42s</span>
+            </button>
+            <button class="agent-row" type="button" data-agent="permission">
+              <span class="agent-mark" aria-hidden="true">S</span>
+              <span class="agent-row-copy"><strong>Inspect security boundary</strong><small>Needs permission to continue</small></span>
+              <span class="agent-duration">waiting</span>
+            </button>
+          </div>
+
+          <footer class="agents-footer">
+            <span class="agents-footer-live"><span class="dot working" aria-hidden="true"></span> 2 working</span>
+            <span>Σ 10.2k tokens</span>
+          </footer>
+        </aside>
+
+        <span class="screen-reader-status" id="screen-reader-status" aria-live="polite"></span>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    const agents = {
+      protocol: {
+        mark: "R",
+        title: "Review protocol compatibility",
+        meta: "Reviewer · GPT-5.6 Luna · 4.1k tokens · 3 tools",
+        status: "Working · 1m 24s",
+        state: "working",
+        update: "I found the compatibility boundary and am checking the replay fixtures.",
+        tool: "Reading event normalization tests",
+        toolStatus: "Running",
+        prompt: "Review the ACP and app-server event mappings for compatibility. Report concrete risks and the fixtures that prove each conclusion.",
+        composer: "Message Review protocol compatibility..."
+      },
+      layout: {
+        mark: "U",
+        title: "Check narrow pane layout",
+        meta: "UI reviewer · Claude Sonnet · 2.8k tokens · 2 tools",
+        status: "Working · 58s",
+        state: "working",
+        update: "The navigator becomes an overlay below 900 px and keeps the transcript at a readable width.",
+        tool: "Testing 580 px viewport",
+        toolStatus: "Running",
+        prompt: "Verify the agent navigator in full width, half-width, and narrow terminal panes. Pay special attention to composer space and overflow.",
+        composer: "Message Check narrow pane layout..."
+      },
+      tests: {
+        mark: "T",
+        title: "Review selector tests",
+        meta: "Test reviewer · GPT-5.6 Terra · 1.9k tokens · 4 tools",
+        status: "Completed · 42s",
+        state: "completed",
+        update: "Current-turn isolation, historical rosters, and L1 fallback coverage passed.",
+        tool: "Ran focused selector tests",
+        toolStatus: "Completed",
+        prompt: "Review the subagent selectors and identify missing tests for historical turns, fallback providers, and resumed children.",
+        composer: "Send a follow-up to resume Review selector tests..."
+      },
+      permission: {
+        mark: "S",
+        title: "Inspect security boundary",
+        meta: "Security reviewer · Claude Opus · 1.4k tokens · 1 tool",
+        status: "Needs permission · 36s",
+        state: "waiting",
+        update: "The agent needs network access to verify the current provider documentation.",
+        tool: "Open provider documentation",
+        toolStatus: "Waiting",
+        prompt: "Check whether child permission requests remain attributed to the correct subagent and surface a clear action for the user.",
+        composer: "Resolve the permission request before messaging this agent"
+      }
+    };
+
+    const appLayout = document.getElementById("app-layout");
+    const panel = document.getElementById("agents-panel");
+    const navigatorToggle = document.getElementById("navigator-toggle");
+    const parentView = document.getElementById("parent-view");
+    const agentView = document.getElementById("agent-view");
+    const breadcrumbLabel = document.getElementById("breadcrumb-label");
+    const threadStatus = document.getElementById("thread-status");
+    const composerTarget = document.getElementById("composer-target");
+    const screenReaderStatus = document.getElementById("screen-reader-status");
+    const promptToggle = document.getElementById("prompt-toggle");
+    const delegatedPrompt = document.getElementById("delegated-prompt");
+    const multiToggle = document.getElementById("multi-toggle");
+    const multiPaneBoard = document.getElementById("multi-pane-board");
+    let multiPaneMode = false;
+
+    function setPanel(open) {
+      panel.classList.toggle("closed", !open);
+      appLayout.classList.toggle("panel-closed", !open);
+      navigatorToggle.setAttribute("aria-expanded", String(open));
+    }
+
+    function updateSelection(agentId) {
+      document.querySelectorAll("[data-agent]").forEach((row) => {
+        row.classList.toggle("selected", row.dataset.agent === agentId);
+      });
+    }
+
+    function setMultiPane(open) {
+      multiPaneMode = open;
+      multiPaneBoard.hidden = !open;
+      multiToggle.setAttribute("aria-pressed", String(open));
+      if (open) {
+        parentView.hidden = true;
+        agentView.hidden = true;
+        breadcrumbLabel.textContent = "Codex / 3 panes";
+        threadStatus.textContent = "3 live panes";
+        composerTarget.textContent = "Message the active pane...";
+        screenReaderStatus.textContent = "Multi-pane workspace opened with 3 panes";
+      } else {
+        showParent();
+      }
+    }
+
+    function showParent() {
+      multiPaneMode = false;
+      multiPaneBoard.hidden = true;
+      multiToggle.setAttribute("aria-pressed", "false");
+      parentView.hidden = false;
+      agentView.hidden = true;
+      breadcrumbLabel.textContent = "Codex";
+      threadStatus.textContent = "Parent working";
+      composerTarget.textContent = "Queue a follow-up...";
+      delegatedPrompt.hidden = true;
+      promptToggle.setAttribute("aria-expanded", "false");
+      updateSelection("parent");
+      screenReaderStatus.textContent = "Parent thread selected";
+    }
+
+    function showAgent(agentId) {
+      const agent = agents[agentId];
+      if (!agent) return;
+      multiPaneMode = false;
+      multiPaneBoard.hidden = true;
+      multiToggle.setAttribute("aria-pressed", "false");
+      parentView.hidden = true;
+      agentView.hidden = false;
+      document.getElementById("detail-mark").textContent = agent.mark;
+      document.getElementById("detail-title").textContent = agent.title;
+      document.getElementById("detail-meta").textContent = agent.meta;
+      document.getElementById("detail-status").textContent = agent.status;
+      document.getElementById("detail-update").textContent = agent.update;
+      document.getElementById("detail-tool").textContent = agent.tool;
+      document.getElementById("detail-tool-status").textContent = agent.toolStatus;
+      delegatedPrompt.textContent = agent.prompt;
+      delegatedPrompt.hidden = true;
+      promptToggle.setAttribute("aria-expanded", "false");
+      const detailDot = document.getElementById("detail-dot");
+      detailDot.className = `dot ${agent.state}`;
+      breadcrumbLabel.textContent = `Codex / ${agent.title}`;
+      threadStatus.textContent = agent.state === "completed" ? "Completed child" : "Parent still working";
+      composerTarget.textContent = agent.composer;
+      updateSelection(agentId);
+      screenReaderStatus.textContent = `${agent.title} selected, ${agent.status}`;
+      if (window.matchMedia("(max-width: 900px)").matches) setPanel(false);
+    }
+
+    document.querySelectorAll("[data-agent]").forEach((row) => {
+      row.addEventListener("click", () => {
+        if (row.dataset.agent === "parent") showParent();
+        else showAgent(row.dataset.agent);
+      });
+    });
+
+    document.getElementById("parent-button").addEventListener("click", showParent);
+    multiToggle.addEventListener("click", () => setMultiPane(!multiPaneMode));
+    document.querySelectorAll("[data-focus-agent]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const agentId = button.dataset.focusAgent;
+        if (agentId === "parent") showParent();
+        else showAgent(agentId);
+      });
+    });
+    document.getElementById("panel-close").addEventListener("click", () => setPanel(false));
+    navigatorToggle.addEventListener("click", () => setPanel(panel.classList.contains("closed")));
+    document.getElementById("spawn-cta").addEventListener("click", () => setPanel(true));
+    promptToggle.addEventListener("click", () => {
+      const shouldOpen = delegatedPrompt.hidden;
+      delegatedPrompt.hidden = !shouldOpen;
+      promptToggle.setAttribute("aria-expanded", String(shouldOpen));
+    });
+
+    if (window.matchMedia("(max-width: 900px)").matches) setPanel(false);
+  </script>
+</body>
+</html>
