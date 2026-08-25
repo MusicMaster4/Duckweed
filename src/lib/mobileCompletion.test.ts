@@ -107,7 +107,7 @@ describe("delayed mobile completion delivery", () => {
     })).toBe(true);
   });
 
-  test("does not notify after interaction in the selected terminal", () => {
+  test("does not notify after any desktop app interaction", () => {
     expect(shouldSendDelayedMobileCompletion({
       unreadAtCompletion: false,
       unreadNow: false,

@@ -33,8 +33,13 @@ class MessageFetchWorker(context: Context, parameters: WorkerParameters) : Worke
                 workspaceStore.markPresence(pairId, receivedAt)
                 val store = MessageStore(applicationContext)
                 store.put(message)
+                val consumed = MobileNotificationVisibility.consumeIfVisible(
+                    applicationContext,
+                    store,
+                    message,
+                )
                 val unread = store.message(message.id)?.readAt == null
-                if (!unread) {
+                if (consumed || !unread) {
                     NotificationTools.cancelIds(applicationContext, listOf(message.id))
                 } else if (
                     message.kind == "attention" &&

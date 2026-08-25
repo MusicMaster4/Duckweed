@@ -16,7 +16,7 @@ export interface DelayedMobileCompletionState {
   unreadAtCompletion: boolean;
   /** Whether that mark still exists when the grace period ends. */
   unreadNow: boolean;
-  /** Last deliberate keyboard or pointer interaction in this terminal. */
+  /** Last deliberate interaction anywhere in the desktop app. */
   lastInteractionAt: number | null;
   /** Time when this completion was observed by the desktop. */
   completedAt: number;
@@ -29,8 +29,9 @@ export function mobileCompletionDelay(unreadAtCompletion: boolean): number {
 /**
  * Background completions notify only while their unread mark survives the
  * grace period. A completion in the already-selected terminal has no mark to
- * clear, so interaction after it completes is the evidence that it was seen
- * rather than merely open on an unattended desktop.
+ * clear, so any app interaction after it completes is the evidence that the
+ * computer is attended. This includes leaving the selected pane: tying the
+ * signal to that pane would miss the tab or pane switch itself.
  */
 export function shouldSendDelayedMobileCompletion(
   state: DelayedMobileCompletionState,

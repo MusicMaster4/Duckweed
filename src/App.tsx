@@ -461,7 +461,7 @@ export default function App() {
   const completionFlashSeq = useRef(0);
   const completionFlashTimers = useRef(new Map<string, number>());
   const mobileCompletionTimers = useRef(new Map<string, number>());
-  const lastTerminalInteractionAt = useRef(new Map<string, number>());
+  const lastDesktopInteractionAt = useRef<number | null>(null);
   const scheduledSendsRef = useRef(scheduledSends);
   scheduledSendsRef.current = scheduledSends;
   /** Dirty flag for the lifted file editor (file switches confirm through this). */
@@ -623,23 +623,25 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    const recordSelectedTerminalInteraction = (event: KeyboardEvent | PointerEvent) => {
-      if (!document.hasFocus() || settingsActiveRef.current) return;
-      if (
-        event instanceof KeyboardEvent &&
-        ["Shift", "Control", "Alt", "Meta"].includes(event.key)
-      ) return;
-      const tab = currentTab();
-      const termId = tab ? (findLeaf(tab.root, tab.activeLeaf)?.term ?? null) : null;
-      if (termId) lastTerminalInteractionAt.current.set(termId, Date.now());
+    const recordDesktopInteraction = () => {
+      if (!document.hasFocus()) return;
+      lastDesktopInteractionAt.current = Date.now();
     };
-    window.addEventListener("keydown", recordSelectedTerminalInteraction, true);
-    window.addEventListener("pointerdown", recordSelectedTerminalInteraction, true);
+    const recordKeyboardInteraction = (event: KeyboardEvent) => {
+      if (["Shift", "Control", "Alt", "Meta"].includes(event.key)) return;
+      recordDesktopInteraction();
+    };
+    window.addEventListener("focus", recordDesktopInteraction);
+    window.addEventListener("keydown", recordKeyboardInteraction, true);
+    window.addEventListener("pointerdown", recordDesktopInteraction, true);
+    window.addEventListener("wheel", recordDesktopInteraction, true);
     return () => {
-      window.removeEventListener("keydown", recordSelectedTerminalInteraction, true);
-      window.removeEventListener("pointerdown", recordSelectedTerminalInteraction, true);
+      window.removeEventListener("focus", recordDesktopInteraction);
+      window.removeEventListener("keydown", recordKeyboardInteraction, true);
+      window.removeEventListener("pointerdown", recordDesktopInteraction, true);
+      window.removeEventListener("wheel", recordDesktopInteraction, true);
     };
-  }, [currentTab]);
+  }, []);
 
   /** Selected pane while the user is actually looking at the window (flash vs unread). */
   const isFocusedTerm = useCallback(
@@ -765,7 +767,6 @@ export default function App() {
       window.clearTimeout(timer);
       mobileCompletionTimers.current.delete(key);
     }
-    lastTerminalInteractionAt.current.delete(term);
     setCompletionFlashes((previous) => {
       if (!previous.has(term)) return previous;
       const next = new Map(previous);
@@ -1390,7 +1391,7 @@ export default function App() {
           if (!shouldSendDelayedMobileCompletion({
             unreadAtCompletion,
             unreadNow: unreadTermIdsRef.current.has(termId),
-            lastInteractionAt: lastTerminalInteractionAt.current.get(termId) ?? null,
+            lastInteractionAt: lastDesktopInteractionAt.current,
             completedAt,
           })) return;
           void mobileSendCompletion(message)

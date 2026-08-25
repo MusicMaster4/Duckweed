@@ -426,6 +426,17 @@ class MainActivity : AppCompatActivity() {
 
     override fun onStart() {
         super.onStart()
+        MobileNotificationVisibility.activityStarted()
+        if (conversationDetail.visibility == View.VISIBLE) {
+            val target = selectedTarget
+            val response = legacyResponse
+            MobileNotificationVisibility.showConversation(
+                target?.pairId ?: response?.pairId,
+                target?.terminal?.id ?: response?.terminalId,
+            )
+        } else {
+            MobileNotificationVisibility.hideConversation()
+        }
         if (!receiverRegistered) {
             ContextCompat.registerReceiver(
                 this,
@@ -445,6 +456,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onStop() {
         persistCurrentDraft()
+        MobileNotificationVisibility.activityStopped()
         if (isAppLockEnabled() && !appLockPromptVisible && !isChangingConfigurations) {
             appUnlocked = false
             appRoot.visibility = View.INVISIBLE
@@ -595,6 +607,7 @@ class MainActivity : AppCompatActivity() {
         selectedTarget = null
         selectedDraftAttachment = null
         legacyResponse = null
+        MobileNotificationVisibility.hideConversation()
         projectDetail.visibility = View.GONE
         conversationDetail.visibility = View.GONE
         setDetailChrome(false)
@@ -831,6 +844,9 @@ class MainActivity : AppCompatActivity() {
         executor.execute {
             val store = MessageStore(this)
             store.pendingNotifications().asReversed().forEach { message ->
+                if (MobileNotificationVisibility.consumeIfVisible(this, store, message)) {
+                    return@forEach
+                }
                 if (NotificationTools.show(this, message)) store.markNotified(message.id)
             }
         }
@@ -1260,6 +1276,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun openProject(row: ProjectRow) {
         persistCurrentDraft()
+        MobileNotificationVisibility.hideConversation()
         selectedProject = row
         terminalAdapter.submit(row, unreadConversationKeys)
         findViewById<TextView>(R.id.project_detail_title).text = row.project.name
@@ -1302,6 +1319,7 @@ class MainActivity : AppCompatActivity() {
         }
         selectedTarget = null
         legacyResponse = message
+        MobileNotificationVisibility.showConversation(message.pairId, message.terminalId)
         conversationReturnsToProject = false
         conversationShouldStickToBottom = true
         projectDetail.visibility = View.GONE
@@ -1352,6 +1370,7 @@ class MainActivity : AppCompatActivity() {
         conversationsAdapter.markRead(target.pairId, target.terminal.id)
         selectedTarget = target.copy(unread = false)
         legacyResponse = null
+        MobileNotificationVisibility.showConversation(target.pairId, target.terminal.id)
         conversationReturnsToProject = returnToProject
         conversationShouldStickToBottom = true
         terminalShouldStickToBottom = true
@@ -1369,6 +1388,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun closeConversation() {
         persistCurrentDraft()
+        MobileNotificationVisibility.hideConversation()
         selectedTarget = null
         selectedDraftAttachment = null
         legacyResponse = null

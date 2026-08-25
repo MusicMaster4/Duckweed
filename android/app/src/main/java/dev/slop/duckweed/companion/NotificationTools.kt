@@ -49,6 +49,7 @@ object NotificationTools {
 
     fun show(context: Context, message: CompletionRecord): Boolean {
         if (!NotificationPreference.isEnabled(context)) return false
+        if (MobileNotificationVisibility.isViewing(message)) return false
         if (
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
