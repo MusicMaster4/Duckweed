@@ -362,6 +362,18 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     }
   }
 
+  /**
+   * A queued follow-up can start before every terminal notification from the
+   * previous turn has drained from app-server. Never let one of those late
+   * frames settle the new turn or append its final answer after the new user
+   * message.
+   */
+  function rootTurnSignalIsStale(turnId: string | null): boolean {
+    if (!turnId) return false;
+    if (completedRootTurnIds.has(turnId)) return true;
+    return currentTurnId !== null && currentTurnId !== turnId;
+  }
+
   function settleRootTurn(turnId: string | null): void {
     rememberRootTurnCompleted(turnId ?? currentTurnId);
     currentTurnId = null;
@@ -1535,6 +1547,13 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
   }
 
   function handleNotification(method: string, params: Record<string, unknown>, ctx: AdapterContext) {
+    const notificationTurnId = asString(params.turnId);
+    if (
+      (method.startsWith("item/") || method === "turn/plan/updated") &&
+      rootTurnSignalIsStale(notificationTurnId)
+    ) {
+      return;
+    }
     if (
       rootTurnMayBeActive &&
       (method.startsWith("item/") || method === "turn/plan/updated")
@@ -1570,9 +1589,11 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       case "turn/started": {
         // Codex goals can auto-continue a few milliseconds after the previous
         // turn completed. Keep the original user-owned stretch open.
-        cancelPendingRootCompletion();
         const turn = asRecord(params.turn);
-        currentTurnId = asString(turn?.id);
+        const startedTurnId = asString(turn?.id);
+        if (rootTurnSignalIsStale(startedTurnId)) return;
+        cancelPendingRootCompletion();
+        currentTurnId = startedTurnId;
         rootTurnMayBeActive = true;
         rootTurnStatusConfirmed = true;
         ctx.emit({ type: "status", status: "working" });
@@ -1581,6 +1602,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       case "turn/completed": {
         const turn = asRecord(params.turn);
         const completedTurnId = asString(turn?.id);
+        if (rootTurnSignalIsStale(completedTurnId)) return;
         const error = asRecord(turn?.error);
         if (error) {
           ctx.emit({
@@ -1605,6 +1627,10 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
           // This is Codex's thread-level reconciliation channel. It closes the
           // turn when a start/completed notification was lost or reordered.
           const wasActive = rootTurnStatusConfirmed || currentTurnId !== null;
+          // Sending turn/start only proves that Duckweed asked for work. Until
+          // Codex acknowledges that turn, a thread-idle frame can still belong
+          // to the turn that just released a queued follow-up.
+          if (rootTurnMayBeActive && !wasActive) return;
           if (wasActive) rootCompletionVersion += 1;
           settleRootTurn(null);
           if (wasActive) scheduleRootCompletion(ctx);
@@ -1621,6 +1647,8 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         return;
       case "item/completed": {
         const item = asRecord(params.item) ?? {};
+        const itemTurnId = asString(params.turnId);
+        if (rootTurnSignalIsStale(itemTurnId)) return;
         handleItem(item, true, ctx);
         if (
           rootTurnMayBeActive &&
@@ -1632,7 +1660,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
           // thread-idle frames are missing, which would otherwise strand the
           // pane in working and suppress both completion effects.
           rootCompletionVersion += 1;
-          settleRootTurn(asString(params.turnId));
+          settleRootTurn(itemTurnId);
           scheduleRootCompletion(ctx);
         }
         return;
@@ -2372,7 +2400,10 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       ctx.emit({ type: "user", text: prompt.text, images: prompt.images });
       ctx.emit({ type: "status", status: "working" });
       rootTurnMayBeActive = true;
-      rootTurnStatusConfirmed = true;
+      // The request is optimistic. A start response/notification, live item,
+      // or active thread status must confirm it before thread-idle is allowed
+      // to close this turn.
+      rootTurnStatusConfirmed = false;
       const generation = ++rootTurnGeneration;
       void request(ctx, "turn/start", {
         threadId,

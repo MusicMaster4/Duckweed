@@ -1960,6 +1960,10 @@ describe("codex adapter", () => {
     const h = harness();
     await h.handshake();
     h.adapter.prompt({ text: "run the audit", images: [] }, h.ctx);
+    h.notify("turn/started", {
+      threadId: "thread_1",
+      turn: { id: "turn_audit", status: "inProgress", items: [] },
+    });
 
     h.notify("thread/status/changed", {
       threadId: "thread_1",
@@ -1972,6 +1976,66 @@ describe("codex adapter", () => {
       turn: { id: "late_duplicate", status: "completed", items: [] },
     });
     expect(h.events.filter((event) => event.type === "turn-end")).toHaveLength(1);
+  });
+
+  test("keeps a queued follow-up working when terminal frames from the previous turn arrive late", async () => {
+    const h = harness();
+    await h.handshake();
+    h.adapter.prompt({ text: "first task", images: [] }, h.ctx);
+    h.notify("turn/started", {
+      threadId: "thread_1",
+      turn: { id: "turn_first", status: "inProgress", items: [] },
+    });
+    h.notify("turn/completed", {
+      threadId: "thread_1",
+      turn: { id: "turn_first", status: "completed", items: [] },
+    });
+    expect(h.state().status).toBe("idle");
+
+    // This is the message the session releases from its local follow-up queue.
+    h.adapter.prompt({ text: "queued follow-up", images: [] }, h.ctx);
+    expect(h.state().status).toBe("working");
+
+    // App-server can drain these old terminal frames after turn/start for the
+    // follow-up was already written. None may end or pollute the new turn.
+    h.notify("item/completed", {
+      threadId: "thread_1",
+      turnId: "turn_first",
+      item: {
+        id: "late_first_answer",
+        type: "agentMessage",
+        phase: "final_answer",
+        text: "Late duplicate answer.",
+      },
+    });
+    h.notify("turn/completed", {
+      threadId: "thread_1",
+      turn: { id: "turn_first", status: "completed", items: [] },
+    });
+    h.notify("thread/status/changed", {
+      threadId: "thread_1",
+      status: { type: "idle" },
+    });
+
+    expect(h.state().status).toBe("working");
+    expect(h.events.filter((event) => event.type === "turn-end")).toHaveLength(1);
+    expect(
+      h.state().items.some(
+        (item) => item.kind === "assistant" && item.text === "Late duplicate answer.",
+      ),
+    ).toBe(false);
+
+    h.notify("turn/started", {
+      threadId: "thread_1",
+      turn: { id: "turn_followup", status: "inProgress", items: [] },
+    });
+    h.notify("turn/completed", {
+      threadId: "thread_1",
+      turn: { id: "turn_followup", status: "completed", items: [] },
+    });
+
+    expect(h.state().status).toBe("idle");
+    expect(h.events.filter((event) => event.type === "turn-end")).toHaveLength(2);
   });
 
   test("uses the final-answer item when both boundary notifications are missing", async () => {
