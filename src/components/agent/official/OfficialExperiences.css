@@ -575,6 +575,12 @@
   line-height: 1;
 }
 
+.official-plan-step-number {
+  /* Mono font metrics sit a little high inside this small circle. Keep the
+     marker geometrically centered, then optically center only its number. */
+  transform: translateY(0.5px);
+}
+
 .official-plan-steps li.is-done .official-plan-step-mark {
   border-color: color-mix(in srgb, var(--plan-color) 55%, transparent);
   color: var(--plan-color);

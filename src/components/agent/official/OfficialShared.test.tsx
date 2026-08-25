@@ -128,6 +128,7 @@ describe("official agent presentation", () => {
     expect(html).toContain(">Workflow</span>");
     expect(html).toContain('aria-current="step"');
     expect(html.match(/official-plan-running-arrow/g)?.length).toBe(1);
+    expect(html).toContain('class="official-plan-step-number"');
     expect(html).toContain("✓");
   });
 

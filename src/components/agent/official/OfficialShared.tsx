@@ -568,7 +568,7 @@ export const PlanTracker = memo(function PlanTracker({
                     <path d="M1.5 5h10M8 1.75 11.5 5 8 8.25" />
                   </svg>
                 ) : (
-                  index + 1
+                  <span className="official-plan-step-number">{index + 1}</span>
                 )}
               </span>
               <span>{step.text}</span>
