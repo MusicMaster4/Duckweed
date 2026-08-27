@@ -417,6 +417,12 @@ async fn agent_proc_probe(names: Vec<String>) -> Result<Vec<AgentAvailability>, 
     blocking(move || Ok(agent_proc::probe(names))).await
 }
 
+/// Refresh the catalog OpenCode uses to build its OpenRouter model picker.
+#[tauri::command]
+async fn opencode_models_refresh() -> Result<(), String> {
+    blocking(agent_proc::refresh_opencode_models).await
+}
+
 /// Launch a coding agent in its line-delimited JSON mode.
 #[tauri::command]
 async fn agent_proc_start(
@@ -989,6 +995,7 @@ fn main() {
             agent_sessions_list,
             agent_session_transcript,
             agent_proc_probe,
+            opencode_models_refresh,
             agent_proc_start,
             agent_proc_send,
             agent_proc_close_stdin,

@@ -16,6 +16,8 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tauri::ipc::Channel;
@@ -268,6 +270,49 @@ pub fn probe(names: Vec<String>) -> Vec<AgentAvailability> {
             AgentAvailability { name, path }
         })
         .collect()
+}
+
+/// Refresh OpenCode's models.dev cache before its ACP session advertises the
+/// model picker. Filtering the command to OpenRouter keeps its otherwise large
+/// stdout small; `--refresh` still updates OpenCode's shared model cache first.
+pub fn refresh_opencode_models() -> Result<(), String> {
+    let resolved = resolve_program("opencode")
+        .ok_or_else(|| "`opencode` was not found on PATH".to_string())?;
+    let mut command = build_command(&resolved);
+    command.args(["models", "openrouter", "--refresh"]);
+    command
+        .env("NO_COLOR", "1")
+        .env("TERM", "dumb")
+        .env("TERM_PROGRAM", "Duckweed")
+        .env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    hide_console(&mut command);
+
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("failed to start `{}`: {error}", resolved.display()))?;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        match child.try_wait().map_err(err)? {
+            Some(status) if status.success() => return Ok(()),
+            Some(status) => {
+                return Err(format!(
+                    "OpenCode model refresh exited with {}",
+                    status
+                        .code()
+                        .map_or_else(|| "an error".into(), |code| code.to_string())
+                ));
+            }
+            None if Instant::now() < deadline => thread::sleep(Duration::from_millis(100)),
+            None => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("OpenCode model refresh timed out after 30 seconds".into());
+            }
+        }
+    }
 }
 
 /// Build the command for `program`, routing Windows batch shims through cmd.

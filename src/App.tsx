@@ -2513,6 +2513,9 @@ export default function App() {
       terminals.setHighlight(initial.highlight);
       terminals.setAgentUi(initial.customAgentUi);
       agentSessions.setFollowupMode(initial.agentFollowupMode);
+      // Keep OpenCode's OpenRouter picker current after app updates, Vite HMR,
+      // and manual WebView reloads. OpenCode launches share and await this task.
+      void agentSessions.refreshOpenCodeModels();
       terminals.setInputMode(initial.inputMode);
       preloadCompletionSound();
       // Durable storage has been restored into the WebView copy by now, so the

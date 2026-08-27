@@ -491,6 +491,9 @@ export const agentSessionTranscript = (agent: string, cwd: string, sessionId: st
 export const agentProcProbe = (names: string[]) =>
   invoke<AgentAvailability[]>("agent_proc_probe", { names });
 
+/** Refresh OpenCode's cached model registry, including its OpenRouter models. */
+export const openCodeModelsRefresh = () => invoke<void>("opencode_models_refresh");
+
 /** Launch a coding agent in its line-delimited JSON mode. */
 export const agentProcStart = (
   id: string,

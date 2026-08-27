@@ -6,6 +6,7 @@ import {
   agentProcSend,
   agentProcStart,
   agentProcStop,
+  openCodeModelsRefresh,
   type AgentFrame,
 } from "../ipc";
 import type { AdapterContext, AgentAdapter } from "./adapter";
@@ -372,6 +373,24 @@ function createAdapter(agent: AgentId): AgentAdapter {
 let availabilityProbe: Promise<Set<string>> | null = null;
 let availablePrograms: Set<string> = new Set();
 let availabilityKnown = false;
+
+/**
+ * One refresh per WebView lifetime. React remounts and an OpenCode launch can
+ * both request it, so keep the shared promise and let the launch await the
+ * same work the app boot already started.
+ */
+let openCodeModelsRefreshTask: Promise<void> | null = null;
+
+export function refreshOpenCodeModels(): Promise<void> {
+  if (!TAURI_RUNTIME) return Promise.resolve();
+  if (!openCodeModelsRefreshTask) {
+    openCodeModelsRefreshTask = openCodeModelsRefresh().catch(() => {
+      // OpenCode is optional, may be offline, or may not have OpenRouter set
+      // up. None of those should make Duckweed startup noisy or unusable.
+    });
+  }
+  return openCodeModelsRefreshTask;
+}
 
 export function probeAvailability(): Promise<Set<string>> {
   if (availabilityProbe) return availabilityProbe;
@@ -796,6 +815,10 @@ export async function start(
 ): Promise<string | null> {
   if (sessions.has(termId)) return null;
   if (!TAURI_RUNTIME) return "the custom agent UI needs the desktop app";
+
+  // OpenCode snapshots its model registry during the ACP handshake. Waiting
+  // here ensures a launch made during WebView startup sees the refreshed list.
+  if (launch.agent === "opencode") await refreshOpenCodeModels();
 
   // Explicit launch flags win field by field and become the next remembered
   // choice. Everything omitted inherits the last choice for this exact CLI.

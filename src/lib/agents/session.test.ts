@@ -62,6 +62,7 @@ mock.module("../ipc", () => ({
   agentProcStop: async () => {},
   agentProcCloseStdin: async () => {},
   agentProcProbe: async () => [],
+  openCodeModelsRefresh: async () => {},
   agentSessionTranscript: async () => [],
   agentSessionsList: async () => [],
   homeDir: async () => "H:/",
