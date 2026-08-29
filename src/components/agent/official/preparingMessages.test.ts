@@ -15,8 +15,8 @@ afterEach(() => {
 });
 
 describe("preparingMessages", () => {
-  test("the pool has six hundred short lines", () => {
-    expect(PREPARING_MESSAGES).toHaveLength(600);
+  test("the pool has short unique lines", () => {
+    expect(PREPARING_MESSAGES).toHaveLength(1093);
     for (const line of PREPARING_MESSAGES) {
       expect(line.length).toBeGreaterThan(0);
       expect(line.length).toBeLessThanOrEqual(24);
