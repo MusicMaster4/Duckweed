@@ -2185,17 +2185,15 @@ export function getHighlight(): boolean {
 /**
  * Turn the custom agent UI on or off.
  *
- * Switching it off ends every session that is already up: leaving them running
- * behind a setting that says they are off is the kind of half-applied state
- * that makes a toggle untrustworthy. The shell underneath is untouched either
- * way, so each pane simply becomes a terminal again.
+ * This is a launch preference, not a session-lifetime control. Existing custom
+ * sessions keep their interface and process until the user exits them, just as
+ * enabling the preference does not replace an agent already running in its
+ * terminal UI.
  */
 export function setAgentUi(enabled: boolean): void {
   if (agentUiEnabled === enabled) return;
   agentUiEnabled = enabled;
-  if (!enabled) {
-    for (const id of agentSessions.activeTermIds()) closeAgentUi(id);
-  } else {
+  if (enabled) {
     void agentSessions.probeAvailability();
   }
   notifySettings();

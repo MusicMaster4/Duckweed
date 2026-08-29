@@ -617,8 +617,8 @@ export function SettingsMenu({
                   <span className="settings-copy">
                     <strong>Custom Agent UI</strong>
                     <span>
-                      Show thinking, tool calls, and live diffs instead of the terminal UI for
-                      Claude Code, Codex, Cursor, Grok, and OpenCode
+                      Use thinking, tool calls, and live diffs for new Claude Code, Codex,
+                      Cursor, Grok, and OpenCode sessions. Current sessions keep running
                     </span>
                   </span>
                   <Toggle enabled={customAgentUi} />

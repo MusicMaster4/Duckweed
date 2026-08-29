@@ -3454,7 +3454,7 @@ export default function App() {
         id: "view.agentui",
         group: "View",
         title: customAgentUi ? "Turn off Custom Agent UI" : "Turn on Custom Agent UI",
-        subtitle: "Draw Duckweed's own interface over Claude, Codex, Cursor, Grok, and OpenCode",
+        subtitle: "Choose the interface for new agent launches; current sessions keep running",
         run: toggleCustomAgentUi,
       },
     ];

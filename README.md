@@ -379,7 +379,8 @@ transcripts Duckweed can measure even when they do not have a custom agent
 interface. Usage scanning support does not imply custom-interface support.
 
 Turn off **Custom Agent UI** from the command palette whenever you prefer to use
-an agent's original terminal interface.
+an agent's original terminal interface for new launches. Existing sessions keep
+their current interface and continue running until you exit them.
 
 ## Agent usage
 
