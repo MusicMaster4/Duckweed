@@ -296,6 +296,16 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
   /** Bounded memory of completions used to reject stale RPC/resume snapshots. */
   const completedRootTurnIds = new Set<string>();
   let rootCompletionTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * A completion is not settled until its quiet window expires. Keeping the
+   * provider turn addressable lets Stop and same-turn steering win races with
+   * terminal notifications, while a new auto-continuation can cancel it.
+   */
+  let rootPendingCompletion: { turnId: string | null } | null = null;
+  /** Same-turn input makes the first final answer non-terminal. */
+  let rootSteerRequestsInFlight = 0;
+  let rootTurnWasSteered = false;
+  let rootCompletionSeenDuringSteer: string | null | undefined;
   /** The resume RPC currently occupying the pane, so Stop can cancel it too. */
   let resumeRequestId: RequestKey | null = null;
   /**
@@ -379,24 +389,36 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     currentTurnId = null;
     rootTurnMayBeActive = false;
     rootTurnStatusConfirmed = false;
+    rootPendingCompletion = null;
+    rootSteerRequestsInFlight = 0;
+    rootTurnWasSteered = false;
+    rootCompletionSeenDuringSteer = undefined;
   }
 
   function cancelPendingRootCompletion(): void {
-    if (rootCompletionTimer === null) return;
-    clearTimeout(rootCompletionTimer);
-    rootCompletionTimer = null;
+    if (rootCompletionTimer !== null) {
+      clearTimeout(rootCompletionTimer);
+      rootCompletionTimer = null;
+    }
+    rootPendingCompletion = null;
   }
 
-  function scheduleRootCompletion(ctx: AdapterContext): void {
+  function scheduleRootCompletion(turnId: string | null, ctx: AdapterContext): void {
     cancelPendingRootCompletion();
-    if (completionQuietMs <= 0) {
+    rootPendingCompletion = { turnId };
+    const finish = () => {
+      rootCompletionTimer = null;
+      const completion = rootPendingCompletion;
+      rootPendingCompletion = null;
+      if (!completion || rootTurnSignalIsStale(completion.turnId)) return;
+      settleRootTurn(completion.turnId);
       ctx.emit({ type: "turn-end" });
+    };
+    if (completionQuietMs <= 0) {
+      finish();
       return;
     }
-    rootCompletionTimer = setTimeout(() => {
-      rootCompletionTimer = null;
-      ctx.emit({ type: "turn-end" });
-    }, completionQuietMs);
+    rootCompletionTimer = setTimeout(finish, completionQuietMs);
   }
 
   function newChildState(childThreadId: string): AgentSessionState {
@@ -1591,7 +1613,16 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         // turn completed. Keep the original user-owned stretch open.
         const turn = asRecord(params.turn);
         const startedTurnId = asString(turn?.id);
-        if (rootTurnSignalIsStale(startedTurnId)) return;
+        const continuesAfterPendingCompletion = Boolean(
+          rootPendingCompletion &&
+          startedTurnId &&
+          startedTurnId !== currentTurnId,
+        );
+        if (!continuesAfterPendingCompletion && rootTurnSignalIsStale(startedTurnId)) return;
+        if (startedTurnId !== currentTurnId) {
+          rootTurnWasSteered = false;
+          rootCompletionSeenDuringSteer = undefined;
+        }
         cancelPendingRootCompletion();
         currentTurnId = startedTurnId;
         rootTurnMayBeActive = true;
@@ -1611,9 +1642,12 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
             text: asString(error.message) ?? "The turn failed.",
           });
         }
-        rootCompletionVersion += 1;
-        settleRootTurn(completedTurnId);
-        scheduleRootCompletion(ctx);
+        if (rootSteerRequestsInFlight > 0) {
+          rootCompletionSeenDuringSteer = completedTurnId;
+        } else {
+          rootCompletionVersion += 1;
+          scheduleRootCompletion(completedTurnId, ctx);
+        }
         return;
       }
       case "thread/status/changed": {
@@ -1631,10 +1665,15 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
           // Codex acknowledges that turn, a thread-idle frame can still belong
           // to the turn that just released a queued follow-up.
           if (rootTurnMayBeActive && !wasActive) return;
-          if (wasActive) rootCompletionVersion += 1;
-          settleRootTurn(null);
-          if (wasActive) scheduleRootCompletion(ctx);
-          else if (rootCompletionTimer === null) ctx.emit({ type: "status", status: "idle" });
+          if (wasActive && rootSteerRequestsInFlight > 0) {
+            rootCompletionSeenDuringSteer = currentTurnId;
+          } else if (wasActive) {
+            rootCompletionVersion += 1;
+            scheduleRootCompletion(currentTurnId, ctx);
+          } else if (rootCompletionTimer === null) {
+            settleRootTurn(null);
+            ctx.emit({ type: "status", status: "idle" });
+          }
         } else if (status === "error") {
           cancelPendingRootCompletion();
           settleRootTurn(null);
@@ -1659,9 +1698,12 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
           // Use it when the visible answer arrives but the turn-completed and
           // thread-idle frames are missing, which would otherwise strand the
           // pane in working and suppress both completion effects.
-          rootCompletionVersion += 1;
-          settleRootTurn(itemTurnId);
-          scheduleRootCompletion(ctx);
+          if (rootSteerRequestsInFlight > 0) {
+            rootCompletionSeenDuringSteer = itemTurnId;
+          } else if (!rootTurnWasSteered) {
+            rootCompletionVersion += 1;
+            scheduleRootCompletion(itemTurnId, ctx);
+          }
         }
         return;
       }
@@ -1783,7 +1825,15 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     const turn = asRecord(params.turn);
     const eventTurnId = asString(params.turnId) ?? asString(turn?.id);
     if (method === "turn/started") {
-      return !currentTurnId || eventTurnId === currentTurnId;
+      return (
+        !currentTurnId ||
+        eventTurnId === currentTurnId ||
+        Boolean(
+          rootPendingCompletion &&
+          eventTurnId &&
+          !completedRootTurnIds.has(eventTurnId),
+        )
+      );
     }
     if (currentTurnId && eventTurnId && eventTurnId !== currentTurnId) return false;
     if (method === "turn/completed" && !currentTurnId && eventTurnId) {
@@ -2397,6 +2447,8 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     prompt: (prompt, ctx) => {
       if (!threadId) return;
       cancelPendingRootCompletion();
+      rootTurnWasSteered = false;
+      rootCompletionSeenDuringSteer = undefined;
       ctx.emit({ type: "user", text: prompt.text, images: prompt.images });
       ctx.emit({ type: "status", status: "working" });
       rootTurnMayBeActive = true;
@@ -2454,6 +2506,11 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
 
     steer: async (prompt, ctx) => {
       if (!threadId || !currentTurnId) return false;
+      rootSteerRequestsInFlight += 1;
+      // A terminal notification may already have armed the quiet window.
+      // Steering means that boundary is no longer the end of the turn.
+      const completionBeforeSteer = rootPendingCompletion;
+      cancelPendingRootCompletion();
       try {
         await request(ctx, "turn/steer", {
           threadId,
@@ -2466,6 +2523,8 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
             })),
           ],
         });
+        rootTurnWasSteered = true;
+        rootCompletionSeenDuringSteer = undefined;
         ctx.emit({
           type: "user",
           text: prompt.text,
@@ -2474,7 +2533,24 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         });
         return true;
       } catch {
+        // If Codex rejected the steer after a terminal signal landed, restore
+        // that boundary so the unmodified turn does not stay working forever.
+        const pendingCompletion =
+          rootCompletionSeenDuringSteer !== undefined
+            ? { turnId: rootCompletionSeenDuringSteer }
+            : completionBeforeSteer;
+        if (
+          rootSteerRequestsInFlight === 1 &&
+          !rootTurnWasSteered &&
+          pendingCompletion
+        ) {
+          rootCompletionVersion += 1;
+          scheduleRootCompletion(pendingCompletion.turnId, ctx);
+          rootCompletionSeenDuringSteer = undefined;
+        }
         return false;
+      } finally {
+        rootSteerRequestsInFlight = Math.max(0, rootSteerRequestsInFlight - 1);
       }
     },
 

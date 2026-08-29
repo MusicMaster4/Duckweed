@@ -2075,6 +2075,105 @@ describe("codex adapter", () => {
     expect(h.events.filter((event) => event.type === "turn-end")).toHaveLength(1);
   });
 
+  test("keeps the active turn steerable while a final-answer fallback is quiet", async () => {
+    const h = harness({}, { completionQuietMs: 20 });
+    await h.handshake();
+    h.adapter.prompt({ text: "inspect the failure", images: [] }, h.ctx);
+    h.notify("turn/started", {
+      threadId: "thread_1",
+      turn: { id: "turn_steered_final", status: "inProgress", items: [] },
+    });
+    h.notify("item/completed", {
+      threadId: "thread_1",
+      turnId: "turn_steered_final",
+      item: {
+        id: "answer_before_steer",
+        type: "agentMessage",
+        phase: "final_answer",
+        text: "The first answer.",
+      },
+    });
+
+    const steering = h.adapter.steer?.(
+      { text: "Check the other failing case too", images: [] },
+      h.ctx,
+    );
+    const steer = h.sent.at(-1) as { id: number };
+    expect(steer).toMatchObject({
+      method: "turn/steer",
+      params: {
+        threadId: "thread_1",
+        expectedTurnId: "turn_steered_final",
+      },
+    });
+    // The old response can finish on the notification channel before the
+    // steer RPC response is delivered. It must not invalidate that steer.
+    h.notify("turn/completed", {
+      threadId: "thread_1",
+      turn: { id: "turn_steered_final", status: "completed", items: [] },
+    });
+    expect(h.state().status).toBe("working");
+    h.feed({ jsonrpc: "2.0", id: steer.id, result: { turnId: "turn_steered_final" } });
+    await expect(steering).resolves.toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    expect(h.state().status).toBe("working");
+    expect(h.events.filter((event) => event.type === "turn-end")).toHaveLength(0);
+
+    h.notify("item/reasoning/textDelta", {
+      threadId: "thread_1",
+      turnId: "turn_steered_final",
+      itemId: "reasoning_after_steer",
+      delta: "Checking the other case now.",
+    });
+    expect(
+      h.state().items.some(
+        (item) => item.kind === "thinking" && item.text === "Checking the other case now.",
+      ),
+    ).toBe(true);
+
+    h.notify("turn/completed", {
+      threadId: "thread_1",
+      turn: { id: "turn_steered_final", status: "completed", items: [] },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(h.state().status).toBe("idle");
+    expect(h.events.filter((event) => event.type === "turn-end")).toHaveLength(1);
+  });
+
+  test("interrupts the provider turn while a final-answer fallback is quiet", async () => {
+    const h = harness({}, { completionQuietMs: 20 });
+    await h.handshake();
+    h.adapter.prompt({ text: "run the check", images: [] }, h.ctx);
+    h.notify("turn/started", {
+      threadId: "thread_1",
+      turn: { id: "turn_interrupt_final", status: "inProgress", items: [] },
+    });
+    h.notify("item/completed", {
+      threadId: "thread_1",
+      turnId: "turn_interrupt_final",
+      item: {
+        id: "answer_before_interrupt",
+        type: "agentMessage",
+        phase: "final_answer",
+        text: "Almost settled.",
+      },
+    });
+
+    h.adapter.interrupt(h.ctx);
+    const interrupt = h.sent.at(-1) as { id: number };
+    expect(interrupt).toMatchObject({
+      method: "turn/interrupt",
+      params: { threadId: "thread_1", turnId: "turn_interrupt_final" },
+    });
+    h.feed({ jsonrpc: "2.0", id: interrupt.id, result: {} });
+    await Promise.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    expect(h.state().status).toBe("idle");
+    expect(h.events.filter((event) => event.type === "turn-end")).toHaveLength(1);
+  });
+
   test("starts a turn with the typed prompt", async () => {
     const h = harness();
     await h.handshake();
