@@ -9588,6 +9588,45 @@ body.is-resizing * {
   padding: 5px 9px 2px;
 }
 
+/* The textarea retains native editing, selection, undo, and accessibility.
+   This inert layer paints agent-specific syntax with identical text metrics. */
+.agent-composer-editor {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+}
+
+.agent-composer-mirror {
+  position: absolute;
+  z-index: 0;
+  inset: 0;
+  max-height: 220px;
+  margin: 0;
+  padding: 4px 2px;
+  border: 0;
+  overflow: hidden;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  pointer-events: none;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: var(--terminal-font-size);
+  line-height: 1.5;
+}
+
+.agent-composer-token {
+  color: var(--text);
+}
+
+.agent-composer-token.token-command {
+  color: var(--accent-strong);
+}
+
+.agent-composer-token.token-file {
+  color: #8cc4ff;
+}
+
 /* T3-style control strip under the input: model + effort always one click away. */
 .agent-composer-footer {
   display: flex;
@@ -9598,9 +9637,13 @@ body.is-resizing * {
 }
 
 .agent-composer-input {
-  flex: 1;
+  position: relative;
+  z-index: 1;
+  display: block;
+  width: 100%;
   min-width: 0;
   max-height: 220px;
+  margin: 0;
   padding: 4px 2px;
   border: 0;
   background: transparent;
@@ -9610,9 +9653,23 @@ body.is-resizing * {
   font-family: var(--font-mono);
   font-size: var(--terminal-font-size);
   line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
   resize: none;
   outline: none;
   user-select: text;
+}
+
+.agent-composer-input.has-painted-text {
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+}
+
+.agent-composer-input.has-painted-text::selection {
+  background: rgba(123, 224, 90, 0.28);
+  color: transparent;
+  -webkit-text-fill-color: transparent;
 }
 
 .agent-composer-input::placeholder {

@@ -15,6 +15,7 @@ import {
   searchWorkspaceIndex,
   type FileMention,
 } from "../../lib/agentComposer";
+import { highlightAgentComposer } from "../../lib/agentComposerSyntax";
 import * as bus from "../../lib/bus";
 import {
   GUIDED_ARG_COMMANDS,
@@ -146,6 +147,7 @@ export function AgentComposer({
 }: Props) {
   const own = useRef<HTMLTextAreaElement>(null);
   const rootRef = useRef<HTMLDivElement>(null);
+  const mirrorRef = useRef<HTMLDivElement>(null);
   const ref = inputRef ?? own;
   const [value, setValue] = useState(() => agents.getDraft(session.termId));
   const [images, setImages] = useState(() => agents.getDraftImages(session.termId));
@@ -178,6 +180,8 @@ export function AgentComposer({
   const mention = useMemo(() => activeFileMention(value, cursor), [value, cursor]);
   const mentionKey = mention ? `${mention.start}:${mention.query}` : null;
   const commandMenu = buildMenu(value, session);
+  const paintedTokens = useMemo(() => highlightAgentComposer(value), [value]);
+  const showPaintedText = paintedTokens.some((token) => token.kind !== "plain");
   const menu: Menu | null =
     mention && mentionKey !== dismissedMention && fileRows.length
       ? { kind: "files", mention, rows: fileRows }
@@ -336,6 +340,10 @@ export function AgentComposer({
     node.style.height = "auto";
     const lineHeight = parseFloat(getComputedStyle(node).lineHeight) || 20;
     node.style.height = `${Math.min(node.scrollHeight, lineHeight * MAX_ROWS)}px`;
+    if (mirrorRef.current) {
+      mirrorRef.current.scrollTop = node.scrollTop;
+      mirrorRef.current.scrollLeft = node.scrollLeft;
+    }
   }, [value]);
 
   // Same registry the shell composer uses: pane activation, paste shortcuts,
@@ -818,40 +826,56 @@ export function AgentComposer({
         </div>
       )}
       <div className="agent-composer-row">
-        <textarea
-          ref={ref}
-          className="agent-composer-input"
-          value={value}
-          rows={1}
-          spellCheck={false}
-          placeholder={
-            subagentCopy
-              ? subagentCopy.placeholder
-              : exitArmed
-                ? "Ctrl+C again to close"
-                : loadingHistory
-                  ? "Queue a message after the conversation loads..."
-                : working
-                  ? agents.getFollowupMode() === "steer"
-                    ? "Steer this turn…"
-                    : "Queue a follow-up…"
-                  : `Message ${session.label}…`
-          }
-          aria-label={subagentCopy ? subagentCopy.ariaLabel : `Message ${session.label}`}
-          disabled={Boolean(subagentCopy?.disabled)}
-          onChange={(event) => {
-            // Typing after a Ctrl+C clear discards that one-shot undo.
-            if (undoClearRef.current !== null) undoClearRef.current = null;
-            // Manual edits leave history browse; the buffer is the new draft.
-            leaveHistoryBrowse();
-            change(event.target.value, event.target.selectionStart);
-          }}
-          onClick={(event) => setCursor(event.currentTarget.selectionStart)}
-          onKeyUp={(event) => setCursor(event.currentTarget.selectionStart)}
-          onSelect={(event) => setCursor(event.currentTarget.selectionStart)}
-          onKeyDown={onKeyDown}
-          onPaste={onPaste}
-        />
+        <div className="agent-composer-editor">
+          {showPaintedText && (
+            <div ref={mirrorRef} className="agent-composer-mirror" aria-hidden="true">
+              {paintedTokens.map((token, index) => (
+                <span key={index} className={`agent-composer-token token-${token.kind}`}>
+                  {token.text}
+                </span>
+              ))}
+            </div>
+          )}
+          <textarea
+            ref={ref}
+            className={`agent-composer-input${showPaintedText ? " has-painted-text" : ""}`}
+            value={value}
+            rows={1}
+            spellCheck={false}
+            placeholder={
+              subagentCopy
+                ? subagentCopy.placeholder
+                : exitArmed
+                  ? "Ctrl+C again to close"
+                  : loadingHistory
+                    ? "Queue a message after the conversation loads..."
+                    : working
+                      ? agents.getFollowupMode() === "steer"
+                        ? "Steer this turn…"
+                        : "Queue a follow-up…"
+                      : `Message ${session.label}…`
+            }
+            aria-label={subagentCopy ? subagentCopy.ariaLabel : `Message ${session.label}`}
+            disabled={Boolean(subagentCopy?.disabled)}
+            onChange={(event) => {
+              // Typing after a Ctrl+C clear discards that one-shot undo.
+              if (undoClearRef.current !== null) undoClearRef.current = null;
+              // Manual edits leave history browse; the buffer is the new draft.
+              leaveHistoryBrowse();
+              change(event.target.value, event.target.selectionStart);
+            }}
+            onClick={(event) => setCursor(event.currentTarget.selectionStart)}
+            onKeyUp={(event) => setCursor(event.currentTarget.selectionStart)}
+            onSelect={(event) => setCursor(event.currentTarget.selectionStart)}
+            onKeyDown={onKeyDown}
+            onPaste={onPaste}
+            onScroll={(event) => {
+              if (!mirrorRef.current) return;
+              mirrorRef.current.scrollTop = event.currentTarget.scrollTop;
+              mirrorRef.current.scrollLeft = event.currentTarget.scrollLeft;
+            }}
+          />
+        </div>
         {/* No send button: Enter submits, and a button that only ever repeats
             a key everybody already presses is a permanent third of the row. */}
         {working && (
