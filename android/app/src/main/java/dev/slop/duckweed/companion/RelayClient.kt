@@ -105,6 +105,24 @@ object RelayClient {
         )
     }
 
+    data class PendingMessage(val id: String, val sentAt: Long)
+
+    /** Recover relay payloads even when Android or FCM dropped the wake-up push. */
+    fun pendingMessages(credentials: PairCredentials): List<PendingMessage> {
+        val result = request(
+            method = "GET",
+            url = "${credentials.relayUrl}/v1/pairings/${credentials.pairId}/messages",
+            bearer = credentials.receiveToken,
+        )
+        val messages = result.optJSONArray("messages") ?: JSONArray()
+        return (0 until messages.length()).mapNotNull { index ->
+            val message = messages.optJSONObject(index) ?: return@mapNotNull null
+            val id = message.optString("messageId")
+            if (runCatching { UUID.fromString(id) }.isFailure) return@mapNotNull null
+            PendingMessage(id, message.optLong("sentAt"))
+        }
+    }
+
     fun acknowledge(credentials: PairCredentials, messageId: String) {
         request(
             method = "DELETE",
@@ -168,6 +186,72 @@ object RelayClient {
             .put("terminalId", terminalId)
             .put("permissionId", permissionId)
             .put("optionId", optionId),
+    )
+
+    fun sendQuestionAnswers(
+        credentials: PairCredentials,
+        projectId: String,
+        terminalId: String,
+        permissionId: String,
+        answers: List<RemoteQuestionAnswer>,
+    ): SentCommand = sendEncryptedCommand(
+        credentials,
+        JSONObject()
+            .put("kind", "question")
+            .put("projectId", projectId)
+            .put("terminalId", terminalId)
+            .put("permissionId", permissionId)
+            .put(
+                "answers",
+                JSONArray().apply {
+                    answers.forEach { answer ->
+                        put(
+                            JSONObject()
+                                .put("questionId", answer.questionId)
+                                .put("labels", JSONArray(answer.labels))
+                                .put("custom", answer.custom),
+                        )
+                    }
+                },
+            ),
+    )
+
+    fun sendRead(
+        credentials: PairCredentials,
+        terminalId: String,
+        completionSeq: Long?,
+        commandId: String,
+    ): SentCommand = sendEncryptedCommand(
+        credentials,
+        JSONObject()
+            .put("kind", "read")
+            .put("terminalId", terminalId)
+            .apply {
+                if (completionSeq != null) put("completionSeq", completionSeq)
+            },
+        commandId,
+    )
+
+    fun createTerminal(
+        credentials: PairCredentials,
+        projectId: String,
+        command: String,
+    ): SentCommand = sendEncryptedCommand(
+        credentials,
+        JSONObject()
+            .put("kind", "create_terminal")
+            .put("projectId", projectId)
+            .put("text", command),
+    )
+
+    fun closeTerminal(
+        credentials: PairCredentials,
+        terminalId: String,
+    ): SentCommand = sendEncryptedCommand(
+        credentials,
+        JSONObject()
+            .put("kind", "close_terminal")
+            .put("terminalId", terminalId),
     )
 
     private fun sendEncryptedCommand(

@@ -7,6 +7,7 @@ import {
   parseJson,
   type AdapterContext,
   type AgentAdapter,
+  type AgentCommandResult,
 } from "../adapter";
 import { isAuthenticationFailure } from "../auth";
 import { applyEvent, type AgentEvent } from "../events";
@@ -70,12 +71,42 @@ const FAST_SERVICE_TIER = "priority";
 const DEFAULT_SERVICE_TIER = "default";
 /** Matches the native log monitor's guard for Codex auto-continuations. */
 const ROOT_COMPLETION_QUIET_MS = 800;
+/**
+ * Codex `thread/resume` has no server-side timeout. A thread left `active`
+ * with no running turn never answers, which used to leave the pane loading
+ * forever. Ten seconds is long enough for a real page and short enough to
+ * recover before the composer looks wedged.
+ */
+const RESUME_RPC_TIMEOUT_MS = 10_000;
 const SIDE_DEVELOPER_INSTRUCTIONS = `You are in an ephemeral side conversation, not the main thread.
 Use the inherited conversation only as reference context. Answer only the question submitted after the fork. Do not continue tasks, plans, or tool calls inherited from the parent thread. Keep the response focused and do not modify files or workspace state.`;
+
+/** Side cards show the reply, not Codex commentary or reasoning traces. */
+function pickSideAnswer(messages: Map<string, CodexSideMessage>): string {
+  let lastAnswer = "";
+  let lastFinal = "";
+  let sawFinal = false;
+  for (const item of messages.values()) {
+    if (item.phase === "commentary") continue;
+    if (item.phase === "final_answer") {
+      lastFinal = item.text;
+      sawFinal = true;
+      continue;
+    }
+    if (!item.phase) lastAnswer = item.text;
+  }
+  return sawFinal ? lastFinal : lastAnswer;
+}
 
 interface CodexAdapterOptions {
   /** Test seam; production uses the same 800 ms quiet window as raw Codex. */
   completionQuietMs?: number;
+  /**
+   * How long `thread/resume` and history pages may sit unanswered before
+   * Duckweed cancels them. Codex can hang forever on a stale-active thread;
+   * production recovers by forking. `0` disables the timer (interrupt-only).
+   */
+  resumeTimeoutMs?: number;
 }
 
 const EXEC_STATUS: Record<string, ToolStatus> = {
@@ -195,6 +226,7 @@ interface Pending {
 type RequestKey = string | number;
 
 const RESUME_CANCELLED = "duckweed_resume_cancelled";
+const RESUME_TIMEOUT = "duckweed_resume_timeout";
 
 interface ChildThread {
   callId: string | null;
@@ -204,13 +236,28 @@ interface ChildThread {
   prompt: string | null;
   activity: string | null;
   currentTurnId: string | null;
+  streamed: Set<string>;
   state: AgentSessionState;
+}
+
+interface PendingChildSpawn {
+  callId: string;
+  prompt: string | null;
+  label: string;
+  model: string | null;
+  activity: string | null;
+}
+
+interface CodexSideMessage {
+  text: string;
+  /** Codex `commentary` is a thinking trace; `final_answer` is the reply. */
+  phase: string | null;
 }
 
 interface CodexSideThread {
   threadId: string | null;
   currentTurnId: string | null;
-  streamedItems: Set<string>;
+  messages: Map<string, CodexSideMessage>;
   sideQuestion: AgentSideQuestion;
 }
 
@@ -228,6 +275,7 @@ function readFileChanges(raw: unknown): AgentFileChange[] {
 
 export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdapter {
   const completionQuietMs = options.completionQuietMs ?? ROOT_COMPLETION_QUIET_MS;
+  const resumeTimeoutMs = options.resumeTimeoutMs ?? RESUME_RPC_TIMEOUT_MS;
   let nextId = 1;
   const pending = new Map<RequestKey, Pending>();
   let threadId: string | null = null;
@@ -248,6 +296,16 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
   /** Bounded memory of completions used to reject stale RPC/resume snapshots. */
   const completedRootTurnIds = new Set<string>();
   let rootCompletionTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * A completion is not settled until its quiet window expires. Keeping the
+   * provider turn addressable lets Stop and same-turn steering win races with
+   * terminal notifications, while a new auto-continuation can cancel it.
+   */
+  let rootPendingCompletion: { turnId: string | null } | null = null;
+  /** Same-turn input makes the first final answer non-terminal. */
+  let rootSteerRequestsInFlight = 0;
+  let rootTurnWasSteered = false;
+  let rootCompletionSeenDuringSteer: string | null | undefined;
   /** The resume RPC currently occupying the pane, so Stop can cancel it too. */
   let resumeRequestId: RequestKey | null = null;
   /**
@@ -256,6 +314,8 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
    * cannot be misrouted; side forks must still wait for that hydration.
    */
   let hydratingResume = false;
+  /** Stop pressed while resume RPCs were in flight or between recovery steps. */
+  let resumeAborted = false;
   /**
    * The model and effort turns run with. Seeded from the launch flags,
    * corrected by the `thread/start` response, and moved by /model and
@@ -286,8 +346,17 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
   const approvals = new Map<string, { id: string | number; kind: "command" | "file" }>();
   /** Child thread id to its live, independently reduced transcript. */
   const children = new Map<string, ChildThread>();
-  /** Avoid issuing the same final transcript reconciliation more than once. */
+  /** Spawn rows that arrived before app-server exposed their child thread id. */
+  const pendingChildSpawns = new Map<string, PendingChildSpawn>();
+  /** Avoid issuing the same automatic transcript reconciliation more than once. */
   const hydratedChildren = new Set<string>();
+  /** Coalesce focus, discovery, and completion reads for the same child. */
+  const hydratingChildren = new Map<string, Promise<boolean>>();
+  /** Queue one explicit refresh when focus arrives during an automatic read. */
+  const queuedChildRefreshes = new Map<string, Promise<boolean>>();
+  let childDiscoveryInFlight: Promise<void> | null = null;
+  let childDiscoveryRequested = false;
+  let childDiscoveryShouldSynthesize = false;
   /** Ephemeral `/side` and `/btw` forks, kept outside the main transcript. */
   const sideThreads = new Map<string, CodexSideThread>();
   let pendingSideThread: CodexSideThread | null = null;
@@ -303,29 +372,53 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     }
   }
 
+  /**
+   * A queued follow-up can start before every terminal notification from the
+   * previous turn has drained from app-server. Never let one of those late
+   * frames settle the new turn or append its final answer after the new user
+   * message.
+   */
+  function rootTurnSignalIsStale(turnId: string | null): boolean {
+    if (!turnId) return false;
+    if (completedRootTurnIds.has(turnId)) return true;
+    return currentTurnId !== null && currentTurnId !== turnId;
+  }
+
   function settleRootTurn(turnId: string | null): void {
     rememberRootTurnCompleted(turnId ?? currentTurnId);
     currentTurnId = null;
     rootTurnMayBeActive = false;
     rootTurnStatusConfirmed = false;
+    rootPendingCompletion = null;
+    rootSteerRequestsInFlight = 0;
+    rootTurnWasSteered = false;
+    rootCompletionSeenDuringSteer = undefined;
   }
 
   function cancelPendingRootCompletion(): void {
-    if (rootCompletionTimer === null) return;
-    clearTimeout(rootCompletionTimer);
-    rootCompletionTimer = null;
+    if (rootCompletionTimer !== null) {
+      clearTimeout(rootCompletionTimer);
+      rootCompletionTimer = null;
+    }
+    rootPendingCompletion = null;
   }
 
-  function scheduleRootCompletion(ctx: AdapterContext): void {
+  function scheduleRootCompletion(turnId: string | null, ctx: AdapterContext): void {
     cancelPendingRootCompletion();
-    if (completionQuietMs <= 0) {
+    rootPendingCompletion = { turnId };
+    const finish = () => {
+      rootCompletionTimer = null;
+      const completion = rootPendingCompletion;
+      rootPendingCompletion = null;
+      if (!completion || rootTurnSignalIsStale(completion.turnId)) return;
+      settleRootTurn(completion.turnId);
       ctx.emit({ type: "turn-end" });
+    };
+    if (completionQuietMs <= 0) {
+      finish();
       return;
     }
-    rootCompletionTimer = setTimeout(() => {
-      rootCompletionTimer = null;
-      ctx.emit({ type: "turn-end" });
-    }, completionQuietMs);
+    rootCompletionTimer = setTimeout(finish, completionQuietMs);
   }
 
   function newChildState(childThreadId: string): AgentSessionState {
@@ -369,6 +462,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       prompt: null,
       activity: null,
       currentTurnId: null,
+      streamed: new Set<string>(),
       state: newChildState(childThreadId),
     };
     children.set(childThreadId, child);
@@ -486,10 +580,30 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       : null;
   }
 
-  function hydrateChild(childThreadId: string, ctx: AdapterContext): void {
-    if (hydratedChildren.has(childThreadId)) return;
-    hydratedChildren.add(childThreadId);
-    void request(ctx, "thread/read", { threadId: childThreadId, includeTurns: true })
+  function hydrateChild(
+    childThreadId: string,
+    ctx: AdapterContext,
+    force = false,
+  ): Promise<boolean> {
+    if (!force && hydratedChildren.has(childThreadId)) return Promise.resolve(true);
+    const active = hydratingChildren.get(childThreadId);
+    if (active) {
+      if (!force) return active;
+      const queued = queuedChildRefreshes.get(childThreadId);
+      if (queued) return queued;
+      const refresh = active
+        .then(() => hydrateChild(childThreadId, ctx, true))
+        .finally(() => {
+          queuedChildRefreshes.delete(childThreadId);
+        });
+      queuedChildRefreshes.set(childThreadId, refresh);
+      return refresh;
+    }
+
+    const hydration = request(ctx, "thread/read", {
+      threadId: childThreadId,
+      includeTurns: true,
+    })
       .then((result) => {
         const thread = asRecord(result.thread) ?? result;
         const child = childFor(childThreadId);
@@ -507,7 +621,6 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         }
 
         const nested = childContext(childThreadId, ctx);
-        emitChild(childThreadId, { type: "transcript" }, ctx);
         for (const rawTurn of asArray(thread.turns)) {
           const turn = asRecord(rawTurn);
           if (!turn) continue;
@@ -515,7 +628,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
             const item = asRecord(rawItem);
             if (!item) continue;
             if (replayUserMessage(item, nested)) continue;
-            handleItem(item, true, nested);
+            handleItem(item, true, nested, child.streamed);
           }
         }
         emitChild(
@@ -526,11 +639,148 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
           },
           ctx,
         );
+        hydratedChildren.add(childThreadId);
+        return true;
       })
       .catch(() => {
         // Live child notifications remain the source of truth when this
         // app-server build does not expose thread/read for delegated threads.
+        return false;
+      })
+      .finally(() => {
+        hydratingChildren.delete(childThreadId);
       });
+    hydratingChildren.set(childThreadId, hydration);
+    return hydration;
+  }
+
+  function childPromptKey(value: string | null): string {
+    return value?.trim().replace(/\s+/g, " ").toLowerCase() ?? "";
+  }
+
+  function pendingSpawnForPrompt(prompt: string | null): PendingChildSpawn | null {
+    const key = childPromptKey(prompt);
+    if (key) {
+      const exact = [...pendingChildSpawns.values()].find(
+        (spawn) => childPromptKey(spawn.prompt) === key,
+      );
+      if (exact) return exact;
+    }
+    return pendingChildSpawns.size === 1
+      ? (pendingChildSpawns.values().next().value ?? null)
+      : null;
+  }
+
+  function unboundChildForPrompt(prompt: string | null): [string, ChildThread] | null {
+    const key = childPromptKey(prompt);
+    if (!key) return null;
+    return (
+      [...children.entries()].find(
+        ([, child]) => !child.callId && childPromptKey(child.prompt) === key,
+      ) ?? null
+    );
+  }
+
+  function adoptChildThread(
+    rawThread: Record<string, unknown>,
+    ctx: AdapterContext,
+    synthesizeMissing: boolean,
+  ): string | null {
+    const childThreadId = asString(rawThread.id);
+    if (!childThreadId || childThreadId === threadId) return null;
+
+    const child = childFor(childThreadId);
+    const preview = asString(rawThread.preview);
+    child.label =
+      asString(rawThread.agentNickname) ??
+      asString(rawThread.nickname) ??
+      child.label ??
+      (preview ? oneLine(preview, 80) : null);
+    child.role = asString(rawThread.agentRole) ?? asString(rawThread.role) ?? child.role;
+    child.model = asString(rawThread.model) ?? child.model;
+    child.prompt = preview ?? child.prompt;
+
+    const status = threadStatus(rawThread.status);
+    if (status) {
+      child.state = applyEvent(child.state, { type: "status", status });
+    }
+
+    if (!child.callId) {
+      const pendingSpawn = pendingSpawnForPrompt(child.prompt);
+      if (pendingSpawn) {
+        child.callId = pendingSpawn.callId;
+        child.label ??= pendingSpawn.label;
+        child.prompt ??= pendingSpawn.prompt;
+        child.model ??= pendingSpawn.model;
+        child.activity ??= pendingSpawn.activity;
+        pendingChildSpawns.delete(pendingSpawn.callId);
+      } else if (synthesizeMissing) {
+        child.callId = `codex-child:${childThreadId}`;
+        const label = child.label ?? child.prompt ?? "Subagent";
+        ctx.emit({
+          type: "tool",
+          callId: child.callId,
+          name: "subagent",
+          tool: "task",
+          title: `Subagent: ${oneLine(label, 80)}`,
+          status: childToolStatus(child.state.status),
+          subagent: {
+            threadId: childThreadId,
+            label: oneLine(label, 80),
+            ...(child.role ? { role: child.role } : {}),
+            ...(child.model ? { model: child.model } : {}),
+            ...(child.prompt ? { prompt: child.prompt } : {}),
+            activity: child.activity ?? "Loading conversation",
+          },
+        });
+      }
+    }
+
+    if (child.callId) {
+      syncChild(childThreadId, ctx);
+      void hydrateChild(childThreadId, ctx);
+    }
+    return childThreadId;
+  }
+
+  function discoverChildThreads(
+    ctx: AdapterContext,
+    synthesizeMissing = false,
+  ): Promise<void> {
+    if (!threadId) return Promise.resolve();
+    childDiscoveryRequested = true;
+    childDiscoveryShouldSynthesize ||= synthesizeMissing;
+    if (childDiscoveryInFlight) return childDiscoveryInFlight;
+
+    const discover = async () => {
+      while (childDiscoveryRequested && threadId) {
+        childDiscoveryRequested = false;
+        const synthesize = childDiscoveryShouldSynthesize;
+        childDiscoveryShouldSynthesize = false;
+        const parentThreadId = threadId;
+        try {
+          const result = await request(ctx, "thread/list", {
+            parentThreadId,
+            limit: 100,
+            sortKey: "created_at",
+            sortDirection: "asc",
+          });
+          for (const rawThread of asArray(result.data)) {
+            const childThread = asRecord(rawThread);
+            if (!childThread) continue;
+            adoptChildThread(childThread, ctx, synthesize);
+          }
+        } catch {
+          // Older app-server builds can stream child events without supporting
+          // the experimental parentThreadId filter.
+        }
+      }
+    };
+
+    childDiscoveryInFlight = discover().finally(() => {
+      childDiscoveryInFlight = null;
+    });
+    return childDiscoveryInFlight;
   }
 
   function request(
@@ -553,12 +803,92 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     });
   }
 
+  function resumeErrorCode(error: unknown): string | null {
+    return asString(asRecord(error)?.code);
+  }
+
+  function throwIfResumeAborted(): void {
+    if (!resumeAborted) return;
+    throw { code: RESUME_CANCELLED };
+  }
+
+  /**
+   * Same as `requestWithId`, but a silent Codex hang cannot occupy the pane
+   * forever. The timer is a client watchdog: app-server has none for resume.
+   */
+  function requestWithTimeout(
+    ctx: AdapterContext,
+    id: RequestKey,
+    method: string,
+    params: unknown,
+  ): Promise<Record<string, unknown>> {
+    if (resumeTimeoutMs <= 0) return requestWithId(ctx, id, method, params);
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      const finish = (action: () => void) => {
+        if (settled) return;
+        settled = true;
+        if (timer !== null) clearTimeout(timer);
+        pending.delete(id);
+        action();
+      };
+      timer = setTimeout(() => {
+        finish(() => {
+          notify(ctx, "$/cancelRequest", { id });
+          reject({
+            code: RESUME_TIMEOUT,
+            message: "Codex did not resume that conversation.",
+          });
+        });
+      }, resumeTimeoutMs);
+      pending.set(id, {
+        resolve: (result) => finish(() => resolve(result)),
+        reject: (error) => finish(() => reject(error)),
+      });
+      ctx.send({ jsonrpc: "2.0", id, method, params });
+    });
+  }
+
+  function resumeThreadParams(targetId: string): Record<string, unknown> {
+    return {
+      threadId: targetId,
+      excludeTurns: true,
+      initialTurnsPage: {
+        limit: RESUME_PAGE_SIZE,
+        sortDirection: "desc",
+        itemsView: "full",
+      },
+    };
+  }
+
   function notify(ctx: AdapterContext, method: string, params: unknown) {
     ctx.send({ jsonrpc: "2.0", method, params });
   }
 
   function emitSide(side: CodexSideThread, ctx: AdapterContext): void {
     ctx.emit({ type: "side-question", sideQuestion: { ...side.sideQuestion } });
+  }
+
+  function noteSideMessage(
+    side: CodexSideThread,
+    itemId: string,
+    patch: { text?: string; phase?: string | null; append?: boolean },
+  ): CodexSideMessage {
+    const current = side.messages.get(itemId) ?? { text: "", phase: null };
+    if (patch.phase) current.phase = patch.phase;
+    if (patch.text) {
+      current.text = patch.append ? current.text + patch.text : patch.text;
+    }
+    side.messages.set(itemId, current);
+    return current;
+  }
+
+  function publishSideAnswer(side: CodexSideThread, ctx: AdapterContext): void {
+    const next = pickSideAnswer(side.messages);
+    if (next === side.sideQuestion.answer) return;
+    side.sideQuestion.answer = next;
+    emitSide(side, ctx);
   }
 
   function finishSide(
@@ -571,6 +901,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     if (!side) return;
     side.currentTurnId = null;
     side.sideQuestion.status = status;
+    side.sideQuestion.answer = pickSideAnswer(side.messages);
     if (!side.sideQuestion.answer.trim() && fallback) side.sideQuestion.answer = fallback;
     if (status === "answered" && !side.sideQuestion.answer.trim()) {
       side.sideQuestion.status = "error";
@@ -598,24 +929,35 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       case "turn/started":
         side.currentTurnId = asString(asRecord(params.turn)?.id);
         return;
+      case "item/started": {
+        const item = asRecord(params.item);
+        const itemId = asString(item?.id);
+        if (!item || asString(item.type) !== "agentMessage" || !itemId) return;
+        noteSideMessage(side, itemId, { phase: asString(item.phase) });
+        publishSideAnswer(side, ctx);
+        return;
+      }
       case "item/agentMessage/delta": {
         const itemId = asString(params.itemId);
         const delta = asString(params.delta);
         if (!itemId || !delta) return;
-        side.streamedItems.add(itemId);
-        side.sideQuestion.answer += delta;
-        emitSide(side, ctx);
+        noteSideMessage(side, itemId, {
+          text: delta,
+          phase: asString(params.phase),
+          append: true,
+        });
+        publishSideAnswer(side, ctx);
         return;
       }
       case "item/completed": {
         const item = asRecord(params.item);
         const itemId = asString(item?.id);
-        if (asString(item?.type) !== "agentMessage" || !itemId) return;
-        const text = asString(item?.text) ?? "";
-        if (text && !side.streamedItems.has(itemId)) {
-          side.sideQuestion.answer += text;
-          emitSide(side, ctx);
-        }
+        if (!item || asString(item.type) !== "agentMessage" || !itemId) return;
+        noteSideMessage(side, itemId, {
+          text: asString(item.text) ?? "",
+          phase: asString(item.phase),
+        });
+        publishSideAnswer(side, ctx);
         return;
       }
       case "turn/completed": {
@@ -638,7 +980,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
           finishSide(sideThreadId, "error", ctx, "The side conversation failed.");
         } else if (
           status === "idle" &&
-          (side.currentTurnId || side.sideQuestion.answer.trim())
+          (side.currentTurnId || side.sideQuestion.answer.trim() || side.messages.size > 0)
         ) {
           // Thread-level idle is Codex's reconciliation channel. Side forks
           // often receive this without a matching turn/completed, which would
@@ -686,7 +1028,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     const side: CodexSideThread = {
       threadId: null,
       currentTurnId: null,
-      streamedItems: new Set(),
+      messages: new Map(),
       sideQuestion: {
         id: `codex-side-${sideSequence}`,
         command,
@@ -870,7 +1212,12 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
   }
 
   /** One thread item, in whichever state it arrived. */
-  function handleItem(item: Record<string, unknown>, settled: boolean, ctx: AdapterContext) {
+  function handleItem(
+    item: Record<string, unknown>,
+    settled: boolean,
+    ctx: AdapterContext,
+    streamedItems = streamed,
+  ) {
     const id = asString(item.id);
     const type = asString(item.type);
     if (!id || !type) return;
@@ -879,7 +1226,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       case "agentMessage": {
         if (!settled) return;
         const text = asString(item.text) ?? "";
-        if (text && !streamed.has(`am-${id}`)) {
+        if (text && !streamedItems.has(`am-${id}`)) {
           ctx.emit({ type: "assistant-delta", id: `am-${id}`, text });
         }
         ctx.emit({ type: "assistant-end", id: `am-${id}` });
@@ -891,7 +1238,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
           .map((part) => asString(part) ?? "")
           .filter(Boolean)
           .join("\n");
-        if (text && !streamed.has(`rs-${id}`)) {
+        if (text && !streamedItems.has(`rs-${id}`)) {
           ctx.emit({ type: "thinking-delta", id: `rs-${id}`, text });
         }
         ctx.emit({ type: "thinking-end", id: `rs-${id}` });
@@ -959,11 +1306,21 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         const prompt = asString(item.prompt);
         const model = asString(item.model);
         const effort = asString(item.reasoningEffort);
-        const receiverIds = asArray(item.receiverThreadIds)
+        const explicitReceiverIds = asArray(item.receiverThreadIds)
           .map((entry) => asString(entry) ?? "")
           .filter(Boolean);
         const states = asRecord(item.agentsStates);
         const stateEntries = states ? Object.entries(states) : [];
+        let receiverIds = [
+          ...new Set([
+            ...explicitReceiverIds,
+            ...(isSpawn ? stateEntries.map(([agentId]) => agentId) : []),
+          ]),
+        ];
+        if (isSpawn && receiverIds.length === 0) {
+          const unboundChild = unboundChildForPrompt(prompt);
+          if (unboundChild) receiverIds = [unboundChild[0]];
+        }
         const stateLines = stateEntries.length
           ? stateEntries.map(([agentId, raw]) => {
               const state = asRecord(raw);
@@ -1021,6 +1378,17 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
                   ? "error"
                   : null;
         if (isSpawn) {
+          if (receiverIds.length === 0) {
+            pendingChildSpawns.set(id, {
+              callId: id,
+              prompt,
+              label: prompt ? oneLine(prompt, 80) : operation,
+              model,
+              activity: activity ? oneLine(activity, 120) : null,
+            });
+          } else {
+            pendingChildSpawns.delete(id);
+          }
           for (const receiverId of receiverIds) {
             const child = childFor(receiverId);
             child.callId = id;
@@ -1068,8 +1436,9 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         if (isSpawn) {
           for (const receiverId of receiverIds) {
             syncChild(receiverId, ctx);
-            if (settled) hydrateChild(receiverId, ctx);
+            void hydrateChild(receiverId, ctx, settled);
           }
+          if (receiverIds.length === 0) void discoverChildThreads(ctx);
         }
         return;
       }
@@ -1077,6 +1446,27 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         const kind = asString(item.kind) ?? "interacted";
         const agentPath = asString(item.agentPath);
         const agentThreadId = asString(item.agentThreadId);
+        if (agentThreadId) {
+          adoptChildThread(
+            {
+              id: agentThreadId,
+              ...(agentPath ? { agentRole: agentPath } : {}),
+            },
+            ctx,
+            false,
+          );
+          const child = childFor(agentThreadId);
+          child.activity = kind.replace(/([a-z])([A-Z])/g, "$1 $2");
+          child.state = applyEvent(child.state, {
+            type: "status",
+            status: kind === "interrupted" ? "error" : kind === "started" ? "working" : "idle",
+          });
+          if (child.callId) {
+            syncChild(agentThreadId, ctx);
+            void hydrateChild(agentThreadId, ctx);
+            return;
+          }
+        }
         ctx.emit({
           type: "tool",
           callId: id,
@@ -1179,6 +1569,13 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
   }
 
   function handleNotification(method: string, params: Record<string, unknown>, ctx: AdapterContext) {
+    const notificationTurnId = asString(params.turnId);
+    if (
+      (method.startsWith("item/") || method === "turn/plan/updated") &&
+      rootTurnSignalIsStale(notificationTurnId)
+    ) {
+      return;
+    }
     if (
       rootTurnMayBeActive &&
       (method.startsWith("item/") || method === "turn/plan/updated")
@@ -1214,9 +1611,20 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       case "turn/started": {
         // Codex goals can auto-continue a few milliseconds after the previous
         // turn completed. Keep the original user-owned stretch open.
-        cancelPendingRootCompletion();
         const turn = asRecord(params.turn);
-        currentTurnId = asString(turn?.id);
+        const startedTurnId = asString(turn?.id);
+        const continuesAfterPendingCompletion = Boolean(
+          rootPendingCompletion &&
+          startedTurnId &&
+          startedTurnId !== currentTurnId,
+        );
+        if (!continuesAfterPendingCompletion && rootTurnSignalIsStale(startedTurnId)) return;
+        if (startedTurnId !== currentTurnId) {
+          rootTurnWasSteered = false;
+          rootCompletionSeenDuringSteer = undefined;
+        }
+        cancelPendingRootCompletion();
+        currentTurnId = startedTurnId;
         rootTurnMayBeActive = true;
         rootTurnStatusConfirmed = true;
         ctx.emit({ type: "status", status: "working" });
@@ -1225,6 +1633,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       case "turn/completed": {
         const turn = asRecord(params.turn);
         const completedTurnId = asString(turn?.id);
+        if (rootTurnSignalIsStale(completedTurnId)) return;
         const error = asRecord(turn?.error);
         if (error) {
           ctx.emit({
@@ -1233,9 +1642,12 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
             text: asString(error.message) ?? "The turn failed.",
           });
         }
-        rootCompletionVersion += 1;
-        settleRootTurn(completedTurnId);
-        scheduleRootCompletion(ctx);
+        if (rootSteerRequestsInFlight > 0) {
+          rootCompletionSeenDuringSteer = completedTurnId;
+        } else {
+          rootCompletionVersion += 1;
+          scheduleRootCompletion(completedTurnId, ctx);
+        }
         return;
       }
       case "thread/status/changed": {
@@ -1249,10 +1661,19 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
           // This is Codex's thread-level reconciliation channel. It closes the
           // turn when a start/completed notification was lost or reordered.
           const wasActive = rootTurnStatusConfirmed || currentTurnId !== null;
-          if (wasActive) rootCompletionVersion += 1;
-          settleRootTurn(null);
-          if (wasActive) scheduleRootCompletion(ctx);
-          else if (rootCompletionTimer === null) ctx.emit({ type: "status", status: "idle" });
+          // Sending turn/start only proves that Duckweed asked for work. Until
+          // Codex acknowledges that turn, a thread-idle frame can still belong
+          // to the turn that just released a queued follow-up.
+          if (rootTurnMayBeActive && !wasActive) return;
+          if (wasActive && rootSteerRequestsInFlight > 0) {
+            rootCompletionSeenDuringSteer = currentTurnId;
+          } else if (wasActive) {
+            rootCompletionVersion += 1;
+            scheduleRootCompletion(currentTurnId, ctx);
+          } else if (rootCompletionTimer === null) {
+            settleRootTurn(null);
+            ctx.emit({ type: "status", status: "idle" });
+          }
         } else if (status === "error") {
           cancelPendingRootCompletion();
           settleRootTurn(null);
@@ -1265,6 +1686,8 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         return;
       case "item/completed": {
         const item = asRecord(params.item) ?? {};
+        const itemTurnId = asString(params.turnId);
+        if (rootTurnSignalIsStale(itemTurnId)) return;
         handleItem(item, true, ctx);
         if (
           rootTurnMayBeActive &&
@@ -1275,9 +1698,12 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
           // Use it when the visible answer arrives but the turn-completed and
           // thread-idle frames are missing, which would otherwise strand the
           // pane in working and suppress both completion effects.
-          rootCompletionVersion += 1;
-          settleRootTurn(asString(params.turnId));
-          scheduleRootCompletion(ctx);
+          if (rootSteerRequestsInFlight > 0) {
+            rootCompletionSeenDuringSteer = itemTurnId;
+          } else if (!rootTurnWasSteered) {
+            rootCompletionVersion += 1;
+            scheduleRootCompletion(itemTurnId, ctx);
+          }
         }
         return;
       }
@@ -1399,7 +1825,15 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     const turn = asRecord(params.turn);
     const eventTurnId = asString(params.turnId) ?? asString(turn?.id);
     if (method === "turn/started") {
-      return !currentTurnId || eventTurnId === currentTurnId;
+      return (
+        !currentTurnId ||
+        eventTurnId === currentTurnId ||
+        Boolean(
+          rootPendingCompletion &&
+          eventTurnId &&
+          !completedRootTurnIds.has(eventTurnId),
+        )
+      );
     }
     if (currentTurnId && eventTurnId && eventTurnId !== currentTurnId) return false;
     if (method === "turn/completed" && !currentTurnId && eventTurnId) {
@@ -1421,12 +1855,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     switch (method) {
       case "thread/started": {
         const thread = asRecord(params.thread);
-        const child = childFor(childThreadId);
-        child.label =
-          asString(thread?.agentNickname) ?? asString(thread?.nickname) ?? child.label;
-        child.role = asString(thread?.agentRole) ?? asString(thread?.role) ?? child.role;
-        child.model = asString(thread?.model) ?? child.model;
-        syncChild(childThreadId, ctx);
+        if (thread) adoptChildThread(thread, ctx, false);
         return;
       }
       case "turn/started": {
@@ -1453,7 +1882,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         } else {
           emitChild(childThreadId, { type: "turn-end" }, ctx);
         }
-        hydrateChild(childThreadId, ctx);
+        void hydrateChild(childThreadId, ctx, true);
         return;
       }
       case "thread/status/changed": {
@@ -1463,20 +1892,32 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
           childFor(childThreadId).currentTurnId = null;
         }
         if (status) emitChild(childThreadId, { type: "status", status }, ctx);
-        if (status === "idle" || status === "error") hydrateChild(childThreadId, ctx);
+        if (status === "idle" || status === "error") {
+          void hydrateChild(childThreadId, ctx, true);
+        }
         return;
       }
       case "item/started":
-        handleItem(asRecord(params.item) ?? {}, false, nested);
+        handleItem(
+          asRecord(params.item) ?? {},
+          false,
+          nested,
+          childFor(childThreadId).streamed,
+        );
         return;
       case "item/completed":
-        handleItem(asRecord(params.item) ?? {}, true, nested);
+        handleItem(
+          asRecord(params.item) ?? {},
+          true,
+          nested,
+          childFor(childThreadId).streamed,
+        );
         return;
       case "item/agentMessage/delta": {
         const itemId = asString(params.itemId);
         const delta = asString(params.delta);
         if (!itemId || !delta) return;
-        streamed.add(`am-${itemId}`);
+        childFor(childThreadId).streamed.add(`am-${itemId}`);
         emitChild(childThreadId, { type: "assistant-delta", id: `am-${itemId}`, text: delta }, ctx);
         return;
       }
@@ -1485,7 +1926,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         const itemId = asString(params.itemId);
         const delta = asString(params.delta);
         if (!itemId || !delta) return;
-        streamed.add(`rs-${itemId}`);
+        childFor(childThreadId).streamed.add(`rs-${itemId}`);
         emitChild(childThreadId, { type: "thinking-delta", id: `rs-${itemId}`, text: delta }, ctx);
         return;
       }
@@ -1660,23 +2101,23 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       .catch((error: unknown) => goalError(error, "Codex could not set the goal.", ctx));
   }
 
-  function handleGoalCommand(arg: string, ctx: AdapterContext): void {
+  function handleGoalCommand(arg: string, ctx: AdapterContext): boolean {
     if (!arg) {
       getGoal(ctx);
-      return;
+      return false;
     }
     const action = arg.toLowerCase();
     if (action === "clear") {
       clearGoal(ctx);
-      return;
+      return false;
     }
     if (action === "pause") {
       setGoalStatus("paused", ctx);
-      return;
+      return false;
     }
     if (action === "resume") {
       setGoalStatus("active", ctx);
-      return;
+      return true;
     }
     if (action === "edit" || action === "help") {
       ctx.emit({
@@ -1685,7 +2126,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         text:
           "Usage: /goal <objective>, /goal edit <objective>, /goal pause, /goal resume, or /goal clear.",
       });
-      return;
+      return false;
     }
 
     const edit = /^edit\s+([\s\S]+)$/i.exec(arg);
@@ -1696,10 +2137,14 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         tone: "error",
         text: `Goal objectives can be at most ${MAX_GOAL_OBJECTIVE_CHARS.toLocaleString("en-US")} characters. Put longer instructions in a file and refer to it from the goal.`,
       });
-      return;
+      return false;
     }
     if (edit) editGoal(objective, ctx);
     else replaceGoal(objective, ctx);
+    // An active goal is provider-owned work: Codex starts its turn from the
+    // goal RPC rather than from adapter.prompt(), so the session must retain
+    // completion ownership until that turn settles.
+    return true;
   }
 
   /** Codex TUI controls that Duckweed maps onto app-server requests. */
@@ -1798,7 +2243,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       });
   }
 
-  function handleCommand(text: string, ctx: AdapterContext): "handled" | "prompt" {
+  function handleCommand(text: string, ctx: AdapterContext): AgentCommandResult {
     const space = text.search(/\s/);
     const name = (space < 0 ? text : text.slice(0, space)).toLowerCase();
     const arg = space < 0 ? "" : text.slice(space + 1).trim();
@@ -1899,8 +2344,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     }
 
     if (name === "/goal") {
-      handleGoalCommand(arg, ctx);
-      return "handled";
+      return handleGoalCommand(arg, ctx) ? "handled-turn" : "handled";
     }
 
     ctx.emit({
@@ -2003,10 +2447,15 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     prompt: (prompt, ctx) => {
       if (!threadId) return;
       cancelPendingRootCompletion();
+      rootTurnWasSteered = false;
+      rootCompletionSeenDuringSteer = undefined;
       ctx.emit({ type: "user", text: prompt.text, images: prompt.images });
       ctx.emit({ type: "status", status: "working" });
       rootTurnMayBeActive = true;
-      rootTurnStatusConfirmed = true;
+      // The request is optimistic. A start response/notification, live item,
+      // or active thread status must confirm it before thread-idle is allowed
+      // to close this turn.
+      rootTurnStatusConfirmed = false;
       const generation = ++rootTurnGeneration;
       void request(ctx, "turn/start", {
         threadId,
@@ -2057,6 +2506,11 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
 
     steer: async (prompt, ctx) => {
       if (!threadId || !currentTurnId) return false;
+      rootSteerRequestsInFlight += 1;
+      // A terminal notification may already have armed the quiet window.
+      // Steering means that boundary is no longer the end of the turn.
+      const completionBeforeSteer = rootPendingCompletion;
+      cancelPendingRootCompletion();
       try {
         await request(ctx, "turn/steer", {
           threadId,
@@ -2069,6 +2523,8 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
             })),
           ],
         });
+        rootTurnWasSteered = true;
+        rootCompletionSeenDuringSteer = undefined;
         ctx.emit({
           type: "user",
           text: prompt.text,
@@ -2077,8 +2533,39 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         });
         return true;
       } catch {
+        // If Codex rejected the steer after a terminal signal landed, restore
+        // that boundary so the unmodified turn does not stay working forever.
+        const pendingCompletion =
+          rootCompletionSeenDuringSteer !== undefined
+            ? { turnId: rootCompletionSeenDuringSteer }
+            : completionBeforeSteer;
+        if (
+          rootSteerRequestsInFlight === 1 &&
+          !rootTurnWasSteered &&
+          pendingCompletion
+        ) {
+          rootCompletionVersion += 1;
+          scheduleRootCompletion(pendingCompletion.turnId, ctx);
+          rootCompletionSeenDuringSteer = undefined;
+        }
         return false;
+      } finally {
+        rootSteerRequestsInFlight = Math.max(0, rootSteerRequestsInFlight - 1);
       }
+    },
+
+    inspectSubagent: async (callId, childThreadId, ctx) => {
+      if (childThreadId) {
+        const child = childFor(childThreadId);
+        child.callId ??= callId;
+        syncChild(childThreadId, ctx);
+        return hydrateChild(childThreadId, ctx, true);
+      }
+
+      await discoverChildThreads(ctx);
+      const linked = [...children.entries()].find(([, child]) => child.callId === callId);
+      if (!linked) return false;
+      return hydrateChild(linked[0], ctx, true);
     },
 
     promptSubagent: async (childThreadId, prompt, ctx) => {
@@ -2161,61 +2648,111 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     /**
      * `thread/resume` keeps the running process. Newer app-server builds page
      * the transcript, so hydrate bounded full-detail pages before replaying it.
+     *
+     * Codex can leave a thread `active` with no running turn after an aborted
+     * session. `thread/resume` then never answers. Time out, fork a copy (the
+     * idle fork resumes immediately), and still paint whatever history pages
+     * arrived so the composer does not sit on "Loading conversation" forever.
      */
     resume: (sessionId, ctx) => {
       cancelPendingRootCompletion();
       hydratingResume = true;
+      resumeAborted = false;
       ctx.emit({ type: "history-loading", loading: true });
       ctx.emit({ type: "status", status: "working" });
       ctx.emit({ type: "goal", goal: null });
       const previousThreadId = threadId;
+      let targetId = sessionId;
       // Claim the target before awaiting `thread/resume`. A live resumed turn
       // can finish while that request or its transcript pages are in flight;
       // leaving the old id here used to route the real completion as a child.
-      threadId = sessionId;
+      threadId = targetId;
       currentTurnId = null;
       rootTurnMayBeActive = true;
       rootTurnStatusConfirmed = false;
       const resumeGeneration = ++rootTurnGeneration;
       const resumeCompletionVersion = rootCompletionVersion;
 
-      const load = async (): Promise<boolean> => {
+      const callResume = (id: string): Promise<Record<string, unknown>> => {
+        throwIfResumeAborted();
         const requestId = nextId++;
         resumeRequestId = requestId;
-        const result = await requestWithId(ctx, requestId, "thread/resume", {
-          threadId: sessionId,
-          excludeTurns: true,
-          initialTurnsPage: {
-            limit: RESUME_PAGE_SIZE,
-            sortDirection: "desc",
-            itemsView: "full",
-          },
+        return requestWithTimeout(ctx, requestId, "thread/resume", resumeThreadParams(id));
+      };
+
+      const recoverHungResume = async (hungId: string): Promise<Record<string, unknown>> => {
+        throwIfResumeAborted();
+        const forkRequestId = nextId++;
+        resumeRequestId = forkRequestId;
+        const forked = await requestWithTimeout(ctx, forkRequestId, "thread/fork", {
+          threadId: hungId,
+          cwd: ctx.cwd,
+          ...threadAccessParams(currentAccess),
+          ...(currentModel ? { model: currentModel } : {}),
         });
+        const copyId =
+          asString(asRecord(forked.thread)?.id) ?? asString(forked.id);
+        if (!copyId) throw { message: "Codex could not copy that thread." };
+        threadId = copyId;
+        targetId = copyId;
+        return callResume(copyId);
+      };
+
+      const load = async (): Promise<boolean> => {
+        let result: Record<string, unknown>;
+        let recoveredFromHang = false;
+        try {
+          result = await callResume(targetId);
+        } catch (error: unknown) {
+          if (resumeErrorCode(error) !== RESUME_TIMEOUT) throw error;
+          result = await recoverHungResume(targetId);
+          recoveredFromHang = true;
+        }
+        throwIfResumeAborted();
         const thread = asRecord(result.thread) ?? result;
-        threadId = asString(thread.id) ?? sessionId;
+        threadId = asString(thread.id) ?? targetId;
 
         const initialPage = asRecord(result.initialTurnsPage);
         const paginated = initialPage !== null;
         const turns = paginated ? asArray(initialPage.data) : asArray(thread.turns);
-        let cursor = asString(initialPage?.nextCursor);
+        let cursor = paginated
+          ? asString(initialPage?.nextCursor)
+          : asString(result.turnsBackwardsCursor);
+        const descending = paginated || cursor !== null;
         while (cursor && turns.length < MAX_RESUMED_TURNS) {
+          throwIfResumeAborted();
           const pageRequestId = nextId++;
           resumeRequestId = pageRequestId;
-          const page = await requestWithId(ctx, pageRequestId, "thread/turns/list", {
-            threadId,
-            cursor,
-            limit: Math.min(RESUME_PAGE_SIZE, MAX_RESUMED_TURNS - turns.length),
-            sortDirection: "desc",
-            itemsView: "full",
-          });
-          turns.push(...asArray(page.data));
-          cursor = asString(page.nextCursor);
+          try {
+            const page = await requestWithTimeout(ctx, pageRequestId, "thread/turns/list", {
+              threadId,
+              cursor,
+              limit: Math.min(RESUME_PAGE_SIZE, MAX_RESUMED_TURNS - turns.length),
+              sortDirection: "desc",
+              itemsView: "full",
+            });
+            turns.push(...asArray(page.data));
+            cursor = asString(page.nextCursor);
+          } catch (error: unknown) {
+            if (resumeErrorCode(error) === RESUME_CANCELLED) throw error;
+            // A hung or unsupported page must not keep the composer locked.
+            // Replay whatever already arrived.
+            cursor = null;
+          }
         }
 
         // Descending pagination starts at the newest turn. The transcript
         // renderer expects natural conversation order from oldest to newest.
-        const chronologicalTurns = paginated ? turns.reverse() : turns;
+        const chronologicalTurns = descending ? turns.reverse() : turns;
         replayTurns(chronologicalTurns, ctx);
+        void discoverChildThreads(ctx, true);
+        if (recoveredFromHang) {
+          ctx.emit({
+            type: "notice",
+            tone: "info",
+            text: "Codex did not resume that conversation, so Duckweed opened a copy of it.",
+          });
+        }
         const hydrated = hydratedTurnId({ ...thread, turns: chronologicalTurns });
         const hydratedActiveTurn =
           hydrated && !completedRootTurnIds.has(hydrated) ? hydrated : null;
@@ -2293,11 +2830,14 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
             settleRootTurn(null);
           }
           const record = asRecord(error);
-          if (asString(record?.code) !== RESUME_CANCELLED) {
+          if (resumeErrorCode(error) !== RESUME_CANCELLED) {
             ctx.emit({
               type: "notice",
               tone: "error",
-              text: asString(record?.message) ?? "Codex could not resume that thread.",
+              text:
+                resumeErrorCode(error) === RESUME_TIMEOUT
+                  ? "Codex did not resume that conversation."
+                  : asString(record?.message) ?? "Codex could not resume that thread.",
             });
           }
           ctx.emit({ type: "status", status: "idle" });
@@ -2312,6 +2852,9 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
 
     interrupt: (ctx) => {
       cancelPendingRootCompletion();
+      if (resumeRequestId !== null || hydratingResume) {
+        resumeAborted = true;
+      }
       if (resumeRequestId !== null) {
         const requestId = resumeRequestId;
         resumeRequestId = null;
@@ -2319,6 +2862,11 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         pending.delete(requestId);
         inFlight?.reject({ code: RESUME_CANCELLED });
         notify(ctx, "$/cancelRequest", { id: requestId });
+        return;
+      }
+      if (hydratingResume) {
+        // Gap between a timed-out resume RPC and the fork that recovers it.
+        // load() sees `resumeAborted` on the next step and settles.
         return;
       }
       if (!threadId || !currentTurnId) {

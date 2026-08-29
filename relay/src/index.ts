@@ -387,6 +387,27 @@ export async function handleRequest(request: Request, env: Env, push: PushSender
       }
     }
 
+    if (request.method === "GET" && parts.length === 4 && parts[3] === "messages") {
+      const found = await requireReceive(env, pairId, request);
+      if (!found) return fail(401, "invalid receiver credential");
+      const pending = await env.DB.prepare(`
+        SELECT message_id, sent_at
+          FROM messages
+         WHERE pair_id = ? AND expires_at > ?
+         ORDER BY created_at DESC
+         LIMIT 100
+      `).bind(pairId, Date.now()).all<{
+        message_id: string;
+        sent_at: number;
+      }>();
+      return response({
+        messages: pending.results.map((message) => ({
+          messageId: message.message_id,
+          sentAt: message.sent_at,
+        })),
+      }, 200);
+    }
+
     if (request.method === "POST" && parts.length === 4 && parts[3] === "messages") {
       const found = await requireSend(env, pairId, request);
       if (!found?.device_id || !found.fcm_token) {

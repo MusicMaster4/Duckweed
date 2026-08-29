@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import {
   runningSubagentCount,
   subagentForCallId,
+  subagentRosters,
   subagentsForTurn,
 } from "../../lib/agents/subagents";
 import type { AgentId, AgentItem, AgentSessionState, PlanItem } from "../../lib/agents/types";
@@ -14,8 +15,11 @@ import { AgentTimeline } from "./AgentTimeline";
 import { copySelectedTextFromContextMenu } from "./selectionCopy";
 import { Tooltip } from "../Tooltip";
 import { PlanTracker, type OfficialVariant } from "./official/OfficialShared";
-import { SubagentFleet } from "./subagents/SubagentFleet";
-import { SubagentInspector } from "./subagents/SubagentInspector";
+import { SubagentFocus } from "./subagents/SubagentFocus";
+import {
+  SubagentMultiPane,
+  SubagentNavigator,
+} from "./subagents/SubagentNavigator";
 import { SubagentUiProvider } from "./subagents/SubagentUiContext";
 import "./subagents/subagents.css";
 import "./AgentExperiencePreview.css";
@@ -92,6 +96,7 @@ function previewItems(): AgentItem[] {
         label: "Review protocol compatibility",
         role: "Reviewer",
         model: "provider default",
+        threadId: "preview-child-thread",
         prompt: "Review the ACP and app-server event mappings for compatibility.",
         activity: "Reviewing adapter event mappings",
         items: [
@@ -128,12 +133,12 @@ function previewItems(): AgentItem[] {
       title: "Check narrow pane layout",
       status: "running",
       command: null,
-      output: "Testing fleet overflow and bottom-docked inspector behavior",
+      output: "Testing roster overflow and pin behavior",
       changes: [],
       subagent: {
         label: "Check narrow pane layout",
         role: "UI reviewer",
-        prompt: "Verify the fleet and inspector in a half-width terminal pane.",
+        prompt: "Verify the roster and pin in a half-width terminal pane.",
         activity: "Testing the half-width pane",
       },
     },
@@ -224,11 +229,25 @@ export function AgentExperiencePreview() {
   const starting = query.get("starting") === "1";
   const exitArmed = query.get("exit-armed") === "1";
   const stillWorking = query.get("still-working") === "1";
+  const startWithAgents = query.get("agents") === "1";
+  const startWithMultiPane = query.get("multi") === "1";
   const [agent, setAgent] = useState<AgentId>(
     PROVIDERS.some((provider) => provider.id === requested) && requested ? requested : "codex",
   );
   const [visibleCount, setVisibleCount] = useState(playTurn ? 1 : Number.POSITIVE_INFINITY);
-  const [selectedSubagentCallId, setSelectedSubagentCallId] = useState<string | null>(null);
+  const [peekedCallId, setPeekedCallId] = useState<string | null>(null);
+  const [focusedCallId, setFocusedCallId] = useState<string | null>(null);
+  const [navigatorOpen, setNavigatorOpen] = useState(startWithAgents || startWithMultiPane);
+  const [multiPane, setMultiPane] = useState(startWithMultiPane);
+  const [paneIds, setPaneIds] = useState([
+    "preview-subagent",
+    "preview-subagent-layout",
+  ]);
+  const [activePaneId, setActivePaneId] = useState("parent");
+
+  const closeNavigatorIfCompact = () => {
+    if (window.innerWidth <= 760) setNavigatorOpen(false);
+  };
   const provider = PROVIDERS.find((entry) => entry.id === agent) ?? PROVIDERS[0];
   const allItems = useMemo(
     () => (stillWorking ? stillWorkingPreviewItems() : previewItems()),
@@ -270,9 +289,17 @@ export function AgentExperiencePreview() {
       : "working";
   const visibleItems = starting ? [] : items;
   const fleet = subagentsForTurn(visibleItems);
-  const selectedSubagent = selectedSubagentCallId
-    ? subagentForCallId(visibleItems, selectedSubagentCallId)
+  const rosters = subagentRosters(visibleItems);
+  const focusedSubagent = focusedCallId
+    ? subagentForCallId(visibleItems, focusedCallId)
     : null;
+  const paneSubagents = paneIds
+    .map((callId) => subagentForCallId(visibleItems, callId))
+    .filter((subagent): subagent is NonNullable<typeof focusedSubagent> => Boolean(subagent));
+  const composerSubagent =
+    multiPane && activePaneId !== "parent"
+      ? subagentForCallId(visibleItems, activePaneId)
+      : focusedSubagent;
   let workflow: PlanItem | null = null;
   for (let index = visibleItems.length - 1; index >= 0; index -= 1) {
     if (visibleItems[index].kind === "plan") {
@@ -339,7 +366,7 @@ export function AgentExperiencePreview() {
         </button>
       </nav>
       <section
-        className="agent-preview-surface"
+        className={`agent-preview-surface${navigatorOpen ? " has-subagent-navigator" : ""}${multiPane ? " is-subagent-multi-pane" : ""}`}
         style={{ ["--agent-accent" as string]: provider.accent }}
         data-agent={provider.id}
         onContextMenu={(event) => {
@@ -350,11 +377,32 @@ export function AgentExperiencePreview() {
           <span className="agent-badge">
             <AgentProviderIcon agent={provider.id} program={provider.id} />
           </span>
-          <span className="agent-name">{provider.label}</span>
+          <span className="agent-name">
+            {multiPane ? `${provider.label} / ${paneSubagents.length + 1} panes` : provider.label}
+          </span>
           <span className={`agent-state is-${status}`}>
             {status === "working" && <span className="agent-pulse" />}
             {status === "working" ? "working" : status === "starting" ? "starting" : "ready"}
           </span>
+          {fleet.length > 0 && (
+            <button
+              type="button"
+              className={`agent-sub-tab${navigatorOpen ? " is-active" : ""}`}
+              onClick={() => setNavigatorOpen((open) => !open)}
+              aria-controls="agent-preview-subagent-navigator"
+              aria-expanded={navigatorOpen}
+              aria-label={`Agents, ${fleet.length} subagents`}
+            >
+              <svg viewBox="0 0 16 16" aria-hidden="true">
+                <circle cx="4" cy="5" r="1.5" />
+                <circle cx="12" cy="5" r="1.5" />
+                <circle cx="8" cy="12" r="1.5" />
+                <path d="M5.3 5.8 7.1 10M10.7 5.8 8.9 10" />
+              </svg>
+              <span>Agents</span>
+              <i>{fleet.length}</i>
+            </button>
+          )}
           <span className="agent-head-spacer" />
           <span className="agent-usage">12.4k in · 2.1k out</span>
           <Tooltip title="Session usage" detail="12.4k input · 2.1k output">
@@ -370,34 +418,123 @@ export function AgentExperiencePreview() {
           </Tooltip>
           <AgentGoalIndicator goal={session.goal} />
         </header>
-        <div className="agent-scroll">
+        <div className={`agent-scroll${multiPane ? " is-subagent-workspace" : ""}`}>
           <SubagentUiProvider
-            selectedCallId={selectedSubagentCallId}
-            onSelect={setSelectedSubagentCallId}
+            agent={provider.id}
+            now={Date.now()}
+            rosters={rosters}
+            peekedCallId={peekedCallId}
+            focusedCallId={focusedCallId}
+            onPeek={setPeekedCallId}
+            onOpen={(callId) => {
+              setPeekedCallId(null);
+              setFocusedCallId(callId);
+            }}
+            onClosePeek={() => setPeekedCallId(null)}
+            onLeaveFocus={() => setFocusedCallId(null)}
           >
-            <AgentTimeline
-              session={session}
-              items={timelineItems}
-              /* Per provider, so switching the preview draws a new animation. */
-              termId={`${session.termId}:${provider.id}`}
-              agent={provider.id}
-              status={status}
-              started={!starting}
-              label={provider.label}
-              mark={provider.mark}
-              program={provider.id}
-              cwd="H:\\Python\\Slop\\duckweed"
-            />
+            {multiPane ? (
+              <SubagentMultiPane
+                agent={provider.id}
+                parentLabel={provider.label}
+                parentWorking={status === "working"}
+                parent={
+                  <AgentTimeline
+                    session={session}
+                    items={timelineItems}
+                    termId={`${session.termId}:${provider.id}:parent`}
+                    agent={provider.id}
+                    status={status}
+                    started={!starting}
+                    label={provider.label}
+                    mark={provider.mark}
+                    program={provider.id}
+                    cwd="H:\Python\Slop\duckweed"
+                  />
+                }
+                subagents={paneSubagents}
+                now={Date.now()}
+                activeId={activePaneId}
+                onActivate={setActivePaneId}
+                onFocus={(id) => {
+                  setMultiPane(false);
+                  setActivePaneId(id);
+                  setFocusedCallId(id === "parent" ? null : id);
+                }}
+                onClosePane={(callId) => {
+                  setPaneIds((current) => current.filter((id) => id !== callId));
+                  if (activePaneId === callId) setActivePaneId("parent");
+                }}
+              />
+            ) : focusedSubagent ? (
+              <SubagentFocus
+                agent={provider.id}
+                parentLabel={provider.label}
+                parentWorking={status === "working"}
+                subagent={focusedSubagent}
+                now={Date.now()}
+                onBack={() => setFocusedCallId(null)}
+              />
+            ) : (
+              <AgentTimeline
+                session={session}
+                items={timelineItems}
+                /* Per provider, so switching the preview draws a new animation. */
+                termId={`${session.termId}:${provider.id}`}
+                agent={provider.id}
+                status={status}
+                started={!starting}
+                label={provider.label}
+                mark={provider.mark}
+                program={provider.id}
+                cwd="H:\\Python\\Slop\\duckweed"
+              />
+            )}
           </SubagentUiProvider>
         </div>
+        {navigatorOpen && fleet.length > 0 && (
+          <div
+            className="agent-sub-navigator-shell"
+            id="agent-preview-subagent-navigator"
+          >
+            <SubagentNavigator
+              agent={provider.id}
+              parentLabel={provider.label}
+              parentWorking={status === "working"}
+              subagents={fleet}
+              now={Date.now()}
+              selectedId={multiPane ? activePaneId : focusedCallId ?? "parent"}
+              multiPane={multiPane}
+              paneIds={paneIds}
+              onSelectParent={() => {
+                if (multiPane) setActivePaneId("parent");
+                else setFocusedCallId(null);
+                closeNavigatorIfCompact();
+              }}
+              onSelectSubagent={(callId) => {
+                if (!multiPane) {
+                  setFocusedCallId(callId);
+                  closeNavigatorIfCompact();
+                  return;
+                }
+                setPaneIds((current) =>
+                  current.includes(callId) ? current : [...current, callId].slice(-3),
+                );
+                setActivePaneId(callId);
+                closeNavigatorIfCompact();
+              }}
+              onToggleMultiPane={() => {
+                setMultiPane((open) => !open);
+                setFocusedCallId(null);
+                setActivePaneId("parent");
+                closeNavigatorIfCompact();
+              }}
+              onClose={() => setNavigatorOpen(false)}
+            />
+          </div>
+        )}
         {!starting && (
           <div className="agent-composer-shell">
-            <SubagentFleet
-              agent={agent}
-              subagents={fleet}
-              selectedCallId={selectedSubagentCallId}
-              onSelect={setSelectedSubagentCallId}
-            />
             {workflow && (
               <div className="agent-workflow-dock">
                 <PlanTracker
@@ -412,23 +549,17 @@ export function AgentExperiencePreview() {
               active
               onSubmit={() => {}}
               onInterrupt={() => {}}
+              target={
+                composerSubagent
+                  ? {
+                      kind: "subagent",
+                      label: composerSubagent.label,
+                      canMessage: Boolean(composerSubagent.threadId),
+                    }
+                  : undefined
+              }
             />
           </div>
-        )}
-        {selectedSubagent && (
-          <SubagentInspector
-            agent={agent}
-            subagent={selectedSubagent}
-            canMessage={false}
-            onMessage={async () => false}
-            onClose={() => setSelectedSubagentCallId(null)}
-            onShowInTimeline={(callId) => {
-              const target = Array.from(
-                document.querySelectorAll<HTMLElement>("[data-subagent-call-id]"),
-              ).find((element) => element.dataset.subagentCallId === callId);
-              target?.scrollIntoView({ block: "center", behavior: "smooth" });
-            }}
-          />
         )}
       </section>
     </main>

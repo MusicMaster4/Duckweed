@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import worker, { handleRequest, type Env } from "../src/index";
 
@@ -82,6 +82,24 @@ describe("encrypted notification relay", () => {
     }]);
     expect(JSON.stringify(pushed)).not.toContain(payload.ciphertext);
 
+    // FCM is a wake-up hint, not the only recovery path. A phone that missed
+    // the push can list opaque pending ids when it returns to the foreground.
+    const pending = await handleRequest(
+      request(`/v1/pairings/${pairId}/messages`, "GET", receiveToken),
+      env,
+      push,
+    );
+    expect(await pending.json()).toMatchObject({
+      messages: [{ messageId }],
+    });
+
+    const unauthorizedPending = await handleRequest(
+      request(`/v1/pairings/${pairId}/messages`, "GET", sendToken),
+      env,
+      push,
+    );
+    expect(unauthorizedPending.status).toBe(401);
+
     const fetched = await handleRequest(
       request(`/v1/pairings/${pairId}/messages/${messageId}`, "GET", receiveToken),
       env,
@@ -95,6 +113,13 @@ describe("encrypted notification relay", () => {
       push,
     );
     expect(acknowledged.status).toBe(204);
+
+    const emptyPending = await handleRequest(
+      request(`/v1/pairings/${pairId}/messages`, "GET", receiveToken),
+      env,
+      push,
+    );
+    expect(await emptyPending.json()).toEqual({ messages: [] });
 
     const gone = await handleRequest(
       request(`/v1/pairings/${pairId}/messages/${messageId}`, "GET", receiveToken),
@@ -258,12 +283,17 @@ describe("encrypted notification relay", () => {
   });
 
   it("rate limits pairing creation by source address", async () => {
-    for (let attempt = 0; attempt < 12; attempt += 1) {
-      const invalid = await handleRequest(request("/v1/pairings", "POST", undefined, {}, "198.51.100.9"), env);
-      expect(invalid.status).toBe(400);
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_750_000_000_000);
+    try {
+      for (let attempt = 0; attempt < 12; attempt += 1) {
+        const invalid = await handleRequest(request("/v1/pairings", "POST", undefined, {}, "198.51.100.9"), env);
+        expect(invalid.status).toBe(400);
+      }
+      const limited = await handleRequest(request("/v1/pairings", "POST", undefined, {}, "198.51.100.9"), env);
+      expect(limited.status).toBe(429);
+    } finally {
+      now.mockRestore();
     }
-    const limited = await handleRequest(request("/v1/pairings", "POST", undefined, {}, "198.51.100.9"), env);
-    expect(limited.status).toBe(429);
   });
 
   it("reports the D1-backed health endpoint without touching FCM", async () => {

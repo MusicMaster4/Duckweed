@@ -10,6 +10,8 @@ import androidx.recyclerview.widget.DiffUtil
 
 class TerminalAdapter(
     private val onOpen: (ConversationTarget) -> Unit,
+    private val onClose: ((ConversationTarget) -> Unit)? = null,
+    private val onPending: (() -> Unit)? = null,
 ) : RecyclerView.Adapter<TerminalAdapter.Holder>() {
     private var targets: List<ConversationTarget> = emptyList()
 
@@ -23,6 +25,7 @@ class TerminalAdapter(
                     row.pairId,
                     row.project.id,
                     row.project.name,
+                    row.project.color,
                     terminal,
                     Pair(row.pairId, terminal.id) in unreadKeys,
                     row.desktopOnline,
@@ -65,17 +68,25 @@ class TerminalAdapter(
     override fun onBindViewHolder(holder: Holder, position: Int) {
         val target = targets[position]
         val terminal = target.terminal
-        holder.itemView.setBackgroundResource(
-            if (target.unread) R.drawable.message_card_unread else R.drawable.message_card,
-        )
+        val pending = terminal.pendingAction
+        val accent = MobileTabColorStyle.parse(target.projectColor)
+        MobileTabColorStyle.apply(holder.itemView, accent, unread = target.unread)
+        holder.itemView.alpha = if (pending == null) 1f else PENDING_ALPHA
         holder.context.text = "Project  ${target.projectName}"
         holder.title.text = terminal.agent ?: terminal.title
         holder.model.text = terminal.model ?: terminal.shell
-        holder.status.text = if (!target.desktopOnline) {
+        holder.status.text = if (pending != null) {
+            when (pending.kind) {
+                PendingMobileAction.CREATE_TERMINAL -> "OPENING..."
+                PendingMobileAction.CLOSE_TERMINAL -> "CLOSING..."
+                else -> "UPDATING..."
+            }
+        } else if (!target.desktopOnline) {
             "OFFLINE"
         } else {
             when (terminal.status) {
-                "working" -> "THINKING"
+                "starting" -> "OPENING"
+                "working" -> if (terminal.agent != null) "THINKING" else "RUNNING"
                 "waiting" -> "NEEDS YOU"
                 "exited" -> "CLOSED"
                 else -> "READY"
@@ -84,7 +95,9 @@ class TerminalAdapter(
         holder.status.setTextColor(
             ContextCompat.getColor(
                 holder.itemView.context,
-                if (!target.desktopOnline) {
+                if (pending != null) {
+                    R.color.duckweed_text_faint
+                } else if (!target.desktopOnline) {
                     R.color.duckweed_error
                 } else {
                     when (terminal.status) {
@@ -96,9 +109,16 @@ class TerminalAdapter(
             ),
         )
         holder.shimmer.visibility =
-            if (target.desktopOnline && terminal.status == "working") View.VISIBLE else View.GONE
-        holder.itemView.setOnClickListener { onOpen(target) }
+            if (pending == null && target.desktopOnline && terminal.status == "working" && terminal.agent != null) View.VISIBLE else View.GONE
+        holder.itemView.setOnClickListener {
+            if (pending == null) onOpen(target) else onPending?.invoke()
+        }
+        holder.itemView.setOnLongClickListener {
+            if (pending == null) onClose?.invoke(target) else onPending?.invoke()
+            pending != null || onClose != null
+        }
         holder.itemView.contentDescription = buildString {
+            if (pending != null) append("Waiting for the desktop to update. ")
             if (target.unread) append("Unread conversation. ")
             append("${terminal.agent ?: terminal.title}, ${target.projectName}")
         }
@@ -110,5 +130,9 @@ class TerminalAdapter(
         val title: TextView = view.findViewById(R.id.terminal_title)
         val model: TextView = view.findViewById(R.id.terminal_model)
         val shimmer: View = view.findViewById(R.id.terminal_shimmer)
+    }
+
+    companion object {
+        private const val PENDING_ALPHA = 0.48f
     }
 }

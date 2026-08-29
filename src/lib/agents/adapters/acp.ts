@@ -15,7 +15,9 @@ import {
   toolKind,
   type AgentFileChange,
   type AgentGoal,
+  type AgentId,
   type AgentPlanStep,
+  type AgentPrompt,
   type SubagentMeta,
   type ToolStatus,
 } from "../types";
@@ -29,8 +31,10 @@ import {
  * can keep a workflow running after that response, so its private workflow
  * lifecycle also participates in turn completion. Because three of the five
  * supported agents speak ACP, this one adapter is most of the
- * protocol coverage — the per-agent differences live in the catalog's spawn
- * arguments and in the `_meta` fields read below.
+ * protocol coverage — the per-agent differences live in spawn arguments
+ * and in the `_meta` fields read below. Same-turn steering is Grok-only:
+ * `_x.ai/interject` while the original `session/prompt` is still pending.
+ * Cursor and OpenCode do not get that method.
  *
  * Slash commands: names an agent advertises (`availableCommands`) are sent
  * back as plain `session/prompt` text — the agent intercepts them (verified:
@@ -203,7 +207,7 @@ function readSubagentMeta(
   };
 }
 
-export function createAcpAdapter(): AgentAdapter {
+export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
   let nextId = 1;
   const pending = new Map<number, Pending>();
   let sessionId: string | null = null;
@@ -1052,6 +1056,46 @@ export function createAcpAdapter(): AgentAdapter {
     return "handled";
   }
 
+  function promptContent(prompt: AgentPrompt) {
+    return [
+      ...(prompt.text ? [{ type: "text", text: prompt.text }] : []),
+      ...prompt.images.map((image) => ({
+        type: "image",
+        data: imagePayloadBase64(image),
+        mimeType: image.mimeType,
+      })),
+    ];
+  }
+
+  /**
+   * Grok's mid-turn inject is `_x.ai/interject`. The original `session/prompt`
+   * stays open and still owns turn completion. A missing method (`-32601`)
+   * or any other RPC failure returns false so the session can restore the
+   * follow-up into the local queue. Do not `session/cancel`.
+   */
+  async function steerTurn(prompt: AgentPrompt, ctx: AdapterContext): Promise<boolean> {
+    if (agent !== "grok" || ctx.launch.agent !== "grok" || !sessionId || !turnOpen) {
+      return false;
+    }
+    const content = promptContent(prompt);
+    try {
+      await request(ctx, "_x.ai/interject", {
+        sessionId,
+        text: prompt.text,
+        ...(content.length ? { content } : {}),
+      });
+    } catch {
+      return false;
+    }
+    ctx.emit({
+      type: "user",
+      text: prompt.text,
+      images: prompt.images,
+      sameTurn: true,
+    });
+    return true;
+  }
+
   return {
     // ACP carries model and session choices in its protocol, so nothing the
     // user typed becomes a command-line flag here.
@@ -1118,14 +1162,7 @@ export function createAcpAdapter(): AgentAdapter {
       ctx.emit({ type: "status", status: "working" });
       request(ctx, "session/prompt", {
         sessionId,
-        prompt: [
-          ...(prompt.text ? [{ type: "text", text: prompt.text }] : []),
-          ...prompt.images.map((image) => ({
-            type: "image",
-            data: imagePayloadBase64(image),
-            mimeType: image.mimeType,
-          })),
-        ],
+        prompt: promptContent(prompt),
       })
         .then((result) => {
           const stop = asString(result.stopReason);
@@ -1169,6 +1206,8 @@ export function createAcpAdapter(): AgentAdapter {
           finishTurnWhenReady(ctx, true);
         });
     },
+
+    ...(agent === "grok" ? { steer: steerTurn } : {}),
 
     command: handleCommand,
 

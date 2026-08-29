@@ -218,6 +218,16 @@ export const AGENTS: Record<AgentId, AgentDefinition> = {
 
 export const AGENT_IDS = Object.keys(AGENTS) as AgentId[];
 
+/**
+ * Extra process environment for a custom-UI spawn. Empty env becomes `null`
+ * so the spawn IPC can omit the field. Caller's `GROK_CONFIG` is left as-is:
+ * Grok's stdio overlay allowlist drops `ui.follow_up_behavior`, so Duckweed
+ * cannot enable mid-turn inject that way.
+ */
+export function agentSpawnEnv(env: Record<string, string>): Record<string, string> | null {
+  return Object.keys(env).length ? { ...env } : null;
+}
+
 /** Every executable name the launch parser recognises. */
 export const AGENT_BINARIES: string[] = AGENT_IDS.flatMap((id) => AGENTS[id].binaries);
 

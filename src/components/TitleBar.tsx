@@ -7,6 +7,7 @@ interface Props {
   settingsActive: boolean;
   onOpenSettings: () => void;
   toolsOpen: boolean;
+  toolsActive: boolean;
   onToggleTools: () => void;
   locked?: boolean;
 }
@@ -16,6 +17,7 @@ export function TitleBar({
   settingsActive,
   onOpenSettings,
   toolsOpen,
+  toolsActive,
   onToggleTools,
   locked = false,
 }: Props) {
@@ -62,8 +64,10 @@ export function TitleBar({
           <button
             type="button"
             className={`tools-trigger ${toolsOpen ? "is-open" : ""}`}
-            title={`${toolsOpen ? "Hide" : "Show"} the tools panel (Ctrl+Shift+X)`}
-            aria-label="Tools panel"
+            title={`${toolsOpen ? "Hide" : "Show"} the tools panel (Ctrl+Shift+X)${
+              toolsActive && !toolsOpen ? ". Activity is running." : ""
+            }`}
+            aria-label={`Tools panel${toolsActive && !toolsOpen ? ", activity running" : ""}`}
             aria-expanded={toolsOpen}
             onClick={onToggleTools}
           >
@@ -71,6 +75,9 @@ export function TitleBar({
               <rect x="2" y="2.5" width="12" height="11" rx="2" />
               <path d="M6.5 2.5v11" />
             </svg>
+            {toolsActive && !toolsOpen && (
+              <span className="tools-trigger-activity" aria-hidden="true" />
+            )}
           </button>
         )}
       </div>

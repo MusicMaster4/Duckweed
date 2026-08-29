@@ -6,8 +6,9 @@ import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 import org.json.JSONObject
 import org.json.JSONArray
+import java.util.UUID
 
-class MessageStore(context: Context) : SQLiteOpenHelper(context, "duckweed-messages.db", null, 5) {
+class MessageStore(context: Context) : SQLiteOpenHelper(context, "duckweed-messages.db", null, 6) {
     override fun onCreate(database: SQLiteDatabase) {
         database.execSQL(
             """
@@ -29,6 +30,7 @@ class MessageStore(context: Context) : SQLiteOpenHelper(context, "duckweed-messa
         database.execSQL(
             "CREATE TABLE conversation_reads (pair_id TEXT NOT NULL, terminal_id TEXT NOT NULL, read_at INTEGER NOT NULL, PRIMARY KEY(pair_id, terminal_id))",
         )
+        createPendingReadSyncs(database)
     }
 
     override fun onUpgrade(database: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
@@ -54,6 +56,7 @@ class MessageStore(context: Context) : SQLiteOpenHelper(context, "duckweed-messa
                 "CREATE TABLE conversation_reads (pair_id TEXT NOT NULL, terminal_id TEXT NOT NULL, read_at INTEGER NOT NULL, PRIMARY KEY(pair_id, terminal_id))",
             )
         }
+        if (oldVersion < 6) createPendingReadSyncs(database)
     }
 
     fun put(message: CompletionRecord) {
@@ -105,6 +108,7 @@ class MessageStore(context: Context) : SQLiteOpenHelper(context, "duckweed-messa
             .put("deliveryState", message.deliveryState)
             .put("deliveryError", message.deliveryError)
             .put("unreadOnDesktop", message.unreadOnDesktop)
+            .put("completionSeq", message.completionSeq)
             .put(
                 "attachments",
                 JSONArray().apply {
@@ -152,15 +156,73 @@ class MessageStore(context: Context) : SQLiteOpenHelper(context, "duckweed-messa
         )
     }
 
-    fun markConversationRead(pairId: String, terminalId: String, at: Long = System.currentTimeMillis()) {
+    fun markConversationRead(
+        pairId: String,
+        terminalId: String,
+        completionSeq: Long?,
+        at: Long = System.currentTimeMillis(),
+    ): List<String> {
         val database = writableDatabase
+        var messageIds = emptyList<String>()
         database.beginTransaction()
         try {
+            messageIds = unreadMessageIds(database, pairId, terminalId, at)
             markConversationReadThrough(database, pairId, terminalId, at)
+            // Explicit reads are idempotent and must always reach the desktop.
+            // The local row may already be read when a full payload or workspace
+            // update races the notification action, but the desktop can still
+            // have the unread outline that this receipt is meant to clear.
+            database.insertWithOnConflict(
+                "pending_read_syncs",
+                null,
+                ContentValues().apply {
+                    put("pair_id", pairId)
+                    put("terminal_id", terminalId)
+                    if (completionSeq != null) put("completion_seq", completionSeq) else putNull("completion_seq")
+                    put("command_id", UUID.randomUUID().toString())
+                },
+                SQLiteDatabase.CONFLICT_REPLACE,
+            )
             database.setTransactionSuccessful()
         } finally {
             database.endTransaction()
         }
+        return messageIds
+    }
+
+    fun pendingReadSyncs(): List<PendingReadSync> {
+        val pending = mutableListOf<PendingReadSync>()
+        readableDatabase.query(
+            "pending_read_syncs",
+            arrayOf("pair_id", "terminal_id", "completion_seq", "command_id"),
+            null,
+            null,
+            null,
+            null,
+            null,
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                pending += PendingReadSync(
+                    pairId = cursor.getString(0),
+                    terminalId = cursor.getString(1),
+                    completionSeq = if (cursor.isNull(2)) null else cursor.getLong(2),
+                    commandId = cursor.getString(3),
+                )
+            }
+        }
+        return pending
+    }
+
+    fun completeReadSync(sync: PendingReadSync) {
+        writableDatabase.delete(
+            "pending_read_syncs",
+            "pair_id = ? AND terminal_id = ? AND command_id = ?",
+            arrayOf(sync.pairId, sync.terminalId, sync.commandId),
+        )
+    }
+
+    fun discardReadSyncs(pairId: String) {
+        writableDatabase.delete("pending_read_syncs", "pair_id = ?", arrayOf(pairId))
     }
 
     fun unreadConversationKeys(): Set<Pair<String, String>> {
@@ -304,9 +366,9 @@ class MessageStore(context: Context) : SQLiteOpenHelper(context, "duckweed-messa
                 project.terminals.forEach { terminal ->
                     val mobileReadAt = conversationReadAt(database, snapshot.pairId, terminal.id)
                     val latestAssistantId = terminal.conversation
-                        .lastOrNull { it.role == "assistant" }
+                        .lastOrNull { it.role == "assistant" && !it.streaming }
                         ?.id
-                    terminal.conversation.forEach { message ->
+                    terminal.conversation.filterNot { it.streaming }.forEach { message ->
                         val id = "workspace:${snapshot.pairId}:${terminal.id}:${message.id}"
                         val unread = MobileSyncPolicy.isSyncedMessageUnread(
                             terminal.unreadOnDesktop,
@@ -330,6 +392,7 @@ class MessageStore(context: Context) : SQLiteOpenHelper(context, "duckweed-messa
                             workspace = null,
                             readAt = message.sentAt.takeUnless { unread },
                             unreadOnDesktop = terminal.unreadOnDesktop,
+                            completionSeq = terminal.completionSeq,
                         )
                         if (!recordExists(database, id)) {
                             database.insertWithOnConflict(
@@ -356,6 +419,7 @@ class MessageStore(context: Context) : SQLiteOpenHelper(context, "duckweed-messa
                             database,
                             snapshot.pairId,
                             terminal.id,
+                            snapshot.updatedAt,
                         )
                         markConversationReadThrough(
                             database,
@@ -427,6 +491,11 @@ class MessageStore(context: Context) : SQLiteOpenHelper(context, "duckweed-messa
                         } else {
                             null
                         },
+                        completionSeq = if (json.has("completionSeq") && !json.isNull("completionSeq")) {
+                            json.optLong("completionSeq")
+                        } else {
+                            null
+                        },
                     )
                 }
             }
@@ -460,6 +529,20 @@ class MessageStore(context: Context) : SQLiteOpenHelper(context, "duckweed-messa
     private fun prune(database: SQLiteDatabase) {
         database.execSQL(
             "DELETE FROM messages WHERE id NOT IN (SELECT id FROM messages ORDER BY sent_at DESC LIMIT 500)",
+        )
+    }
+
+    private fun createPendingReadSyncs(database: SQLiteDatabase) {
+        database.execSQL(
+            """
+            CREATE TABLE pending_read_syncs (
+              pair_id TEXT NOT NULL,
+              terminal_id TEXT NOT NULL,
+              completion_seq INTEGER,
+              command_id TEXT NOT NULL,
+              PRIMARY KEY(pair_id, terminal_id)
+            )
+            """.trimIndent(),
         )
     }
 
@@ -522,13 +605,14 @@ class MessageStore(context: Context) : SQLiteOpenHelper(context, "duckweed-messa
         database: SQLiteDatabase,
         pairId: String,
         terminalId: String,
+        through: Long,
     ): List<String> {
         val ids = mutableListOf<String>()
         database.query(
             "messages",
             arrayOf("id"),
-            "pair_id = ? AND terminal_id = ? AND read_at IS NULL",
-            arrayOf(pairId, terminalId),
+            "pair_id = ? AND terminal_id = ? AND read_at IS NULL AND kind IN (?, ?) AND sent_at <= ?",
+            arrayOf(pairId, terminalId, "completed", "attention", through.toString()),
             null,
             null,
             null,

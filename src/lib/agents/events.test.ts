@@ -478,6 +478,15 @@ describe("completion announcements are only for real tasks", () => {
     expect(isAnnounceableTurn(announce({ usedTools: true }))).toBe(true);
   });
 
+  test("provider-owned goal work is announceable", () => {
+    expect(isMetaSlashCommand("/goal finish the migration")).toBe(false);
+    expect(
+      isAnnounceableTurn(
+        announce({ userText: "/goal finish the migration", userInitiated: true }),
+      ),
+    ).toBe(true);
+  });
+
   test("a permission prompt is announceable even without tools", () => {
     expect(
       isAnnounceableTurn(

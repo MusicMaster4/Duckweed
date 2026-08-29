@@ -1,9 +1,5 @@
 package dev.slop.duckweed.companion
 
-import androidx.work.Data
-import androidx.work.ExistingWorkPolicy
-import androidx.work.OneTimeWorkRequestBuilder
-import androidx.work.WorkManager
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
 import java.util.concurrent.Executors
@@ -41,10 +37,17 @@ class DuckweedMessagingService : FirebaseMessagingService() {
                 EncryptedEnvelope(nonce, ciphertext),
             )
         }.getOrNull() ?: return
+        // A successfully decrypted push proves that this desktop pairing is
+        // reachable. Use the phone's clock so clock skew cannot turn a message
+        // that just arrived into an "offline" state.
+        WorkspaceStore(this).markPresence(pairId, System.currentTimeMillis())
         if (preview.kind != "workspace" && preview.kind != "presence") {
             val store = MessageStore(this)
             store.put(preview)
-            if (!NotificationPreference.isEnabled(this) || preview.unreadOnDesktop == false) {
+            if (MobileNotificationVisibility.consumeIfVisible(this, store, preview)) {
+                // The response is already on screen. Its read receipt also
+                // clears the matching unread marker on the desktop.
+            } else if (!NotificationPreference.isEnabled(this) || preview.unreadOnDesktop == false) {
                 store.markNotified(preview.id, preview.sentAt)
             } else if (store.isNotificationPending(preview.id) && NotificationTools.show(this, preview)) {
                 store.markNotified(preview.id)
@@ -52,17 +55,6 @@ class DuckweedMessagingService : FirebaseMessagingService() {
         }
         NotificationTools.announceChanged(this)
 
-        val input = Data.Builder()
-            .putString(MessageFetchWorker.PAIR_ID, pairId)
-            .putString(MessageFetchWorker.MESSAGE_ID, messageId)
-            .build()
-        val work = OneTimeWorkRequestBuilder<MessageFetchWorker>()
-            .setInputData(input)
-            .build()
-        WorkManager.getInstance(this).enqueueUniqueWork(
-            "duckweed-message-$messageId",
-            ExistingWorkPolicy.KEEP,
-            work,
-        )
+        MessageFetchScheduler.enqueue(this, pairId, messageId)
     }
 }

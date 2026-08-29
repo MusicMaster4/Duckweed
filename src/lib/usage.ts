@@ -279,6 +279,18 @@ export const formatTokens = (value: number) => compactNumber(value);
 /** Full precision, for tooltips and tables where the exact figure matters. */
 export const formatExact = (value: number) => value.toLocaleString();
 
+/**
+ * Keep live agent sessions distinct from transcript sources discovered on disk.
+ * A source can remain available long after its CLI has closed, so presenting
+ * the two as one "detected agents" count makes historical data look like stale
+ * runtime state.
+ */
+export function agentTrackingSummary(openSessions: number, historySources: number): string {
+  const sessions = `${formatExact(openSessions)} agent session${openSessions === 1 ? "" : "s"} open`;
+  const sources = `${formatExact(historySources)} agent CLI${historySources === 1 ? "" : "s"}`;
+  return `${sessions} \u00b7 usage history found for ${sources}`;
+}
+
 const USAGE_DATE_LOCALE = "en-US";
 
 /** `Mon 21` — an axis tick for a daily series. */

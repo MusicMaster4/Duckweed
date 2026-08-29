@@ -1,6 +1,13 @@
 import { describe, expect, test } from "bun:test";
 
-import type { AgentItem, PlanItem } from "../../lib/agents/types";
+import type { AgentItem, PlanItem, ToolItem } from "../../lib/agents/types";
+import {
+  subagentPinShouldShow,
+  subagentPresenceNeeded,
+  subagentRosterNodeInView,
+  subagentRosters,
+  subagentsForTurn,
+} from "../../lib/agents/subagents";
 import {
   COMPLETED_WORKFLOW_TTL_MS,
   latestWorkflow,
@@ -98,5 +105,42 @@ describe("agent work status", () => {
         0,
       ),
     ).toBe("Ready");
+  });
+});
+
+function task(callId: string, status: ToolItem["status"]): ToolItem {
+  return {
+    kind: "tool",
+    id: `tool-${callId}`,
+    at: 2,
+    callId,
+    name: "task",
+    tool: "task",
+    title: `Task ${callId}`,
+    status,
+    command: null,
+    output: "",
+    changes: [],
+  };
+}
+
+describe("agent subagent roster lifetime", () => {
+  test("keeps a completed idle roster in the transcript instead of TTL-retiring it", () => {
+    const items: AgentItem[] = [
+      { kind: "user", id: "user", at: 1, text: "Inspect in parallel" },
+      task("research", "done"),
+      task("tests", "done"),
+    ];
+    const roster = subagentsForTurn(items);
+
+    expect(subagentRosters(items)).toHaveLength(1);
+    expect(roster).toHaveLength(2);
+    expect(subagentPresenceNeeded(roster, "idle")).toBe(false);
+    expect(subagentPinShouldShow(false, roster, "idle")).toBe(false);
+    expect(subagentPinShouldShow(false, roster, "working")).toBe(true);
+    expect(subagentPinShouldShow(true, roster, "working")).toBe(false);
+    expect(
+      subagentPinShouldShow(subagentRosterNodeInView(null, true), roster, "working"),
+    ).toBe(true);
   });
 });

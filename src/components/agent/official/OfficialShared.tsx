@@ -15,8 +15,9 @@ import { AgentDiff } from "../AgentDiff";
 import { AgentImageAttachments } from "../AgentImageAttachments";
 import { MessageCopyButton } from "../MessageCopyButton";
 import { AgentProviderIcon } from "../AgentProviderIcon";
+import { SubagentBoardAnchor } from "../subagents/SubagentBoard";
 import { useSubagentUi } from "../subagents/SubagentUiContext";
-import { preparingMessageFor } from "./preparingMessages";
+import { preparingMessageFor, thinkingHeadlineFor } from "./preparingMessages";
 import { thinkingPulsePatternFor } from "./thinkingPulsePatterns";
 
 export interface ExperienceProps {
@@ -567,7 +568,7 @@ export const PlanTracker = memo(function PlanTracker({
                     <path d="M1.5 5h10M8 1.75 11.5 5 8 8.25" />
                   </svg>
                 ) : (
-                  index + 1
+                  <span className="official-plan-step-number">{index + 1}</span>
                 )}
               </span>
               <span>{step.text}</span>
@@ -596,8 +597,9 @@ export const ToolActivity = memo(function ToolActivity({
   compact?: boolean;
   expandSubagentLocally?: boolean;
 }) {
-  const { selectedCallId, selectSubagent } = useSubagentUi();
+  const { absorbedCallIds, peekedCallId, peekSubagent } = useSubagentUi();
   const isSubagent = item.tool === "task";
+  const absorbed = isSubagent && !expandSubagentLocally && absorbedCallIds.has(item.callId);
   const hasOutput = item.output.trim().length > 0;
   const hasChanges = item.changes.length > 0;
   const expandable = hasOutput || hasChanges || Boolean(item.command);
@@ -619,11 +621,13 @@ export const ToolActivity = memo(function ToolActivity({
     [item.changes],
   );
 
+  if (absorbed) return null;
+
   return (
     <section
       className={`official-tool official-tool--${variant} is-${item.status}${
         isSubagent ? " is-subagent" : ""
-      }${selectedCallId === item.callId ? " is-selected" : ""}${
+      }${peekedCallId === item.callId ? " is-selected" : ""}${
         compact ? " is-compact" : ""
       }${open && expandsHere ? " is-open" : ""}`}
       {...(isSubagent ? { "data-subagent-call-id": item.callId } : {})}
@@ -633,7 +637,7 @@ export const ToolActivity = memo(function ToolActivity({
         className="official-tool-head"
         onClick={() => {
           if (isSubagent && !expandSubagentLocally) {
-            selectSubagent(item.callId);
+            peekSubagent(item.callId);
           } else if (expandable) {
             setOpen((value) => !value);
           }
@@ -733,17 +737,19 @@ export function StillWorking({
   variant: ActivityVariant;
   clusterId: string;
 }) {
+  const message = preparingMessageFor(clusterId);
+
   return (
     <div
       className="agent-activity-cluster agent-still-working"
       data-variant={variant}
       role="status"
-      aria-label="Still working"
+      aria-label={message}
     >
       <div className="agent-activity-history is-thinking is-active">
         <div className="agent-activity-history-head">
           <ActivityPulse active clusterId={clusterId} />
-          <span className="agent-activity-history-label">Still working</span>
+          <span className="agent-activity-history-label">{message}</span>
         </div>
       </div>
     </div>
@@ -770,14 +776,19 @@ function ThinkingHistory({
   clusterId: string;
 }) {
   const [open, setOpen] = useState(false);
-  // Registry-backed like the pulse: a fresh preparing cluster gets a new line;
-  // remounts during the same wait keep the same stand-in text.
-  const preparingMessage = preparingMessageFor(clusterId);
   const panelId = useId();
   const latest = showLatestFull ? thoughts[thoughts.length - 1] : undefined;
   const active = working;
   const earlierThoughts = showLatestFull ? thoughts.slice(0, -1) : thoughts;
   const expandable = earlierThoughts.length > 0;
+  const showPreparingSummary = !latest && thoughts.length === 0;
+  // Registry-backed like the pulse: a fresh preparing cluster gets a new line;
+  // remounts during the same wait keep the same stand-in text.
+  const preparingMessage = showPreparingSummary ? preparingMessageFor(clusterId) : null;
+  const headline = thinkingHeadlineFor(clusterId, {
+    working: active,
+    hasLatest: Boolean(latest),
+  });
 
   return (
     <section
@@ -794,13 +805,13 @@ function ThinkingHistory({
         aria-controls={expandable ? panelId : undefined}
         aria-label={
           latest
-            ? `Thinking: ${traceSummary(latest.text)}`
-            : "Thinking"
+            ? `${headline}: ${traceSummary(latest.text)}`
+            : headline
         }
       >
         <ActivityPulse active={active} clusterId={clusterId} />
-        <span className="agent-activity-history-label">Thinking</span>
-        {!latest && thoughts.length === 0 && (
+        <span className="agent-activity-history-label">{headline}</span>
+        {showPreparingSummary && preparingMessage && (
           <span className="agent-activity-history-summary agent-thinking-shimmer">
             {preparingMessage}
           </span>
@@ -952,12 +963,19 @@ export const ActivityHistory = memo(function ActivityHistory({
    */
   clusterId: string;
 }) {
+  const { absorbedCallIds, rosterAnchorIds } = useSubagentUi();
   const thoughts = activities.filter(
     (item): item is ThinkingItem => item.kind === "thinking",
   );
-  const tools = activities.filter((item): item is ToolItem => item.kind === "tool");
+  const tools = activities.filter(
+    (item): item is ToolItem =>
+      item.kind === "tool" && !absorbedCallIds.has(item.callId),
+  );
+  const rosterAnchorId = activities.find(
+    (item) => item.kind === "tool" && rosterAnchorIds.has(item.id),
+  )?.id;
 
-  if (!thoughts.length && !tools.length && !working) return null;
+  if (!thoughts.length && !tools.length && !rosterAnchorId && !working) return null;
 
   return (
     <div className="agent-activity-cluster" data-variant={variant}>
@@ -969,6 +987,7 @@ export const ActivityHistory = memo(function ActivityHistory({
           clusterId={clusterId}
         />
       )}
+      {rosterAnchorId && <SubagentBoardAnchor itemId={rosterAnchorId} />}
       {tools.length > 0 && (
         <ToolHistory tools={tools} variant={variant} showLatestDiff={showLatestThinking} />
       )}
@@ -1118,6 +1137,22 @@ export interface ActivityGroup {
   answerId: string | null;
   /** Interim comment that replaces this completed activity phase. */
   replacedByCommentId: string | null;
+}
+
+/**
+ * Thinking/tool chrome hides behind a later comment or the live answer.
+ * Delegated workers still need their roster, so callers should render the
+ * board from {@link ActivityGroup.activities} when this is true.
+ */
+export function activityClusterHiddenByComment(
+  group: ActivityGroup,
+  working: boolean,
+  liveGroup: ActivityGroup | undefined,
+): boolean {
+  return Boolean(
+    group.replacedByCommentId ||
+      (working && group === liveGroup && group.answerId),
+  );
 }
 
 /**

@@ -616,6 +616,242 @@ describe("codex adapter", () => {
     });
   });
 
+  test("keeps Codex commentary and reasoning out of the side-question answer", async () => {
+    const h = harness();
+    await h.handshake();
+
+    expect(h.adapter.command?.("/side what changed?", h.ctx)).toBe("handled");
+    h.feed({ jsonrpc: "2.0", id: 4, result: { thread: { id: "side_1" } } });
+    await Promise.resolve();
+    await Promise.resolve();
+    h.feed({ jsonrpc: "2.0", id: 5, result: { turn: { id: "side_turn_1" } } });
+
+    h.notify("item/started", {
+      threadId: "side_1",
+      turnId: "side_turn_1",
+      item: { id: "side_think_1", type: "reasoning" },
+    });
+    h.notify("item/reasoning/textDelta", {
+      threadId: "side_1",
+      turnId: "side_turn_1",
+      itemId: "side_think_1",
+      delta: "The user asked about the parser. I should inspect the last edit.",
+    });
+    h.notify("item/completed", {
+      threadId: "side_1",
+      turnId: "side_turn_1",
+      item: {
+        id: "side_think_1",
+        type: "reasoning",
+        content: ["The user asked about the parser. I should inspect the last edit."],
+      },
+    });
+    h.notify("item/started", {
+      threadId: "side_1",
+      turnId: "side_turn_1",
+      item: { id: "side_comment_1", type: "agentMessage", phase: "commentary" },
+    });
+    h.notify("item/agentMessage/delta", {
+      threadId: "side_1",
+      turnId: "side_turn_1",
+      itemId: "side_comment_1",
+      phase: "commentary",
+      delta: "Checking the last parser commit.",
+    });
+    h.notify("item/completed", {
+      threadId: "side_1",
+      turnId: "side_turn_1",
+      item: {
+        id: "side_comment_1",
+        type: "agentMessage",
+        phase: "commentary",
+        text: "Checking the last parser commit.",
+      },
+    });
+
+    expect(h.state().sideQuestion).toMatchObject({
+      status: "asking",
+      answer: "",
+    });
+    expect(h.state().items).toEqual([]);
+
+    h.notify("item/started", {
+      threadId: "side_1",
+      turnId: "side_turn_1",
+      item: { id: "side_answer_1", type: "agentMessage", phase: "final_answer" },
+    });
+    h.notify("item/agentMessage/delta", {
+      threadId: "side_1",
+      turnId: "side_turn_1",
+      itemId: "side_answer_1",
+      phase: "final_answer",
+      delta: "Only the parser changed.",
+    });
+    h.notify("item/completed", {
+      threadId: "side_1",
+      turnId: "side_turn_1",
+      item: {
+        id: "side_answer_1",
+        type: "agentMessage",
+        phase: "final_answer",
+        text: "Only the parser changed.",
+      },
+    });
+    h.notify("turn/completed", {
+      threadId: "side_1",
+      turn: { id: "side_turn_1", status: "completed", items: [] },
+    });
+
+    expect(h.state().sideQuestion).toMatchObject({
+      answer: "Only the parser changed.",
+      status: "answered",
+    });
+    expect(h.state().sideQuestion?.answer).not.toContain("inspect the last edit");
+    expect(h.state().sideQuestion?.answer).not.toContain("Checking the last parser commit.");
+    expect(h.state().items).toEqual([]);
+  });
+
+  test("does not treat unphased thinking-then-answer side messages as one blob", async () => {
+    const h = harness();
+    await h.handshake();
+
+    expect(h.adapter.command?.("/btw what changed?", h.ctx)).toBe("handled");
+    h.feed({ jsonrpc: "2.0", id: 4, result: { thread: { id: "side_1" } } });
+    await Promise.resolve();
+    await Promise.resolve();
+    h.feed({ jsonrpc: "2.0", id: 5, result: { turn: { id: "side_turn_1" } } });
+
+    h.notify("item/agentMessage/delta", {
+      threadId: "side_1",
+      itemId: "side_trace_1",
+      delta: "Let me think about the last diff.",
+    });
+    h.notify("item/completed", {
+      threadId: "side_1",
+      item: {
+        id: "side_trace_1",
+        type: "agentMessage",
+        text: "Let me think about the last diff.",
+      },
+    });
+    h.notify("item/agentMessage/delta", {
+      threadId: "side_1",
+      itemId: "side_trace_2",
+      delta: "Only the parser changed.",
+    });
+    h.notify("item/completed", {
+      threadId: "side_1",
+      item: {
+        id: "side_trace_2",
+        type: "agentMessage",
+        text: "Only the parser changed.",
+      },
+    });
+    h.notify("turn/completed", {
+      threadId: "side_1",
+      turn: { id: "side_turn_1", status: "completed", items: [] },
+    });
+
+    expect(h.state().sideQuestion).toMatchObject({
+      answer: "Only the parser changed.",
+      status: "answered",
+    });
+    expect(h.state().sideQuestion?.answer).not.toContain("Let me think");
+  });
+
+  test("drops side commentary whose phase arrives only on item completion", async () => {
+    const h = harness();
+    await h.handshake();
+
+    expect(h.adapter.command?.("/side what changed?", h.ctx)).toBe("handled");
+    h.feed({ jsonrpc: "2.0", id: 4, result: { thread: { id: "side_1" } } });
+    await Promise.resolve();
+    await Promise.resolve();
+    h.feed({ jsonrpc: "2.0", id: 5, result: { turn: { id: "side_turn_1" } } });
+
+    h.notify("item/agentMessage/delta", {
+      threadId: "side_1",
+      itemId: "side_comment_late",
+      delta: "Checking the last parser commit.",
+    });
+    expect(h.state().sideQuestion?.answer).toBe("Checking the last parser commit.");
+
+    h.notify("item/completed", {
+      threadId: "side_1",
+      item: {
+        id: "side_comment_late",
+        type: "agentMessage",
+        phase: "commentary",
+        text: "Checking the last parser commit.",
+      },
+    });
+    expect(h.state().sideQuestion).toMatchObject({
+      status: "asking",
+      answer: "",
+    });
+
+    h.notify("item/agentMessage/delta", {
+      threadId: "side_1",
+      itemId: "side_answer_late",
+      delta: "Only the parser changed.",
+    });
+    h.notify("item/completed", {
+      threadId: "side_1",
+      item: {
+        id: "side_answer_late",
+        type: "agentMessage",
+        phase: "final_answer",
+        text: "Only the parser changed.",
+      },
+    });
+    h.notify("turn/completed", {
+      threadId: "side_1",
+      turn: { id: "side_turn_1", status: "completed", items: [] },
+    });
+
+    expect(h.state().sideQuestion).toMatchObject({
+      answer: "Only the parser changed.",
+      status: "answered",
+    });
+    expect(h.state().sideQuestion?.answer).not.toContain("Checking the last parser commit.");
+  });
+
+  test("does not settle a commentary-only side thread as an answer", async () => {
+    const h = harness();
+    await h.handshake();
+
+    expect(h.adapter.command?.("/side what changed?", h.ctx)).toBe("handled");
+    h.feed({ jsonrpc: "2.0", id: 4, result: { thread: { id: "side_1" } } });
+    await Promise.resolve();
+    await Promise.resolve();
+    h.feed({ jsonrpc: "2.0", id: 5, result: { turn: { id: "side_turn_1" } } });
+
+    h.notify("item/agentMessage/delta", {
+      threadId: "side_1",
+      itemId: "side_comment_only",
+      delta: "Still thinking about the parser.",
+    });
+    h.notify("item/completed", {
+      threadId: "side_1",
+      item: {
+        id: "side_comment_only",
+        type: "agentMessage",
+        phase: "commentary",
+        text: "Still thinking about the parser.",
+      },
+    });
+    h.notify("turn/completed", {
+      threadId: "side_1",
+      turn: { id: "side_turn_1", status: "completed", items: [] },
+    });
+
+    expect(h.state().sideQuestion).toMatchObject({
+      status: "error",
+      answer: "Codex did not return a side-conversation response.",
+    });
+    expect(h.state().sideQuestion?.answer).not.toContain("Still thinking");
+  });
+
   test("holds /side and /btw out of the same-turn path until resume hydration finishes", async () => {
     const h = harness();
     await h.handshake();
@@ -681,7 +917,7 @@ describe("codex adapter", () => {
     await h.handshake();
 
     expect(h.adapter.command?.("/goal Finish the migration and keep tests green", h.ctx)).toBe(
-      "handled",
+      "handled-turn",
     );
     expect(h.sent.at(-1)).toMatchObject({
       id: 4,
@@ -743,6 +979,19 @@ describe("codex adapter", () => {
 
     h.notify("thread/goal/cleared", { threadId: "thread_1" });
     expect(h.state().goal).toBeNull();
+  });
+
+  test("distinguishes goal work from goal-only control commands", async () => {
+    const h = harness();
+    await h.handshake();
+
+    expect(h.adapter.command?.("/goal", h.ctx)).toBe("handled");
+    expect(h.adapter.command?.("/goal pause", h.ctx)).toBe("handled");
+    expect(h.adapter.command?.("/goal clear", h.ctx)).toBe("handled");
+    expect(h.adapter.command?.("/goal resume", h.ctx)).toBe("handled-turn");
+    expect(h.adapter.command?.("/goal edit Finish the regression test", h.ctx)).toBe(
+      "handled-turn",
+    );
   });
 
   test("views, pauses, resumes, clears, and edits the current goal", async () => {
@@ -1061,6 +1310,321 @@ describe("codex adapter", () => {
         ]),
       },
     });
+  });
+
+  test("links a spawn when the child thread id arrives in thread/started", async () => {
+    const h = harness();
+    await h.handshake();
+    h.notify("item/started", {
+      threadId: "thread_1",
+      item: {
+        id: "sub-late-id",
+        type: "collabAgentToolCall",
+        tool: "spawnAgent",
+        status: "inProgress",
+        receiverThreadIds: [],
+        prompt: "Audit the repository structure",
+        agentsStates: {},
+      },
+    });
+
+    expect(h.state().items[0]).toMatchObject({
+      kind: "tool",
+      subagent: {
+        prompt: "Audit the repository structure",
+      },
+    });
+    expect(h.state().items[0]?.subagent?.threadId).toBeUndefined();
+
+    const discovery = h.sent.findLast((message) => message.method === "thread/list") as {
+      id: number;
+      params: unknown;
+    };
+    expect(discovery.params).toMatchObject({ parentThreadId: "thread_1" });
+
+    h.notify("thread/started", {
+      thread: {
+        id: "thread_child_late",
+        parentThreadId: "thread_1",
+        preview: "Audit the repository structure",
+        agentNickname: "Pauli",
+        agentRole: "explorer",
+        status: { type: "active" },
+      },
+    });
+    const read = h.sent.findLast((message) => message.method === "thread/read") as {
+      id: number;
+    };
+    h.feed({
+      jsonrpc: "2.0",
+      id: read.id,
+      result: {
+        thread: {
+          id: "thread_child_late",
+          status: { type: "active" },
+          turns: [
+            {
+              id: "child-turn",
+              items: [
+                {
+                  id: "child-commentary",
+                  type: "agentMessage",
+                  text: "I found the main entrypoints and am checking their dependencies.",
+                  phase: "commentary",
+                },
+                {
+                  id: "child-command",
+                  type: "commandExecution",
+                  command: "rg --files",
+                  cwd: "H:/project",
+                  status: "completed",
+                  aggregatedOutput: "src/index.ts\n",
+                },
+              ],
+            },
+          ],
+        },
+      },
+    });
+    h.feed({ jsonrpc: "2.0", id: discovery.id, result: { data: [] } });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(h.state().items[0]).toMatchObject({
+      kind: "tool",
+      status: "running",
+      subagent: {
+        threadId: "thread_child_late",
+        label: "Pauli",
+        role: "explorer",
+        items: expect.arrayContaining([
+          expect.objectContaining({
+            kind: "assistant",
+            text: "I found the main entrypoints and am checking their dependencies.",
+          }),
+          expect.objectContaining({
+            kind: "tool",
+            title: "rg --files",
+            status: "done",
+          }),
+        ]),
+      },
+    });
+  });
+
+  test("recovers a missed child start from the parent thread listing", async () => {
+    const h = harness();
+    await h.handshake();
+    h.notify("item/started", {
+      threadId: "thread_1",
+      item: {
+        id: "sub-discovered",
+        type: "collabAgentToolCall",
+        tool: "spawnAgent",
+        status: "inProgress",
+        receiverThreadIds: [],
+        prompt: "Review the data flow",
+        agentsStates: {},
+      },
+    });
+
+    const discovery = h.sent.findLast((message) => message.method === "thread/list") as {
+      id: number;
+    };
+    h.feed({
+      jsonrpc: "2.0",
+      id: discovery.id,
+      result: {
+        data: [
+          {
+            id: "thread_child_discovered",
+            parentThreadId: "thread_1",
+            preview: "Review the data flow",
+            agentNickname: "Dirac",
+            agentRole: "explorer",
+            status: { type: "active" },
+          },
+        ],
+      },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const read = h.sent.findLast((message) => message.method === "thread/read") as {
+      id: number;
+    };
+    h.feed({
+      jsonrpc: "2.0",
+      id: read.id,
+      result: {
+        thread: {
+          id: "thread_child_discovered",
+          status: { type: "active" },
+          turns: [
+            {
+              id: "child-turn",
+              items: [
+                {
+                  id: "child-answer",
+                  type: "agentMessage",
+                  text: "The request crosses the API boundary twice.",
+                },
+              ],
+            },
+          ],
+        },
+      },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(h.state().items[0]).toMatchObject({
+      subagent: {
+        threadId: "thread_child_discovered",
+        label: "Dirac",
+        items: [
+          expect.objectContaining({
+            kind: "assistant",
+            text: "The request crosses the API boundary twice.",
+          }),
+        ],
+      },
+    });
+  });
+
+  test("refreshes persisted child messages when the subagent is inspected", async () => {
+    const h = harness();
+    await h.handshake();
+    h.notify("item/started", {
+      threadId: "thread_1",
+      item: {
+        id: "sub-inspected",
+        type: "collabAgentToolCall",
+        tool: "spawnAgent",
+        status: "inProgress",
+        receiverThreadIds: ["thread_child_inspected"],
+        prompt: "Inspect the parser",
+        agentsStates: { thread_child_inspected: { status: "running" } },
+      },
+    });
+    const initialRead = h.sent.findLast((message) => message.method === "thread/read") as {
+      id: number;
+    };
+    h.feed({
+      jsonrpc: "2.0",
+      id: initialRead.id,
+      result: {
+        thread: {
+          id: "thread_child_inspected",
+          status: { type: "active" },
+          turns: [],
+        },
+      },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const inspection = h.adapter.inspectSubagent?.(
+      "sub-inspected",
+      "thread_child_inspected",
+      h.ctx,
+    );
+    for (let attempt = 0; attempt < 5; attempt += 1) await Promise.resolve();
+    const refreshedRead = h.sent.findLast((message) => message.method === "thread/read") as {
+      id: number;
+    };
+    expect(refreshedRead.id).not.toBe(initialRead.id);
+    h.feed({
+      jsonrpc: "2.0",
+      id: refreshedRead.id,
+      result: {
+        thread: {
+          id: "thread_child_inspected",
+          status: { type: "active" },
+          turns: [
+            {
+              id: "child-turn",
+              items: [
+                {
+                  id: "persisted-message",
+                  type: "agentMessage",
+                  text: "This message was loaded when the panel opened.",
+                },
+              ],
+            },
+          ],
+        },
+      },
+    });
+    expect(await inspection).toBe(true);
+
+    expect(h.state().items[0]?.subagent?.items).toContainEqual(
+      expect.objectContaining({
+        kind: "assistant",
+        text: "This message was loaded when the panel opened.",
+      }),
+    );
+  });
+
+  test("keeps streamed item ids isolated between parent and child threads", async () => {
+    const h = harness();
+    await h.handshake();
+    h.notify("item/agentMessage/delta", {
+      threadId: "thread_1",
+      itemId: "shared-message-id",
+      delta: "Parent message.",
+    });
+    h.notify("item/completed", {
+      threadId: "thread_1",
+      item: { id: "shared-message-id", type: "agentMessage", text: "Parent message." },
+    });
+    h.notify("item/started", {
+      threadId: "thread_1",
+      item: {
+        id: "sub-shared-id",
+        type: "collabAgentToolCall",
+        tool: "spawnAgent",
+        status: "inProgress",
+        receiverThreadIds: ["thread_child_shared"],
+        prompt: "Inspect shared ids",
+        agentsStates: { thread_child_shared: { status: "running" } },
+      },
+    });
+
+    const read = h.sent.findLast((message) => message.method === "thread/read") as {
+      id: number;
+    };
+    h.feed({
+      jsonrpc: "2.0",
+      id: read.id,
+      result: {
+        thread: {
+          id: "thread_child_shared",
+          status: { type: "active" },
+          turns: [
+            {
+              id: "child-turn",
+              items: [
+                {
+                  id: "shared-message-id",
+                  type: "agentMessage",
+                  text: "Child message with the same provider item id.",
+                },
+              ],
+            },
+          ],
+        },
+      },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(h.state().items[1]?.subagent?.items).toContainEqual(
+      expect.objectContaining({
+        kind: "assistant",
+        text: "Child message with the same provider item id.",
+      }),
+    );
   });
 
   test("starts a direct follow-up turn in a completed child thread", async () => {
@@ -1396,6 +1960,10 @@ describe("codex adapter", () => {
     const h = harness();
     await h.handshake();
     h.adapter.prompt({ text: "run the audit", images: [] }, h.ctx);
+    h.notify("turn/started", {
+      threadId: "thread_1",
+      turn: { id: "turn_audit", status: "inProgress", items: [] },
+    });
 
     h.notify("thread/status/changed", {
       threadId: "thread_1",
@@ -1408,6 +1976,66 @@ describe("codex adapter", () => {
       turn: { id: "late_duplicate", status: "completed", items: [] },
     });
     expect(h.events.filter((event) => event.type === "turn-end")).toHaveLength(1);
+  });
+
+  test("keeps a queued follow-up working when terminal frames from the previous turn arrive late", async () => {
+    const h = harness();
+    await h.handshake();
+    h.adapter.prompt({ text: "first task", images: [] }, h.ctx);
+    h.notify("turn/started", {
+      threadId: "thread_1",
+      turn: { id: "turn_first", status: "inProgress", items: [] },
+    });
+    h.notify("turn/completed", {
+      threadId: "thread_1",
+      turn: { id: "turn_first", status: "completed", items: [] },
+    });
+    expect(h.state().status).toBe("idle");
+
+    // This is the message the session releases from its local follow-up queue.
+    h.adapter.prompt({ text: "queued follow-up", images: [] }, h.ctx);
+    expect(h.state().status).toBe("working");
+
+    // App-server can drain these old terminal frames after turn/start for the
+    // follow-up was already written. None may end or pollute the new turn.
+    h.notify("item/completed", {
+      threadId: "thread_1",
+      turnId: "turn_first",
+      item: {
+        id: "late_first_answer",
+        type: "agentMessage",
+        phase: "final_answer",
+        text: "Late duplicate answer.",
+      },
+    });
+    h.notify("turn/completed", {
+      threadId: "thread_1",
+      turn: { id: "turn_first", status: "completed", items: [] },
+    });
+    h.notify("thread/status/changed", {
+      threadId: "thread_1",
+      status: { type: "idle" },
+    });
+
+    expect(h.state().status).toBe("working");
+    expect(h.events.filter((event) => event.type === "turn-end")).toHaveLength(1);
+    expect(
+      h.state().items.some(
+        (item) => item.kind === "assistant" && item.text === "Late duplicate answer.",
+      ),
+    ).toBe(false);
+
+    h.notify("turn/started", {
+      threadId: "thread_1",
+      turn: { id: "turn_followup", status: "inProgress", items: [] },
+    });
+    h.notify("turn/completed", {
+      threadId: "thread_1",
+      turn: { id: "turn_followup", status: "completed", items: [] },
+    });
+
+    expect(h.state().status).toBe("idle");
+    expect(h.events.filter((event) => event.type === "turn-end")).toHaveLength(2);
   });
 
   test("uses the final-answer item when both boundary notifications are missing", async () => {
@@ -1442,6 +2070,105 @@ describe("codex adapter", () => {
       },
     });
     await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(h.state().status).toBe("idle");
+    expect(h.events.filter((event) => event.type === "turn-end")).toHaveLength(1);
+  });
+
+  test("keeps the active turn steerable while a final-answer fallback is quiet", async () => {
+    const h = harness({}, { completionQuietMs: 20 });
+    await h.handshake();
+    h.adapter.prompt({ text: "inspect the failure", images: [] }, h.ctx);
+    h.notify("turn/started", {
+      threadId: "thread_1",
+      turn: { id: "turn_steered_final", status: "inProgress", items: [] },
+    });
+    h.notify("item/completed", {
+      threadId: "thread_1",
+      turnId: "turn_steered_final",
+      item: {
+        id: "answer_before_steer",
+        type: "agentMessage",
+        phase: "final_answer",
+        text: "The first answer.",
+      },
+    });
+
+    const steering = h.adapter.steer?.(
+      { text: "Check the other failing case too", images: [] },
+      h.ctx,
+    );
+    const steer = h.sent.at(-1) as { id: number };
+    expect(steer).toMatchObject({
+      method: "turn/steer",
+      params: {
+        threadId: "thread_1",
+        expectedTurnId: "turn_steered_final",
+      },
+    });
+    // The old response can finish on the notification channel before the
+    // steer RPC response is delivered. It must not invalidate that steer.
+    h.notify("turn/completed", {
+      threadId: "thread_1",
+      turn: { id: "turn_steered_final", status: "completed", items: [] },
+    });
+    expect(h.state().status).toBe("working");
+    h.feed({ jsonrpc: "2.0", id: steer.id, result: { turnId: "turn_steered_final" } });
+    await expect(steering).resolves.toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    expect(h.state().status).toBe("working");
+    expect(h.events.filter((event) => event.type === "turn-end")).toHaveLength(0);
+
+    h.notify("item/reasoning/textDelta", {
+      threadId: "thread_1",
+      turnId: "turn_steered_final",
+      itemId: "reasoning_after_steer",
+      delta: "Checking the other case now.",
+    });
+    expect(
+      h.state().items.some(
+        (item) => item.kind === "thinking" && item.text === "Checking the other case now.",
+      ),
+    ).toBe(true);
+
+    h.notify("turn/completed", {
+      threadId: "thread_1",
+      turn: { id: "turn_steered_final", status: "completed", items: [] },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(h.state().status).toBe("idle");
+    expect(h.events.filter((event) => event.type === "turn-end")).toHaveLength(1);
+  });
+
+  test("interrupts the provider turn while a final-answer fallback is quiet", async () => {
+    const h = harness({}, { completionQuietMs: 20 });
+    await h.handshake();
+    h.adapter.prompt({ text: "run the check", images: [] }, h.ctx);
+    h.notify("turn/started", {
+      threadId: "thread_1",
+      turn: { id: "turn_interrupt_final", status: "inProgress", items: [] },
+    });
+    h.notify("item/completed", {
+      threadId: "thread_1",
+      turnId: "turn_interrupt_final",
+      item: {
+        id: "answer_before_interrupt",
+        type: "agentMessage",
+        phase: "final_answer",
+        text: "Almost settled.",
+      },
+    });
+
+    h.adapter.interrupt(h.ctx);
+    const interrupt = h.sent.at(-1) as { id: number };
+    expect(interrupt).toMatchObject({
+      method: "turn/interrupt",
+      params: { threadId: "thread_1", turnId: "turn_interrupt_final" },
+    });
+    h.feed({ jsonrpc: "2.0", id: interrupt.id, result: {} });
+    await Promise.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 30));
 
     expect(h.state().status).toBe("idle");
     expect(h.events.filter((event) => event.type === "turn-end")).toHaveLength(1);
@@ -2139,6 +2866,153 @@ describe("codex adapter", () => {
     expect(
       h.state().items.some((item) => item.kind === "notice" && item.tone === "error"),
     ).toBe(false);
+  });
+
+  test("times out a silent thread/resume, then hydrates a forked copy", async () => {
+    const h = harness({}, { completionQuietMs: 0, resumeTimeoutMs: 40 });
+    await h.handshake();
+
+    const resumed = h.adapter.resume?.("thread_stuck_active", h.ctx);
+    expect(h.state()).toMatchObject({ status: "working", loadingHistory: true });
+    await new Promise((resolve) => setTimeout(resolve, 70));
+
+    const fork = h.sent.find((message) => message.method === "thread/fork") as {
+      id: number;
+      params: Record<string, unknown>;
+    };
+    expect(fork.params).toMatchObject({ threadId: "thread_stuck_active" });
+    h.feed({ jsonrpc: "2.0", id: fork.id, result: { thread: { id: "thread_copy" } } });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const resumes = h.sent.filter((message) => message.method === "thread/resume") as {
+      id: number;
+      params: Record<string, unknown>;
+    }[];
+    expect(resumes).toHaveLength(2);
+    expect(resumes[1]?.params.threadId).toBe("thread_copy");
+    h.feed({
+      jsonrpc: "2.0",
+      id: resumes[1]!.id,
+      result: {
+        thread: {
+          id: "thread_copy",
+          sessionId: "sess_copy",
+          status: { type: "idle" },
+          turns: [],
+        },
+        initialTurnsPage: {
+          data: [
+            {
+              id: "turn-copy",
+              status: "completed",
+              items: [
+                {
+                  type: "userMessage",
+                  id: "user-copy",
+                  content: [{ type: "text", text: "Keep going from the copy" }],
+                },
+                { type: "agentMessage", id: "answer-copy", text: "Copied." },
+              ],
+            },
+          ],
+          nextCursor: null,
+        },
+      },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(await resumed).toBe(true);
+    expect(h.state()).toMatchObject({
+      status: "idle",
+      loadingHistory: false,
+      sessionId: "sess_copy",
+    });
+    expect(h.state().items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "notice",
+          tone: "info",
+          text: "Codex did not resume that conversation, so Duckweed opened a copy of it.",
+        }),
+        expect.objectContaining({ kind: "user", text: "Keep going from the copy" }),
+        expect.objectContaining({ kind: "assistant", text: "Copied." }),
+      ]),
+    );
+  });
+
+  test("keeps the first history page when later transcript pages never answer", async () => {
+    const h = harness({}, { completionQuietMs: 0, resumeTimeoutMs: 40 });
+    await h.handshake();
+
+    const resumed = h.adapter.resume?.("thread_paged_hang", h.ctx);
+    const resumeCall = h.sent.find((message) => message.method === "thread/resume") as {
+      id: number;
+    };
+    h.feed({
+      jsonrpc: "2.0",
+      id: resumeCall.id,
+      result: {
+        thread: {
+          id: "thread_paged_hang",
+          sessionId: "sess_paged_hang",
+          status: { type: "idle" },
+          turns: [],
+        },
+        initialTurnsPage: {
+          data: [
+            {
+              id: "turn-new",
+              status: "completed",
+              items: [
+                {
+                  type: "userMessage",
+                  id: "user-new",
+                  content: [{ type: "text", text: "Inspect the latest layout" }],
+                },
+                { type: "agentMessage", id: "answer-new", text: "The latest layout is fine." },
+              ],
+            },
+          ],
+          nextCursor: "older-turns",
+        },
+      },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(h.sent.some((message) => message.method === "thread/turns/list")).toBe(true);
+
+    await new Promise((resolve) => setTimeout(resolve, 70));
+    expect(await resumed).toBe(true);
+    expect(h.state()).toMatchObject({
+      status: "idle",
+      loadingHistory: false,
+      sessionId: "sess_paged_hang",
+    });
+    expect(h.state().items).toEqual([
+      expect.objectContaining({ kind: "user", text: "Inspect the latest layout" }),
+      expect.objectContaining({ kind: "assistant", text: "The latest layout is fine." }),
+    ]);
+    expect(h.sent.some((message) => message.method === "thread/fork")).toBe(false);
+  });
+
+  test("does not fork when thread/resume returns an application error", async () => {
+    const h = harness({}, { completionQuietMs: 0, resumeTimeoutMs: 40 });
+    await h.handshake();
+    const resumed = h.adapter.resume?.("gone", h.ctx);
+    const call = h.sent.find((message) => message.method === "thread/resume") as { id: number };
+    h.feed({ jsonrpc: "2.0", id: call.id, error: { message: "thread not found" } });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(await resumed).toBe(false);
+    expect(h.sent.some((message) => message.method === "thread/fork")).toBe(false);
+    expect(h.state().items.at(-1)).toMatchObject({
+      kind: "notice",
+      tone: "error",
+      text: "thread not found",
+    });
+    expect(h.state()).toMatchObject({ status: "idle", loadingHistory: false });
   });
 
   test("says so when a thread cannot be resumed", async () => {

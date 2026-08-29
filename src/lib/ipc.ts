@@ -66,6 +66,8 @@ export interface MobileCompletionMessage {
   durationMs: number | null;
   soundCue: number | null;
   unreadOnDesktop: boolean;
+  /** Identifies the exact terminal completion this notification represents. */
+  completionSeq: number | null;
 }
 
 export interface MobileTerminalSnapshot {
@@ -74,10 +76,54 @@ export interface MobileTerminalSnapshot {
   shell: string;
   agent: string | null;
   model: string | null;
-  status: "idle" | "working" | "waiting" | "exited";
+  status: "starting" | "idle" | "working" | "waiting" | "exited";
+  /** Raw PTY grid or the structured agent conversation surface. */
+  mode: "terminal" | "conversation";
+  terminalColumns?: number;
+  terminalRows?: number;
   unreadOnDesktop: boolean;
+  /** Current terminal completion identity, used to reject stale read receipts. */
+  completionSeq: number;
+  /** Slash commands currently available in this agent session. */
+  commands: MobileSlashCommandSnapshot[];
+  /** Recent reasoning, plan, and tool steps shown inline with the conversation. */
+  activity: MobileAgentActivitySnapshot[];
   conversation: MobileConversationSnapshot[];
   permission: MobilePermissionSnapshot | null;
+  terminalOutput?: string;
+}
+
+export interface MobileSlashCommandSnapshot {
+  name: string;
+  description: string;
+}
+
+export interface MobileAgentActivitySnapshot {
+  id: string;
+  at: number;
+  kind: "thinking" | "tool" | "plan";
+  title: string;
+  detail: string | null;
+  /** Shell command kept separate from output so the phone can style it as code. */
+  command: string | null;
+  /** File edits attached to this tool call, including a bounded diff preview. */
+  changes: MobileFileChangeSnapshot[];
+  /** A plan stays one docked tracker on mobile instead of one timeline row per step. */
+  planType?: "tasks" | "workflow";
+  steps?: MobilePlanStepSnapshot[];
+  status: "pending" | "running" | "done" | "error";
+}
+
+export interface MobilePlanStepSnapshot {
+  text: string;
+  status: "pending" | "running" | "done";
+}
+
+export interface MobileFileChangeSnapshot {
+  path: string;
+  insertions: number;
+  deletions: number;
+  diff: string | null;
 }
 
 export interface MobilePermissionOptionSnapshot {
@@ -88,10 +134,33 @@ export interface MobilePermissionOptionSnapshot {
 
 export interface MobilePermissionSnapshot {
   id: string;
+  kind: "approval" | "question";
   title: string;
   detail: string | null;
   command: string | null;
   options: MobilePermissionOptionSnapshot[];
+  questions: MobileQuestionSnapshot[];
+}
+
+export interface MobileQuestionOptionSnapshot {
+  id: string;
+  label: string;
+  description: string;
+  preview: string | null;
+}
+
+export interface MobileQuestionSnapshot {
+  id: string;
+  header: string;
+  question: string;
+  multiSelect: boolean;
+  options: MobileQuestionOptionSnapshot[];
+}
+
+export interface MobileQuestionAnswerSnapshot {
+  questionId: string;
+  labels: string[];
+  custom: string | null;
 }
 
 export interface MobileConversationSnapshot {
@@ -99,6 +168,8 @@ export interface MobileConversationSnapshot {
   sentAt: number;
   role: "user" | "assistant";
   text: string;
+  /** True while the assistant response is still arriving from the provider. */
+  streaming?: boolean;
 }
 
 export interface MobileProjectSnapshot {
@@ -106,22 +177,54 @@ export interface MobileProjectSnapshot {
   name: string;
   path: string;
   branch: string | null;
+  /** Desktop tab accent, shared with the companion app. */
+  color?: string | null;
   terminals: MobileTerminalSnapshot[];
+}
+
+export interface MobileUsageLimitSnapshot {
+  id: string;
+  label: string;
+  /** Provider-reported utilization, where 100 means the window is exhausted. */
+  percent: number;
+  resetsAt: number | null;
+  /** Estimated hours of active use left, when the provider history supports it. */
+  usageHoursLeft: number | null;
+  /** Utilization points consumed per hour of continued use. */
+  perHour: number | null;
+  /** Utilization projected for the moment the window resets. */
+  projectedPercent: number | null;
+  /** Epoch ms this limit would hit 100%; null when the pace never gets there. */
+  runsOutAt: number | null;
+  /** Forecast basis from the desktop scan, including `exhausted`. */
+  basis: "recent" | "blended" | "window" | "exhausted" | null;
+}
+
+export interface MobileUsageQuotaSnapshot {
+  agent: string;
+  label: string;
+  plan: string | null;
+  limits: MobileUsageLimitSnapshot[];
 }
 
 export interface MobileWorkspaceSnapshot {
   projects: MobileProjectSnapshot[];
+  /** Compact provider-reported limits for the companion Settings page. */
+  usageLimits?: MobileUsageQuotaSnapshot[];
 }
 
 export interface MobileRemoteCommand {
   deviceId: string;
   commandId: string;
-  kind: "input" | "refresh" | "approval";
+  kind: "input" | "refresh" | "approval" | "question" | "read" | "create_terminal" | "close_terminal";
   terminalId: string | null;
   projectId: string | null;
   text: string | null;
+  agent?: string | null;
   permissionId: string | null;
   optionId: string | null;
+  completionSeq: number | null;
+  answers: MobileQuestionAnswerSnapshot[];
   images: Array<{
     id: string;
     name: string;
@@ -155,8 +258,18 @@ export const mobileDeviceRemove = (id: string) =>
 export const mobileSendCompletion = (message: MobileCompletionMessage) =>
   invoke<MobileSendResult>("mobile_send_completion", { message });
 
-export const mobileSendWorkspace = (snapshot: MobileWorkspaceSnapshot) =>
-  invoke<MobileSendResult>("mobile_send_workspace", { snapshot });
+// React effects can restart while a previous encrypted snapshot is still in
+// flight. Keep sends ordered across effect lifetimes so an older "working"
+// snapshot cannot reach the relay after the newer settled state.
+let mobileWorkspaceSendQueue: Promise<void> = Promise.resolve();
+
+export const mobileSendWorkspace = (snapshot: MobileWorkspaceSnapshot) => {
+  const send = mobileWorkspaceSendQueue
+    .catch(() => undefined)
+    .then(() => invoke<MobileSendResult>("mobile_send_workspace", { snapshot }));
+  mobileWorkspaceSendQueue = send.then(() => undefined, () => undefined);
+  return send;
+};
 
 export const mobileSendPresence = () =>
   invoke<MobileSendResult>("mobile_send_presence");
@@ -377,6 +490,9 @@ export const agentSessionTranscript = (agent: string, cwd: string, sessionId: st
 /** Which agent CLIs this machine has, without starting any of them. */
 export const agentProcProbe = (names: string[]) =>
   invoke<AgentAvailability[]>("agent_proc_probe", { names });
+
+/** Refresh OpenCode's cached model registry, including its OpenRouter models. */
+export const openCodeModelsRefresh = () => invoke<void>("opencode_models_refresh");
 
 /** Launch a coding agent in its line-delimited JSON mode. */
 export const agentProcStart = (

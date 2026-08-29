@@ -57,7 +57,20 @@ while alerts are off are still saved, but they are never replayed as alerts
 when notifications are enabled again. **Activity** shows the newest response
 from each currently open agent, up to 50 agents. A new response uses the same
 red outline as an unread desktop terminal and loses it when its conversation is
-opened.
+opened. Completion and attention notifications also include **Mark as read**.
+Using it clears the conversation on the phone immediately and sends an
+encrypted read receipt through the relay, which removes the red unread marker
+from the matching desktop terminal. If the phone is temporarily offline, the
+companion keeps the receipt locally and retries it when connectivity returns.
+Opening the notification or conversation performs the same synchronized read.
+For a completion outside the visible desktop pane, Duckweed waits 30 seconds
+before sending the phone notification. If the red unread outline is cleared
+during that interval, no notification is sent.
+For a completion in the selected pane, Duckweed waits one minute and sends the
+notification only if there has been no app interaction since the completion.
+Focusing Duckweed, switching tabs or panes, typing, clicking, or scrolling all
+count as activity. The Android companion also suppresses and marks as read a
+completion for the conversation currently visible on the phone.
 
 The main companion navigation contains **Activity**, **Projects**, and
 **Conversations**. Connection management, sync health, and updates live in

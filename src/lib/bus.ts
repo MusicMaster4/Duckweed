@@ -6,6 +6,8 @@ type Events = {
   "term:reveal": { termId: string };
   /** Insert prompt-template text into one exact terminal or agent composer. */
   "term:insert-prompt": { termId: string; text: string };
+  /** Clear a draft after an app-level delayed send was confirmed. */
+  "term:clear-draft": { termId: string };
 };
 
 type Handler<K extends keyof Events> = (payload: Events[K]) => void;

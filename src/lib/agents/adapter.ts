@@ -7,6 +7,15 @@ import type {
   AgentQuestionAnswer,
 } from "./types";
 
+/** How a provider adapter handled text beginning with `/`. */
+export type AgentCommandResult =
+  /** The adapter answered or applied the command without starting user-facing work. */
+  | "handled"
+  /** The adapter handled the command and started or resumed user-facing work itself. */
+  | "handled-turn"
+  /** Send the slash text through the provider's ordinary prompt path. */
+  | "prompt";
+
 /** What an adapter is given to do its job. */
 export interface AdapterContext {
   /** Folder the agent was launched in. */
@@ -51,13 +60,20 @@ export interface AgentAdapter {
     prompt: AgentPrompt,
     ctx: AdapterContext,
   ) => Promise<boolean> | boolean;
+  /** Resolve and hydrate a provider-owned child before its focused UI opens. */
+  inspectSubagent?: (
+    callId: string,
+    threadId: string | null,
+    ctx: AdapterContext,
+  ) => Promise<boolean> | boolean;
   /**
    * The user submitted text starting with `/`. Returning `"handled"` means
-   * the adapter ran the command itself (an RPC, a local answer); `"prompt"`
-   * sends the text on as a normal message, which is how agents that interpret
-   * slash text themselves (Claude, ACP) receive their commands.
+   * the adapter ran a local-only command; `"handled-turn"` means its RPC also
+   * started or resumed user-facing work; `"prompt"` sends the text on as a
+   * normal message, which is how agents that interpret slash text themselves
+   * (Claude, ACP) receive their commands.
    */
-  command?: (text: string, ctx: AdapterContext) => "handled" | "prompt";
+  command?: (text: string, ctx: AdapterContext) => AgentCommandResult;
   /**
    * Apply model or reasoning configuration and resolve only after the provider
    * has accepted it. Sessions use this before dispatching the next message so

@@ -6,6 +6,7 @@ import {
   agentProcSend,
   agentProcStart,
   agentProcStop,
+  openCodeModelsRefresh,
   type AgentFrame,
 } from "../ipc";
 import type { AdapterContext, AgentAdapter } from "./adapter";
@@ -21,7 +22,7 @@ import {
 import { createAcpAdapter } from "./adapters/acp";
 import { createClaudeAdapter } from "./adapters/claude";
 import { createCodexAdapter } from "./adapters/codex";
-import { AGENTS, agentPresentation } from "./catalog";
+import { AGENTS, agentPresentation, agentSpawnEnv } from "./catalog";
 import {
   applyEvent,
   didStatusEnterIdle,
@@ -34,6 +35,7 @@ import { latest as latestSession, transcript as sessionTranscript } from "./hist
 import { AGENT_PROGRAMS, type AgentLaunch } from "./launch";
 import { loadClaudeSettingsDefaults } from "./claudeSettings";
 import {
+  rememberConfigurationChoice,
   rememberPreferences,
   withRememberedPreferences,
 } from "./preferences";
@@ -65,7 +67,9 @@ import {
  * arrangement `terminals.ts` uses for xterm, for the same reason.
  */
 
-const TAURI_RUNTIME = "__TAURI_INTERNALS__" in window;
+const runtimeWindow = globalThis.window;
+const TAURI_RUNTIME =
+  typeof runtimeWindow !== "undefined" && "__TAURI_INTERNALS__" in runtimeWindow;
 
 interface Session {
   termId: string;
@@ -333,7 +337,7 @@ function announce(termId: string): void {
 
 function notify(session: Session): void {
   if (session.notifyHandle !== null) return;
-  session.notifyHandle = window.requestAnimationFrame(() => {
+  session.notifyHandle = runtimeWindow.requestAnimationFrame(() => {
     session.notifyHandle = null;
     announce(session.termId);
   });
@@ -342,7 +346,7 @@ function notify(session: Session): void {
 /** Flush any pending notification immediately — used when a session ends. */
 function notifyNow(session: Session): void {
   if (session.notifyHandle !== null) {
-    window.cancelAnimationFrame(session.notifyHandle);
+    runtimeWindow.cancelAnimationFrame(session.notifyHandle);
     session.notifyHandle = null;
   }
   announce(session.termId);
@@ -355,7 +359,7 @@ function createAdapter(agent: AgentId): AgentAdapter {
     case "codex-app-server":
       return createCodexAdapter();
     case "acp":
-      return createAcpAdapter();
+      return createAcpAdapter(agent);
   }
 }
 
@@ -369,6 +373,24 @@ function createAdapter(agent: AgentId): AgentAdapter {
 let availabilityProbe: Promise<Set<string>> | null = null;
 let availablePrograms: Set<string> = new Set();
 let availabilityKnown = false;
+
+/**
+ * One refresh per WebView lifetime. React remounts and an OpenCode launch can
+ * both request it, so keep the shared promise and let the launch await the
+ * same work the app boot already started.
+ */
+let openCodeModelsRefreshTask: Promise<void> | null = null;
+
+export function refreshOpenCodeModels(): Promise<void> {
+  if (!TAURI_RUNTIME) return Promise.resolve();
+  if (!openCodeModelsRefreshTask) {
+    openCodeModelsRefreshTask = openCodeModelsRefresh().catch(() => {
+      // OpenCode is optional, may be offline, or may not have OpenRouter set
+      // up. None of those should make Duckweed startup noisy or unusable.
+    });
+  }
+  return openCodeModelsRefreshTask;
+}
 
 export function probeAvailability(): Promise<Set<string>> {
   if (availabilityProbe) return availabilityProbe;
@@ -420,6 +442,12 @@ function contextWithoutUserEcho(session: Session): AdapterContext {
   };
 }
 
+/** Preserve completion ownership when a provider-side slash RPC starts work. */
+function claimHandledTurn(session: Session): void {
+  session.userInitiatedTurn = true;
+  session.interactionEpoch += 1;
+}
+
 function dispatchNow(session: Session, prompt: AgentPrompt, echoUser = true): void {
   // Whatever the last turn's ending was, this one is the user's own request.
   session.interrupted = false;
@@ -434,15 +462,18 @@ function dispatchNow(session: Session, prompt: AgentPrompt, echoUser = true): vo
   }
   if (prompt.images.length === 0 && prompt.text.startsWith("/")) {
     const previousModel = session.state.model;
-    if (session.adapter.command?.(prompt.text, context) === "handled") {
+    const result = session.adapter.command?.(prompt.text, context);
+    if (result === "handled" || result === "handled-turn") {
+      if (result === "handled-turn") claimHandledTurn(session);
       // Codex may report temporary or provider-selected models in ordinary
       // session events. Only a successful user /model command belongs in its
       // durable preference.
       if (session.launch.agent === "codex" && session.state.model !== previousModel) {
         rememberPreferences(session.launch, { model: session.state.model });
       }
-      // Local answer only (notice, model switch over RPC). No working stretch,
-      // so nothing to announce when it "finishes".
+      // A plain handled command is only a local answer or setting change. A
+      // handled-turn has already claimed the provider-side work above, so its
+      // eventual turn-end still earns completion effects.
       return;
     }
   }
@@ -701,7 +732,22 @@ function emit(session: Session, event: AgentEvent): void {
     }
     dispatch(session, queued.prompt, !queued.echoed);
   }
-  notify(session);
+  // Browser animation frames can stop while the desktop window is minimized.
+  // Settled states are also synchronization boundaries for the mobile
+  // companion, so publish them immediately instead of waiting for a paint that
+  // may never happen until the user restores Duckweed.
+  if (
+    event.type === "turn-end" ||
+    (event.type === "status" &&
+      (event.status === "idle" ||
+        event.status === "waiting" ||
+        event.status === "exited" ||
+        event.status === "error"))
+  ) {
+    notifyNow(session);
+  } else {
+    notify(session);
+  }
 
   // Config slash commands and synthetic idles still end the turn for the
   // protocol — they just do not earn a sound or unread flash.
@@ -769,6 +815,10 @@ export async function start(
 ): Promise<string | null> {
   if (sessions.has(termId)) return null;
   if (!TAURI_RUNTIME) return "the custom agent UI needs the desktop app";
+
+  // OpenCode snapshots its model registry during the ACP handshake. Waiting
+  // here ensures a launch made during WebView startup sees the refreshed list.
+  if (launch.agent === "opencode") await refreshOpenCodeModels();
 
   // Explicit launch flags win field by field and become the next remembered
   // choice. Everything omitted inherits the last choice for this exact CLI.
@@ -890,7 +940,7 @@ export async function start(
           ...adapter.args(launch),
         ],
         cwd,
-        env: Object.keys(launch.env).length ? launch.env : null,
+        env: agentSpawnEnv(launch.env),
       },
       channel,
     );
@@ -1035,13 +1085,16 @@ export function submit(
     images.length === 0 &&
     session.state.status !== "idle" &&
     session.state.status !== "starting" &&
-    session.adapter.commandAvailableDuringTurn?.(trimmed) &&
-    session.adapter.command?.(trimmed, session.context) === "handled"
+    session.adapter.commandAvailableDuringTurn?.(trimmed)
   ) {
-    // Control-plane commands such as `/goal pause` must take effect while the
-    // provider is working. Sending them through the normal follow-up queue can
-    // strand them behind the automatic continuation they are meant to stop.
-    return;
+    const result = session.adapter.command?.(trimmed, session.context);
+    if (result === "handled-turn") claimHandledTurn(session);
+    if (result === "handled" || result === "handled-turn") {
+      // Control-plane commands such as `/goal pause` must take effect while the
+      // provider is working. Sending them through the normal follow-up queue can
+      // strand them behind the automatic continuation they are meant to stop.
+      return;
+    }
   }
   if (session.state.status === "starting") {
     // Show the opening prompt immediately. The handshake still owns when it
@@ -1080,6 +1133,21 @@ export function canSteer(termId: string): boolean {
 export function canPromptSubagent(termId: string): boolean {
   const session = sessions.get(termId);
   return Boolean(session && !session.disposed && session.adapter.promptSubagent);
+}
+
+/** Resolve and load one provider-owned child transcript for focused inspection. */
+export async function inspectSubagent(
+  termId: string,
+  callId: string,
+  threadId: string | null,
+): Promise<boolean> {
+  const session = sessions.get(termId);
+  if (!session || session.disposed || !session.adapter.inspectSubagent) return false;
+  try {
+    return await session.adapter.inspectSubagent(callId, threadId, session.context);
+  } catch {
+    return false;
+  }
 }
 
 /** Deliver text to one child without adding it to the parent conversation. */
@@ -1191,10 +1259,12 @@ export function configure(
   }
 
   const clean = value.trim();
+  // Picker choices are defaults for future sessions even though applying them
+  // to this live process is staged until the next turn. Persist at selection
+  // time so closing the app, including an automatic shutdown after the current
+  // turn, cannot bring the previous choice back.
+  rememberConfigurationChoice(session.launch, kind, clean);
   if (kind === "model") {
-    if (session.launch.agent === "codex") {
-      rememberPreferences(session.launch, { model: clean });
-    }
     session.state = {
       ...session.state,
       nextModel: clean === session.state.model ? null : clean,
@@ -1405,7 +1475,7 @@ export function requestExit(termId: string): "armed" | "close" | "none" {
 
   session.exitArmedUntil = now + 1800;
   emit(session, { type: "exit-armed", armed: true });
-  window.setTimeout(() => {
+  runtimeWindow.setTimeout(() => {
     if (session.disposed || session.exitArmedUntil > Date.now()) return;
     session.exitArmedUntil = 0;
     emit(session, { type: "exit-armed", armed: false });

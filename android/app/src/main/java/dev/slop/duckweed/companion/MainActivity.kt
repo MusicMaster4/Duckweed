@@ -8,21 +8,32 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.res.ColorStateList
 import android.content.pm.PackageManager
+import android.graphics.drawable.ClipDrawable
+import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.LayerDrawable
 import android.os.Build
 import android.os.Bundle
 import android.text.Editable
+import android.text.InputFilter
 import android.text.TextWatcher
 import android.text.format.DateUtils
+import android.text.method.ScrollingMovementMethod
+import android.view.Gravity
 import android.view.HapticFeedbackConstants
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.animation.DecelerateInterpolator
 import android.widget.Button
+import android.widget.CheckBox
+import android.widget.CompoundButton
 import android.widget.EditText
 import android.widget.ImageButton
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ProgressBar
+import android.widget.RadioButton
+import android.widget.RadioGroup
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
@@ -35,6 +46,7 @@ import androidx.biometric.BiometricPrompt
 import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsAnimationCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.updatePadding
 import androidx.recyclerview.widget.LinearLayoutManager
@@ -46,6 +58,8 @@ import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
 import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.Locale
 import java.util.UUID
 
 class MainActivity : AppCompatActivity() {
@@ -68,9 +82,13 @@ class MainActivity : AppCompatActivity() {
     private lateinit var connectionHealth: TextView
     private lateinit var connectionLastSync: TextView
     private lateinit var retryConnectionButton: Button
+    private lateinit var usageLimitsContent: LinearLayout
+    private lateinit var usageLimitsEmpty: TextView
+    private lateinit var pendingNotice: TextView
     private lateinit var projectDetail: View
     private lateinit var conversationDetail: View
-    private lateinit var conversationThinking: View
+    private lateinit var conversationCommandsScroll: View
+    private lateinit var conversationCommands: LinearLayout
     private lateinit var conversationComposer: View
     private lateinit var conversationUnavailable: TextView
     private lateinit var conversationInput: EditText
@@ -80,7 +98,16 @@ class MainActivity : AppCompatActivity() {
     private lateinit var conversationAttachmentImage: ImageView
     private lateinit var conversationAttachmentName: TextView
     private lateinit var conversationList: RecyclerView
-    private lateinit var conversationApproval: View
+    private lateinit var conversationTerminal: TextView
+    private lateinit var conversationPlan: View
+    private lateinit var conversationPlanHead: View
+    private lateinit var conversationPlanLabel: TextView
+    private lateinit var conversationPlanCurrent: TextView
+    private lateinit var conversationPlanCount: TextView
+    private lateinit var conversationPlanProgress: ProgressBar
+    private lateinit var conversationPlanExpand: ImageView
+    private lateinit var conversationPlanSteps: LinearLayout
+    private lateinit var conversationApproval: MaxHeightScrollView
     private lateinit var approvalTitle: TextView
     private lateinit var approvalDetail: TextView
     private lateinit var approvalCommand: TextView
@@ -90,12 +117,24 @@ class MainActivity : AppCompatActivity() {
     private lateinit var appUpdater: AppUpdater
     private val messageAdapter = MessageAdapter { openResponse(it) }
     private val projectAdapter = ProjectAdapter { openProject(it) }
-    private val terminalAdapter = TerminalAdapter { openConversation(it, true) }
-    private val conversationsAdapter = TerminalAdapter { openConversation(it, false) }
-    private val conversationAdapter = ConversationAdapter(::retryConversationMessage)
+    private val terminalAdapter = TerminalAdapter(
+        { openConversation(it, true) },
+        ::requestCloseTerminal,
+        ::showPendingNotice,
+    )
+    private val conversationsAdapter = TerminalAdapter(
+        onOpen = { openConversation(it, false) },
+        onPending = ::showPendingNotice,
+    )
+    private val conversationAdapter = ConversationAdapter(
+        ::retryConversationMessage,
+        ::showPendingNotice,
+    )
     private val executor = Executors.newSingleThreadExecutor()
     private val storageExecutor = Executors.newSingleThreadExecutor()
     private lateinit var draftStore: DraftStore
+    private lateinit var pendingActionStore: PendingMobileActionStore
+    private var pendingMobileActions: List<PendingMobileAction> = emptyList()
     private var receiverRegistered = false
     private var syncingNotificationsToggle = false
     private var syncingAppLockToggle = false
@@ -103,11 +142,22 @@ class MainActivity : AppCompatActivity() {
     private var appLockPromptVisible = false
     private var updateAvailable: AndroidUpdateManifest? = null
     private var selectedPage = Page.ACTIVITY
+    private val pageHistory = ArrayDeque<Page>()
     private var selectedProject: ProjectRow? = null
     private var selectedTarget: ConversationTarget? = null
     private var legacyResponse: CompletionRecord? = null
     private var conversationReturnsToProject = false
     private var conversationShouldStickToBottom = true
+    private var terminalShouldStickToBottom = true
+    private var displayedPlan: RemoteAgentActivity? = null
+    private var displayedPlanKey: String? = null
+    private var planExpanded = false
+    private var renderedPermissionKey: String? = null
+    private val questionSelections = mutableMapOf<String, MutableSet<String>>()
+    private val questionNotes = mutableMapOf<String, EditText>()
+    private val questionControls = mutableListOf<View>()
+    private var questionSendButton: Button? = null
+    private var questionSubmitting = false
     private var selectedDraftAttachment: MobileImageAttachment? = null
     private val deliveryChecks = mutableSetOf<String>()
     private val draftPersistRunnable = Runnable { writeCurrentDraft() }
@@ -117,10 +167,13 @@ class MainActivity : AppCompatActivity() {
     private var unreadConversationKeys: Set<Pair<String, String>> = emptySet()
     private var remoteStateLoading = false
     private var remoteStateReloadPending = false
+    private val relayRecoveryRunning = AtomicBoolean(false)
     private val connectionTicker = object : Runnable {
         override fun run() {
+            recoverPendingRelayMessages()
             refreshConnectionHealth()
             refreshWorkspaces()
+            refreshUsageLimits()
             refreshConversationAvailability()
             connectionDot.postDelayed(this, 30_000)
         }
@@ -202,7 +255,10 @@ class MainActivity : AppCompatActivity() {
         NotificationTools.createChannel(this)
         appUpdater = AppUpdater(this)
         draftStore = DraftStore(this)
+        pendingActionStore = PendingMobileActionStore(this)
+        pendingMobileActions = pendingActionStore.all()
         storageExecutor.execute { MessageStore(this).recoverInterruptedSends() }
+        ReadSyncScheduler.enqueue(this)
 
         pairingStatus = findViewById(R.id.pairing_status)
         scanButton = findViewById(R.id.scan_button)
@@ -220,9 +276,14 @@ class MainActivity : AppCompatActivity() {
         connectionHealth = findViewById(R.id.connection_health)
         connectionLastSync = findViewById(R.id.connection_last_sync)
         retryConnectionButton = findViewById(R.id.retry_connection_button)
+        usageLimitsContent = findViewById(R.id.usage_limits_content)
+        usageLimitsEmpty = findViewById(R.id.usage_limits_empty)
+        pendingNotice = findViewById(R.id.pending_notice)
+        pendingNotice.accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
         projectDetail = findViewById(R.id.project_detail)
         conversationDetail = findViewById(R.id.conversation_detail)
-        conversationThinking = findViewById(R.id.conversation_thinking)
+        conversationCommandsScroll = findViewById(R.id.conversation_commands_scroll)
+        conversationCommands = findViewById(R.id.conversation_commands)
         conversationComposer = findViewById(R.id.conversation_composer)
         conversationUnavailable = findViewById(R.id.conversation_unavailable)
         conversationInput = findViewById(R.id.conversation_input)
@@ -232,7 +293,17 @@ class MainActivity : AppCompatActivity() {
         conversationAttachmentImage = findViewById(R.id.conversation_attachment_image)
         conversationAttachmentName = findViewById(R.id.conversation_attachment_name)
         conversationList = findViewById(R.id.conversation_list)
+        conversationTerminal = findViewById(R.id.conversation_terminal)
+        conversationPlan = findViewById(R.id.conversation_plan)
+        conversationPlanHead = findViewById(R.id.conversation_plan_head)
+        conversationPlanLabel = findViewById(R.id.conversation_plan_label)
+        conversationPlanCurrent = findViewById(R.id.conversation_plan_current)
+        conversationPlanCount = findViewById(R.id.conversation_plan_count)
+        conversationPlanProgress = findViewById(R.id.conversation_plan_progress)
+        conversationPlanExpand = findViewById(R.id.conversation_plan_expand)
+        conversationPlanSteps = findViewById(R.id.conversation_plan_steps)
         conversationApproval = findViewById(R.id.conversation_approval)
+        conversationApproval.maxHeightPx = (resources.displayMetrics.heightPixels * 0.56f).toInt()
         approvalTitle = findViewById(R.id.approval_title)
         approvalDetail = findViewById(R.id.approval_detail)
         approvalCommand = findViewById(R.id.approval_command)
@@ -270,6 +341,17 @@ class MainActivity : AppCompatActivity() {
                 }
             })
         }
+        conversationTerminal.apply {
+            movementMethod = ScrollingMovementMethod.getInstance()
+            setHorizontallyScrolling(true)
+            setOnScrollChangeListener { _, _, scrollY, _, _ ->
+                val contentHeight = layout?.height ?: 0
+                val viewportHeight = height - compoundPaddingTop - compoundPaddingBottom
+                val bottom = maxOf(0, contentHeight - viewportHeight)
+                terminalShouldStickToBottom =
+                    scrollY >= bottom - (24 * resources.displayMetrics.density).toInt()
+            }
+        }
         responsesRefresh.setOnChildScrollUpCallback { _, _ ->
             findViewById<RecyclerView>(R.id.message_list).canScrollVertically(-1)
         }
@@ -278,8 +360,15 @@ class MainActivity : AppCompatActivity() {
         }
         responsesRefresh.setOnRefreshListener { requestRemoteRefresh() }
         projectsRefresh.setOnRefreshListener { requestRemoteRefresh() }
-        findViewById<View>(R.id.project_back).setOnClickListener { closeProject() }
-        findViewById<View>(R.id.conversation_back).setOnClickListener { closeConversation() }
+        findViewById<View>(R.id.project_back).setOnClickListener { navigateBack() }
+        findViewById<View>(R.id.project_new_terminal).setOnClickListener { showCreateTerminalDialog() }
+        findViewById<View>(R.id.conversation_back).setOnClickListener { navigateBack() }
+        conversationPlanHead.setOnClickListener { view ->
+            displayedPlan ?: return@setOnClickListener
+            view.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
+            planExpanded = !planExpanded
+            renderPlanDetails()
+        }
         conversationSend.setOnClickListener { sendConversationMessage() }
         conversationAttach.setOnClickListener {
             it.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
@@ -297,18 +386,15 @@ class MainActivity : AppCompatActivity() {
             override fun afterTextChanged(value: Editable?) {
                 scheduleDraftPersist()
                 updateComposerActions()
+                updateSlashCommandSuggestions()
             }
         })
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
-                when {
-                    conversationDetail.visibility == View.VISIBLE -> closeConversation()
-                    projectDetail.visibility == View.VISIBLE -> closeProject()
-                    selectedPage == Page.SETTINGS -> showPage(Page.ACTIVITY)
-                    else -> {
-                        isEnabled = false
-                        onBackPressedDispatcher.onBackPressed()
-                    }
+                if (!navigateBack()) {
+                    isEnabled = false
+                    onBackPressedDispatcher.onBackPressed()
+                    isEnabled = true
                 }
             }
         })
@@ -320,6 +406,9 @@ class MainActivity : AppCompatActivity() {
         savedInstanceState?.getString(STATE_PAGE)
             ?.let { runCatching { Page.valueOf(it) }.getOrNull() }
             ?.let(::showPage)
+        savedInstanceState?.getStringArrayList(STATE_PAGE_HISTORY)
+            ?.mapNotNull { runCatching { Page.valueOf(it) }.getOrNull() }
+            ?.forEach(pageHistory::addLast)
         configureUpdater()
         resumePendingUpdate()
         scanButton.setOnClickListener { scanPairingCode() }
@@ -337,6 +426,17 @@ class MainActivity : AppCompatActivity() {
 
     override fun onStart() {
         super.onStart()
+        MobileNotificationVisibility.activityStarted()
+        if (conversationDetail.visibility == View.VISIBLE) {
+            val target = selectedTarget
+            val response = legacyResponse
+            MobileNotificationVisibility.showConversation(
+                target?.pairId ?: response?.pairId,
+                target?.terminal?.id ?: response?.terminalId,
+            )
+        } else {
+            MobileNotificationVisibility.hideConversation()
+        }
         if (!receiverRegistered) {
             ContextCompat.registerReceiver(
                 this,
@@ -356,6 +456,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onStop() {
         persistCurrentDraft()
+        MobileNotificationVisibility.activityStopped()
         if (isAppLockEnabled() && !appLockPromptVisible && !isChangingConfigurations) {
             appUnlocked = false
             appRoot.visibility = View.INVISIBLE
@@ -374,6 +475,7 @@ class MainActivity : AppCompatActivity() {
         requestAppUnlockIfNeeded()
         syncNotificationToggle()
         refreshRemoteState()
+        recoverPendingRelayMessages()
         requestRemoteRefresh(showSpinner = false)
     }
 
@@ -386,6 +488,10 @@ class MainActivity : AppCompatActivity() {
     override fun onSaveInstanceState(outState: Bundle) {
         persistCurrentDraft()
         outState.putString(STATE_PAGE, selectedPage.name)
+        outState.putStringArrayList(
+            STATE_PAGE_HISTORY,
+            ArrayList(pageHistory.map(Page::name)),
+        )
         super.onSaveInstanceState(outState)
     }
 
@@ -401,7 +507,7 @@ class MainActivity : AppCompatActivity() {
             findViewById<View>(id).setOnClickListener { view ->
                 if (selectedPage != page) {
                     view.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
-                    showPage(page)
+                    navigateToPage(page)
                 }
             }
         }
@@ -410,6 +516,30 @@ class MainActivity : AppCompatActivity() {
         bind(R.id.nav_conversations, Page.CONVERSATIONS)
         bind(R.id.settings_button, Page.SETTINGS)
         showPage(Page.ACTIVITY)
+    }
+
+    private fun navigateToPage(page: Page) {
+        if (selectedPage == page) return
+        pageHistory.addLast(selectedPage)
+        showPage(page)
+    }
+
+    private fun navigateBack(): Boolean {
+        when {
+            conversationDetail.visibility == View.VISIBLE -> closeConversation()
+            projectDetail.visibility == View.VISIBLE -> closeProject()
+            else -> {
+                while (pageHistory.isNotEmpty()) {
+                    val previousPage = pageHistory.removeLast()
+                    if (previousPage != selectedPage) {
+                        showPage(previousPage)
+                        return true
+                    }
+                }
+                return false
+            }
+        }
+        return true
     }
 
     private fun tuneListMotion(list: RecyclerView) {
@@ -431,19 +561,43 @@ class MainActivity : AppCompatActivity() {
     private fun configureSystemBarInsets() {
         val root = findViewById<View>(R.id.app_root)
         ViewCompat.setOnApplyWindowInsetsListener(root) { view, insets ->
-            val systemArea = insets.getInsets(
-                WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout(),
-            )
-            val keyboardArea = insets.getInsets(WindowInsetsCompat.Type.ime())
+            applyWindowInsets(view, insets)
+            insets
+        }
+        ViewCompat.setWindowInsetsAnimationCallback(
+            root,
+            object : WindowInsetsAnimationCompat.Callback(DISPATCH_MODE_CONTINUE_ON_SUBTREE) {
+                override fun onProgress(
+                    insets: WindowInsetsCompat,
+                    runningAnimations: MutableList<WindowInsetsAnimationCompat>,
+                ): WindowInsetsCompat {
+                    applyWindowInsets(root, insets)
+                    return insets
+                }
+            },
+        )
+        ViewCompat.requestApplyInsets(root)
+    }
+
+    private fun applyWindowInsets(view: View, insets: WindowInsetsCompat) {
+        val systemArea = insets.getInsets(
+            WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout(),
+        )
+        val keyboardArea = insets.getInsets(WindowInsetsCompat.Type.ime())
+        val bottom = maxOf(systemArea.bottom, keyboardArea.bottom)
+        if (
+            view.paddingLeft != systemArea.left ||
+            view.paddingTop != systemArea.top ||
+            view.paddingRight != systemArea.right ||
+            view.paddingBottom != bottom
+        ) {
             view.updatePadding(
                 left = systemArea.left,
                 top = systemArea.top,
                 right = systemArea.right,
-                bottom = maxOf(systemArea.bottom, keyboardArea.bottom),
+                bottom = bottom,
             )
-            insets
         }
-        ViewCompat.requestApplyInsets(root)
     }
 
     private fun showPage(page: Page) {
@@ -453,6 +607,7 @@ class MainActivity : AppCompatActivity() {
         selectedTarget = null
         selectedDraftAttachment = null
         legacyResponse = null
+        MobileNotificationVisibility.hideConversation()
         projectDetail.visibility = View.GONE
         conversationDetail.visibility = View.GONE
         setDetailChrome(false)
@@ -689,6 +844,9 @@ class MainActivity : AppCompatActivity() {
         executor.execute {
             val store = MessageStore(this)
             store.pendingNotifications().asReversed().forEach { message ->
+                if (MobileNotificationVisibility.consumeIfVisible(this, store, message)) {
+                    return@forEach
+                }
                 if (NotificationTools.show(this, message)) store.markNotified(message.id)
             }
         }
@@ -843,6 +1001,8 @@ class MainActivity : AppCompatActivity() {
                             .onSuccess {
                                 SecretStore.remove(this, pairing.pairId)
                                 WorkspaceStore(this).remove(pairing.pairId)
+                                MessageStore(this).discardReadSyncs(pairing.pairId)
+                                PendingMobileActionStore(this).removePair(pairing.pairId)
                             }
                             .onFailure { failures += it.message ?: pairing.pairId }
                     }
@@ -976,11 +1136,43 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * FCM only wakes the app. The encrypted relay remains the source of truth,
+     * so foreground recovery lists and downloads any payload whose wake-up was
+     * delayed or dropped by Android battery management.
+     */
+    private fun recoverPendingRelayMessages() {
+        if (!relayRecoveryRunning.compareAndSet(false, true)) return
+        val credentials = SecretStore.loadAll(this)
+        if (credentials.isEmpty()) {
+            relayRecoveryRunning.set(false)
+            return
+        }
+        executor.execute {
+            try {
+                credentials.forEach { pairing ->
+                    runCatching { RelayClient.pendingMessages(pairing) }
+                        .getOrDefault(emptyList())
+                        .forEach { pending ->
+                            MessageFetchScheduler.enqueue(
+                                applicationContext,
+                                pairing.pairId,
+                                pending.id,
+                            )
+                        }
+                }
+            } finally {
+                relayRecoveryRunning.set(false)
+            }
+        }
+    }
+
     private fun applyRemoteState(
         snapshots: List<WorkspaceSnapshot>,
         messages: List<CompletionRecord>,
         unreadKeys: Set<Pair<String, String>>,
     ) {
+        reconcilePendingActions(snapshots)
         cachedSnapshots = snapshots
         unreadConversationKeys = unreadKeys
         if (refreshRequestedAt > 0 && snapshots.any { it.updatedAt > refreshSnapshotVersion }) {
@@ -993,8 +1185,24 @@ class MainActivity : AppCompatActivity() {
         emptyState.visibility = if (messages.isEmpty()) View.VISIBLE else View.GONE
         refreshWorkspaces(snapshots, unreadKeys)
         refreshConnectionHealth(snapshots)
+        refreshUsageLimits(snapshots)
         if (conversationDetail.visibility == View.VISIBLE) refreshConversation()
         openIntentResponse()
+    }
+
+    private fun reconcilePendingActions(
+        snapshots: List<WorkspaceSnapshot>,
+        now: Long = System.currentTimeMillis(),
+    ): Boolean {
+        val reconciliation = PendingMobileActionPolicy.reconcile(
+            pendingMobileActions,
+            snapshots,
+            now,
+        )
+        if (reconciliation.pending == pendingMobileActions) return false
+        pendingMobileActions = reconciliation.pending
+        pendingActionStore.replace(pendingMobileActions)
+        return true
     }
 
     private fun refreshWorkspaces(
@@ -1006,8 +1214,12 @@ class MainActivity : AppCompatActivity() {
             .filter { MobileSyncPolicy.isDesktopOnline(it.lastSeenAt, now, CONNECTION_FRESH_MS) }
             .mapTo(mutableSetOf()) { it.pairId }
         val rows = snapshots.flatMap { snapshot ->
-            snapshot.projects.map {
-                ProjectRow(snapshot.pairId, it, snapshot.pairId in onlinePairIds)
+            snapshot.projects.map { project ->
+                ProjectRow(
+                    snapshot.pairId,
+                    projectWithPendingActions(snapshot.pairId, project),
+                    snapshot.pairId in onlinePairIds,
+                )
             }
         }
         projectAdapter.submit(rows)
@@ -1018,6 +1230,7 @@ class MainActivity : AppCompatActivity() {
                     row.pairId,
                     row.project.id,
                     row.project.name,
+                    row.project.color,
                     terminal,
                     Pair(row.pairId, terminal.id) in unreadKeys,
                     row.desktopOnline,
@@ -1051,6 +1264,7 @@ class MainActivity : AppCompatActivity() {
                         row.pairId,
                         row.project.id,
                         row.project.name,
+                        row.project.color,
                         terminal,
                         Pair(row.pairId, terminal.id) in unreadKeys,
                         row.desktopOnline,
@@ -1062,6 +1276,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun openProject(row: ProjectRow) {
         persistCurrentDraft()
+        MobileNotificationVisibility.hideConversation()
         selectedProject = row
         terminalAdapter.submit(row, unreadConversationKeys)
         findViewById<TextView>(R.id.project_detail_title).text = row.project.name
@@ -1082,15 +1297,29 @@ class MainActivity : AppCompatActivity() {
 
     private fun openResponse(message: CompletionRecord) {
         persistCurrentDraft()
-        MessageStore(this).markRead(message.id)
-        messageAdapter.markRead(message.id)
         val target = findConversationTarget(message)
         if (target != null) {
-            openConversation(target, false)
+            openConversation(target, false, message.completionSeq ?: target.terminal.completionSeq)
             return
+        }
+        val pairId = message.pairId
+        val terminalId = message.terminalId
+        if (pairId != null && terminalId != null) {
+            val cleared = MessageStore(this).markConversationRead(
+                pairId,
+                terminalId,
+                message.completionSeq,
+            )
+            NotificationTools.cancelIds(this, cleared)
+            ReadSyncScheduler.enqueue(this)
+            messageAdapter.markConversationRead(pairId, terminalId)
+        } else {
+            MessageStore(this).markRead(message.id)
+            messageAdapter.markRead(message.id)
         }
         selectedTarget = null
         legacyResponse = message
+        MobileNotificationVisibility.showConversation(message.pairId, message.terminalId)
         conversationReturnsToProject = false
         conversationShouldStickToBottom = true
         projectDetail.visibility = View.GONE
@@ -1112,6 +1341,7 @@ class MainActivity : AppCompatActivity() {
                         pairId,
                         project.id,
                         project.name,
+                        project.color,
                         terminal,
                         Pair(pairId, terminal.id) in unreadConversationKeys,
                         isDesktopOnline(pairId),
@@ -1121,19 +1351,32 @@ class MainActivity : AppCompatActivity() {
             ?.firstOrNull()
     }
 
-    private fun openConversation(target: ConversationTarget, returnToProject: Boolean) {
+    private fun openConversation(
+        target: ConversationTarget,
+        returnToProject: Boolean,
+        readCompletionSeq: Long? = target.terminal.completionSeq,
+    ) {
         persistCurrentDraft()
-        MessageStore(this).markConversationRead(target.pairId, target.terminal.id)
+        val cleared = MessageStore(this).markConversationRead(
+            target.pairId,
+            target.terminal.id,
+            readCompletionSeq,
+        )
+        NotificationTools.cancelIds(this, cleared)
+        ReadSyncScheduler.enqueue(this)
         messageAdapter.markConversationRead(target.pairId, target.terminal.id)
         unreadConversationKeys = unreadConversationKeys - Pair(target.pairId, target.terminal.id)
         terminalAdapter.markRead(target.pairId, target.terminal.id)
         conversationsAdapter.markRead(target.pairId, target.terminal.id)
         selectedTarget = target.copy(unread = false)
         legacyResponse = null
+        MobileNotificationVisibility.showConversation(target.pairId, target.terminal.id)
         conversationReturnsToProject = returnToProject
         conversationShouldStickToBottom = true
+        terminalShouldStickToBottom = true
+        conversationTerminal.scrollTo(0, 0)
         val draft = draftStore.load(target.pairId, target.terminal.id)
-        selectedDraftAttachment = draft.attachment
+        selectedDraftAttachment = draft.attachment.takeIf { target.terminal.mode == "conversation" }
         conversationInput.setText(draft.text)
         conversationInput.setSelection(conversationInput.text.length)
         renderDraftAttachment()
@@ -1145,6 +1388,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun closeConversation() {
         persistCurrentDraft()
+        MobileNotificationVisibility.hideConversation()
         selectedTarget = null
         selectedDraftAttachment = null
         legacyResponse = null
@@ -1161,8 +1405,11 @@ class MainActivity : AppCompatActivity() {
         if (legacy != null) {
             findViewById<TextView>(R.id.conversation_title).text = legacy.agent
             findViewById<TextView>(R.id.conversation_status).text = legacy.project
-            conversationAdapter.submit(listOf(legacy))
-            conversationThinking.visibility = View.GONE
+            conversationAdapter.submit(listOf(ConversationTimelineItem.Message(legacy)))
+            conversationList.visibility = View.VISIBLE
+            conversationTerminal.visibility = View.GONE
+            conversationCommandsScroll.visibility = View.GONE
+            conversationPlan.visibility = View.GONE
             conversationApproval.visibility = View.GONE
             conversationComposer.visibility = View.GONE
             conversationUnavailable.text =
@@ -1171,6 +1418,7 @@ class MainActivity : AppCompatActivity() {
             return
         }
         val target = selectedTarget ?: return
+        val terminalMode = target.terminal.mode == "terminal"
         val synced = target.terminal.conversation.map { message ->
             CompletionRecord(
                 id = "workspace:${target.pairId}:${target.terminal.id}:${message.id}",
@@ -1186,23 +1434,41 @@ class MainActivity : AppCompatActivity() {
                 durationMs = null,
                 soundCue = null,
                 workspace = null,
+                streaming = message.streaming,
             )
         }
         val stored = MessageStore(this).conversation(target.pairId, target.terminal.id)
-        val messages = mergeConversation(synced, stored)
-        val last = messages.lastOrNull()
-        val thinking = target.terminal.status == "working" ||
-            (last?.kind == "user" && target.terminal.status != "waiting")
+        val messages = if (terminalMode) {
+            emptyList()
+        } else {
+            ConversationMergePolicy.merge(synced, stored)
+        }
+        if (!terminalMode) {
+            val storedById = stored.associateBy { it.id }
+            messages.asSequence()
+                .filter { it.kind == "user" && it.deliveryState == "delivered" }
+                .mapNotNull { storedById[it.id] }
+                .filter { it.deliveryState == "sent" || it.deliveryState == "received" }
+                .forEach { MessageStore(this).updateOutgoingState(it.id, "delivered") }
+        }
+        val isAgent = target.terminal.agent != null
+        val thinking = isAgent && target.terminal.status == "working"
         val desktopOnline = isDesktopOnline(target.pairId)
         findViewById<TextView>(R.id.conversation_title).text =
             target.terminal.agent ?: target.terminal.title
         findViewById<TextView>(R.id.conversation_status).text = buildList {
             add(target.projectName)
             target.terminal.model?.let { add(it) }
+            if (terminalMode && target.terminal.terminalColumns != null && target.terminal.terminalRows != null) {
+                add("${target.terminal.terminalColumns}×${target.terminal.terminalRows}")
+            }
             add(
                 when {
                     !desktopOnline -> "Desktop offline"
+                    pendingDecision(target) != null -> "Updating desktop"
+                    target.terminal.status == "starting" -> "Opening agent"
                     thinking -> "Thinking"
+                    target.terminal.status == "working" -> "Running"
                     target.terminal.status == "waiting" -> "Needs attention"
                     target.terminal.status == "exited" -> "Closed"
                     else -> "Ready"
@@ -1210,34 +1476,403 @@ class MainActivity : AppCompatActivity() {
             )
         }.joinToString("  •  ")
         val shouldScrollToBottom = conversationShouldStickToBottom
-        conversationAdapter.submit(messages)
-        setAnimatedVisibility(conversationThinking, thinking && desktopOnline)
+        val timeline = ConversationTimelinePolicy.build(
+            messages = messages,
+            activity = target.terminal.activity,
+            agentWorking = thinking && desktopOnline,
+            thinkingId = target.terminal.id,
+        )
+        conversationAdapter.submit(timeline)
+        conversationList.visibility = if (terminalMode) View.GONE else View.VISIBLE
+        conversationTerminal.visibility = if (terminalMode) View.VISIBLE else View.GONE
+        if (terminalMode) renderTerminalOutput(target.terminal.terminalOutput)
+        renderPlan(target, terminalMode)
         renderApproval(target)
         refreshConversationAvailability()
+        updateSlashCommandSuggestions()
         messages.filter { it.kind == "user" && it.deliveryState == "sent" }
             .takeLast(5)
-            .forEach { trackDelivery(it.id, target.pairId) }
-        if (shouldScrollToBottom && messages.isNotEmpty()) {
-            conversationList.post {
-                conversationList.scrollToPosition(messages.lastIndex)
+            .forEach {
+                trackDelivery(
+                    it.id,
+                    target.pairId,
+                    awaitWorkspaceConfirmation = !terminalMode,
+                )
             }
+        if (shouldScrollToBottom && timeline.isNotEmpty()) {
+            conversationList.post {
+                conversationList.scrollToPosition(timeline.lastIndex)
+            }
+        }
+    }
+
+    private fun projectWithPendingActions(pairId: String, project: RemoteProject): RemoteProject {
+        val actions = pendingMobileActions.filter {
+            it.pairId == pairId && it.projectId == project.id
+        }
+        if (actions.isEmpty()) return project
+        val closingByTerminal = actions
+            .filter { it.kind == PendingMobileAction.CLOSE_TERMINAL }
+            .associateBy { it.terminalId }
+        val createActions = actions
+            .filter { it.kind == PendingMobileAction.CREATE_TERMINAL }
+            .sortedBy { it.createdAt }
+        val claimedTerminalIds = mutableSetOf<String>()
+        val creatingByTerminal = mutableMapOf<String, PendingMobileAction>()
+        createActions.forEach { action ->
+            project.terminals.firstOrNull {
+                it.id !in action.baselineTerminalIds && it.id !in claimedTerminalIds
+            }?.let { terminal ->
+                claimedTerminalIds += terminal.id
+                creatingByTerminal[terminal.id] = action
+            }
+        }
+        val terminals = project.terminals.map { terminal ->
+            terminal.copy(
+                pendingAction = closingByTerminal[terminal.id] ?: creatingByTerminal[terminal.id],
+            )
+        }.toMutableList()
+        val matchedCreateActionIds = creatingByTerminal.values.mapTo(mutableSetOf()) { it.id }
+        createActions
+            .filterNot { it.id in matchedCreateActionIds }
+            .forEach { action ->
+                terminals += RemoteTerminal(
+                    id = "pending:${action.id}",
+                    title = action.label ?: "New terminal",
+                    shell = "Waiting for desktop",
+                    agent = null,
+                    model = null,
+                    status = "starting",
+                    pendingAction = action,
+                )
+            }
+        return project.copy(terminals = terminals)
+    }
+
+    private fun refreshUsageLimits(snapshots: List<WorkspaceSnapshot> = cachedSnapshots) {
+        if (!::usageLimitsContent.isInitialized || !::usageLimitsEmpty.isInitialized) return
+        val quotas = snapshots.firstOrNull { it.usageLimits.isNotEmpty() }?.usageLimits.orEmpty()
+        usageLimitsContent.removeAllViews()
+        usageLimitsEmpty.visibility = if (quotas.isEmpty()) View.VISIBLE else View.GONE
+        if (quotas.isEmpty()) return
+
+        val now = System.currentTimeMillis()
+        quotas.forEachIndexed { quotaIndex, quota ->
+            val card = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(16), dp(16), dp(16), dp(16))
+                setBackgroundResource(R.drawable.message_card)
+            }
+            val header = LinearLayout(this).apply {
+                gravity = Gravity.CENTER_VERTICAL
+                orientation = LinearLayout.HORIZONTAL
+            }
+            header.addView(usageSwatch(UsageLimitCopy.agentSwatch(quota.agent), 9, 2), LinearLayout.LayoutParams(dp(9), dp(9)).apply {
+                marginEnd = dp(8)
+            })
+            header.addView(TextView(this).apply {
+                text = quota.label
+                textSize = 15f
+                setTextColor(ContextCompat.getColor(this@MainActivity, R.color.duckweed_text))
+                typeface = android.graphics.Typeface.DEFAULT_BOLD
+            }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            quota.plan?.let { plan ->
+                header.addView(TextView(this).apply {
+                    text = plan.replaceFirstChar { letter ->
+                        if (letter.isLowerCase()) letter.titlecase(Locale.US) else letter.toString()
+                    }
+                    textSize = 10f
+                    setTextColor(ContextCompat.getColor(this@MainActivity, R.color.duckweed_accent))
+                    setBackgroundResource(R.drawable.chip_accent)
+                    setPadding(dp(10), dp(5), dp(10), dp(5))
+                })
+            }
+            card.addView(header)
+
+            quota.limits.forEach { limit ->
+                val remaining = UsageLimitCopy.remainingPercent(limit.percent)
+                val remainingLabel = UsageLimitCopy.remainingLabel(limit.percent)
+                val resetHint = UsageLimitCopy.resetHint(limit.resetsAt, now)
+                val forecast = UsageLimitCopy.describeForecast(limit, now)
+                val meterColor = when (UsageLimitCopy.meterLevel(limit.percent)) {
+                    UsageLimitCopy.MeterLevel.Critical -> R.color.duckweed_usage_critical
+                    UsageLimitCopy.MeterLevel.Warning -> R.color.duckweed_usage_warning
+                    UsageLimitCopy.MeterLevel.Ok -> R.color.duckweed_usage_ok
+                }
+                val block = LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                }
+                val labelRow = LinearLayout(this).apply {
+                    gravity = Gravity.CENTER_VERTICAL
+                    orientation = LinearLayout.HORIZONTAL
+                }
+                labelRow.addView(TextView(this).apply {
+                    text = limit.label
+                    textSize = 13f
+                    setTextColor(ContextCompat.getColor(this@MainActivity, R.color.duckweed_text_dim))
+                }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+                val valueCluster = LinearLayout(this).apply {
+                    gravity = Gravity.CENTER_VERTICAL
+                    orientation = LinearLayout.HORIZONTAL
+                }
+                valueCluster.addView(TextView(this).apply {
+                    text = remainingLabel
+                    textSize = 13f
+                    setTextColor(ContextCompat.getColor(this@MainActivity, R.color.duckweed_text))
+                    typeface = android.graphics.Typeface.DEFAULT_BOLD
+                })
+                resetHint?.let { hint ->
+                    valueCluster.addView(TextView(this).apply {
+                        text = hint
+                        textSize = 11f
+                        setTextColor(ContextCompat.getColor(this@MainActivity, R.color.duckweed_text_faint))
+                    }, LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.WRAP_CONTENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT,
+                    ).apply {
+                        marginStart = dp(6)
+                    })
+                }
+                labelRow.addView(valueCluster)
+                block.addView(labelRow)
+                block.addView(ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+                    max = 100
+                    progress = remaining
+                    progressDrawable = usageMeterDrawable(
+                        ContextCompat.getColor(this@MainActivity, meterColor),
+                    )
+                    contentDescription = listOfNotNull(
+                        "${limit.label} remaining $remainingLabel",
+                        resetHint,
+                        forecast.text,
+                    ).joinToString(", ")
+                }, LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    dp(7),
+                ).apply {
+                    topMargin = dp(8)
+                })
+                val forecastRow = LinearLayout(this).apply {
+                    gravity = Gravity.CENTER_VERTICAL
+                    orientation = LinearLayout.HORIZONTAL
+                }
+                val forecastColor = when (forecast.tone) {
+                    UsageLimitCopy.Tone.Critical -> R.color.duckweed_usage_forecast_critical
+                    UsageLimitCopy.Tone.Warning -> R.color.duckweed_text_dim
+                    UsageLimitCopy.Tone.Ok -> R.color.duckweed_text_dim
+                    UsageLimitCopy.Tone.Muted -> R.color.duckweed_text_faint
+                }
+                val forecastDot = when (forecast.tone) {
+                    UsageLimitCopy.Tone.Critical -> R.color.duckweed_usage_forecast_critical
+                    UsageLimitCopy.Tone.Warning -> R.color.duckweed_usage_forecast_warning
+                    UsageLimitCopy.Tone.Ok -> R.color.duckweed_usage_ok
+                    UsageLimitCopy.Tone.Muted -> R.color.duckweed_text_faint
+                }
+                forecastRow.addView(
+                    usageSwatch(ContextCompat.getColor(this, forecastDot), 5, 3),
+                    LinearLayout.LayoutParams(dp(5), dp(5)).apply { marginEnd = dp(6) },
+                )
+                forecastRow.addView(TextView(this).apply {
+                    text = forecast.text
+                    textSize = 12f
+                    setTextColor(ContextCompat.getColor(this@MainActivity, forecastColor))
+                })
+                forecast.detail?.let { detail ->
+                    forecastRow.addView(TextView(this).apply {
+                        text = detail
+                        textSize = 11f
+                        setTextColor(ContextCompat.getColor(this@MainActivity, R.color.duckweed_text_faint))
+                    }, LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.WRAP_CONTENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT,
+                    ).apply {
+                        marginStart = dp(6)
+                    })
+                }
+                block.addView(forecastRow, LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                ).apply {
+                    topMargin = dp(7)
+                })
+                card.addView(block, LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                ).apply {
+                    topMargin = dp(16)
+                })
+            }
+            usageLimitsContent.addView(card, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ).apply {
+                if (quotaIndex > 0) topMargin = dp(10)
+            })
+        }
+    }
+
+    private fun renderPlan(target: ConversationTarget, terminalMode: Boolean) {
+        val plan = target.terminal.activity
+            .asSequence()
+            .filter { it.kind == "plan" && it.steps.isNotEmpty() }
+            .maxByOrNull { it.at }
+            .takeUnless { terminalMode }
+        displayedPlan = plan
+        if (plan == null) {
+            displayedPlanKey = null
+            planExpanded = false
+            conversationPlan.visibility = View.GONE
+            conversationPlanSteps.removeAllViews()
+            return
+        }
+
+        val key = "${target.pairId}:${target.terminal.id}:${plan.id}"
+        if (displayedPlanKey != key) {
+            displayedPlanKey = key
+            planExpanded = false
+        }
+        val completed = plan.steps.count { it.status == "done" }
+        val current = plan.steps.firstOrNull { it.status == "running" }
+            ?: plan.steps.firstOrNull { it.status == "pending" }
+        conversationPlan.visibility = View.VISIBLE
+        conversationPlanLabel.text = if (plan.planType == "workflow") "Workflow" else "Tasks"
+        conversationPlanCurrent.text = current?.text ?: "Tasks completed"
+        conversationPlanCount.text = "$completed/${plan.steps.size}"
+        conversationPlanProgress.progress = if (plan.steps.isEmpty()) {
+            0
+        } else {
+            (completed * 100) / plan.steps.size
+        }
+        renderPlanDetails()
+    }
+
+    private fun renderPlanDetails() {
+        val plan = displayedPlan ?: return
+        conversationPlanExpand.rotation = if (planExpanded) 90f else 0f
+        conversationPlanSteps.visibility = if (planExpanded) View.VISIBLE else View.GONE
+        conversationPlanHead.contentDescription = buildString {
+            append(conversationPlanLabel.text)
+            append(" progress. ")
+            append(conversationPlanCount.text)
+            append(". Current step: ")
+            append(conversationPlanCurrent.text)
+            append(if (planExpanded) ". Expanded" else ". Collapsed. Double tap to expand")
+        }
+        conversationPlanSteps.removeAllViews()
+        if (!planExpanded) return
+        plan.steps.forEachIndexed { index, step ->
+            val row = LinearLayout(this).apply {
+                gravity = android.view.Gravity.CENTER_VERTICAL
+                orientation = LinearLayout.HORIZONTAL
+                setPadding(0, dp(4), 0, dp(4))
+            }
+            val marker = TextView(this).apply {
+                gravity = android.view.Gravity.CENTER
+                text = when (step.status) {
+                    "done" -> "✓"
+                    "running" -> "›"
+                    else -> "${index + 1}"
+                }
+                textSize = 11f
+                setTextColor(
+                    ContextCompat.getColor(
+                        this@MainActivity,
+                        when (step.status) {
+                            "running" -> R.color.duckweed_accent
+                            "done" -> R.color.duckweed_text_dim
+                            else -> R.color.duckweed_text_faint
+                        },
+                    ),
+                )
+            }
+            row.addView(marker, LinearLayout.LayoutParams(dp(24), dp(24)))
+            row.addView(TextView(this).apply {
+                text = step.text
+                textSize = 12f
+                setLineSpacing(0f, 1.08f)
+                setTextColor(
+                    ContextCompat.getColor(
+                        this@MainActivity,
+                        if (step.status == "running") R.color.duckweed_text else R.color.duckweed_text_dim,
+                    ),
+                )
+            }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginStart = dp(6)
+            })
+            conversationPlanSteps.addView(
+                row,
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                ),
+            )
+        }
+    }
+
+    private fun renderTerminalOutput(output: String?) {
+        val rendered = output?.takeIf { it.isNotBlank() } ?: "Waiting for terminal output..."
+        if (conversationTerminal.text.toString() == rendered) return
+        val followOutput = terminalShouldStickToBottom
+        val horizontal = conversationTerminal.scrollX
+        conversationTerminal.text = rendered
+        conversationTerminal.post {
+            if (!followOutput) return@post
+            val contentHeight = conversationTerminal.layout?.height ?: 0
+            val viewportHeight = conversationTerminal.height -
+                conversationTerminal.compoundPaddingTop - conversationTerminal.compoundPaddingBottom
+            conversationTerminal.scrollTo(horizontal, maxOf(0, contentHeight - viewportHeight))
+            terminalShouldStickToBottom = true
         }
     }
 
     private fun renderApproval(target: ConversationTarget) {
         val permission = target.terminal.permission
         if (permission == null) {
+            renderedPermissionKey = null
+            questionSelections.clear()
+            questionNotes.clear()
+            questionControls.clear()
+            questionSendButton = null
+            questionSubmitting = false
+            conversationApproval.alpha = 1f
+            conversationApproval.setOnTouchListener(null)
             setAnimatedVisibility(conversationApproval, false)
             approvalActions.removeAllViews()
             return
         }
+        val permissionKey = "${target.pairId}:${target.terminal.id}:${permission.id}"
         setAnimatedVisibility(conversationApproval, true)
-        approvalTitle.text = permission.title
+        if (permission.kind == "question" && renderedPermissionKey == permissionKey) {
+            setQuestionControlsEnabled(
+                isDesktopOnline(target.pairId) && pendingDecision(target) == null,
+            )
+            updateQuestionSubmitState(permission, target)
+            applyPendingDecisionState(target)
+            return
+        }
+        renderedPermissionKey = permissionKey
+        questionSelections.clear()
+        questionNotes.clear()
+        questionControls.clear()
+        questionSendButton = null
+        questionSubmitting = false
+        approvalTitle.text = if (permission.kind == "question") {
+            if (permission.questions.size == 1) "A question for you" else "Questions for you"
+        } else {
+            permission.title
+        }
         approvalDetail.text = permission.detail
         approvalDetail.visibility = if (permission.detail.isNullOrBlank()) View.GONE else View.VISIBLE
         approvalCommand.text = permission.command
-        approvalCommand.visibility = if (permission.command.isNullOrBlank()) View.GONE else View.VISIBLE
+        approvalCommand.visibility = if (
+            permission.kind == "question" || permission.command.isNullOrBlank()
+        ) View.GONE else View.VISIBLE
         approvalActions.removeAllViews()
+        if (permission.kind == "question") {
+            renderQuestions(target, permission)
+            applyPendingDecisionState(target)
+            return
+        }
         permission.options.forEach { option ->
             val affirmative = option.kind == "allow" || option.kind == "allow-always"
             val button = Button(this).apply {
@@ -1266,6 +1901,247 @@ class MainActivity : AppCompatActivity() {
                 ).apply { topMargin = resources.getDimensionPixelSize(R.dimen.mobile_action_gap) },
             )
         }
+        applyPendingDecisionState(target)
+    }
+
+    private fun pendingDecision(target: ConversationTarget): PendingMobileAction? =
+        pendingMobileActions.firstOrNull {
+            it.kind == PendingMobileAction.DECISION &&
+                it.pairId == target.pairId &&
+                it.terminalId == target.terminal.id &&
+                it.permissionId == target.terminal.permission?.id
+        }
+
+    private fun applyPendingDecisionState(target: ConversationTarget) {
+        val pending = pendingDecision(target) != null
+        conversationApproval.alpha = if (pending) PENDING_ALPHA else 1f
+        conversationApproval.contentDescription = if (pending) {
+            "Decision sent. Waiting for the desktop to update."
+        } else {
+            null
+        }
+        conversationApproval.setOnTouchListener(
+            if (pending) {
+                View.OnTouchListener { _, event ->
+                    if (event.action == MotionEvent.ACTION_UP) showPendingNotice()
+                    true
+                }
+            } else {
+                null
+            },
+        )
+        if (pending) {
+            for (index in 0 until approvalActions.childCount) {
+                approvalActions.getChildAt(index).isEnabled = false
+            }
+            setQuestionControlsEnabled(false)
+        }
+    }
+
+    private fun renderQuestions(target: ConversationTarget, permission: RemotePermission) {
+        permission.questions.forEachIndexed { questionIndex, question ->
+            val block = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                if (questionIndex > 0) setPadding(0, dp(14), 0, 0)
+            }
+            if (question.header.isNotBlank()) {
+                block.addView(TextView(this).apply {
+                    text = question.header.uppercase()
+                    textSize = 10f
+                    letterSpacing = 0.08f
+                    setTextColor(ContextCompat.getColor(this@MainActivity, R.color.duckweed_accent))
+                })
+            }
+            block.addView(TextView(this).apply {
+                text = question.question
+                textSize = 14f
+                setLineSpacing(dp(2).toFloat(), 1f)
+                setTextColor(ContextCompat.getColor(this@MainActivity, R.color.duckweed_text))
+            }, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = if (question.header.isBlank()) 0 else dp(5) })
+
+            val choices = if (question.multiSelect) LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+            } else RadioGroup(this).apply {
+                orientation = RadioGroup.VERTICAL
+            }
+            question.options.forEach { option ->
+                val choice = if (question.multiSelect) CheckBox(this) else RadioButton(this)
+                choice.apply {
+                    text = if (option.description.isBlank()) {
+                        option.label
+                    } else {
+                        "${option.label}\n${option.description}"
+                    }
+                    textSize = 12f
+                    minHeight = dp(48)
+                    setTextColor(ContextCompat.getColor(this@MainActivity, R.color.duckweed_text_dim))
+                    buttonTintList = ColorStateList.valueOf(
+                        ContextCompat.getColor(this@MainActivity, R.color.duckweed_accent),
+                    )
+                    setPadding(dp(4), 0, dp(4), 0)
+                    setOnCheckedChangeListener { _, checked ->
+                        val selected = questionSelections.getOrPut(question.id) { mutableSetOf() }
+                        if (checked) {
+                            if (!question.multiSelect) selected.clear()
+                            selected.add(option.id)
+                        } else {
+                            selected.remove(option.id)
+                        }
+                        updateQuestionSubmitState(permission, target)
+                    }
+                }
+                questionControls += choice
+                choices.addView(
+                    choice,
+                    LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT,
+                    ),
+                )
+                if (!option.preview.isNullOrBlank()) {
+                    val preview = TextView(this).apply {
+                        text = option.preview
+                        textSize = 10f
+                        maxLines = 10
+                        typeface = android.graphics.Typeface.MONOSPACE
+                        setTextIsSelectable(true)
+                        setTextColor(ContextCompat.getColor(this@MainActivity, R.color.duckweed_text_dim))
+                        setBackgroundResource(R.drawable.diff_surface)
+                        setPadding(dp(9), dp(8), dp(9), dp(8))
+                        visibility = View.GONE
+                    }
+                    val toggle = TextView(this).apply {
+                        text = "Show preview"
+                        textSize = 11f
+                        setTextColor(ContextCompat.getColor(this@MainActivity, R.color.duckweed_accent))
+                        setPadding(dp(36), dp(5), dp(4), dp(5))
+                        isClickable = true
+                        isFocusable = true
+                        setOnClickListener {
+                            val opening = preview.visibility != View.VISIBLE
+                            preview.visibility = if (opening) View.VISIBLE else View.GONE
+                            text = if (opening) "Hide preview" else "Show preview"
+                        }
+                    }
+                    questionControls += toggle
+                    choices.addView(toggle)
+                    choices.addView(preview, LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT,
+                    ).apply { marginStart = dp(32); marginEnd = dp(4) })
+                }
+            }
+            block.addView(choices, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(7) })
+
+            block.addView(TextView(this).apply {
+                text = "Add a note or write your own answer"
+                textSize = 11f
+                setTextColor(ContextCompat.getColor(this@MainActivity, R.color.duckweed_text_faint))
+            }, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(8) })
+            val note = EditText(this).apply {
+                hint = "Optional note or your own answer"
+                minHeight = dp(48)
+                maxLines = 4
+                filters = arrayOf(InputFilter.LengthFilter(4_000))
+                textSize = 12f
+                setTextColor(ContextCompat.getColor(this@MainActivity, R.color.duckweed_text))
+                setHintTextColor(ContextCompat.getColor(this@MainActivity, R.color.duckweed_text_faint))
+                setBackgroundResource(R.drawable.composer_background)
+                setPadding(dp(10), dp(8), dp(10), dp(8))
+                addTextChangedListener(object : TextWatcher {
+                    override fun beforeTextChanged(value: CharSequence?, start: Int, count: Int, after: Int) = Unit
+                    override fun onTextChanged(value: CharSequence?, start: Int, before: Int, count: Int) = Unit
+                    override fun afterTextChanged(value: Editable?) {
+                        updateQuestionSubmitState(permission, target)
+                    }
+                })
+            }
+            questionNotes[question.id] = note
+            questionControls += note
+            block.addView(note, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(5) })
+            approvalActions.addView(block)
+        }
+
+        val actions = LinearLayout(this).apply {
+            gravity = android.view.Gravity.END
+            orientation = LinearLayout.HORIZONTAL
+        }
+        val skip = Button(this).apply {
+            text = "Skip"
+            setAllCaps(false)
+            textSize = 12f
+            setBackgroundResource(R.drawable.button_secondary)
+            setTextColor(ContextCompat.getColor(this@MainActivity, R.color.duckweed_text_dim))
+            setOnClickListener { view ->
+                view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+                sendQuestionAnswers(target, permission, emptyList())
+            }
+        }
+        questionControls += skip
+        actions.addView(skip, LinearLayout.LayoutParams(0, dp(46), 1f).apply {
+            marginEnd = dp(8)
+        })
+        val send = Button(this).apply {
+            text = "Send answer"
+            setAllCaps(false)
+            textSize = 12f
+            setBackgroundResource(R.drawable.button_primary)
+            setTextColor(ContextCompat.getColor(this@MainActivity, R.color.duckweed_accent_ink))
+            setOnClickListener { view ->
+                view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+                sendQuestionAnswers(target, permission, collectQuestionAnswers(permission))
+            }
+        }
+        questionSendButton = send
+        questionControls += send
+        actions.addView(send, LinearLayout.LayoutParams(0, dp(46), 1.35f))
+        approvalActions.addView(actions, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(14) })
+        setQuestionControlsEnabled(isDesktopOnline(target.pairId))
+        updateQuestionSubmitState(permission, target)
+    }
+
+    private fun collectQuestionAnswers(permission: RemotePermission): List<RemoteQuestionAnswer> =
+        permission.questions.map { question ->
+            val picked = questionSelections[question.id].orEmpty()
+            RemoteQuestionAnswer(
+                questionId = question.id,
+                labels = question.options.filter { it.id in picked }.map { it.label },
+                custom = questionNotes[question.id]?.text?.toString()?.trim()?.takeIf { it.isNotEmpty() },
+            )
+        }
+
+    private fun updateQuestionSubmitState(permission: RemotePermission, target: ConversationTarget) {
+        val complete = permission.questions.all { question ->
+            questionSelections[question.id].orEmpty().isNotEmpty() ||
+                !questionNotes[question.id]?.text.isNullOrBlank()
+        }
+        questionSendButton?.apply {
+            isEnabled = complete && isDesktopOnline(target.pairId) &&
+                !questionSubmitting && pendingDecision(target) == null
+            alpha = if (isEnabled) 1f else 0.45f
+        }
+    }
+
+    private fun setQuestionControlsEnabled(enabled: Boolean) {
+        val effective = enabled && !questionSubmitting
+        questionControls.forEach { control ->
+            if (control !== questionSendButton) control.isEnabled = effective
+        }
     }
 
     private fun isDesktopOnline(pairId: String, now: Long = System.currentTimeMillis()): Boolean =
@@ -1281,19 +2157,35 @@ class MainActivity : AppCompatActivity() {
         val paired = SecretStore.load(this, target.pairId) != null
         val open = target.terminal.status != "exited"
         val online = isDesktopOnline(target.pairId)
-        val canCompose = paired && open
+        val waitingForDecision = target.terminal.permission != null
+        val decisionPending = pendingDecision(target) != null
+        val canCompose = paired && open && !waitingForDecision
         conversationComposer.visibility = if (canCompose) View.VISIBLE else View.GONE
         conversationAttach.visibility =
-            if (canCompose && target.terminal.agent != null) View.VISIBLE else View.GONE
+            if (canCompose && target.terminal.mode == "conversation") View.VISIBLE else View.GONE
+        conversationInput.hint = if (target.terminal.mode == "terminal") {
+            "Send input to terminal"
+        } else {
+            "Message this agent"
+        }
         conversationUnavailable.text = when {
+            waitingForDecision -> ""
             !paired -> "Pair this desktop again before sending messages."
             !open -> "This terminal is closed and cannot receive messages."
             !online -> "This desktop instance is offline and cannot receive messages."
             else -> ""
         }
-        conversationUnavailable.visibility = if (canCompose && online) View.GONE else View.VISIBLE
+        conversationUnavailable.visibility = if (waitingForDecision || canCompose && online) {
+            View.GONE
+        } else {
+            View.VISIBLE
+        }
         for (index in 0 until approvalActions.childCount) {
-            approvalActions.getChildAt(index).isEnabled = online
+            approvalActions.getChildAt(index).isEnabled = online && !decisionPending
+        }
+        setQuestionControlsEnabled(online && !decisionPending)
+        target.terminal.permission?.takeIf { it.kind == "question" }?.let {
+            updateQuestionSubmitState(it, target)
         }
         updateComposerActions()
     }
@@ -1306,6 +2198,56 @@ class MainActivity : AppCompatActivity() {
         updateComposerActions()
     }
 
+    private fun beginPendingAction(action: PendingMobileAction) {
+        pendingMobileActions = pendingMobileActions.filterNot { it.id == action.id } + action
+        pendingActionStore.put(action)
+        refreshWorkspaces()
+        if (conversationDetail.visibility == View.VISIBLE) refreshConversation()
+        if (action.kind == PendingMobileAction.CREATE_TERMINAL) {
+            projectDetail.postDelayed({
+                if (pendingMobileActions.none { it.id == action.id }) {
+                    return@postDelayed
+                }
+                if (reconcilePendingActions(cachedSnapshots)) {
+                    refreshWorkspaces()
+                    if (conversationDetail.visibility == View.VISIBLE) refreshConversation()
+                }
+            }, PendingMobileActionPolicy.MIN_CREATE_PENDING_MS + 50L)
+        }
+    }
+
+    private fun removePendingAction(id: String) {
+        pendingMobileActions = pendingMobileActions.filterNot { it.id == id }
+        pendingActionStore.remove(id)
+        refreshWorkspaces()
+        if (conversationDetail.visibility == View.VISIBLE) refreshConversation()
+    }
+
+    private fun showPendingNotice() {
+        if (!::pendingNotice.isInitialized) return
+        pendingNotice.removeCallbacks(hidePendingNotice)
+        pendingNotice.text = "Please wait. The desktop is still updating."
+        pendingNotice.visibility = View.VISIBLE
+        pendingNotice.alpha = 0f
+        pendingNotice.translationY = dp(10).toFloat()
+        pendingNotice.animate()
+            .alpha(1f)
+            .translationY(0f)
+            .setDuration(160L)
+            .start()
+        pendingNotice.postDelayed(hidePendingNotice, 2_800L)
+    }
+
+    private val hidePendingNotice = Runnable {
+        if (!::pendingNotice.isInitialized) return@Runnable
+        pendingNotice.animate()
+            .alpha(0f)
+            .translationY(dp(8).toFloat())
+            .setDuration(140L)
+            .withEndAction { pendingNotice.visibility = View.GONE }
+            .start()
+    }
+
     private fun sendApproval(
         target: ConversationTarget,
         permission: RemotePermission,
@@ -1316,6 +2258,16 @@ class MainActivity : AppCompatActivity() {
             return
         }
         val credentials = SecretStore.load(this, target.pairId) ?: return
+        val action = PendingMobileAction(
+            id = UUID.randomUUID().toString(),
+            kind = PendingMobileAction.DECISION,
+            pairId = target.pairId,
+            projectId = target.projectId,
+            terminalId = target.terminal.id,
+            permissionId = permission.id,
+            createdAt = System.currentTimeMillis(),
+        )
+        beginPendingAction(action)
         for (index in 0 until approvalActions.childCount) {
             approvalActions.getChildAt(index).isEnabled = false
         }
@@ -1337,6 +2289,7 @@ class MainActivity : AppCompatActivity() {
                 }
             }.onFailure { error ->
                 runOnUiThread {
+                    removePendingAction(action.id)
                     findViewById<TextView>(R.id.conversation_status).text =
                         error.message ?: "Could not send this decision."
                     renderApproval(target)
@@ -1345,47 +2298,215 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun mergeConversation(
-        synced: List<CompletionRecord>,
-        stored: List<CompletionRecord>,
-    ): List<CompletionRecord> {
-        val storedById = stored.associateBy { it.id }
-        val merged = synced.map { storedById[it.id] ?: it }.toMutableList()
-        val syncedIds = synced.mapTo(mutableSetOf()) { it.id }
-
-        stored.asSequence()
-            .filter { it.id !in syncedIds }
-            .forEach { candidate ->
-                val duplicate = merged.indexOfFirst { existing ->
-                    isCrossSourceDuplicate(existing, candidate)
+    private fun sendQuestionAnswers(
+        target: ConversationTarget,
+        permission: RemotePermission,
+        answers: List<RemoteQuestionAnswer>,
+    ) {
+        if (!isDesktopOnline(target.pairId)) {
+            showDesktopOffline()
+            return
+        }
+        if (answers.isNotEmpty() && answers.any { it.labels.isEmpty() && it.custom.isNullOrBlank() }) {
+            return
+        }
+        val credentials = SecretStore.load(this, target.pairId) ?: return
+        val action = PendingMobileAction(
+            id = UUID.randomUUID().toString(),
+            kind = PendingMobileAction.DECISION,
+            pairId = target.pairId,
+            projectId = target.projectId,
+            terminalId = target.terminal.id,
+            permissionId = permission.id,
+            createdAt = System.currentTimeMillis(),
+        )
+        questionSubmitting = true
+        beginPendingAction(action)
+        setQuestionControlsEnabled(false)
+        questionSendButton?.isEnabled = false
+        findViewById<TextView>(R.id.conversation_status).text = "Sending answer securely..."
+        executor.execute {
+            runCatching {
+                RelayClient.sendQuestionAnswers(
+                    credentials = credentials,
+                    projectId = target.projectId,
+                    terminalId = target.terminal.id,
+                    permissionId = permission.id,
+                    answers = answers,
+                )
+            }.onSuccess {
+                runOnUiThread {
+                    findViewById<TextView>(R.id.conversation_status).text =
+                        if (answers.isEmpty()) {
+                            "Question skipped. Waiting for desktop..."
+                        } else {
+                            "Answer sent. Waiting for desktop..."
+                        }
+                    requestRemoteRefresh(showSpinner = false)
                 }
-                if (duplicate < 0) {
-                    merged += candidate
-                } else if (merged[duplicate].id.startsWith("workspace:")) {
-                    merged[duplicate] = candidate
+            }.onFailure { error ->
+                runOnUiThread {
+                    removePendingAction(action.id)
+                    questionSubmitting = false
+                    findViewById<TextView>(R.id.conversation_status).text =
+                        error.message ?: "Could not send this answer."
+                    setQuestionControlsEnabled(true)
+                    updateQuestionSubmitState(permission, target)
                 }
             }
-        return merged.sortedBy { it.sentAt }
+        }
     }
 
-    /**
-     * A workspace row and a stored notification can represent the same event,
-     * but repeated text is not an identity. Exact routing and timestamp are
-     * required before the two transport representations are collapsed.
-     */
-    private fun isCrossSourceDuplicate(
-        first: CompletionRecord,
-        second: CompletionRecord,
-    ): Boolean {
-        val firstIsWorkspace = first.id.startsWith("workspace:")
-        val secondIsWorkspace = second.id.startsWith("workspace:")
-        return firstIsWorkspace != secondIsWorkspace &&
-            first.pairId == second.pairId &&
-            first.projectId == second.projectId &&
-            first.terminalId == second.terminalId &&
-            first.kind == second.kind &&
-            first.response == second.response &&
-            first.sentAt == second.sentAt
+    private fun showCreateTerminalDialog() {
+        val project = selectedProject ?: return
+        if (!project.desktopOnline) { showDesktopOffline(); return }
+        val input = EditText(this).apply {
+            hint = "Optional command, e.g. codex or claude"
+            setSingleLine(true)
+        }
+        AlertDialog.Builder(this)
+            .setTitle("New terminal split")
+            .setMessage("Open a new pane in ${project.project.name}.")
+            .setView(input)
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Open split") { _, _ ->
+                val credentials = SecretStore.load(this, project.pairId) ?: return@setPositiveButton
+                val command = input.text.toString()
+                val action = PendingMobileAction(
+                    id = UUID.randomUUID().toString(),
+                    kind = PendingMobileAction.CREATE_TERMINAL,
+                    pairId = project.pairId,
+                    projectId = project.project.id,
+                    label = command.trim().takeIf { it.isNotEmpty() } ?: "New terminal",
+                    baselineTerminalIds = project.project.terminals
+                        .filter { it.pendingAction == null }
+                        .mapTo(mutableSetOf()) { it.id },
+                    createdAt = System.currentTimeMillis(),
+                )
+                beginPendingAction(action)
+                executor.execute {
+                    runCatching { RelayClient.createTerminal(credentials, project.project.id, command) }
+                        .onFailure { error -> runOnUiThread {
+                            removePendingAction(action.id)
+                            Toast.makeText(this, error.message ?: "Could not open terminal.", Toast.LENGTH_LONG).show()
+                        } }
+                        .onSuccess { runOnUiThread { requestRemoteRefresh(showSpinner = false) } }
+                }
+            }.show()
+    }
+
+    private fun updateSlashCommandSuggestions() {
+        if (!::conversationCommands.isInitialized || !::conversationInput.isInitialized) return
+        val target = selectedTarget
+        val value = conversationInput.text.toString()
+        val visible = target != null &&
+            target.terminal.mode == "conversation" &&
+            value.startsWith("/")
+        val commands = if (visible) {
+            SlashCommandPolicy.matches(value, target.terminal.commands)
+        } else {
+            emptyList()
+        }
+        conversationCommands.removeAllViews()
+        commands.forEach { command ->
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                isClickable = true
+                isFocusable = true
+                background = ContextCompat.getDrawable(this@MainActivity, R.drawable.nav_item)
+                setPadding(dp(12), dp(9), dp(12), dp(9))
+                contentDescription = "${command.name}. ${command.description}"
+                setOnClickListener {
+                    val next = SlashCommandPolicy.completion(command)
+                    conversationInput.setText(next)
+                    conversationInput.setSelection(next.length)
+                    conversationInput.requestFocus()
+                }
+            }
+            row.addView(TextView(this).apply {
+                text = command.name
+                textSize = 13f
+                setTextColor(ContextCompat.getColor(this@MainActivity, R.color.duckweed_accent))
+            })
+            if (command.description.isNotBlank()) {
+                row.addView(TextView(this).apply {
+                    text = command.description
+                    textSize = 11f
+                    maxLines = 2
+                    ellipsize = android.text.TextUtils.TruncateAt.END
+                    setTextColor(ContextCompat.getColor(this@MainActivity, R.color.duckweed_text_faint))
+                })
+            }
+            conversationCommands.addView(
+                row,
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                ).apply { bottomMargin = dp(3) },
+            )
+        }
+        conversationCommandsScroll.visibility = if (commands.isEmpty()) View.GONE else View.VISIBLE
+    }
+
+    private fun usageSwatch(color: Int, sizeDp: Int, cornerDp: Int): View {
+        return View(this).apply {
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dp(cornerDp).toFloat()
+                setColor(color)
+            }
+            minimumWidth = dp(sizeDp)
+            minimumHeight = dp(sizeDp)
+        }
+    }
+
+    private fun usageMeterDrawable(fillColor: Int): LayerDrawable {
+        val radius = dp(4).toFloat()
+        val track = GradientDrawable().apply {
+            cornerRadius = radius
+            setColor(ContextCompat.getColor(this@MainActivity, R.color.duckweed_border))
+        }
+        val fill = GradientDrawable().apply {
+            cornerRadius = radius
+            setColor(fillColor)
+        }
+        val clip = ClipDrawable(fill, Gravity.START, ClipDrawable.HORIZONTAL)
+        return LayerDrawable(arrayOf(track, clip)).apply {
+            setId(0, android.R.id.background)
+            setId(1, android.R.id.progress)
+        }
+    }
+
+    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
+
+    private fun requestCloseTerminal(target: ConversationTarget) {
+        if (!target.desktopOnline) { showDesktopOffline(); return }
+        AlertDialog.Builder(this)
+            .setTitle("Close terminal?")
+            .setMessage("Close ${target.terminal.agent ?: target.terminal.title} on the desktop?")
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Close") { _, _ ->
+                val credentials = SecretStore.load(this, target.pairId) ?: return@setPositiveButton
+                val action = PendingMobileAction(
+                    id = UUID.randomUUID().toString(),
+                    kind = PendingMobileAction.CLOSE_TERMINAL,
+                    pairId = target.pairId,
+                    projectId = target.projectId,
+                    terminalId = target.terminal.id,
+                    label = target.terminal.agent ?: target.terminal.title,
+                    createdAt = System.currentTimeMillis(),
+                )
+                beginPendingAction(action)
+                executor.execute {
+                    runCatching { RelayClient.closeTerminal(credentials, target.terminal.id) }
+                        .onFailure { error -> runOnUiThread {
+                            removePendingAction(action.id)
+                            Toast.makeText(this, error.message ?: "Could not close terminal.", Toast.LENGTH_LONG).show()
+                        } }
+                        .onSuccess { runOnUiThread { requestRemoteRefresh(showSpinner = false) } }
+                }
+            }.show()
     }
 
     private fun requestRemoteRefresh(showSpinner: Boolean = true) {
@@ -1428,8 +2549,8 @@ class MainActivity : AppCompatActivity() {
         val text = conversationInput.text.toString().trim().take(32_000)
         val attachments = listOfNotNull(selectedDraftAttachment)
         if (text.isEmpty() && attachments.isEmpty()) return
-        if (attachments.isNotEmpty() && target.terminal.agent == null) {
-            Toast.makeText(this, "Images require an active agent session.", Toast.LENGTH_LONG).show()
+        if (attachments.isNotEmpty() && target.terminal.mode != "conversation") {
+            Toast.makeText(this, "Images require the structured agent view.", Toast.LENGTH_LONG).show()
             return
         }
         if (!isDesktopOnline(target.pairId)) {
@@ -1454,6 +2575,9 @@ class MainActivity : AppCompatActivity() {
         renderDraftAttachment()
         conversationShouldStickToBottom = true
         refreshConversation()
+        if (target.terminal.mode == "terminal") {
+            findViewById<TextView>(R.id.conversation_status).text = "Sending input securely..."
+        }
         executor.execute {
             runCatching {
                 RelayClient.sendCommand(
@@ -1468,8 +2592,17 @@ class MainActivity : AppCompatActivity() {
             }.onSuccess {
                 MessageStore(this).updateOutgoingState(commandId, "sent")
                 runOnUiThread {
-                    refreshConversation()
-                    trackDelivery(commandId, target.pairId)
+                    if (target.terminal.mode == "terminal") {
+                        findViewById<TextView>(R.id.conversation_status).text =
+                            "Input delivered. Waiting for terminal output..."
+                    } else {
+                        refreshConversation()
+                    }
+                    trackDelivery(
+                        commandId,
+                        target.pairId,
+                        awaitWorkspaceConfirmation = target.terminal.mode == "conversation",
+                    )
                 }
             }.onFailure { error ->
                 MessageStore(this).updateOutgoingState(
@@ -1517,7 +2650,13 @@ class MainActivity : AppCompatActivity() {
                 MessageStore(this).updateOutgoingState(message.id, "sent")
                 runOnUiThread {
                     refreshConversation()
-                    trackDelivery(message.id, pairId)
+                    trackDelivery(
+                        message.id,
+                        pairId,
+                        awaitWorkspaceConfirmation = selectedTarget?.terminal?.let {
+                            it.id == terminalId && it.mode == "conversation"
+                        } ?: true,
+                    )
                 }
             }.onFailure { error ->
                 MessageStore(this).updateOutgoingState(
@@ -1530,12 +2669,21 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun trackDelivery(messageId: String, pairId: String) {
+    private fun trackDelivery(
+        messageId: String,
+        pairId: String,
+        awaitWorkspaceConfirmation: Boolean,
+    ) {
         if (!deliveryChecks.add(messageId)) return
-        scheduleDeliveryCheck(messageId, pairId, 0)
+        scheduleDeliveryCheck(messageId, pairId, awaitWorkspaceConfirmation, 0)
     }
 
-    private fun scheduleDeliveryCheck(messageId: String, pairId: String, attempt: Int) {
+    private fun scheduleDeliveryCheck(
+        messageId: String,
+        pairId: String,
+        awaitWorkspaceConfirmation: Boolean,
+        attempt: Int,
+    ) {
         conversationList.postDelayed({
             if (isFinishing || isDestroyed) {
                 deliveryChecks.remove(messageId)
@@ -1549,12 +2697,20 @@ class MainActivity : AppCompatActivity() {
                 runOnUiThread {
                     when {
                         delivered == true -> {
-                            MessageStore(this).updateOutgoingState(messageId, "delivered")
+                            MessageStore(this).updateOutgoingState(
+                                messageId,
+                                if (awaitWorkspaceConfirmation) "received" else "delivered",
+                            )
                             deliveryChecks.remove(messageId)
                             if (conversationDetail.visibility == View.VISIBLE) refreshConversation()
                         }
                         attempt >= 20 -> deliveryChecks.remove(messageId)
-                        else -> scheduleDeliveryCheck(messageId, pairId, attempt + 1)
+                        else -> scheduleDeliveryCheck(
+                            messageId,
+                            pairId,
+                            awaitWorkspaceConfirmation,
+                            attempt + 1,
+                        )
                     }
                 }
             }
@@ -1612,7 +2768,7 @@ class MainActivity : AppCompatActivity() {
         val messageId = intent.getStringExtra("message_id") ?: return
         val message = MessageStore(this).response(messageId) ?: return
         intent.removeExtra("message_id")
-        showPage(Page.ACTIVITY)
+        navigateToPage(Page.ACTIVITY)
         openResponse(message)
     }
 
@@ -1704,7 +2860,9 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val STATE_PAGE = "selected-page"
+        private const val STATE_PAGE_HISTORY = "page-history"
         private const val CONNECTION_FRESH_MS = 75_000L
+        private const val PENDING_ALPHA = 0.48f
         private const val APP_LOCK_PREFERENCES = "app-lock"
         private const val APP_LOCK_ENABLED = "enabled"
         private val APP_LOCK_AUTHENTICATORS =

@@ -1,10 +1,18 @@
 import { describe, expect, test } from "bun:test";
+import type { ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { subagentsForTurn } from "../../../lib/agents/subagents";
+import {
+  subagentRosters,
+  subagentsForTurn,
+} from "../../../lib/agents/subagents";
 import type { AgentItem } from "../../../lib/agents/types";
-import { scrollFleetWithWheel, SubagentFleet } from "./SubagentFleet";
-import { SubagentInspector } from "./SubagentInspector";
+import { ClaudeExperience } from "../official/ClaudeExperience";
+import { ActivityHistory } from "../official/OfficialShared";
+import { SubagentBoard, SubagentPin } from "./SubagentBoard";
+import { SubagentFocus } from "./SubagentFocus";
+import { SubagentMultiPane, SubagentNavigator } from "./SubagentNavigator";
+import { SubagentUiProvider } from "./SubagentUiContext";
 
 const items: AgentItem[] = [
   { kind: "user", id: "user", at: 1, text: "Inspect in parallel" },
@@ -64,68 +72,337 @@ const items: AgentItem[] = [
     output: "Half-width layout passed",
     changes: [],
   },
+  {
+    kind: "tool",
+    id: "read-source",
+    at: 4,
+    callId: "read-source",
+    name: "Read",
+    tool: "read",
+    title: "Read session.ts",
+    status: "done",
+    command: null,
+    output: "ok",
+    changes: [],
+  },
 ];
 
-describe("subagent UI", () => {
-  test("turns a vertical wheel step into bounded horizontal fleet scrolling", () => {
-    const list = { clientWidth: 300, scrollLeft: 20, scrollWidth: 800 };
+const rosters = subagentRosters(items);
+const live = subagentsForTurn(items);
 
-    expect(scrollFleetWithWheel(list, 120)).toBe(true);
-    expect(list.scrollLeft).toBe(140);
-    expect(scrollFleetWithWheel(list, 1_000)).toBe(true);
-    expect(list.scrollLeft).toBe(500);
-    expect(scrollFleetWithWheel(list, 120)).toBe(false);
-  });
+function wrap(
+  node: ReactNode,
+  overrides: {
+    peekedCallId?: string | null;
+    items?: AgentItem[];
+  } = {},
+) {
+  const rosterItems = overrides.items ?? items;
+  return (
+    <SubagentUiProvider
+      agent="claude"
+      now={26_000}
+      rosters={subagentRosters(rosterItems)}
+      peekedCallId={overrides.peekedCallId ?? null}
+      focusedCallId={null}
+      onPeek={() => {}}
+      onOpen={() => {}}
+      onClosePeek={() => {}}
+      onLeaveFocus={() => {}}
+    >
+      {node}
+    </SubagentUiProvider>
+  );
+}
 
-  test("renders an accessible fleet with live activity and selection", () => {
-    const subagents = subagentsForTurn(items);
+function claudeProps(nextItems: AgentItem[], status: "working" | "idle" = "working") {
+  return {
+    items: nextItems,
+    termId: "claude-roster",
+    agent: "claude" as const,
+    status,
+    started: true,
+    label: "Claude Code",
+    mark: "CC",
+    program: "claude",
+    cwd: ".",
+  };
+}
+
+describe("subagent roster UI", () => {
+  test("renders one roster of parallel workers with status and live activity", () => {
     const html = renderToStaticMarkup(
-      <SubagentFleet
+      <SubagentBoard
         agent="claude"
-        subagents={subagents}
-        selectedCallId="task-parser"
-        onSelect={() => {}}
+        roster={rosters[0]!}
+        now={26_000}
+        peekedCallId={null}
+        onPeek={() => {}}
+        onOpen={() => {}}
       />,
     );
 
     expect(html).toContain('aria-label="Subagents"');
     expect(html).toContain("<strong>Subagents</strong>");
-    expect(html).not.toContain("<strong>Fleet</strong>");
     expect(html).toContain("1 running · 1 completed");
     expect(html).toContain("Inspect parser tests");
     expect(html).toContain("Comparing parser fixtures");
     expect(html).toContain(">Running</span>");
-    expect(html).toContain('aria-pressed="true"');
-    expect(html).toContain("Completed: Check narrow layout");
+    expect(html).toContain("Check narrow layout");
+    expect(html).toContain("Half-width layout passed");
+    expect(html).not.toContain("agent-sub-chip");
+    expect(html).not.toContain("Show in timeline");
   });
 
-  test("renders prompt, identity, output, and timeline action in the inspector", () => {
-    const subagent = subagentsForTurn(items)[0];
+  test("absorbs current-turn task cards so the timeline does not also render Subagent rows", () => {
+    const activities = items.filter(
+      (item): item is Extract<AgentItem, { kind: "tool" }> => item.kind === "tool",
+    );
     const html = renderToStaticMarkup(
-      <SubagentInspector
+      wrap(
+        <ActivityHistory
+          activities={activities}
+          variant="claude"
+          clusterId="turn-1"
+        />,
+      ),
+    );
+
+    expect(html).toContain('aria-label="Subagents"');
+    expect(html).toContain("Inspect parser tests");
+    expect(html).toContain("Read session.ts");
+    expect(html).not.toContain("official-tool-kicker");
+    expect(html).not.toContain(">Subagent<");
+  });
+
+  test("keeps the roster when an interim comment hides the activity cluster", () => {
+    const hiddenItems: AgentItem[] = [
+      items[0]!,
+      items[1]!,
+      items[2]!,
+      {
+        kind: "assistant",
+        id: "progress-1",
+        at: 5,
+        text:
+          "I found the compatibility boundary and I am checking every streamed update before I finish. The adapters still need a second pass.",
+        streaming: false,
+      },
+      {
+        kind: "thinking",
+        id: "thinking-later",
+        at: 6,
+        text: "Checking the remaining references.",
+        streaming: true,
+      },
+    ];
+    const html = renderToStaticMarkup(
+      wrap(
+        <ClaudeExperience {...claudeProps(hiddenItems)} />,
+        { items: hiddenItems },
+      ),
+    );
+
+    expect(html).toContain('aria-label="Subagents"');
+    expect(html).toContain("Inspect parser tests");
+    expect(html).toContain("Comparing parser fixtures");
+    expect(html).toContain("I found the compatibility boundary");
+    expect(html).not.toContain("official-tool-kicker");
+    expect(html).not.toContain(">Subagent<");
+  });
+
+  test("keeps the roster when the live answer hides the current activity cluster", () => {
+    const hiddenItems: AgentItem[] = [
+      items[0]!,
+      items[1]!,
+      items[2]!,
+      {
+        kind: "assistant",
+        id: "live-answer",
+        at: 5,
+        text:
+          "I found the compatibility boundary and I am checking every streamed update before I finish. The adapters still need a second pass.",
+        streaming: true,
+      },
+    ];
+    const html = renderToStaticMarkup(
+      wrap(
+        <ClaudeExperience {...claudeProps(hiddenItems)} />,
+        { items: hiddenItems },
+      ),
+    );
+
+    expect(html).toContain('aria-label="Subagents"');
+    expect(html).toContain("Inspect parser tests");
+    expect(html).toContain("Check narrow layout");
+    expect(html).toContain("I found the compatibility boundary");
+    expect(html).not.toContain("official-tool-kicker");
+  });
+
+  test("peeks a compact inline summary without an overlay inspector", () => {
+    const html = renderToStaticMarkup(
+      <SubagentBoard
         agent="claude"
-        subagent={subagent}
-        canMessage={false}
-        onMessage={async () => false}
-        onClose={() => {}}
-        onShowInTimeline={() => {}}
+        roster={rosters[0]!}
+        now={26_000}
+        peekedCallId="task-parser"
+        onPeek={() => {}}
+        onOpen={() => {}}
       />,
     );
 
-    expect(html).toContain("Subagent inspector: Inspect parser tests");
-    expect(html).toContain("<dt>Role</dt>");
-    expect(html).toContain("Explore");
+    expect(html).toContain("agent-sub-peek");
     expect(html).toContain("Find the fixture that breaks the parser.");
-    expect(html).toContain("Reading parser fixtures");
-    expect(html).toContain("Conversation");
+    expect(html).toContain("Inspect nested dependency");
+    expect(html).toContain(">Open<");
+    expect(html).not.toContain("Subagent inspector:");
+    expect(html).not.toContain("Show in timeline");
+    expect(html).not.toContain("Message this subagent");
+  });
+});
+
+describe("subagent focus UI", () => {
+  test("replaces the parent view with nested child content and a back control", () => {
+    const html = renderToStaticMarkup(
+      <SubagentFocus
+        agent="claude"
+        parentLabel="Claude Code"
+        parentWorking
+        subagent={live[0]!}
+        now={26_000}
+        onBack={() => {}}
+      />,
+    );
+
+    expect(html).toContain('aria-label="Back to parent"');
+    expect(html).toContain("Claude Code");
+    expect(html).toContain("Inspect parser tests");
     expect(html).toContain("The legacy fixture is the likely failure.");
     expect(html).toContain("Inspect nested dependency");
-    expect(html).toContain(
-      'aria-label="Toggle subagent details: Inspect nested dependency"',
-    );
-    expect(html).toContain('aria-expanded="false"');
+    expect(html).toContain("Parent still working");
+    expect(html).not.toContain("Show in timeline");
+    expect(html).not.toContain("Message this subagent");
     expect(html).not.toContain("only reports a summary");
-    expect(html).toContain("Copy summary");
-    expect(html).toContain("Show in timeline");
+  });
+
+  test("renders a provider result as a readable transcript when nested events are unavailable", () => {
+    const html = renderToStaticMarkup(
+      <SubagentFocus
+        agent="claude"
+        parentLabel="Claude Code"
+        parentWorking={false}
+        subagent={live[1]!}
+        now={26_000}
+        onBack={() => {}}
+      />,
+    );
+
+    expect(html).toContain("Reported result");
+    expect(html).toContain("Half-width layout passed");
+    expect(html).toContain('aria-label="Back to parent"');
+  });
+});
+
+describe("subagent pin and composer retarget", () => {
+  test("renders a single-line pin rather than a multi-chip fleet", () => {
+    const html = renderToStaticMarkup(
+      <SubagentPin agent="claude" subagents={live} onPeek={() => {}} />,
+    );
+
+    expect(html).toContain("agent-sub-pin");
+    expect(html).toContain("1 running · Inspect parser tests · Comparing parser fixtures");
+    expect(html).not.toContain("agent-sub-chip");
+    expect(html).not.toContain("agent-sub-board-list");
+  });
+
+  test("wires the focused composer to the shared subagent copy helper", async () => {
+    const source = await Bun.file(`${import.meta.dir}/../AgentComposer.tsx`).text();
+    expect(source).toContain("subagentComposerCopy");
+    expect(source).toContain("target.canMessage");
+    expect(source).toContain("disabled");
+  });
+
+  test("mounts the navigator and multi-pane workspace without the old floating pin", async () => {
+    const surface = await Bun.file(`${import.meta.dir}/../AgentSurface.tsx`).text();
+    expect(surface).toContain("SubagentNavigator");
+    expect(surface).toContain("SubagentMultiPane");
+    expect(surface).toContain("SubagentFocus");
+    expect(surface).not.toContain("SubagentPin");
+    expect(surface).not.toContain("subagentPinShouldShow");
+    expect(surface).not.toContain("subagentRosterNodeInView");
+    expect(surface).not.toContain("SubagentFleet");
+    expect(surface).not.toContain("SubagentInspector");
+    expect(surface).not.toContain("Show in timeline");
+    expect(surface).not.toContain("COMPLETED_SUBAGENT_FLEET_TTL_MS");
+  });
+});
+
+describe("subagent navigator and multi-pane UI", () => {
+  test("keeps fleet status inside the selected Agents navigator", () => {
+    const html = renderToStaticMarkup(
+      <SubagentNavigator
+        agent="codex"
+        parentLabel="Codex"
+        parentWorking
+        subagents={live}
+        now={26_000}
+        selectedId="task-parser"
+        multiPane
+        paneIds={["task-parser"]}
+        onSelectParent={() => {}}
+        onSelectSubagent={() => {}}
+        onToggleMultiPane={() => {}}
+        onClose={() => {}}
+      />,
+    );
+
+    expect(html).toContain('aria-label="Subagents navigator"');
+    expect(html).toContain("1 running · 1 completed");
+    expect(html).toContain("1 working");
+    expect(html).toContain('aria-pressed="true"');
+    expect(html).toContain("Open in workspace");
+    expect(html).not.toContain("agent-sub-pin");
+  });
+
+  test("renders parent and child conversations together in multi-pane", () => {
+    const html = renderToStaticMarkup(
+      <SubagentMultiPane
+        agent="claude"
+        parentLabel="Claude Code"
+        parentWorking
+        parent={<p>Parent conversation</p>}
+        subagents={live}
+        now={26_000}
+        activeId="task-parser"
+        onActivate={() => {}}
+        onFocus={() => {}}
+        onClosePane={() => {}}
+      />,
+    );
+
+    expect(html).toContain('aria-label="Multi-pane subagent workspace"');
+    expect(html).toContain("Parent conversation");
+    expect(html).toContain("The legacy fixture is the likely failure.");
+    expect(html).toContain("Reported result");
+    expect(html).toContain("Half-width layout passed");
+    expect(html).toContain('aria-label="Focus Parent thread"');
+    expect(html).toContain('aria-label="Close Inspect parser tests pane"');
+  });
+
+  test("uses the same readable conversation surface for Codex, Claude, and Grok", () => {
+    for (const agent of ["codex", "claude", "grok"] as const) {
+      const html = renderToStaticMarkup(
+        <SubagentFocus
+          agent={agent}
+          parentLabel={agent}
+          parentWorking={false}
+          subagent={live[agent === "grok" ? 1 : 0]!}
+          now={26_000}
+          onBack={() => {}}
+        />,
+      );
+      expect(html).toContain(`agent-sub--${agent}`);
+      expect(html).toContain(agent === "grok" ? "Reported result" : "legacy fixture");
+    }
   });
 });

@@ -32,10 +32,11 @@ const image = {
 function harness(overrides: Partial<AgentLaunch> = {}) {
   const events: AgentEvent[] = [];
   const sent: Record<string, unknown>[] = [];
-  const adapter = createAcpAdapter();
+  const resolved = { ...launch, ...overrides };
+  const adapter = createAcpAdapter(resolved.agent);
   const ctx: AdapterContext = {
     cwd: "H:/project",
-    launch: { ...launch, ...overrides },
+    launch: resolved,
     send: (message) => sent.push(message as Record<string, unknown>),
     emit: (event) => events.push(event),
   };
@@ -654,6 +655,115 @@ describe("acp adapter", () => {
 
     expect(h.events.filter((event) => event.type === "turn-end")).toHaveLength(1);
     expect(h.state().status).toBe("idle");
+  });
+
+  test("steers a Grok turn already in flight without ending it", async () => {
+    const h = harness();
+    await h.handshake();
+    h.adapter.prompt({ text: "fix the parser", images: [] }, h.ctx);
+    const original = h.sent.find((message) => message.method === "session/prompt");
+    expect(original).toMatchObject({
+      method: "session/prompt",
+      params: { sessionId: "s1", prompt: [{ type: "text", text: "fix the parser" }] },
+    });
+    expect(h.state().status).toBe("working");
+
+    const steering = h.adapter.steer?.(
+      { text: "Focus on the failing test instead", images: [image] },
+      h.ctx,
+    );
+    expect(h.adapter.steer).toBeTypeOf("function");
+    const interject = h.sent.find((message) => message.method === "_x.ai/interject");
+    expect(interject).toMatchObject({
+      method: "_x.ai/interject",
+      params: {
+        sessionId: "s1",
+        text: "Focus on the failing test instead",
+        content: [
+          { type: "text", text: "Focus on the failing test instead" },
+          { type: "image", data: "aGVsbG8=", mimeType: "image/png" },
+        ],
+      },
+    });
+    expect(interject?.id).not.toBe(original?.id);
+    expect(h.sent.filter((message) => message.method === "session/prompt")).toHaveLength(1);
+    expect(h.sent.some((message) => message.method === "session/cancel")).toBe(false);
+    expect(h.state().items.filter((item) => item.kind === "user")).toHaveLength(1);
+
+    h.feed({ jsonrpc: "2.0", id: interject?.id, result: { status: "queued" } });
+    await expect(steering).resolves.toBe(true);
+    expect(h.state().status).toBe("working");
+    expect(h.state().items.at(-1)).toMatchObject({
+      kind: "user",
+      text: "Focus on the failing test instead",
+      images: [image],
+      sameTurn: true,
+    });
+    expect(h.events.filter((event) => event.type === "turn-end")).toHaveLength(0);
+    expect(h.events.filter((event) => event.type === "status" && event.status === "idle")).toHaveLength(
+      1,
+    );
+
+    expect(h.sent.filter((message) => message.method === "session/prompt")).toHaveLength(1);
+    h.feed({ jsonrpc: "2.0", id: original?.id, result: { stopReason: "end_turn" } });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(h.state().status).toBe("idle");
+    expect(h.events.filter((event) => event.type === "turn-end")).toHaveLength(1);
+  });
+
+  test("returns false when Grok rejects mid-turn interject", async () => {
+    const h = harness();
+    await h.handshake();
+    h.adapter.prompt({ text: "fix the parser", images: [] }, h.ctx);
+    const original = h.sent.find((message) => message.method === "session/prompt");
+
+    const steering = h.adapter.steer?.({ text: "Focus on the failing test", images: [] }, h.ctx);
+    const interject = h.sent.find((message) => message.method === "_x.ai/interject");
+    expect(interject).toMatchObject({
+      method: "_x.ai/interject",
+      params: { sessionId: "s1", text: "Focus on the failing test" },
+    });
+    h.feed({
+      jsonrpc: "2.0",
+      id: interject?.id,
+      error: { code: -32601, message: "Method not found" },
+    });
+    await expect(steering).resolves.toBe(false);
+    expect(h.state().items.filter((item) => item.kind === "user")).toHaveLength(1);
+    expect(h.state().items.some((item) => item.kind === "user" && item.sameTurn)).toBe(false);
+    expect(h.events.filter((event) => event.type === "turn-end")).toHaveLength(0);
+    expect(h.state().status).toBe("working");
+    expect(h.sent.filter((message) => message.method === "session/prompt")).toHaveLength(1);
+    expect(h.sent.some((message) => message.method === "session/cancel")).toBe(false);
+
+    h.feed({ jsonrpc: "2.0", id: original?.id, result: { stopReason: "end_turn" } });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(h.state().status).toBe("idle");
+    expect(h.events.filter((event) => event.type === "turn-end")).toHaveLength(1);
+  });
+
+  test("does not expose same-turn steering for Cursor", async () => {
+    const h = harness({ agent: "cursor", program: "cursor-agent" });
+    await h.handshake();
+    h.adapter.prompt({ text: "hi", images: [] }, h.ctx);
+    expect(h.adapter.steer).toBeUndefined();
+  });
+
+  test("does not expose same-turn steering for OpenCode", async () => {
+    const h = harness({ agent: "opencode", program: "opencode" });
+    await h.handshake();
+    h.adapter.prompt({ text: "hi", images: [] }, h.ctx);
+    expect(h.adapter.steer).toBeUndefined();
+  });
+
+  test("refuses to steer Grok when no turn is in flight", async () => {
+    const h = harness();
+    await h.handshake();
+    expect(await h.adapter.steer?.({ text: "later", images: [] }, h.ctx)).toBe(false);
+    expect(h.sent.filter((message) => message.method === "session/prompt")).toHaveLength(0);
+    expect(h.sent.filter((message) => message.method === "_x.ai/interject")).toHaveLength(0);
   });
 
   test("sends the original image instead of its thumbnail over ACP", async () => {

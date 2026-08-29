@@ -6,6 +6,7 @@ import {
   ghostSuffix,
   suggest,
 } from "../lib/autosuggest";
+import * as bus from "../lib/bus";
 import * as commandHistory from "../lib/commandHistory";
 import { highlightCommand } from "../lib/commandSyntax";
 import { cKeyAction, isControlChord } from "../lib/platform";
@@ -17,6 +18,8 @@ interface Props {
   active: boolean;
   exited: boolean;
   highlight: boolean;
+  /** Return true when an app-level action handled this submission. */
+  onBeforeSubmit?: (text: string) => boolean;
 }
 
 /**
@@ -29,7 +32,7 @@ interface Props {
  * It renders only while the pane is in editor mode (or the shell has exited) —
  * a running CLI owns the whole pane, and the composer is unmounted for it.
  */
-export function CommandInput({ termId, active, exited, highlight }: Props) {
+export function CommandInput({ termId, active, exited, highlight, onBeforeSubmit }: Props) {
   // Seed from the session so a pane remount (first split, drag) keeps the
   // unsent command instead of blanking the composer and stranding it on the
   // old terminal only in the user's head.
@@ -141,6 +144,18 @@ export function CommandInput({ termId, active, exited, highlight }: Props) {
     return terminals.subscribeSession(termId, () => setTerminalEpoch((n) => n + 1));
   }, [termId]);
 
+  useEffect(
+    () =>
+      bus.on("term:clear-draft", ({ termId: clearedTermId }) => {
+        if (clearedTermId !== termId) return;
+        flushUnusedOffers();
+        setValue("");
+        setHistoryIndex(null);
+        draftRef.current = "";
+      }),
+    [flushUnusedOffers, setValue, termId],
+  );
+
   useEffect(() => {
     return commandHistory.subscribe(() => setHistoryEpoch((n) => n + 1));
   }, []);
@@ -232,6 +247,10 @@ export function CommandInput({ termId, active, exited, highlight }: Props) {
   const submit = () => {
     if (exited) return;
     const command = value;
+    if (onBeforeSubmit?.(command) === true) {
+      requestAnimationFrame(() => textareaRef.current?.focus());
+      return;
+    }
     // Any ghost shown this draft and not accepted (Tab/→) is unused.
     // recordUsed may clear the streak if they still ran that same command.
     flushUnusedOffers();

@@ -6,4 +6,7 @@
     <string name="app_lock_summary">Require biometrics or your device PIN when opening Duckweed.</string>
     <string name="app_lock_prompt_title">Unlock Duckweed</string>
     <string name="app_lock_prompt_subtitle">Use biometrics or your device PIN</string>
+    <string name="usage_limits_title">Usage limits</string>
+    <string name="usage_limits_summary">Provider-reported limits synced from your most recently active desktop.</string>
+    <string name="usage_limits_empty">No provider-reported limits yet. Keep Duckweed open on desktop, then retry the connection.</string>
 </resources>

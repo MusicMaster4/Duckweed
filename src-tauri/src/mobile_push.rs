@@ -4,9 +4,10 @@
 //! the encryption secret on the phone through the QR code and keeps desktop
 //! credentials in the operating-system credential store.
 
+use std::error::Error as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aes_gcm::aead::{Aead, Payload};
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
@@ -14,7 +15,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
-use reqwest::blocking::{Client, Response};
+use reqwest::blocking::{Client, RequestBuilder, Response};
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -29,8 +30,10 @@ const MAX_PREVIEW_CIPHERTEXT: usize = 3_000;
 // Keep the plaintext below the relay's 320,000-character base64url ciphertext
 // limit, with room for AES-GCM overhead and the JSON request envelope.
 const MAX_WORKSPACE_PLAINTEXT_BYTES: usize = 225_000;
+const PRESENCE_INTERVAL: Duration = Duration::from_secs(30);
 
 static FILE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static HTTP_CLIENT: OnceLock<Result<Client, String>> = OnceLock::new();
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -125,6 +128,7 @@ pub struct CompletionMessage {
     pub duration_ms: Option<u64>,
     pub sound_cue: Option<u8>,
     pub unread_on_desktop: bool,
+    pub completion_seq: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -143,6 +147,7 @@ struct PlainMessage<'a> {
     duration_ms: Option<u64>,
     sound_cue: Option<u8>,
     unread_on_desktop: bool,
+    completion_seq: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -154,11 +159,71 @@ pub struct WorkspaceTerminal {
     pub agent: Option<String>,
     pub model: Option<String>,
     pub status: String,
+    #[serde(default = "default_terminal_mode")]
+    pub mode: String,
+    #[serde(default)]
+    pub terminal_columns: Option<u16>,
+    #[serde(default)]
+    pub terminal_rows: Option<u16>,
     #[serde(default)]
     pub unread_on_desktop: bool,
     #[serde(default)]
+    pub completion_seq: u64,
+    #[serde(default)]
+    pub commands: Vec<WorkspaceSlashCommand>,
+    #[serde(default)]
+    pub activity: Vec<WorkspaceAgentActivity>,
+    #[serde(default)]
     pub conversation: Vec<WorkspaceConversationMessage>,
     pub permission: Option<WorkspacePermission>,
+    #[serde(default)]
+    pub terminal_output: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceSlashCommand {
+    pub name: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceAgentActivity {
+    pub id: String,
+    pub at: i64,
+    pub kind: String,
+    pub title: String,
+    pub detail: Option<String>,
+    #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default)]
+    pub changes: Vec<WorkspaceFileChange>,
+    #[serde(default)]
+    pub plan_type: Option<String>,
+    #[serde(default)]
+    pub steps: Vec<WorkspacePlanStep>,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspacePlanStep {
+    pub text: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceFileChange {
+    pub path: String,
+    pub insertions: u64,
+    pub deletions: u64,
+    pub diff: Option<String>,
+}
+
+fn default_terminal_mode() -> String {
+    "terminal".to_string()
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -173,10 +238,37 @@ pub struct WorkspacePermissionOption {
 #[serde(rename_all = "camelCase")]
 pub struct WorkspacePermission {
     pub id: String,
+    #[serde(default = "default_permission_kind")]
+    pub kind: String,
     pub title: String,
     pub detail: Option<String>,
     pub command: Option<String>,
     pub options: Vec<WorkspacePermissionOption>,
+    #[serde(default)]
+    pub questions: Vec<WorkspaceQuestion>,
+}
+
+fn default_permission_kind() -> String {
+    "approval".to_string()
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceQuestion {
+    pub id: String,
+    pub header: String,
+    pub question: String,
+    pub multi_select: bool,
+    pub options: Vec<WorkspaceQuestionOption>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceQuestionOption {
+    pub id: String,
+    pub label: String,
+    pub description: String,
+    pub preview: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -186,6 +278,8 @@ pub struct WorkspaceConversationMessage {
     pub sent_at: i64,
     pub role: String,
     pub text: String,
+    #[serde(default)]
+    pub streaming: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -195,6 +289,8 @@ pub struct WorkspaceProject {
     pub name: String,
     pub path: String,
     pub branch: Option<String>,
+    #[serde(default)]
+    pub color: Option<String>,
     pub terminals: Vec<WorkspaceTerminal>,
 }
 
@@ -202,6 +298,36 @@ pub struct WorkspaceProject {
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceSnapshot {
     pub projects: Vec<WorkspaceProject>,
+    #[serde(default)]
+    pub usage_limits: Vec<WorkspaceUsageQuota>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceUsageQuota {
+    pub agent: String,
+    pub label: String,
+    pub plan: Option<String>,
+    pub limits: Vec<WorkspaceUsageLimit>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceUsageLimit {
+    pub id: String,
+    pub label: String,
+    pub percent: f64,
+    pub resets_at: Option<i64>,
+    #[serde(default)]
+    pub usage_hours_left: Option<f64>,
+    #[serde(default)]
+    pub per_hour: Option<f64>,
+    #[serde(default)]
+    pub projected_percent: Option<f64>,
+    #[serde(default)]
+    pub runs_out_at: Option<i64>,
+    #[serde(default)]
+    pub basis: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -212,6 +338,7 @@ struct PlainWorkspace<'a> {
     sent_at: i64,
     kind: &'static str,
     projects: &'a [WorkspaceProject],
+    usage_limits: &'a [WorkspaceUsageQuota],
 }
 
 #[derive(Debug, Serialize)]
@@ -240,7 +367,42 @@ struct PlainRemoteCommand {
     #[serde(default)]
     option_id: Option<String>,
     #[serde(default)]
+    completion_seq: Option<u64>,
+    #[serde(default)]
+    answers: Vec<RemoteQuestionAnswer>,
+    #[serde(default)]
+    agent: Option<String>,
+    #[serde(default)]
     images: Vec<RemoteImageAttachment>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteQuestionAnswer {
+    question_id: String,
+    labels: Vec<String>,
+    custom: Option<String>,
+}
+
+impl RemoteQuestionAnswer {
+    fn is_valid(&self) -> bool {
+        !self.question_id.trim().is_empty()
+            && self.question_id.len() <= 160
+            && self.labels.len() <= 12
+            && self
+                .labels
+                .iter()
+                .all(|label| !label.trim().is_empty() && label.len() <= 240)
+            && self
+                .custom
+                .as_deref()
+                .map_or(true, |custom| custom.len() <= 4_000)
+            && (!self.labels.is_empty()
+                || self
+                    .custom
+                    .as_deref()
+                    .is_some_and(|custom| !custom.trim().is_empty()))
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -272,6 +434,18 @@ impl PlainRemoteCommand {
     fn is_valid(&self) -> bool {
         match self.kind.as_str() {
             "refresh" => true,
+            "create_terminal" => self
+                .project_id
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty()),
+            "close_terminal" => self
+                .terminal_id
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty()),
+            "read" => self
+                .terminal_id
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty()),
             "input" => {
                 self.terminal_id
                     .as_deref()
@@ -297,6 +471,18 @@ impl PlainRemoteCommand {
                         .as_deref()
                         .is_some_and(|value| !value.trim().is_empty())
             }
+            "question" => {
+                self.terminal_id
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty())
+                    && self
+                        .permission_id
+                        .as_deref()
+                        .is_some_and(|value| !value.trim().is_empty())
+                    && self.answers.len() <= 3
+                    && (self.answers.is_empty()
+                        || self.answers.iter().all(RemoteQuestionAnswer::is_valid))
+            }
             _ => false,
         }
     }
@@ -313,6 +499,9 @@ pub struct RemoteCommand {
     pub text: Option<String>,
     pub permission_id: Option<String>,
     pub option_id: Option<String>,
+    pub completion_seq: Option<u64>,
+    pub answers: Vec<RemoteQuestionAnswer>,
+    pub agent: Option<String>,
     pub images: Vec<RemoteImageAttachment>,
 }
 
@@ -438,13 +627,51 @@ fn remove_secret(id: &str) {
     }
 }
 
-fn client() -> Result<Client, String> {
-    let _ = rustls::crypto::ring::default_provider().install_default();
-    Client::builder()
-        .user_agent(concat!("Duckweed/", env!("CARGO_PKG_VERSION")))
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .map_err(|error| error.to_string())
+fn client() -> Result<&'static Client, String> {
+    HTTP_CLIENT
+        .get_or_init(|| {
+            let _ = rustls::crypto::ring::default_provider().install_default();
+            Client::builder()
+                .user_agent(concat!("Duckweed/", env!("CARGO_PKG_VERSION")))
+                .connect_timeout(Duration::from_secs(5))
+                .timeout(Duration::from_secs(15))
+                .pool_idle_timeout(Duration::from_secs(60))
+                .pool_max_idle_per_host(4)
+                .build()
+                .map_err(|error| error.to_string())
+        })
+        .as_ref()
+        .map_err(Clone::clone)
+}
+
+fn send_request(request: RequestBuilder) -> Result<Response, reqwest::Error> {
+    let mut attempt = request;
+    for retry_delay in [Some(150), Some(500), None] {
+        let retry = attempt.try_clone();
+        match attempt.send() {
+            Ok(response) => return Ok(response),
+            Err(error) if error.is_connect() && retry_delay.is_some() && retry.is_some() => {
+                std::thread::sleep(Duration::from_millis(retry_delay.unwrap_or_default()));
+                attempt = retry.expect("retryable request was cloned");
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!("the final request attempt always returns")
+}
+
+fn request_error(context: &str, error: &reqwest::Error) -> String {
+    let mut detail = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        let cause_text = cause.to_string();
+        if !detail.ends_with(&cause_text) {
+            detail.push_str(": ");
+            detail.push_str(&cause_text);
+        }
+        source = cause.source();
+    }
+    format!("{context}: {detail}")
 }
 
 fn checked(response: Response) -> Result<Response, String> {
@@ -591,6 +818,8 @@ fn bounded_preview_plaintext(
     duration_ms: Option<u64>,
     sound_cue: Option<u8>,
     unread_on_desktop: bool,
+    terminal_id: Option<&str>,
+    completion_seq: Option<u64>,
 ) -> Result<Vec<u8>, String> {
     let serialize = |preview_response: Option<&str>| {
         serde_json::to_vec(&PlainMessage {
@@ -600,13 +829,14 @@ fn bounded_preview_plaintext(
             agent,
             project,
             project_id: None,
-            terminal_id: None,
+            terminal_id,
             terminal_title: None,
             kind,
             response: preview_response,
             duration_ms,
             sound_cue,
             unread_on_desktop,
+            completion_seq,
         })
         .map_err(|error| error.to_string())
     };
@@ -697,16 +927,17 @@ fn pair_start_blocking(app: &AppHandle) -> Result<PairingStart, String> {
     let relay = relay_url();
 
     checked(
-        client()?
-            .post(format!("{relay}/v1/pairings"))
-            .json(&CreatePairing {
-                pair_id: &pair_id,
-                registration_token_hash: &sha256(&registration_token),
-                send_token_hash: &sha256(&send_token),
-                expires_at,
-            })
-            .send()
-            .map_err(|error| format!("could not reach notification relay: {error}"))?,
+        send_request(
+            client()?
+                .post(format!("{relay}/v1/pairings"))
+                .json(&CreatePairing {
+                    pair_id: &pair_id,
+                    registration_token_hash: &sha256(&registration_token),
+                    send_token_hash: &sha256(&send_token),
+                    expires_at,
+                }),
+        )
+        .map_err(|error| request_error("could not reach notification relay", &error))?,
     )?;
 
     save_secret(
@@ -758,11 +989,12 @@ fn pair_poll_blocking(app: &AppHandle) -> Result<MobileStatus, String> {
     let secret = load_secret(&pending.id)?;
     let relay = relay_url();
     let poll: PairingPoll = checked(
-        client()?
-            .get(format!("{relay}/v1/pairings/{}", pending.id))
-            .bearer_auth(&secret.send_token)
-            .send()
-            .map_err(|error| format!("could not reach notification relay: {error}"))?,
+        send_request(
+            client()?
+                .get(format!("{relay}/v1/pairings/{}", pending.id))
+                .bearer_auth(&secret.send_token),
+        )
+        .map_err(|error| request_error("could not reach notification relay", &error))?,
     )?
     .json()
     .map_err(|error| error.to_string())?;
@@ -795,10 +1027,11 @@ fn remove_device_blocking(app: &AppHandle, id: &str) -> Result<MobileStatus, Str
     // deleted the relay row, the sender credential necessarily returns 401.
     // A missing keyring item must not leave an undeletable row in Settings.
     if let Ok(secret) = load_secret(id) {
-        let _ = client()?
-            .delete(format!("{}/v1/pairings/{id}", relay_url()))
-            .bearer_auth(secret.send_token)
-            .send();
+        let _ = send_request(
+            client()?
+                .delete(format!("{}/v1/pairings/{id}", relay_url()))
+                .bearer_auth(secret.send_token),
+        );
     }
     let _guard = FILE_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
     let mut state = read_state(&path);
@@ -855,6 +1088,8 @@ fn send_to_device(
         message.duration_ms,
         message.sound_cue,
         message.unread_on_desktop,
+        message.terminal_id.as_deref(),
+        message.completion_seq,
     )?;
     let full_plain = serde_json::to_vec(&PlainMessage {
         version: 1,
@@ -870,6 +1105,7 @@ fn send_to_device(
         duration_ms: message.duration_ms,
         sound_cue: message.sound_cue.filter(|cue| *cue < 6),
         unread_on_desktop: message.unread_on_desktop,
+        completion_seq: message.completion_seq,
     })
     .map_err(|error| error.to_string())?;
     let preview = encrypt(
@@ -888,18 +1124,19 @@ fn send_to_device(
     )?;
     let relay = relay_url();
     checked(
-        client()?
-            .post(format!("{relay}/v1/pairings/{}/messages", device.id))
-            .bearer_auth(secret.send_token)
-            .json(&SendMessage {
-                message_id,
-                sent_at,
-                collapse_key: None,
-                preview: &preview,
-                payload: &payload,
-            })
-            .send()
-            .map_err(|error| format!("could not send mobile notification: {error}"))?,
+        send_request(
+            client()?
+                .post(format!("{relay}/v1/pairings/{}/messages", device.id))
+                .bearer_auth(secret.send_token)
+                .json(&SendMessage {
+                    message_id,
+                    sent_at,
+                    collapse_key: None,
+                    preview: &preview,
+                    payload: &payload,
+                }),
+        )
+        .map_err(|error| request_error("could not send mobile notification", &error))?,
     )?;
     Ok(())
 }
@@ -911,6 +1148,9 @@ fn send_workspace_to_device(
     message_id: &str,
 ) -> Result<(), String> {
     let secret = load_secret(&device.id)?;
+    // Workspace snapshots replace one another. Keep the identity stable for
+    // this pairing so an offline phone retains only the newest pending state.
+    let collapse_key = workspace_collapse_key(&device.id);
     let preview_plain = serde_json::to_vec(&serde_json::json!({
         "version": 1,
         "id": message_id,
@@ -924,6 +1164,7 @@ fn send_workspace_to_device(
         sent_at,
         kind: "workspace",
         projects: &snapshot.projects,
+        usage_limits: &snapshot.usage_limits,
     })
     .map_err(|error| error.to_string())?;
     if full_plain.len() > MAX_WORKSPACE_PLAINTEXT_BYTES {
@@ -947,30 +1188,32 @@ fn send_workspace_to_device(
         &full_plain,
     )?;
     checked(
-        client()?
-            .post(format!(
-                "{}/v1/pairings/{}/messages",
-                relay_url(),
-                device.id
-            ))
-            .bearer_auth(secret.send_token)
-            .json(&SendMessage {
-                message_id,
-                sent_at,
-                collapse_key: None,
-                preview: &preview,
-                payload: &payload,
-            })
-            .send()
-            .map_err(|error| format!("could not send mobile workspace: {error}"))?,
+        send_request(
+            client()?
+                .post(format!(
+                    "{}/v1/pairings/{}/messages",
+                    relay_url(),
+                    device.id
+                ))
+                .bearer_auth(secret.send_token)
+                .json(&SendMessage {
+                    message_id,
+                    sent_at,
+                    collapse_key: Some(&collapse_key),
+                    preview: &preview,
+                    payload: &payload,
+                }),
+        )
+        .map_err(|error| request_error("could not send mobile workspace", &error))?,
     )?;
     Ok(())
 }
 
-fn send_presence_to_device(
-    device: &MobileDevice,
-    sent_at: i64,
-) -> Result<(), String> {
+fn workspace_collapse_key(device_id: &str) -> String {
+    format!("workspace:{device_id}")
+}
+
+fn send_presence_to_device(device: &MobileDevice, sent_at: i64) -> Result<(), String> {
     let secret = load_secret(&device.id)?;
     // Reusing one id makes the relay replace an unacknowledged heartbeat, so
     // an offline phone keeps only the latest presence payload.
@@ -998,22 +1241,23 @@ fn send_presence_to_device(
         &plain,
     )?;
     checked(
-        client()?
-            .post(format!(
-                "{}/v1/pairings/{}/messages",
-                relay_url(),
-                device.id
-            ))
-            .bearer_auth(secret.send_token)
-            .json(&SendMessage {
-                message_id,
-                sent_at,
-                collapse_key: Some(message_id),
-                preview: &preview,
-                payload: &payload,
-            })
-            .send()
-            .map_err(|error| format!("could not send mobile presence: {error}"))?,
+        send_request(
+            client()?
+                .post(format!(
+                    "{}/v1/pairings/{}/messages",
+                    relay_url(),
+                    device.id
+                ))
+                .bearer_auth(secret.send_token)
+                .json(&SendMessage {
+                    message_id,
+                    sent_at,
+                    collapse_key: Some(message_id),
+                    preview: &preview,
+                    payload: &payload,
+                }),
+        )
+        .map_err(|error| request_error("could not send mobile presence", &error))?,
     )?;
     Ok(())
 }
@@ -1065,6 +1309,24 @@ fn presence_blocking(app: &AppHandle) -> Result<SendResult, String> {
     Ok(result)
 }
 
+/// Keep mobile presence independent from WebView timers. Windows can suspend
+/// animation frames and JavaScript intervals while the app is minimized, but
+/// the native process remains responsible for the paired desktop connection.
+pub fn start_presence_monitor(app: AppHandle) -> std::io::Result<()> {
+    std::thread::Builder::new()
+        .name("mobile-presence".into())
+        .spawn(move || loop {
+            let started = std::time::Instant::now();
+            if let Ok(result) = presence_blocking(&app) {
+                if result.failed > 0 {
+                    eprintln!("mobile presence sync: {}", result.errors.join("; "));
+                }
+            }
+            std::thread::sleep(PRESENCE_INTERVAL.saturating_sub(started.elapsed()));
+        })?;
+    Ok(())
+}
+
 fn poll_commands_blocking(app: &AppHandle) -> Result<Vec<RemoteCommand>, String> {
     let state = {
         let _guard = FILE_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
@@ -1077,15 +1339,16 @@ fn poll_commands_blocking(app: &AppHandle) -> Result<Vec<RemoteCommand>, String>
         let Ok(secret) = load_secret(&device.id) else {
             continue;
         };
-        let response = client()?
-            .get(format!(
-                "{}/v1/pairings/{}/commands",
-                relay_url(),
-                device.id
-            ))
-            .bearer_auth(&secret.send_token)
-            .send()
-            .map_err(|error| format!("could not poll mobile commands: {error}"))?;
+        let response = send_request(
+            client()?
+                .get(format!(
+                    "{}/v1/pairings/{}/commands",
+                    relay_url(),
+                    device.id
+                ))
+                .bearer_auth(&secret.send_token),
+        )
+        .map_err(|error| request_error("could not poll mobile commands", &error))?;
         if pairing_is_gone(response.status()) {
             // The phone may have removed the relay row, or the relay may be
             // between deployments. Keep the local credential until the user
@@ -1120,6 +1383,9 @@ fn poll_commands_blocking(app: &AppHandle) -> Result<Vec<RemoteCommand>, String>
                 text: command.text,
                 permission_id: command.permission_id,
                 option_id: command.option_id,
+                completion_seq: command.completion_seq,
+                answers: command.answers,
+                agent: command.agent,
                 images: command.images,
             });
         }
@@ -1130,14 +1396,15 @@ fn poll_commands_blocking(app: &AppHandle) -> Result<Vec<RemoteCommand>, String>
 fn ack_command_blocking(device_id: &str, command_id: &str) -> Result<(), String> {
     let secret = load_secret(device_id)?;
     checked(
-        client()?
-            .delete(format!(
-                "{}/v1/pairings/{device_id}/commands/{command_id}",
-                relay_url()
-            ))
-            .bearer_auth(secret.send_token)
-            .send()
-            .map_err(|error| format!("could not acknowledge mobile command: {error}"))?,
+        send_request(
+            client()?
+                .delete(format!(
+                    "{}/v1/pairings/{device_id}/commands/{command_id}",
+                    relay_url()
+                ))
+                .bearer_auth(secret.send_token),
+        )
+        .map_err(|error| request_error("could not acknowledge mobile command", &error))?,
     )?;
     Ok(())
 }
@@ -1245,6 +1512,7 @@ pub async fn mobile_send_test(app: AppHandle) -> Result<SendResult, String> {
                 duration_ms: None,
                 sound_cue: None,
                 unread_on_desktop: true,
+                completion_seq: None,
             },
         )
     })
@@ -1254,10 +1522,45 @@ pub async fn mobile_send_test(app: AppHandle) -> Result<SendResult, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        bounded_preview_plaintext, decrypt, encrypt, encrypt_with_nonce, encrypted_ciphertext_len,
-        pairing_is_gone, pairing_proof, truncate_utf8, PlainRemoteCommand, MAX_PREVIEW_CIPHERTEXT,
+        bounded_preview_plaintext, client, decrypt, encrypt, encrypt_with_nonce,
+        encrypted_ciphertext_len, pairing_is_gone, pairing_proof, truncate_utf8,
+        workspace_collapse_key, PlainRemoteCommand, WorkspaceUsageLimit, MAX_PREVIEW_CIPHERTEXT,
         MAX_WORKSPACE_PLAINTEXT_BYTES,
     };
+
+    #[test]
+    fn workspace_usage_limits_keep_the_desktop_forecast() {
+        let limit: WorkspaceUsageLimit = serde_json::from_str(
+            r#"{
+                "id":"weekly",
+                "label":"7-day limit",
+                "percent":16.0,
+                "resetsAt":1800000000000,
+                "usageHoursLeft":12.5,
+                "perHour":0.3,
+                "projectedPercent":40.0,
+                "runsOutAt":1803600000000,
+                "basis":"recent"
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(limit.usage_hours_left, Some(12.5));
+        assert_eq!(limit.per_hour, Some(0.3));
+        assert_eq!(limit.projected_percent, Some(40.0));
+        assert_eq!(limit.runs_out_at, Some(1_803_600_000_000));
+        assert_eq!(limit.basis.as_deref(), Some("recent"));
+
+        let encoded = serde_json::to_value(&limit).unwrap();
+        assert_eq!(encoded["perHour"], 0.3);
+        assert_eq!(encoded["projectedPercent"], 40.0);
+        assert_eq!(encoded["runsOutAt"], 1_803_600_000_000i64);
+        assert_eq!(encoded["basis"], "recent");
+    }
+
+    #[test]
+    fn mobile_requests_reuse_one_connection_pool() {
+        assert!(std::ptr::eq(client().unwrap(), client().unwrap()));
+    }
 
     #[test]
     fn pairing_proof_binds_the_phone_identity() {
@@ -1316,6 +1619,43 @@ mod tests {
         )
         .unwrap();
         assert!(!missing_option.is_valid());
+    }
+
+    #[test]
+    fn read_commands_target_one_terminal_completion() {
+        let valid: PlainRemoteCommand = serde_json::from_str(
+            r#"{"version":1,"id":"00000000-0000-4000-8000-000000000001","kind":"read","terminalId":"term-1","completionSeq":7}"#,
+        )
+        .unwrap();
+        assert!(valid.is_valid());
+        assert_eq!(valid.completion_seq, Some(7));
+
+        let missing_terminal: PlainRemoteCommand = serde_json::from_str(
+            r#"{"version":1,"id":"00000000-0000-4000-8000-000000000001","kind":"read","completionSeq":7}"#,
+        )
+        .unwrap();
+        assert!(!missing_terminal.is_valid());
+    }
+
+    #[test]
+    fn question_commands_carry_structured_answers_or_an_explicit_skip() {
+        let answered: PlainRemoteCommand = serde_json::from_str(
+            r#"{"version":1,"id":"00000000-0000-4000-8000-000000000001","kind":"question","terminalId":"term-1","permissionId":"permission-1","answers":[{"questionId":"q0","labels":["PostgreSQL"],"custom":"Use the existing cluster"}]}"#,
+        )
+        .unwrap();
+        assert!(answered.is_valid());
+
+        let skipped: PlainRemoteCommand = serde_json::from_str(
+            r#"{"version":1,"id":"00000000-0000-4000-8000-000000000001","kind":"question","terminalId":"term-1","permissionId":"permission-1","answers":[]}"#,
+        )
+        .unwrap();
+        assert!(skipped.is_valid());
+
+        let empty_answer: PlainRemoteCommand = serde_json::from_str(
+            r#"{"version":1,"id":"00000000-0000-4000-8000-000000000001","kind":"question","terminalId":"term-1","permissionId":"permission-1","answers":[{"questionId":"q0","labels":[],"custom":"  "}]}"#,
+        )
+        .unwrap();
+        assert!(!empty_answer.is_valid());
     }
 
     #[test]
@@ -1382,11 +1722,15 @@ mod tests {
             Some(42),
             Some(3),
             true,
+            Some("term-1"),
+            Some(7),
         )
         .unwrap();
         let decoded: serde_json::Value = serde_json::from_slice(&plain).unwrap();
         let preview_response = decoded["response"].as_str().unwrap();
         assert_eq!(decoded["unreadOnDesktop"], true);
+        assert_eq!(decoded["terminalId"], "term-1");
+        assert_eq!(decoded["completionSeq"], 7);
         let envelope = encrypt(
             "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
             "pair",
@@ -1407,5 +1751,17 @@ mod tests {
     #[test]
     fn workspace_plaintext_budget_stays_inside_the_relay_ciphertext_limit() {
         assert!(encrypted_ciphertext_len(MAX_WORKSPACE_PLAINTEXT_BYTES) <= 320_000);
+    }
+
+    #[test]
+    fn workspace_snapshots_collapse_per_pairing() {
+        assert_eq!(
+            workspace_collapse_key("phone-one"),
+            workspace_collapse_key("phone-one")
+        );
+        assert_ne!(
+            workspace_collapse_key("phone-one"),
+            workspace_collapse_key("phone-two")
+        );
     }
 }

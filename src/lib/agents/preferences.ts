@@ -154,6 +154,15 @@ export function rememberPreferences(
   persist({ version: 1, choices });
 }
 
+/** Persist a model or effort as soon as the user chooses it in the composer. */
+export function rememberConfigurationChoice(
+  launch: AgentLaunch,
+  kind: "model" | "effort",
+  value: string,
+): void {
+  rememberPreferences(launch, kind === "model" ? { model: value } : { effort: value });
+}
+
 /** Test seam that also avoids coupling unit tests to Bun's localStorage. */
 export function resetForTests(choices: Record<string, AgentPreference> = {}): void {
   cached = { version: 1, choices };

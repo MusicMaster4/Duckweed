@@ -13,6 +13,8 @@ import { AsciiAmbient } from "./AsciiAmbient";
 interface Props {
   /** Process owners belonging to the visible tab, keyed by terminal id. */
   ownerNames: ReadonlyMap<string, string>;
+  /** Reports every scan so activity outside the mounted tool stays visible. */
+  onSnapshot?: (ports: readonly AppPort[]) => void;
 }
 
 function binding(port: AppPort): string {
@@ -92,7 +94,7 @@ function AddressRow({
   );
 }
 
-export function PortsTool({ ownerNames }: Props) {
+export function PortsTool({ ownerNames, onSnapshot }: Props) {
   const [ports, setPorts] = useState<AppPort[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -105,6 +107,7 @@ export function PortsTool({ ownerNames }: Props) {
     try {
       const snapshot = await portsList();
       setPorts(snapshot.ports);
+      onSnapshot?.(snapshot.ports);
       // Background polling must not erase an action failure before the user
       // has had a chance to read it. Explicit refreshes still clear stale
       // errors after a successful scan.
@@ -114,7 +117,7 @@ export function PortsTool({ ownerNames }: Props) {
     } finally {
       if (!quiet) setLoading(false);
     }
-  }, []);
+  }, [onSnapshot]);
 
   useEffect(() => {
     let disposed = false;

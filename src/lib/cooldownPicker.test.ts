@@ -61,6 +61,18 @@ describe("createCooldownPicker", () => {
     expect(pick()).toBe("only");
   });
 
+  test("honors a half-pool cooldown fraction", () => {
+    const items = Array.from({ length: 10 }, (_, index) => index);
+    // floor(10 * 0.5) = 5 sit-outs
+    const pick = createCooldownPicker(items, -1, () => 0, { cooldownFraction: 0.5 });
+    const selected = Array.from({ length: 20 }, () => pick());
+
+    selected.forEach((item, index) => {
+      const protectedWindow = selected.slice(Math.max(0, index - 5), index);
+      expect(protectedWindow).not.toContain(item);
+    });
+  });
+
   test("persists recent picks so a fresh picker keeps the sit-outs", () => {
     installStorage();
     const items = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"];

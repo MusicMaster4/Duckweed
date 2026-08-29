@@ -15,10 +15,12 @@ import {
   searchWorkspaceIndex,
   type FileMention,
 } from "../../lib/agentComposer";
+import * as bus from "../../lib/bus";
 import {
   GUIDED_ARG_COMMANDS,
   INLINE_ARG_COMMANDS,
 } from "../../lib/agents/slashCatalog";
+import { subagentComposerCopy } from "../../lib/agents/subagents";
 import {
   effortsFor,
   shortModelLabel,
@@ -45,8 +47,14 @@ interface Props {
     text: string,
     images: AgentImageAttachment[],
     delivery?: "default" | "alternate",
-  ) => void;
+  ) => boolean | void;
   onInterrupt: () => void;
+  /** When focused on a child, the composer talks to that subagent instead. */
+  target?: {
+    kind: "subagent";
+    label: string;
+    canMessage: boolean;
+  };
 }
 
 /** Tallest the composer grows before it scrolls instead. */
@@ -128,7 +136,14 @@ function buildMenu(value: string, session: AgentSessionState): Menu | null {
   return rows.length ? { kind: "commands", rows } : null;
 }
 
-export function AgentComposer({ session, active, inputRef, onSubmit, onInterrupt }: Props) {
+export function AgentComposer({
+  session,
+  active,
+  inputRef,
+  onSubmit,
+  onInterrupt,
+  target,
+}: Props) {
   const own = useRef<HTMLTextAreaElement>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   const ref = inputRef ?? own;
@@ -156,6 +171,9 @@ export function AgentComposer({ session, active, inputRef, onSubmit, onInterrupt
   const working = session.status === "working";
   const loadingHistory = session.loadingHistory === true;
   const ended = session.status === "exited" || session.status === "error";
+  const subagentCopy = target
+    ? subagentComposerCopy(target.label, target.canMessage)
+    : null;
   const exitArmed = session.exitArmed === true;
   const mention = useMemo(() => activeFileMention(value, cursor), [value, cursor]);
   const mentionKey = mention ? `${mention.start}:${mention.query}` : null;
@@ -177,6 +195,23 @@ export function AgentComposer({ session, active, inputRef, onSubmit, onInterrupt
     setDismissedMention(null);
     agents.setDraft(session.termId, text);
   };
+
+  useEffect(
+    () =>
+      bus.on("term:clear-draft", ({ termId }) => {
+        if (termId !== session.termId) return;
+        setValue("");
+        setCursor(0);
+        setImages([]);
+        imagesRef.current = [];
+        setAttachmentError(null);
+        leaveHistoryBrowse();
+        undoClearRef.current = null;
+        agents.setDraft(session.termId, "");
+        agents.setDraftImages(session.termId, []);
+      }),
+    [session.termId],
+  );
 
   const applyHistoryEntry = (text: string, nextImages: AgentImageAttachment[] = []) => {
     change(text, text.length);
@@ -256,8 +291,9 @@ export function AgentComposer({ session, active, inputRef, onSubmit, onInterrupt
   };
 
   const commit = (text: string, delivery: "default" | "alternate" = "default") => {
+    if (subagentCopy?.disabled) return;
     if (!text.trim() && imagesRef.current.length === 0) return;
-    onSubmit(text, imagesRef.current, delivery);
+    if (onSubmit(text, imagesRef.current, delivery) === true) return;
     undoClearRef.current = null;
     leaveHistoryBrowse();
     setValue("");
@@ -789,17 +825,20 @@ export function AgentComposer({ session, active, inputRef, onSubmit, onInterrupt
           rows={1}
           spellCheck={false}
           placeholder={
-            exitArmed
-              ? "Ctrl+C again to close"
-              : loadingHistory
-                ? "Queue a message after the conversation loads..."
-              : working
-                ? agents.getFollowupMode() === "steer"
-                  ? "Steer this turn…"
-                  : "Queue a follow-up…"
-                : `Message ${session.label}…`
+            subagentCopy
+              ? subagentCopy.placeholder
+              : exitArmed
+                ? "Ctrl+C again to close"
+                : loadingHistory
+                  ? "Queue a message after the conversation loads..."
+                : working
+                  ? agents.getFollowupMode() === "steer"
+                    ? "Steer this turn…"
+                    : "Queue a follow-up…"
+                  : `Message ${session.label}…`
           }
-          aria-label={`Message ${session.label}`}
+          aria-label={subagentCopy ? subagentCopy.ariaLabel : `Message ${session.label}`}
+          disabled={Boolean(subagentCopy?.disabled)}
           onChange={(event) => {
             // Typing after a Ctrl+C clear discards that one-shot undo.
             if (undoClearRef.current !== null) undoClearRef.current = null;

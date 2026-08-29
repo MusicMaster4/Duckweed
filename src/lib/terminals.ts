@@ -197,6 +197,7 @@ const inputPasters = new Map<string, (text: string) => void>();
 
 const sessions = new Map<string, Session>();
 const sessionListeners = new Map<string, Set<() => void>>();
+const outputListeners = new Map<string, Set<() => void>>();
 const settingsListeners = new Set<() => void>();
 let busyUnlisten: Promise<UnlistenFn> | null = null;
 let agentUnlisten: Promise<UnlistenFn> | null = null;
@@ -376,6 +377,10 @@ function limbo(): HTMLElement {
 
 function notifySession(id: string) {
   for (const cb of sessionListeners.get(id) ?? []) cb();
+}
+
+function notifyOutput(id: string) {
+  for (const cb of outputListeners.get(id) ?? []) cb();
 }
 
 function notifySettings() {
@@ -1012,6 +1017,9 @@ function draw(session: Session, chunk: FrameWrite): void {
   session.term.write(stabilized.text, () => {
     scheduleVisualCursor(session);
     session.blocks.scheduleLayout();
+    // Mobile terminal mirroring cares about the painted grid, while pane
+    // metadata subscribers do not need to re-render for every PTY chunk.
+    notifyOutput(session.id);
   });
 }
 
@@ -1814,6 +1822,34 @@ function sendToShell(session: Session, text: string): void {
 }
 
 /**
+ * Send one mobile composer submission to the program currently owning a PTY.
+ * Raw agent CLIs need a credited turn so status and completion tracking follow
+ * the prompt, while an ordinary idle shell should keep normal command blocks.
+ */
+export function submitRemoteInput(id: string, input: string): void {
+  const session = sessions.get(id);
+  if (!session || session.exited) return;
+  const text = input.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  if (!text.trim()) return;
+
+  if (!session.agent && !session.busy) {
+    submitCommand(id, text);
+    return;
+  }
+
+  markRan(session);
+  session.lastSubmitAt = Date.now();
+  if (session.agent) creditAgentTurn(session, text);
+  markTyping(session);
+  if (text.includes("\n")) {
+    send(session, `\x1b[200~${text}\x1b[201~\r`);
+  } else {
+    send(session, `${text}\r`);
+  }
+  session.term.scrollToBottom();
+}
+
+/**
  * How long after a submit empty Ctrl+C is still treated as an interrupt, so a
  * quick cancel lands before the busy poll notices the child.
  */
@@ -1906,6 +1942,8 @@ export function dispose(id: string): void {
   session.host.remove();
   sessions.delete(id);
   notifySession(id);
+  notifyOutput(id);
+  outputListeners.delete(id);
 }
 
 export function disposeAll(): void {
@@ -2052,6 +2090,25 @@ export function getFontSize(): number {
  * Dump the active buffer as plain text (no cell colours). Used when the
  * highlighter toggle flips so scrollback can be redrawn with the new setting.
  */
+export function dumpBufferPlainForMobile(id: string): string {
+  const session = sessions.get(id);
+  return session ? dumpBufferPlain(session.term) : "";
+}
+
+/** Subscribe to rendered PTY changes without re-rendering terminal chrome. */
+export function subscribeOutput(id: string, cb: () => void): () => void {
+  let listeners = outputListeners.get(id);
+  if (!listeners) {
+    listeners = new Set();
+    outputListeners.set(id, listeners);
+  }
+  listeners.add(cb);
+  return () => {
+    listeners?.delete(cb);
+    if (listeners?.size === 0) outputListeners.delete(id);
+  };
+}
+
 function dumpBufferPlain(term: Terminal): string {
   const buffer = term.buffer.active;
   const lines: string[] = [];

@@ -563,16 +563,27 @@
 }
 
 .official-plan-step-mark {
-  display: grid;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   width: 15px;
   height: 15px;
-  place-items: center;
+  flex: none;
   border: 1px solid var(--border-strong);
   border-radius: 50%;
   color: var(--text-faint);
   font-family: var(--font-mono);
   font-size: 8px;
   line-height: 1;
+}
+
+.official-plan-step-number {
+  /* Lining figures sit on the baseline, so centering the em-square leaves
+     them low in this 15px circle. Trim to the cap/alphabetic ink box. */
+  font-size: 8px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  text-box: trim-both cap alphabetic;
 }
 
 .official-plan-steps li.is-done .official-plan-step-mark {

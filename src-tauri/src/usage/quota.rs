@@ -33,15 +33,16 @@
 //! never runs out at all.
 
 use std::collections::{HashMap, HashSet};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::process::Stdio;
+use std::sync::{mpsc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 
 const CLAUDE_USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 const CLAUDE_BETA: &str = "oauth-2025-04-20";
@@ -100,6 +101,12 @@ const GROK_REFRESH_TTL_MS: i64 = 15 * 1000;
 /// The dashboard fetches billing during startup, normally in under a second.
 /// Keep the probe bounded so a broken or offline CLI cannot stall Usage.
 const GROK_REFRESH_TIMEOUT: Duration = Duration::from_secs(3);
+/// A live Codex account read normally answers in well under a second. Bound it
+/// so a broken CLI cannot make the Usage page wait on an app-server forever.
+const CODEX_RATE_LIMIT_TIMEOUT: Duration = Duration::from_secs(4);
+/// App-server messages are one JSON value per line. Rate-limit responses are
+/// small, and this keeps a bad child process from growing memory without bound.
+const CODEX_RPC_MAX_LINE_BYTES: usize = 2 * 1024 * 1024;
 
 /// How far back the burn rate reads for a limit with this window length.
 fn lookback_ms(window_ms: Option<i64>) -> i64 {
@@ -286,9 +293,14 @@ fn apply_estimate(quota: &mut Quota, history: &mut QuotaHistory, now: i64, duty:
 }
 
 fn record_samples(quota: &Quota, history: &mut QuotaHistory, now: i64) {
-    history
-        .samples
-        .retain(|sample| now - sample.at <= HISTORY_RETENTION_MS);
+    history.samples.retain(|sample| {
+        now - sample.at <= HISTORY_RETENTION_MS
+            // Codex previously reused `primary` and `secondary` for whichever
+            // pool happened to write the newest rollout. Those samples can mix
+            // the default and Spark limits and must never feed a forecast.
+            && !(sample.agent == "codex"
+                && matches!(sample.limit_id.as_str(), "primary" | "secondary"))
+    });
 
     let observed_at = quota.observed_at.unwrap_or(now).min(now);
     for limit in &quota.limits {
@@ -921,49 +933,90 @@ fn claude_quota_from_payload(
 }
 
 fn codex_quota(home: &Path, latest_session: Option<&Path>) -> Option<Quota> {
+    // The live API is the only source that preserves every metered bucket.
+    // Rollout events carry one compatibility snapshot and can relabel a
+    // model-specific pool as plain `codex`.
+    #[cfg(not(test))]
+    if let Some((observed_at, buckets)) = live_codex_rate_limits() {
+        if let Some(quota) = codex_quota_from_buckets(Some(observed_at), &buckets) {
+            return Some(quota);
+        }
+    }
+
+    // Older Codex builds do not expose account/rateLimits/read.
     let (observed_at, value) = latest_codex_rate_limits(home, latest_session)?;
-    let plan = value
-        .get("plan_type")
+    codex_quota_from_buckets(observed_at, &[value])
+}
+
+fn codex_quota_from_buckets(observed_at: Option<i64>, buckets: &[Value]) -> Option<Quota> {
+    let plan = buckets
+        .iter()
+        .find(|bucket| bucket.get("limit_id").and_then(Value::as_str) == Some("codex"))
+        .or_else(|| buckets.first())
+        .and_then(|bucket| bucket.get("plan_type"))
         .and_then(Value::as_str)
         .map(str::to_string);
 
     let mut limits = Vec::new();
-    for (key, fallback) in [
-        ("primary", "Primary limit"),
-        ("secondary", "Secondary limit"),
-    ] {
-        let Some(block) = value.get(key).filter(|block| !block.is_null()) else {
-            continue;
-        };
-        // A present block without a percentage is not a usable limit — skip it
-        // rather than failing the whole snapshot (the other window may still
-        // have data).
-        let Some(percent) = block.get("used_percent").and_then(Value::as_f64) else {
-            continue;
-        };
-        let minutes = block
-            .get("window_minutes")
-            .and_then(Value::as_i64)
-            .unwrap_or(0);
-        limits.push(QuotaLimit {
-            id: key.to_string(),
-            label: block
+    let multiple_buckets = buckets.len() > 1;
+    for value in buckets {
+        let bucket_id = value
+            .get("limit_id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.trim().is_empty())
+            .unwrap_or("codex");
+        let bucket_name = value
+            .get("limit_name")
+            .and_then(Value::as_str)
+            .filter(|name| !name.trim().is_empty());
+        for (key, fallback) in [
+            ("primary", "Primary limit"),
+            ("secondary", "Secondary limit"),
+        ] {
+            let Some(block) = value.get(key).filter(|block| !block.is_null()) else {
+                continue;
+            };
+            // A present block without a percentage is not a usable limit — skip it
+            // rather than failing the whole snapshot (the other window may still
+            // have data).
+            let Some(percent) = block.get("used_percent").and_then(Value::as_f64) else {
+                continue;
+            };
+            let minutes = block
+                .get("window_minutes")
+                .and_then(Value::as_i64)
+                .unwrap_or(0);
+            let window_label = block
                 .get("limit_name")
                 .and_then(Value::as_str)
                 .map(str::to_string)
-                .unwrap_or_else(|| window_name(minutes).unwrap_or_else(|| fallback.to_string())),
-            used: percent,
-            // Codex supplies a percentage, not the underlying token allowance.
-            limit: Some(100.0),
-            percent,
-            unit: "percent".into(),
-            resets_at: block
-                .get("resets_at")
-                .and_then(Value::as_i64)
-                .map(|seconds| seconds * 1000),
-            window_ms: (minutes > 0).then(|| minutes * 60 * 1000),
-            forecast: None,
-        });
+                .unwrap_or_else(|| window_name(minutes).unwrap_or_else(|| fallback.to_string()));
+            let label = match bucket_name {
+                Some(name) => format!("{name} | {window_label}"),
+                None if multiple_buckets => format!("Codex | {window_label}"),
+                None => window_label,
+            };
+            let id = if minutes > 0 {
+                format!("{bucket_id}:{key}:{minutes}")
+            } else {
+                format!("{bucket_id}:{key}")
+            };
+            limits.push(QuotaLimit {
+                id,
+                label,
+                used: percent,
+                // Codex supplies a percentage, not the underlying token allowance.
+                limit: Some(100.0),
+                percent,
+                unit: "percent".into(),
+                resets_at: block
+                    .get("resets_at")
+                    .and_then(Value::as_i64)
+                    .map(|seconds| seconds * 1000),
+                window_ms: (minutes > 0).then(|| minutes * 60 * 1000),
+                forecast: None,
+            });
+        }
     }
     if limits.is_empty() {
         return None;
@@ -977,6 +1030,164 @@ fn codex_quota(home: &Path, latest_session: Option<&Path>) -> Option<Quota> {
         message: None,
         limits,
     })
+}
+
+/// Normalize the app-server's camelCase multi-bucket response to the same
+/// shape the rollout fallback already uses. When `rateLimitsByLimitId` exists,
+/// it is authoritative. The legacy `rateLimits` value is already repeated in
+/// that map and must not be counted twice.
+fn codex_buckets_from_live_result(result: &Value) -> Vec<Value> {
+    let mut buckets = Vec::new();
+    if let Some(by_id) = result
+        .get("rateLimitsByLimitId")
+        .and_then(Value::as_object)
+        .filter(|map| !map.is_empty())
+    {
+        for (id, bucket) in by_id {
+            if let Some(normalized) = normalize_live_codex_bucket(bucket, Some(id)) {
+                buckets.push(normalized);
+            }
+        }
+    } else if let Some(bucket) = result.get("rateLimits") {
+        if let Some(normalized) = normalize_live_codex_bucket(bucket, None) {
+            buckets.push(normalized);
+        }
+    }
+
+    // Stable order: the default pool first, then named or model pools.
+    buckets.sort_by(|left, right| {
+        let left_id = left
+            .get("limit_id")
+            .and_then(Value::as_str)
+            .unwrap_or("codex");
+        let right_id = right
+            .get("limit_id")
+            .and_then(Value::as_str)
+            .unwrap_or("codex");
+        (left_id != "codex", left_id).cmp(&(right_id != "codex", right_id))
+    });
+    buckets
+}
+
+fn normalize_live_codex_bucket(bucket: &Value, map_id: Option<&str>) -> Option<Value> {
+    let bucket = bucket.as_object()?;
+    let window = |key: &str| {
+        bucket
+            .get(key)
+            .filter(|value| !value.is_null())
+            .map(|value| {
+                json!({
+                    "used_percent": value.get("usedPercent").cloned().unwrap_or(Value::Null),
+                    "window_minutes": value
+                        .get("windowDurationMins")
+                        .cloned()
+                        .unwrap_or(Value::Null),
+                    "resets_at": value.get("resetsAt").cloned().unwrap_or(Value::Null),
+                })
+            })
+    };
+    Some(json!({
+        "limit_id": bucket
+            .get("limitId")
+            .filter(|value| !value.is_null())
+            .cloned()
+            .or_else(|| map_id.map(|id| Value::String(id.to_string())))
+            .unwrap_or_else(|| Value::String("codex".into())),
+        "limit_name": bucket.get("limitName").cloned().unwrap_or(Value::Null),
+        "primary": window("primary"),
+        "secondary": window("secondary"),
+        "plan_type": bucket.get("planType").cloned().unwrap_or(Value::Null),
+    }))
+}
+
+fn live_codex_rate_limits() -> Option<(i64, Vec<Value>)> {
+    let resolved = crate::agent_proc::resolve_program("codex")?;
+    let mut command = crate::agent_proc::build_command(&resolved);
+    command
+        .arg("app-server")
+        .env("NO_COLOR", "1")
+        .env("TERM", "dumb")
+        .env("TERM_PROGRAM", "Duckweed")
+        .env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    crate::agent_proc::hide_console(&mut command);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+
+    let mut child = command.spawn().ok()?;
+    let pid = child.id();
+    let Some(mut stdin) = child.stdin.take() else {
+        stop_codex_app_server(&mut child, pid);
+        return None;
+    };
+    let Some(stdout) = child.stdout.take() else {
+        stop_codex_app_server(&mut child, pid);
+        return None;
+    };
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let reader = match std::thread::Builder::new()
+        .name("codex-quota-read".into())
+        .spawn(move || {
+            let mut reader = BufReader::new(stdout);
+            let mut line = Vec::new();
+            loop {
+                line.clear();
+                match reader.read_until(b'\n', &mut line) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) if line.len() > CODEX_RPC_MAX_LINE_BYTES => continue,
+                    Ok(_) => {}
+                }
+                let Ok(message) = serde_json::from_slice::<Value>(&line) else {
+                    continue;
+                };
+                if message.get("id").and_then(Value::as_str) != Some("duckweed-rate-limits") {
+                    continue;
+                }
+                let _ = sender.send(message.get("result").cloned());
+                break;
+            }
+        })
+    {
+        Ok(reader) => reader,
+        Err(_) => {
+            stop_codex_app_server(&mut child, pid);
+            return None;
+        }
+    };
+
+    let requests = [
+        r#"{"jsonrpc":"2.0","id":"duckweed-init","method":"initialize","params":{"clientInfo":{"name":"duckweed","title":"Duckweed","version":"0.1.0"},"capabilities":{"experimentalApi":true,"requestAttestation":false}}}"#,
+        r#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#,
+        r#"{"jsonrpc":"2.0","id":"duckweed-rate-limits","method":"account/rateLimits/read","params":{}}"#,
+    ];
+    let wrote = requests.iter().all(|request| {
+        stdin
+            .write_all(request.as_bytes())
+            .and_then(|_| stdin.write_all(b"\n"))
+            .is_ok()
+    }) && stdin.flush().is_ok();
+    let result = wrote
+        .then(|| receiver.recv_timeout(CODEX_RATE_LIMIT_TIMEOUT).ok())
+        .flatten()
+        .flatten();
+
+    stop_codex_app_server(&mut child, pid);
+    let _ = reader.join();
+
+    let result = result?;
+    let buckets = codex_buckets_from_live_result(&result);
+    (!buckets.is_empty()).then(|| (Utc::now().timestamp_millis(), buckets))
+}
+
+fn stop_codex_app_server(child: &mut std::process::Child, pid: u32) {
+    crate::agent_proc::kill_tree(pid);
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 fn grok_quota(home: &Path) -> Option<Quota> {
@@ -2113,6 +2324,164 @@ mod tests {
         assert_eq!(quota.limits[1].label, "5-hour limit");
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn codex_live_account_read_keeps_default_and_model_pools_separate() {
+        let result = json!({
+            "rateLimits": {
+                "limitId": "codex",
+                "limitName": null,
+                "primary": {
+                    "usedPercent": 50,
+                    "windowDurationMins": 10080,
+                    "resetsAt": 1787824021i64
+                },
+                "secondary": null,
+                "planType": "pro"
+            },
+            "rateLimitsByLimitId": {
+                "codex_bengalfox": {
+                    "limitId": "codex_bengalfox",
+                    "limitName": "GPT-5.3-Codex-Spark",
+                    "primary": {
+                        "usedPercent": 12,
+                        "windowDurationMins": 300,
+                        "resetsAt": 1787501927i64
+                    },
+                    "secondary": {
+                        "usedPercent": 30,
+                        "windowDurationMins": 10080,
+                        "resetsAt": 1787963324i64
+                    },
+                    "planType": "pro"
+                },
+                "codex": {
+                    "limitId": "codex",
+                    "limitName": null,
+                    "primary": {
+                        "usedPercent": 50,
+                        "windowDurationMins": 10080,
+                        "resetsAt": 1787824021i64
+                    },
+                    "secondary": null,
+                    "planType": "pro"
+                }
+            }
+        });
+
+        let buckets = codex_buckets_from_live_result(&result);
+        assert_eq!(buckets.len(), 2);
+        assert_eq!(buckets[0]["limit_id"], "codex");
+        assert_eq!(buckets[1]["limit_id"], "codex_bengalfox");
+
+        let quota = codex_quota_from_buckets(Some(1787486400000), &buckets)
+            .expect("multi-bucket Codex quota");
+        assert_eq!(quota.plan.as_deref(), Some("pro"));
+        assert_eq!(quota.limits.len(), 3);
+        assert_eq!(quota.limits[0].id, "codex:primary:10080");
+        assert_eq!(quota.limits[0].label, "Codex | 7-day limit");
+        assert!((quota.limits[0].percent - 50.0).abs() < f64::EPSILON);
+        assert_eq!(quota.limits[1].id, "codex_bengalfox:primary:300");
+        assert_eq!(quota.limits[1].label, "GPT-5.3-Codex-Spark | 5-hour limit");
+        assert!((quota.limits[1].percent - 12.0).abs() < f64::EPSILON);
+        assert_eq!(quota.limits[2].id, "codex_bengalfox:secondary:10080");
+        assert_eq!(quota.limits[2].label, "GPT-5.3-Codex-Spark | 7-day limit");
+        assert!((quota.limits[2].percent - 30.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn codex_forecast_discards_history_from_the_old_ambiguous_pool_ids() {
+        let now = 1_787_502_400_000i64;
+        let result = json!({
+            "rateLimitsByLimitId": {
+                "codex": {
+                    "limitId": "codex",
+                    "limitName": null,
+                    "primary": {
+                        "usedPercent": 51,
+                        "windowDurationMins": 10080,
+                        "resetsAt": now / 1000 + 4 * 24 * 60 * 60
+                    },
+                    "secondary": null,
+                    "planType": "pro"
+                },
+                "codex_bengalfox": {
+                    "limitId": "codex_bengalfox",
+                    "limitName": "GPT-5.3-Codex-Spark",
+                    "primary": {
+                        "usedPercent": 0,
+                        "windowDurationMins": 300,
+                        "resetsAt": now / 1000 + 5 * 60 * 60
+                    },
+                    "secondary": {
+                        "usedPercent": 30,
+                        "windowDurationMins": 10080,
+                        "resetsAt": now / 1000 + 5 * 24 * 60 * 60
+                    },
+                    "planType": "pro"
+                }
+            }
+        });
+        let buckets = codex_buckets_from_live_result(&result);
+        let mut quota = codex_quota_from_buckets(Some(now), &buckets).expect("Codex quota");
+        let mut history = QuotaHistory {
+            samples: vec![
+                QuotaSample {
+                    at: now - 3 * HOUR,
+                    agent: "codex".into(),
+                    limit_id: "primary".into(),
+                    percent: 50.0,
+                },
+                QuotaSample {
+                    at: now - 2 * HOUR,
+                    agent: "codex".into(),
+                    limit_id: "primary".into(),
+                    percent: 10.0,
+                },
+                QuotaSample {
+                    at: now - HOUR,
+                    agent: "codex".into(),
+                    limit_id: "primary".into(),
+                    percent: 11.0,
+                },
+                QuotaSample {
+                    at: now - 30 * 60 * 1000,
+                    agent: "codex".into(),
+                    limit_id: "primary".into(),
+                    percent: 50.0,
+                },
+            ],
+        };
+
+        apply_estimate(&mut quota, &mut history, now, None);
+
+        assert!(history
+            .samples
+            .iter()
+            .all(|sample| sample.limit_id != "primary"));
+        assert_eq!(quota.limits[0].id, "codex:primary:10080");
+        assert_ne!(
+            quota.limits[0].forecast.as_ref().map(|forecast| forecast.basis.as_str()),
+            Some("recent")
+        );
+        assert_eq!(quota.limits[1].id, "codex_bengalfox:primary:300");
+        assert_eq!(quota.limits[2].id, "codex_bengalfox:secondary:10080");
+    }
+
+    #[test]
+    #[ignore = "queries the locally installed Codex CLI account"]
+    fn codex_live_account_read_returns_current_provider_pools() {
+        let (_, buckets) = live_codex_rate_limits().expect("live Codex rate limits");
+        assert!(buckets.iter().any(|bucket| {
+            bucket.get("limit_id").and_then(Value::as_str) == Some("codex")
+        }));
+
+        let quota = codex_quota_from_buckets(None, &buckets).expect("live Codex quota");
+        assert!(!quota.limits.is_empty());
+        for limit in quota.limits {
+            eprintln!("{}: {:.0}% used", limit.label, limit.percent);
+        }
     }
 
     #[test]

@@ -649,6 +649,42 @@
                     android:text="Android will ask you to confirm the installation. The downloaded APK is verified before it opens."
                     android:textColor="@color/duckweed_text_faint"
                     android:textSize="12sp" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="28dp"
+                    android:fontFamily="sans-serif-medium"
+                    android:text="@string/usage_limits_title"
+                    android:textColor="@color/duckweed_text"
+                    android:textSize="24sp" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="@string/usage_limits_summary"
+                    android:textColor="@color/duckweed_text_faint"
+                    android:textSize="13sp" />
+
+                <LinearLayout
+                    android:id="@+id/usage_limits_content"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:orientation="vertical" />
+
+                <TextView
+                    android:id="@+id/usage_limits_empty"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:background="@drawable/message_card"
+                    android:gravity="center"
+                    android:padding="20dp"
+                    android:text="@string/usage_limits_empty"
+                    android:textColor="@color/duckweed_text_faint"
+                    android:textSize="12sp" />
             </LinearLayout>
         </ScrollView>
 
@@ -706,6 +742,16 @@
                         android:textColor="@color/duckweed_text_faint"
                         android:textSize="11sp" />
                 </LinearLayout>
+
+                <Button
+                    android:id="@+id/project_new_terminal"
+                    android:layout_width="wrap_content"
+                    android:layout_height="42dp"
+                    android:background="@drawable/button_secondary"
+                    android:text="New terminal"
+                    android:textAllCaps="false"
+                    android:textColor="@color/duckweed_text_dim"
+                    android:textSize="12sp" />
             </LinearLayout>
 
             <TextView
@@ -785,6 +831,17 @@
                 </LinearLayout>
             </LinearLayout>
 
+            <!-- Keep the composer outside this flexible region. When the IME
+                 reduces the window, conversation content gives up height first
+                 instead of pushing the text field below the keyboard. -->
+            <LinearLayout
+                android:id="@+id/conversation_content"
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="1"
+                android:clipChildren="true"
+                android:orientation="vertical">
+
             <androidx.recyclerview.widget.RecyclerView
                 android:id="@+id/conversation_list"
                 android:layout_width="match_parent"
@@ -796,15 +853,129 @@
                 android:paddingBottom="8dp" />
 
             <LinearLayout
+                android:id="@+id/conversation_plan"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:layout_marginBottom="8dp"
+                android:background="@drawable/plan_tracker_surface"
+                android:orientation="vertical"
+                android:paddingStart="12dp"
+                android:paddingTop="8dp"
+                android:paddingEnd="8dp"
+                android:paddingBottom="9dp"
+                android:visibility="gone">
+
+                <LinearLayout
+                    android:id="@+id/conversation_plan_head"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:background="?attr/selectableItemBackground"
+                    android:gravity="center_vertical"
+                    android:minHeight="42dp"
+                    android:orientation="horizontal">
+
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:orientation="vertical">
+
+                        <TextView
+                            android:id="@+id/conversation_plan_label"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:fontFamily="sans-serif-medium"
+                            android:letterSpacing="0.08"
+                            android:text="Tasks"
+                            android:textColor="@color/duckweed_accent"
+                            android:textSize="11sp" />
+
+                        <TextView
+                            android:id="@+id/conversation_plan_current"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="3dp"
+                            android:ellipsize="end"
+                            android:fontFamily="sans-serif-medium"
+                            android:maxLines="1"
+                            android:textColor="@color/duckweed_text"
+                            android:textSize="12sp" />
+                    </LinearLayout>
+
+                    <TextView
+                        android:id="@+id/conversation_plan_count"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="10dp"
+                        android:fontFamily="sans-serif-medium"
+                        android:textColor="@color/duckweed_text_dim"
+                        android:textSize="11sp" />
+
+                    <ImageView
+                        android:id="@+id/conversation_plan_expand"
+                        android:layout_width="32dp"
+                        android:layout_height="32dp"
+                        android:contentDescription="@null"
+                        android:importantForAccessibility="no"
+                        android:padding="9dp"
+                        android:src="@drawable/ic_chevron_right"
+                        app:tint="@color/duckweed_text_faint" />
+                </LinearLayout>
+
+                <ProgressBar
+                    android:id="@+id/conversation_plan_progress"
+                    style="?android:attr/progressBarStyleHorizontal"
+                    android:layout_width="match_parent"
+                    android:layout_height="4dp"
+                    android:layout_marginTop="4dp"
+                    android:max="100"
+                    android:progressDrawable="@drawable/plan_progress" />
+
+                <LinearLayout
+                    android:id="@+id/conversation_plan_steps"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="9dp"
+                    android:orientation="vertical"
+                    android:visibility="gone" />
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/conversation_terminal"
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_marginTop="8dp"
+                android:layout_marginBottom="8dp"
+                android:layout_weight="1"
+                android:background="@drawable/terminal_surface"
+                android:fadeScrollbars="false"
+                android:fontFamily="monospace"
+                android:gravity="top|start"
+                android:includeFontPadding="false"
+                android:lineSpacingExtra="2dp"
+                android:padding="14dp"
+                android:scrollbars="horizontal|vertical"
+                android:textColor="@color/duckweed_text"
+                android:textIsSelectable="true"
+                android:textSize="11sp"
+                android:visibility="gone" />
+
+            <dev.slop.duckweed.companion.MaxHeightScrollView
                 android:id="@+id/conversation_approval"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="6dp"
                 android:layout_marginBottom="8dp"
                 android:background="@drawable/approval_card"
-                android:orientation="vertical"
+                android:fillViewport="true"
                 android:padding="16dp"
                 android:visibility="gone">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical">
 
                 <TextView
                     android:id="@+id/approval_title"
@@ -842,34 +1013,27 @@
                     android:layout_height="wrap_content"
                     android:layout_marginTop="12dp"
                     android:orientation="vertical" />
-            </LinearLayout>
+                </LinearLayout>
+            </dev.slop.duckweed.companion.MaxHeightScrollView>
 
-            <FrameLayout
-                android:id="@+id/conversation_thinking"
+            <ScrollView
+                android:id="@+id/conversation_commands_scroll"
                 android:layout_width="match_parent"
-                android:layout_height="52dp"
-                android:layout_marginTop="6dp"
+                android:layout_height="220dp"
                 android:layout_marginBottom="8dp"
                 android:background="@drawable/message_card"
-                android:clipChildren="true"
-                android:clipToOutline="true"
+                android:fillViewport="true"
                 android:visibility="gone">
 
-                <TextView
+                <LinearLayout
+                    android:id="@+id/conversation_commands"
                     android:layout_width="match_parent"
-                    android:layout_height="match_parent"
-                    android:fontFamily="sans-serif-medium"
-                    android:gravity="center_vertical"
-                    android:paddingStart="16dp"
-                    android:text="Agent is thinking"
-                    android:textColor="@color/duckweed_text_dim"
-                    android:textSize="13sp" />
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:padding="6dp" />
+            </ScrollView>
 
-                <dev.slop.duckweed.companion.ShimmerView
-                    android:layout_width="match_parent"
-                    android:layout_height="match_parent"
-                    android:importantForAccessibility="no" />
-            </FrameLayout>
+            </LinearLayout>
 
             <LinearLayout
                 android:id="@+id/conversation_composer"
@@ -996,6 +1160,29 @@
                 android:textSize="12sp"
                 android:visibility="gone" />
         </LinearLayout>
+
+        <TextView
+            android:id="@+id/pending_notice"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="bottom|center_horizontal"
+            android:layout_marginStart="24dp"
+            android:layout_marginEnd="24dp"
+            android:layout_marginBottom="16dp"
+            android:accessibilityLiveRegion="polite"
+            android:background="@drawable/pending_notice_surface"
+            android:elevation="8dp"
+            android:fontFamily="sans-serif-medium"
+            android:gravity="center"
+            android:maxLines="2"
+            android:paddingStart="16dp"
+            android:paddingTop="12dp"
+            android:paddingEnd="16dp"
+            android:paddingBottom="12dp"
+            android:text="Please wait. The desktop is still updating."
+            android:textColor="@color/duckweed_text"
+            android:textSize="13sp"
+            android:visibility="gone" />
     </FrameLayout>
 
     <FrameLayout

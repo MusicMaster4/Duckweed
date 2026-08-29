@@ -4,6 +4,8 @@ import { createPortal } from "react-dom";
 import * as bus from "../lib/bus";
 import type { CompletionFlash } from "../lib/completionHighlights";
 import { edgeRadius } from "../lib/layout";
+import type { AgentTarget, ScheduledSend, SubmitDelivery } from "../lib/scheduledSend";
+import type { AgentImageAttachment } from "../lib/agents/types";
 import * as terminals from "../lib/terminals";
 import type { DropZone, LeafNode, ProjectInfo } from "../lib/types";
 import { AgentSurface } from "./agent/AgentSurface";
@@ -14,6 +16,7 @@ import { SearchBar } from "./SearchBar";
 /** Brief "Copied" chip shown at the cursor after right-click copy. */
 type CopyToast = { x: number; y: number; id: number };
 type TitleMenu = { x: number; y: number };
+type ToolsMenu = { left: number; top: number };
 
 interface Props {
   node: LeafNode;
@@ -40,6 +43,16 @@ interface Props {
   onSplit: (zone: "right" | "bottom") => void;
   onClose: () => void;
   onToggleZoom: () => void;
+  agentTargets: readonly AgentTarget[];
+  scheduledSend: ScheduledSend | null;
+  onScheduleSend: (termId: string, target: AgentTarget) => void;
+  onCancelSchedule: (termId: string) => void;
+  onBeforeSubmit: (
+    termId: string,
+    text: string,
+    images: AgentImageAttachment[],
+    delivery: SubmitDelivery,
+  ) => boolean;
   onDragHandle: (e: React.PointerEvent) => void;
   onBrowseProject: () => void;
   onPickProject: (path: string) => void;
@@ -70,6 +83,11 @@ export const TerminalPane = memo(function TerminalPane({
   onSplit,
   onClose,
   onToggleZoom,
+  agentTargets,
+  scheduledSend,
+  onScheduleSend,
+  onCancelSchedule,
+  onBeforeSubmit,
   onDragHandle,
   onBrowseProject,
   onPickProject,
@@ -82,6 +100,7 @@ export const TerminalPane = memo(function TerminalPane({
   const [copyToast, setCopyToast] = useState<CopyToast | null>(null);
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleMenu, setTitleMenu] = useState<TitleMenu | null>(null);
+  const [toolsMenu, setToolsMenu] = useState<ToolsMenu | null>(null);
 
   useEffect(
     () => () => {
@@ -98,6 +117,15 @@ export const TerminalPane = memo(function TerminalPane({
     window.addEventListener("keydown", dismiss, true);
     return () => window.removeEventListener("keydown", dismiss, true);
   }, [titleMenu]);
+
+  useEffect(() => {
+    if (!toolsMenu) return;
+    const dismiss = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setToolsMenu(null);
+    };
+    window.addEventListener("keydown", dismiss, true);
+    return () => window.removeEventListener("keydown", dismiss, true);
+  }, [toolsMenu]);
 
   const showCopyToast = (x: number, y: number) => {
     if (copyToastTimer.current != null) window.clearTimeout(copyToastTimer.current);
@@ -204,6 +232,7 @@ export const TerminalPane = memo(function TerminalPane({
    * shell worth labelling, so the empty state gets the pane to itself.
    */
   const showHeader = inputMode === "raw" || !!project;
+  const availableAgentTargets = agentTargets.filter((target) => target.termId !== node.term);
 
   return (
     <div
@@ -216,6 +245,7 @@ export const TerminalPane = memo(function TerminalPane({
         effectiveRaw ? "is-raw" : "is-editor",
         blank ? "is-blank" : "",
         unread ? "is-unread" : "",
+        scheduledSend ? "is-waiting" : "",
       ]
         .filter(Boolean)
         .join(" ")}
@@ -289,6 +319,31 @@ export const TerminalPane = memo(function TerminalPane({
           {meta?.exited && <span className="pane-badge">exited</span>}
           {busy && !meta?.exited && <span className="pane-badge pane-badge-busy">running</span>}
           <span className="pane-spacer" />
+          <button
+            type="button"
+            className={`pane-btn pane-tools-btn${scheduledSend ? " is-active" : ""}`}
+            title="Terminal tools"
+            aria-label="Terminal tools"
+            aria-haspopup="menu"
+            aria-expanded={toolsMenu !== null}
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              if (toolsMenu) {
+                setToolsMenu(null);
+                return;
+              }
+              const rect = e.currentTarget.getBoundingClientRect();
+              setToolsMenu({
+                left: Math.max(8, Math.min(rect.right - 258, window.innerWidth - 266)),
+                top: Math.max(8, Math.min(rect.bottom + 5, window.innerHeight - 300)),
+              });
+            }}
+          >
+            <svg viewBox="0 0 14 14" aria-hidden="true">
+              <path d="M8.9 2.1a3 3 0 0 0-3.7 3.7l-3 3a1.4 1.4 0 0 0 2 2l3-3a3 3 0 0 0 3.7-3.7L9 6.1 7.9 5l2.1-1.9z" />
+              <path d="m4.1 9.9 1 1" />
+            </svg>
+          </button>
           <button
             type="button"
             className="pane-btn"
@@ -404,6 +459,9 @@ export const TerminalPane = memo(function TerminalPane({
         <AgentSurface
           termId={node.term}
           active={active && !searching}
+          onBeforeSubmit={(text, images, delivery) =>
+            onBeforeSubmit(node.term, text, images, delivery)
+          }
           onClose={() => terminals.closeAgentUi(node.term)}
           onSelectionCopied={showCopyToast}
         />
@@ -415,6 +473,7 @@ export const TerminalPane = memo(function TerminalPane({
           active={active && !searching}
           exited={!!meta?.exited}
           highlight={highlight}
+          onBeforeSubmit={(text) => onBeforeSubmit(node.term, text, [], "default")}
         />
       )}
 
@@ -433,6 +492,66 @@ export const TerminalPane = memo(function TerminalPane({
           >
             Copied
           </div>,
+          document.body,
+        )}
+
+      {toolsMenu &&
+        createPortal(
+          <>
+            <div className="menu-backdrop" onPointerDown={() => setToolsMenu(null)} />
+            <div
+              className="menu pane-tools-menu"
+              role="menu"
+              style={{ left: toolsMenu.left, top: toolsMenu.top }}
+            >
+              <div className="menu-section-label">Tools</div>
+              {scheduledSend && (
+                <div className="pane-tools-scheduled" role="status">
+                  <span className="pane-tools-scheduled-mark" aria-hidden="true" />
+                  <span>
+                    Scheduled for <strong>{scheduledSend.targetLabel}</strong>
+                  </span>
+                  <button
+                    type="button"
+                    className="pane-tools-cancel"
+                    onClick={() => {
+                      onCancelSchedule(node.term);
+                      setToolsMenu(null);
+                    }}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              )}
+              <div className="menu-section-label">Send on agent completion</div>
+              <div className="menu-hint pane-tools-description">
+                Send the current draft after another working agent finishes.
+              </div>
+              {availableAgentTargets.length === 0 ? (
+                <div className="menu-empty">No other agents are working in this tab.</div>
+              ) : (
+                availableAgentTargets.map((target) => {
+                  const selected = scheduledSend?.targetTermId === target.termId;
+                  return (
+                    <button
+                      key={target.termId}
+                      type="button"
+                      role="menuitemradio"
+                      aria-checked={selected}
+                      className={`menu-item pane-tools-target${selected ? " is-current" : ""}`}
+                      onClick={() => {
+                        onScheduleSend(node.term, target);
+                        setToolsMenu(null);
+                      }}
+                    >
+                      <span>{target.label}</span>
+                      <span className="menu-hint">{target.detail}</span>
+                    </button>
+                  );
+                })
+              )}
+            </div>
+          </>,
           document.body,
         )}
 

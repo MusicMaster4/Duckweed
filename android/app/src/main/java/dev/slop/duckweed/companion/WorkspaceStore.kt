@@ -7,14 +7,29 @@ import org.json.JSONObject
 class WorkspaceStore(private val context: Context) {
     private val preferences = context.getSharedPreferences("duckweed-workspaces", Context.MODE_PRIVATE)
 
-    fun put(snapshot: WorkspaceSnapshot): Boolean {
-        val currentUpdatedAt = preferences.getString(snapshot.pairId, null)?.let { stored ->
+    fun put(snapshot: WorkspaceSnapshot, receivedAt: Long = System.currentTimeMillis()): Boolean =
+        synchronized(STORE_LOCK) { putLocked(snapshot, receivedAt) }
+
+    private fun putLocked(snapshot: WorkspaceSnapshot, receivedAt: Long): Boolean {
+        val currentState = preferences.getString(snapshot.pairId, null)?.let { stored ->
             runCatching {
-                JSONObject(String(SecretStore.decryptLocal(stored), Charsets.UTF_8))
-                    .optLong("updatedAt")
+                val json = JSONObject(String(SecretStore.decryptLocal(stored), Charsets.UTF_8))
+                val updatedAt = json.optLong("updatedAt")
+                val presenceAt = if (json.has("presenceAt") && !json.isNull("presenceAt")) {
+                    json.optLong("presenceAt")
+                } else {
+                    updatedAt
+                }
+                Pair(updatedAt, presenceAt)
             }.getOrNull()
-        } ?: 0L
+        }
+        val currentUpdatedAt = currentState?.first ?: 0L
         if (currentUpdatedAt > snapshot.updatedAt) return false
+        val presenceAt = maxOf(
+            currentState?.second ?: 0L,
+            snapshot.presenceAt ?: 0L,
+            receivedAt,
+        )
         val projects = JSONArray()
         snapshot.projects.forEach { project ->
             val terminals = JSONArray()
@@ -26,12 +41,56 @@ class WorkspaceStore(private val context: Context) {
                             .put("id", message.id)
                             .put("sentAt", message.sentAt)
                             .put("role", message.role)
-                            .put("text", message.text),
+                            .put("text", message.text)
+                            .put("streaming", message.streaming),
                     )
+                }
+                val commands = JSONArray().apply {
+                    terminal.commands.forEach { command ->
+                        put(JSONObject().put("name", command.name).put("description", command.description))
+                    }
+                }
+                val activity = JSONArray().apply {
+                    terminal.activity.forEach { item ->
+                        put(
+                            JSONObject()
+                                .put("id", item.id)
+                                .put("at", item.at)
+                                .put("kind", item.kind)
+                                .put("title", item.title)
+                                .put("detail", item.detail)
+                                .put("command", item.command)
+                                .put(
+                                    "changes",
+                                    JSONArray().apply {
+                                        item.changes.forEach { change ->
+                                            put(
+                                                JSONObject()
+                                                    .put("path", change.path)
+                                                    .put("insertions", change.insertions)
+                                                    .put("deletions", change.deletions)
+                                                    .put("diff", change.diff),
+                                            )
+                                        }
+                                    },
+                                )
+                                .put("planType", item.planType)
+                                .put(
+                                    "steps",
+                                    JSONArray().apply {
+                                        item.steps.forEach { step ->
+                                            put(JSONObject().put("text", step.text).put("status", step.status))
+                                        }
+                                    },
+                                )
+                                .put("status", item.status),
+                        )
+                    }
                 }
                 val permission = terminal.permission?.let { pending ->
                     JSONObject()
                         .put("id", pending.id)
+                        .put("kind", pending.kind)
                         .put("title", pending.title)
                         .put("detail", pending.detail)
                         .put("command", pending.command)
@@ -48,6 +107,34 @@ class WorkspaceStore(private val context: Context) {
                                 }
                             },
                         )
+                        .put(
+                            "questions",
+                            JSONArray().apply {
+                                pending.questions.forEach { question ->
+                                    put(
+                                        JSONObject()
+                                            .put("id", question.id)
+                                            .put("header", question.header)
+                                            .put("question", question.question)
+                                            .put("multiSelect", question.multiSelect)
+                                            .put(
+                                                "options",
+                                                JSONArray().apply {
+                                                    question.options.forEach { option ->
+                                                        put(
+                                                            JSONObject()
+                                                                .put("id", option.id)
+                                                                .put("label", option.label)
+                                                                .put("description", option.description)
+                                                                .put("preview", option.preview),
+                                                        )
+                                                    }
+                                                },
+                                            ),
+                                    )
+                                }
+                            },
+                        )
                 }
                 terminals.put(
                     JSONObject()
@@ -57,9 +144,16 @@ class WorkspaceStore(private val context: Context) {
                         .put("agent", terminal.agent)
                         .put("model", terminal.model)
                         .put("status", terminal.status)
+                        .put("mode", terminal.mode)
+                        .put("terminalColumns", terminal.terminalColumns)
+                        .put("terminalRows", terminal.terminalRows)
                         .put("unreadOnDesktop", terminal.unreadOnDesktop)
+                        .put("completionSeq", terminal.completionSeq)
+                        .put("commands", commands)
+                        .put("activity", activity)
                         .put("conversation", conversation)
-                        .put("permission", permission),
+                        .put("permission", permission)
+                        .put("terminalOutput", terminal.terminalOutput),
                 )
             }
             projects.put(
@@ -68,14 +162,20 @@ class WorkspaceStore(private val context: Context) {
                     .put("name", project.name)
                     .put("path", project.path)
                     .put("branch", project.branch)
+                    .put("color", project.color)
                     .put("terminals", terminals),
             )
         }
+        val usageLimits = UsageLimitsJson.write(snapshot.usageLimits)
         val raw = JSONObject()
             .put("pairId", snapshot.pairId)
             .put("updatedAt", snapshot.updatedAt)
-            .put("presenceAt", snapshot.presenceAt ?: snapshot.updatedAt)
+            // Preserve a newer heartbeat if FCM delivers an older workspace
+            // snapshot after it. The receipt time is local to Android and is
+            // therefore unaffected by desktop/phone clock skew.
+            .put("presenceAt", presenceAt)
             .put("projects", projects)
+            .put("usageLimits", usageLimits)
             .toString()
             .toByteArray(Charsets.UTF_8)
         preferences.edit().putString(snapshot.pairId, SecretStore.encryptLocal(raw)).apply()
@@ -98,22 +198,45 @@ class WorkspaceStore(private val context: Context) {
                         name = project.optString("name", "Project"),
                         path = project.optString("path"),
                         branch = if (project.isNull("branch")) null else project.optString("branch").takeIf { it.isNotBlank() },
+                        color = if (project.isNull("color")) null else project.optString("color").takeIf { it.isNotBlank() },
                         terminals = (0 until terminalsJson.length()).map { terminalIndex ->
                             val terminal = terminalsJson.getJSONObject(terminalIndex)
                             val conversationJson = terminal.optJSONArray("conversation") ?: JSONArray()
+                            val commandsJson = terminal.optJSONArray("commands") ?: JSONArray()
+                            val activityJson = terminal.optJSONArray("activity") ?: JSONArray()
                             val permissionJson = terminal.optJSONObject("permission")
+                            val agent = if (terminal.isNull("agent")) null else {
+                                terminal.optString("agent").takeIf { it.isNotBlank() }
+                            }
+                            val terminalOutput = if (terminal.isNull("terminalOutput")) null else {
+                                terminal.optString("terminalOutput").takeIf { it.isNotBlank() }
+                            }
+                            val mode = terminal.optString("mode").takeIf {
+                                it == "terminal" || it == "conversation"
+                            } ?: if (terminalOutput != null || agent == null) "terminal" else "conversation"
                             RemoteTerminal(
                                 id = terminal.getString("id"),
                                 title = terminal.optString("title", "Terminal"),
                                 shell = terminal.optString("shell", "Terminal"),
-                                agent = if (terminal.isNull("agent")) null else terminal.optString("agent").takeIf { it.isNotBlank() },
+                                agent = agent,
                                 model = if (terminal.isNull("model")) null else terminal.optString("model").takeIf { it.isNotBlank() },
                                 status = terminal.optString("status", "idle"),
+                                mode = mode,
+                                terminalColumns = terminal.optInt("terminalColumns").takeIf { it > 0 },
+                                terminalRows = terminal.optInt("terminalRows").takeIf { it > 0 },
                                 unreadOnDesktop = if (terminal.has("unreadOnDesktop") && !terminal.isNull("unreadOnDesktop")) {
                                     terminal.optBoolean("unreadOnDesktop")
                                 } else {
                                     null
                                 },
+                                completionSeq = terminal.optLong("completionSeq"),
+                                commands = (0 until commandsJson.length()).mapNotNull { commandIndex ->
+                                    val command = commandsJson.optJSONObject(commandIndex) ?: return@mapNotNull null
+                                    val name = command.optString("name").trim()
+                                    if (!name.startsWith("/")) return@mapNotNull null
+                                    RemoteSlashCommand(name, command.optString("description").trim())
+                                },
+                                activity = parseAgentActivities(activityJson, json.optLong("updatedAt")),
                                 conversation = (0 until conversationJson.length()).mapNotNull { messageIndex ->
                                     val message = conversationJson.optJSONObject(messageIndex) ?: return@mapNotNull null
                                     val role = message.optString("role")
@@ -126,29 +249,16 @@ class WorkspaceStore(private val context: Context) {
                                         sentAt = message.optLong("sentAt", json.optLong("updatedAt")),
                                         role = role,
                                         text = text,
+                                        streaming = message.optBoolean("streaming", false),
                                     )
                                 },
-                                permission = permissionJson?.let { permission ->
-                                    val optionsJson = permission.optJSONArray("options") ?: JSONArray()
-                                    RemotePermission(
-                                        id = permission.optString("id"),
-                                        title = permission.optString("title", "Approval required"),
-                                        detail = permission.optString("detail").takeIf { it.isNotBlank() },
-                                        command = permission.optString("command").takeIf { it.isNotBlank() },
-                                        options = (0 until optionsJson.length()).mapNotNull { optionIndex ->
-                                            val option = optionsJson.optJSONObject(optionIndex) ?: return@mapNotNull null
-                                            val id = option.optString("id")
-                                            val label = option.optString("label")
-                                            val kind = option.optString("kind")
-                                            if (id.isBlank() || label.isBlank()) return@mapNotNull null
-                                            RemotePermissionOption(id, label, kind)
-                                        },
-                                    ).takeIf { it.id.isNotBlank() && it.options.isNotEmpty() }
-                                },
+                                permission = parseRemotePermission(permissionJson),
+                                terminalOutput = terminalOutput,
                             )
                         },
                     )
                 },
+                usageLimits = UsageLimitsJson.parse(json.optJSONArray("usageLimits")),
                 presenceAt = if (json.has("presenceAt") && !json.isNull("presenceAt")) {
                     json.optLong("presenceAt")
                 } else {
@@ -158,7 +268,10 @@ class WorkspaceStore(private val context: Context) {
         }.getOrNull()
     }.sortedByDescending { it.updatedAt }
 
-    fun markPresence(pairId: String, at: Long): Boolean {
+    fun markPresence(pairId: String, at: Long): Boolean =
+        synchronized(STORE_LOCK) { markPresenceLocked(pairId, at) }
+
+    private fun markPresenceLocked(pairId: String, at: Long): Boolean {
         val stored = preferences.getString(pairId, null) ?: return false
         val json = runCatching {
             JSONObject(String(SecretStore.decryptLocal(stored), Charsets.UTF_8))
@@ -177,6 +290,15 @@ class WorkspaceStore(private val context: Context) {
     }
 
     fun remove(pairId: String) {
-        preferences.edit().remove(pairId).apply()
+        synchronized(STORE_LOCK) {
+            preferences.edit().remove(pairId).apply()
+        }
+    }
+
+    companion object {
+        // Firebase callbacks and WorkManager can update the same pairing on
+        // different threads. Serialize their read-modify-write operations so
+        // an older snapshot cannot win a race against a fresh heartbeat.
+        private val STORE_LOCK = Any()
     }
 }

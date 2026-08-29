@@ -64,6 +64,11 @@ object Crypto {
             durationMs = if (json.isNull("durationMs")) null else json.getLong("durationMs"),
             soundCue = if (json.isNull("soundCue")) null else json.optInt("soundCue").takeIf { it in 0..5 },
             unreadOnDesktop = if (json.has("unreadOnDesktop")) json.optBoolean("unreadOnDesktop") else null,
+            completionSeq = if (json.has("completionSeq") && !json.isNull("completionSeq")) {
+                json.optLong("completionSeq")
+            } else {
+                null
+            },
             workspace = parseWorkspace(credentials.pairId, json),
         )
     }
@@ -85,9 +90,10 @@ object Crypto {
         return EncryptedEnvelope(encode(nonce), encode(cipher.doFinal(plain)))
     }
 
-    private fun parseWorkspace(pairId: String, json: JSONObject): WorkspaceSnapshot? {
+    internal fun parseWorkspace(pairId: String, json: JSONObject): WorkspaceSnapshot? {
         if (json.optString("kind") != "workspace" || !json.has("projects")) return null
         val projectsJson = json.optJSONArray("projects") ?: JSONArray()
+        val usageLimitsJson = json.optJSONArray("usageLimits") ?: JSONArray()
         val projects = (0 until projectsJson.length()).mapNotNull { projectIndex ->
             val project = projectsJson.optJSONObject(projectIndex) ?: return@mapNotNull null
             val terminalsJson = project.optJSONArray("terminals") ?: JSONArray()
@@ -96,22 +102,45 @@ object Crypto {
                 name = project.optString("name", "Project"),
                 path = project.optString("path"),
                 branch = if (project.isNull("branch")) null else project.optString("branch").takeIf { it.isNotBlank() },
+                color = if (project.isNull("color")) null else project.optString("color").takeIf { it.isNotBlank() },
                 terminals = (0 until terminalsJson.length()).mapNotNull { terminalIndex ->
                     val terminal = terminalsJson.optJSONObject(terminalIndex) ?: return@mapNotNull null
                     val conversationJson = terminal.optJSONArray("conversation") ?: JSONArray()
+                    val commandsJson = terminal.optJSONArray("commands") ?: JSONArray()
+                    val activityJson = terminal.optJSONArray("activity") ?: JSONArray()
                     val permissionJson = terminal.optJSONObject("permission")
+                    val agent = if (terminal.isNull("agent")) null else {
+                        terminal.optString("agent").takeIf { it.isNotBlank() }
+                    }
+                    val terminalOutput = if (terminal.isNull("terminalOutput")) null else {
+                        terminal.optString("terminalOutput").takeIf { it.isNotBlank() }
+                    }
+                    val mode = terminal.optString("mode").takeIf {
+                        it == "terminal" || it == "conversation"
+                    } ?: if (terminalOutput != null || agent == null) "terminal" else "conversation"
                     RemoteTerminal(
                         id = terminal.optString("id"),
                         title = terminal.optString("title", "Terminal"),
                         shell = terminal.optString("shell", "Terminal"),
-                        agent = if (terminal.isNull("agent")) null else terminal.optString("agent").takeIf { it.isNotBlank() },
+                        agent = agent,
                         model = if (terminal.isNull("model")) null else terminal.optString("model").takeIf { it.isNotBlank() },
                         status = terminal.optString("status", "idle"),
+                        mode = mode,
+                        terminalColumns = terminal.optInt("terminalColumns").takeIf { it > 0 },
+                        terminalRows = terminal.optInt("terminalRows").takeIf { it > 0 },
                         unreadOnDesktop = if (terminal.has("unreadOnDesktop")) {
                             terminal.optBoolean("unreadOnDesktop")
                         } else {
                             null
                         },
+                        completionSeq = terminal.optLong("completionSeq"),
+                        commands = (0 until commandsJson.length()).mapNotNull { commandIndex ->
+                            val command = commandsJson.optJSONObject(commandIndex) ?: return@mapNotNull null
+                            val name = command.optString("name").trim()
+                            if (!name.startsWith("/")) return@mapNotNull null
+                            RemoteSlashCommand(name, command.optString("description").trim())
+                        },
+                        activity = parseAgentActivities(activityJson, json.optLong("sentAt")),
                         conversation = (0 until conversationJson.length()).mapNotNull { messageIndex ->
                             val message = conversationJson.optJSONObject(messageIndex) ?: return@mapNotNull null
                             val role = message.optString("role")
@@ -124,34 +153,22 @@ object Crypto {
                                 sentAt = message.optLong("sentAt", json.optLong("sentAt")),
                                 role = role,
                                 text = text,
+                                streaming = message.optBoolean("streaming", false),
                             )
                         },
-                        permission = permissionJson?.let { permission ->
-                            val optionsJson = permission.optJSONArray("options") ?: JSONArray()
-                            val options = (0 until optionsJson.length()).mapNotNull { optionIndex ->
-                                val option = optionsJson.optJSONObject(optionIndex) ?: return@mapNotNull null
-                                val id = option.optString("id")
-                                val label = option.optString("label")
-                                val kind = option.optString("kind")
-                                if (id.isBlank() || label.isBlank() || kind !in setOf(
-                                        "allow", "allow-always", "reject", "reject-always",
-                                    )
-                                ) return@mapNotNull null
-                                RemotePermissionOption(id, label, kind)
-                            }
-                            RemotePermission(
-                                id = permission.optString("id"),
-                                title = permission.optString("title", "Approval required"),
-                                detail = permission.optString("detail").takeIf { it.isNotBlank() },
-                                command = permission.optString("command").takeIf { it.isNotBlank() },
-                                options = options,
-                            ).takeIf { it.id.isNotBlank() && it.options.isNotEmpty() }
-                        },
+                        permission = parseRemotePermission(permissionJson),
+                        terminalOutput = terminalOutput,
                     )
                 }.filter { it.id.isNotBlank() },
             )
         }.filter { it.id.isNotBlank() }
-        return WorkspaceSnapshot(pairId, json.optLong("sentAt", System.currentTimeMillis()), projects)
+        val usageLimits = UsageLimitsJson.parse(usageLimitsJson)
+        return WorkspaceSnapshot(
+            pairId = pairId,
+            updatedAt = json.optLong("sentAt", System.currentTimeMillis()),
+            projects = projects,
+            usageLimits = usageLimits,
+        )
     }
 
     internal fun decryptBytes(

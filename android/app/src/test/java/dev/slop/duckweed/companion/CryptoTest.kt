@@ -2,7 +2,9 @@ package dev.slop.duckweed.companion
 
 import java.util.Base64
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Test
+import org.json.JSONObject
 
 class CryptoTest {
     private fun decode(value: String): ByteArray = Base64.getUrlDecoder().decode(value)
@@ -20,5 +22,128 @@ class CryptoTest {
             ),
         )
         assertEquals("{\"version\":1,\"project\":\"Duckweed\"}", plain.toString(Charsets.UTF_8))
+    }
+
+    @Test
+    fun keepsTerminalPresentationFieldsFromWorkspacePayload() {
+        val snapshot = Crypto.parseWorkspace(
+            "pair",
+            JSONObject(
+                """
+                {
+                  "kind":"workspace",
+                  "sentAt":42,
+                  "usageLimits":[{
+                    "agent":"codex",
+                    "label":"Codex",
+                    "plan":"pro",
+                    "limits":[{
+                      "id":"weekly",
+                      "label":"7-day limit",
+                      "percent":47.4,
+                      "resetsAt":1800000000000,
+                      "usageHoursLeft":12.5,
+                      "perHour":0.3,
+                      "projectedPercent":88,
+                      "runsOutAt":1803600000000,
+                      "basis":"recent"
+                    }]
+                  }],
+                  "projects":[{
+                    "id":"project",
+                    "name":"Duckweed",
+                    "path":"C:/duckweed",
+                    "branch":"main",
+                    "color":"#7BE05A",
+                    "terminals":[{
+                      "id":"terminal",
+                      "title":"Codex",
+                      "shell":"PowerShell",
+                      "agent":"Codex",
+                      "model":null,
+                      "status":"idle",
+                      "mode":"terminal",
+                      "terminalColumns":120,
+                      "terminalRows":32,
+                      "terminalOutput":"Codex ready",
+                      "conversation":[],
+                      "permission":null
+                    }]
+                  }]
+                }
+                """.trimIndent(),
+            ),
+        )
+
+        assertNotNull(snapshot)
+        val project = snapshot!!.projects.single()
+        val terminal = project.terminals.single()
+        assertEquals("#7BE05A", project.color)
+        assertEquals("terminal", terminal.mode)
+        assertEquals(120, terminal.terminalColumns)
+        assertEquals(32, terminal.terminalRows)
+        assertEquals("Codex ready", terminal.terminalOutput)
+        val usage = snapshot.usageLimits.single()
+        assertEquals("Codex", usage.label)
+        assertEquals("pro", usage.plan)
+        assertEquals("7-day limit", usage.limits.single().label)
+        assertEquals(47.4, usage.limits.single().percent, 0.001)
+        assertEquals(1_800_000_000_000L, usage.limits.single().resetsAt)
+        assertEquals(12.5, usage.limits.single().usageHoursLeft!!, 0.001)
+        assertEquals(0.3, usage.limits.single().perHour!!, 0.001)
+        assertEquals(88.0, usage.limits.single().projectedPercent!!, 0.001)
+        assertEquals(1_803_600_000_000L, usage.limits.single().runsOutAt)
+        assertEquals("recent", usage.limits.single().basis)
+    }
+
+    @Test
+    fun keepsCommandsAndDiffsFromAgentActivity() {
+        val snapshot = Crypto.parseWorkspace(
+            "pair",
+            JSONObject(
+                """
+                {
+                  "kind":"workspace",
+                  "sentAt":42,
+                  "projects":[{
+                    "id":"project",
+                    "name":"Duckweed",
+                    "path":"C:/duckweed",
+                    "terminals":[{
+                      "id":"terminal",
+                      "title":"Codex",
+                      "shell":"PowerShell",
+                      "agent":"Codex",
+                      "status":"working",
+                      "mode":"conversation",
+                      "activity":[{
+                        "id":"tool",
+                        "at":40,
+                        "kind":"tool",
+                        "title":"Update the mobile timeline",
+                        "detail":"Applied patch",
+                        "command":"git diff -- app.kt",
+                        "changes":[{
+                          "path":"app.kt",
+                          "insertions":2,
+                          "deletions":1,
+                          "diff":"@@\n-old\n+new"
+                        }],
+                        "status":"done"
+                      }],
+                      "conversation":[],
+                      "permission":null
+                    }]
+                  }]
+                }
+                """.trimIndent(),
+            ),
+        )
+
+        val activity = snapshot!!.projects.single().terminals.single().activity.single()
+        assertEquals("git diff -- app.kt", activity.command)
+        assertEquals("app.kt", activity.changes.single().path)
+        assertEquals(2, activity.changes.single().insertions)
+        assertEquals("@@\n-old\n+new", activity.changes.single().diff)
     }
 }

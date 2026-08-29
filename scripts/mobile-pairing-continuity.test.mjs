@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 
-const read = (path) => readFileSync(path, "utf8");
+const read = (path) => readFileSync(path, "utf8").replaceAll("\r\n", "\n");
 
 describe("mobile pairing continuity", () => {
   test("updates keep the Android package and encrypted credential locations stable", () => {
@@ -75,6 +75,8 @@ describe("mobile pairing continuity", () => {
 
   test("workspace state can refresh automatically and on a phone gesture", () => {
     const desktop = read("src/App.tsx");
+    const native = read("src-tauri/src/mobile_push.rs");
+    const main = read("src-tauri/src/main.rs");
     const activity = read(
       "android/app/src/main/java/dev/slop/duckweed/companion/MainActivity.kt",
     );
@@ -83,14 +85,65 @@ describe("mobile pairing continuity", () => {
     );
     const build = read("android/app/build.gradle.kts");
 
-    expect(desktop).toContain('window.addEventListener("duckweed:mobile-refresh", paired)');
-    expect(desktop).toContain("pollDelay = commands.length > 0 ? 1_800 : Math.min(30_000, pollDelay * 2)");
-    expect(desktop).toContain("const presence = window.setInterval");
-    expect(desktop).toContain("mobileSendPresence()");
+    expect(desktop).toContain('window.addEventListener("duckweed:mobile-refresh", refreshed)');
+    expect(desktop).toContain("refreshUsageLimits(0)");
+    expect(desktop).toContain("pollDelay = commands.length > 0 ? 1_200 : Math.min(4_000, pollDelay * 1.5)");
+    expect(desktop).not.toContain("mobileSendPresence()");
+    expect(native).toContain("pub fn start_presence_monitor(app: AppHandle)");
+    expect(native).toContain("PRESENCE_INTERVAL.saturating_sub(started.elapsed())");
+    expect(main).toContain("mobile_push::start_presence_monitor(app.handle().clone())?");
     expect(desktop).toContain('command.kind === "refresh"');
     expect(activity).toContain("setOnRefreshListener { requestRemoteRefresh() }");
     expect(relay).toContain('put("kind", "refresh")');
     expect(build).toContain("androidx.swiperefreshlayout:swiperefreshlayout:1.2.0");
+  });
+
+  test("authenticated desktop traffic renews presence using the phone clock", () => {
+    const service = read(
+      "android/app/src/main/java/dev/slop/duckweed/companion/DuckweedMessagingService.kt",
+    );
+    const worker = read(
+      "android/app/src/main/java/dev/slop/duckweed/companion/MessageFetchWorker.kt",
+    );
+    const store = read(
+      "android/app/src/main/java/dev/slop/duckweed/companion/WorkspaceStore.kt",
+    );
+
+    expect(service.indexOf("Crypto.decrypt(")).toBeLessThan(
+      service.indexOf("markPresence(pairId, System.currentTimeMillis())"),
+    );
+    expect(worker).toContain("workspaceStore.markPresence(pairId, receivedAt)");
+    expect(worker).toContain("workspaceStore.put(message.workspace, receivedAt)");
+    expect(store).toContain("currentState?.second ?: 0L");
+    expect(store).toContain("receivedAt,");
+  });
+
+  test("the phone recovers relay payloads when an FCM wake-up is missed", () => {
+    const activity = read(
+      "android/app/src/main/java/dev/slop/duckweed/companion/MainActivity.kt",
+    );
+    const relay = read(
+      "android/app/src/main/java/dev/slop/duckweed/companion/RelayClient.kt",
+    );
+    const worker = read(
+      "android/app/src/main/java/dev/slop/duckweed/companion/MessageFetchWorker.kt",
+    );
+
+    expect(activity).toContain("recoverPendingRelayMessages()\n        requestRemoteRefresh");
+    expect(activity).toContain("RelayClient.pendingMessages(pairing)");
+    expect(relay).toContain("fun pendingMessages(credentials: PairCredentials)");
+    expect(worker).toContain("object MessageFetchScheduler");
+  });
+
+  test("settled agent state bypasses suspended animation frames", () => {
+    const sessions = read("src/lib/agents/session.ts");
+    const desktop = read("src/App.tsx");
+    const ipc = read("src/lib/ipc.ts");
+
+    expect(sessions).toContain('event.type === "turn-end"');
+    expect(sessions).toContain("notifyNow(session)");
+    expect(desktop).toContain("agentSessions.subscribeTurnEnd(() => publish(true))");
+    expect(ipc).toContain("mobileWorkspaceSendQueue");
   });
 
   test("workspace snapshots retain compact readable conversation history", () => {
@@ -106,7 +159,10 @@ describe("mobile pairing continuity", () => {
     expect(desktop).toContain("fitMobileWorkspaceSnapshot(snapshot)");
     expect(desktop).toContain("utf8ByteLength(text)");
     expect(desktop).toContain('.slice(-6)');
-    expect(desktop).toContain('item.kind === "assistant" && !item.streaming');
+    expect(desktop).toContain('item.kind === "assistant"');
+    expect(desktop).toContain("streaming: item.streaming");
+    expect(desktop).toContain("activity: mobileAgentActivity");
+    expect(desktop).toContain("session?.commands ?? []");
     expect(worker).toContain("putSyncedConversation(message.workspace)");
     expect(store).toContain("fun putSyncedConversation(snapshot: WorkspaceSnapshot)");
   });
@@ -143,6 +199,32 @@ describe("mobile pairing continuity", () => {
     expect(store).toContain("fun markRead(messageId: String");
     expect(adapter).toContain("R.drawable.message_card_unread");
     expect(adapter).toContain("message.readAt == null");
+  });
+
+  test("notification read actions clear mobile and desktop unread state", () => {
+    const notifications = read(
+      "android/app/src/main/java/dev/slop/duckweed/companion/NotificationTools.kt",
+    );
+    const receiver = read(
+      "android/app/src/main/java/dev/slop/duckweed/companion/ReadActionReceiver.kt",
+    );
+    const worker = read(
+      "android/app/src/main/java/dev/slop/duckweed/companion/ReadSyncWorker.kt",
+    );
+    const relay = read(
+      "android/app/src/main/java/dev/slop/duckweed/companion/RelayClient.kt",
+    );
+    const desktop = read("src/App.tsx");
+    const manifest = read("android/app/src/main/AndroidManifest.xml");
+
+    expect(notifications).toContain('Action.Builder(0, "Mark as read", pending)');
+    expect(receiver).toContain("store.markConversationRead(");
+    expect(receiver).toContain("message.completionSeq");
+    expect(worker).toContain("RelayClient.sendRead(");
+    expect(relay).toContain('.put("kind", "read")');
+    expect(desktop).toContain('command.kind === "read"');
+    expect(desktop).toContain("acknowledgeTermFromMobile(command.terminalId, command.completionSeq)");
+    expect(manifest).toContain('android:name=".ReadActionReceiver"');
   });
 
   test("mobile approvals are encrypted and revalidated against the live permission", () => {

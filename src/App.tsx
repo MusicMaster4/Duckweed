@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type CSSProperties,
+} from "react";
 import { flushSync } from "react-dom";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { exit } from "@tauri-apps/plugin-process";
@@ -38,6 +46,7 @@ import * as powerWatch from "./lib/powerWatch";
 import type { BusyEntry } from "./lib/powerWatch";
 import { agentHasUnfinishedWork } from "./lib/agents/activity";
 import * as agentSessions from "./lib/agents/session";
+import type { AgentImageAttachment } from "./lib/agents/types";
 import { handleUnattendedPermission } from "./lib/agents/autoApproval";
 import {
   confirmCloseRunning,
@@ -47,6 +56,7 @@ import {
 } from "./lib/confirmClose";
 import {
   acknowledgeCompletion,
+  shouldAcknowledgeMobileCompletion,
   shouldFlashCompletionReview,
   type CompletionFlash,
 } from "./lib/completionHighlights";
@@ -64,14 +74,16 @@ import {
   mobileAckCommand,
   mobilePollCommands,
   mobileSendCompletion,
-  mobileSendPresence,
   mobileSendWorkspace,
+  mobileStatus,
+  portsList,
   powerAction,
   projectInfo,
   shellIntegrationSet,
   shellIntegrationStatus,
   takeLaunchIntent,
   watchProject,
+  type AppPort,
   type LaunchIntent,
   type ShellIntegrationStatus,
 } from "./lib/ipc";
@@ -107,12 +119,14 @@ import {
 } from "./lib/zoomRail";
 import { toggleFullscreen } from "./lib/window";
 import { DEFAULT_TOOLS_WIDTH, load, pushRecent, rehydrate, save } from "./lib/persist";
+import { flushDurableStorage } from "./lib/durableStorage";
 import {
   shouldPlayCompletionSound,
   shouldSignalCompletion,
   type ProcessState,
 } from "./lib/processActivity";
 import { setCompletionTaskbarBadge } from "./lib/taskbarCompletion";
+import type { AgentTarget, ScheduledSend, SubmitDelivery } from "./lib/scheduledSend";
 import {
   mobileCompletionDelay,
   shouldSendDelayedMobileCompletion,
@@ -120,7 +134,11 @@ import {
 import {
   fitMobileWorkspaceSnapshot,
   MOBILE_WORKSPACE_CONVERSATION_BUDGET_BYTES,
+  mobileAgentActivity,
+  mobileTerminalStatus,
+  mobileUsageLimits,
   truncateUtf8,
+  truncateUtf8Tail,
   utf8ByteLength,
 } from "./lib/mobileWorkspace";
 import {
@@ -129,7 +147,11 @@ import {
   applyStripReorder,
 } from "./lib/tabReorder";
 import * as terminals from "./lib/terminals";
-import { loadSettings as loadUsageSettings, prefetchUsage } from "./lib/usage";
+import {
+  cachedUsage,
+  loadSettings as loadUsageSettings,
+  prefetchUsage,
+} from "./lib/usage";
 import type {
   EditorReveal,
   LeafNode,
@@ -196,6 +218,10 @@ async function confirmUpdateWithRunningProcesses(): Promise<boolean> {
 
 function basename(path: string): string {
   return path.split(/[\\/]/).filter(Boolean).pop() ?? path;
+}
+
+function hasSendablePayload(text: string, images: readonly AgentImageAttachment[]): boolean {
+  return text.trim().length > 0 || images.length > 0;
 }
 
 /**
@@ -369,6 +395,15 @@ export default function App() {
   const [changesOpen, setChangesOpen] = useState(false);
   const [toolsOpen, setToolsOpen] = useState(initial.toolsOpen);
   const [toolsMounted, setToolsMounted] = useState(initial.toolsOpen);
+  const [sharedPortActive, setSharedPortActive] = useState(false);
+  const powerScheduleActive = useSyncExternalStore(
+    powerWatch.subscribe,
+    () => {
+      const phase = powerWatch.getState().phase;
+      return phase === "armed" || phase === "countdown";
+    },
+    () => false,
+  );
   /** Keeps the fullscreen switcher on screen while it slides shut. */
   const [zoomRailMounted, setZoomRailMounted] = useState(false);
   const [paneMotion, setPaneMotion] = useState<PaneLayoutMotion | null>(null);
@@ -386,6 +421,10 @@ export default function App() {
   );
   const [workingAgentTermIds, setWorkingAgentTermIds] = useState<Set<string>>(
     () => new Set(),
+  );
+  const [openAgentCount, setOpenAgentCount] = useState(0);
+  const [scheduledSends, setScheduledSends] = useState<Map<string, ScheduledSend>>(
+    () => new Map(),
   );
   const unreadTermIdsRef = useRef(unreadTermIds);
   unreadTermIdsRef.current = unreadTermIds;
@@ -422,7 +461,9 @@ export default function App() {
   const completionFlashSeq = useRef(0);
   const completionFlashTimers = useRef(new Map<string, number>());
   const mobileCompletionTimers = useRef(new Map<string, number>());
-  const lastTerminalInteractionAt = useRef(new Map<string, number>());
+  const lastDesktopInteractionAt = useRef<number | null>(null);
+  const scheduledSendsRef = useRef(scheduledSends);
+  scheduledSendsRef.current = scheduledSends;
   /** Dirty flag for the lifted file editor (file switches confirm through this). */
   const editorDirtyRef = useRef(false);
   const processState = useRef(new Map<string, ProcessState>());
@@ -434,6 +475,16 @@ export default function App() {
   const spawnOpts = useRef(new Map<string, SpawnOpts>(initial.startupSpawns));
 
   const activeTab = tabs.find((t) => t.id === activeTabId) ?? tabs[0];
+  const activeChecklistScope = activeTab?.id ?? null;
+  const readActiveChecklistItems = useCallback(
+    () => (activeChecklistScope ? checklist.openCount(activeChecklistScope) : 0),
+    [activeChecklistScope],
+  );
+  const openChecklistItems = useSyncExternalStore(
+    checklist.subscribe,
+    readActiveChecklistItems,
+    readActiveChecklistItems,
+  );
   const project = activeTab?.project ?? null;
   const toolStats = useMemo(
     () => ({
@@ -525,6 +576,18 @@ export default function App() {
     });
   }, []);
 
+  const acknowledgeTermFromMobile = useCallback((termId: string, completionSeq: number | null) => {
+    const meta = terminals.getMeta(termId);
+    // A delayed receipt for an older notification must not clear a newer
+    // completion that arrived before the desktop drained the relay queue.
+    if (!shouldAcknowledgeMobileCompletion(meta?.completionSeq ?? null, completionSeq)) return;
+    const unread = unreadTermIdsRef.current;
+    if (!unread.has(termId)) return;
+    const clearsLastBackgroundBadge = unread.size === 1 && completionFlashesRef.current.size === 0;
+    acknowledgeTerm(termId);
+    if (clearsLastBackgroundBadge) setCompletionTaskbarBadge(false);
+  }, [acknowledgeTerm]);
+
   const flashCompletion = useCallback((termId: string, kind: CompletionFlash["kind"]) => {
     const previousTimer = completionFlashTimers.current.get(termId);
     if (previousTimer !== undefined) window.clearTimeout(previousTimer);
@@ -560,23 +623,25 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    const recordSelectedTerminalInteraction = (event: KeyboardEvent | PointerEvent) => {
-      if (!document.hasFocus() || settingsActiveRef.current) return;
-      if (
-        event instanceof KeyboardEvent &&
-        ["Shift", "Control", "Alt", "Meta"].includes(event.key)
-      ) return;
-      const tab = currentTab();
-      const termId = tab ? (findLeaf(tab.root, tab.activeLeaf)?.term ?? null) : null;
-      if (termId) lastTerminalInteractionAt.current.set(termId, Date.now());
+    const recordDesktopInteraction = () => {
+      if (!document.hasFocus()) return;
+      lastDesktopInteractionAt.current = Date.now();
     };
-    window.addEventListener("keydown", recordSelectedTerminalInteraction, true);
-    window.addEventListener("pointerdown", recordSelectedTerminalInteraction, true);
+    const recordKeyboardInteraction = (event: KeyboardEvent) => {
+      if (["Shift", "Control", "Alt", "Meta"].includes(event.key)) return;
+      recordDesktopInteraction();
+    };
+    window.addEventListener("focus", recordDesktopInteraction);
+    window.addEventListener("keydown", recordKeyboardInteraction, true);
+    window.addEventListener("pointerdown", recordDesktopInteraction, true);
+    window.addEventListener("wheel", recordDesktopInteraction, true);
     return () => {
-      window.removeEventListener("keydown", recordSelectedTerminalInteraction, true);
-      window.removeEventListener("pointerdown", recordSelectedTerminalInteraction, true);
+      window.removeEventListener("focus", recordDesktopInteraction);
+      window.removeEventListener("keydown", recordKeyboardInteraction, true);
+      window.removeEventListener("pointerdown", recordDesktopInteraction, true);
+      window.removeEventListener("wheel", recordDesktopInteraction, true);
     };
-  }, [currentTab]);
+  }, []);
 
   /** Selected pane while the user is actually looking at the window (flash vs unread). */
   const isFocusedTerm = useCallback(
@@ -682,6 +747,16 @@ export default function App() {
     terminals.dispose(term);
     spawnOpts.current.delete(term);
     processState.current.delete(term);
+    const previousSchedules = scheduledSendsRef.current;
+    const nextSchedules = new Map(previousSchedules);
+    for (const [sourceTermId, scheduled] of previousSchedules) {
+      if (sourceTermId !== term && scheduled.targetTermId !== term) continue;
+      nextSchedules.delete(sourceTermId);
+    }
+    if (nextSchedules.size !== previousSchedules.size) {
+      scheduledSendsRef.current = nextSchedules;
+      setScheduledSends(nextSchedules);
+    }
     const flashTimer = completionFlashTimers.current.get(term);
     if (flashTimer !== undefined) {
       window.clearTimeout(flashTimer);
@@ -692,7 +767,6 @@ export default function App() {
       window.clearTimeout(timer);
       mobileCompletionTimers.current.delete(key);
     }
-    lastTerminalInteractionAt.current.delete(term);
     setCompletionFlashes((previous) => {
       if (!previous.has(term)) return previous;
       const next = new Map(previous);
@@ -709,42 +783,157 @@ export default function App() {
   );
   const termIdsKey = termIds.join("\0");
 
-  // Keep a compact remote index on paired phones. It contains only open
-  // projects, terminal identity, and status, never terminal output or an
-  // in-progress agent transcript.
+  const scheduleSend = useCallback((termId: string, target: AgentTarget) => {
+    if (termId === target.termId) return;
+    const targetLabel = `${target.label} · ${target.detail}`;
+    const current = scheduledSendsRef.current.get(termId);
+    if (current?.targetTermId === target.termId && current.targetLabel === targetLabel) return;
+    const next = new Map(scheduledSendsRef.current);
+    next.set(termId, { targetTermId: target.termId, targetLabel });
+    scheduledSendsRef.current = next;
+    setScheduledSends(next);
+  }, []);
+
+  const cancelSchedule = useCallback((termId: string) => {
+    if (!scheduledSendsRef.current.has(termId)) return;
+    const next = new Map(scheduledSendsRef.current);
+    next.delete(termId);
+    scheduledSendsRef.current = next;
+    setScheduledSends(next);
+  }, []);
+
+  const sendDraftNow = useCallback(
+    (
+      termId: string,
+      text: string,
+      images: AgentImageAttachment[],
+      delivery: SubmitDelivery = "default",
+    ): boolean => {
+      const agent = agentSessions.get(termId);
+      if (agent) {
+        if (agent.status === "exited" || agent.status === "error") return false;
+        agentSessions.submit(termId, text, images, delivery);
+        bus.emit("term:clear-draft", { termId });
+        return true;
+      }
+
+      const meta = terminals.getMeta(termId);
+      if (!meta || meta.exited || images.length > 0 || !text.trim()) return false;
+      terminals.setDraft(termId, "");
+      if (meta.agent || meta.busy) {
+        terminals.writeRaw(termId, `${text}\r`);
+      } else {
+        terminals.submitCommand(termId, text);
+      }
+      bus.emit("term:clear-draft", { termId });
+      return true;
+    },
+    [],
+  );
+
+  const completeScheduledSendsForTarget = useCallback(
+    (targetTermId: string) => {
+      const targetAgent = agentSessions.get(targetTermId);
+      const targetStillWorking = targetAgent
+        ? agentHasUnfinishedWork(targetAgent.status)
+        : terminals.hasPendingAgentTurn(targetTermId);
+      if (targetStillWorking) return;
+
+      const waiting = [...scheduledSendsRef.current].filter(
+        ([, scheduled]) => scheduled.targetTermId === targetTermId,
+      );
+      for (const [sourceTermId] of waiting) {
+        const sourceAgent = agentSessions.get(sourceTermId);
+        const text = sourceAgent
+          ? agentSessions.getDraft(sourceTermId)
+          : terminals.getDraft(sourceTermId);
+        const images = sourceAgent ? agentSessions.getDraftImages(sourceTermId) : [];
+        const next = new Map(scheduledSendsRef.current);
+        next.delete(sourceTermId);
+        scheduledSendsRef.current = next;
+        setScheduledSends(next);
+        if (hasSendablePayload(text, images)) {
+          sendDraftNow(sourceTermId, text, images);
+        }
+      }
+    },
+    [sendDraftNow],
+  );
+
+  const beforeScheduledSubmit = useCallback(
+    (
+      termId: string,
+      text: string,
+      images: AgentImageAttachment[],
+      delivery: SubmitDelivery,
+    ): boolean => {
+      const scheduled = scheduledSendsRef.current.get(termId);
+      if (!scheduled || !hasSendablePayload(text, images)) return false;
+
+      void confirmCloseRunning({
+        title: "Send scheduled message now?",
+        message: `This terminal is scheduled to send when ${scheduled.targetLabel} finishes. Send the message now instead?`,
+        confirmLabel: "Send now",
+      }).then((ok) => {
+        if (!ok) return;
+        const current = scheduledSendsRef.current.get(termId);
+        if (
+          !current ||
+          current.targetTermId !== scheduled.targetTermId ||
+          current.targetLabel !== scheduled.targetLabel
+        ) {
+          return;
+        }
+        cancelSchedule(termId);
+        sendDraftNow(termId, text, images, delivery);
+      });
+      return true;
+    },
+    [cancelSchedule, sendDraftNow],
+  );
+
+  // Keep a compact remote workspace on paired phones. Structured agents send
+  // conversation rows; ordinary shells and raw agent TUIs send a bounded tail
+  // of their painted terminal grid.
   useEffect(() => {
     if (!TAURI_RUNTIME) return;
     let timer = 0;
     let stopped = false;
+    let publishing = false;
+    let publishQueued = false;
+    let urgentPublishQueued = false;
+    let publishDelay = 250;
+    const usageDays = loadUsageSettings().days;
+    let usageLimits = mobileUsageLimits(cachedUsage(usageDays)?.quotas ?? []);
+    let hasPairedDevice = false;
 
-    const publish = () => {
+    const publish = (urgent = false) => {
       timer = 0;
+      if (publishing) {
+        publishQueued = true;
+        urgentPublishQueued ||= urgent;
+        return;
+      }
       let remainingConversationBytes = MOBILE_WORKSPACE_CONVERSATION_BUDGET_BYTES;
       const snapshot = {
+        usageLimits,
         projects: tabsRef.current.map((tab) => ({
           id: tab.id,
           name: tab.project?.name ?? tab.title,
           path: tab.project?.path ?? "",
           branch: tab.project?.branch ?? null,
+          color: tab.color ? tabColorHex(tab.color) : null,
           terminals: leaves(tab.root).flatMap((node) => {
             const meta = terminals.getMeta(node.term);
             if (!meta) return [];
             const session = agentSessions.get(node.term);
-            const status = session
-              ? session.status === "working" || session.status === "starting"
-                ? "working" as const
-                : session.status === "waiting"
-                  ? "waiting" as const
-                  : session.status === "exited" || session.status === "error"
-                    ? "exited" as const
-                    : "idle" as const
-              : meta.exited
-                ? "exited" as const
-                : meta.agent && terminals.hasPendingAgentTurn(node.term)
-                  ? "working" as const
-                  : meta.busy
-                    ? "working" as const
-                    : "idle" as const;
+            const status = mobileTerminalStatus({
+              exited: meta.exited,
+              agent: meta.agent,
+              busy: meta.busy,
+              pendingAgentTurn: terminals.hasPendingAgentTurn(node.term),
+              structuredStatus: session?.status ?? null,
+            });
             const rawAgent = meta.agent
               ? meta.agent.charAt(0).toUpperCase() + meta.agent.slice(1)
               : null;
@@ -753,6 +942,7 @@ export default function App() {
               sentAt: number;
               role: "user" | "assistant";
               rawText: string;
+              streaming?: boolean;
             }> = [];
             for (const item of session?.items ?? []) {
               if (item.kind === "user") {
@@ -762,12 +952,13 @@ export default function App() {
                   role: "user",
                   rawText: item.text,
                 });
-              } else if (item.kind === "assistant" && !item.streaming) {
+              } else if (item.kind === "assistant") {
                 conversationSource.push({
                   id: item.id,
                   sentAt: item.at,
                   role: "assistant",
                   rawText: item.text,
+                  streaming: item.streaming,
                 });
               }
             }
@@ -781,7 +972,13 @@ export default function App() {
                 0,
                 remainingConversationBytes - utf8ByteLength(text),
               );
-              return { id: item.id, sentAt: item.sentAt, role: item.role, text };
+              return {
+                id: item.id,
+                sentAt: item.sentAt,
+                role: item.role,
+                text,
+                streaming: item.streaming || undefined,
+              };
             }).filter((item) => item.text.length > 0);
             return [{
               id: node.term,
@@ -790,11 +987,31 @@ export default function App() {
               agent: session?.label ?? rawAgent,
               model: session?.model ?? null,
               status,
+              mode: session ? "conversation" as const : "terminal" as const,
+              terminalColumns: meta.cols,
+              terminalRows: meta.rows,
+              terminalOutput: !session
+                ? truncateUtf8Tail(terminals.dumpBufferPlainForMobile(node.term), 16_000)
+                : undefined,
               unreadOnDesktop: unreadTermIdsRef.current.has(node.term),
+              completionSeq: meta.completionSeq,
+              commands: [...(session?.commands ?? [])]
+                .sort((left, right) => {
+                  const priority = (name: string) =>
+                    name === "/new" ? 0 : name === "/model" ? 1 : name === "/effort" ? 2 : 3;
+                  return priority(left.name) - priority(right.name);
+                })
+                .slice(0, 32)
+                .map((command) => ({
+                  name: command.name.slice(0, 80),
+                  description: command.description.slice(0, 180),
+                })),
+              activity: mobileAgentActivity(session?.items ?? []),
               conversation,
-              permission: session?.permission && session.permission.kind !== "question"
+              permission: session?.permission
                 ? {
                     id: session.permission.id,
+                    kind: session.permission.kind ?? "approval",
                     title: session.permission.title.slice(0, 240),
                     detail: session.permission.detail?.slice(0, 4_000) ?? null,
                     command: session.permission.command?.slice(0, 8_000) ?? null,
@@ -802,6 +1019,18 @@ export default function App() {
                       id: option.id,
                       label: option.label.slice(0, 120),
                       kind: option.kind,
+                    })),
+                    questions: (session.permission.questions ?? []).slice(0, 3).map((question) => ({
+                      id: question.id.slice(0, 160),
+                      header: question.header.slice(0, 120),
+                      question: question.question.slice(0, 1_000),
+                      multiSelect: question.multiSelect,
+                      options: question.options.slice(0, 12).map((option) => ({
+                        id: option.id.slice(0, 160),
+                        label: option.label.slice(0, 240),
+                        description: option.description.slice(0, 1_000),
+                        preview: option.preview?.slice(0, 4_000) ?? null,
+                      })),
                     })),
                   }
                 : null,
@@ -813,47 +1042,112 @@ export default function App() {
       const serialized = JSON.stringify(boundedSnapshot);
       if (serialized === mobileWorkspaceSnapshotRef.current) return;
       mobileWorkspaceSnapshotRef.current = serialized;
+      publishing = true;
       void mobileSendWorkspace(boundedSnapshot).then((result) => {
         if (result.failed > 0) throw new Error(result.errors.join("; "));
       }).catch((error) => {
+        if (mobileWorkspaceSnapshotRef.current === serialized) {
+          mobileWorkspaceSnapshotRef.current = "";
+        }
         if (!stopped) {
-          if (mobileWorkspaceSnapshotRef.current === serialized) {
-            mobileWorkspaceSnapshotRef.current = "";
-          }
           console.error("mobile workspace sync", error);
-          timer = window.setTimeout(publish, 5_000);
+          publishQueued = true;
+          publishDelay = 5_000;
+        } else {
+          // A failed request can outlive the React effect that started it. Ask
+          // the current effect to retry instead of leaving its dedupe marker
+          // permanently suppressing this snapshot.
+          window.dispatchEvent(new Event("duckweed:mobile-sync-retry"));
+        }
+      }).finally(() => {
+        publishing = false;
+        if (!stopped && publishQueued) {
+          const delay = publishDelay;
+          const queuedUrgently = urgentPublishQueued;
+          publishQueued = false;
+          urgentPublishQueued = false;
+          publishDelay = 250;
+          if (queuedUrgently) {
+            queueMicrotask(() => publish(true));
+          } else {
+            schedule(delay);
+          }
         }
       });
     };
 
-    const schedule = () => {
-      if (stopped || timer) return;
-      timer = window.setTimeout(publish, 250);
+    const schedule = (delay = 250) => {
+      if (stopped) return;
+      if (publishing) {
+        publishQueued = true;
+        publishDelay = Math.max(publishDelay, delay);
+        return;
+      }
+      if (timer) return;
+      timer = window.setTimeout(publish, delay);
+    };
+    const refreshUsageLimits = (maxAgeMs = 60_000) => {
+      void prefetchUsage(usageDays, maxAgeMs).then((snapshot) => {
+        if (stopped) return;
+        usageLimits = mobileUsageLimits(snapshot.quotas);
+        schedule();
+      }).catch((error) => {
+        if (!stopped) console.error("mobile usage limits sync", error);
+      });
     };
     const offAgents = agentSessions.subscribeAll(schedule);
     const offTerminals = termIds.map((termId) => terminals.subscribeSession(termId, schedule));
+    const offTerminalOutput = termIds.map((termId) =>
+      terminals.subscribeOutput(termId, () => {
+        // PTYs can repaint dozens of times per second. A short coalescing
+        // window stays live on a phone without flooding the encrypted relay.
+        schedule(600);
+      }),
+    );
     const paired = () => {
       mobileWorkspaceSnapshotRef.current = "";
+      hasPairedDevice = true;
+      refreshUsageLimits();
       schedule();
     };
+    const refreshed = () => {
+      mobileWorkspaceSnapshotRef.current = "";
+      hasPairedDevice = true;
+      refreshUsageLimits(0);
+      schedule();
+    };
+    const retry = () => schedule(1_000);
     window.addEventListener("duckweed:mobile-paired", paired);
-    window.addEventListener("duckweed:mobile-refresh", paired);
-    const presence = window.setInterval(() => {
-      void mobileSendPresence().then((result) => {
-        if (result.failed > 0) throw new Error(result.errors.join("; "));
-      }).catch((error) => {
-        if (!stopped) console.error("mobile presence sync", error);
-      });
-    }, 30_000);
+    window.addEventListener("duckweed:mobile-refresh", refreshed);
+    window.addEventListener("duckweed:mobile-sync-retry", retry);
+    // Turn completion is a data synchronization boundary. Send the settled
+    // state directly from the protocol event, even when browser timers and
+    // animation frames are paused by a minimized desktop window.
+    const offTurnEnds = agentSessions.subscribeTurnEnd(() => publish(true));
+    // Keep phone meters on the same live provider reading as the desktop Usage
+    // panel, not the snapshot from when the pairing was first opened.
+    const usagePoll = window.setInterval(() => {
+      if (hasPairedDevice) refreshUsageLimits(0);
+    }, 60_000);
+    void mobileStatus().then((status) => {
+      if (stopped || status.devices.length === 0) return;
+      hasPairedDevice = true;
+      refreshUsageLimits();
+    }).catch((error) => {
+      if (!stopped) console.error("mobile usage limits status", error);
+    });
     schedule();
     return () => {
       stopped = true;
       if (timer) window.clearTimeout(timer);
-      window.clearInterval(presence);
+      window.clearInterval(usagePoll);
       window.removeEventListener("duckweed:mobile-paired", paired);
-      window.removeEventListener("duckweed:mobile-refresh", paired);
+      window.removeEventListener("duckweed:mobile-refresh", refreshed);
+      window.removeEventListener("duckweed:mobile-sync-retry", retry);
+      offTurnEnds();
       offAgents();
       offTerminals.forEach((off) => off());
+      offTerminalOutput.forEach((off) => off());
     };
   }, [tabs, termIds, termIdsKey, unreadTermIds]);
 
@@ -864,7 +1158,7 @@ export default function App() {
     let stopped = false;
     let timer = 0;
     let polling = false;
-    let pollDelay = 1_800;
+    let pollDelay = 1_200;
     const handling = new Set<string>();
     const applied = new Set<string>();
 
@@ -873,7 +1167,9 @@ export default function App() {
       polling = true;
       try {
         const commands = await mobilePollCommands();
-        pollDelay = commands.length > 0 ? 1_800 : Math.min(30_000, pollDelay * 2);
+        // Mobile input is interactive. A 30-second idle backoff made a send
+        // look broken even when it was merely waiting in the relay queue.
+        pollDelay = commands.length > 0 ? 1_200 : Math.min(4_000, pollDelay * 1.5);
         for (const command of commands) {
           const key = `${command.deviceId}:${command.commandId}`;
           if (handling.has(key)) continue;
@@ -882,6 +1178,16 @@ export default function App() {
             if (!applied.has(key)) {
               if (command.kind === "refresh") {
                 window.dispatchEvent(new Event("duckweed:mobile-refresh"));
+              } else if (command.kind === "create_terminal" && command.projectId) {
+                window.dispatchEvent(new CustomEvent("duckweed:mobile-create-terminal", {
+                  detail: { projectId: command.projectId, command: command.text ?? command.agent ?? "" },
+                }));
+              } else if (command.kind === "close_terminal" && command.terminalId) {
+                window.dispatchEvent(new CustomEvent("duckweed:mobile-close-terminal", {
+                  detail: { terminalId: command.terminalId },
+                }));
+              } else if (command.kind === "read" && command.terminalId) {
+                acknowledgeTermFromMobile(command.terminalId, command.completionSeq);
               } else if (
                 command.kind === "approval" &&
                 command.terminalId &&
@@ -897,6 +1203,40 @@ export default function App() {
                   agentSessions.respond(command.terminalId, command.permissionId, command.optionId);
                 }
               } else if (
+                command.kind === "question" &&
+                command.terminalId &&
+                command.permissionId
+              ) {
+                const permission = agentSessions.get(command.terminalId)?.permission;
+                if (permission?.id === command.permissionId && permission.kind === "question") {
+                  if (command.answers.length === 0) {
+                    const reject = permission.options.find((option) => option.kind === "reject");
+                    agentSessions.respond(
+                      command.terminalId,
+                      command.permissionId,
+                      reject?.id ?? "deny",
+                    );
+                  } else {
+                    const asked = new Map(
+                      (permission.questions ?? []).map((question) => [question.id, question]),
+                    );
+                    const uniqueIds = new Set(command.answers.map((answer) => answer.questionId));
+                    const valid = uniqueIds.size === asked.size && command.answers.length === asked.size &&
+                      command.answers.every((answer) => {
+                        const question = asked.get(answer.questionId);
+                        if (!question) return false;
+                        const labels = new Set(question.options.map((option) => option.label));
+                        return (question.multiSelect || answer.labels.length <= 1) &&
+                          new Set(answer.labels).size === answer.labels.length &&
+                          answer.labels.every((label) => labels.has(label)) &&
+                          (answer.labels.length > 0 || Boolean(answer.custom?.trim()));
+                      });
+                    if (valid) {
+                      agentSessions.answer(command.terminalId, command.permissionId, command.answers);
+                    }
+                  }
+                }
+              } else if (
                 command.kind === "input" &&
                 command.terminalId &&
                 (command.text || command.images.length > 0)
@@ -906,10 +1246,8 @@ export default function App() {
                   const session = agentSessions.get(command.terminalId);
                   if (session) {
                     agentSessions.submit(command.terminalId, command.text ?? "", command.images);
-                  } else if (command.text && (meta.agent || meta.busy)) {
-                    terminals.writeRaw(command.terminalId, `${command.text}\r`);
                   } else if (command.text) {
-                    terminals.submitCommand(command.terminalId, command.text);
+                    terminals.submitRemoteInput(command.terminalId, command.text);
                   }
                 }
               }
@@ -942,6 +1280,10 @@ export default function App() {
   // use the turn credits maintained by the terminal registry.
   useEffect(() => {
     const syncWorkingAgents = () => {
+      const openCount = termIds.filter((termId) => {
+        const meta = terminals.getMeta(termId);
+        return agentSessions.isActive(termId) || meta?.agent != null || meta?.agentUi != null;
+      }).length;
       const next = new Set(
         termIds.filter((termId) => {
           const agent = agentSessions.get(termId);
@@ -958,6 +1300,7 @@ export default function App() {
         }
         return next;
       });
+      setOpenAgentCount((previous) => (previous === openCount ? previous : openCount));
     };
 
     syncWorkingAgents();
@@ -996,6 +1339,10 @@ export default function App() {
       };
       processState.current.set(termId, current);
       if (!previous) return;
+
+      if (current.completionSeq > previous.completionSeq) {
+        completeScheduledSendsForTarget(termId);
+      }
 
       if (!shouldSignalCompletion(previous, current)) return;
       const completionCue =
@@ -1037,13 +1384,14 @@ export default function App() {
           // A completion that survives the desktop grace period is unread on
           // the phone, including an unattended selected terminal.
           unreadOnDesktop: true,
+          completionSeq: current.completionSeq,
         } as const;
         const timer = window.setTimeout(() => {
           mobileCompletionTimers.current.delete(completionKey);
           if (!shouldSendDelayedMobileCompletion({
             unreadAtCompletion,
             unreadNow: unreadTermIdsRef.current.has(termId),
-            lastInteractionAt: lastTerminalInteractionAt.current.get(termId) ?? null,
+            lastInteractionAt: lastDesktopInteractionAt.current,
             completedAt,
           })) return;
           void mobileSendCompletion(message)
@@ -1077,7 +1425,14 @@ export default function App() {
     };
     // Tab metadata changes must not tear down every terminal subscription.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [termIdsKey, acknowledgeTerm, flashCompletion, isFocusedTerm, isSelectedTerm]);
+  }, [
+    termIdsKey,
+    acknowledgeTerm,
+    completeScheduledSendsForTarget,
+    flashCompletion,
+    isFocusedTerm,
+    isSelectedTerm,
+  ]);
 
   // ---------------------------------------------------------- power watch
 
@@ -1135,9 +1490,14 @@ export default function App() {
     return entries;
   }, []);
 
+  const firePowerAction = useCallback(async (action: powerWatch.PowerAction) => {
+    await flushDurableStorage();
+    await powerAction(action);
+  }, [acknowledgeTermFromMobile]);
+
   useEffect(
-    () => powerWatch.connect({ probe: probeActivity, fire: powerAction }),
-    [probeActivity],
+    () => powerWatch.connect({ probe: probeActivity, fire: firePowerAction }),
+    [firePowerAction, probeActivity],
   );
 
   // Power watch (and anything else that lists panes) can jump the UI to a
@@ -1575,30 +1935,60 @@ export default function App() {
   // --------------------------------------------------------------- panes
 
   const splitPane = useCallback(
-    (leafId: string, zone: "left" | "right" | "top" | "bottom") => {
-      const tab = currentTab();
-      if (!tab || paneMotionRef.current) return;
-      const node = leaf(createTerm());
+    (
+      leafId: string,
+      zone: "left" | "right" | "top" | "bottom",
+      options: {
+        tabId?: string;
+        cwd?: string | null;
+        command?: string | null;
+        immediate?: boolean;
+        revealSplit?: boolean;
+      } = {},
+    ): string | null => {
+      const tab = options.tabId
+        ? tabsRef.current.find((candidate) => candidate.id === options.tabId) ?? null
+        : currentTab();
+      if (!tab || paneMotionRef.current) return null;
+      const target = findLeaf(tab.root, leafId);
+      if (!target) return null;
+      const targetMeta = terminals.getMeta(target.term);
+      const cwd = options.cwd !== undefined
+        ? options.cwd
+        : targetMeta?.cwd || tab.project?.path || null;
+      const node = leaf(createTerm({ cwd, command: options.command ?? null }));
       const nextRoot = insertBeside(tab.root, leafId, node, zone);
 
       // Fullscreen is a mode, not a one-off: splitting inside it opens the new
       // terminal fullscreen too, and the switcher on the right is where the
       // pane it was split from went. Only the user leaves fullscreen. The
       // split animation is skipped because the split itself is not on screen.
-      if (tab.zoomedLeaf) {
+      if (tab.zoomedLeaf && !options.revealSplit) {
         updateTab(tab.id, (t) => ({
           ...t,
           root: nextRoot,
           activeLeaf: node.id,
           zoomedLeaf: node.id,
         }));
-        return;
+        return node.term;
+      }
+
+      // Remote mobile actions do not need a transition on a possibly hidden
+      // tab. Commit the real split first, then let the caller reveal its tab.
+      if (options.immediate) {
+        updateTab(tab.id, (t) => ({
+          ...t,
+          root: nextRoot,
+          activeLeaf: node.id,
+          zoomedLeaf: null,
+        }));
+        return node.term;
       }
 
       const owner = findLeafOwner(nextRoot, node.id);
       if (!owner) {
         releaseTerm(node.term);
-        return;
+        return null;
       }
       const previousSplit = findSplit(tab.root, owner.split.id);
       const fromSizes = owner.split.children.map((child) => {
@@ -1631,13 +2021,16 @@ export default function App() {
             zoomedLeaf: null,
           })),
       );
+      return node.term;
     },
     [createTerm, currentTab, releaseTerm, runPaneTransition, updateTab],
   );
 
   const closePane = useCallback(
-    async (leafId: string) => {
-      const tab = currentTab();
+    async (leafId: string, options: { tabId?: string } = {}) => {
+      const tab = options.tabId
+        ? tabsRef.current.find((candidate) => candidate.id === options.tabId) ?? null
+        : currentTab();
       if (!tab || paneMotionRef.current) return;
       const node = findLeaf(tab.root, leafId);
       if (!node) return;
@@ -1656,8 +2049,8 @@ export default function App() {
       }
 
       // Re-read after the dialog — the layout may have changed while it was open.
-      const tabNow = currentTab();
-      if (!tabNow || tabNow.id !== tab.id) return;
+      const tabNow = tabsRef.current.find((candidate) => candidate.id === tab.id) ?? null;
+      if (!tabNow) return;
       const nodeNow = findLeaf(tabNow.root, leafId);
       if (!nodeNow) return;
 
@@ -2120,6 +2513,9 @@ export default function App() {
       terminals.setHighlight(initial.highlight);
       terminals.setAgentUi(initial.customAgentUi);
       agentSessions.setFollowupMode(initial.agentFollowupMode);
+      // Keep OpenCode's OpenRouter picker current after app updates, Vite HMR,
+      // and manual WebView reloads. OpenCode launches share and await this task.
+      void agentSessions.refreshOpenCodeModels();
       terminals.setInputMode(initial.inputMode);
       preloadCompletionSound();
       // Durable storage has been restored into the WebView copy by now, so the
@@ -2460,6 +2856,32 @@ export default function App() {
   // --------------------------------------------------------- tools panel
 
   const toolsVisible = toolsOpen && !settingsActive;
+
+  const observePorts = useCallback((ports: readonly AppPort[]) => {
+    setSharedPortActive(ports.some((port) => port.forward !== null));
+  }, []);
+
+  useEffect(() => {
+    if (!TAURI_RUNTIME) return;
+    let disposed = false;
+    const refresh = () => {
+      void portsList().then(
+        (snapshot) => {
+          if (!disposed) observePorts(snapshot.ports);
+        },
+        () => {
+          // Keep the last known state if a scan fails. A public share should
+          // not look inactive merely because one background poll was refused.
+        },
+      );
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 2500);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+    };
+  }, [observePorts]);
 
   useEffect(() => {
     if (toolsVisible) {
@@ -3144,6 +3566,23 @@ export default function App() {
       ),
     [tabs, workingAgentTermIds],
   );
+  const agentTargets = useMemo<AgentTarget[]>(() => {
+    if (!activeTab) return [];
+    return leaves(activeTab.root).flatMap((node, index) => {
+      if (!workingAgentTermIds.has(node.term)) return [];
+      const session = agentSessions.get(node.term);
+      const meta = terminals.getMeta(node.term);
+      const rawLabel = session?.label ?? meta?.agent ?? "Agent";
+      const label = rawLabel.charAt(0).toUpperCase() + rawLabel.slice(1);
+      return [
+        {
+          termId: node.term,
+          label,
+          detail: meta?.title || `Pane ${index + 1}`,
+        },
+      ];
+    });
+  }, [activeTab, workingAgentTermIds]);
   const unreadCounts = useMemo(
     () =>
       Object.fromEntries(
@@ -3252,6 +3691,11 @@ export default function App() {
       onSplit: splitAt,
       onClose: closePaneById,
       onToggleZoom: toggleZoom,
+      agentTargets,
+      scheduledSends,
+      onScheduleSend: scheduleSend,
+      onCancelSchedule: cancelSchedule,
+      onBeforeSubmit: beforeScheduledSubmit,
       onStartDrag,
       onResize: resizeSplitSizes,
     }),
@@ -3259,8 +3703,11 @@ export default function App() {
       activeTab?.activeLeaf,
       activeTab?.zoomedLeaf,
       acknowledgeTerm,
+      agentTargets,
       activatePane,
+      beforeScheduledSubmit,
       browseActiveProject,
+      cancelSchedule,
       closePaneById,
       completionFlashes,
       finishPaneMotion,
@@ -3273,6 +3720,8 @@ export default function App() {
       project,
       recents,
       resizeSplitSizes,
+      scheduleSend,
+      scheduledSends,
       spawnFor,
       splitAt,
       toggleZoom,
@@ -3297,6 +3746,42 @@ export default function App() {
       ? tabColorHex(activeTab?.color)
       : null;
 
+  useEffect(() => {
+    const create = (event: Event) => {
+      const detail = (event as CustomEvent<{ projectId: string; command: string }>).detail;
+      const openSplit = (attempt = 0) => {
+        const source = tabsRef.current.find((tab) => tab.id === detail.projectId);
+        if (!source?.project) return;
+        const term = splitPane(source.activeLeaf, "right", {
+          tabId: source.id,
+          cwd: source.project.path,
+          command: detail.command.trim() || null,
+          immediate: true,
+          // A phone asked for a visible split, so leave pane fullscreen mode.
+          revealSplit: true,
+        });
+        if (!term && paneMotionRef.current && attempt < 3) {
+          window.setTimeout(() => openSplit(attempt + 1), PANE_MOTION_MS + 100);
+          return;
+        }
+        if (term) selectTab(source.id);
+      };
+      openSplit();
+    };
+    const close = (event: Event) => {
+      const terminalId = (event as CustomEvent<{ terminalId: string }>).detail.terminalId;
+      const owner = tabsRef.current.find((tab) => leaves(tab.root).some((node) => node.term === terminalId));
+      const leaf = owner && leaves(owner.root).find((node) => node.term === terminalId);
+      if (owner && leaf) void closePane(leaf.id, { tabId: owner.id });
+    };
+    window.addEventListener("duckweed:mobile-create-terminal", create);
+    window.addEventListener("duckweed:mobile-close-terminal", close);
+    return () => {
+      window.removeEventListener("duckweed:mobile-create-terminal", create);
+      window.removeEventListener("duckweed:mobile-close-terminal", close);
+    };
+  }, [closePane, selectTab, splitPane]);
+
   return (
     <div
       className={`app${activeWindowColor ? " has-tab-color" : ""}${
@@ -3312,6 +3797,7 @@ export default function App() {
         settingsActive={settingsActive}
         onOpenSettings={openSettings}
         toolsOpen={toolsOpen}
+        toolsActive={openChecklistItems > 0 || powerScheduleActive || sharedPortActive}
         onToggleTools={() => setToolsOpen((open) => !open)}
         locked={dailyLocked}
       >
@@ -3371,6 +3857,7 @@ export default function App() {
               onOpenLayout={openLayoutTemplate}
               stats={toolStats}
               ownerNames={portOwnerNames}
+              onPortsSnapshot={observePorts}
               section={toolsSection}
               onSection={setToolsSection}
             />
@@ -3396,6 +3883,7 @@ export default function App() {
                 wellbeingEnabled={dailyUsage.state.enabled}
                 dailyLimitMinutes={dailyUsage.state.limitMinutes}
                 dailyUsedMs={dailyUsage.state.usedMs}
+                openAgentCount={openAgentCount}
                 customAgentUi={customAgentUi}
                 agentFollowupMode={agentFollowupMode}
                 autoApproveLockedRequests={autoApproveLockedRequests}
