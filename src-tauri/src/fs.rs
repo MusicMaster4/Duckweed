@@ -7,7 +7,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -563,10 +563,124 @@ pub fn write_file(path: &str, content: String) -> Result<(), String> {
     std::fs::write(file, content.as_bytes()).map_err(|e| format!("could not write `{path}`: {e}"))
 }
 
+/// Resolve an agent-requested file against a workspace after following every
+/// symlink/junction in the existing portion of the path. A lexical prefix is
+/// not sufficient here: `workspace/link/file` may actually live outside the
+/// workspace when `link` is a filesystem link.
+fn workspace_file_path(workspace: &str, requested: &str) -> Result<PathBuf, String> {
+    let root = std::fs::canonicalize(workspace)
+        .map_err(|e| format!("could not open workspace `{workspace}`: {e}"))?;
+    let requested_path = Path::new(requested);
+    let candidate = if requested_path.is_absolute() {
+        requested_path.to_path_buf()
+    } else {
+        root.join(requested_path)
+    };
+
+    // Existing targets can be canonicalized directly. New files use their
+    // canonical parent, which also catches a parent symlink or junction that
+    // escapes the workspace.
+    let resolved = match std::fs::symlink_metadata(&candidate) {
+        Ok(_) => std::fs::canonicalize(&candidate)
+            .map_err(|e| format!("could not resolve `{}`: {e}", candidate.display()))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let parent = candidate
+                .parent()
+                .ok_or_else(|| format!("`{}` has no parent folder", candidate.display()))?;
+            let name = candidate
+                .file_name()
+                .ok_or_else(|| format!("`{}` is not a file path", candidate.display()))?;
+            std::fs::canonicalize(parent)
+                .map_err(|e| format!("could not resolve folder `{}`: {e}", parent.display()))?
+                .join(name)
+        }
+        Err(error) => {
+            return Err(format!(
+                "could not inspect `{}`: {error}",
+                candidate.display()
+            ));
+        }
+    };
+
+    if resolved != root && !resolved.starts_with(&root) {
+        return Err("Path outside workspace.".into());
+    }
+    Ok(resolved)
+}
+
+/// Read text on behalf of an agent, confined to its launched workspace.
+pub fn read_workspace_file(workspace: &str, path: &str) -> Result<FileContent, String> {
+    let resolved = workspace_file_path(workspace, path)?;
+    read_file(&resolved.to_string_lossy())
+}
+
+/// Write text on behalf of an agent, confined to its launched workspace.
+pub fn write_workspace_file(workspace: &str, path: &str, content: String) -> Result<(), String> {
+    let resolved = workspace_file_path(workspace, path)?;
+    write_file(&resolved.to_string_lossy(), content)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temporary_root(label: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("duckweed-{label}-{unique}"))
+    }
+
+    #[test]
+    fn workspace_file_access_rejects_paths_outside_the_canonical_root() {
+        let root = temporary_root("workspace-file-root");
+        let outside = temporary_root("workspace-file-outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let outside_file = outside.join("secret.txt");
+        std::fs::write(&outside_file, "secret").unwrap();
+
+        assert_eq!(
+            read_workspace_file(&root.to_string_lossy(), &outside_file.to_string_lossy())
+                .unwrap_err(),
+            "Path outside workspace."
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(outside).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_file_access_rejects_a_symlink_that_escapes_the_root() {
+        use std::os::unix::fs::symlink;
+
+        let root = temporary_root("workspace-link-root");
+        let outside = temporary_root("workspace-link-outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), "secret").unwrap();
+        symlink(&outside, root.join("link")).unwrap();
+
+        assert_eq!(
+            read_workspace_file(&root.to_string_lossy(), "link/secret.txt").unwrap_err(),
+            "Path outside workspace."
+        );
+        assert_eq!(
+            write_workspace_file(
+                &root.to_string_lossy(),
+                "link/new.txt",
+                "overwritten".into(),
+            )
+            .unwrap_err(),
+            "Path outside workspace."
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(outside).unwrap();
+    }
 
     #[test]
     fn workspace_index_returns_relative_files_and_skips_dependencies() {

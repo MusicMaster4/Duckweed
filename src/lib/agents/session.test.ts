@@ -66,6 +66,7 @@ mock.module("../ipc", () => ({
   agentSessionTranscript: async () => [],
   agentSessionsList: async () => [],
   homeDir: async () => "H:/",
+  listDir: async () => [],
   readFile: async () => "",
 }));
 
@@ -87,6 +88,12 @@ const cursorLaunch: AgentLaunch = {
   ...grokLaunch,
   agent: "cursor",
   program: "cursor-agent",
+};
+
+const openCodeLaunch: AgentLaunch = {
+  ...grokLaunch,
+  agent: "opencode",
+  program: "opencode",
 };
 
 function rpc(value: unknown): Record<string, unknown> {
@@ -250,5 +257,26 @@ describe("Grok custom-UI follow-up steering", () => {
     expect(
       sent.map(rpc).filter((message) => message.method === "session/prompt"),
     ).toHaveLength(1);
+  });
+
+  test("opens an existing OpenCode conversation with its native session flag", async () => {
+    const requests: session.AgentAuthRequest[] = [];
+    const unsubscribe = session.subscribeAuthRequest((request) => requests.push(request));
+    try {
+      expect(await session.start("t-opencode-native", openCodeLaunch, "H:/project")).toBeNull();
+      await handshake();
+
+      expect(session.handoffToNative("t-opencode-native")).toBe(true);
+      expect(requests).toEqual([
+        expect.objectContaining({
+          termId: "t-opencode-native",
+          agent: "opencode",
+          action: "native",
+          command: 'opencode --session "s1"',
+        }),
+      ]);
+    } finally {
+      unsubscribe();
+    }
   });
 });

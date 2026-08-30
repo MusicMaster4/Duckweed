@@ -247,6 +247,24 @@ async fn write_file(path: String, content: String) -> Result<(), String> {
     blocking(move || fs::write_file(&path, content)).await
 }
 
+/// Read a file requested by an agent after resolving filesystem links and
+/// proving the target remains inside the launched workspace.
+#[tauri::command]
+async fn read_workspace_file(workspace: String, path: String) -> Result<FileContent, String> {
+    blocking(move || fs::read_workspace_file(&workspace, &path)).await
+}
+
+/// Write a file requested by an agent under the same canonical containment
+/// check used for reads.
+#[tauri::command]
+async fn write_workspace_file(
+    workspace: String,
+    path: String,
+    content: String,
+) -> Result<(), String> {
+    blocking(move || fs::write_workspace_file(&workspace, &path, content)).await
+}
+
 /// Local and remote branches of the repo `path` sits in.
 #[tauri::command]
 async fn git_branches(path: String) -> Result<Branches, String> {
@@ -975,6 +993,8 @@ fn main() {
             read_file,
             read_dropped_image,
             write_file,
+            read_workspace_file,
+            write_workspace_file,
             git_branches,
             git_checkout,
             git_diff_stats,

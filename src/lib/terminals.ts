@@ -816,7 +816,9 @@ function ensureAgentUiListener(): void {
     closeAgentUi(termId);
     session.term.write(
       `\r\n\x1b[38;5;244m${
-        action === "login"
+        action === "native"
+          ? "Opening the provider's native interface."
+          : action === "login"
           ? "Sign in to continue in the Custom Agent UI."
           : "Signing out with the agent CLI."
       }\x1b[0m\r\n`,

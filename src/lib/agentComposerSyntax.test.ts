@@ -13,6 +13,8 @@ describe("agent composer syntax highlighting", () => {
       "",
       "/",
       "/model gpt-5",
+      "$",
+      "$unslop rewrite this",
       "Review @src/AgentComposer.tsx and @",
       'Open @"docs/release notes.md',
       "mail@example.com",
@@ -37,6 +39,17 @@ describe("agent composer syntax highlighting", () => {
       ["@README.md", "file"],
       [" and mail@example.com", "plain"],
     ]);
+  });
+
+  test("gives selected skills their own syntax token", () => {
+    expect(compact("Use $unslop and $html-plan for this")).toEqual([
+      ["Use ", "plain"],
+      ["$unslop", "skill"],
+      [" and ", "plain"],
+      ["$html-plan", "skill"],
+      [" for this", "plain"],
+    ]);
+    expect(compact("price$amount stays plain")).toEqual([["price$amount stays plain", "plain"]]);
   });
 
   test("keeps a quoted path, spaces, and escaped quotes in one mention", () => {

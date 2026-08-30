@@ -9024,7 +9024,8 @@ body.is-resizing * {
   font-size: 11px;
 }
 
-.agent-question-custom textarea {
+.agent-question-custom textarea,
+.agent-question-custom input {
   display: block;
   width: 100%;
   min-height: 30px;
@@ -9040,11 +9041,13 @@ body.is-resizing * {
   resize: none;
 }
 
-.agent-question-custom textarea::placeholder {
+.agent-question-custom textarea::placeholder,
+.agent-question-custom input::placeholder {
   color: var(--text-faint);
 }
 
-.agent-question-custom textarea:focus {
+.agent-question-custom textarea:focus,
+.agent-question-custom input:focus {
   border-color: color-mix(in srgb, var(--agent-accent) 55%, transparent);
   outline: none;
 }
@@ -9588,6 +9591,268 @@ body.is-resizing * {
   padding: 5px 9px 2px;
 }
 
+.agent-question-url {
+  display: inline-flex;
+  width: fit-content;
+  padding: 6px 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--agent-accent);
+  font-size: 11px;
+  text-decoration: none;
+}
+
+.agent-question-url:hover {
+  border-color: var(--border-strong);
+  background: var(--hover);
+}
+
+.agent-runtime-panel {
+  position: absolute;
+  top: 34px;
+  right: 8px;
+  z-index: 34;
+  display: flex;
+  flex-direction: column;
+  width: min(440px, calc(100% - 16px));
+  max-height: min(560px, calc(100% - 50px));
+  overflow: hidden;
+  border: 1px solid var(--border-strong);
+  border-radius: 9px;
+  background: var(--bg-elevated);
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.45);
+}
+
+.agent-runtime-tabs {
+  display: flex;
+  gap: 2px;
+  padding: 5px;
+  border-bottom: 1px solid var(--border);
+}
+
+.agent-runtime-tabs button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  padding: 0 10px;
+  border-radius: 5px;
+  color: var(--text-faint);
+  font-size: 11px;
+}
+
+.agent-runtime-tabs button:hover,
+.agent-runtime-tabs button.is-active {
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--text);
+}
+
+.agent-runtime-tabs i {
+  min-width: 16px;
+  padding: 1px 4px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--agent-accent) 18%, transparent);
+  color: var(--agent-accent);
+  font-size: 9px;
+  font-style: normal;
+  text-align: center;
+}
+
+.agent-runtime-body {
+  min-height: 160px;
+  overflow-y: auto;
+  padding: 8px;
+}
+
+.agent-runtime-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 26px;
+  padding: 0 4px;
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.agent-runtime-section-head button,
+.agent-runtime-stop,
+.agent-native-fallback button {
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--text-muted);
+  font-size: 10px;
+  letter-spacing: normal;
+  text-transform: none;
+}
+
+.agent-runtime-section-head button:hover:not(:disabled),
+.agent-runtime-stop:hover,
+.agent-native-fallback button:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text);
+}
+
+.agent-runtime-group + .agent-runtime-group {
+  margin-top: 10px;
+}
+
+.agent-runtime-group h4 {
+  margin: 4px 5px;
+  color: var(--text-faint);
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.agent-runtime-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 40px;
+  padding: 5px 6px;
+  border-radius: 6px;
+}
+
+.agent-runtime-row:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.agent-runtime-status {
+  width: 7px;
+  height: 7px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--text-faint);
+}
+
+.agent-runtime-status.is-ready,
+.agent-runtime-status.is-running,
+.agent-runtime-status.is-done {
+  background: var(--accent);
+}
+
+.agent-runtime-status.is-error,
+.agent-runtime-status.is-stopped {
+  background: var(--rose);
+}
+
+.agent-runtime-status.is-connecting,
+.agent-runtime-status.is-pending,
+.agent-runtime-status.is-blocked {
+  background: var(--amber);
+}
+
+.agent-runtime-copy {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.agent-runtime-copy strong {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 11.5px;
+  font-weight: 500;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.agent-runtime-copy small {
+  overflow: hidden;
+  color: var(--text-faint);
+  font-size: 10px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.agent-runtime-row code {
+  flex: none;
+  max-width: 130px;
+  overflow: hidden;
+  color: var(--agent-accent);
+  font-size: 9.5px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.agent-runtime-empty,
+.agent-runtime-error {
+  margin: 22px 8px;
+  color: var(--text-faint);
+  font-size: 11px;
+  text-align: center;
+}
+
+.agent-runtime-error {
+  color: var(--rose);
+}
+
+.agent-capability-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 5px;
+  margin-top: 5px;
+}
+
+.agent-capability-grid span {
+  overflow: hidden;
+  padding: 5px 7px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--text-faint);
+  font-size: 9.5px;
+  text-transform: capitalize;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.agent-capability-grid span.is-supported {
+  border-color: color-mix(in srgb, var(--agent-accent) 32%, var(--border));
+  color: var(--text-muted);
+}
+
+.agent-capability-grid span.is-unsupported {
+  opacity: 0.45;
+  text-decoration: line-through;
+}
+
+.agent-native-fallback {
+  margin-top: 12px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+}
+
+.agent-native-fallback strong {
+  color: var(--text);
+  font-size: 11px;
+}
+
+.agent-native-fallback p,
+.agent-native-fallback small {
+  display: block;
+  margin: 3px 0 8px;
+  color: var(--text-faint);
+  font-size: 10px;
+}
+
+.agent-native-fallback button:disabled,
+.agent-runtime-section-head button:disabled {
+  cursor: default;
+  opacity: 0.4;
+}
+
+@container agent-pane (max-width: 520px) {
+  .agent-capability-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 /* The textarea retains native editing, selection, undo, and accessibility.
    This inert layer paints agent-specific syntax with identical text metrics. */
 .agent-composer-editor {
@@ -9625,6 +9890,10 @@ body.is-resizing * {
 
 .agent-composer-token.token-file {
   color: #8cc4ff;
+}
+
+.agent-composer-token.token-skill {
+  color: #c792ea;
 }
 
 /* T3-style control strip under the input: model + effort always one click away. */
@@ -10040,6 +10309,30 @@ body.is-resizing * {
 .agent-commands-hint span {
   font-family: var(--font-mono);
   opacity: 0.75;
+}
+
+.agent-commands-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 34px;
+  padding: 6px 8px;
+  color: var(--text-faint);
+  font-size: 11px;
+}
+
+.agent-commands .agent-command-retry {
+  width: auto;
+  padding: 3px 7px;
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-size: 10px;
+}
+
+.agent-commands .agent-command-retry:hover {
+  border-color: var(--border-strong);
+  background: var(--hover);
 }
 
 .agent-commands button {

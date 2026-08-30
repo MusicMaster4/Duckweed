@@ -96,6 +96,27 @@ describe("agent question", () => {
     expect(html).toContain('class="agent-question-send" disabled=""');
   });
 
+  test("renders numeric MCP fields with their bounds", () => {
+    const html = render([
+      {
+        id: "count",
+        header: "Count",
+        question: "How many retries?",
+        multiSelect: false,
+        inputKind: "integer",
+        required: true,
+        minimum: 1,
+        maximum: 10,
+        options: [],
+      },
+    ]);
+
+    expect(html).toContain('type="number"');
+    expect(html).toContain('step="1"');
+    expect(html).toContain('min="1"');
+    expect(html).toContain('max="10"');
+  });
+
   test("renders nothing when the permission carries no questions", () => {
     expect(
       renderToStaticMarkup(

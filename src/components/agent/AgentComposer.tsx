@@ -76,7 +76,70 @@ type MenuRow = {
 type Menu =
   | { kind: "commands"; rows: MenuRow[] }
   | { kind: "args"; command: "/model" | "/effort"; rows: MenuRow[] }
-  | { kind: "files"; mention: FileMention; rows: MenuRow[] };
+  | { kind: "files"; mention: FileMention; rows: MenuRow[] }
+  | {
+      kind: "extensions";
+      start: number;
+      end: number;
+      prefix: "$" | "@";
+      query: string;
+      rows: MenuRow[];
+    };
+
+function extensionMenu(
+  value: string,
+  cursor: number,
+  session: AgentSessionState,
+): Extract<Menu, { kind: "extensions" }> | null {
+  const match = /(?:^|\s)([$@])([^\s$@]*)$/.exec(value.slice(0, cursor));
+  if (!match) return null;
+  const prefix = match[1] as "$" | "@";
+  const query = match[2].toLowerCase();
+  const kind = prefix === "$" ? "skill" : "app";
+  const supported =
+    prefix === "$"
+      ? true
+      : (session.capabilities?.inputs.appMention ?? session.agent === "codex");
+  const rows = (session.extensions ?? [])
+    .filter(
+      (extension) =>
+        extension.callable &&
+        extension.kind === kind &&
+        (kind !== "skill" || extension.local === true) &&
+        !extension.name.startsWith("/") &&
+        (!query ||
+          extension.name.toLowerCase().includes(query) ||
+          extension.description.toLowerCase().includes(query)),
+    )
+    .slice(0, 10)
+    .map((extension) => ({
+      value: extension.name,
+      label: `${prefix}${extension.name}`,
+      description: extension.description || extension.source || "Available",
+      current: false,
+    }));
+  // `$` has no competing composer syntax, so it always owns the trigger while
+  // the provider supports skills. `@` gives an empty result back to workspace
+  // file mentions after the provider inventory has finished loading.
+  if (
+    !supported ||
+    (prefix === "@" &&
+      session.extensionsLoaded === true &&
+      !session.extensionsLoading &&
+      !session.extensionsError &&
+      !rows.length)
+  ) {
+    return null;
+  }
+  return {
+    kind: "extensions",
+    start: cursor - match[2].length - 1,
+    end: cursor,
+    prefix,
+    query,
+    rows,
+  };
+}
 
 function buildMenu(value: string, session: AgentSessionState): Menu | null {
   if (!value.startsWith("/")) return null;
@@ -180,13 +243,59 @@ export function AgentComposer({
   const mention = useMemo(() => activeFileMention(value, cursor), [value, cursor]);
   const mentionKey = mention ? `${mention.start}:${mention.query}` : null;
   const commandMenu = buildMenu(value, session);
+  const providerExtensionMenu = useMemo(
+    () => extensionMenu(value, cursor, session),
+    [
+      cursor,
+      session.agent,
+      session.capabilities,
+      session.extensions,
+      session.extensionsError,
+      session.extensionsLoaded,
+      session.extensionsLoading,
+      value,
+    ],
+  );
+  const extensionKey = providerExtensionMenu
+    ? `extension:${providerExtensionMenu.start}:${providerExtensionMenu.prefix}:${providerExtensionMenu.query}`
+    : null;
   const paintedTokens = useMemo(() => highlightAgentComposer(value), [value]);
   const showPaintedText = paintedTokens.some((token) => token.kind !== "plain");
   const menu: Menu | null =
-    mention && mentionKey !== dismissedMention && fileRows.length
+    (extensionKey !== dismissedMention ? providerExtensionMenu : null) ??
+    (mention && mentionKey !== dismissedMention && fileRows.length
       ? { kind: "files", mention, rows: fileRows }
-      : commandMenu;
+      : commandMenu);
   const rows = menu?.rows ?? [];
+
+  // The prefix itself is the discovery action. Users should not have to find
+  // and refresh a separate panel before `$` can behave like `/`.
+  useEffect(() => {
+    const loaded =
+      providerExtensionMenu?.prefix === "$"
+        ? session.localSkillsLoaded === true
+        : session.extensionsLoaded === true;
+    if (
+      !providerExtensionMenu ||
+      session.status === "starting" ||
+      loaded ||
+      session.extensionsLoading
+    ) {
+      return;
+    }
+    if (providerExtensionMenu.prefix === "$") {
+      void agents.refreshSkills(session.termId);
+    } else {
+      void agents.refreshExtensions(session.termId);
+    }
+  }, [
+    providerExtensionMenu?.prefix,
+    session.extensionsLoaded,
+    session.extensionsLoading,
+    session.localSkillsLoaded,
+    session.status,
+    session.termId,
+  ]);
 
   const leaveHistoryBrowse = () => {
     setHistoryIndex(null);
@@ -488,6 +597,14 @@ export function AgentComposer({
       placeCursor(next.cursor);
       return;
     }
+    if (menu.kind === "extensions") {
+      const token = `${menu.prefix}${row.value} `;
+      const next = value.slice(0, menu.start) + token + value.slice(menu.end);
+      const nextCursor = menu.start + token.length;
+      change(next, nextCursor);
+      placeCursor(nextCursor);
+      return;
+    }
     if (menu.kind === "commands") {
       // Trailing space opens the guided argument menu for /model and /effort.
       const next = `${row.value} `;
@@ -513,11 +630,13 @@ export function AgentComposer({
       applyRow(rows[highlighted]);
       return;
     }
-    if (rows.length > 0 && event.key === "Escape") {
+    if ((rows.length > 0 || menu?.kind === "extensions") && event.key === "Escape") {
       event.preventDefault();
       if (menu?.kind === "files") {
         setDismissedMention(mentionKey);
         setFileRows([]);
+      } else if (menu?.kind === "extensions") {
+        setDismissedMention(extensionKey);
       } else if (menu?.kind === "args") {
         // Back out to the bare command rather than wiping the draft.
         change(`${menu.command} `);
@@ -532,6 +651,7 @@ export function AgentComposer({
     // first rendered line, including lines created by automatic text wrapping.
     if (
       rows.length === 0 &&
+      menu?.kind !== "extensions" &&
       (event.key === "ArrowUp" || event.key === "ArrowDown") &&
       !event.altKey &&
       !event.ctrlKey &&
@@ -614,8 +734,9 @@ export function AgentComposer({
 
     if (event.key === "Enter" && !event.shiftKey && !event.ctrlKey && !event.altKey) {
       event.preventDefault();
+      if (menu?.kind === "extensions" && rows.length === 0) return;
       if (menu && rows.length > 0) {
-        if (menu.kind === "args" || menu.kind === "files") {
+        if (menu.kind === "args" || menu.kind === "files" || menu.kind === "extensions") {
           applyRow(rows[highlighted]);
           return;
         }
@@ -743,13 +864,15 @@ export function AgentComposer({
         .join(" ")}
       onMouseDown={focusInputFromChrome}
     >
-      {menu && rows.length > 0 && (
+      {menu && (rows.length > 0 || menu.kind === "extensions") && (
         <div
           className="agent-commands"
           role="listbox"
           aria-label={
             menu.kind === "commands"
               ? "Commands"
+              : menu.kind === "extensions"
+                ? menu.prefix === "$" ? "Skills" : "Apps"
               : menu.kind === "files"
                 ? "Files"
                 : menu.command === "/model"
@@ -757,14 +880,43 @@ export function AgentComposer({
                   : "Effort"
           }
         >
-          {(menu.kind === "args" || menu.kind === "files") && (
+          {(menu.kind === "args" || menu.kind === "files" || menu.kind === "extensions") && (
             <div className="agent-commands-hint">
               {menu.kind === "files"
                 ? "Mention a file"
+                : menu.kind === "extensions"
+                  ? menu.prefix === "$" ? "Invoke a skill" : "Mention an app"
                 : menu.command === "/model"
                   ? "Model"
                   : "Reasoning effort"}
               <span>↑↓ · Enter</span>
+            </div>
+          )}
+          {menu.kind === "extensions" && rows.length === 0 && (
+            <div className="agent-commands-status" role="status">
+              <span>
+                {session.extensionsLoading ||
+                (menu.prefix === "$"
+                  ? session.localSkillsLoaded !== true
+                  : session.extensionsLoaded !== true)
+                  ? `Loading ${menu.prefix === "$" ? "skills" : "apps"}...`
+                  : session.extensionsError
+                    ? `Could not load ${menu.prefix === "$" ? "skills" : "apps"}.`
+                    : `No matching ${menu.prefix === "$" ? "skills" : "apps"}.`}
+              </span>
+              {session.extensionsError && !session.extensionsLoading && (
+                <button
+                  type="button"
+                  className="agent-command-retry"
+                  onMouseDown={(event) => {
+                    event.preventDefault();
+                    if (menu.prefix === "$") void agents.refreshSkills(session.termId);
+                    else void agents.refreshExtensions(session.termId);
+                  }}
+                >
+                  Retry
+                </button>
+              )}
             </div>
           )}
           {rows.map((row, index) => (
