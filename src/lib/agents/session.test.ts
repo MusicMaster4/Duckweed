@@ -96,6 +96,12 @@ const openCodeLaunch: AgentLaunch = {
   program: "opencode",
 };
 
+const codexLaunch: AgentLaunch = {
+  ...grokLaunch,
+  agent: "codex",
+  program: "codex",
+};
+
 function rpc(value: unknown): Record<string, unknown> {
   return JSON.parse(value as string) as Record<string, unknown>;
 }
@@ -121,9 +127,26 @@ async function handshake(): Promise<void> {
   await flush();
 }
 
+async function codexHandshake(sessionId = "01900000-0000-7000-8000-000000000001"): Promise<void> {
+  await flush();
+  const initialize = sent.map(rpc).find((message) => message.method === "initialize");
+  feed({ jsonrpc: "2.0", id: initialize?.id, result: {} });
+  await flush();
+  const accountRead = sent.map(rpc).find((message) => message.method === "account/read");
+  feed({ jsonrpc: "2.0", id: accountRead?.id, result: { account: { type: "chatgpt" } } });
+  await flush();
+  const threadStart = sent.map(rpc).find((message) => message.method === "thread/start");
+  feed({
+    jsonrpc: "2.0",
+    id: threadStart?.id,
+    result: { thread: { id: sessionId }, model: "gpt-5" },
+  });
+  await flush();
+}
+
 const session = await import("./session");
 
-describe("Grok custom-UI follow-up steering", () => {
+describe("Custom agent UI sessions", () => {
   beforeEach(() => {
     sent.length = 0;
     spawn = null;
@@ -275,6 +298,61 @@ describe("Grok custom-UI follow-up steering", () => {
           command: 'opencode --session "s1"',
         }),
       ]);
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  test("opens bare Codex natively when its provisional empty thread was not saved", async () => {
+    const requests: session.AgentAuthRequest[] = [];
+    const unsubscribe = session.subscribeAuthRequest((request) => requests.push(request));
+    try {
+      expect(await session.start("t-codex-native-empty", codexLaunch, "H:/project")).toBeNull();
+      await codexHandshake();
+
+      expect(session.handoffToNative("t-codex-native-empty")).toBe(true);
+      expect(requests).toEqual([
+        expect.objectContaining({
+          termId: "t-codex-native-empty",
+          agent: "codex",
+          action: "native",
+          command: "codex",
+        }),
+      ]);
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  test("resumes Codex natively after the conversation has a user turn", async () => {
+    const requests: session.AgentAuthRequest[] = [];
+    const unsubscribe = session.subscribeAuthRequest((request) => requests.push(request));
+    const sessionId = "01900000-0000-7000-8000-000000000002";
+    try {
+      expect(await session.start("t-codex-native-started", codexLaunch, "H:/project")).toBeNull();
+      await codexHandshake(sessionId);
+      session.submit("t-codex-native-started", "Fix the parser");
+      await flush();
+
+      // Native handoff is gated while the turn is active. Completing it also
+      // models the point at which Codex has persisted the rollout for resume.
+      const turnStart = sent.map(rpc).find((message) => message.method === "turn/start");
+      feed({ jsonrpc: "2.0", id: turnStart?.id, result: { turn: { id: "turn-1" } } });
+      feed({
+        method: "turn/completed",
+        params: { threadId: sessionId, turn: { id: "turn-1", status: "completed", items: [] } },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 850));
+
+      expect(session.handoffToNative("t-codex-native-started")).toBe(true);
+      expect(requests.at(-1)).toEqual(
+        expect.objectContaining({
+          termId: "t-codex-native-started",
+          agent: "codex",
+          action: "native",
+          command: `codex resume "${sessionId}"`,
+        }),
+      );
     } finally {
       unsubscribe();
     }

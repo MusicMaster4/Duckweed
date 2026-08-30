@@ -417,7 +417,17 @@ export function handoffToNative(termId: string): boolean {
   if (session.state.status === "working" || session.state.status === "waiting") return false;
   session.authHandoff = true;
   const program = session.launch.program;
-  const id = session.state.sessionId;
+  // Codex gives `thread/start` an id before the first turn, but that empty
+  // thread is not written to its resumable session store. Passing the
+  // provisional id to `codex resume` exits with "No saved session found".
+  // Once a user turn exists the rollout has been persisted and the id is safe
+  // to hand to the native CLI. Other providers persist their session during
+  // the handshake, so keep their existing behaviour.
+  const id =
+    session.state.agent === "codex" &&
+    !session.state.items.some((item) => item.kind === "user")
+      ? null
+      : session.state.sessionId;
   const command = nativeResumeCommand(session.state.agent, program, id);
   const request: AgentAuthRequest = {
     termId,

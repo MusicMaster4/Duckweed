@@ -823,7 +823,9 @@ function ensureAgentUiListener(): void {
           : "Signing out with the agent CLI."
       }\x1b[0m\r\n`,
     );
-    submitCommand(termId, command);
+    // A native handoff can intentionally launch a bare agent command. Sending
+    // that through startAgentUi would immediately reopen the custom surface.
+    submitShellCommand(session, command);
   });
   agentUiUnsubscribe = () => {
     offEnd();
@@ -1774,6 +1776,12 @@ export function submitCommand(id: string, command: string): void {
   // marking the pane used or recording the command so closing can reveal the
   // exact terminal that was underneath — including the welcome duck.
   if (text.trim() && startAgentUi(session, text, session.ran)) return;
+  submitShellCommand(session, text);
+}
+
+/** Submit directly to the pane's shell, bypassing custom-agent interception. */
+function submitShellCommand(session: Session, text: string): void {
+  session.draft = "";
   markRan(session);
   if (!text.trim()) {
     // Empty Enter — just send a newline so the shell re-draws the prompt.
