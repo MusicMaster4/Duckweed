@@ -41,6 +41,7 @@ import { AgentImageAttachments } from "./AgentImageAttachments";
 import { AgentPermission } from "./AgentPermission";
 import { AgentProviderIcon } from "./AgentProviderIcon";
 import { AgentQuestion } from "./AgentQuestion";
+import { AgentRuntimePanel } from "./AgentRuntimePanel";
 import { AgentSessions } from "./AgentSessions";
 import { AgentSideQuestion } from "./AgentSideQuestion";
 import { AgentTimeline } from "./AgentTimeline";
@@ -115,6 +116,7 @@ export function AgentSurface({
   const [resumeQuery, setResumeQuery] = useState<string | null>(null);
   const [conversationMenuOpen, setConversationMenuOpen] = useState(false);
   const [conversationCopied, setConversationCopied] = useState(false);
+  const [runtimePanelOpen, setRuntimePanelOpen] = useState(false);
   // Following the stream is the default, but scrolling up to read something is
   // a deliberate act — new output must not yank the view back down.
   const pinnedRef = useRef(true);
@@ -700,6 +702,26 @@ export function AgentSurface({
           </Tooltip>
         )}
         <AgentGoalIndicator goal={session.goal} />
+        <button
+          type="button"
+          className={`agent-head-btn is-quiet${runtimePanelOpen ? " is-active" : ""}`}
+          onClick={() => {
+            const open = !runtimePanelOpen;
+            setRuntimePanelOpen(open);
+            if (open) {
+              void agents.refreshExtensions(termId);
+              void agents.refreshTasks(termId);
+            }
+          }}
+          title="Extensions, tasks and protocol support"
+          aria-label="Extensions, tasks and protocol support"
+          aria-expanded={runtimePanelOpen}
+        >
+          <svg viewBox="0 0 14 14" aria-hidden="true">
+            <path d="M2.5 3.5h9M2.5 7h9M2.5 10.5h9" />
+            <circle cx="4" cy="3.5" r="1" /><circle cx="9" cy="7" r="1" /><circle cx="6" cy="10.5" r="1" />
+          </svg>
+        </button>
         <div className="agent-conversation-menu" ref={conversationMenuRef}>
           <button
             type="button"
@@ -771,6 +793,16 @@ export function AgentSurface({
           </svg>
         </button>
       </header>
+
+      {runtimePanelOpen && (
+        <AgentRuntimePanel
+          session={session}
+          onRefreshExtensions={() => void agents.refreshExtensions(termId)}
+          onRefreshTasks={() => void agents.refreshTasks(termId)}
+          onStopTask={(taskId) => void agents.stopTask(termId, taskId)}
+          onNative={() => agents.handoffToNative(termId)}
+        />
+      )}
 
       <div
         className={`agent-scroll${multiPane ? " is-subagent-workspace" : ""}${

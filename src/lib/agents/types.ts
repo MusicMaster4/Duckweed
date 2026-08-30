@@ -153,10 +153,89 @@ export interface AgentImageAttachment {
   size: number;
 }
 
+/** Rich prompt input understood by at least one provider protocol. */
+export type AgentPromptPart =
+  | { type: "text"; text: string }
+  | { type: "image"; image: AgentImageAttachment }
+  | { type: "file"; path: string; name?: string }
+  | { type: "skill"; id: string; name: string; path?: string }
+  | { type: "app"; id: string; name: string; uri?: string }
+  | { type: "resource"; uri: string; name?: string; mimeType?: string };
+
 /** One user turn, before an adapter translates it to its wire protocol. */
 export interface AgentPrompt {
   text: string;
   images: AgentImageAttachment[];
+  /** Structured references preserved instead of flattening every input to text. */
+  parts?: AgentPromptPart[];
+}
+
+export interface AgentCapabilities {
+  inputs: {
+    text: boolean;
+    image: boolean;
+    file: boolean;
+    embeddedContext: boolean;
+    skill: boolean;
+    appMention: boolean;
+  };
+  interactions: {
+    approvals: boolean;
+    questions: boolean;
+    forms: boolean;
+    links: boolean;
+  };
+  extensions: {
+    skills: boolean;
+    apps: boolean;
+    plugins: boolean;
+    mcp: boolean;
+    hooks: boolean;
+    workflows: boolean;
+  };
+  runtime: {
+    backgroundTasks: boolean;
+    terminals: boolean;
+    worktrees: boolean;
+    checkpointing: boolean;
+    nativeFallback: boolean;
+  };
+}
+
+export type AgentExtensionKind =
+  | "skill"
+  | "app"
+  | "plugin"
+  | "mcp"
+  | "hook"
+  | "workflow"
+  | "agent";
+
+/** One provider-owned capability users can invoke or inspect from the composer. */
+export interface AgentExtension {
+  id: string;
+  kind: AgentExtensionKind;
+  name: string;
+  description: string;
+  enabled: boolean;
+  callable: boolean;
+  /** Filesystem-backed user/project skill, distinct from plugin/app inventory. */
+  local?: boolean;
+  status?: "ready" | "disabled" | "connecting" | "error";
+  path?: string;
+  uri?: string;
+  source?: string;
+}
+
+export interface AgentRuntimeTask {
+  id: string;
+  kind: "task" | "terminal" | "worktree" | "workflow";
+  title: string;
+  status: "pending" | "running" | "blocked" | "done" | "error" | "stopped";
+  detail?: string;
+  command?: string;
+  cwd?: string;
+  startedAt?: number;
 }
 
 /** How a follow-up submitted during an active turn should be delivered. */
@@ -305,6 +384,10 @@ export interface AgentQuestionItem {
   /** The user may pick several options rather than exactly one. */
   multiSelect: boolean;
   options: AgentQuestionOption[];
+  /** Text and secret fields are used by tool input and MCP elicitation forms. */
+  inputKind?: "select" | "multiselect" | "text" | "secret" | "url";
+  required?: boolean;
+  placeholder?: string;
 }
 
 /**
@@ -439,6 +522,18 @@ export interface AgentSessionState {
    * (live names win, static descriptions survive an empty live one).
    */
   commands: { name: string; description: string }[];
+  /** Negotiated protocol support, absent only in old persisted/test state. */
+  capabilities?: AgentCapabilities;
+  /** Skills, apps, plugins, MCP servers, hooks, workflows and subagents. */
+  extensions?: AgentExtension[];
+  /** True after the provider has answered at least one extension inventory request. */
+  extensionsLoaded?: boolean;
+  /** True after shared and provider-local skill folders have been scanned. */
+  localSkillsLoaded?: boolean;
+  extensionsLoading?: boolean;
+  extensionsError?: string | null;
+  /** Long-running provider processes that can outlive a single tool row. */
+  runtimeTasks?: AgentRuntimeTask[];
   /** True once any turn has run — the empty state steps aside. */
   started: boolean;
   /** Claude/Grok are waiting for the confirming Ctrl+C that closes the harness. */

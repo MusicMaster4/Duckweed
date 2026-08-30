@@ -25,6 +25,7 @@ function emptyDraft(questions: AgentQuestionItem[]): Draft {
 
 /** A question is answered once it has a choice, or text standing in for one. */
 function isAnswered(question: AgentQuestionItem, draft: Draft): boolean {
+  if (question.required === false) return true;
   const entry = draft[question.id];
   if (!entry) return false;
   return entry.picked.length > 0 || entry.custom.trim() !== "";
@@ -72,7 +73,8 @@ export function AgentQuestion({ permission, onAnswer, onSkip }: Props) {
 
   const answered = questions.filter((question) => isAnswered(question, draft)).length;
   const complete = questions.length > 0 && answered === questions.length;
-  const instant = questions.length === 1 && !questions[0].multiSelect;
+  const instant =
+    questions.length === 1 && !questions[0].multiSelect && questions[0].options.length > 0;
 
   useEffect(() => {
     cardRef.current?.scrollIntoView({ block: "nearest" });
@@ -147,9 +149,13 @@ export function AgentQuestion({ permission, onAnswer, onSkip }: Props) {
   const onCardKeyDown = (event: React.KeyboardEvent) => {
     if (sent) return;
     const target = event.target as HTMLElement;
-    if (target.tagName === "TEXTAREA") {
+    if (target.tagName === "TEXTAREA" || target.tagName === "INPUT") {
       // Ctrl/Cmd+Enter sends from inside a note, the way the composer does.
-      if (event.key === "Enter" && (event.ctrlKey || event.metaKey) && complete) {
+      if (
+        event.key === "Enter" &&
+        (target.tagName === "INPUT" || event.ctrlKey || event.metaKey) &&
+        complete
+      ) {
         event.preventDefault();
         send();
       }
@@ -259,6 +265,16 @@ export function AgentQuestion({ permission, onAnswer, onSkip }: Props) {
               role={question.multiSelect ? "group" : "radiogroup"}
               aria-label={question.question}
             >
+              {question.inputKind === "url" && question.placeholder && (
+                <a
+                  className="agent-question-url"
+                  href={question.placeholder}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  Open authorization page
+                </a>
+              )}
               {question.options.map((option, optionIndex) => {
                 const picked = entry.picked.includes(option.id);
                 const previewKey = `${question.id}:${option.id}`;
@@ -324,6 +340,16 @@ export function AgentQuestion({ permission, onAnswer, onSkip }: Props) {
                   ? "Add a note (optional)"
                   : "Or write your own answer"}
               </span>
+              {question.inputKind === "secret" ? (
+                <input
+                  type="password"
+                  value={entry.custom}
+                  disabled={sent}
+                  autoComplete="off"
+                  placeholder={question.placeholder ?? "Enter a private value"}
+                  onChange={(event) => writeCustom(question.id, event.target.value)}
+                />
+              ) : (
               <textarea
                 rows={1}
                 value={entry.custom}
@@ -331,7 +357,7 @@ export function AgentQuestion({ permission, onAnswer, onSkip }: Props) {
                 placeholder={
                   entry.picked.length > 0
                     ? "Anything the agent should know about that choice"
-                    : "Answer in your own words"
+                    : question.placeholder ?? "Answer in your own words"
                 }
                 onChange={(event) => writeCustom(question.id, event.target.value)}
                 onInput={(event) => {
@@ -340,6 +366,7 @@ export function AgentQuestion({ permission, onAnswer, onSkip }: Props) {
                   node.style.height = `${Math.min(node.scrollHeight, 132)}px`;
                 }}
               />
+              )}
             </label>
           </section>
         );

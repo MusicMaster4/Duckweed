@@ -1237,6 +1237,27 @@ export const meta = {
     });
   });
 
+  test("applies a selected local skill while preserving the composer text in the UI", () => {
+    const h = harness();
+    h.adapter.prompt(
+      {
+        text: "$unslop rewrite this",
+        images: [],
+        parts: [
+          { type: "text", text: "$unslop rewrite this" },
+          { type: "skill", id: "local:unslop", name: "unslop", path: "H:/skills/unslop/SKILL.md" },
+        ],
+      },
+      h.ctx,
+    );
+    expect(h.state().items.at(-1)).toMatchObject({ kind: "user", text: "$unslop rewrite this" });
+    const providerText = (h.sent[0] as {
+      message: { content: Array<{ type: string; text: string }> };
+    }).message.content[0]?.text;
+    expect(providerText).toContain('Read "H:/skills/unslop/SKILL.md" completely');
+    expect(providerText).toContain("rewrite this");
+  });
+
   test("interrupts over the control channel", () => {
     const h = harness();
     h.adapter.interrupt(h.ctx);

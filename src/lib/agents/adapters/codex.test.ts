@@ -244,6 +244,63 @@ describe("codex adapter", () => {
     expect(models[0].label).toBe("GPT-5.6-Sol");
   });
 
+  test("lists callable skills with their invocation names and excludes Computer Use", async () => {
+    const h = harness();
+    await h.handshake();
+
+    const refresh = h.adapter.refreshExtensions?.(h.ctx);
+    const calls = h.sent.filter((message) =>
+      ["skills/list", "app/installed", "plugin/list", "hooks/list", "mcpServerStatus/list"].includes(
+        String(message.method),
+      ),
+    );
+    for (const call of calls) {
+      const result =
+        call.method === "skills/list"
+          ? {
+              data: [
+                {
+                  cwd: "H:/project",
+                  skills: [
+                    {
+                      name: "documents:documents",
+                      description: "Create and edit documents",
+                      interface: { displayName: "Documents" },
+                      path: "H:/skills/documents/SKILL.md",
+                      scope: "user",
+                      enabled: true,
+                    },
+                    {
+                      name: "computer-use:computer-use",
+                      description: "Control Windows apps",
+                      path: "H:/skills/computer-use/SKILL.md",
+                      scope: "user",
+                      enabled: true,
+                    },
+                  ],
+                  errors: [],
+                },
+              ],
+            }
+          : call.method === "app/installed"
+            ? { apps: [] }
+            : call.method === "plugin/list"
+              ? { marketplaces: [] }
+              : { data: [] };
+      h.feed({ jsonrpc: "2.0", id: call.id, result });
+    }
+
+    const extensions = await refresh;
+    expect(extensions).toEqual([
+      expect.objectContaining({
+        kind: "skill",
+        name: "documents:documents",
+        path: "H:/skills/documents/SKILL.md",
+        callable: true,
+      }),
+    ]);
+  });
+
   test("hides internal models and repairs an internal current model", async () => {
     const h = harness();
     await h.handshake({ model: "codex-auto-review" });
@@ -488,6 +545,7 @@ describe("codex adapter", () => {
       params: {
         threadId: "thread_1",
         ephemeral: true,
+        excludeTurns: true,
         sandbox: "read-only",
         model: "gpt-5.6-sol",
       },

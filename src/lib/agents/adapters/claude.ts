@@ -14,16 +14,19 @@ import {
   goalResponseFailed,
 } from "../goal";
 import type { AgentLaunch } from "../launch";
+import { promptTextWithLocalSkills } from "../localSkills";
 import {
   makeChange,
   toolKind,
   type AgentAccessMode,
   type AgentFileChange,
   type AgentGoal,
+  type AgentExtension,
   type AgentPrompt,
   type AgentQuestionItem,
   type AgentSideQuestion,
   type AgentPlanStep,
+  type AgentRuntimeTask,
   type SubagentMeta,
   type ToolStatus,
 } from "../types";
@@ -554,6 +557,7 @@ export function createClaudeAdapter(): AgentAdapter {
    */
   const seenTurnErrors = new Set<string>();
   let currentGoal: AgentGoal | null = null;
+  let extensions: AgentExtension[] = [];
   let goalBeforeCommand: AgentGoal | null = null;
   let goalResponsePending = false;
 
@@ -576,6 +580,7 @@ export function createClaudeAdapter(): AgentAdapter {
     }));
     if (scope === ROOT_TASK_SCOPE) {
       ctx.emit({ type: "plan", planType: "tasks", steps });
+      emitRuntimeTasks(ctx);
       return;
     }
     ctx.emit({
@@ -589,6 +594,36 @@ export function createClaudeAdapter(): AgentAdapter {
         steps,
       },
     });
+  }
+
+  function runtimeTaskRows(): AgentRuntimeTask[] {
+    const tasks: AgentRuntimeTask[] = [...tasksFor(ROOT_TASK_SCOPE).values()].map((task) => ({
+      id: `task:${task.id}`,
+      kind: "task",
+      title: task.text,
+      status: task.status === "done" ? "done" : task.status === "running" ? "running" : "pending",
+    }));
+    for (const workflow of workflowsByCallId.values()) {
+      tasks.push({
+        id: `workflow:${workflow.taskId ?? workflow.callId}`,
+        kind: "workflow",
+        title: workflow.name,
+        status:
+          workflow.status === "completed"
+            ? "done"
+            : workflow.status === "failed"
+              ? "error"
+              : workflow.status === "stopped"
+                ? "stopped"
+                : "running",
+        detail: workflow.summary || undefined,
+      });
+    }
+    return tasks;
+  }
+
+  function emitRuntimeTasks(ctx: AdapterContext): void {
+    ctx.emit({ type: "runtime-tasks", tasks: runtimeTaskRows() });
   }
 
   function replaceTaskId(
@@ -797,6 +832,7 @@ export function createClaudeAdapter(): AgentAdapter {
       };
       workflowsByCallId.set(callId, workflow);
       latestWorkflowCallId = callId;
+      emitRuntimeTasks(ctx);
       ctx.emit({
         type: "plan",
         planType: "workflow",
@@ -1214,6 +1250,7 @@ export function createClaudeAdapter(): AgentAdapter {
     if (!workflow) return;
     const completed = notification.status === "completed";
     workflow.status = notification.status;
+    emitRuntimeTasks(ctx);
     ctx.emit({
       type: "tool",
       callId,
@@ -1578,6 +1615,7 @@ export function createClaudeAdapter(): AgentAdapter {
   }
 
   function sendUserMessage(prompt: AgentPrompt, ctx: AdapterContext): void {
+    const providerText = promptTextWithLocalSkills(prompt);
     ctx.send({
       type: "user",
       message: {
@@ -1591,7 +1629,7 @@ export function createClaudeAdapter(): AgentAdapter {
               data: imagePayloadBase64(image),
             },
           })),
-          ...(prompt.text ? [{ type: "text", text: prompt.text }] : []),
+          ...(providerText ? [{ type: "text", text: providerText }] : []),
         ],
       },
     });
@@ -1619,6 +1657,35 @@ export function createClaudeAdapter(): AgentAdapter {
       // already seeded Claude's model aliases so the picker works immediately.
       const accessMode = ctx.launch.accessMode ?? "default";
       if (accessMode !== "default") setAccessMode(accessMode, ctx, false);
+      ctx.emit({
+        type: "session",
+        capabilities: {
+          inputs: {
+            text: true,
+            image: true,
+            file: true,
+            embeddedContext: true,
+            skill: true,
+            appMention: false,
+          },
+          interactions: { approvals: true, questions: true, forms: true, links: false },
+          extensions: {
+            skills: true,
+            apps: false,
+            plugins: true,
+            mcp: true,
+            hooks: true,
+            workflows: true,
+          },
+          runtime: {
+            backgroundTasks: true,
+            terminals: true,
+            worktrees: true,
+            checkpointing: true,
+            nativeFallback: true,
+          },
+        },
+      });
       ctx.emit({ type: "status", status: "idle" });
     },
 
@@ -1630,6 +1697,20 @@ export function createClaudeAdapter(): AgentAdapter {
       switch (type) {
         case "system": {
           if (asString(frame.subtype) !== "init") {
+            const subtype = asString(frame.subtype) ?? "hook";
+            if (subtype.includes("hook")) {
+              const callId = asString(frame.hook_id) ?? asString(frame.uuid) ?? `hook-${++controlSeq}`;
+              const failed = frame.error != null || subtype.includes("error");
+              ctx.emit({
+                type: "tool",
+                callId,
+                name: asString(frame.hook_name) ?? asString(frame.hook_event) ?? "hook",
+                tool: "other",
+                title: asString(frame.hook_name) ?? asString(frame.hook_event) ?? "Claude hook",
+                status: failed ? "error" : subtype.includes("start") ? "running" : "done",
+                output: asString(frame.output) ?? asString(frame.message) ?? "",
+              });
+            }
             handleNotificationFrame(frame, null, ctx);
             return;
           }
@@ -1637,6 +1718,47 @@ export function createClaudeAdapter(): AgentAdapter {
             .map((name) => asString(name))
             .filter((name): name is string => name !== null)
             .map((name) => ({ name: `/${name}`, description: "" }));
+          const skillRows: AgentExtension[] = commands.map((command) => ({
+            id: `skill:${command.name.slice(1)}`,
+            kind: "skill",
+            name: command.name,
+            description: command.description,
+            enabled: true,
+            callable: true,
+            status: "ready",
+            source: "Claude Code",
+          }));
+          const mcpRows: AgentExtension[] = asArray(frame.mcp_servers)
+            .map((raw) => asRecord(raw))
+            .filter((server): server is Record<string, unknown> => server !== null)
+            .map((server) => {
+              const status = asString(server.status) ?? "connected";
+              return {
+                id: `mcp:${asString(server.name) ?? "server"}`,
+                kind: "mcp" as const,
+                name: asString(server.name) ?? "MCP server",
+                description: asString(server.description) ?? `Status: ${status}`,
+                enabled: status !== "disabled",
+                callable: false,
+                status: status.includes("fail") ? ("error" as const) : status === "disabled" ? ("disabled" as const) : ("ready" as const),
+                source: "Claude Code",
+              };
+            });
+          const pluginRows: AgentExtension[] = asArray(frame.plugins)
+            .map((raw) => asRecord(raw))
+            .filter((plugin): plugin is Record<string, unknown> => plugin !== null)
+            .map((plugin) => ({
+              id: `plugin:${asString(plugin.id) ?? asString(plugin.name) ?? "plugin"}`,
+              kind: "plugin",
+              name: asString(plugin.name) ?? asString(plugin.id) ?? "Plugin",
+              description: asString(plugin.description) ?? "",
+              enabled: plugin.enabled !== false,
+              callable: false,
+              status: plugin.enabled === false ? "disabled" : "ready",
+              source: asString(plugin.path) ?? "Claude Code",
+            }));
+          extensions = [...skillRows, ...mcpRows, ...pluginRows];
+          ctx.emit({ type: "extensions", extensions, loading: false, error: null });
           // Prefer the raw model id from init (`claude-opus-5[1m]`); the
           // session already seeded the alias list for the picker.
           ctx.emit({
@@ -1835,5 +1957,7 @@ export function createClaudeAdapter(): AgentAdapter {
       ctx.emit({ type: "permission", permission: null });
       ctx.emit({ type: "status", status: "working" });
     },
+    refreshExtensions: () => extensions.map((extension) => ({ ...extension })),
+    refreshTasks: () => runtimeTaskRows(),
   };
 }

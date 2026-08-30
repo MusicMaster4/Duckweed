@@ -5,6 +5,8 @@ import type {
   AgentImageAttachment,
   AgentPrompt,
   AgentQuestionAnswer,
+  AgentExtension,
+  AgentRuntimeTask,
 } from "./types";
 
 /** How a provider adapter handled text beginning with `/`. */
@@ -26,6 +28,11 @@ export interface AdapterContext {
   send: (message: unknown) => void;
   /** Report something the UI should show. */
   emit: (event: AgentEvent) => void;
+  /** Workspace-scoped file service advertised to protocols such as ACP. */
+  files?: {
+    readText: (path: string) => Promise<{ content: string; binary: boolean; tooLarge: boolean }>;
+    writeText: (path: string, content: string) => Promise<void>;
+  };
 }
 
 /**
@@ -124,6 +131,12 @@ export interface AgentAdapter {
     answers: AgentQuestionAnswer[],
     ctx: AdapterContext,
   ) => void;
+  /** Refresh provider-owned skills, apps, plugins, MCP servers and hooks. */
+  refreshExtensions?: (ctx: AdapterContext) => Promise<AgentExtension[]> | AgentExtension[];
+  /** Refresh provider-owned background terminals, tasks and worktrees. */
+  refreshTasks?: (ctx: AdapterContext) => Promise<AgentRuntimeTask[]> | AgentRuntimeTask[];
+  /** Stop one provider-owned long-running task when the protocol supports it. */
+  stopTask?: (taskId: string, ctx: AdapterContext) => Promise<boolean> | boolean;
   /**
    * The session is closing. Adapters that end on stdin EOF rather than a kill
    * say so, and the session closes their stdin first.

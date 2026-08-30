@@ -5,14 +5,14 @@
  * character is emitted exactly once so the painted text remains aligned with
  * the native textarea, including while a command or quoted mention is typed.
  */
-export type AgentComposerTokenKind = "plain" | "command" | "file";
+export type AgentComposerTokenKind = "plain" | "command" | "file" | "skill";
 
 export interface AgentComposerToken {
   text: string;
   kind: AgentComposerTokenKind;
 }
 
-/** Highlight a leading slash command and workspace-style `@file` mentions. */
+/** Highlight slash commands, `$skill` references, and workspace-style `@file` mentions. */
 export function highlightAgentComposer(input: string): AgentComposerToken[] {
   const tokens: AgentComposerToken[] = [];
   let index = 0;
@@ -33,14 +33,18 @@ export function highlightAgentComposer(input: string): AgentComposerToken[] {
 
   let plainStart = index;
   while (index < input.length) {
-    if (input[index] !== "@" || (index > 0 && !isWhitespace(input[index - 1]!))) {
+    const marker = input[index];
+    if (
+      (marker !== "@" && marker !== "$") ||
+      (index > 0 && !isWhitespace(input[index - 1]!))
+    ) {
       index++;
       continue;
     }
 
     push(input.slice(plainStart, index), "plain");
-    const end = mentionEnd(input, index);
-    push(input.slice(index, end), "file");
+    const end = marker === "@" ? mentionEnd(input, index) : firstWhitespace(input, index + 1);
+    push(input.slice(index, end), marker === "$" ? "skill" : "file");
     index = end;
     plainStart = end;
   }

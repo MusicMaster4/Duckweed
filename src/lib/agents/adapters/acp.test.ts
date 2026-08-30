@@ -562,6 +562,34 @@ describe("acp adapter", () => {
     expect(h.state().status).toBe("idle");
   });
 
+  test("applies a selected local skill over ACP", async () => {
+    const h = harness();
+    await h.handshake();
+    h.adapter.prompt(
+      {
+        text: "$unslop rewrite this",
+        images: [],
+        parts: [
+          { type: "text", text: "$unslop rewrite this" },
+          { type: "skill", id: "local:unslop", name: "unslop", path: "H:/skills/unslop/SKILL.md" },
+        ],
+      },
+      h.ctx,
+    );
+    expect(h.sent.at(-1)).toMatchObject({
+      method: "session/prompt",
+      params: {
+        prompt: [
+          {
+            type: "text",
+            text: expect.stringContaining('Read "H:/skills/unslop/SKILL.md" completely'),
+          },
+        ],
+      },
+    });
+    expect(h.state().items.at(-1)).toMatchObject({ kind: "user", text: "$unslop rewrite this" });
+  });
+
   test("keeps Grok working after the prompt resolves while its workflow is active", async () => {
     const h = harness();
     await h.handshake();

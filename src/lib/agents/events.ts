@@ -3,6 +3,8 @@ import type {
   AgentAccessMode,
   AgentFileChange,
   AgentGoal,
+  AgentCapabilities,
+  AgentExtension,
   AgentImageAttachment,
   AgentItem,
   AgentModelChoice,
@@ -11,6 +13,7 @@ import type {
   AgentPlanStep,
   AgentPlanType,
   AgentSessionState,
+  AgentRuntimeTask,
   AgentSideQuestion,
   AgentStatus,
   AgentUsage,
@@ -47,6 +50,7 @@ export type AgentEvent =
       commands?: { name: string; description: string }[];
       /** Replaces the switchable-model list when the adapter learns it. */
       models?: AgentModelChoice[];
+      capabilities?: AgentCapabilities;
     }
   | { type: "status"; status: AgentStatus; error?: string }
   /** A provider is loading a stored conversation, not running an agent turn. */
@@ -110,6 +114,15 @@ export type AgentEvent =
    */
   | { type: "resumed"; sessionId: string; title: string }
   | { type: "permission"; permission: AgentPermission | null }
+  | {
+      type: "extensions";
+      extensions?: AgentExtension[];
+      loading?: boolean;
+      error?: string | null;
+      extensionsLoaded?: boolean;
+      localSkillsLoaded?: boolean;
+    }
+  | { type: "runtime-tasks"; tasks: AgentRuntimeTask[] }
   | { type: "usage"; usage: Partial<AgentUsage> }
   /** A follow-up the user sent while a turn was still running. */
   | { type: "queue"; prompt: AgentPendingPrompt }
@@ -313,6 +326,7 @@ export function applyEvent(state: AgentSessionState, event: AgentEvent): AgentSe
         // A non-empty list wins; adapters re-emit the full set whenever it
         // changes rather than patching individual rows.
         models: event.models && event.models.length ? event.models : state.models,
+        capabilities: event.capabilities ?? state.capabilities,
       };
 
     case "status": {
@@ -610,6 +624,31 @@ export function applyEvent(state: AgentSessionState, event: AgentEvent): AgentSe
         permission: event.permission,
         status: event.permission ? "waiting" : state.status === "waiting" ? "working" : state.status,
       };
+
+    case "extensions": {
+      const incoming = event.extensions
+        ? event.extensions.map((item) => ({ ...item }))
+        : state.extensions;
+      const incomingIds = new Set((incoming ?? []).map((item) => item.id));
+      const preservedLocal = (state.extensions ?? []).filter(
+        (item) => item.local && !incomingIds.has(item.id),
+      );
+      return {
+        ...state,
+        extensions: incoming ? [...incoming, ...preservedLocal] : incoming,
+        extensionsLoaded:
+          event.extensionsLoaded ??
+          (event.loading === false && (event.extensions !== undefined || event.error !== undefined)
+            ? true
+            : state.extensionsLoaded),
+        localSkillsLoaded: event.localSkillsLoaded ?? state.localSkillsLoaded,
+        extensionsLoading: event.loading ?? state.extensionsLoading,
+        extensionsError: event.error !== undefined ? event.error : state.extensionsError,
+      };
+    }
+
+    case "runtime-tasks":
+      return { ...state, runtimeTasks: event.tasks.map((task) => ({ ...task })) };
 
     case "usage":
       return { ...state, usage: { ...state.usage, ...event.usage } };

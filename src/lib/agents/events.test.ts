@@ -38,6 +38,23 @@ function blank(): AgentSessionState {
   };
 }
 
+describe("extension inventory state", () => {
+  test("distinguishes an unrequested inventory from a loaded empty inventory", () => {
+    const loading = applyEvent(blank(), { type: "extensions", loading: true, error: null });
+    expect(loading.extensionsLoaded).not.toBe(true);
+    expect(loading.extensionsLoading).toBe(true);
+
+    const loaded = applyEvent(loading, {
+      type: "extensions",
+      extensions: [],
+      loading: false,
+      error: null,
+    });
+    expect(loaded.extensionsLoaded).toBe(true);
+    expect(loaded.extensionsLoading).toBe(false);
+  });
+});
+
 describe("tool subagent metadata", () => {
   test("creates and incrementally enriches one task row", () => {
     let state = applyEvent(blank(), {
