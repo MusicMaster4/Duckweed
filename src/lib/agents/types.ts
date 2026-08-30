@@ -385,9 +385,20 @@ export interface AgentQuestionItem {
   multiSelect: boolean;
   options: AgentQuestionOption[];
   /** Text and secret fields are used by tool input and MCP elicitation forms. */
-  inputKind?: "select" | "multiselect" | "text" | "secret" | "url";
+  inputKind?:
+    | "select"
+    | "multiselect"
+    | "text"
+    | "secret"
+    | "url"
+    | "number"
+    | "integer";
   required?: boolean;
+  /** Strict schema controls such as MCP enums do not accept arbitrary text. */
+  allowCustom?: boolean;
   placeholder?: string;
+  minimum?: number;
+  maximum?: number;
 }
 
 /**

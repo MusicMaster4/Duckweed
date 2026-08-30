@@ -28,7 +28,11 @@ export interface AdapterContext {
   send: (message: unknown) => void;
   /** Report something the UI should show. */
   emit: (event: AgentEvent) => void;
-  /** Workspace-scoped file service advertised to protocols such as ACP. */
+  /**
+   * Workspace-scoped file service advertised to protocols such as ACP.
+   * Implementations must enforce canonical containment after following
+   * filesystem links, not merely trust the adapter's normalized path.
+   */
   files?: {
     readText: (path: string) => Promise<{ content: string; binary: boolean; tooLarge: boolean }>;
     writeText: (path: string, content: string) => Promise<void>;

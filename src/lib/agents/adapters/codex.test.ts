@@ -250,7 +250,7 @@ describe("codex adapter", () => {
 
     const refresh = h.adapter.refreshExtensions?.(h.ctx);
     const calls = h.sent.filter((message) =>
-      ["skills/list", "app/installed", "plugin/list", "hooks/list", "mcpServerStatus/list"].includes(
+      ["skills/list", "app/list", "plugin/list", "hooks/list", "mcpServerStatus/list"].includes(
         String(message.method),
       ),
     );
@@ -282,8 +282,19 @@ describe("codex adapter", () => {
                 },
               ],
             }
-          : call.method === "app/installed"
-            ? { apps: [] }
+          : call.method === "app/list"
+            ? {
+                data: [
+                  {
+                    id: "calendar",
+                    name: "Calendar",
+                    description: "Read calendar events",
+                    isEnabled: true,
+                    isAccessible: true,
+                  },
+                ],
+                nextCursor: null,
+              }
             : call.method === "plugin/list"
               ? { marketplaces: [] }
               : { data: [] };
@@ -298,7 +309,95 @@ describe("codex adapter", () => {
         path: "H:/skills/documents/SKILL.md",
         callable: true,
       }),
+      expect.objectContaining({
+        id: "app:calendar",
+        kind: "app",
+        name: "Calendar",
+        uri: "app://calendar",
+        enabled: true,
+        callable: true,
+      }),
     ]);
+  });
+
+  test("preserves MCP boolean, numeric, and multi-select form values", async () => {
+    const h = harness();
+    await h.handshake();
+    h.feed({
+      jsonrpc: "2.0",
+      id: "elicitation-1",
+      method: "mcpServer/elicitation/request",
+      params: {
+        mode: "form",
+        serverName: "Reports",
+        message: "Configure the report",
+        requestedSchema: {
+          type: "object",
+          required: ["confirmed", "count", "ratio", "features", "mode"],
+          properties: {
+            confirmed: { type: "boolean", title: "Confirmed" },
+            count: { type: "integer", title: "Count", minimum: 1, maximum: 10 },
+            ratio: { type: "number", title: "Ratio" },
+            features: {
+              type: "array",
+              title: "Features",
+              items: { type: "string", enum: ["Search", "Export"] },
+            },
+            mode: {
+              type: "string",
+              title: "Mode",
+              oneOf: [
+                { const: "fast", title: "Fast mode" },
+                { const: "safe", title: "Safe mode" },
+              ],
+            },
+          },
+        },
+      },
+    });
+
+    const permission = h.state().permission!;
+    expect(permission.questions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "confirmed", inputKind: "select" }),
+        expect.objectContaining({
+          id: "count",
+          inputKind: "integer",
+          minimum: 1,
+          maximum: 10,
+        }),
+        expect.objectContaining({ id: "ratio", inputKind: "number" }),
+        expect.objectContaining({ id: "features", inputKind: "multiselect", multiSelect: true }),
+      ]),
+    );
+
+    h.adapter.answer?.(
+      permission.id,
+      [
+        { questionId: "confirmed", labels: ["True"], custom: null },
+        { questionId: "count", labels: [], custom: "3" },
+        { questionId: "ratio", labels: [], custom: "1.5" },
+        { questionId: "features", labels: ["Search", "Export"], custom: null },
+        { questionId: "mode", labels: ["Fast mode"], custom: null },
+      ],
+      h.ctx,
+    );
+
+    expect(h.sent.at(-1)).toEqual({
+      jsonrpc: "2.0",
+      id: "elicitation-1",
+      result: {
+        action: "accept",
+        content: {
+          confirmed: true,
+          count: 3,
+          ratio: 1.5,
+          features: ["Search", "Export"],
+          mode: "fast",
+        },
+        _meta: null,
+      },
+    });
   });
 
   test("hides internal models and repairs an internal current model", async () => {

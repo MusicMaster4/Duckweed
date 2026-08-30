@@ -349,7 +349,11 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
   const approvals = new Map<string, { id: string | number; kind: "command" | "file" }>();
   const questions = new Map<
     string,
-    { id: string | number; kind: "user-input" | "mcp-form" | "mcp-url" }
+    {
+      id: string | number;
+      kind: "user-input" | "mcp-form" | "mcp-url";
+      fields?: Map<string, { type: string; choices: Map<string, unknown> }>;
+    }
   >();
   /** Child thread id to its live, independently reduced transcript. */
   const children = new Map<string, ChildThread>();
@@ -878,7 +882,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       kind === "skill"
         ? asArray(result.data).flatMap((entry) => asArray(asRecord(entry)?.skills))
         : kind === "app"
-          ? asArray(result.apps)
+          ? asArray(result.data)
           : kind === "plugin"
             ? asArray(result.marketplaces).flatMap((entry) => asArray(asRecord(entry)?.plugins))
             : kind === "hook"
@@ -899,7 +903,11 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
           asString(row.key) ??
           id;
         const runtimeStatus = asString(row.runtimeStatus);
-        const enabled = row.enabled !== false && runtimeStatus !== "disabled";
+        const enabled =
+          row.enabled !== false &&
+          row.isEnabled !== false &&
+          row.isAccessible !== false &&
+          runtimeStatus !== "disabled";
         return {
           id: `${kind}:${id}`,
           kind,
@@ -912,7 +920,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
             (runtimeStatus ? `Status: ${runtimeStatus}` : ""),
           enabled,
           callable:
-            kind === "skill" ? enabled : kind === "app" ? row.callable === true : false,
+            kind === "skill" ? enabled : kind === "app" ? enabled : false,
           status:
             runtimeStatus === "failed"
               ? "error"
@@ -938,7 +946,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
   async function listExtensions(ctx: AdapterContext): Promise<AgentExtension[]> {
     const calls: [AgentExtension["kind"], Promise<Record<string, unknown>>][] = [
       ["skill", request(ctx, "skills/list", { cwds: [ctx.cwd], forceReload: false })],
-      ["app", request(ctx, "app/installed", { forceRefresh: false, threadId })],
+      ["app", request(ctx, "app/list", { forceRefetch: false, threadId })],
       ["plugin", request(ctx, "plugin/list", { cwds: [ctx.cwd], forceRefetch: false })],
       ["hook", request(ctx, "hooks/list", { cwds: [ctx.cwd] })],
       ["mcp", request(ctx, "mcpServerStatus/list", { threadId })],
@@ -2178,34 +2186,88 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
   ): void {
     const permissionId = `mcp-${String(id)}`;
     const mode = asString(params.mode);
-    questions.set(permissionId, { id, kind: mode === "url" ? "mcp-url" : "mcp-form" });
     const schema = asRecord(params.requestedSchema);
     const properties = asRecord(schema?.properties) ?? {};
     const required = new Set(asArray(schema?.required).map((value) => asString(value)).filter(Boolean));
+    const fieldTypes = new Map<string, { type: string; choices: Map<string, unknown> }>();
+
+    const choicesFor = (field: Record<string, unknown>) => {
+      const type = asString(field.type);
+      const items = type === "array" ? asRecord(field.items) : null;
+      const source = items ?? field;
+      const titled = asArray(source.oneOf ?? source.anyOf)
+        .map((raw) => asRecord(raw))
+        .filter((option): option is Record<string, unknown> => option !== null)
+        .map((option) => ({
+          label: asString(option.title) ?? String(option.const ?? ""),
+          value: option.const,
+        }))
+        .filter((option) => option.label !== "");
+      if (titled.length) return titled;
+      const names = asArray(source.enumNames).map((value) => String(value));
+      return asArray(source.enum).map((value, index) => ({
+        label: names[index] ?? String(value),
+        value,
+      }));
+    };
+
     const formQuestions = Object.entries(properties).map(([key, raw], index) => {
       const field = asRecord(raw) ?? {};
-      const choices = asArray(field.enum).map((value) => String(value));
+      const type = asString(field.type) ?? "string";
+      const choices =
+        type === "boolean"
+          ? [
+              { label: "True", value: true },
+              { label: "False", value: false },
+            ]
+          : choicesFor(field);
+      fieldTypes.set(key, {
+        type,
+        choices: new Map(choices.map((choice) => [choice.label, choice.value])),
+      });
+      const defaultValue = field.default;
+      const inputKind =
+        asString(field.format) === "password"
+          ? ("secret" as const)
+          : type === "number"
+            ? ("number" as const)
+            : type === "integer"
+              ? ("integer" as const)
+              : type === "array"
+                ? ("multiselect" as const)
+                : choices.length
+                  ? ("select" as const)
+                  : ("text" as const);
       return {
         id: key,
         header: asString(field.title) ?? key,
         question: asString(field.description) ?? asString(field.title) ?? key,
-        multiSelect: false,
-        inputKind: (asString(field.format) === "password"
-          ? "secret"
-          : choices.length
-            ? "select"
-            : "text") as "secret" | "select" | "text",
+        multiSelect: type === "array",
+        inputKind,
         required: required.has(key),
-        placeholder: asString(field.default) ?? undefined,
+        allowCustom: choices.length === 0,
+        placeholder:
+          defaultValue === undefined || defaultValue === null
+            ? undefined
+            : Array.isArray(defaultValue)
+              ? defaultValue.map(String).join(", ")
+              : String(defaultValue),
+        minimum: typeof field.minimum === "number" ? field.minimum : undefined,
+        maximum: typeof field.maximum === "number" ? field.maximum : undefined,
         options: choices.map((choice, choiceIndex) => ({
           id: `${index}-${choiceIndex}`,
-          label: choice,
+          label: choice.label,
           description: "",
           preview: null,
         })),
       };
     });
     const url = asString(params.url);
+    questions.set(permissionId, {
+      id,
+      kind: mode === "url" ? "mcp-url" : "mcp-form",
+      fields: mode === "url" ? undefined : fieldTypes,
+    });
     ctx.emit({
       type: "permission",
       permission: {
@@ -3179,7 +3241,11 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
           result:
             pendingQuestion.kind === "user-input"
               ? { answers: {} }
-              : { action: optionId === "deny" ? "decline" : "cancel" },
+              : {
+                  action: optionId === "deny" ? "decline" : "cancel",
+                  content: null,
+                  _meta: null,
+                },
         });
         ctx.emit({ type: "permission", permission: null });
         ctx.emit({ type: "status", status: "working" });
@@ -3208,19 +3274,44 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         ctx.send({
           jsonrpc: "2.0",
           id: pendingQuestion.id,
-          result: { action: accepted ? "accept" : "cancel" },
+          result: { action: accepted ? "accept" : "cancel", content: null, _meta: null },
         });
       } else {
-        const content = Object.fromEntries(
-          answers.map((answer) => [
-            answer.questionId,
-            answer.custom ?? (answer.labels.length > 1 ? answer.labels : answer.labels[0] ?? ""),
-          ]),
-        );
+        const entries: [string, unknown][] = answers.flatMap((answer) => {
+          const field = pendingQuestion.fields?.get(answer.questionId);
+          if (!field) return [] as [string, unknown][];
+          const rawValues = [
+            ...answer.labels,
+            ...(answer.custom !== null ? [answer.custom] : []),
+          ];
+          if (rawValues.length === 0) return [] as [string, unknown][];
+          const valueFor = (raw: string): unknown =>
+            field.choices.has(raw) ? field.choices.get(raw) : raw;
+          if (field.type === "array") {
+            return [[answer.questionId, rawValues.map(valueFor)] as [string, unknown]];
+          }
+          const raw = answer.custom ?? answer.labels[0];
+          if (raw === undefined) return [] as [string, unknown][];
+          const selected = valueFor(raw);
+          if (field.type === "boolean") {
+            const value =
+              typeof selected === "boolean"
+                ? selected
+                : String(selected).toLowerCase() === "true";
+            return [[answer.questionId, value] as [string, unknown]];
+          }
+          if (field.type === "number" || field.type === "integer") {
+            const value = Number(selected);
+            const valid = Number.isFinite(value) && (field.type !== "integer" || Number.isInteger(value));
+            return valid ? [[answer.questionId, value] as [string, unknown]] : [];
+          }
+          return [[answer.questionId, selected] as [string, unknown]];
+        });
+        const content = Object.fromEntries(entries);
         ctx.send({
           jsonrpc: "2.0",
           id: pendingQuestion.id,
-          result: { action: "accept", content },
+          result: { action: "accept", content, _meta: null },
         });
       }
       ctx.emit({ type: "permission", permission: null });

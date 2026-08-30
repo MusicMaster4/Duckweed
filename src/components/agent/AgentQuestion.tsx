@@ -28,7 +28,16 @@ function isAnswered(question: AgentQuestionItem, draft: Draft): boolean {
   if (question.required === false) return true;
   const entry = draft[question.id];
   if (!entry) return false;
-  return entry.picked.length > 0 || entry.custom.trim() !== "";
+  if (entry.picked.length > 0) return true;
+  const custom = entry.custom.trim();
+  if (custom === "" || question.allowCustom === false) return false;
+  if (question.inputKind !== "number" && question.inputKind !== "integer") return true;
+  const value = Number(custom);
+  if (!Number.isFinite(value)) return false;
+  if (question.inputKind === "integer" && !Number.isInteger(value)) return false;
+  if (question.minimum !== undefined && value < question.minimum) return false;
+  if (question.maximum !== undefined && value > question.maximum) return false;
+  return true;
 }
 
 function toAnswers(questions: AgentQuestionItem[], draft: Draft): AgentQuestionAnswer[] {
@@ -334,7 +343,8 @@ export function AgentQuestion({ permission, onAnswer, onSkip }: Props) {
               })}
             </div>
 
-            <label className="agent-question-custom">
+            {question.allowCustom !== false && (
+              <label className="agent-question-custom">
               <span className="agent-question-custom-label">
                 {entry.picked.length > 0
                   ? "Add a note (optional)"
@@ -349,25 +359,37 @@ export function AgentQuestion({ permission, onAnswer, onSkip }: Props) {
                   placeholder={question.placeholder ?? "Enter a private value"}
                   onChange={(event) => writeCustom(question.id, event.target.value)}
                 />
+              ) : question.inputKind === "number" || question.inputKind === "integer" ? (
+                <input
+                  type="number"
+                  step={question.inputKind === "integer" ? 1 : "any"}
+                  min={question.minimum}
+                  max={question.maximum}
+                  value={entry.custom}
+                  disabled={sent}
+                  placeholder={question.placeholder ?? "Enter a number"}
+                  onChange={(event) => writeCustom(question.id, event.target.value)}
+                />
               ) : (
-              <textarea
-                rows={1}
-                value={entry.custom}
-                disabled={sent}
-                placeholder={
-                  entry.picked.length > 0
-                    ? "Anything the agent should know about that choice"
-                    : question.placeholder ?? "Answer in your own words"
-                }
-                onChange={(event) => writeCustom(question.id, event.target.value)}
-                onInput={(event) => {
-                  const node = event.currentTarget;
-                  node.style.height = "auto";
-                  node.style.height = `${Math.min(node.scrollHeight, 132)}px`;
-                }}
-              />
+                <textarea
+                  rows={1}
+                  value={entry.custom}
+                  disabled={sent}
+                  placeholder={
+                    entry.picked.length > 0
+                      ? "Anything the agent should know about that choice"
+                      : question.placeholder ?? "Answer in your own words"
+                  }
+                  onChange={(event) => writeCustom(question.id, event.target.value)}
+                  onInput={(event) => {
+                    const node = event.currentTarget;
+                    node.style.height = "auto";
+                    node.style.height = `${Math.min(node.scrollHeight, 132)}px`;
+                  }}
+                />
               )}
-            </label>
+              </label>
+            )}
           </section>
         );
       })}

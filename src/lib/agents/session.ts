@@ -393,6 +393,21 @@ export function refreshOpenCodeModels(): Promise<void> {
   return openCodeModelsRefreshTask;
 }
 
+function nativeResumeCommand(agent: AgentId, program: string, sessionId: string | null): string {
+  if (!sessionId) return program;
+  const quoted = ` "${sessionId.replace(/"/g, '\\"')}"`;
+  switch (agent) {
+    case "codex":
+      return `${program} resume${quoted}`;
+    case "opencode":
+      return `${program} --session${quoted}`;
+    case "claude":
+    case "cursor":
+    case "grok":
+      return `${program} --resume${quoted}`;
+  }
+}
+
 /** Replace the structured harness with the provider's native terminal UI. */
 export function handoffToNative(termId: string): boolean {
   const session = sessions.get(termId);
@@ -403,12 +418,7 @@ export function handoffToNative(termId: string): boolean {
   session.authHandoff = true;
   const program = session.launch.program;
   const id = session.state.sessionId;
-  const quoted = id ? ` "${id.replace(/"/g, '\\"')}"` : "";
-  const command = id
-    ? session.state.agent === "codex"
-      ? `${program} resume${quoted}`
-      : `${program} --resume${quoted}`
-    : program;
+  const command = nativeResumeCommand(session.state.agent, program, id);
   const request: AgentAuthRequest = {
     termId,
     agent: session.state.agent,
@@ -953,10 +963,11 @@ export async function start(
             content: string;
             binary: boolean;
             too_large: boolean;
-          }>("read_file", { path });
+          }>("read_workspace_file", { workspace: cwd, path });
           return { content: file.content, binary: file.binary, tooLarge: file.too_large };
         },
-        writeText: (path, content) => invoke<void>("write_file", { path, content }),
+        writeText: (path, content) =>
+          invoke<void>("write_workspace_file", { workspace: cwd, path, content }),
       },
     },
   };
