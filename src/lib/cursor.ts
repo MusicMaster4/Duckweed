@@ -41,26 +41,46 @@ export function createCursorSettler(
 ): CursorSettler {
   let timer: Timer | undefined;
   let stable: CursorPosition | null = null;
+  let pendingPosition: CursorPosition | null = null;
+  let pendingPaint: (() => void) | null = null;
 
   function cancel(): void {
-    if (timer === undefined) return;
-    clearTimer(timer);
+    if (timer !== undefined) clearTimer(timer);
     timer = undefined;
+    pendingPosition = null;
+    pendingPaint = null;
   }
 
   return {
     schedule(position, paint, force = false) {
-      cancel();
-      if (!force && !cursorMoveNeedsSettling(stable, position)) {
+      const needsSettling = force || cursorMoveNeedsSettling(stable, position);
+      if (!needsSettling) {
+        cancel();
         stable = position;
         paint();
         return;
       }
 
+      pendingPosition = position;
+      pendingPaint = paint;
+
+      // Keep the first deadline for a provisional move. A long wrapped prompt
+      // can produce a new row/column on every keystroke; restarting this timer
+      // for each update starves it while the user is typing and leaves the
+      // painted cursor several lines behind the actual terminal cursor. Later
+      // provisional updates replace the target, but still settle no later than
+      // CURSOR_SETTLE_MS after the jump began.
+      if (timer !== undefined && !force) return;
+      if (timer !== undefined) clearTimer(timer);
       timer = setTimer(() => {
         timer = undefined;
-        stable = position;
-        paint();
+        const nextPosition = pendingPosition;
+        const nextPaint = pendingPaint;
+        pendingPosition = null;
+        pendingPaint = null;
+        if (!nextPosition || !nextPaint) return;
+        stable = nextPosition;
+        nextPaint();
       }, CURSOR_SETTLE_MS);
     },
     cancel,
