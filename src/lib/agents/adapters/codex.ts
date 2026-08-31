@@ -1602,9 +1602,15 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
           });
           if (child.callId) {
             syncChild(agentThreadId, ctx);
-            void hydrateChild(agentThreadId, ctx);
+            void hydrateChild(agentThreadId, ctx, true);
             return;
           }
+
+          // Multi-agent v2 can surface the child through subAgentActivity
+          // without a preceding spawnAgent collaboration item. Bind this
+          // fallback row to the child immediately so its persisted nickname
+          // can replace agentPath without waiting for the user to inspect it.
+          child.callId = id;
         }
         ctx.emit({
           type: "tool",
@@ -1626,6 +1632,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
             activity: kind.replace(/([a-z])([A-Z])/g, "$1 $2"),
           },
         });
+        if (agentThreadId) void hydrateChild(agentThreadId, ctx, true);
         return;
       }
       case "webSearch": {

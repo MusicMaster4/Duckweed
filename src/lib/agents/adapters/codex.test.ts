@@ -1723,6 +1723,61 @@ describe("codex adapter", () => {
     );
   });
 
+  test("replaces a subagent path with its nickname without requiring inspection", async () => {
+    const h = harness();
+    await h.handshake();
+
+    h.notify("item/started", {
+      threadId: "thread_1",
+      item: {
+        id: "sub-path-only",
+        type: "subAgentActivity",
+        kind: "started",
+        agentThreadId: "thread_child_named",
+        agentPath: "/root/algorithm_research",
+      },
+    });
+
+    expect(h.state().items[0]).toMatchObject({
+      kind: "tool",
+      status: "running",
+      subagent: {
+        label: "/root/algorithm_research",
+        threadId: "thread_child_named",
+      },
+    });
+
+    const read = h.sent.findLast((message) => message.method === "thread/read") as {
+      id: number;
+    };
+    h.feed({
+      jsonrpc: "2.0",
+      id: read.id,
+      result: {
+        thread: {
+          id: "thread_child_named",
+          agentNickname: "Pauli",
+          agentRole: "explorer",
+          status: { type: "active" },
+          turns: [],
+        },
+      },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(h.state().items).toHaveLength(1);
+    expect(h.state().items[0]).toMatchObject({
+      kind: "tool",
+      status: "running",
+      subagent: {
+        label: "Pauli",
+        role: "explorer",
+        threadId: "thread_child_named",
+      },
+    });
+  });
+
   test("keeps streamed item ids isolated between parent and child threads", async () => {
     const h = harness();
     await h.handshake();

@@ -112,6 +112,8 @@ export function AgentSurface({
   const surfaceRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const conversationMenuRef = useRef<HTMLDivElement>(null);
+  const runtimePanelButtonRef = useRef<HTMLButtonElement>(null);
+  const runtimePanelRef = useRef<HTMLElement>(null);
   /** Open with the text typed after `/resume`, so it doubles as a filter. */
   const [resumeQuery, setResumeQuery] = useState<string | null>(null);
   const [conversationMenuOpen, setConversationMenuOpen] = useState(false);
@@ -278,6 +280,22 @@ export function AgentSurface({
       window.removeEventListener("keydown", closeOnEscape);
     };
   }, [conversationMenuOpen]);
+
+  useEffect(() => {
+    if (!runtimePanelOpen) return;
+    const closeOnPointer = (event: PointerEvent) => {
+      const target = event.target as Node;
+      if (
+        runtimePanelRef.current?.contains(target) ||
+        runtimePanelButtonRef.current?.contains(target)
+      ) {
+        return;
+      }
+      setRuntimePanelOpen(false);
+    };
+    window.addEventListener("pointerdown", closeOnPointer);
+    return () => window.removeEventListener("pointerdown", closeOnPointer);
+  }, [runtimePanelOpen]);
 
   useEffect(() => {
     if (!conversationCopied) return;
@@ -703,6 +721,7 @@ export function AgentSurface({
         )}
         <AgentGoalIndicator goal={session.goal} />
         <button
+          ref={runtimePanelButtonRef}
           type="button"
           className={`agent-head-btn is-quiet${runtimePanelOpen ? " is-active" : ""}`}
           onClick={() => {
@@ -796,6 +815,7 @@ export function AgentSurface({
 
       {runtimePanelOpen && (
         <AgentRuntimePanel
+          ref={runtimePanelRef}
           session={session}
           onRefreshExtensions={() => void agents.refreshExtensions(termId)}
           onRefreshTasks={() => void agents.refreshTasks(termId)}

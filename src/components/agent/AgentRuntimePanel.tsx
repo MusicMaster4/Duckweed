@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { forwardRef, useMemo, useState } from "react";
 
 import type { AgentSessionState } from "../../lib/agents/types";
 
@@ -22,13 +22,13 @@ const EXTENSION_LABELS = {
   agent: "Agents",
 } as const;
 
-export function AgentRuntimePanel({
+export const AgentRuntimePanel = forwardRef<HTMLElement, Props>(function AgentRuntimePanel({
   session,
   onRefreshExtensions,
   onRefreshTasks,
   onStopTask,
   onNative,
-}: Props) {
+}, ref) {
   const [tab, setTab] = useState<Tab>("extensions");
   const groups = useMemo(() => {
     const result = new Map<string, NonNullable<AgentSessionState["extensions"]>>();
@@ -44,7 +44,7 @@ export function AgentRuntimePanel({
   const capabilities = session.capabilities;
 
   return (
-    <section className="agent-runtime-panel" aria-label="Agent capabilities">
+    <section ref={ref} className="agent-runtime-panel" aria-label="Agent capabilities">
       <div className="agent-runtime-tabs" role="tablist">
         {(["extensions", "tasks", "capabilities"] as const).map((id) => (
           <button
@@ -153,4 +153,4 @@ export function AgentRuntimePanel({
       </div>
     </section>
   );
-}
+});
