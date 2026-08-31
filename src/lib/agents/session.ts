@@ -1,4 +1,4 @@
-import { Channel } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 
 import {
   agentProcCloseStdin,
@@ -46,6 +46,7 @@ import {
   formatSessionUsage,
   isClaudexProgram,
 } from "./slashCatalog";
+import { discoverLocalSkills } from "./localSkills";
 import {
   emptyUsage,
   type AgentAccessMode,
@@ -166,7 +167,7 @@ const turnStartListeners = new Set<(termId: string) => void>();
 export interface AgentAuthRequest {
   termId: string;
   agent: AgentId;
-  action: AgentAuthAction;
+  action: AgentAuthAction | "native";
   command: string;
 }
 const authRequestListeners = new Set<(request: AgentAuthRequest) => void>();
@@ -390,6 +391,52 @@ export function refreshOpenCodeModels(): Promise<void> {
     });
   }
   return openCodeModelsRefreshTask;
+}
+
+function nativeResumeCommand(agent: AgentId, program: string, sessionId: string | null): string {
+  if (!sessionId) return program;
+  const quoted = ` "${sessionId.replace(/"/g, '\\"')}"`;
+  switch (agent) {
+    case "codex":
+      return `${program} resume${quoted}`;
+    case "opencode":
+      return `${program} --session${quoted}`;
+    case "claude":
+    case "cursor":
+    case "grok":
+      return `${program} --resume${quoted}`;
+  }
+}
+
+/** Replace the structured harness with the provider's native terminal UI. */
+export function handoffToNative(termId: string): boolean {
+  const session = sessions.get(termId);
+  if (!session || session.disposed || session.authHandoff || authRequestListeners.size === 0) {
+    return false;
+  }
+  if (session.state.status === "working" || session.state.status === "waiting") return false;
+  session.authHandoff = true;
+  const program = session.launch.program;
+  // Codex gives `thread/start` an id before the first turn, but that empty
+  // thread is not written to its resumable session store. Passing the
+  // provisional id to `codex resume` exits with "No saved session found".
+  // Once a user turn exists the rollout has been persisted and the id is safe
+  // to hand to the native CLI. Other providers persist their session during
+  // the handshake, so keep their existing behaviour.
+  const id =
+    session.state.agent === "codex" &&
+    !session.state.items.some((item) => item.kind === "user")
+      ? null
+      : session.state.sessionId;
+  const command = nativeResumeCommand(session.state.agent, program, id);
+  const request: AgentAuthRequest = {
+    termId,
+    agent: session.state.agent,
+    action: "native",
+    command,
+  };
+  for (const listener of [...authRequestListeners]) listener(request);
+  return true;
 }
 
 export function probeAvailability(): Promise<Set<string>> {
@@ -901,6 +948,12 @@ export async function start(
       // Live advertisements merge over this list as they arrive; the composer
       // never has to wait on the protocol to answer `/`.
       commands: fallbackCommands(launch.agent, launch.program),
+      extensions: [],
+      extensionsLoaded: false,
+      localSkillsLoaded: false,
+      extensionsLoading: false,
+      extensionsError: null,
+      runtimeTasks: [],
       started: false,
       exitArmed: false,
     },
@@ -914,6 +967,18 @@ export async function start(
         });
       },
       emit: (event) => emit(session, event),
+      files: {
+        readText: async (path) => {
+          const file = await invoke<{
+            content: string;
+            binary: boolean;
+            too_large: boolean;
+          }>("read_workspace_file", { workspace: cwd, path });
+          return { content: file.content, binary: file.binary, tooLarge: file.too_large };
+        },
+        writeText: (path, content) =>
+          invoke<void>("write_workspace_file", { workspace: cwd, path, content }),
+      },
     },
   };
 
@@ -1055,7 +1120,29 @@ export function submit(
   if (!session || session.disposed) return;
   const trimmed = text.trim();
   if (!trimmed && images.length === 0) return;
-  const prompt: AgentPrompt = { text: trimmed, images: [...images] };
+  const extensions = session.state.extensions ?? [];
+  const parts: NonNullable<AgentPrompt["parts"]> = [];
+  const selectedExtensions = new Set<string>();
+  if (trimmed) parts.push({ type: "text", text: trimmed });
+  for (const image of images) parts.push({ type: "image", image });
+  for (const extension of extensions) {
+    if (!extension.callable) continue;
+    if (extension.kind === "skill" && !extension.local) continue;
+    const prefix = extension.kind === "skill" ? "$" : extension.kind === "app" ? "@" : null;
+    if (!prefix) continue;
+    const token = `${prefix}${extension.name}`;
+    const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    if (!new RegExp(`(^|\\s)${escaped}(?=\\s|$)`, "i").test(trimmed)) continue;
+    const partKey = `${extension.kind}:${extension.name.toLowerCase()}`;
+    if (selectedExtensions.has(partKey)) continue;
+    selectedExtensions.add(partKey);
+    if (extension.kind === "skill") {
+      parts.push({ type: "skill", id: extension.id, name: extension.name, path: extension.path });
+    } else {
+      parts.push({ type: "app", id: extension.id, name: extension.name, uri: extension.uri });
+    }
+  }
+  const prompt: AgentPrompt = { text: trimmed, images: [...images], parts };
   if (session.exitArmedUntil > 0) {
     session.exitArmedUntil = 0;
     emit(session, { type: "exit-armed", armed: false });
@@ -1133,6 +1220,94 @@ export function canSteer(termId: string): boolean {
 export function canPromptSubagent(termId: string): boolean {
   const session = sessions.get(termId);
   return Boolean(session && !session.disposed && session.adapter.promptSubagent);
+}
+
+/** Ask the live provider for its current extension inventory. */
+export async function refreshExtensions(termId: string): Promise<boolean> {
+  const session = sessions.get(termId);
+  if (!session || session.disposed) return false;
+  emit(session, { type: "extensions", loading: true, error: null });
+  try {
+    const [providerExtensions, localSkills] = await Promise.all([
+      session.adapter.refreshExtensions?.(session.context) ?? [],
+      discoverLocalSkills(session.state.agent, session.state.cwd),
+    ]);
+    emit(session, {
+      type: "extensions",
+      extensions: [
+        ...providerExtensions.filter((extension) => !extension.local),
+        ...localSkills,
+      ],
+      loading: false,
+      error: null,
+      extensionsLoaded: true,
+      localSkillsLoaded: true,
+    });
+    return true;
+  } catch (error) {
+    emit(session, {
+      type: "extensions",
+      loading: false,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return false;
+  }
+}
+
+/** Scan only filesystem-backed skills for the `$` picker. */
+export async function refreshSkills(termId: string): Promise<boolean> {
+  const session = sessions.get(termId);
+  if (!session || session.disposed) return false;
+  emit(session, { type: "extensions", loading: true, error: null });
+  try {
+    const localSkills = await discoverLocalSkills(session.state.agent, session.state.cwd);
+    emit(session, {
+      type: "extensions",
+      extensions: [
+        ...(session.state.extensions ?? []).filter((extension) => !extension.local),
+        ...localSkills,
+      ],
+      loading: false,
+      error: null,
+      extensionsLoaded: session.state.extensionsLoaded,
+      localSkillsLoaded: true,
+    });
+    return true;
+  } catch (error) {
+    emit(session, {
+      type: "extensions",
+      loading: false,
+      error: error instanceof Error ? error.message : String(error),
+      extensionsLoaded: session.state.extensionsLoaded,
+      localSkillsLoaded: true,
+    });
+    return false;
+  }
+}
+
+/** Ask the live provider for background tasks, terminals and worktrees. */
+export async function refreshTasks(termId: string): Promise<boolean> {
+  const session = sessions.get(termId);
+  if (!session || session.disposed || !session.adapter.refreshTasks) return false;
+  try {
+    const tasks = await session.adapter.refreshTasks(session.context);
+    emit(session, { type: "runtime-tasks", tasks });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function stopTask(termId: string, taskId: string): Promise<boolean> {
+  const session = sessions.get(termId);
+  if (!session || session.disposed || !session.adapter.stopTask) return false;
+  try {
+    const stopped = await session.adapter.stopTask(taskId, session.context);
+    if (stopped) await refreshTasks(termId);
+    return stopped;
+  } catch {
+    return false;
+  }
 }
 
 /** Resolve and load one provider-owned child transcript for focused inspection. */

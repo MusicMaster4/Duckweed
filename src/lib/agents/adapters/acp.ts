@@ -10,14 +10,18 @@ import {
 } from "../adapter";
 import { goalAfterCommand, goalAfterProviderText } from "../goal";
 import type { AgentLaunch } from "../launch";
+import { promptTextWithLocalSkills } from "../localSkills";
 import {
   makeChange,
   toolKind,
   type AgentFileChange,
   type AgentGoal,
+  type AgentExtension,
   type AgentId,
   type AgentPlanStep,
   type AgentPrompt,
+  type AgentQuestionAnswer,
+  type AgentRuntimeTask,
   type SubagentMeta,
   type ToolStatus,
 } from "../types";
@@ -240,6 +244,7 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
   const seenToolCalls = new Set<string>();
   /** Permission id → the JSON-RPC request id ACP is waiting on. */
   const permissionRequests = new Map<string, string | number>();
+  const questionRequests = new Map<string, string | number>();
   /** Tool calls whose content we have already seen, to merge partial updates. */
   const toolTitles = new Map<string, string>();
   /** ACP updates omit raw input, so remember which calls were delegated work. */
@@ -250,6 +255,11 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
    * chatted to the model at full price.
    */
   const advertised = new Set<string>();
+  let extensions: AgentExtension[] = [];
+  const runtimeTasks = new Map<string, AgentRuntimeTask>();
+  let supportsImages = false;
+  let supportsEmbeddedContext = false;
+  let supportsTerminalClient = false;
   /** Models the agent can switch to, and each one's effort levels. */
   let availableModels: AcpModel[] = [];
   let currentModelId: string | null = null;
@@ -411,6 +421,19 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
       }))
       .filter((command) => command.name.length > 1);
     for (const command of commands) advertised.add(command.name.slice(1).toLowerCase());
+    extensions = [
+      ...extensions.filter((extension) => extension.kind !== "workflow"),
+      ...commands.map((command) => ({
+        id: `workflow:${command.name.slice(1)}`,
+        kind: "workflow" as const,
+        name: command.name,
+        description: command.description,
+        enabled: true,
+        callable: true,
+        status: "ready" as const,
+        source: agent,
+      })),
+    ];
     return commands;
   }
 
@@ -591,15 +614,92 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
   }
 
   /** `initialize` → `session/new` → launch-time model/effort → ready. */
+  /** Resolve ACP client-file requests inside the launched workspace only. */
+  function resolveClientPath(cwd: string, requested: string): string | null {
+    const slash = (value: string) => value.replace(/\\/g, "/");
+    const root = slash(cwd).replace(/\/+$/, "");
+    const absolute = /^(?:[A-Za-z]:\/|\/)/.test(slash(requested))
+      ? slash(requested)
+      : `${root}/${slash(requested)}`;
+    const drive = /^[A-Za-z]:/.exec(absolute)?.[0] ?? "";
+    const segments: string[] = [];
+    for (const segment of absolute.slice(drive.length).split("/")) {
+      if (!segment || segment === ".") continue;
+      if (segment === "..") segments.pop();
+      else segments.push(segment);
+    }
+    const resolved = `${drive}/${segments.join("/")}`;
+    const fold = (value: string) => (drive ? value.toLowerCase() : value);
+    if (fold(resolved) !== fold(root) && !fold(resolved).startsWith(`${fold(root)}/`)) return null;
+    return resolved;
+  }
+
+  function handleClientFileRequest(
+    id: string | number,
+    method: string,
+    params: Record<string, unknown>,
+    ctx: AdapterContext,
+  ): boolean {
+    if (method !== "fs/read_text_file" && method !== "fs/write_text_file") return false;
+    const requested = asString(params.path);
+    const path = requested ? resolveClientPath(ctx.cwd, requested) : null;
+    if (!path) {
+      ctx.send({ jsonrpc: "2.0", id, error: { code: -32602, message: "Path outside workspace." } });
+      return true;
+    }
+    if (method === "fs/read_text_file") {
+      if (!ctx.files) {
+        ctx.send({ jsonrpc: "2.0", id, error: { code: -32601, message: "File service unavailable." } });
+        return true;
+      }
+      void ctx.files.readText(path)
+        .then((file) => {
+          if (file.binary || file.tooLarge) throw new Error("The file is not readable text.");
+          const line = typeof params.line === "number" ? Math.max(1, Math.floor(params.line)) : 1;
+          const limit = typeof params.limit === "number" ? Math.max(0, Math.floor(params.limit)) : null;
+          const lines = file.content.split(/(?<=\n)/);
+          const content = lines.slice(line - 1, limit === null ? undefined : line - 1 + limit).join("");
+          ctx.send({ jsonrpc: "2.0", id, result: { content } });
+        })
+        .catch((error: unknown) =>
+          ctx.send({
+            jsonrpc: "2.0",
+            id,
+            error: { code: -32000, message: error instanceof Error ? error.message : String(error) },
+          }),
+        );
+    } else {
+      const content = asString(params.content);
+      if (content === null) {
+        ctx.send({ jsonrpc: "2.0", id, error: { code: -32602, message: "Missing content." } });
+        return true;
+      }
+      if (!ctx.files) {
+        ctx.send({ jsonrpc: "2.0", id, error: { code: -32601, message: "File service unavailable." } });
+        return true;
+      }
+      void ctx.files.writeText(path, content)
+        .then(() => ctx.send({ jsonrpc: "2.0", id, result: null }))
+        .catch((error: unknown) =>
+          ctx.send({
+            jsonrpc: "2.0",
+            id,
+            error: { code: -32000, message: error instanceof Error ? error.message : String(error) },
+          }),
+        );
+    }
+    return true;
+  }
+
   async function handshake(ctx: AdapterContext) {
     try {
       const initialized = await request(ctx, "initialize", {
         protocolVersion: PROTOCOL_VERSION,
         clientCapabilities: {
-          // Duckweed does not proxy the filesystem for the agent; it has its
-          // own access to the project it was launched in. Declaring these
-          // false is what stops an agent asking us to read files for it.
-          fs: { readTextFile: false, writeTextFile: false },
+          // ACP file services stay confined to the launched workspace. This
+          // lets remote agents request context without exposing arbitrary
+          // paths from the user's machine.
+          fs: { readTextFile: Boolean(ctx.files), writeTextFile: Boolean(ctx.files) },
           terminal: false,
         },
         clientInfo: { name: "duckweed", title: "Duckweed", version: "0.1.0" },
@@ -609,6 +709,16 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
       // calling `session/load` on one that cannot is a hard JSON-RPC error.
       canLoadSession = asRecord(initialized.agentCapabilities)?.loadSession === true;
 
+      const agentCapabilities = asRecord(initialized.agentCapabilities) ?? {};
+      const promptCapabilities = asRecord(agentCapabilities.promptCapabilities) ?? {};
+      // Older ACP agents omitted promptCapabilities while still accepting
+      // images. An explicit false is authoritative; absence keeps the legacy
+      // compatible path.
+      supportsImages = promptCapabilities.image !== false;
+      supportsEmbeddedContext = promptCapabilities.embeddedContext === true;
+      const clientNeeds = asRecord(asRecord(initialized._meta)?.clientCapabilities);
+      supportsTerminalClient = clientNeeds?.terminal === true;
+
       const meta = asRecord(initialized._meta);
       const identity = readModelState(meta?.modelState);
       const commands = readCommands(meta?.availableCommands);
@@ -616,7 +726,34 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
         type: "session",
         ...identity,
         ...(commands.length ? { commands } : {}),
+        capabilities: {
+          inputs: {
+            text: true,
+            image: supportsImages,
+            file: supportsEmbeddedContext,
+            embeddedContext: supportsEmbeddedContext,
+            skill: agent === "grok",
+            appMention: false,
+          },
+          interactions: { approvals: true, questions: agent === "grok", forms: false, links: false },
+          extensions: {
+            skills: agent === "grok",
+            apps: false,
+            plugins: agent === "grok",
+            mcp: true,
+            hooks: agent === "grok",
+            workflows: agent === "grok",
+          },
+          runtime: {
+            backgroundTasks: agent === "grok",
+            terminals: agent === "grok" || supportsTerminalClient,
+            worktrees: agent === "grok",
+            checkpointing: agent === "grok",
+            nativeFallback: true,
+          },
+        },
       });
+      ctx.emit({ type: "extensions", extensions, loading: false, error: null });
 
       const session = await request(ctx, "session/new", {
         cwd: ctx.cwd,
@@ -842,6 +979,21 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
           }
         }
         const steps = readWorkflowSteps(update);
+        const runtimeStatus: AgentRuntimeTask["status"] = workflowIsTerminal(workflowStatus)
+          ? workflowStatus === "failed" || workflowStatus === "error"
+            ? "error"
+            : "done"
+          : workflowStatus === "blocked"
+            ? "blocked"
+            : "running";
+        runtimeTasks.set(id, {
+          id,
+          kind: "workflow",
+          title: asString(update.title) ?? asString(update.name) ?? "Grok workflow",
+          status: runtimeStatus,
+          detail: steps.length ? `${steps.filter((step) => step.status === "done").length}/${steps.length} phases` : undefined,
+        });
+        ctx.emit({ type: "runtime-tasks", tasks: [...runtimeTasks.values()] });
         if (steps.length) {
           turnHadContent = true;
           ctx.emit({ type: "plan", planType: "workflow", steps });
@@ -910,6 +1062,56 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
               { id: "allow", label: "Allow", kind: "allow" },
               { id: "reject", label: "Reject", kind: "reject" },
             ],
+      },
+    });
+  }
+
+  function handleQuestionRequest(
+    id: string | number,
+    params: Record<string, unknown>,
+    ctx: AdapterContext,
+  ): void {
+    const permissionId = `question-${String(id)}`;
+    questionRequests.set(permissionId, id);
+    const rawQuestions = asArray(params.questions);
+    const source = rawQuestions.length ? rawQuestions : [params];
+    const questions = source
+      .map((raw) => asRecord(raw))
+      .filter((question): question is Record<string, unknown> => question !== null)
+      .map((question, index) => ({
+        id: asString(question.id) ?? `question-${index}`,
+        header: asString(question.header) ?? "Grok needs input",
+        question:
+          asString(question.question) ?? asString(question.prompt) ?? asString(question.message) ?? "What should Grok do?",
+        multiSelect: question.multiSelect === true || question.multi_select === true,
+        inputKind: question.isSecret === true ? ("secret" as const) : undefined,
+        required: true,
+        options: asArray(question.options)
+          .map((raw, optionIndex) => {
+            const option = asRecord(raw);
+            const label = asString(option?.label) ?? asString(option?.name) ?? asString(raw);
+            return label
+              ? {
+                  id: asString(option?.id) ?? asString(option?.value) ?? `${optionIndex}`,
+                  label,
+                  description: asString(option?.description) ?? "",
+                  preview: null,
+                }
+              : null;
+          })
+          .filter((option): option is NonNullable<typeof option> => option !== null),
+      }));
+    ctx.emit({
+      type: "permission",
+      permission: {
+        id: permissionId,
+        kind: "question",
+        title: "Grok needs input",
+        detail: null,
+        command: null,
+        changes: [],
+        options: [],
+        questions,
       },
     });
   }
@@ -1057,13 +1259,32 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
   }
 
   function promptContent(prompt: AgentPrompt) {
+    const providerText = promptTextWithLocalSkills(prompt);
     return [
-      ...(prompt.text ? [{ type: "text", text: prompt.text }] : []),
-      ...prompt.images.map((image) => ({
+      ...(providerText ? [{ type: "text", text: providerText }] : []),
+      ...(supportsImages ? prompt.images : []).map((image) => ({
         type: "image",
         data: imagePayloadBase64(image),
         mimeType: image.mimeType,
       })),
+      ...(supportsEmbeddedContext
+        ? (prompt.parts ?? []).flatMap((part) => {
+            if (part.type === "file") {
+              return [{ type: "resource_link", uri: part.path, name: part.name ?? part.path }];
+            }
+            if (part.type === "resource") {
+              return [
+                {
+                  type: "resource_link",
+                  uri: part.uri,
+                  name: part.name ?? part.uri,
+                  ...(part.mimeType ? { mimeType: part.mimeType } : {}),
+                },
+              ];
+            }
+            return [];
+          })
+        : []),
     ];
   }
 
@@ -1132,6 +1353,26 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
           handlePermissionRequest(id, params, ctx);
           return;
         }
+        if (method === "_x.ai/ask_user_question" || method === "session/request_input") {
+          handleQuestionRequest(id, params, ctx);
+          return;
+        }
+        if (method === "_x.ai/exit_plan_mode") {
+          handleQuestionRequest(
+            id,
+            {
+              header: "Plan ready",
+              question: asString(params.message) ?? "Approve this plan and begin implementation?",
+              options: [
+                { id: "approve", label: "Approve", description: "Begin implementation" },
+                { id: "revise", label: "Revise", description: "Keep planning" },
+              ],
+            },
+            ctx,
+          );
+          return;
+        }
+        if (handleClientFileRequest(id, method, params, ctx)) return;
         // Everything else is a capability we declared we do not have.
         ctx.send({
           jsonrpc: "2.0",
@@ -1147,11 +1388,36 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
         method === "_x.ai/session_notification"
       ) {
         handleSessionUpdate(params, ctx);
+        return;
+      }
+      if (method === "_x.ai/mcp/servers_updated") {
+        const rows = asArray(params.servers ?? params.mcpServers)
+          .map((raw) => asRecord(raw))
+          .filter((row): row is Record<string, unknown> => row !== null)
+          .map((row) => ({
+            id: `mcp:${asString(row.id) ?? asString(row.name) ?? "server"}`,
+            kind: "mcp" as const,
+            name: asString(row.name) ?? asString(row.id) ?? "MCP server",
+            description: asString(row.description) ?? "",
+            enabled: row.enabled !== false,
+            callable: false,
+            status: row.error ? ("error" as const) : row.enabled === false ? ("disabled" as const) : ("ready" as const),
+            source: "grok",
+          }));
+        extensions = [...extensions.filter((extension) => extension.kind !== "mcp"), ...rows];
+        ctx.emit({ type: "extensions", extensions, loading: false, error: null });
       }
     },
 
     prompt: (prompt, ctx) => {
       if (!sessionId) return;
+      if (prompt.images.length && !supportsImages) {
+        ctx.emit({
+          type: "notice",
+          tone: "error",
+          text: `${ctx.launch.program} does not accept image input over ACP. The text and supported context were sent without the image.`,
+        });
+      }
       turnSeq += 1;
       resetContentSegments();
       promptRequestSettled = false;
@@ -1315,7 +1581,15 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
 
     respond: (permissionId, optionId, ctx) => {
       const id = permissionRequests.get(permissionId);
-      if (id === undefined) return;
+      if (id === undefined) {
+        const questionId = questionRequests.get(permissionId);
+        if (questionId === undefined) return;
+        questionRequests.delete(permissionId);
+        ctx.send({ jsonrpc: "2.0", id: questionId, result: { outcome: "cancelled" } });
+        ctx.emit({ type: "permission", permission: null });
+        ctx.emit({ type: "status", status: "working" });
+        return;
+      }
       permissionRequests.delete(permissionId);
       ctx.send({
         jsonrpc: "2.0",
@@ -1325,5 +1599,21 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
       ctx.emit({ type: "permission", permission: null });
       ctx.emit({ type: "status", status: "working" });
     },
+    answer: (permissionId, answers: AgentQuestionAnswer[], ctx) => {
+      const id = questionRequests.get(permissionId);
+      if (id === undefined) return;
+      questionRequests.delete(permissionId);
+      const answerMap = Object.fromEntries(
+        answers.map((answer) => [
+          answer.questionId,
+          answer.custom ?? (answer.labels.length > 1 ? answer.labels : answer.labels[0] ?? ""),
+        ]),
+      );
+      ctx.send({ jsonrpc: "2.0", id, result: { answers: answerMap } });
+      ctx.emit({ type: "permission", permission: null });
+      ctx.emit({ type: "status", status: "working" });
+    },
+    refreshExtensions: () => extensions.map((extension) => ({ ...extension })),
+    refreshTasks: () => [...runtimeTasks.values()].map((task) => ({ ...task })),
   };
 }

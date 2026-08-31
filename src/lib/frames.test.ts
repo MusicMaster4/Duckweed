@@ -237,4 +237,45 @@ describe("visual cursor stabilization", () => {
     expect(painted).toEqual(["14:3", "14:3"]);
     settler.cancel();
   });
+
+  test("continuous typing after a wrapped-line jump cannot starve the cursor", () => {
+    let pending: (() => void) | null = null;
+    let timers = 0;
+    const painted: string[] = [];
+    const settler = createCursorSettler(
+      (callback) => {
+        timers += 1;
+        pending = callback;
+        return timers;
+      },
+      () => {
+        pending = null;
+      },
+    );
+
+    settler.schedule({ row: 4, column: 58 }, () => painted.push("4:58"), true);
+    pending?.();
+    pending = null;
+
+    // The prompt wraps, then keeps advancing faster than the settle window.
+    // These updates must share the first deadline instead of postponing it on
+    // every character and leaving the visual cursor on row 4 indefinitely.
+    settler.schedule({ row: 5, column: 0 }, () => painted.push("5:0"));
+    const firstDeadline = pending;
+    settler.schedule({ row: 5, column: 1 }, () => painted.push("5:1"));
+    settler.schedule({ row: 5, column: 2 }, () => painted.push("5:2"));
+
+    expect(timers).toBe(2);
+    expect(pending).toBe(firstDeadline);
+    expect(painted).toEqual(["4:58"]);
+
+    pending?.();
+    pending = null;
+    expect(painted).toEqual(["4:58", "5:2"]);
+
+    // Once the new row is stable, ordinary typing is immediate again.
+    settler.schedule({ row: 5, column: 3 }, () => painted.push("5:3"));
+    expect(painted).toEqual(["4:58", "5:2", "5:3"]);
+    settler.cancel();
+  });
 });

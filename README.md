@@ -366,6 +366,44 @@ conversation. Open one to inspect its status, prompt, child conversation, tool
 activity, plan, output, and file changes. When the child thread accepts input,
 you can send it a follow-up or redirect it without leaving the parent session.
 
+### Commands, skills, apps, and provider features
+
+The agent composer uses different prefixes for different kinds of input:
+
+- Type `/` to browse commands exposed by the CLI, such as `/model`, `/effort`,
+  `/compact`, or `/rewind` when the active provider supports them.
+- Type `$` to browse filesystem-backed skills from `.agents/skills` and the
+  active provider's local skill directory, such as `.codex/skills` or
+  `.claude/skills`. Plugin and app bundles stay in **Extensions** instead of
+  crowding this picker.
+- Type `@` to browse installed apps and connectors. Workspace file mentions
+  continue to use `@` when no matching provider app is available.
+
+Typing `$` scans local skill folders automatically. Shared `.agents/skills`
+entries work with every custom agent: Codex receives its structured skill
+reference, while other providers are directed to read and apply the selected
+`SKILL.md`. Typing `@` loads the provider's installed app inventory. Use
+**Refresh** under the three-line provider-features button after installing or
+changing an extension during an existing session. The same panel contains:
+
+- **Extensions**, for skills, apps, plugins, MCP servers, hooks, workflows, and
+  provider agents reported by the running CLI.
+- **Tasks**, for background workflows, tasks, and Codex background terminals.
+- **Support**, for the capabilities negotiated with the provider, including
+  accepted input types, questions, forms, extensions, and runtime features.
+
+Choose **Open native interface** under Support when a feature is available only
+in the provider's terminal UI. Duckweed closes the structured harness and, when
+the provider supports it, resumes the same conversation in the native CLI.
+Finish or stop the active turn before switching interfaces.
+
+Extension availability depends on the installed CLI version, account, plugins,
+MCP configuration, and workspace settings. If Duckweed was already running
+while you installed an update or rebuilt it from source, restart the app before
+testing the new interface. Desktop Computer Use, screen control, mouse control,
+and keyboard automation are intentionally not integrated into the custom agent
+UI.
+
 Supported custom interfaces currently include:
 
 - Claude Code and compatible Claudex launches
@@ -379,7 +417,8 @@ transcripts Duckweed can measure even when they do not have a custom agent
 interface. Usage scanning support does not imply custom-interface support.
 
 Turn off **Custom Agent UI** from the command palette whenever you prefer to use
-an agent's original terminal interface.
+an agent's original terminal interface for new launches. Existing sessions keep
+their current interface and continue running until you exit them.
 
 ## Agent usage
 

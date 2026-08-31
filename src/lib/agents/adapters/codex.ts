@@ -19,8 +19,11 @@ import {
   type AgentAccessMode,
   type AgentFileChange,
   type AgentGoalStatus,
+  type AgentExtension,
   type AgentImageAttachment,
   type AgentItem,
+  type AgentQuestionAnswer,
+  type AgentRuntimeTask,
   type AgentSessionState,
   type AgentSideQuestion,
   type AgentStatus,
@@ -344,6 +347,14 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
   const streamed = new Set<string>();
   /** Permission id → the JSON-RPC id Codex is waiting on, and its shape. */
   const approvals = new Map<string, { id: string | number; kind: "command" | "file" }>();
+  const questions = new Map<
+    string,
+    {
+      id: string | number;
+      kind: "user-input" | "mcp-form" | "mcp-url";
+      fields?: Map<string, { type: string; choices: Map<string, unknown> }>;
+    }
+  >();
   /** Child thread id to its live, independently reduced transcript. */
   const children = new Map<string, ChildThread>();
   /** Spawn rows that arrived before app-server exposed their child thread id. */
@@ -866,6 +877,107 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     ctx.send({ jsonrpc: "2.0", method, params });
   }
 
+  function extensionRows(result: Record<string, unknown>, kind: AgentExtension["kind"]): AgentExtension[] {
+    const source =
+      kind === "skill"
+        ? asArray(result.data).flatMap((entry) => asArray(asRecord(entry)?.skills))
+        : kind === "app"
+          ? asArray(result.data)
+          : kind === "plugin"
+            ? asArray(result.marketplaces).flatMap((entry) => asArray(asRecord(entry)?.plugins))
+            : kind === "hook"
+              ? asArray(result.data).flatMap((entry) => asArray(asRecord(entry)?.hooks))
+              : asArray(result.data ?? result.servers);
+    return source
+      .map((raw) => asRecord(raw))
+      .filter((row): row is Record<string, unknown> => row !== null)
+      .map((row) => {
+        const info = asRecord(row.interface) ?? asRecord(row.serverInfo);
+        const id = asString(row.id) ?? asString(row.name) ?? asString(row.key) ?? "";
+        const name =
+          (kind === "skill" ? asString(row.name) : null) ??
+          asString(info?.displayName) ??
+          asString(info?.title) ??
+          asString(row.runtimeName) ??
+          asString(row.name) ??
+          asString(row.key) ??
+          id;
+        const runtimeStatus = asString(row.runtimeStatus);
+        const enabled =
+          row.enabled !== false &&
+          row.isEnabled !== false &&
+          row.isAccessible !== false &&
+          runtimeStatus !== "disabled";
+        return {
+          id: `${kind}:${id}`,
+          kind,
+          name,
+          description:
+            asString(row.description) ??
+            asString(row.shortDescription) ??
+            asString(info?.shortDescription) ??
+            asString(info?.longDescription) ??
+            (runtimeStatus ? `Status: ${runtimeStatus}` : ""),
+          enabled,
+          callable:
+            kind === "skill" ? enabled : kind === "app" ? enabled : false,
+          status:
+            runtimeStatus === "failed"
+              ? "error"
+              : runtimeStatus === "starting"
+                ? "connecting"
+                : enabled
+                  ? "ready"
+                  : "disabled",
+          path: asString(row.path) ?? asString(row.sourcePath) ?? undefined,
+          uri: kind === "app" ? `app://${id}` : undefined,
+          source: asString(row.scope) ?? asString(row.pluginId) ?? undefined,
+        } satisfies AgentExtension;
+      })
+      .filter((row) => {
+        if (!row.id || !row.name) return false;
+        // Computer Use was deliberately excluded from Duckweed's custom UI.
+        // Keep it out of both the callable picker and the provider inventory.
+        const identity = `${row.id} ${row.name}`.toLowerCase().replace(/[\s_]+/g, "-");
+        return !identity.includes("computer-use");
+      });
+  }
+
+  async function listExtensions(ctx: AdapterContext): Promise<AgentExtension[]> {
+    const calls: [AgentExtension["kind"], Promise<Record<string, unknown>>][] = [
+      ["skill", request(ctx, "skills/list", { cwds: [ctx.cwd], forceReload: false })],
+      ["app", request(ctx, "app/list", { forceRefetch: false, threadId })],
+      ["plugin", request(ctx, "plugin/list", { cwds: [ctx.cwd], forceRefetch: false })],
+      ["hook", request(ctx, "hooks/list", { cwds: [ctx.cwd] })],
+      ["mcp", request(ctx, "mcpServerStatus/list", { threadId })],
+    ];
+    const settled = await Promise.allSettled(calls.map(([, call]) => call));
+    return settled.flatMap((result, index) =>
+      result.status === "fulfilled" ? extensionRows(result.value, calls[index][0]) : [],
+    );
+  }
+
+  async function listRuntimeTasks(ctx: AdapterContext): Promise<AgentRuntimeTask[]> {
+    if (!threadId) return [];
+    const result = await request(ctx, "thread/backgroundTerminals/list", { threadId, limit: 100 });
+    return asArray(result.data)
+      .map((raw) => asRecord(raw))
+      .filter((row): row is Record<string, unknown> => row !== null)
+      .map((row) => ({
+        id: asString(row.processId) ?? asString(row.itemId) ?? "",
+        kind: "terminal" as const,
+        title: asString(row.command) ?? "Background terminal",
+        status: "running" as const,
+        command: asString(row.command) ?? undefined,
+        cwd: asString(row.cwd) ?? undefined,
+        detail:
+          typeof row.osPid === "number"
+            ? `PID ${row.osPid}${typeof row.cpuPercent === "number" ? `, ${row.cpuPercent.toFixed(1)}% CPU` : ""}`
+            : undefined,
+      }))
+      .filter((task) => Boolean(task.id));
+  }
+
   function emitSide(side: CodexSideThread, ctx: AdapterContext): void {
     ctx.emit({ type: "side-question", sideQuestion: { ...side.sideQuestion } });
   }
@@ -1043,6 +1155,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     void request(ctx, "thread/fork", {
       threadId: parentThreadId,
       ephemeral: true,
+      excludeTurns: true,
       developerInstructions: SIDE_DEVELOPER_INSTRUCTIONS,
       ...threadAccessParams("read-only"),
       ...(currentModel ? { model: currentModel } : {}),
@@ -1147,6 +1260,32 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         ...(currentModel ? { model: currentModel } : {}),
         ...(currentEffort ? { effort: currentEffort } : {}),
         serviceTier: currentServiceTier,
+        capabilities: {
+          inputs: {
+            text: true,
+            image: true,
+            file: true,
+            embeddedContext: true,
+            skill: true,
+            appMention: true,
+          },
+          interactions: { approvals: true, questions: true, forms: true, links: true },
+          extensions: {
+            skills: true,
+            apps: true,
+            plugins: true,
+            mcp: true,
+            hooks: true,
+            workflows: true,
+          },
+          runtime: {
+            backgroundTasks: true,
+            terminals: true,
+            worktrees: true,
+            checkpointing: false,
+            nativeFallback: true,
+          },
+        },
       });
       ctx.emit({ type: "status", status: "idle" });
 
@@ -1463,9 +1602,15 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
           });
           if (child.callId) {
             syncChild(agentThreadId, ctx);
-            void hydrateChild(agentThreadId, ctx);
+            void hydrateChild(agentThreadId, ctx, true);
             return;
           }
+
+          // Multi-agent v2 can surface the child through subAgentActivity
+          // without a preceding spawnAgent collaboration item. Bind this
+          // fallback row to the child immediately so its persisted nickname
+          // can replace agentPath without waiting for the user to inspect it.
+          child.callId = id;
         }
         ctx.emit({
           type: "tool",
@@ -1487,6 +1632,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
             activity: kind.replace(/([a-z])([A-Z])/g, "$1 $2"),
           },
         });
+        if (agentThreadId) void hydrateChild(agentThreadId, ctx, true);
         return;
       }
       case "webSearch": {
@@ -1998,6 +2144,182 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     });
   }
 
+  function handleUserInput(
+    id: string | number,
+    params: Record<string, unknown>,
+    ctx: AdapterContext,
+  ): void {
+    const permissionId = `question-${String(id)}`;
+    questions.set(permissionId, { id, kind: "user-input" });
+    const items = asArray(params.questions)
+      .map((raw) => asRecord(raw))
+      .filter((question): question is Record<string, unknown> => question !== null)
+      .map((question, index) => ({
+        id: asString(question.id) ?? `question-${index}`,
+        header: asString(question.header) ?? "Input",
+        question: asString(question.question) ?? "What should Codex use?",
+        multiSelect: false,
+        inputKind: question.isSecret === true ? ("secret" as const) : undefined,
+        required: true,
+        options: asArray(question.options)
+          .map((raw) => asRecord(raw))
+          .filter((option): option is Record<string, unknown> => option !== null)
+          .map((option, optionIndex) => ({
+            id: `${optionIndex}`,
+            label: asString(option.label) ?? `Option ${optionIndex + 1}`,
+            description: asString(option.description) ?? "",
+            preview: null,
+          })),
+      }));
+    ctx.emit({
+      type: "permission",
+      permission: {
+        id: permissionId,
+        kind: "question",
+        title: "Codex needs input",
+        detail: null,
+        command: null,
+        changes: [],
+        options: [],
+        questions: items,
+      },
+    });
+  }
+
+  function handleMcpElicitation(
+    id: string | number,
+    params: Record<string, unknown>,
+    ctx: AdapterContext,
+  ): void {
+    const permissionId = `mcp-${String(id)}`;
+    const mode = asString(params.mode);
+    const schema = asRecord(params.requestedSchema);
+    const properties = asRecord(schema?.properties) ?? {};
+    const required = new Set(asArray(schema?.required).map((value) => asString(value)).filter(Boolean));
+    const fieldTypes = new Map<string, { type: string; choices: Map<string, unknown> }>();
+
+    const choicesFor = (field: Record<string, unknown>) => {
+      const type = asString(field.type);
+      const items = type === "array" ? asRecord(field.items) : null;
+      const source = items ?? field;
+      const titled = asArray(source.oneOf ?? source.anyOf)
+        .map((raw) => asRecord(raw))
+        .filter((option): option is Record<string, unknown> => option !== null)
+        .map((option) => ({
+          label: asString(option.title) ?? String(option.const ?? ""),
+          value: option.const,
+        }))
+        .filter((option) => option.label !== "");
+      if (titled.length) return titled;
+      const names = asArray(source.enumNames).map((value) => String(value));
+      return asArray(source.enum).map((value, index) => ({
+        label: names[index] ?? String(value),
+        value,
+      }));
+    };
+
+    const formQuestions = Object.entries(properties).map(([key, raw], index) => {
+      const field = asRecord(raw) ?? {};
+      const type = asString(field.type) ?? "string";
+      const choices =
+        type === "boolean"
+          ? [
+              { label: "True", value: true },
+              { label: "False", value: false },
+            ]
+          : choicesFor(field);
+      fieldTypes.set(key, {
+        type,
+        choices: new Map(choices.map((choice) => [choice.label, choice.value])),
+      });
+      const defaultValue = field.default;
+      const inputKind =
+        asString(field.format) === "password"
+          ? ("secret" as const)
+          : type === "number"
+            ? ("number" as const)
+            : type === "integer"
+              ? ("integer" as const)
+              : type === "array"
+                ? ("multiselect" as const)
+                : choices.length
+                  ? ("select" as const)
+                  : ("text" as const);
+      return {
+        id: key,
+        header: asString(field.title) ?? key,
+        question: asString(field.description) ?? asString(field.title) ?? key,
+        multiSelect: type === "array",
+        inputKind,
+        required: required.has(key),
+        allowCustom: choices.length === 0,
+        placeholder:
+          defaultValue === undefined || defaultValue === null
+            ? undefined
+            : Array.isArray(defaultValue)
+              ? defaultValue.map(String).join(", ")
+              : String(defaultValue),
+        minimum: typeof field.minimum === "number" ? field.minimum : undefined,
+        maximum: typeof field.maximum === "number" ? field.maximum : undefined,
+        options: choices.map((choice, choiceIndex) => ({
+          id: `${index}-${choiceIndex}`,
+          label: choice.label,
+          description: "",
+          preview: null,
+        })),
+      };
+    });
+    const url = asString(params.url);
+    questions.set(permissionId, {
+      id,
+      kind: mode === "url" ? "mcp-url" : "mcp-form",
+      fields: mode === "url" ? undefined : fieldTypes,
+    });
+    ctx.emit({
+      type: "permission",
+      permission: {
+        id: permissionId,
+        kind: "question",
+        title: `${asString(params.serverName) ?? "MCP server"} needs input`,
+        detail: url ?? asString(params.message),
+        command: null,
+        changes: [],
+        options: [],
+        questions:
+          mode === "url"
+            ? [
+                {
+                  id: "confirmation",
+                  header: "Authorization",
+                  question: asString(params.message) ?? "Complete authorization in the linked page.",
+                  multiSelect: false,
+                  inputKind: "url",
+                  required: true,
+                  placeholder: url ?? undefined,
+                  options: [
+                    { id: "accept", label: "Completed", description: url ?? "", preview: null },
+                  ],
+                },
+              ]
+            : formQuestions.length
+              ? formQuestions
+              : [
+                  {
+                    id: "confirmation",
+                    header: "Confirmation",
+                    question: asString(params.message) ?? "Allow this MCP server to continue?",
+                    multiSelect: false,
+                    inputKind: "select",
+                    required: true,
+                    options: [
+                      { id: "accept", label: "Continue", description: "Allow the request", preview: null },
+                    ],
+                  },
+                ],
+      },
+    });
+  }
+
   function goalError(error: unknown, fallback: string, ctx: AdapterContext): void {
     const record = asRecord(error);
     const message = asString(record?.message);
@@ -2413,6 +2735,14 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
           handleApproval(id, method, params, ctx);
           return;
         }
+        if (method === "item/tool/requestUserInput") {
+          handleUserInput(id, params, ctx);
+          return;
+        }
+        if (method === "mcpServer/elicitation/request") {
+          handleMcpElicitation(id, params, ctx);
+          return;
+        }
         ctx.send({
           jsonrpc: "2.0",
           id,
@@ -2465,6 +2795,21 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
             type: "image",
             url: imagePayloadDataUrl(image),
           })),
+          ...(prompt.parts ?? []).flatMap((part) => {
+            if (part.type === "skill") {
+              return part.path ? [{ type: "skill", name: part.name, path: part.path }] : [];
+            }
+            if (part.type === "app") {
+              return [{ type: "mention", name: part.name, path: part.uri ?? `app://${part.id}` }];
+            }
+            if (part.type === "file") {
+              return [{ type: "mention", name: part.name ?? part.path, path: part.path }];
+            }
+            if (part.type === "resource") {
+              return [{ type: "mention", name: part.name ?? part.uri, path: part.uri }];
+            }
+            return [];
+          }),
         ],
         ...turnAccessParams(currentAccess),
         ...(currentModel ? { model: currentModel } : {}),
@@ -2893,11 +3238,99 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
 
     respond: (permissionId, optionId, ctx) => {
       const approval = approvals.get(permissionId);
-      if (!approval) return;
+      if (!approval) {
+        const pendingQuestion = questions.get(permissionId);
+        if (!pendingQuestion) return;
+        questions.delete(permissionId);
+        ctx.send({
+          jsonrpc: "2.0",
+          id: pendingQuestion.id,
+          result:
+            pendingQuestion.kind === "user-input"
+              ? { answers: {} }
+              : {
+                  action: optionId === "deny" ? "decline" : "cancel",
+                  content: null,
+                  _meta: null,
+                },
+        });
+        ctx.emit({ type: "permission", permission: null });
+        ctx.emit({ type: "status", status: "working" });
+        return;
+      }
       approvals.delete(permissionId);
       ctx.send({ jsonrpc: "2.0", id: approval.id, result: { decision: optionId } });
       ctx.emit({ type: "permission", permission: null });
       ctx.emit({ type: "status", status: "working" });
+    },
+
+    answer: (permissionId, answers: AgentQuestionAnswer[], ctx) => {
+      const pendingQuestion = questions.get(permissionId);
+      if (!pendingQuestion) return;
+      questions.delete(permissionId);
+      if (pendingQuestion.kind === "user-input") {
+        const payload = Object.fromEntries(
+          answers.map((answer) => [
+            answer.questionId,
+            { answers: [...answer.labels, ...(answer.custom ? [answer.custom] : [])] },
+          ]),
+        );
+        ctx.send({ jsonrpc: "2.0", id: pendingQuestion.id, result: { answers: payload } });
+      } else if (pendingQuestion.kind === "mcp-url") {
+        const accepted = answers.some((answer) => answer.labels.length || answer.custom);
+        ctx.send({
+          jsonrpc: "2.0",
+          id: pendingQuestion.id,
+          result: { action: accepted ? "accept" : "cancel", content: null, _meta: null },
+        });
+      } else {
+        const entries: [string, unknown][] = answers.flatMap((answer) => {
+          const field = pendingQuestion.fields?.get(answer.questionId);
+          if (!field) return [] as [string, unknown][];
+          const rawValues = [
+            ...answer.labels,
+            ...(answer.custom !== null ? [answer.custom] : []),
+          ];
+          if (rawValues.length === 0) return [] as [string, unknown][];
+          const valueFor = (raw: string): unknown =>
+            field.choices.has(raw) ? field.choices.get(raw) : raw;
+          if (field.type === "array") {
+            return [[answer.questionId, rawValues.map(valueFor)] as [string, unknown]];
+          }
+          const raw = answer.custom ?? answer.labels[0];
+          if (raw === undefined) return [] as [string, unknown][];
+          const selected = valueFor(raw);
+          if (field.type === "boolean") {
+            const value =
+              typeof selected === "boolean"
+                ? selected
+                : String(selected).toLowerCase() === "true";
+            return [[answer.questionId, value] as [string, unknown]];
+          }
+          if (field.type === "number" || field.type === "integer") {
+            const value = Number(selected);
+            const valid = Number.isFinite(value) && (field.type !== "integer" || Number.isInteger(value));
+            return valid ? [[answer.questionId, value] as [string, unknown]] : [];
+          }
+          return [[answer.questionId, selected] as [string, unknown]];
+        });
+        const content = Object.fromEntries(entries);
+        ctx.send({
+          jsonrpc: "2.0",
+          id: pendingQuestion.id,
+          result: { action: "accept", content, _meta: null },
+        });
+      }
+      ctx.emit({ type: "permission", permission: null });
+      ctx.emit({ type: "status", status: "working" });
+    },
+
+    refreshExtensions: listExtensions,
+    refreshTasks: listRuntimeTasks,
+    stopTask: async (processId, ctx) => {
+      if (!threadId) return false;
+      await request(ctx, "thread/backgroundTerminals/terminate", { threadId, processId });
+      return true;
     },
   };
 }

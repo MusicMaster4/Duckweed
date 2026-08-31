@@ -816,12 +816,16 @@ function ensureAgentUiListener(): void {
     closeAgentUi(termId);
     session.term.write(
       `\r\n\x1b[38;5;244m${
-        action === "login"
+        action === "native"
+          ? "Opening the provider's native interface."
+          : action === "login"
           ? "Sign in to continue in the Custom Agent UI."
           : "Signing out with the agent CLI."
       }\x1b[0m\r\n`,
     );
-    submitCommand(termId, command);
+    // A native handoff can intentionally launch a bare agent command. Sending
+    // that through startAgentUi would immediately reopen the custom surface.
+    submitShellCommand(session, command);
   });
   agentUiUnsubscribe = () => {
     offEnd();
@@ -1772,6 +1776,12 @@ export function submitCommand(id: string, command: string): void {
   // marking the pane used or recording the command so closing can reveal the
   // exact terminal that was underneath — including the welcome duck.
   if (text.trim() && startAgentUi(session, text, session.ran)) return;
+  submitShellCommand(session, text);
+}
+
+/** Submit directly to the pane's shell, bypassing custom-agent interception. */
+function submitShellCommand(session: Session, text: string): void {
+  session.draft = "";
   markRan(session);
   if (!text.trim()) {
     // Empty Enter — just send a newline so the shell re-draws the prompt.
@@ -2185,17 +2195,15 @@ export function getHighlight(): boolean {
 /**
  * Turn the custom agent UI on or off.
  *
- * Switching it off ends every session that is already up: leaving them running
- * behind a setting that says they are off is the kind of half-applied state
- * that makes a toggle untrustworthy. The shell underneath is untouched either
- * way, so each pane simply becomes a terminal again.
+ * This is a launch preference, not a session-lifetime control. Existing custom
+ * sessions keep their interface and process until the user exits them, just as
+ * enabling the preference does not replace an agent already running in its
+ * terminal UI.
  */
 export function setAgentUi(enabled: boolean): void {
   if (agentUiEnabled === enabled) return;
   agentUiEnabled = enabled;
-  if (!enabled) {
-    for (const id of agentSessions.activeTermIds()) closeAgentUi(id);
-  } else {
+  if (enabled) {
     void agentSessions.probeAvailability();
   }
   notifySettings();
