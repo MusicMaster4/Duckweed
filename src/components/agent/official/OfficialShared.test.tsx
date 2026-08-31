@@ -23,6 +23,7 @@ import {
   activityGroups,
   AssistantMarkdown,
   continuedAssistantIds,
+  formatActivityElapsed,
   PlanTracker,
   ProviderEmpty,
   shortAssistantUpdatesAsThinking,
@@ -107,6 +108,23 @@ describe("official agent presentation", () => {
 
   afterEach(() => {
     resetPreparingMessageAssignmentsForTests();
+  });
+
+  test("formats the live activity clock without noisy milliseconds", () => {
+    expect(formatActivityElapsed(-1)).toBe("0s");
+    expect(formatActivityElapsed(59_999)).toBe("59s");
+    expect(formatActivityElapsed(60_000)).toBe("1m 00s");
+    expect(formatActivityElapsed(125_900)).toBe("2m 05s");
+    expect(formatActivityElapsed(3_600_000)).toBe("1h 00m");
+  });
+
+  test("shows an explicit elapsed state while Codex is silently working", () => {
+    const html = renderAgentActivity("codex", [
+      { kind: "user", id: "prompt", at: 1, text: "Investigate the issue" },
+    ]);
+
+    expect(html).toContain("Working · 0s");
+    expect(html).toContain('role="timer"');
   });
 
   test("uses an animated arrow only for the running workflow step", () => {

@@ -48,6 +48,54 @@ const TOOL_LABEL: Record<ToolKind, string> = {
   other: "Using tool",
 };
 
+const ACTIVITY_CLOCK_INTERVAL_MS = 1_000;
+const ACTIVITY_CLOCK_REGISTRY_LIMIT = 128;
+const activityStartedAt = new Map<string, number>();
+
+function activityStartedAtFor(clusterId: string, now: number): number {
+  const existing = activityStartedAt.get(clusterId);
+  if (existing !== undefined) return existing;
+  if (activityStartedAt.size >= ACTIVITY_CLOCK_REGISTRY_LIMIT) {
+    const oldest = activityStartedAt.keys().next().value;
+    if (oldest !== undefined) activityStartedAt.delete(oldest);
+  }
+  activityStartedAt.set(clusterId, now);
+  return now;
+}
+
+/** Compact, stable duration used by the live activity clock. */
+export function formatActivityElapsed(elapsedMs: number): string {
+  const totalSeconds = Math.max(0, Math.floor(elapsedMs / 1_000));
+  const seconds = totalSeconds % 60;
+  const totalMinutes = Math.floor(totalSeconds / 60);
+  if (totalMinutes < 1) return `${seconds}s`;
+  const minutes = totalMinutes % 60;
+  if (totalMinutes < 60) return `${minutes}m ${String(seconds).padStart(2, "0")}s`;
+  const hours = Math.floor(totalMinutes / 60);
+  return `${hours}h ${String(minutes).padStart(2, "0")}m`;
+}
+
+/**
+ * Providers can remain silent while they reason. Keep the UI observably alive
+ * without presenting a local timer tick as a new provider update.
+ */
+function useActivityElapsed(clusterId: string, active: boolean): string | null {
+  const startedAt = useMemo(
+    () => activityStartedAtFor(clusterId, Date.now()),
+    [clusterId],
+  );
+  const [now, setNow] = useState(startedAt);
+
+  useEffect(() => {
+    if (!active) return;
+    setNow(Date.now());
+    const interval = window.setInterval(() => setNow(Date.now()), ACTIVITY_CLOCK_INTERVAL_MS);
+    return () => window.clearInterval(interval);
+  }, [active, startedAt]);
+
+  return active ? formatActivityElapsed(now - startedAt) : null;
+}
+
 function iconPath(kind: ToolKind): ReactNode {
   switch (kind) {
     case "execute":
@@ -738,18 +786,25 @@ export function StillWorking({
   clusterId: string;
 }) {
   const message = preparingMessageFor(clusterId);
+  const elapsed = useActivityElapsed(clusterId, variant === "chatgpt");
+  const activeDuration = elapsed === null ? null : `Working · ${elapsed}`;
 
   return (
     <div
       className="agent-activity-cluster agent-still-working"
       data-variant={variant}
       role="status"
-      aria-label={message}
+      aria-label={activeDuration ? `${message}. ${activeDuration}` : message}
     >
       <div className="agent-activity-history is-thinking is-active">
         <div className="agent-activity-history-head">
           <ActivityPulse active clusterId={clusterId} />
           <span className="agent-activity-history-label">{message}</span>
+          {activeDuration && (
+            <span className="agent-activity-history-status" role="timer">
+              {activeDuration}
+            </span>
+          )}
         </div>
       </div>
     </div>
@@ -767,11 +822,13 @@ function ThinkingHistory({
   thoughts,
   working,
   showLatestFull,
+  showElapsed,
   clusterId,
 }: {
   thoughts: ThinkingItem[];
   working: boolean;
   showLatestFull: boolean;
+  showElapsed: boolean;
   /** Stable id for this thinking wait; keeps pulse + preparing line across remounts. */
   clusterId: string;
 }) {
@@ -789,6 +846,11 @@ function ThinkingHistory({
     working: active,
     hasLatest: Boolean(latest),
   });
+  const elapsed = useActivityElapsed(clusterId, active && showElapsed);
+  const activeDuration = elapsed === null ? null : `Working · ${elapsed}`;
+  const accessibleHeadline = latest
+    ? `${headline}: ${traceSummary(latest.text)}`
+    : headline;
 
   return (
     <section
@@ -804,9 +866,7 @@ function ThinkingHistory({
         aria-expanded={expandable ? open : undefined}
         aria-controls={expandable ? panelId : undefined}
         aria-label={
-          latest
-            ? `${headline}: ${traceSummary(latest.text)}`
-            : headline
+          activeDuration ? `${accessibleHeadline}. ${activeDuration}` : accessibleHeadline
         }
       >
         <ActivityPulse active={active} clusterId={clusterId} />
@@ -814,6 +874,11 @@ function ThinkingHistory({
         {showPreparingSummary && preparingMessage && (
           <span className="agent-activity-history-summary agent-thinking-shimmer">
             {preparingMessage}
+          </span>
+        )}
+        {activeDuration && (
+          <span className="agent-activity-history-status" role="timer">
+            {activeDuration}
           </span>
         )}
         {expandable && <Chevron open={open} />}
@@ -984,6 +1049,7 @@ export const ActivityHistory = memo(function ActivityHistory({
           thoughts={thoughts}
           working={working}
           showLatestFull={showLatestThinking}
+          showElapsed={variant === "chatgpt"}
           clusterId={clusterId}
         />
       )}
