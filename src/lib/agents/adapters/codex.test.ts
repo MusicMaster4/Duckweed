@@ -609,16 +609,29 @@ describe("codex adapter", () => {
     expect(h.state().items.at(-1)).toMatchObject({ text: "Fast Mode disabled." });
   });
 
-  test("blocks models that do not advertise Fast Mode while it is active", async () => {
+  test("uses the default tier for models that do not support active Fast Mode", async () => {
     const h = harness();
     await h.handshake({ serviceTier: "priority" });
     await h.loadModels();
 
     h.adapter.command?.("/model gpt-5.5", h.ctx);
-    expect(h.state().model).toBe("gpt-5.6-sol");
+    expect(h.state().model).toBe("gpt-5.5");
     expect(h.state().items.at(-1)).toMatchObject({
-      tone: "error",
-      text: "gpt-5.5 does not support Fast Mode. Use /fast to turn it off first.",
+      tone: "info",
+      text: "Model set to gpt-5.5.",
+    });
+
+    h.adapter.prompt({ text: "hello", images: [] }, h.ctx);
+    expect(h.sent.at(-1)).toMatchObject({
+      method: "turn/start",
+      params: { model: "gpt-5.5", serviceTier: "default" },
+    });
+
+    h.adapter.command?.("/model gpt-5.6-sol", h.ctx);
+    h.adapter.prompt({ text: "hello again", images: [] }, h.ctx);
+    expect(h.sent.at(-1)).toMatchObject({
+      method: "turn/start",
+      params: { model: "gpt-5.6-sol", serviceTier: "priority" },
     });
   });
 
