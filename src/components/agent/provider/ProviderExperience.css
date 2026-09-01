@@ -2489,14 +2489,16 @@ button.oc-sub-head:hover {
   background-image: linear-gradient(
     90deg,
     transparent 0%,
-    rgba(255, 255, 255, 0.12) 25%,
+    rgba(255, 255, 255, 0.08) 18%,
+    rgba(255, 255, 255, 0.24) 36%,
     rgba(255, 255, 255, 0.52) 50%,
-    rgba(255, 255, 255, 0.12) 75%,
+    rgba(255, 255, 255, 0.24) 64%,
+    rgba(255, 255, 255, 0.08) 82%,
     transparent 100%
   );
-  background-position: -90px 0;
+  background-position: -136px 0;
   background-repeat: no-repeat;
-  background-size: 72px 100%;
+  background-size: 112px 100%;
   background-clip: text;
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
@@ -2505,11 +2507,11 @@ button.oc-sub-head:hover {
 
 @keyframes provider-command-shimmer {
   from {
-    background-position: -90px 0;
+    background-position: -136px 0;
   }
 
   to {
-    background-position: calc(100% + 90px) 0;
+    background-position: calc(100% + 136px) 0;
   }
 }
 
