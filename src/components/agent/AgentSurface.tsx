@@ -892,6 +892,16 @@ export function AgentSurface({
               cwd={session.cwd}
             />
           )}
+
+          {visibleWorkflow && !multiPane && !focusedSubagent && (
+            <div className="agent-workflow-dock is-in-transcript">
+              <PlanTracker
+                item={visibleWorkflow}
+                variant={workflowVariant(session.agent)}
+                runningSubagents={runningSubagentCount(fleet)}
+              />
+            </div>
+          )}
         </SubagentUiProvider>
 
         {session.pending.map((prompt) => (
@@ -1022,15 +1032,6 @@ export function AgentSurface({
               </svg>
               <span>Jump to bottom</span>
             </button>
-          )}
-          {visibleWorkflow && (
-            <div className="agent-workflow-dock">
-              <PlanTracker
-                item={visibleWorkflow}
-                variant={workflowVariant(session.agent)}
-                runningSubagents={runningSubagentCount(fleet)}
-              />
-            </div>
           )}
           {session.sideQuestion && (
             <div className="agent-side-question-dock">

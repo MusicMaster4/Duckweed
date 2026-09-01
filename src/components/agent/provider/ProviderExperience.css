@@ -885,6 +885,13 @@ button.cx-row-head:hover {
   color: #f3a9ad;
 }
 
+.cx-row.is-error .cx-row-head *,
+.cx-row.is-error .cx-row-panel,
+.cx-row.is-error .cx-row-panel * {
+  color: var(--cx-bad);
+  -webkit-text-fill-color: currentColor;
+}
+
 .cx-row-panel {
   margin: 2px 0 1px;
   border: 1px solid var(--border);
@@ -1831,6 +1838,13 @@ button.oc-row-head:hover {
   color: #f3a9ad;
 }
 
+.oc-row.is-error .oc-row-head *,
+.oc-row.is-error .oc-row-panel,
+.oc-row.is-error .oc-row-panel * {
+  color: var(--oc-bad);
+  -webkit-text-fill-color: currentColor;
+}
+
 .oc-row-panel {
   margin: 2px 0 1px;
   border: 1px solid var(--border);
@@ -2099,7 +2113,7 @@ button.oc-sub-head:hover {
 
 .oc-lanes {
   gap: 11px;
-  padding: 1px 2px 24px;
+  padding: 1px 2px 0;
 }
 
 .oc-mod {
@@ -2363,4 +2377,158 @@ button.oc-sub-head:hover {
 .oc-lanes > .oc-mod {
   content-visibility: auto;
   contain-intrinsic-size: auto 88px;
+}
+
+/* Cross-provider visual polish. */
+.cx,
+.oc {
+  width: min(100%, 960px);
+  margin-inline: auto;
+}
+
+.cx {
+  --cx-line: rgba(255, 255, 255, 0.14);
+  gap: 13px;
+}
+
+.cx-open {
+  padding: 18px 4px 14px;
+}
+
+.cx-hud,
+.oc-bar {
+  border-color: rgba(255, 255, 255, 0.075);
+  background: color-mix(in srgb, var(--bg-elevated) 96%, transparent);
+  box-shadow: 0 7px 20px rgba(0, 0, 0, 0.14);
+}
+
+.cx-hud {
+  padding: 8px 10px;
+}
+
+.cx-metric,
+.oc-tally,
+.oc-ident {
+  min-height: 20px;
+  box-sizing: border-box;
+  padding-inline: 7px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.055);
+  color: var(--text-dim);
+  font-size: 10.5px;
+}
+
+.cx-metric.is-agent,
+.oc-tally.is-live {
+  border-color: color-mix(in srgb, var(--agent-accent) 23%, transparent);
+}
+
+.cx-rail {
+  gap: 12px;
+  padding: 2px 1px 0;
+}
+
+.cx-rail::before {
+  left: 7px;
+  width: 1px;
+  background: linear-gradient(to bottom, transparent, var(--cx-line) 18px, var(--cx-line) calc(100% - 18px), transparent);
+}
+
+.cx-node {
+  grid-template-columns: 15px minmax(0, 1fr);
+  gap: 11px;
+}
+
+.cx-node.is-user .cx-body {
+  display: flex;
+  width: fit-content;
+  max-width: min(78%, 680px);
+  flex-direction: column;
+  align-items: flex-end;
+  justify-self: end;
+}
+
+.cx-user-bubble {
+  max-width: 100%;
+  padding: 10px 14px;
+  border: 1px solid rgba(255, 255, 255, 0.065);
+  border-radius: 15px;
+  background: rgba(255, 255, 255, 0.09);
+  box-shadow:
+    0 5px 14px rgba(0, 0, 0, 0.12),
+    inset 0 1px rgba(255, 255, 255, 0.025);
+}
+
+.cx-said,
+.oc-said {
+  font-size: 14px;
+}
+
+.oc-user-bubble {
+  border-color: rgba(255, 255, 255, 0.065);
+  background: rgba(255, 255, 255, 0.09);
+  box-shadow:
+    0 5px 14px rgba(0, 0, 0, 0.12),
+    inset 0 1px rgba(255, 255, 255, 0.025);
+  font-size: 14px;
+}
+
+.cx-plan,
+.oc-plan {
+  border-color: rgba(255, 255, 255, 0.075);
+  background: rgba(255, 255, 255, 0.026);
+  box-shadow: 0 5px 14px rgba(0, 0, 0, 0.08);
+}
+
+.cx-row.is-shimmering .cx-command,
+.cx-sub.is-shimmering .cx-sub-title,
+.oc-row.is-shimmering .oc-command,
+.oc-sub.is-shimmering .oc-sub-title {
+  color: color-mix(in srgb, var(--text-faint) 78%, var(--text));
+  background-color: color-mix(in srgb, var(--text-faint) 78%, var(--text));
+  background-image: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(255, 255, 255, 0.12) 25%,
+    rgba(255, 255, 255, 0.52) 50%,
+    rgba(255, 255, 255, 0.12) 75%,
+    transparent 100%
+  );
+  background-position: -90px 0;
+  background-repeat: no-repeat;
+  background-size: 72px 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: provider-command-shimmer 1800ms ease-in-out infinite;
+}
+
+@keyframes provider-command-shimmer {
+  from {
+    background-position: -90px 0;
+  }
+
+  to {
+    background-position: calc(100% + 90px) 0;
+  }
+}
+
+@media (max-width: 720px) {
+  .cx-node.is-user .cx-body,
+  .oc-mod[data-lane="you"] .oc-mod-body {
+    max-width: 90%;
+  }
+
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cx-row.is-shimmering .cx-command,
+  .cx-sub.is-shimmering .cx-sub-title,
+  .oc-row.is-shimmering .oc-command,
+  .oc-sub.is-shimmering .oc-sub-title {
+    color: var(--text-dim);
+    background: none;
+    -webkit-text-fill-color: currentColor;
+    animation: none;
+  }
 }

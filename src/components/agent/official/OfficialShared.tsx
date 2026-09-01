@@ -17,6 +17,7 @@ import { MessageCopyButton } from "../MessageCopyButton";
 import { AgentProviderIcon } from "../AgentProviderIcon";
 import { SubagentBoardAnchor } from "../subagents/SubagentBoard";
 import { useSubagentUi } from "../subagents/SubagentUiContext";
+import { useToolLoadingPhase } from "../useToolLoadingPhase";
 import { preparingMessageFor, thinkingHeadlineFor } from "./preparingMessages";
 import { thinkingPulsePatternFor } from "./thinkingPulsePatterns";
 
@@ -668,6 +669,7 @@ export const ToolActivity = memo(function ToolActivity({
     () => item.changes.reduce((sum, change) => sum + change.deletions, 0),
     [item.changes],
   );
+  const loadingPhase = useToolLoadingPhase(item.callId, item.status);
 
   if (absorbed) return null;
 
@@ -677,7 +679,9 @@ export const ToolActivity = memo(function ToolActivity({
         isSubagent ? " is-subagent" : ""
       }${peekedCallId === item.callId ? " is-selected" : ""}${
         compact ? " is-compact" : ""
-      }${open && expandsHere ? " is-open" : ""}`}
+      }${open && expandsHere ? " is-open" : ""}${
+        loadingPhase !== null ? " is-shimmering" : ""
+      }`}
       {...(isSubagent ? { "data-subagent-call-id": item.callId } : {})}
     >
       <button
@@ -702,7 +706,7 @@ export const ToolActivity = memo(function ToolActivity({
       >
         <span className="official-tool-mark">
           <ToolIcon kind={item.tool} />
-          {(item.status === "running" || item.status === "pending") && (
+          {loadingPhase === "indicator" && (
             <span className="official-tool-spinner" aria-hidden="true" />
           )}
         </span>
@@ -926,6 +930,7 @@ function ToolHistory({
   const [open, setOpen] = useState(false);
   const panelId = useId();
   const latest = tools[tools.length - 1];
+  const loadingPhase = useToolLoadingPhase(latest?.callId ?? "", latest?.status ?? "done");
   if (!latest) return null;
   const running = latest.status === "running" || latest.status === "pending";
   // The CLI prints each edit's diff as it happens; the same live feel here is
@@ -952,6 +957,8 @@ function ToolHistory({
     <section
       className={`agent-activity-history is-tools${open ? " is-open" : ""}${
         running ? " is-active" : ""
+      }${latest.status === "error" ? " is-error" : ""}${
+        loadingPhase !== null ? " is-shimmering" : ""
       }`}
     >
       <button
@@ -964,7 +971,9 @@ function ToolHistory({
       >
         <span className="official-tool-mark">
           <ToolIcon kind={latest.tool} />
-          {running && <span className="official-tool-spinner" aria-hidden="true" />}
+          {loadingPhase === "indicator" && (
+            <span className="official-tool-spinner" aria-hidden="true" />
+          )}
         </span>
         <span className="agent-activity-history-label">
           {tools.length === 1 ? "Tool call" : `${tools.length} tool calls`}

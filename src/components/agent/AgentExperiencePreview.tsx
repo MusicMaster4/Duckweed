@@ -490,6 +490,15 @@ export function AgentExperiencePreview() {
                 cwd="H:\\Python\\Slop\\duckweed"
               />
             )}
+            {workflow && !multiPane && !focusedSubagent && (
+              <div className="agent-workflow-dock is-in-transcript">
+                <PlanTracker
+                  item={workflow}
+                  variant={workflowVariant}
+                  runningSubagents={runningSubagentCount(fleet)}
+                />
+              </div>
+            )}
           </SubagentUiProvider>
         </div>
         {navigatorOpen && fleet.length > 0 && (
@@ -535,15 +544,6 @@ export function AgentExperiencePreview() {
         )}
         {!starting && (
           <div className="agent-composer-shell">
-            {workflow && (
-              <div className="agent-workflow-dock">
-                <PlanTracker
-                  item={workflow}
-                  variant={workflowVariant}
-                  runningSubagents={runningSubagentCount(fleet)}
-                />
-              </div>
-            )}
             <AgentComposer
               session={session}
               active

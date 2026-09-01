@@ -5,6 +5,7 @@ import { AgentImageAttachments } from "../AgentImageAttachments";
 import { MessageCopyButton } from "../MessageCopyButton";
 import { SubagentBoardAnchor, SubagentBoardForActivities } from "../subagents/SubagentBoard";
 import { useSubagentUi } from "../subagents/SubagentUiContext";
+import { useToolLoadingPhase, type ToolLoadingPhase } from "../useToolLoadingPhase";
 import {
   ActivityHistory,
   activeAssistantId,
@@ -126,7 +127,15 @@ function toModules(items: AgentItem[]): Module[] {
   return modules;
 }
 
-function OpenCodeStatus({ status, elapsed }: { status: ToolStatus; elapsed: string | null }) {
+function OpenCodeStatus({
+  status,
+  elapsed,
+  loadingPhase,
+}: {
+  status: ToolStatus;
+  elapsed: string | null;
+  loadingPhase: ToolLoadingPhase;
+}) {
   const label =
     status === "running"
       ? "running"
@@ -139,7 +148,7 @@ function OpenCodeStatus({ status, elapsed }: { status: ToolStatus; elapsed: stri
     <span className={`oc-status is-${status}`}>
       {elapsed && <span className="oc-status-time">{elapsed}</span>}
       <span className="oc-status-glyph" aria-hidden="true">
-        {status === "running" || status === "pending" ? (
+        {loadingPhase === "indicator" ? (
           <span className="oc-status-dots">
             <span />
             <span />
@@ -147,9 +156,9 @@ function OpenCodeStatus({ status, elapsed }: { status: ToolStatus; elapsed: stri
           </span>
         ) : status === "error" ? (
           "✕"
-        ) : (
+        ) : status === "done" ? (
           "✓"
-        )}
+        ) : null}
       </span>
       <ScreenReaderText>{label}</ScreenReaderText>
     </span>
@@ -246,6 +255,7 @@ function OpenCodePlan({ steps }: { steps: AgentPlanStep[] }) {
 /** A turn OpenCode handed to another agent — its `task` calls. */
 function OpenCodeSubagent({ item, elapsed }: { item: ToolItem; elapsed: string | null }) {
   const { absorbedCallIds, rosterAnchorIds, peekedCallId, peekSubagent } = useSubagentUi();
+  const loadingPhase = useToolLoadingPhase(item.callId, item.status);
   if (rosterAnchorIds.has(item.id)) return <SubagentBoardAnchor itemId={item.id} />;
   if (absorbedCallIds.has(item.callId)) return null;
   const head = (
@@ -254,14 +264,14 @@ function OpenCodeSubagent({ item, elapsed }: { item: ToolItem; elapsed: string |
         ⌈
       </span>
       <span className="oc-sub-title">{item.title}</span>
-      <OpenCodeStatus status={item.status} elapsed={elapsed} />
+      <OpenCodeStatus status={item.status} elapsed={elapsed} loadingPhase={loadingPhase} />
     </>
   );
   return (
     <div
       className={`oc-sub is-${item.status}${
         peekedCallId === item.callId ? " is-selected" : ""
-      }`}
+      }${loadingPhase !== null ? " is-shimmering" : ""}`}
       data-subagent-call-id={item.callId}
     >
       <button
@@ -285,6 +295,7 @@ function OpenCodeTool({ item, elapsed }: { item: ToolItem; elapsed: string | nul
   const command = item.tool === "execute" ? (item.command ?? item.title) : null;
   const insertions = item.changes.reduce((sum, change) => sum + change.insertions, 0);
   const deletions = item.changes.reduce((sum, change) => sum + change.deletions, 0);
+  const loadingPhase = useToolLoadingPhase(item.callId, item.status);
   // One file is the common case for an edit call, and its name beats the tool's
   // own phrasing of it. More than one, and the diffs below say it better.
   const single = item.changes.length === 1 ? item.changes[0] : null;
@@ -313,12 +324,16 @@ function OpenCodeTool({ item, elapsed }: { item: ToolItem; elapsed: string | nul
       {insertions > 0 && <span className="oc-add">+{insertions}</span>}
       {deletions > 0 && <span className="oc-del">−{deletions}</span>}
       {expandable && <span className="oc-chevron" aria-hidden="true" data-open={open} />}
-      <OpenCodeStatus status={item.status} elapsed={elapsed} />
+      <OpenCodeStatus status={item.status} elapsed={elapsed} loadingPhase={loadingPhase} />
     </>
   );
 
   return (
-    <div className={`oc-row is-${item.status}${command ? " is-command" : ""}`}>
+    <div
+      className={`oc-row is-${item.status}${command ? " is-command" : ""}${
+        loadingPhase !== null ? " is-shimmering" : ""
+      }`}
+    >
       {expandable ? (
         <Disclosure
           open={open}
