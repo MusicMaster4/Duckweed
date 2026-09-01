@@ -3679,49 +3679,6 @@ button.chatgpt-thinking-row.is-selected {
   }
 }
 
-.official-tool.is-shimmering .official-tool-copy strong,
-.agent-activity-history.is-shimmering .agent-activity-history-summary {
-  color: color-mix(in srgb, var(--text-faint) 78%, var(--text));
-  background-color: color-mix(in srgb, var(--text-faint) 78%, var(--text));
-  background-image: linear-gradient(
-    90deg,
-    transparent 0%,
-    rgba(255, 255, 255, 0.08) 18%,
-    rgba(255, 255, 255, 0.24) 36%,
-    rgba(255, 255, 255, 0.52) 50%,
-    rgba(255, 255, 255, 0.24) 64%,
-    rgba(255, 255, 255, 0.08) 82%,
-    transparent 100%
-  );
-  background-position: -136px 0;
-  background-repeat: no-repeat;
-  background-size: 112px 100%;
-  background-clip: text;
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  animation: official-tool-command-shimmer 1800ms ease-in-out infinite;
-}
-
-@keyframes official-tool-command-shimmer {
-  from {
-    background-position: -136px 0;
-  }
-
-  to {
-    background-position: calc(100% + 136px) 0;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .official-tool.is-shimmering .official-tool-copy strong,
-  .agent-activity-history.is-shimmering .agent-activity-history-summary {
-    color: var(--text-dim);
-    background: none;
-    -webkit-text-fill-color: currentColor;
-    animation: none;
-  }
-}
-
 .agent-activity-history.is-error .agent-activity-history-head,
 .agent-activity-history.is-error .agent-activity-history-head * {
   color: var(--rose);

@@ -463,6 +463,7 @@ describe("official agent presentation", () => {
       expect(html).not.toContain("2 traces");
       expect(html).toContain("2 tool calls");
       expect(html).toContain("official-chevron");
+      expect(html).not.toContain("is-shimmering");
     });
   }
 

@@ -2480,57 +2480,10 @@ button.oc-sub-head:hover {
   box-shadow: 0 5px 14px rgba(0, 0, 0, 0.08);
 }
 
-.cx-row.is-shimmering .cx-command,
-.cx-sub.is-shimmering .cx-sub-title,
-.oc-row.is-shimmering .oc-command,
-.oc-sub.is-shimmering .oc-sub-title {
-  color: color-mix(in srgb, var(--text-faint) 78%, var(--text));
-  background-color: color-mix(in srgb, var(--text-faint) 78%, var(--text));
-  background-image: linear-gradient(
-    90deg,
-    transparent 0%,
-    rgba(255, 255, 255, 0.08) 18%,
-    rgba(255, 255, 255, 0.24) 36%,
-    rgba(255, 255, 255, 0.52) 50%,
-    rgba(255, 255, 255, 0.24) 64%,
-    rgba(255, 255, 255, 0.08) 82%,
-    transparent 100%
-  );
-  background-position: -136px 0;
-  background-repeat: no-repeat;
-  background-size: 112px 100%;
-  background-clip: text;
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  animation: provider-command-shimmer 1800ms ease-in-out infinite;
-}
-
-@keyframes provider-command-shimmer {
-  from {
-    background-position: -136px 0;
-  }
-
-  to {
-    background-position: calc(100% + 136px) 0;
-  }
-}
-
 @media (max-width: 720px) {
   .cx-node.is-user .cx-body,
   .oc-mod[data-lane="you"] .oc-mod-body {
     max-width: 90%;
   }
 
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .cx-row.is-shimmering .cx-command,
-  .cx-sub.is-shimmering .cx-sub-title,
-  .oc-row.is-shimmering .oc-command,
-  .oc-sub.is-shimmering .oc-sub-title {
-    color: var(--text-dim);
-    background: none;
-    -webkit-text-fill-color: currentColor;
-    animation: none;
-  }
 }

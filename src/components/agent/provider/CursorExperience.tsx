@@ -6,7 +6,7 @@ import { AgentImageAttachments } from "../AgentImageAttachments";
 import { MessageCopyButton } from "../MessageCopyButton";
 import { SubagentBoardAnchor, SubagentBoardForActivities } from "../subagents/SubagentBoard";
 import { useSubagentUi } from "../subagents/SubagentUiContext";
-import { useToolLoadingPhase, type ToolLoadingPhase } from "../useToolLoadingPhase";
+import { toolLoadingPhase, type ToolLoadingPhase } from "../toolLoadingPhase";
 import {
   ActivityHistory,
   activeAssistantId,
@@ -171,7 +171,7 @@ function CursorTracker({ plan }: { plan: PlanSummary }) {
  */
 function CursorSubagent({ item, elapsed }: { item: ToolItem; elapsed: string | null }) {
   const { absorbedCallIds, rosterAnchorIds, peekedCallId, peekSubagent } = useSubagentUi();
-  const loadingPhase = useToolLoadingPhase(item.callId, item.status);
+  const loadingPhase = toolLoadingPhase(item.status);
   if (rosterAnchorIds.has(item.id)) return <SubagentBoardAnchor itemId={item.id} />;
   if (absorbedCallIds.has(item.callId)) return null;
   const head = (
@@ -183,9 +183,7 @@ function CursorSubagent({ item, elapsed }: { item: ToolItem; elapsed: string | n
   );
   return (
     <div
-      className={`cx-sub is-${item.status}${
-        peekedCallId === item.callId ? " is-selected" : ""
-      }${loadingPhase !== null ? " is-shimmering" : ""}`}
+      className={`cx-sub is-${item.status}${peekedCallId === item.callId ? " is-selected" : ""}`}
       data-subagent-call-id={item.callId}
     >
       <button
@@ -212,7 +210,7 @@ function CursorTool({ item, elapsed }: { item: ToolItem; elapsed: string | null 
   const command = item.tool === "execute" ? (item.command ?? item.title) : null;
   const insertions = item.changes.reduce((sum, change) => sum + change.insertions, 0);
   const deletions = item.changes.reduce((sum, change) => sum + change.deletions, 0);
-  const loadingPhase = useToolLoadingPhase(item.callId, item.status);
+  const loadingPhase = toolLoadingPhase(item.status);
 
   const head = (
     <>
@@ -237,11 +235,7 @@ function CursorTool({ item, elapsed }: { item: ToolItem; elapsed: string | null 
   );
 
   return (
-    <div
-      className={`cx-row is-${item.status}${command ? " is-command" : ""}${
-        loadingPhase !== null ? " is-shimmering" : ""
-      }`}
-    >
+    <div className={`cx-row is-${item.status}${command ? " is-command" : ""}`}>
       {expandable ? (
         <Disclosure
           open={open}

@@ -17,7 +17,7 @@ import { MessageCopyButton } from "../MessageCopyButton";
 import { AgentProviderIcon } from "../AgentProviderIcon";
 import { SubagentBoardAnchor } from "../subagents/SubagentBoard";
 import { useSubagentUi } from "../subagents/SubagentUiContext";
-import { useToolLoadingPhase } from "../useToolLoadingPhase";
+import { toolLoadingPhase } from "../toolLoadingPhase";
 import { preparingMessageFor, thinkingHeadlineFor } from "./preparingMessages";
 import { thinkingPulsePatternFor } from "./thinkingPulsePatterns";
 
@@ -669,7 +669,7 @@ export const ToolActivity = memo(function ToolActivity({
     () => item.changes.reduce((sum, change) => sum + change.deletions, 0),
     [item.changes],
   );
-  const loadingPhase = useToolLoadingPhase(item.callId, item.status);
+  const loadingPhase = toolLoadingPhase(item.status);
 
   if (absorbed) return null;
 
@@ -679,9 +679,7 @@ export const ToolActivity = memo(function ToolActivity({
         isSubagent ? " is-subagent" : ""
       }${peekedCallId === item.callId ? " is-selected" : ""}${
         compact ? " is-compact" : ""
-      }${open && expandsHere ? " is-open" : ""}${
-        loadingPhase !== null ? " is-shimmering" : ""
-      }`}
+      }${open && expandsHere ? " is-open" : ""}`}
       {...(isSubagent ? { "data-subagent-call-id": item.callId } : {})}
     >
       <button
@@ -930,7 +928,7 @@ function ToolHistory({
   const [open, setOpen] = useState(false);
   const panelId = useId();
   const latest = tools[tools.length - 1];
-  const loadingPhase = useToolLoadingPhase(latest?.callId ?? "", latest?.status ?? "done");
+  const loadingPhase = toolLoadingPhase(latest?.status ?? "done");
   if (!latest) return null;
   const running = latest.status === "running" || latest.status === "pending";
   // The CLI prints each edit's diff as it happens; the same live feel here is
@@ -957,9 +955,7 @@ function ToolHistory({
     <section
       className={`agent-activity-history is-tools${open ? " is-open" : ""}${
         running ? " is-active" : ""
-      }${latest.status === "error" ? " is-error" : ""}${
-        loadingPhase !== null ? " is-shimmering" : ""
-      }`}
+      }${latest.status === "error" ? " is-error" : ""}`}
     >
       <button
         type="button"

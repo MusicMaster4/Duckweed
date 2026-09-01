@@ -5,7 +5,7 @@ import { AgentImageAttachments } from "../AgentImageAttachments";
 import { MessageCopyButton } from "../MessageCopyButton";
 import { SubagentBoardAnchor, SubagentBoardForActivities } from "../subagents/SubagentBoard";
 import { useSubagentUi } from "../subagents/SubagentUiContext";
-import { useToolLoadingPhase, type ToolLoadingPhase } from "../useToolLoadingPhase";
+import { toolLoadingPhase, type ToolLoadingPhase } from "../toolLoadingPhase";
 import {
   ActivityHistory,
   activeAssistantId,
@@ -255,7 +255,7 @@ function OpenCodePlan({ steps }: { steps: AgentPlanStep[] }) {
 /** A turn OpenCode handed to another agent — its `task` calls. */
 function OpenCodeSubagent({ item, elapsed }: { item: ToolItem; elapsed: string | null }) {
   const { absorbedCallIds, rosterAnchorIds, peekedCallId, peekSubagent } = useSubagentUi();
-  const loadingPhase = useToolLoadingPhase(item.callId, item.status);
+  const loadingPhase = toolLoadingPhase(item.status);
   if (rosterAnchorIds.has(item.id)) return <SubagentBoardAnchor itemId={item.id} />;
   if (absorbedCallIds.has(item.callId)) return null;
   const head = (
@@ -269,9 +269,7 @@ function OpenCodeSubagent({ item, elapsed }: { item: ToolItem; elapsed: string |
   );
   return (
     <div
-      className={`oc-sub is-${item.status}${
-        peekedCallId === item.callId ? " is-selected" : ""
-      }${loadingPhase !== null ? " is-shimmering" : ""}`}
+      className={`oc-sub is-${item.status}${peekedCallId === item.callId ? " is-selected" : ""}`}
       data-subagent-call-id={item.callId}
     >
       <button
@@ -295,7 +293,7 @@ function OpenCodeTool({ item, elapsed }: { item: ToolItem; elapsed: string | nul
   const command = item.tool === "execute" ? (item.command ?? item.title) : null;
   const insertions = item.changes.reduce((sum, change) => sum + change.insertions, 0);
   const deletions = item.changes.reduce((sum, change) => sum + change.deletions, 0);
-  const loadingPhase = useToolLoadingPhase(item.callId, item.status);
+  const loadingPhase = toolLoadingPhase(item.status);
   // One file is the common case for an edit call, and its name beats the tool's
   // own phrasing of it. More than one, and the diffs below say it better.
   const single = item.changes.length === 1 ? item.changes[0] : null;
@@ -329,11 +327,7 @@ function OpenCodeTool({ item, elapsed }: { item: ToolItem; elapsed: string | nul
   );
 
   return (
-    <div
-      className={`oc-row is-${item.status}${command ? " is-command" : ""}${
-        loadingPhase !== null ? " is-shimmering" : ""
-      }`}
-    >
+    <div className={`oc-row is-${item.status}${command ? " is-command" : ""}`}>
       {expandable ? (
         <Disclosure
           open={open}
