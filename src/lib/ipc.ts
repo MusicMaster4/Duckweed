@@ -389,6 +389,9 @@ export const gitBranches = (path: string) => invoke<Branches>("git_branches", { 
 export const gitCheckout = (path: string, branch: string) =>
   invoke<void>("git_checkout", { path, branch });
 
+/** Restore tracked files and permanently remove untracked files. */
+export const gitDiscardAll = (path: string) => invoke<void>("git_discard_all", { path });
+
 /** Counts only — cheap enough to poll while the window has focus. */
 export const gitDiffStats = (path: string) => invoke<DiffStats>("git_diff_stats", { path });
 

@@ -276,6 +276,12 @@ async fn git_checkout(path: String, branch: String) -> Result<(), String> {
     blocking(move || git::checkout(&path, &branch)).await
 }
 
+/// Restore tracked files and permanently remove untracked files.
+#[tauri::command]
+async fn git_discard_all(path: String) -> Result<(), String> {
+    blocking(move || git::discard_all(&path)).await
+}
+
 /// Counts for the status-bar chip: changed files, lines added, lines removed.
 #[tauri::command]
 async fn git_diff_stats(path: String) -> Result<DiffStats, String> {
@@ -997,6 +1003,7 @@ fn main() {
             write_workspace_file,
             git_branches,
             git_checkout,
+            git_discard_all,
             git_diff_stats,
             git_diff,
             git_file_diff,
