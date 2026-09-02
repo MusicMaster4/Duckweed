@@ -179,6 +179,52 @@ function readWorkflowSteps(update: Record<string, unknown>): AgentPlanStep[] {
     .filter((step) => step.text);
 }
 
+/** OpenCode exposes its TodoWrite state as a normal ACP tool call. */
+function readTodoSteps(value: unknown): AgentPlanStep[] | null {
+  let parsed = value;
+  if (typeof parsed === "string") {
+    try {
+      parsed = JSON.parse(parsed) as unknown;
+    } catch {
+      return null;
+    }
+  }
+
+  const record = asRecord(parsed);
+  const entries = Array.isArray(parsed)
+    ? parsed
+    : record && Array.isArray(record.todos)
+      ? record.todos
+      : null;
+  if (!entries?.length) return null;
+
+  const steps: AgentPlanStep[] = [];
+  for (const raw of entries) {
+    const todo = asRecord(raw);
+    if (!todo) return null;
+    const text =
+      asString(todo.content)?.trim() ||
+      asString(todo.description)?.trim() ||
+      asString(todo.text)?.trim();
+    if (!text) return null;
+    const status = asString(todo.status)?.toLowerCase();
+    steps.push({
+      text,
+      status:
+        status === "completed" || status === "done"
+          ? "done"
+          : status === "in_progress" || status === "inprogress" || status === "running"
+            ? "running"
+            : "pending",
+    });
+  }
+  return steps;
+}
+
+function isTodoToolTitle(title: string): boolean {
+  return toolKind(title) === "todo" || /^\s*(?:\d+\s+)?todos?\s*$/i.test(title);
+}
+
 /** Lift task-like raw input without inventing a thread ACP never reported. */
 function readSubagentMeta(
   title: string | null,
@@ -249,6 +295,8 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
   const toolTitles = new Map<string, string>();
   /** ACP updates omit raw input, so remember which calls were delegated work. */
   const taskCalls = new Set<string>();
+  /** OpenCode updates omit raw input too, so keep TodoWrite calls absorbed. */
+  const todoCalls = new Set<string>();
   /**
    * Slash commands the agent advertised, without the leading slash. Only
    * these may go out as prompt text — anything else slash-shaped would be
@@ -914,6 +962,18 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
         const { text, changes } = readToolContent(asArray(update.content));
         const name = title ?? toolTitles.get(callId) ?? "tool";
         const acpKind = asString(update.kind);
+        const inputTodoSteps = readTodoSteps(rawInput);
+        const outputTodoSteps = text ? readTodoSteps(text) : null;
+        const todoSteps = inputTodoSteps ?? outputTodoSteps;
+        const isTodo =
+          todoCalls.has(callId) ||
+          isTodoToolTitle(name) ||
+          (rawInput !== null && Array.isArray(rawInput.todos));
+        if (isTodo) {
+          todoCalls.add(callId);
+          if (todoSteps) ctx.emit({ type: "plan", planType: "tasks", steps: todoSteps });
+          return;
+        }
         const taskMeta = readSubagentMeta(title, rawInput);
         if (taskMeta) taskCalls.add(callId);
         const isTask = taskCalls.has(callId);

@@ -623,17 +623,34 @@ fn codex_database_sessions(home: &Path, cwd: &Path) -> Option<Vec<AgentSessionSu
     let database = codex_state_database(home)?;
     let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
     let connection = Connection::open_with_flags(database, flags).ok()?;
-    let mut statement = connection
-        .prepare(
-            "SELECT id, rollout_path, created_at, updated_at, cwd, title, model, \
-                    created_at_ms, updated_at_ms, recency_at_ms, preview, \
-                    first_user_message, name \
-             FROM threads \
-             WHERE archived = 0 \
-             ORDER BY COALESCE(NULLIF(recency_at_ms, 0), \
-                               NULLIF(updated_at_ms, 0), updated_at * 1000) DESC",
-        )
-        .ok()?;
+    // Multi-agent v2 stores delegated threads in the same flat table as
+    // user-owned conversations. Codex deliberately refuses to resume those
+    // children directly until their parent is loaded, so they must not be
+    // offered by Duckweed's root-session picker. Keep the query compatible
+    // with older state databases that predate `thread_source`.
+    let has_thread_source = {
+        let mut columns = connection.prepare("PRAGMA table_info(threads)").ok()?;
+        let names = columns.query_map([], |row| row.get::<_, String>(1)).ok()?;
+        let found = names
+            .filter_map(Result::ok)
+            .any(|name| name == "thread_source");
+        found
+    };
+    let resumable_filter = if has_thread_source {
+        " AND COALESCE(thread_source, '') NOT IN ('subagent', 'agent_created_thread')"
+    } else {
+        ""
+    };
+    let query = format!(
+        "SELECT id, rollout_path, created_at, updated_at, cwd, title, model, \
+                created_at_ms, updated_at_ms, recency_at_ms, preview, \
+                first_user_message, name \
+         FROM threads \
+         WHERE archived = 0{resumable_filter} \
+         ORDER BY COALESCE(NULLIF(recency_at_ms, 0), \
+                           NULLIF(updated_at_ms, 0), updated_at * 1000) DESC"
+    );
+    let mut statement = connection.prepare(&query).ok()?;
     let mut rows = statement.query([]).ok()?;
     let cwd_text = cwd.to_string_lossy().to_string();
     let mut found = Vec::new();
@@ -770,6 +787,17 @@ fn codex_rollout_sessions(home: &Path, cwd: &Path) -> Vec<AgentSessionSummary> {
             continue;
         }
         let payload = meta.get("payload").cloned().unwrap_or(Value::Null);
+        let thread_source = payload
+            .get("thread_source")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let spawned_as_subagent = payload
+            .get("source")
+            .and_then(Value::as_object)
+            .is_some_and(|source| source.contains_key("subagent"));
+        if matches!(thread_source, "subagent" | "agent_created_thread") || spawned_as_subagent {
+            continue;
+        }
         let session_cwd = payload.get("cwd").and_then(Value::as_str).unwrap_or("");
         if !same_path(session_cwd, &cwd_text) {
             continue;
@@ -1404,6 +1432,68 @@ mod tests {
     }
 
     #[test]
+    fn codex_database_listing_excludes_multi_agent_child_threads() {
+        use rusqlite::{params, Connection};
+
+        let home = temp_dir("codex-state-subagents");
+        let cwd = Path::new(r"H:\Python\Slop\duckweed");
+        let database = home.join(".codex/state_5.sqlite");
+        fs::create_dir_all(database.parent().unwrap()).unwrap();
+        let connection = Connection::open(&database).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE threads (
+                    id TEXT PRIMARY KEY,
+                    rollout_path TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    cwd TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    model TEXT,
+                    created_at_ms INTEGER,
+                    updated_at_ms INTEGER,
+                    recency_at_ms INTEGER,
+                    preview TEXT NOT NULL DEFAULT '',
+                    first_user_message TEXT NOT NULL DEFAULT '',
+                    name TEXT,
+                    thread_source TEXT,
+                    archived INTEGER NOT NULL DEFAULT 0
+                );",
+            )
+            .unwrap();
+        for (id, title, source) in [
+            ("parent", "User conversation", None),
+            ("child", "Delegated worker", Some("subagent")),
+            (
+                "created-child",
+                "Agent-created thread",
+                Some("agent_created_thread"),
+            ),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO threads (
+                        id, rollout_path, created_at, updated_at, cwd, title,
+                        recency_at_ms, thread_source, archived
+                     ) VALUES (?1, ?2, 100, 200, ?3, ?4, 200000, ?5, 0)",
+                    params![
+                        id,
+                        format!(r"C:\sessions\{id}.jsonl"),
+                        cwd.to_string_lossy(),
+                        title,
+                        source
+                    ],
+                )
+                .unwrap();
+        }
+        drop(connection);
+
+        let found = codex_sessions(&home, cwd);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id, "parent");
+    }
+
+    #[test]
     fn codex_listing_returns_more_than_the_previous_forty_row_window() {
         let home = temp_dir("codex-many-results");
         let cwd = Path::new(r"H:\Python\Slop\duckweed");
@@ -1496,6 +1586,40 @@ mod tests {
                 .map(|session| session.title.as_str()),
             Some("Untitled session")
         );
+    }
+
+    #[test]
+    fn codex_rollout_listing_excludes_multi_agent_child_threads() {
+        let home = temp_dir("codex-rollout-subagents");
+        let cwd = Path::new(r"H:\Python\Slop\duckweed");
+        let day = home.join(".codex/sessions/2026/07/26");
+        write(
+            &day.join("rollout-2026-07-26T20-00-01-parent.jsonl"),
+            concat!(
+                r#"{"type":"session_meta","payload":{"id":"parent","cwd":"H:\\Python\\Slop\\duckweed"}}"#,
+                "\n",
+                r#"{"payload":{"type":"user_message","message":"Parent conversation"}}"#,
+                "\n",
+            ),
+        );
+        write(
+            &day.join("rollout-2026-07-26T20-00-02-child.jsonl"),
+            concat!(
+                r#"{"type":"session_meta","payload":{"id":"child","cwd":"H:\\Python\\Slop\\duckweed","thread_source":"subagent","source":{"subagent":{"thread_spawn":{"parent_thread_id":"parent"}}}}}"#,
+                "\n",
+            ),
+        );
+        write(
+            &day.join("rollout-2026-07-26T20-00-03-created-child.jsonl"),
+            concat!(
+                r#"{"type":"session_meta","payload":{"id":"created-child","cwd":"H:\\Python\\Slop\\duckweed","thread_source":"agent_created_thread"}}"#,
+                "\n",
+            ),
+        );
+
+        let found = codex_sessions(&home, cwd);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id, "parent");
     }
 
     #[test]

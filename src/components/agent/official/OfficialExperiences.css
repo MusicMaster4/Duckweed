@@ -11,7 +11,9 @@
   flex-direction: column;
   gap: 12px;
   min-width: 0;
-  padding: 8px 2px 24px;
+  /* The scroll surface owns the trailing gutter. Keeping it here as well
+     creates a second, empty scroll step after the final message. */
+  padding: 8px 2px 0;
 }
 
 /* Long transcripts keep their full DOM and accessibility tree, but Chromium
@@ -412,6 +414,47 @@
   }
 }
 
+/* Shared visual polish: clearer hierarchy, stronger scan paths, and quiet depth. */
+.agent-experience {
+  width: min(100%, 960px);
+}
+
+.official-transcript {
+  gap: 15px;
+  padding: 10px 3px 0;
+}
+
+.official-user {
+  border-color: rgba(255, 255, 255, 0.065);
+  background: rgba(255, 255, 255, 0.095);
+  box-shadow:
+    0 5px 14px rgba(0, 0, 0, 0.12),
+    inset 0 1px rgba(255, 255, 255, 0.025);
+  font-size: 14px;
+}
+
+.official-user--claude {
+  background: rgba(255, 255, 255, 0.085);
+}
+
+.official-user--grok {
+  background: rgba(255, 255, 255, 0.09);
+}
+
+.official-markdown h1,
+.official-markdown h2,
+.official-markdown h3,
+.official-markdown h4 {
+  color: color-mix(in srgb, var(--text) 94%, var(--agent-accent));
+}
+
+.official-plan,
+.agent-activity-history.is-open {
+  border-color: rgba(255, 255, 255, 0.075);
+  background: rgba(255, 255, 255, 0.026);
+  box-shadow: 0 5px 14px rgba(0, 0, 0, 0.08);
+}
+
 /* Shared workflow/task tracker. It is fed by provider plan events and never
    guesses tasks from prose. */
 .official-plan {
@@ -644,6 +687,15 @@
 
 .official-tool.is-error {
   --tool-color: var(--rose);
+}
+
+.official-tool.is-error .official-tool-head,
+.official-tool.is-error .official-tool-head *,
+.official-tool.is-error .official-command,
+.official-tool.is-error .official-command *,
+.official-tool.is-error .official-output {
+  color: var(--rose);
+  -webkit-text-fill-color: currentColor;
 }
 
 .official-tool.is-subagent {
@@ -2861,11 +2913,6 @@ button.chatgpt-thinking-row.is-selected {
   background: rgba(255, 255, 255, 0.025);
 }
 
-.official-tool--chatgpt .official-tool-mark {
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  border-radius: 6px;
-}
-
 .official-tool--chatgpt.is-compact .official-tool-copy strong {
   color: var(--text-faint);
   font-size: 12px;
@@ -3630,4 +3677,27 @@ button.chatgpt-thinking-row.is-selected {
   .grok-hover-chevron svg {
     transition: none;
   }
+}
+
+.agent-activity-history.is-error .agent-activity-history-head,
+.agent-activity-history.is-error .agent-activity-history-head * {
+  color: var(--rose);
+  -webkit-text-fill-color: currentColor;
+}
+
+/* Keep failed compact rows red even after provider-specific compact styling. */
+.official-tool.is-error .official-tool-head,
+.official-tool.is-error .official-tool-head *,
+.official-tool.is-error .official-command,
+.official-tool.is-error .official-command *,
+.official-tool.is-error .official-output {
+  color: var(--rose);
+  -webkit-text-fill-color: currentColor;
+}
+
+.official-plan,
+.agent-activity-history.is-open {
+  border-color: rgba(255, 255, 255, 0.075);
+  background: rgba(255, 255, 255, 0.026);
+  box-shadow: 0 5px 14px rgba(0, 0, 0, 0.08);
 }

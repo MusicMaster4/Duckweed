@@ -329,6 +329,25 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
   let currentEffort: string | null = null;
   let currentServiceTier: string | null = null;
   /**
+   * Fast Mode is a preference, but not every model accepts the `priority`
+   * service tier. Keep the preference active and run incompatible models on
+   * the default tier so switching models never turns into a rejected turn.
+   */
+  function serviceTierParamsFor(modelId: string | null): { serviceTier?: string } {
+    if (currentServiceTier !== FAST_SERVICE_TIER) {
+      return currentServiceTier ? { serviceTier: currentServiceTier } : {};
+    }
+    const model = models.find(
+      (candidate) => candidate.id === modelId || candidate.displayName === modelId,
+    );
+    return {
+      serviceTier:
+        model && !model.serviceTiers.includes(FAST_SERVICE_TIER)
+          ? DEFAULT_SERVICE_TIER
+          : currentServiceTier,
+    };
+  }
+  /**
    * `/fast` only changes the service tier. Codex still announces the thread's
    * stored effort in `thread/settings/updated`, and that value is often the
    * model default (`low`) because `/effort` is a local `turn/start` override.
@@ -1175,7 +1194,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
           sandboxPolicy: { type: "readOnly" },
           ...(currentModel ? { model: currentModel } : {}),
           ...(currentEffort ? { effort: currentEffort } : {}),
-          ...(currentServiceTier ? { serviceTier: currentServiceTier } : {}),
+          ...serviceTierParamsFor(currentModel),
         });
         side.currentTurnId = asString(asRecord(started.turn)?.id) ?? side.currentTurnId;
       })
@@ -2598,18 +2617,6 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         });
         return "handled";
       }
-      if (
-        currentServiceTier === FAST_SERVICE_TIER &&
-        known &&
-        !known.serviceTiers.includes(FAST_SERVICE_TIER)
-      ) {
-        ctx.emit({
-          type: "notice",
-          tone: "error",
-          text: `${known.id} does not support Fast Mode. Use /fast to turn it off first.`,
-        });
-        return "handled";
-      }
       currentModel = (known ?? { id: arg }).id;
       ctx.emit({ type: "session", model: currentModel });
       ctx.emit({ type: "notice", tone: "info", text: `Model set to ${currentModel}.` });
@@ -2816,7 +2823,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         // Same sticky override semantics as `model`, and the same casing
         // discipline: `effort` is the exact field name in TurnStartParams.
         ...(currentEffort ? { effort: currentEffort } : {}),
-        ...(currentServiceTier ? { serviceTier: currentServiceTier } : {}),
+        ...serviceTierParamsFor(currentModel),
       })
         .then((result) => {
           const responseTurnId = asString(asRecord(result.turn)?.id);
@@ -2935,7 +2942,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
             ...turnAccessParams(currentAccess),
             ...(child.model ? { model: child.model } : {}),
             ...(currentEffort ? { effort: currentEffort } : {}),
-            ...(currentServiceTier ? { serviceTier: currentServiceTier } : {}),
+            ...serviceTierParamsFor(child.model),
           });
         } else {
           return false;

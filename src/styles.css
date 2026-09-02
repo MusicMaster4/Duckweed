@@ -7841,33 +7841,42 @@ body.is-resizing * {
   flex: none;
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  padding: 1px 7px;
+  gap: 6px;
+  min-height: 20px;
+  padding: 1px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.055);
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.05);
-  color: var(--text-faint);
-  font-size: 10px;
+  background: rgba(255, 255, 255, 0.065);
+  color: var(--text-dim);
+  font-size: 10.5px;
+  font-weight: 550;
   white-space: nowrap;
 }
 
 .agent-state.is-working {
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
   color: var(--agent-accent);
-  background: color-mix(in srgb, var(--agent-accent) 14%, transparent);
+  background: transparent;
 }
 
 .agent-state.is-waiting {
+  border-color: rgba(240, 192, 82, 0.24);
   color: var(--amber);
   background: rgba(240, 192, 82, 0.14);
 }
 
 .agent-state.is-error {
+  border-color: rgba(242, 104, 111, 0.25);
   color: var(--rose);
   background: rgba(242, 104, 111, 0.14);
 }
 
 .agent-pulse {
-  width: 5px;
-  height: 5px;
+  width: 6px;
+  height: 6px;
   border-radius: 50%;
   background: currentColor;
   animation: agent-pulse 1.1s ease-in-out infinite;
@@ -8003,6 +8012,7 @@ body.is-resizing * {
   stroke: currentColor;
   stroke-width: 1.5;
   stroke-linecap: round;
+  overflow: visible;
 }
 
 .agent-conversation-menu {
@@ -8496,6 +8506,13 @@ body.is-resizing * {
 
 /* ── Diffs ── */
 
+.agent-diff {
+  overflow: hidden;
+  border-radius: 7px;
+  background: rgba(0, 0, 0, 0.12);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.035);
+}
+
 .agent-diff + .agent-diff {
   border-top: 1px solid var(--border);
 }
@@ -8504,8 +8521,10 @@ body.is-resizing * {
   display: flex;
   align-items: center;
   gap: 7px;
-  padding: 5px 10px;
-  background: rgba(255, 255, 255, 0.02);
+  min-height: 32px;
+  padding: 6px 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.045);
+  background: rgba(255, 255, 255, 0.035);
   font-family: var(--font-mono);
   font-size: 11px;
 }
@@ -8521,6 +8540,23 @@ body.is-resizing * {
 
 .agent-diff-dir {
   color: var(--text-faint);
+}
+
+.agent-diff-language {
+  flex: none;
+  padding: 1px 6px;
+  border: 1px solid rgba(255, 255, 255, 0.075);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.035);
+  color: var(--text-faint);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.035em;
+  text-transform: uppercase;
+}
+
+.agent-diff:hover .agent-diff-head {
+  background: rgba(255, 255, 255, 0.045);
 }
 
 .agent-diff-body {
@@ -9129,13 +9165,27 @@ body.is-resizing * {
     var(--bg-pane);
 }
 
+.agent-workflow-dock.is-in-transcript {
+  width: min(100%, 960px);
+  margin: 12px auto 2px;
+  padding: 0;
+  border-top: 0;
+  background: transparent;
+}
+
+.agent-scroll:has(.agent-workflow-dock.is-in-transcript) .agent-experience,
+.agent-scroll:has(.agent-workflow-dock.is-in-transcript) .cx,
+.agent-scroll:has(.agent-workflow-dock.is-in-transcript) .oc {
+  min-height: auto;
+}
+
 .agent-workflow-dock .official-plan {
-  width: min(100%, 840px);
+  width: min(100%, 960px);
   margin: 0 auto;
   border-color: rgba(255, 255, 255, 0.075);
   border-radius: 9px;
   background: color-mix(in srgb, var(--bg-elevated) 74%, transparent);
-  box-shadow: 0 7px 22px rgba(0, 0, 0, 0.16);
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.2);
 }
 
 .agent-workflow-dock .official-plan-head {

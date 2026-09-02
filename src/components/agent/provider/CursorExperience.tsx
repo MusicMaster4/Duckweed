@@ -6,6 +6,7 @@ import { AgentImageAttachments } from "../AgentImageAttachments";
 import { MessageCopyButton } from "../MessageCopyButton";
 import { SubagentBoardAnchor, SubagentBoardForActivities } from "../subagents/SubagentBoard";
 import { useSubagentUi } from "../subagents/SubagentUiContext";
+import { toolLoadingPhase, type ToolLoadingPhase } from "../toolLoadingPhase";
 import {
   ActivityHistory,
   activeAssistantId,
@@ -96,7 +97,15 @@ function CursorOrbit({ phase, large }: { phase: PhaseKind; large?: boolean }) {
   );
 }
 
-function CursorStatus({ status, elapsed }: { status: ToolStatus; elapsed: string | null }) {
+function CursorStatus({
+  status,
+  elapsed,
+  loadingPhase,
+}: {
+  status: ToolStatus;
+  elapsed: string | null;
+  loadingPhase: ToolLoadingPhase;
+}) {
   const label =
     status === "running"
       ? "running"
@@ -108,15 +117,15 @@ function CursorStatus({ status, elapsed }: { status: ToolStatus; elapsed: string
   return (
     <span className={`cx-status is-${status}`}>
       {elapsed && <span className="cx-status-time">{elapsed}</span>}
-      {status === "running" || status === "pending" ? (
+      {loadingPhase === "indicator" ? (
         <span className="cx-status-scan" aria-hidden="true">
           <span />
         </span>
-      ) : (
+      ) : status === "done" || status === "error" ? (
         <span className="cx-status-glyph" aria-hidden="true">
           {status === "error" ? "✕" : "✓"}
         </span>
-      )}
+      ) : null}
       <ScreenReaderText>{label}</ScreenReaderText>
     </span>
   );
@@ -162,20 +171,19 @@ function CursorTracker({ plan }: { plan: PlanSummary }) {
  */
 function CursorSubagent({ item, elapsed }: { item: ToolItem; elapsed: string | null }) {
   const { absorbedCallIds, rosterAnchorIds, peekedCallId, peekSubagent } = useSubagentUi();
+  const loadingPhase = toolLoadingPhase(item.status);
   if (rosterAnchorIds.has(item.id)) return <SubagentBoardAnchor itemId={item.id} />;
   if (absorbedCallIds.has(item.callId)) return null;
   const head = (
     <>
       <span className="cx-sub-tag">Subagent</span>
       <span className="cx-sub-title">{item.title}</span>
-      <CursorStatus status={item.status} elapsed={elapsed} />
+      <CursorStatus status={item.status} elapsed={elapsed} loadingPhase={loadingPhase} />
     </>
   );
   return (
     <div
-      className={`cx-sub is-${item.status}${
-        peekedCallId === item.callId ? " is-selected" : ""
-      }`}
+      className={`cx-sub is-${item.status}${peekedCallId === item.callId ? " is-selected" : ""}`}
       data-subagent-call-id={item.callId}
     >
       <button
@@ -202,6 +210,7 @@ function CursorTool({ item, elapsed }: { item: ToolItem; elapsed: string | null 
   const command = item.tool === "execute" ? (item.command ?? item.title) : null;
   const insertions = item.changes.reduce((sum, change) => sum + change.insertions, 0);
   const deletions = item.changes.reduce((sum, change) => sum + change.deletions, 0);
+  const loadingPhase = toolLoadingPhase(item.status);
 
   const head = (
     <>
@@ -221,7 +230,7 @@ function CursorTool({ item, elapsed }: { item: ToolItem; elapsed: string | null 
       {insertions > 0 && <span className="cx-add">+{insertions}</span>}
       {deletions > 0 && <span className="cx-del">−{deletions}</span>}
       {expandable && <span className="cx-chevron" aria-hidden="true" data-open={open} />}
-      <CursorStatus status={item.status} elapsed={elapsed} />
+      <CursorStatus status={item.status} elapsed={elapsed} loadingPhase={loadingPhase} />
     </>
   );
 
@@ -320,8 +329,10 @@ const CursorNode = memo(function CursorNode({
       <div className="cx-body">
         {item.kind === "user" && (
           <>
-            <AgentImageAttachments images={item.images ?? []} />
-            {item.text && <p className="cx-said">{item.text}</p>}
+            <div className="cx-user-bubble">
+              <AgentImageAttachments images={item.images ?? []} />
+              {item.text && <p className="cx-said">{item.text}</p>}
+            </div>
             {item.text && <MessageCopyButton text={item.text} />}
           </>
         )}

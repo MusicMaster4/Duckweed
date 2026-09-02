@@ -281,7 +281,7 @@
 .agent-sub-focus-head {
   display: flex;
   flex-wrap: wrap;
-  align-items: baseline;
+  align-items: center;
   gap: 8px 10px;
 }
 
@@ -294,6 +294,17 @@
   color: var(--agent-sub-accent);
   font-size: 10.5px;
   font-weight: 550;
+  line-height: 1.35;
+  overflow: visible;
+}
+
+.agent-sub-back > span:first-child {
+  display: inline-grid;
+  min-width: 12px;
+  place-items: center;
+  overflow: visible;
+  font-size: 13px;
+  line-height: 1;
 }
 
 .agent-sub-back:hover,
@@ -378,8 +389,7 @@
   display: flex;
   flex-direction: column;
   gap: 6px;
-  padding-left: 9px;
-  border-left: 1px solid color-mix(in srgb, var(--agent-sub-accent) 34%, var(--border));
+  padding-left: 0;
 }
 
 .agent-sub-nested-message {
@@ -921,5 +931,80 @@
   .agent-sub-board,
   .agent-sub-focus {
     scroll-behavior: auto;
+  }
+}
+
+/* Stronger fleet scanability without turning the board into a separate app. */
+.agent-sub-board {
+  width: min(100%, 960px);
+  padding: 10px 11px 11px;
+  border-color: color-mix(in srgb, var(--agent-sub-accent) 24%, var(--border));
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--agent-sub-accent) 4%, transparent), transparent 55%),
+    color-mix(in srgb, var(--bg-elevated) 88%, transparent);
+  box-shadow: 0 7px 20px rgba(0, 0, 0, 0.14);
+}
+
+.agent-sub-board-head strong {
+  font-size: 9.5px;
+}
+
+.agent-sub-board-list {
+  gap: 5px;
+}
+
+.agent-sub-row {
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.055);
+  border-left: 2px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.022);
+  transition:
+    border-color 140ms ease,
+    background 140ms ease,
+    transform 140ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.agent-sub-row.is-running,
+.agent-sub-row.is-pending {
+  border-left-color: var(--agent-sub-accent);
+}
+
+.agent-sub-row.is-done {
+  border-left-color: var(--sage, #82c98a);
+}
+
+.agent-sub-row.is-error {
+  border-left-color: var(--rose);
+}
+
+.agent-sub-row:hover {
+  border-color: color-mix(in srgb, var(--agent-sub-accent) 26%, var(--border));
+  background: color-mix(in srgb, var(--agent-sub-accent) 5%, rgba(255, 255, 255, 0.024));
+  transform: translateY(-1px);
+}
+
+.agent-sub-row-main {
+  min-height: 38px;
+  padding: 7px 8px;
+}
+
+.agent-sub-row-status,
+.agent-sub-row-elapsed {
+  min-height: 18px;
+  box-sizing: border-box;
+  padding: 2px 6px;
+  border: 1px solid rgba(255, 255, 255, 0.055);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.035);
+  font-size: 9px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-sub-row {
+    transition: none;
+  }
+
+  .agent-sub-row:hover {
+    transform: none;
   }
 }

@@ -406,6 +406,89 @@ describe("acp adapter", () => {
     expect(plans[0].kind === "plan" && plans[0].steps[1].status).toBe("done");
   });
 
+  test("lifts OpenCode's todos tool into the plan checklist", async () => {
+    const h = harness({ agent: "opencode", program: "opencode" });
+    await h.handshake();
+    h.update({
+      sessionUpdate: "tool_call",
+      toolCallId: "todo_1",
+      title: "4 todos",
+      kind: "other",
+      status: "completed",
+      content: [
+        {
+          type: "content",
+          content: {
+            type: "text",
+            text: JSON.stringify([
+              { content: "Redesign index.html", status: "in_progress", priority: "high" },
+              { content: "Rewrite app.css", status: "pending", priority: "high" },
+              { content: "Improve app.js", status: "pending", priority: "high" },
+              { content: "Run the checks", status: "pending", priority: "medium" },
+            ]),
+          },
+        },
+      ],
+    });
+
+    expect(h.state().items).toHaveLength(1);
+    expect(h.state().items[0]).toMatchObject({
+      kind: "plan",
+      planType: "tasks",
+      steps: [
+        { text: "Redesign index.html", status: "running" },
+        { text: "Rewrite app.css", status: "pending" },
+        { text: "Improve app.js", status: "pending" },
+        { text: "Run the checks", status: "pending" },
+      ],
+    });
+  });
+
+  test("keeps OpenCode todo updates in one checklist and hides the raw tool", async () => {
+    const h = harness({ agent: "opencode", program: "opencode" });
+    await h.handshake();
+    h.update({
+      sessionUpdate: "tool_call",
+      toolCallId: "todo_1",
+      title: "2 todos",
+      kind: "other",
+      status: "in_progress",
+      rawInput: {
+        todos: [
+          { content: "Inspect the adapter", status: "in_progress" },
+          { content: "Add coverage", status: "pending" },
+        ],
+      },
+    });
+    h.update({
+      sessionUpdate: "tool_call_update",
+      toolCallId: "todo_1",
+      status: "completed",
+      content: [
+        {
+          type: "content",
+          content: {
+            type: "text",
+            text: JSON.stringify([
+              { content: "Inspect the adapter", status: "completed" },
+              { content: "Add coverage", status: "in_progress" },
+            ]),
+          },
+        },
+      ],
+    });
+
+    const plans = h.state().items.filter((item) => item.kind === "plan");
+    expect(plans).toHaveLength(1);
+    expect(h.state().items.some((item) => item.kind === "tool")).toBe(false);
+    expect(plans[0]).toMatchObject({
+      steps: [
+        { text: "Inspect the adapter", status: "done" },
+        { text: "Add coverage", status: "running" },
+      ],
+    });
+  });
+
   test("surfaces Grok background workflow phases from its ACP extension", async () => {
     const h = harness();
     await h.handshake();
