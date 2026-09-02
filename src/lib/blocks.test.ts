@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import {
   BlockTracker,
   type CommandBlock,
+  formatBlockDuration,
   foldOrphanPrompts,
   logicalLineEnd,
   logicalLineStart,
@@ -10,6 +11,19 @@ import {
   resolveBlockEnd,
   wrappedCommandEnd,
 } from "./blocks";
+
+describe("formatBlockDuration", () => {
+  test("keeps short timings compact", () => {
+    expect(formatBlockDuration(42)).toBe("42 ms");
+    expect(formatBlockDuration(1250)).toBe("1.3 s");
+    expect(formatBlockDuration(12_600)).toBe("13 s");
+  });
+
+  test("formats long-running blocks without wide labels", () => {
+    expect(formatBlockDuration(125_000)).toBe("2m 05s");
+    expect(formatBlockDuration(3_780_000)).toBe("1h 03m");
+  });
+});
 
 describe("looksLikePrompt", () => {
   test("matches classic PowerShell idle prompts", () => {
@@ -245,7 +259,7 @@ describe("BlockTracker.open OSC 133 anchoring", () => {
         },
       },
       registerMarker(offset: number) {
-        const line = cursorLine + offset;
+        const line = this.buffer.active.baseY + this.buffer.active.cursorY + offset;
         const m = { line, isDisposed: false };
         markers.push(m);
         return m;
@@ -312,19 +326,77 @@ describe("BlockTracker.open OSC 133 anchoring", () => {
       startedAt: 900,
       completedAt: null,
       exitCode: null,
+      awaitingShellConfirmation: true,
     };
     (tracker as unknown as { blocks: CommandBlock[]; nextId: number }).blocks = [
       existing as unknown as CommandBlock,
     ];
     (tracker as unknown as { nextId: number }).nextId = 2;
 
-    tracker.open("cargo build", 1200);
+    tracker.open("cargo build", 1200, "shell");
 
     expect(markers).toHaveLength(0);
     const blocks = (tracker as unknown as { blocks: CommandBlock[] }).blocks;
     expect(blocks).toHaveLength(1);
     expect(blocks[0].startedAt).toBe(1200);
     expect(blocks[0].start.line).toBe(5);
+  });
+
+  test("keeps repeated composer submissions as separate blocks", () => {
+    const rows: Record<number, Row> = {
+      2: { text: "PS H:\\proj> npm run dev" },
+      6: { text: "PS H:\\proj> npm run dev" },
+    };
+    const { tracker, markers, term } = openableTracker(rows, 2);
+
+    tracker.open("npm run dev", 1000);
+    term.buffer.active.cursorY = 6;
+    term.buffer.active.length = 7;
+    tracker.open("npm run dev", 2000);
+
+    const blocks = (tracker as unknown as { blocks: CommandBlock[] }).blocks;
+    expect(markers.map((item) => item.line)).toEqual([2, 6]);
+    expect(blocks).toHaveLength(2);
+    expect(blocks[0].completedAt).toBe(2000);
+    expect(blocks[1].completedAt).toBeNull();
+  });
+});
+
+describe("BlockTracker overlay geometry", () => {
+  test("places the selection stroke outside the terminal block", () => {
+    const toggled = new Map<string, boolean>();
+    const element = {
+      hidden: true,
+      classList: {
+        toggle(name: string, enabled: boolean) {
+          toggled.set(name, enabled);
+        },
+      },
+      style: {} as Record<string, string>,
+    };
+    const tracker = Object.create(BlockTracker.prototype) as BlockTracker;
+
+    (
+      tracker as unknown as {
+        layoutRangeOverlay(
+          element: typeof element,
+          range: { start: number; end: number },
+          fullWidth: number,
+          offsetY: number,
+          cellHeight: number,
+          viewportY: number,
+          rows: number,
+          outset: number,
+        ): void;
+      }
+    ).layoutRangeOverlay(element, { start: 10, end: 12 }, 100, 5, 18, 8, 20, 2);
+
+    expect(element.hidden).toBe(false);
+    expect(element.style.transform).toBe("translate3d(-2px, 39px, 0)");
+    expect(element.style.width).toBe("104px");
+    expect(element.style.height).toBe("58px");
+    expect(toggled.get("is-clipped-top")).toBe(false);
+    expect(toggled.get("is-clipped-bottom")).toBe(false);
   });
 });
 

@@ -68,6 +68,7 @@ import {
 import * as commandHistory from "./lib/commandHistory";
 import { clearGreetings } from "./lib/greetings";
 import * as suggestFeedback from "./lib/suggestFeedback";
+import { observeDesktopActivity } from "./lib/desktopActivity";
 import {
   frontendReady,
   listShells,
@@ -623,24 +624,9 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    const recordDesktopInteraction = () => {
-      if (!document.hasFocus()) return;
+    return observeDesktopActivity(window, () => document.hasFocus(), () => {
       lastDesktopInteractionAt.current = Date.now();
-    };
-    const recordKeyboardInteraction = (event: KeyboardEvent) => {
-      if (["Shift", "Control", "Alt", "Meta"].includes(event.key)) return;
-      recordDesktopInteraction();
-    };
-    window.addEventListener("focus", recordDesktopInteraction);
-    window.addEventListener("keydown", recordKeyboardInteraction, true);
-    window.addEventListener("pointerdown", recordDesktopInteraction, true);
-    window.addEventListener("wheel", recordDesktopInteraction, true);
-    return () => {
-      window.removeEventListener("focus", recordDesktopInteraction);
-      window.removeEventListener("keydown", recordKeyboardInteraction, true);
-      window.removeEventListener("pointerdown", recordDesktopInteraction, true);
-      window.removeEventListener("wheel", recordDesktopInteraction, true);
-    };
+    });
   }, []);
 
   /** Selected pane while the user is actually looking at the window (flash vs unread). */

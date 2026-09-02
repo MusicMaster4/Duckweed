@@ -51,8 +51,14 @@
   --scrollbar-thumb-hover: rgba(255, 255, 255, 0.3);
   --scrollbar-track: transparent;
 
-  /* Hairline between Warp-style command blocks (matches former chrome 1px). */
-  --block-separator: rgba(255, 255, 255, 0.16);
+  /* Command blocks read as an execution ledger: quiet at rest, explicit when
+     hovered, selected, running, or failed. */
+  --block-separator: rgba(255, 255, 255, 0.11);
+  --block-header: color-mix(in srgb, var(--bg-pane) 98.2%, white 1.8%);
+  --block-hover: rgba(255, 255, 255, 0.028);
+  --block-selected: rgba(123, 224, 90, 0.065);
+  --block-selected-border: rgba(123, 224, 90, 0.76);
+  --block-failed: rgba(242, 104, 111, 0.075);
 
   font-synthesis: none;
 }
@@ -5096,46 +5102,209 @@ body.is-dragging-prompt * {
   top: 0;
   left: 0;
   box-sizing: border-box;
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
   margin: 0;
-  padding: 0 6px;
+  padding: 0 10px 0 8px;
   overflow: hidden;
   white-space: pre;
-  text-overflow: ellipsis;
   pointer-events: none;
   /* Opaque so the PS prompt underneath never bleeds through. */
-  background: var(--bg-pane);
+  background: var(--block-header);
   color: var(--text);
   font-family: var(--font-mono);
   font-size: var(--terminal-font-size, 13.5px);
   font-weight: 500;
   letter-spacing: var(--terminal-letter-spacing, 1px);
+  transition:
+    background-color 100ms ease,
+    box-shadow 100ms ease;
   will-change: transform;
 }
 
+.command-block-prompt {
+  width: 12px;
+  flex: none;
+  color: var(--accent);
+  font-weight: 700;
+  text-align: center;
+}
+
+.command-block-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: pre;
+}
+
+.command-block-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+  margin-left: auto;
+  color: var(--text-faint);
+  font-family: "Inter", "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  max-width: 0;
+  overflow: hidden;
+  opacity: 0;
+  white-space: nowrap;
+  transition:
+    max-width 100ms ease,
+    opacity 100ms ease;
+}
+
+.command-block-cmd.is-hovered {
+  background: color-mix(in srgb, var(--bg-pane) 97.2%, white 2.8%);
+}
+
 .command-block-cmd.is-selected {
-  /* Same soft green wash as the select overlay, so the command row matches. */
-  background: color-mix(in srgb, var(--bg-pane) 88%, var(--accent) 12%);
+  background: color-mix(in srgb, var(--bg-pane) 93.5%, var(--accent) 6.5%);
+}
+
+.command-block-cmd.is-failed {
+  background: color-mix(in srgb, var(--bg-pane) 92.5%, var(--rose) 7.5%);
+}
+
+.command-block-cmd.is-failed.is-selected {
+  background: color-mix(
+    in srgb,
+    color-mix(in srgb, var(--bg-pane) 93.5%, var(--accent) 6.5%) 94%,
+    var(--rose) 6%
+  );
+}
+
+.command-block-cmd.is-running .command-block-status,
+.command-block-cmd.is-failed .command-block-status,
+.command-block-cmd.is-hovered .command-block-status,
+.command-block-cmd.is-selected .command-block-status,
+.command-block-cmd.is-sticky .command-block-status {
+  max-width: 180px;
+  opacity: 1;
+}
+
+.command-block-cmd.is-running .command-block-status::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: command-block-running 1.15s ease-in-out infinite alternate;
+}
+
+.command-block-cmd.is-failed .command-block-status {
+  color: var(--rose);
+}
+
+.command-block-cmd.is-sticky {
+  background: color-mix(in srgb, var(--bg-elevated) 72%, var(--bg-pane) 28%);
+  box-shadow: inset 0 -1px var(--border-strong);
+}
+
+.command-block-cmd.is-sticky.is-selected {
+  box-shadow: inset 0 -1px var(--border-strong);
+}
+
+@keyframes command-block-running {
+  from {
+    opacity: 0.38;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .command-block-cmd.is-running .command-block-status::before {
+    animation: none;
+  }
 }
 
 /*
- * Soft green wash over a clicked/keyboard-selected chunk. Nothing else — no
- * border, no card. pointer-events none so wheel scroll and free-range drag
- * still reach xterm. Painted instead of selectLines over thousands of rows
- * (which jumped the viewport and froze tall cargo output).
+ * Warp treats a selected block as an atomic object. The outside border and quiet
+ * fill make that boundary explicit without turning every command into a card.
+ * pointer-events none keeps wheel scroll and free-range drag owned by xterm.
  */
 .command-block-select-overlay {
   position: absolute;
-  z-index: 2;
+  z-index: 6;
+  top: 0;
+  left: 0;
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  pointer-events: none;
+  border: 2px solid var(--block-selected-border);
+  background: transparent;
+  will-change: transform;
+}
+
+.command-block-select-fill {
+  position: absolute;
+  z-index: 3;
   top: 0;
   left: 0;
   margin: 0;
   padding: 0;
   pointer-events: none;
-  background: color-mix(in srgb, transparent 88%, var(--accent) 12%);
+  background: var(--block-selected);
   will-change: transform;
 }
 
-/* Hairline on the exact boundary between terminal rows. */
+.command-block-select-overlay.is-clipped-top {
+  border-top-color: transparent;
+}
+
+.command-block-select-overlay.is-clipped-bottom {
+  border-bottom-color: transparent;
+}
+
+.command-block-hover-overlay {
+  position: absolute;
+  z-index: 2;
+  top: 0;
+  left: 0;
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  background: var(--block-hover);
+  pointer-events: none;
+  will-change: transform;
+}
+
+.command-block-hover-overlay.is-clipped-top {
+  border-top-color: transparent;
+}
+
+.command-block-hover-overlay.is-clipped-bottom {
+  border-bottom-color: transparent;
+}
+
+/* Failed blocks keep Warp's low-opacity wash and a stronger left flag pole. */
+.command-block-state-overlay {
+  position: absolute;
+  z-index: 1;
+  top: 0;
+  left: 0;
+  margin: 0;
+  padding: 0;
+  pointer-events: none;
+  will-change: transform;
+}
+
+.command-block-state-overlay.is-failed {
+  background: var(--block-failed);
+  box-shadow: inset 3px 0 var(--rose);
+}
+
+/* Optical gutter centered on the boundary between terminal rows. */
 .command-block-separator {
   position: absolute;
   z-index: 5;
@@ -5145,12 +5314,18 @@ body.is-dragging-prompt * {
   padding: 0;
   border: none;
   pointer-events: none;
-  background: var(--block-separator);
+  background: var(--bg-pane);
   will-change: transform;
 }
 
 .command-block-separator::after {
-  content: none;
+  content: "";
+  position: absolute;
+  top: 3px;
+  right: 0;
+  left: 0;
+  height: 1px;
+  background: var(--block-separator);
 }
 
 /* Hides the idle shell prompt under the last block in editor mode. */
