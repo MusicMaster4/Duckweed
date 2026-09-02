@@ -1,8 +1,10 @@
 /**
  * Browser events that prove somebody is using the desktop app.
  *
- * Pointer movement is intentionally included. Merely moving the cursor over
- * Duckweed is enough to suppress an unattended selected-terminal alert.
+ * Pointer movement is intentionally included while Duckweed is the active
+ * window. Merely moving across an inactive WebView is not reliable evidence
+ * that the completion was seen: WebView2 can deliver hover events without
+ * activating the native window.
  */
 export const DESKTOP_ACTIVITY_EVENTS = [
   "focus",
@@ -19,17 +21,20 @@ export const DESKTOP_ACTIVITY_EVENTS = [
 ] as const;
 
 /**
- * Observe local input delivered to the app.
+ * Observe meaningful local input while the app window has focus.
  *
- * Do not gate this with `document.hasFocus()`. A visible but inactive native
- * window can receive hover movement before the operating system gives it
- * focus, and that movement is still proof that the computer is attended.
+ * The focus event itself always counts. Other events are ignored while the
+ * native window is inactive so background hover traffic cannot suppress every
+ * delayed mobile notification.
  */
 export function observeDesktopActivity(
   target: EventTarget,
+  hasFocus: () => boolean,
   onActivity: () => void,
 ): () => void {
-  const recordActivity: EventListener = () => onActivity();
+  const recordActivity: EventListener = (event) => {
+    if (event.type === "focus" || hasFocus()) onActivity();
+  };
   const options: AddEventListenerOptions = { capture: true, passive: true };
 
   for (const event of DESKTOP_ACTIVITY_EVENTS) {

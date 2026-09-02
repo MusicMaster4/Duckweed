@@ -16,7 +16,7 @@ export interface DelayedMobileCompletionState {
   unreadAtCompletion: boolean;
   /** Whether that mark still exists when the grace period ends. */
   unreadNow: boolean;
-  /** Last interaction anywhere in the desktop app, including hover movement. */
+  /** Last deliberate interaction in the focused desktop app. */
   lastInteractionAt: number | null;
   /** Time when this completion was observed by the desktop. */
   completedAt: number;
@@ -27,19 +27,17 @@ export function mobileCompletionDelay(unreadAtCompletion: boolean): number {
 }
 
 /**
- * A mobile alert is useful only if the desktop stayed completely unattended
- * for the whole grace period. Background completions must also keep their
- * unread mark; selected terminals have no mark, so inactivity alone decides.
+ * Background completions notify while their unread mark survives the grace
+ * period. Activity in another pane must not dismiss that mark or its phone
+ * alert. A completion in the selected terminal has no desktop unread mark, so
+ * focused desktop activity after completion is the acknowledgement signal.
  */
 export function shouldSendDelayedMobileCompletion(
   state: DelayedMobileCompletionState,
 ): boolean {
-  if (
-    state.lastInteractionAt !== null &&
-    state.lastInteractionAt >= state.completedAt
-  ) return false;
   if (state.unreadAtCompletion) return state.unreadNow;
-  return true;
+  if (state.lastInteractionAt === null) return true;
+  return state.lastInteractionAt < state.completedAt;
 }
 
 /** Select the final settled prose from the newest user turn for mobile history. */

@@ -642,7 +642,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    return observeDesktopActivity(window, () => {
+    return observeDesktopActivity(window, () => document.hasFocus(), () => {
       lastDesktopInteractionAt.current = Date.now();
       setMobileAlertTermIds((previous) => {
         if (previous.size === 0) return previous;
