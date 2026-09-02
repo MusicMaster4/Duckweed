@@ -84,7 +84,13 @@ export interface AgentAdapter {
    * normal message, which is how agents that interpret slash text themselves
    * (Claude, ACP) receive their commands.
    */
-  command?: (text: string, ctx: AdapterContext) => AgentCommandResult;
+  command?: (
+    text: string,
+    ctx: AdapterContext,
+    images?: AgentImageAttachment[],
+  ) => AgentCommandResult;
+  /** Whether this slash command can consume attached images instead of becoming a normal prompt. */
+  commandSupportsImages?: (text: string) => boolean;
   /**
    * Apply model or reasoning configuration and resolve only after the provider
    * has accepted it. Sessions use this before dispatching the next message so

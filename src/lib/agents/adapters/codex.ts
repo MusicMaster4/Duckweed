@@ -1202,12 +1202,13 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     command: "/side" | "/btw",
     question: string,
     ctx: AdapterContext,
+    images: AgentImageAttachment[] = [],
   ): void {
-    if (!question) {
+    if (!question && images.length === 0) {
       ctx.emit({
         type: "notice",
         tone: "error",
-        text: `Usage: ${command} <your question>`,
+        text: `Usage: ${command} <your question or attached image>`,
       });
       return;
     }
@@ -1237,6 +1238,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         id: `codex-side-${sideSequence}`,
         command,
         question,
+        images: [...images],
         answer: "",
         status: "asking",
       },
@@ -1262,7 +1264,13 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         sideThreads.set(sideThreadId, side);
         const started = await request(ctx, "turn/start", {
           threadId: sideThreadId,
-          input: [{ type: "text", text: question }],
+          input: [
+            ...(question ? [{ type: "text", text: question }] : []),
+            ...images.map((image) => ({
+              type: "image",
+              url: imagePayloadDataUrl(image),
+            })),
+          ],
           approvalPolicy: "never",
           sandboxPolicy: { type: "readOnly" },
           ...(currentModel ? { model: currentModel } : {}),
@@ -2661,12 +2669,16 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       });
   }
 
-  function handleCommand(text: string, ctx: AdapterContext): AgentCommandResult {
+  function handleCommand(
+    text: string,
+    ctx: AdapterContext,
+    images: AgentImageAttachment[] = [],
+  ): AgentCommandResult {
     const space = text.search(/\s/);
     const name = (space < 0 ? text : text.slice(0, space)).toLowerCase();
     const arg = space < 0 ? "" : text.slice(space + 1).trim();
     if (name === "/side" || name === "/btw") {
-      startSideQuestion(name, arg, ctx);
+      startSideQuestion(name, arg, ctx, images);
       return "handled";
     }
     ctx.emit({ type: "user", text });
@@ -3041,6 +3053,8 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     },
 
     command: handleCommand,
+
+    commandSupportsImages: (text) => /^\/(?:side|btw)(?:\s|$)/i.test(text.trim()),
 
     commandAvailableDuringTurn: (text) => {
       const trimmed = text.trim();

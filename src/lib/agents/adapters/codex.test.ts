@@ -1736,6 +1736,34 @@ describe("codex adapter", () => {
     );
   });
 
+  test("sends attached images to the ephemeral /side turn", async () => {
+    const h = harness();
+    await h.handshake();
+
+    expect(h.adapter.commandSupportsImages?.("/side inspect this")).toBe(true);
+    expect(h.adapter.command?.("/side inspect this", h.ctx, [image])).toBe("handled");
+    expect(h.state().sideQuestion).toMatchObject({
+      question: "inspect this",
+      images: [image],
+      status: "asking",
+    });
+
+    h.feed({ jsonrpc: "2.0", id: 4, result: { thread: { id: "side_image" } } });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(h.sent.at(-1)).toMatchObject({
+      method: "turn/start",
+      params: {
+        threadId: "side_image",
+        input: [
+          { type: "text", text: "inspect this" },
+          { type: "image", url: image.dataUrl },
+        ],
+      },
+    });
+  });
+
   test("publishes a hydrated child transcript atomically", async () => {
     const h = harness();
     await h.handshake();

@@ -554,9 +554,11 @@ function dispatchNow(session: Session, prompt: AgentPrompt, echoUser = true): vo
     });
     return;
   }
-  if (prompt.images.length === 0 && prompt.text.startsWith("/")) {
+  const imageCommand =
+    prompt.images.length > 0 && session.adapter.commandSupportsImages?.(prompt.text) === true;
+  if ((prompt.images.length === 0 || imageCommand) && prompt.text.startsWith("/")) {
     const previousModel = session.state.model;
-    const result = session.adapter.command?.(prompt.text, context);
+    const result = session.adapter.command?.(prompt.text, context, prompt.images);
     if (result === "handled" || result === "handled-turn") {
       if (result === "handled-turn") claimHandledTurn(session);
       // Codex may report temporary or provider-selected models in ordinary
@@ -1239,12 +1241,12 @@ export function submit(
     return;
   }
   if (
-    images.length === 0 &&
+    (images.length === 0 || session.adapter.commandSupportsImages?.(trimmed) === true) &&
     session.state.status !== "idle" &&
     session.state.status !== "starting" &&
     session.adapter.commandAvailableDuringTurn?.(trimmed)
   ) {
-    const result = session.adapter.command?.(trimmed, session.context);
+    const result = session.adapter.command?.(trimmed, session.context, images);
     if (result === "handled-turn") claimHandledTurn(session);
     if (result === "handled" || result === "handled-turn") {
       // Control-plane commands such as `/goal pause` must take effect while the

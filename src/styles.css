@@ -9724,6 +9724,14 @@ body.is-resizing * {
   user-select: text;
 }
 
+.agent-side-question-body > .agent-image-strip {
+  margin-top: 7px;
+}
+
+.agent-side-question-body > .agent-image-strip:first-child {
+  margin-top: 0;
+}
+
 .agent-side-question-answer {
   margin-top: 8px;
   color: var(--text);

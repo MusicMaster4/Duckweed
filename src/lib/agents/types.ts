@@ -254,6 +254,8 @@ export interface AgentSideQuestion {
   /** Slash spelling the user invoked. */
   command: "/btw" | "/side";
   question: string;
+  /** Images supplied specifically to this side conversation. */
+  images?: AgentImageAttachment[];
   /** Empty until the first response text arrives. */
   answer: string;
   status: "asking" | "answered" | "error";
