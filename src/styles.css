@@ -12215,3 +12215,85 @@ body.is-dragging-rail * {
     opacity: 0.45;
   }
 }
+/* Last-resort surface for startup and render failures. */
+.app-recovery {
+  width: 100%;
+  height: 100%;
+  display: grid;
+  place-items: center;
+  padding: 32px;
+  color: #e6ebe7;
+  background: #0f120f;
+}
+
+.app-recovery-card {
+  width: min(520px, 100%);
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 18px 16px;
+  padding: 24px;
+  border: 1px solid #2d352f;
+  border-radius: 12px;
+  background: #171c18;
+}
+
+.app-recovery-mark {
+  width: 38px;
+  height: 38px;
+  display: grid;
+  place-items: center;
+  border-radius: 9px;
+  color: #b8ddb9;
+  background: #263128;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.app-recovery h1 {
+  margin: 0 0 6px;
+  font-size: 18px;
+  line-height: 1.25;
+}
+
+.app-recovery p {
+  margin: 0;
+  color: #aeb8b0;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.app-recovery pre {
+  grid-column: 1 / -1;
+  max-height: 120px;
+  margin: 0;
+  padding: 12px;
+  overflow: auto;
+  border-radius: 7px;
+  color: #c5cec7;
+  background: #101411;
+  font: 11px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.app-recovery button {
+  grid-column: 2;
+  justify-self: end;
+  min-height: 34px;
+  padding: 0 14px;
+  border: 1px solid #789b7b;
+  border-radius: 7px;
+  color: #f2f6f2;
+  background: #3f6844;
+  font: inherit;
+  cursor: pointer;
+}
+
+.app-recovery button:hover {
+  background: #4b7851;
+}
+
+.app-recovery button:focus-visible {
+  outline: 2px solid #a7caaa;
+  outline-offset: 2px;
+}

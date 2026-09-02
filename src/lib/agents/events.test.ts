@@ -144,6 +144,37 @@ describe("tool subagent metadata", () => {
   });
 });
 
+describe("renderer memory bounds", () => {
+  test("keeps only the newest live transcript rows", () => {
+    let state = blank();
+    for (let index = 0; index < 450; index += 1) {
+      state = applyEvent(state, {
+        type: "notice",
+        tone: "info",
+        text: `row ${index}`,
+      });
+    }
+
+    expect(state.items).toHaveLength(400);
+    expect(state.items[0]).toMatchObject({ kind: "notice", text: "row 50" });
+    expect(state.items.at(-1)).toMatchObject({ kind: "notice", text: "row 449" });
+  });
+
+  test("caps a single streamed response", () => {
+    const state = applyEvent(blank(), {
+      type: "assistant-delta",
+      id: "large-answer",
+      text: "x".repeat(200_000),
+    });
+    const answer = state.items[0];
+    expect(answer?.kind).toBe("assistant");
+    if (answer?.kind === "assistant") {
+      expect(answer.text.length).toBe(160_001);
+      expect(answer.text.startsWith("…")).toBe(true);
+    }
+  });
+});
+
 describe("plans", () => {
   test("starts a fresh live checklist when a later user turn updates the plan", () => {
     let state = applyEvent(blank(), { type: "user", text: "First turn" });

@@ -879,6 +879,58 @@ fn disable_browser_accelerator_keys(window: &tauri::WebviewWindow) -> tauri::Res
     })
 }
 
+/// Reload the document after WebView2 loses its renderer process.
+///
+/// Without this handler WebView2 can leave the native window alive with a
+/// black surface or its generic localhost-style refresh page. A document
+/// reload keeps the Tauri process and its PTYs alive while React rebuilds.
+#[cfg(windows)]
+fn recover_failed_webview_renderer(window: &tauri::WebviewWindow) -> tauri::Result<()> {
+    let app = window.app_handle().clone();
+    window.with_webview(|webview| {
+        use webview2_com::{
+            Microsoft::Web::WebView2::Win32::{
+                COREWEBVIEW2_PROCESS_FAILED_KIND,
+                COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED,
+                COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_UNRESPONSIVE,
+                ICoreWebView2ProcessFailedEventArgs,
+            },
+            ProcessFailedEventHandler,
+        };
+
+        unsafe {
+            let Ok(core) = webview.controller().CoreWebView2() else { return };
+            let handler = ProcessFailedEventHandler::create(Box::new(
+                move |sender, args: Option<ICoreWebView2ProcessFailedEventArgs>| {
+                    if let (Some(sender), Some(args)) = (sender, args) {
+                        let mut kind = COREWEBVIEW2_PROCESS_FAILED_KIND(0);
+                        if args.ProcessFailedKind(&mut kind).is_ok()
+                            && (kind == COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED
+                                || kind
+                                    == COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_UNRESPONSIVE)
+                        {
+                            // The old JS channel is gone and cannot own these
+                            // headless processes after the document rebuilds.
+                            if let Some(manager) = app.try_state::<AgentProcManager>() {
+                                manager.stop_all();
+                            }
+                            let _ = sender.Reload();
+                        }
+                    }
+                    Ok(())
+                },
+            ));
+            let mut token = 0;
+            let _ = core.add_ProcessFailed(&handler, &mut token);
+        }
+    })
+}
+
+#[cfg(not(windows))]
+fn recover_failed_webview_renderer(_window: &tauri::WebviewWindow) -> tauri::Result<()> {
+    Ok(())
+}
+
 #[cfg(not(windows))]
 fn disable_browser_accelerator_keys(_window: &tauri::WebviewWindow) -> tauri::Result<()> {
     Ok(())
@@ -974,6 +1026,7 @@ fn main() {
                     window.set_icon(icon)?;
                 }
                 let _ = disable_browser_accelerator_keys(&window);
+                let _ = recover_failed_webview_renderer(&window);
             }
             pty::start_busy_monitor(app.handle().clone())?;
             agent_activity::start_monitor(app.handle().clone())?;

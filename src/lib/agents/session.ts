@@ -99,6 +99,9 @@ interface Session {
   pendingResume: { id: string; title: string } | null;
   /** Coalesces streamed deltas into one notification per frame. */
   notifyHandle: number | null;
+  /** Coalesces reducer work too, so a fast stream cannot outrun WebView2's GC. */
+  streamFlushHandle: number | null;
+  streamEvents: Map<string, AgentEvent>;
   /**
    * The user interrupted the turn in flight. The idle that follows is them
    * stopping the agent, not the agent finishing, so it must not be announced.
@@ -351,6 +354,48 @@ function notifyNow(session: Session): void {
     session.notifyHandle = null;
   }
   announce(session.termId);
+}
+
+function streamEventKey(event: AgentEvent): string | null {
+  if (event.type === "assistant-delta" || event.type === "thinking-delta") {
+    return `${event.type}:${event.id}`;
+  }
+  if (
+    event.type === "tool" &&
+    event.outputDelta !== undefined &&
+    event.output === undefined &&
+    event.changes === undefined &&
+    event.subagent === undefined &&
+    event.subagentItem === undefined
+  ) {
+    return `tool-output:${event.callId}`;
+  }
+  return null;
+}
+
+function mergeStreamEvent(previous: AgentEvent | undefined, event: AgentEvent): AgentEvent {
+  if (!previous || previous.type !== event.type) return event;
+  if (
+    (event.type === "assistant-delta" || event.type === "thinking-delta") &&
+    (previous.type === "assistant-delta" || previous.type === "thinking-delta")
+  ) {
+    return { ...event, text: previous.text + event.text };
+  }
+  if (event.type === "tool" && previous.type === "tool") {
+    return { ...event, outputDelta: (previous.outputDelta ?? "") + (event.outputDelta ?? "") };
+  }
+  return event;
+}
+
+function flushStreamEvents(session: Session): void {
+  if (session.streamFlushHandle !== null) {
+    runtimeWindow.clearTimeout(session.streamFlushHandle);
+    session.streamFlushHandle = null;
+  }
+  if (session.streamEvents.size === 0) return;
+  const events = [...session.streamEvents.values()];
+  session.streamEvents.clear();
+  for (const event of events) emitNow(session, event);
 }
 
 function createAdapter(agent: AgentId): AgentAdapter {
@@ -643,6 +688,27 @@ function dispatch(session: Session, prompt: AgentPrompt, echoUser = true): void 
 }
 
 function emit(session: Session, event: AgentEvent): void {
+  const streamKey = streamEventKey(event);
+  if (TAURI_RUNTIME && streamKey) {
+    session.streamEvents.set(
+      streamKey,
+      mergeStreamEvent(session.streamEvents.get(streamKey), event),
+    );
+    if (session.streamFlushHandle === null) {
+      // Timers continue while the window is minimized; animation frames do
+      // not. This keeps background agents bounded as well as smooth onscreen.
+      session.streamFlushHandle = runtimeWindow.setTimeout(() => {
+        flushStreamEvents(session);
+        notifyNow(session);
+      }, 16);
+    }
+    return;
+  }
+  flushStreamEvents(session);
+  emitNow(session, event);
+}
+
+function emitNow(session: Session, event: AgentEvent): void {
   if (session.disposed) return;
   if (
     event.type === "side-question" &&
@@ -910,6 +976,8 @@ export async function start(
     promptHistory: [],
     pendingResume: startupResume,
     notifyHandle: null,
+    streamFlushHandle: null,
+    streamEvents: new Map(),
     interrupted: false,
     userInitiatedTurn: false,
     deferredTurnEnd: null,

@@ -239,6 +239,8 @@ interface ChildThread {
   prompt: string | null;
   activity: string | null;
   currentTurnId: string | null;
+  /** A streamed/collaboration status outranks the eventually-consistent thread/read snapshot. */
+  hasLiveStatus: boolean;
   streamed: Set<string>;
   state: AgentSessionState;
 }
@@ -384,6 +386,8 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
   const hydratingChildren = new Map<string, Promise<boolean>>();
   /** Queue one explicit refresh when focus arrives during an automatic read. */
   const queuedChildRefreshes = new Map<string, Promise<boolean>>();
+  /** One pending parent publish per streaming child. */
+  const childSyncFrames = new Map<string, number>();
   let childDiscoveryInFlight: Promise<void> | null = null;
   let childDiscoveryRequested = false;
   let childDiscoveryShouldSynthesize = false;
@@ -492,6 +496,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       prompt: null,
       activity: null,
       currentTurnId: null,
+      hasLiveStatus: false,
       streamed: new Set<string>(),
       state: newChildState(childThreadId),
     };
@@ -529,6 +534,11 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
   }
 
   function syncChild(childThreadId: string, ctx: AdapterContext): void {
+    const pendingFrame = childSyncFrames.get(childThreadId);
+    if (pendingFrame !== undefined && typeof cancelAnimationFrame === "function") {
+      cancelAnimationFrame(pendingFrame);
+      childSyncFrames.delete(childThreadId);
+    }
     const child = children.get(childThreadId);
     if (!child?.callId) return;
     const status = childToolStatus(child.state.status);
@@ -558,14 +568,36 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     });
   }
 
+  /** Publish only the newest child snapshot once per paint while text streams. */
+  function scheduleChildSync(childThreadId: string, ctx: AdapterContext): void {
+    if (typeof requestAnimationFrame !== "function") {
+      syncChild(childThreadId, ctx);
+      return;
+    }
+    if (childSyncFrames.has(childThreadId)) return;
+    const frame = requestAnimationFrame(() => {
+      childSyncFrames.delete(childThreadId);
+      syncChild(childThreadId, ctx);
+    });
+    childSyncFrames.set(childThreadId, frame);
+  }
+
   function emitChild(
     childThreadId: string,
     event: AgentEvent,
     ctx: AdapterContext,
   ): void {
     const child = childFor(childThreadId);
+    if (event.type === "status" || event.type === "turn-end") {
+      child.hasLiveStatus = true;
+    }
     child.state = applyEvent(child.state, event);
-    syncChild(childThreadId, ctx);
+    const streaming =
+      event.type === "assistant-delta" ||
+      event.type === "thinking-delta" ||
+      (event.type === "tool" && event.outputDelta !== undefined);
+    if (streaming) scheduleChildSync(childThreadId, ctx);
+    else syncChild(childThreadId, ctx);
   }
 
   function childContext(childThreadId: string, ctx: AdapterContext): AdapterContext {
@@ -642,15 +674,29 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         child.role = asString(thread.agentRole) ?? asString(thread.role) ?? child.role;
         child.model = asString(thread.model) ?? child.model;
         const status = threadStatus(thread.status) ?? "idle";
-        if (status === "working") {
+        if (
+          status === "working" &&
+          (!child.hasLiveStatus || child.state.status === "working")
+        ) {
           // The parent collaboration item independently reported this child as
           // running, so its coarse thread status is corroborated here.
           child.currentTurnId ??= hydratedTurnId(thread, true);
-        } else {
+        } else if (!child.hasLiveStatus) {
           child.currentTurnId = null;
         }
 
-        const nested = childContext(childThreadId, ctx);
+        // Replaying a persisted child used to publish the entire growing child
+        // transcript once per item. A busy delegated run could therefore make
+        // hundreds of parent renders and retain gigabytes of intermediate
+        // arrays before WebView2's collector caught up. Fold the snapshot
+        // locally, then publish it exactly once.
+        let hydratedState = child.state;
+        const nested: AdapterContext = {
+          ...ctx,
+          emit: (event) => {
+            hydratedState = applyEvent(hydratedState, event);
+          },
+        };
         for (const rawTurn of asArray(thread.turns)) {
           const turn = asRecord(rawTurn);
           if (!turn) continue;
@@ -661,14 +707,13 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
             handleItem(item, true, nested, child.streamed);
           }
         }
-        emitChild(
-          childThreadId,
-          {
-            type: "status",
-            status,
-          },
-          ctx,
-        );
+        // Live status events can overtake thread/read. Never flash a completed
+        // child back to working because an older snapshot arrived late.
+        if (!child.hasLiveStatus) {
+          hydratedState = applyEvent(hydratedState, { type: "status", status });
+        }
+        child.state = hydratedState;
+        syncChild(childThreadId, ctx);
         hydratedChildren.add(childThreadId);
         return true;
       })
@@ -715,6 +760,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     rawThread: Record<string, unknown>,
     ctx: AdapterContext,
     synthesizeMissing: boolean,
+    liveStatus = false,
   ): string | null {
     const childThreadId = asString(rawThread.id);
     if (!childThreadId || childThreadId === threadId) return null;
@@ -731,7 +777,8 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     child.prompt = preview ?? child.prompt;
 
     const status = threadStatus(rawThread.status);
-    if (status) {
+    if (status && (liveStatus || !child.hasLiveStatus)) {
+      if (liveStatus) child.hasLiveStatus = true;
       child.state = applyEvent(child.state, { type: "status", status });
     }
 
@@ -1555,6 +1602,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
             child.prompt = prompt ?? child.prompt;
             child.activity = activity ? oneLine(activity, 120) : child.activity;
             if (childStatus && childStatus !== "pending") {
+              child.hasLiveStatus = true;
               child.state = applyEvent(child.state, {
                 type: "status",
                 status:
@@ -1615,6 +1663,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
           );
           const child = childFor(agentThreadId);
           child.activity = kind.replace(/([a-z])([A-Z])/g, "$1 $2");
+          child.hasLiveStatus = true;
           child.state = applyEvent(child.state, {
             type: "status",
             status: kind === "interrupted" ? "error" : kind === "started" ? "working" : "idle",
@@ -2020,7 +2069,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     switch (method) {
       case "thread/started": {
         const thread = asRecord(params.thread);
-        if (thread) adoptChildThread(thread, ctx, false);
+        if (thread) adoptChildThread(thread, ctx, false, true);
         return;
       }
       case "turn/started": {

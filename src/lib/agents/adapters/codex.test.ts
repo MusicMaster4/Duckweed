@@ -1736,6 +1736,92 @@ describe("codex adapter", () => {
     );
   });
 
+  test("publishes a hydrated child transcript atomically", async () => {
+    const h = harness();
+    await h.handshake();
+    h.notify("item/started", {
+      threadId: "thread_1",
+      item: {
+        id: "sub-batched",
+        type: "collabAgentToolCall",
+        tool: "spawnAgent",
+        status: "inProgress",
+        receiverThreadIds: ["thread_child_batched"],
+        prompt: "Inspect several files",
+        agentsStates: { thread_child_batched: { status: "running" } },
+      },
+    });
+
+    const read = h.sent.findLast((message) => message.method === "thread/read") as {
+      id: number;
+    };
+    const before = h.events.length;
+    h.feed({
+      jsonrpc: "2.0",
+      id: read.id,
+      result: {
+        thread: {
+          id: "thread_child_batched",
+          status: { type: "active" },
+          turns: [
+            {
+              id: "child-turn",
+              items: [
+                { id: "thought", type: "reasoning", summary: ["Checking files"] },
+                { id: "cmd", type: "commandExecution", command: "rg --files", status: "completed" },
+                { id: "answer", type: "agentMessage", text: "Inspection complete." },
+              ],
+            },
+          ],
+        },
+      },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(h.events.length - before).toBe(1);
+    expect(h.state().items[0]?.subagent?.items.length).toBe(3);
+  });
+
+  test("does not regress a completed child to a stale active snapshot", async () => {
+    const h = harness();
+    await h.handshake();
+    h.notify("item/completed", {
+      threadId: "thread_1",
+      item: {
+        id: "sub-stale-status",
+        type: "collabAgentToolCall",
+        tool: "spawnAgent",
+        status: "completed",
+        receiverThreadIds: ["thread_child_stale"],
+        prompt: "Inspect status ordering",
+        agentsStates: { thread_child_stale: { status: "completed" } },
+      },
+    });
+
+    const read = h.sent.findLast((message) => message.method === "thread/read") as {
+      id: number;
+    };
+    h.feed({
+      jsonrpc: "2.0",
+      id: read.id,
+      result: {
+        thread: {
+          id: "thread_child_stale",
+          status: { type: "active" },
+          turns: [],
+        },
+      },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(h.state().items[0]).toMatchObject({
+      status: "done",
+      subagent: { activity: "Delegated work completed" },
+    });
+  });
+
   test("replaces a subagent path with its nickname without requiring inspection", async () => {
     const h = harness();
     await h.handshake();
