@@ -6,12 +6,13 @@ describe("desktop activity observation", () => {
   test("counts cursor movement and every other supported input while focused", () => {
     const target = new EventTarget();
     const seen: string[] = [];
-    const stop = observeDesktopActivity(target, () => true, () => seen.push("activity"));
+    const stop = observeDesktopActivity(target, () => seen.push("activity"));
 
     for (const type of DESKTOP_ACTIVITY_EVENTS) target.dispatchEvent(new Event(type));
 
     expect(seen).toHaveLength(DESKTOP_ACTIVITY_EVENTS.length);
     expect(DESKTOP_ACTIVITY_EVENTS).toContain("pointermove");
+    expect(DESKTOP_ACTIVITY_EVENTS).toContain("mousemove");
     expect(DESKTOP_ACTIVITY_EVENTS).toContain("keydown");
 
     stop();
@@ -19,16 +20,14 @@ describe("desktop activity observation", () => {
     expect(seen).toHaveLength(DESKTOP_ACTIVITY_EVENTS.length);
   });
 
-  test("ignores input while the desktop window is not focused", () => {
+  test("counts hover movement even before the native window gains focus", () => {
     const target = new EventTarget();
-    let focused = false;
     let activities = 0;
-    observeDesktopActivity(target, () => focused, () => { activities += 1; });
+    observeDesktopActivity(target, () => { activities += 1; });
 
     target.dispatchEvent(new Event("pointermove"));
-    focused = true;
-    target.dispatchEvent(new Event("pointermove"));
+    target.dispatchEvent(new Event("mousemove"));
 
-    expect(activities).toBe(1);
+    expect(activities).toBe(2);
   });
 });

@@ -87,6 +87,15 @@ describe("delayed mobile completion delivery", () => {
     })).toBe(false);
   });
 
+  test("does not notify for a background completion after any desktop activity", () => {
+    expect(shouldSendDelayedMobileCompletion({
+      unreadAtCompletion: true,
+      unreadNow: true,
+      lastInteractionAt: 60_001,
+      completedAt: 60_000,
+    })).toBe(false);
+  });
+
   test("uses thirty seconds for unread marks and one minute for selected terminals", () => {
     expect(mobileCompletionDelay(true)).toBe(30_000);
     expect(mobileCompletionDelay(false)).toBe(60_000);

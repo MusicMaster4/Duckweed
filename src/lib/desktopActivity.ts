@@ -10,19 +10,26 @@ export const DESKTOP_ACTIVITY_EVENTS = [
   "beforeinput",
   "pointerdown",
   "pointermove",
+  // WebView mouse events are kept as a fallback for environments where
+  // pointer events are not emitted while the native window is inactive.
+  "mousedown",
+  "mousemove",
   "touchmove",
   "wheel",
 ] as const;
 
-/** Observe all meaningful local input while the app window has focus. */
+/**
+ * Observe local input delivered to the app.
+ *
+ * Do not gate this with `document.hasFocus()`. A visible but inactive native
+ * window can receive hover movement before the operating system gives it
+ * focus, and that movement is still proof that the computer is attended.
+ */
 export function observeDesktopActivity(
   target: EventTarget,
-  hasFocus: () => boolean,
   onActivity: () => void,
 ): () => void {
-  const recordActivity: EventListener = () => {
-    if (hasFocus()) onActivity();
-  };
+  const recordActivity: EventListener = () => onActivity();
   const options: AddEventListenerOptions = { capture: true, passive: true };
 
   for (const event of DESKTOP_ACTIVITY_EVENTS) {

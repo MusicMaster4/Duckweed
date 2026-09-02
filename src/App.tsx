@@ -417,6 +417,10 @@ export default function App() {
       user left open has to be the one waiting when they switch back. */
   const [toolsSection, setToolsSection] = useState<ToolsSectionId>("files");
   const [unreadTermIds, setUnreadTermIds] = useState<Set<string>>(() => new Set());
+  // Selected panes do not get a desktop unread outline. Once their idle grace
+  // period really expires, keep the matching phone alert unread until local
+  // activity or a mobile read receipt acknowledges it.
+  const [mobileAlertTermIds, setMobileAlertTermIds] = useState<Set<string>>(() => new Set());
   const [completionFlashes, setCompletionFlashes] = useState<Map<string, CompletionFlash>>(
     () => new Map(),
   );
@@ -429,6 +433,8 @@ export default function App() {
   );
   const unreadTermIdsRef = useRef(unreadTermIds);
   unreadTermIdsRef.current = unreadTermIds;
+  const mobileAlertTermIdsRef = useRef(mobileAlertTermIds);
+  mobileAlertTermIdsRef.current = mobileAlertTermIds;
   const completionFlashesRef = useRef(completionFlashes);
   completionFlashesRef.current = completionFlashes;
   const [toolsWidth, setToolsWidth] = useState(
@@ -568,14 +574,26 @@ export default function App() {
     [rememberPaneFocus],
   );
 
+  const setMobileAlertUnread = useCallback((termId: string, unread: boolean) => {
+    setMobileAlertTermIds((previous) => {
+      if (previous.has(termId) === unread) return previous;
+      const next = new Set(previous);
+      if (unread) next.add(termId);
+      else next.delete(termId);
+      mobileAlertTermIdsRef.current = next;
+      return next;
+    });
+  }, []);
+
   const acknowledgeTerm = useCallback((termId: string) => {
+    setMobileAlertUnread(termId, false);
     setUnreadTermIds((prev) => {
       const next = acknowledgeCompletion(prev, termId);
       if (next === prev) return prev;
       unreadTermIdsRef.current = next;
       return next;
     });
-  }, []);
+  }, [setMobileAlertUnread]);
 
   const acknowledgeTermFromMobile = useCallback((termId: string, completionSeq: number | null) => {
     const meta = terminals.getMeta(termId);
@@ -583,7 +601,7 @@ export default function App() {
     // completion that arrived before the desktop drained the relay queue.
     if (!shouldAcknowledgeMobileCompletion(meta?.completionSeq ?? null, completionSeq)) return;
     const unread = unreadTermIdsRef.current;
-    if (!unread.has(termId)) return;
+    if (!unread.has(termId) && !mobileAlertTermIdsRef.current.has(termId)) return;
     const clearsLastBackgroundBadge = unread.size === 1 && completionFlashesRef.current.size === 0;
     acknowledgeTerm(termId);
     if (clearsLastBackgroundBadge) setCompletionTaskbarBadge(false);
@@ -624,8 +642,14 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    return observeDesktopActivity(window, () => document.hasFocus(), () => {
+    return observeDesktopActivity(window, () => {
       lastDesktopInteractionAt.current = Date.now();
+      setMobileAlertTermIds((previous) => {
+        if (previous.size === 0) return previous;
+        const next = new Set<string>();
+        mobileAlertTermIdsRef.current = next;
+        return next;
+      });
     });
   }, []);
 
@@ -979,7 +1003,9 @@ export default function App() {
               terminalOutput: !session
                 ? truncateUtf8Tail(terminals.dumpBufferPlainForMobile(node.term), 16_000)
                 : undefined,
-              unreadOnDesktop: unreadTermIdsRef.current.has(node.term),
+              unreadOnDesktop:
+                unreadTermIdsRef.current.has(node.term) ||
+                mobileAlertTermIdsRef.current.has(node.term),
               completionSeq: meta.completionSeq,
               commands: [...(session?.commands ?? [])]
                 .sort((left, right) => {
@@ -1135,7 +1161,7 @@ export default function App() {
       offTerminals.forEach((off) => off());
       offTerminalOutput.forEach((off) => off());
     };
-  }, [tabs, termIds, termIdsKey, unreadTermIds]);
+  }, [tabs, termIds, termIdsKey, unreadTermIds, mobileAlertTermIds]);
 
   // The relay cannot open an inbound connection through a user's router, so
   // the desktop checks the small encrypted command queue while Duckweed runs.
@@ -1380,8 +1406,15 @@ export default function App() {
             lastInteractionAt: lastDesktopInteractionAt.current,
             completedAt,
           })) return;
-          void mobileSendCompletion(message)
-            .catch((error) => console.error("mobile completion notification", error));
+          if (!unreadAtCompletion) setMobileAlertUnread(termId, true);
+          void mobileSendCompletion(message).then((result) => {
+            if (!unreadAtCompletion && result.sent === 0) {
+              setMobileAlertUnread(termId, false);
+            }
+          }).catch((error) => {
+            if (!unreadAtCompletion) setMobileAlertUnread(termId, false);
+            console.error("mobile completion notification", error);
+          });
         }, mobileCompletionDelay(unreadAtCompletion));
         mobileCompletionTimers.current.set(completionKey, timer);
       }
@@ -1418,6 +1451,7 @@ export default function App() {
     flashCompletion,
     isFocusedTerm,
     isSelectedTerm,
+    setMobileAlertUnread,
   ]);
 
   // ---------------------------------------------------------- power watch
