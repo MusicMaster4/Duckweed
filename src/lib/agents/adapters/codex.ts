@@ -74,6 +74,8 @@ const FAST_SERVICE_TIER = "priority";
 const DEFAULT_SERVICE_TIER = "default";
 /** Matches the native log monitor's guard for Codex auto-continuations. */
 const ROOT_COMPLETION_QUIET_MS = 800;
+/** Child transcripts are detail views, not a 60 fps animation surface. */
+const DEFAULT_CHILD_STREAM_PUBLISH_MS = 125;
 /**
  * Codex `thread/resume` has no server-side timeout. A thread left `active`
  * with no running turn never answers, which used to leave the pane loading
@@ -104,6 +106,8 @@ function pickSideAnswer(messages: Map<string, CodexSideMessage>): string {
 interface CodexAdapterOptions {
   /** Test seam; production uses the same 800 ms quiet window as raw Codex. */
   completionQuietMs?: number;
+  /** Test seam; production batches nested transcript paints to this cadence. */
+  childStreamPublishMs?: number;
   /**
    * How long `thread/resume` and history pages may sit unanswered before
    * Duckweed cancels them. Codex can hang forever on a stale-active thread;
@@ -280,6 +284,8 @@ function readFileChanges(raw: unknown): AgentFileChange[] {
 
 export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdapter {
   const completionQuietMs = options.completionQuietMs ?? ROOT_COMPLETION_QUIET_MS;
+  const childStreamPublishMs =
+    options.childStreamPublishMs ?? DEFAULT_CHILD_STREAM_PUBLISH_MS;
   const resumeTimeoutMs = options.resumeTimeoutMs ?? RESUME_RPC_TIMEOUT_MS;
   let nextId = 1;
   const pending = new Map<RequestKey, Pending>();
@@ -387,7 +393,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
   /** Queue one explicit refresh when focus arrives during an automatic read. */
   const queuedChildRefreshes = new Map<string, Promise<boolean>>();
   /** One pending parent publish per streaming child. */
-  const childSyncFrames = new Map<string, number>();
+  const childSyncTimers = new Map<string, ReturnType<typeof setTimeout>>();
   let childDiscoveryInFlight: Promise<void> | null = null;
   let childDiscoveryRequested = false;
   let childDiscoveryShouldSynthesize = false;
@@ -534,10 +540,10 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
   }
 
   function syncChild(childThreadId: string, ctx: AdapterContext): void {
-    const pendingFrame = childSyncFrames.get(childThreadId);
-    if (pendingFrame !== undefined && typeof cancelAnimationFrame === "function") {
-      cancelAnimationFrame(pendingFrame);
-      childSyncFrames.delete(childThreadId);
+    const pendingTimer = childSyncTimers.get(childThreadId);
+    if (pendingTimer !== undefined) {
+      clearTimeout(pendingTimer);
+      childSyncTimers.delete(childThreadId);
     }
     const child = children.get(childThreadId);
     if (!child?.callId) return;
@@ -568,18 +574,22 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     });
   }
 
-  /** Publish only the newest child snapshot once per paint while text streams. */
+  /**
+   * Publish a child at a readable cadence while it streams. Sending the full
+   * nested snapshot every animation frame made React repeatedly traverse the
+   * same conversation and could grow WebView2 to several gigabytes.
+   */
   function scheduleChildSync(childThreadId: string, ctx: AdapterContext): void {
-    if (typeof requestAnimationFrame !== "function") {
+    if (childStreamPublishMs <= 0) {
       syncChild(childThreadId, ctx);
       return;
     }
-    if (childSyncFrames.has(childThreadId)) return;
-    const frame = requestAnimationFrame(() => {
-      childSyncFrames.delete(childThreadId);
+    if (childSyncTimers.has(childThreadId)) return;
+    const timer = setTimeout(() => {
+      childSyncTimers.delete(childThreadId);
       syncChild(childThreadId, ctx);
-    });
-    childSyncFrames.set(childThreadId, frame);
+    }, childStreamPublishMs);
+    childSyncTimers.set(childThreadId, timer);
   }
 
   function emitChild(
@@ -646,11 +656,12 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     childThreadId: string,
     ctx: AdapterContext,
     force = false,
+    queueIfActive = false,
   ): Promise<boolean> {
     if (!force && hydratedChildren.has(childThreadId)) return Promise.resolve(true);
     const active = hydratingChildren.get(childThreadId);
     if (active) {
-      if (!force) return active;
+      if (!force || !queueIfActive) return active;
       const queued = queuedChildRefreshes.get(childThreadId);
       if (queued) return queued;
       const refresh = active
@@ -685,12 +696,12 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
           child.currentTurnId = null;
         }
 
-        // Replaying a persisted child used to publish the entire growing child
-        // transcript once per item. A busy delegated run could therefore make
-        // hundreds of parent renders and retain gigabytes of intermediate
-        // arrays before WebView2's collector caught up. Fold the snapshot
-        // locally, then publish it exactly once.
-        let hydratedState = child.state;
+        // A thread/read response is a replacement snapshot. Replaying it on
+        // top of the existing state appended every historical message again
+        // each time completion, status, or focus requested a refresh. Build a
+        // fresh state so repeated reads are idempotent, then publish once.
+        let hydratedState = newChildState(childThreadId);
+        const hydratedStreamed = new Set<string>();
         const nested: AdapterContext = {
           ...ctx,
           emit: (event) => {
@@ -704,15 +715,30 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
             const item = asRecord(rawItem);
             if (!item) continue;
             if (replayUserMessage(item, nested)) continue;
-            handleItem(item, true, nested, child.streamed);
+            handleItem(item, true, nested, hydratedStreamed);
+            const itemId = asString(item.id);
+            if (itemId && item.type === "agentMessage") {
+              hydratedStreamed.add(`am-${itemId}`);
+            } else if (itemId && item.type === "reasoning") {
+              hydratedStreamed.add(`rs-${itemId}`);
+            }
           }
         }
         // Live status events can overtake thread/read. Never flash a completed
         // child back to working because an older snapshot arrived late.
         if (!child.hasLiveStatus) {
           hydratedState = applyEvent(hydratedState, { type: "status", status });
+        } else {
+          hydratedState = {
+            ...hydratedState,
+            status: child.state.status,
+            error: child.state.error,
+            workStartedAt: child.state.workStartedAt,
+            lastWorkedForMs: child.state.lastWorkedForMs,
+          };
         }
         child.state = hydratedState;
+        child.streamed = hydratedStreamed;
         syncChild(childThreadId, ctx);
         hydratedChildren.add(childThreadId);
         return true;
@@ -1761,7 +1787,9 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     const images = content
       .map((entry, index) => replayImage(entry, itemId, index))
       .filter((image): image is AgentImageAttachment => image !== null);
-    if (text || images.length) ctx.emit({ type: "user", text, images });
+    if (text || images.length) {
+      ctx.emit({ type: "user", id: `history-user-${itemId}`, text, images });
+    }
     return true;
   }
 
@@ -2960,13 +2988,13 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         const child = childFor(childThreadId);
         child.callId ??= callId;
         syncChild(childThreadId, ctx);
-        return hydrateChild(childThreadId, ctx, true);
+        return hydrateChild(childThreadId, ctx, true, true);
       }
 
       await discoverChildThreads(ctx);
       const linked = [...children.entries()].find(([, child]) => child.callId === callId);
       if (!linked) return false;
-      return hydrateChild(linked[0], ctx, true);
+      return hydrateChild(linked[0], ctx, true, true);
     },
 
     promptSubagent: async (childThreadId, prompt, ctx) => {

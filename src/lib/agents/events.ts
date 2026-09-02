@@ -60,6 +60,8 @@ export type AgentEvent =
   /** The user's own message, echoed into the transcript. */
   | {
       type: "user";
+      /** Stable provider id for replayed history. Live prompts generate one locally. */
+      id?: string;
       text: string;
       images?: AgentImageAttachment[];
       /** This message steered the active turn instead of starting a new one. */
@@ -137,11 +139,11 @@ const MAX_TOOL_OUTPUT = 20_000;
 /** Cap a streamed block so one runaway response cannot grow without bound. */
 const MAX_TEXT = 160_000;
 
-/** Older rows remain on disk and can be resumed; the live WebView stays finite. */
-const MAX_SESSION_ITEMS = 400;
-const MAX_SESSION_TEXT = 2_000_000;
-const MAX_TOOL_CHANGES = 24;
-const MAX_CHANGE_TEXT = 160_000;
+/** Child detail is auxiliary UI and must never be able to evict the parent chat. */
+const MAX_CHILD_ITEMS = 160;
+const MAX_CHILD_TEXT = 1_000_000;
+const MAX_TOOL_CHANGES = 8;
+const MAX_CHANGE_TEXT = 40_000;
 
 function itemTextSize(item: AgentItem): number {
   if (item.kind === "user") {
@@ -176,12 +178,12 @@ function itemTextSize(item: AgentItem): number {
   );
 }
 
-function boundSessionItems(items: AgentItem[]): AgentItem[] {
+function boundChildItems(items: AgentItem[]): AgentItem[] {
   let start = items.length;
   let text = 0;
-  while (start > 0 && items.length - start < MAX_SESSION_ITEMS) {
+  while (start > 0 && items.length - start < MAX_CHILD_ITEMS) {
     const size = itemTextSize(items[start - 1]);
-    if (start < items.length && text + size > MAX_SESSION_TEXT) break;
+    if (start < items.length && text + size > MAX_CHILD_TEXT) break;
     text += size;
     start -= 1;
   }
@@ -376,7 +378,12 @@ function mergeSubagentMeta(
 export function applyEvent(state: AgentSessionState, event: AgentEvent): AgentSessionState {
   const next = reduceEvent(state, event);
   if (next === state) return next;
-  const items = boundSessionItems(next.items);
+  // Root messages are the conversation, not a cache. The previous global
+  // bound made a large delegated item remove every earlier user and assistant
+  // message from the screen. Only independently recoverable child detail is
+  // windowed here; the provider still owns its full transcript on disk.
+  if (!next.termId.startsWith("subagent:")) return next;
+  const items = boundChildItems(next.items);
   return items === next.items ? next : { ...next, items };
 }
 
@@ -452,7 +459,7 @@ function reduceEvent(state: AgentSessionState, event: AgentEvent): AgentSessionS
           ...state.items.filter((item) => item.kind !== "notice" || !item.transient),
           {
             kind: "user",
-            id: nextId(state),
+            id: event.id ?? nextId(state),
             at: Date.now(),
             text: event.text,
             images: event.images ? [...event.images] : [],

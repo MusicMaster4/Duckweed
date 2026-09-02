@@ -892,7 +892,6 @@ fn recover_failed_webview_renderer(window: &tauri::WebviewWindow) -> tauri::Resu
             Microsoft::Web::WebView2::Win32::{
                 COREWEBVIEW2_PROCESS_FAILED_KIND,
                 COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED,
-                COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_UNRESPONSIVE,
                 ICoreWebView2ProcessFailedEventArgs,
             },
             ProcessFailedEventHandler,
@@ -904,10 +903,13 @@ fn recover_failed_webview_renderer(window: &tauri::WebviewWindow) -> tauri::Resu
                 move |sender, args: Option<ICoreWebView2ProcessFailedEventArgs>| {
                     if let (Some(sender), Some(args)) = (sender, args) {
                         let mut kind = COREWEBVIEW2_PROCESS_FAILED_KIND(0);
+                        // An unresponsive notification can be a temporary GC
+                        // pause. Reloading at that point destroys the live JS
+                        // session and makes a recoverable pause look like a
+                        // conversation reset. Reload only after WebView2 says
+                        // the renderer actually exited.
                         if args.ProcessFailedKind(&mut kind).is_ok()
-                            && (kind == COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED
-                                || kind
-                                    == COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_UNRESPONSIVE)
+                            && kind == COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED
                         {
                             // The old JS channel is gone and cannot own these
                             // headless processes after the document rebuilds.

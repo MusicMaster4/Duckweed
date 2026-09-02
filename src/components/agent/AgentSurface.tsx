@@ -25,6 +25,7 @@ import type { AgentImageAttachment, AgentSessionState } from "../../lib/agents/t
 import {
   isAtScrollBottom,
   shouldShowJumpToBottom,
+  syncObservedChildren,
 } from "../../lib/agentScroll";
 import {
   COMPLETED_WORKFLOW_TTL_MS,
@@ -474,19 +475,20 @@ export function AgentSurface({
       syncScrollState();
     };
     const resizeObserver = new ResizeObserver(followResize);
-    const observeChildren = () => {
-      for (const child of Array.from(node.children)) {
-        resizeObserver.observe(child);
-      }
-    };
+    const observedChildren = new Set<Element>();
+    const syncResizeTargets = () =>
+      syncObservedChildren(resizeObserver, observedChildren, Array.from(node.children));
     const mutationObserver = new MutationObserver(() => {
-      observeChildren();
+      // Focus and multi-pane modes replace the whole transcript subtree.
+      // Unobserve removed roots immediately or ResizeObserver retains every
+      // detached conversation and its Markdown nodes until the pane closes.
+      syncResizeTargets();
       followResize();
     });
 
     node.addEventListener("scroll", syncScrollState, { passive: true });
     resizeObserver.observe(node);
-    observeChildren();
+    syncResizeTargets();
     mutationObserver.observe(node, { childList: true });
     syncScrollState();
     return () => {

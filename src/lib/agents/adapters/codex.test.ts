@@ -35,7 +35,7 @@ function harness(
 ) {
   const events: AgentEvent[] = [];
   const sent: Record<string, unknown>[] = [];
-  const adapter = createCodexAdapter(adapterOptions);
+  const adapter = createCodexAdapter({ childStreamPublishMs: 0, ...adapterOptions });
   const ctx: AdapterContext = {
     cwd: "H:/project",
     launch: { ...launch, ...overrides },
@@ -1781,6 +1781,70 @@ describe("codex adapter", () => {
 
     expect(h.events.length - before).toBe(1);
     expect(h.state().items[0]?.subagent?.items.length).toBe(3);
+  });
+
+  test("replaces repeated child snapshots instead of appending them again", async () => {
+    const h = harness();
+    await h.handshake();
+    h.notify("item/started", {
+      threadId: "thread_1",
+      item: {
+        id: "sub-idempotent",
+        type: "collabAgentToolCall",
+        tool: "spawnAgent",
+        status: "inProgress",
+        receiverThreadIds: ["thread_child_idempotent"],
+        prompt: "Inspect without duplication",
+        agentsStates: { thread_child_idempotent: { status: "running" } },
+      },
+    });
+
+    const snapshot = {
+      thread: {
+        id: "thread_child_idempotent",
+        status: { type: "active" },
+        turns: [
+          {
+            id: "child-turn",
+            items: [
+              {
+                id: "child-user",
+                type: "userMessage",
+                content: [{ type: "text", text: "Check the parser" }],
+              },
+              { id: "child-answer", type: "agentMessage", text: "Parser checked." },
+            ],
+          },
+        ],
+      },
+    };
+
+    const firstRead = h.sent.findLast((message) => message.method === "thread/read") as {
+      id: number;
+    };
+    h.feed({ jsonrpc: "2.0", id: firstRead.id, result: snapshot });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const refresh = h.adapter.inspectSubagent?.(
+      "sub-idempotent",
+      "thread_child_idempotent",
+      h.ctx,
+    );
+    for (let attempt = 0; attempt < 5; attempt += 1) await Promise.resolve();
+    const secondRead = h.sent.findLast((message) => message.method === "thread/read") as {
+      id: number;
+    };
+    h.feed({ jsonrpc: "2.0", id: secondRead.id, result: snapshot });
+    expect(await refresh).toBe(true);
+
+    const childItems = h.state().items[0]?.subagent?.items ?? [];
+    expect(childItems).toHaveLength(2);
+    expect(childItems.filter((item) => item.kind === "user")).toHaveLength(1);
+    expect(childItems.filter((item) => item.kind === "assistant")).toHaveLength(1);
+    expect(childItems.find((item) => item.kind === "assistant")).toMatchObject({
+      text: "Parser checked.",
+    });
   });
 
   test("does not regress a completed child to a stale active snapshot", async () => {

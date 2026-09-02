@@ -145,7 +145,7 @@ describe("tool subagent metadata", () => {
 });
 
 describe("renderer memory bounds", () => {
-  test("keeps only the newest live transcript rows", () => {
+  test("never removes parent conversation rows", () => {
     let state = blank();
     for (let index = 0; index < 450; index += 1) {
       state = applyEvent(state, {
@@ -155,9 +155,24 @@ describe("renderer memory bounds", () => {
       });
     }
 
-    expect(state.items).toHaveLength(400);
-    expect(state.items[0]).toMatchObject({ kind: "notice", text: "row 50" });
+    expect(state.items).toHaveLength(450);
+    expect(state.items[0]).toMatchObject({ kind: "notice", text: "row 0" });
     expect(state.items.at(-1)).toMatchObject({ kind: "notice", text: "row 449" });
+  });
+
+  test("bounds independently recoverable subagent detail", () => {
+    let state = { ...blank(), termId: "subagent:child-1" };
+    for (let index = 0; index < 200; index += 1) {
+      state = applyEvent(state, {
+        type: "notice",
+        tone: "info",
+        text: `child row ${index}`,
+      });
+    }
+
+    expect(state.items).toHaveLength(160);
+    expect(state.items[0]).toMatchObject({ kind: "notice", text: "child row 40" });
+    expect(state.items.at(-1)).toMatchObject({ kind: "notice", text: "child row 199" });
   });
 
   test("caps a single streamed response", () => {

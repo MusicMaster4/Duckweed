@@ -71,6 +71,8 @@ import {
 const runtimeWindow = globalThis.window;
 const TAURI_RUNTIME =
   typeof runtimeWindow !== "undefined" && "__TAURI_INTERNALS__" in runtimeWindow;
+/** Fast enough to look live without making Markdown and long timelines render at 60 fps. */
+const STREAM_FLUSH_INTERVAL_MS = 50;
 
 interface Session {
   termId: string;
@@ -700,7 +702,7 @@ function emit(session: Session, event: AgentEvent): void {
       session.streamFlushHandle = runtimeWindow.setTimeout(() => {
         flushStreamEvents(session);
         notifyNow(session);
-      }, 16);
+      }, STREAM_FLUSH_INTERVAL_MS);
     }
     return;
   }
