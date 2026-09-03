@@ -54,6 +54,90 @@ struct DurableSettings(Mutex<()>);
 struct FullscreenRestore(Mutex<bool>);
 
 const COMMAND_HISTORY_KEY: &str = "duckweed:command-history:v1";
+const CRASH_RECOVERY_LOG_MAX_BYTES: u64 = 512 * 1024;
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CrashRecoveryRecord {
+    timestamp: String,
+    app_version: String,
+    process_failed_kind: String,
+    process_failed_kind_code: i32,
+    reason: Option<String>,
+    reason_code: Option<i32>,
+    exit_code: Option<i32>,
+    exit_code_hex: Option<String>,
+    process_description: Option<String>,
+    active_agent_sessions: usize,
+    protocol_frames_forwarded: u64,
+    protocol_bytes_forwarded: u64,
+    recovery_action: String,
+}
+
+fn append_crash_recovery_record(
+    path: &Path,
+    record: &CrashRecoveryRecord,
+) -> Result<(), String> {
+    use std::io::Write;
+
+    let parent = path.parent().ok_or("crash log path has no parent")?;
+    std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    let line = serde_json::to_string(record).map_err(|error| error.to_string())?;
+
+    if std::fs::metadata(path)
+        .is_ok_and(|metadata| metadata.len() + line.len() as u64 + 1 > CRASH_RECOVERY_LOG_MAX_BYTES)
+    {
+        let previous = path.with_file_name("crash-recovery.previous.log");
+        if previous.exists() {
+            let _ = std::fs::remove_file(&previous);
+        }
+        if std::fs::rename(path, &previous).is_err() {
+            // Logging must never prevent recovery. If rotation is blocked by
+            // an external reader, truncate this one file and continue.
+            let _ = std::fs::OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(path);
+        }
+    }
+
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|error| error.to_string())?;
+    writeln!(file, "{line}").map_err(|error| error.to_string())?;
+    file.flush().map_err(|error| error.to_string())
+}
+
+fn webview_failed_kind_name(code: i32) -> &'static str {
+    match code {
+        0 => "browser_process_exited",
+        1 => "render_process_exited",
+        2 => "render_process_unresponsive",
+        3 => "frame_render_process_exited",
+        4 => "utility_process_exited",
+        5 => "sandbox_helper_process_exited",
+        6 => "gpu_process_exited",
+        7 => "ppapi_plugin_process_exited",
+        8 => "ppapi_broker_process_exited",
+        9 => "unknown_process_exited",
+        _ => "unknown",
+    }
+}
+
+fn webview_failed_reason_name(code: i32) -> &'static str {
+    match code {
+        0 => "unexpected",
+        1 => "unresponsive",
+        2 => "terminated",
+        3 => "crashed",
+        4 => "launch_failed",
+        5 => "out_of_memory",
+        6 => "profile_deleted",
+        _ => "unknown",
+    }
+}
 
 const DURABLE_SETTING_KEYS: [&str; 10] = [
     "duckweed:state:v1",
@@ -887,15 +971,22 @@ fn disable_browser_accelerator_keys(window: &tauri::WebviewWindow) -> tauri::Res
 #[cfg(windows)]
 fn recover_failed_webview_renderer(window: &tauri::WebviewWindow) -> tauri::Result<()> {
     let app = window.app_handle().clone();
+    let crash_log_path = app
+        .path()
+        .app_log_dir()
+        .ok()
+        .map(|directory| directory.join("crash-recovery.log"));
     window.with_webview(|webview| {
         use webview2_com::{
             Microsoft::Web::WebView2::Win32::{
                 COREWEBVIEW2_PROCESS_FAILED_KIND,
                 COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED,
-                ICoreWebView2ProcessFailedEventArgs,
+                COREWEBVIEW2_PROCESS_FAILED_REASON, ICoreWebView2ProcessFailedEventArgs,
+                ICoreWebView2ProcessFailedEventArgs2,
             },
             ProcessFailedEventHandler,
         };
+        use windows_core::Interface;
 
         unsafe {
             let Ok(core) = webview.controller().CoreWebView2() else { return };
@@ -903,14 +994,77 @@ fn recover_failed_webview_renderer(window: &tauri::WebviewWindow) -> tauri::Resu
                 move |sender, args: Option<ICoreWebView2ProcessFailedEventArgs>| {
                     if let (Some(sender), Some(args)) = (sender, args) {
                         let mut kind = COREWEBVIEW2_PROCESS_FAILED_KIND(0);
+                        if args.ProcessFailedKind(&mut kind).is_err() {
+                            kind = COREWEBVIEW2_PROCESS_FAILED_KIND(-1);
+                        }
+
+                        let mut reason_code = None;
+                        let mut exit_code = None;
+                        let mut process_description = None;
+                        if let Ok(details) = args.cast::<ICoreWebView2ProcessFailedEventArgs2>() {
+                            let mut reason = COREWEBVIEW2_PROCESS_FAILED_REASON(0);
+                            if details.Reason(&mut reason).is_ok() {
+                                reason_code = Some(reason.0);
+                            }
+                            let mut code = 0;
+                            if details.ExitCode(&mut code).is_ok() {
+                                exit_code = Some(code);
+                            }
+                            let mut description = windows_core::PWSTR(std::ptr::null_mut());
+                            if details.ProcessDescription(&mut description).is_ok()
+                                && !description.0.is_null()
+                            {
+                                process_description = description.to_string().ok();
+                                windows::Win32::System::Com::CoTaskMemFree(Some(
+                                    description.0.cast(),
+                                ));
+                            }
+                        }
+
+                        let renderer_exited =
+                            kind == COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED;
+                        let (active_agent_sessions, protocol_frames, protocol_bytes) = app
+                            .try_state::<AgentProcManager>()
+                            .map(|manager| {
+                                let (frames, bytes) = manager.traffic_totals();
+                                (manager.open_count(), frames, bytes)
+                            })
+                            .unwrap_or((0, 0, 0));
+                        if let Some(path) = crash_log_path.as_deref() {
+                            let record = CrashRecoveryRecord {
+                                timestamp: chrono::Utc::now().to_rfc3339(),
+                                app_version: app.package_info().version.to_string(),
+                                process_failed_kind: webview_failed_kind_name(kind.0).into(),
+                                process_failed_kind_code: kind.0,
+                                reason: reason_code
+                                    .map(webview_failed_reason_name)
+                                    .map(str::to_string),
+                                reason_code,
+                                exit_code,
+                                exit_code_hex: exit_code
+                                    .map(|code| format!("0x{:08X}", code as u32)),
+                                process_description,
+                                active_agent_sessions,
+                                protocol_frames_forwarded: protocol_frames,
+                                protocol_bytes_forwarded: protocol_bytes,
+                                recovery_action: if renderer_exited {
+                                    "reload_renderer"
+                                } else {
+                                    "record_only"
+                                }
+                                .into(),
+                            };
+                            if let Err(error) = append_crash_recovery_record(path, &record) {
+                                eprintln!("duckweed: could not write WebView2 crash log: {error}");
+                            }
+                        }
+
                         // An unresponsive notification can be a temporary GC
                         // pause. Reloading at that point destroys the live JS
                         // session and makes a recoverable pause look like a
                         // conversation reset. Reload only after WebView2 says
                         // the renderer actually exited.
-                        if args.ProcessFailedKind(&mut kind).is_ok()
-                            && kind == COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED
-                        {
+                        if renderer_exited {
                             // The old JS channel is gone and cannot own these
                             // headless processes after the document rebuilds.
                             if let Some(manager) = app.try_state::<AgentProcManager>() {
@@ -1135,6 +1289,41 @@ mod tests {
 
     fn commands(raw: &str) -> Vec<String> {
         parse_history(raw).into_iter().map(|e| e.command).collect()
+    }
+
+    #[test]
+    fn crash_recovery_log_is_jsonl_and_contains_the_diagnosis() {
+        let directory = std::env::temp_dir().join(format!(
+            "duckweed-crash-log-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&directory);
+        let path = directory.join("crash-recovery.log");
+        let record = CrashRecoveryRecord {
+            timestamp: "2026-09-03T21:14:12Z".into(),
+            app_version: "1.0.30".into(),
+            process_failed_kind: "render_process_exited".into(),
+            process_failed_kind_code: 1,
+            reason: Some("out_of_memory".into()),
+            reason_code: Some(5),
+            exit_code: Some(-1073740791),
+            exit_code_hex: Some("0xC0000409".into()),
+            process_description: Some("Renderer".into()),
+            active_agent_sessions: 2,
+            protocol_frames_forwarded: 12_345,
+            protocol_bytes_forwarded: 6_789_012,
+            recovery_action: "reload_renderer".into(),
+        };
+
+        append_crash_recovery_record(&path, &record).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(raw.trim()).unwrap();
+        assert_eq!(parsed["reason"], "out_of_memory");
+        assert_eq!(parsed["processFailedKind"], "render_process_exited");
+        assert_eq!(parsed["protocolFramesForwarded"], 12_345);
+        assert!(raw.ends_with('\n'));
+
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

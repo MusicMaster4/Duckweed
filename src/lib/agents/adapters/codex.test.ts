@@ -1482,6 +1482,72 @@ describe("codex adapter", () => {
     });
   });
 
+  test("reduces concurrent child token streams once per shared cadence", async () => {
+    let childReductions = 0;
+    const h = harness(
+      {},
+      {
+        completionQuietMs: 0,
+        childStreamPublishMs: 15,
+        childEventReducer: (state, event) => {
+          childReductions += 1;
+          return applyEvent(state, event);
+        },
+      },
+    );
+    await h.handshake();
+
+    const childIds = ["thread_child_a", "thread_child_b", "thread_child_c"];
+    childIds.forEach((childThreadId, index) => {
+      h.notify("item/started", {
+        threadId: "thread_1",
+        item: {
+          id: `sub-burst-${index}`,
+          type: "collabAgentToolCall",
+          tool: "spawnAgent",
+          status: "inProgress",
+          receiverThreadIds: [childThreadId],
+          prompt: `Inspect area ${index}`,
+          agentsStates: { [childThreadId]: { status: "running" } },
+        },
+      });
+      h.notify("turn/started", {
+        threadId: childThreadId,
+        turn: { id: `child-turn-${index}` },
+      });
+    });
+
+    childReductions = 0;
+    childIds.forEach((childThreadId, index) => {
+      for (let token = 0; token < 120; token += 1) {
+        h.notify("item/agentMessage/delta", {
+          threadId: childThreadId,
+          turnId: `child-turn-${index}`,
+          itemId: `child-answer-${index}`,
+          delta: String.fromCharCode(97 + index),
+        });
+      }
+    });
+
+    // The old path ran the reducer 360 times here, repeatedly copying three
+    // growing strings before its paint timer had a chance to help.
+    expect(childReductions).toBe(0);
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    expect(childReductions).toBe(childIds.length);
+
+    for (const [index, childThreadId] of childIds.entries()) {
+      const child = h
+        .state()
+        .items.find((item) => item.kind === "tool" && item.subagent?.threadId === childThreadId);
+      expect(child?.subagent?.items).toContainEqual(
+        expect.objectContaining({
+          kind: "assistant",
+          text: String.fromCharCode(97 + index).repeat(120),
+        }),
+      );
+    }
+  });
+
   test("links a spawn when the child thread id arrives in thread/started", async () => {
     const h = harness();
     await h.handshake();

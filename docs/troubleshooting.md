@@ -49,6 +49,23 @@ operating system, Duckweed version, and the command you ran in a bug report.
 Do not paste API keys, access tokens, or private repository contents into an
 issue. Redact terminal output before sharing it.
 
+## The interface reloads unexpectedly on Windows
+
+Duckweed automatically reloads the interface if the WebView2 renderer exits.
+The native app records every WebView2 process failure before recovery in:
+
+`%LOCALAPPDATA%\dev.slop.duckweed\logs\crash-recovery.log`
+
+Each line is a JSON record with the WebView2 failure kind, reason, exit code,
+Duckweed version, active agent-session count, protocol frame count, protocol
+byte count, and the recovery action. The log does not contain prompts, replies,
+terminal output, file contents, tokens, or credentials. It rotates at 512 KB;
+the preceding file is kept as `crash-recovery.previous.log`.
+
+Attach the relevant redacted line to a bug report. In particular,
+`"reason":"out_of_memory"` identifies a renderer memory failure rather than an
+agent process exiting on its own.
+
 ## The Git diff is empty
 
 Open the repository folder itself, not a parent folder that only contains the

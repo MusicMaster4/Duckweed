@@ -106,8 +106,10 @@ function pickSideAnswer(messages: Map<string, CodexSideMessage>): string {
 interface CodexAdapterOptions {
   /** Test seam; production uses the same 800 ms quiet window as raw Codex. */
   completionQuietMs?: number;
-  /** Test seam; production batches nested transcript paints to this cadence. */
+  /** Test seam; production batches nested transcript reduction and paints to this cadence. */
   childStreamPublishMs?: number;
+  /** Test seam for verifying that child token bursts are reduced in bounded batches. */
+  childEventReducer?: (state: AgentSessionState, event: AgentEvent) => AgentSessionState;
   /**
    * How long `thread/resume` and history pages may sit unanswered before
    * Duckweed cancels them. Codex can hang forever on a stale-active thread;
@@ -286,6 +288,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
   const completionQuietMs = options.completionQuietMs ?? ROOT_COMPLETION_QUIET_MS;
   const childStreamPublishMs =
     options.childStreamPublishMs ?? DEFAULT_CHILD_STREAM_PUBLISH_MS;
+  const reduceChildEvent = options.childEventReducer ?? applyEvent;
   const resumeTimeoutMs = options.resumeTimeoutMs ?? RESUME_RPC_TIMEOUT_MS;
   let nextId = 1;
   const pending = new Map<RequestKey, Pending>();
@@ -392,8 +395,15 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
   const hydratingChildren = new Map<string, Promise<boolean>>();
   /** Queue one explicit refresh when focus arrives during an automatic read. */
   const queuedChildRefreshes = new Map<string, Promise<boolean>>();
-  /** One pending parent publish per streaming child. */
-  const childSyncTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  /**
+   * Token deltas waiting to be reduced, grouped by child and logical stream.
+   * Reducing every token immediately repeatedly copied the growing string for
+   * every active child. With a busy Codex fleet that quadratic allocation was
+   * enough to exhaust WebView2's renderer before the paint throttle helped.
+   */
+  const pendingChildStreamEvents = new Map<string, Map<string, AgentEvent>>();
+  /** One shared timer keeps a fleet on one cadence instead of N staggered timers. */
+  let childStreamFlushTimer: ReturnType<typeof setTimeout> | null = null;
   let childDiscoveryInFlight: Promise<void> | null = null;
   let childDiscoveryRequested = false;
   let childDiscoveryShouldSynthesize = false;
@@ -539,12 +549,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     return "pending";
   }
 
-  function syncChild(childThreadId: string, ctx: AdapterContext): void {
-    const pendingTimer = childSyncTimers.get(childThreadId);
-    if (pendingTimer !== undefined) {
-      clearTimeout(pendingTimer);
-      childSyncTimers.delete(childThreadId);
-    }
+  function publishChild(childThreadId: string, ctx: AdapterContext): void {
     const child = children.get(childThreadId);
     if (!child?.callId) return;
     const status = childToolStatus(child.state.status);
@@ -574,22 +579,98 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     });
   }
 
+  function childStreamEventKey(event: AgentEvent): string | null {
+    if (event.type === "assistant-delta" || event.type === "thinking-delta") {
+      return `${event.type}:${event.id}`;
+    }
+    if (event.type === "tool" && event.outputDelta !== undefined) {
+      return `tool-output:${event.callId}`;
+    }
+    return null;
+  }
+
+  function mergeChildStreamEvent(
+    previous: AgentEvent | undefined,
+    event: AgentEvent,
+  ): AgentEvent {
+    if (!previous || previous.type !== event.type) return event;
+    if (
+      (event.type === "assistant-delta" || event.type === "thinking-delta") &&
+      (previous.type === "assistant-delta" || previous.type === "thinking-delta")
+    ) {
+      return { ...event, text: previous.text + event.text };
+    }
+    if (event.type === "tool" && previous.type === "tool") {
+      return {
+        ...event,
+        outputDelta: (previous.outputDelta ?? "") + (event.outputDelta ?? ""),
+      };
+    }
+    return event;
+  }
+
+  /** Apply one child's queued token burst without publishing intermediate states. */
+  function reducePendingChildStream(childThreadId: string): boolean {
+    const events = pendingChildStreamEvents.get(childThreadId);
+    if (!events) return false;
+    pendingChildStreamEvents.delete(childThreadId);
+    const child = childFor(childThreadId);
+    for (const event of events.values()) {
+      child.state = reduceChildEvent(child.state, event);
+    }
+    return true;
+  }
+
+  function cancelEmptyChildStreamTimer(): void {
+    if (pendingChildStreamEvents.size > 0 || childStreamFlushTimer === null) return;
+    clearTimeout(childStreamFlushTimer);
+    childStreamFlushTimer = null;
+  }
+
+  function flushChildStreams(ctx: AdapterContext): void {
+    if (childStreamFlushTimer !== null) {
+      clearTimeout(childStreamFlushTimer);
+      childStreamFlushTimer = null;
+    }
+    const childThreadIds = [...pendingChildStreamEvents.keys()];
+    for (const childThreadId of childThreadIds) {
+      if (reducePendingChildStream(childThreadId)) publishChild(childThreadId, ctx);
+    }
+  }
+
+  /** Flush pending deltas before snapshots or metadata publish the same child. */
+  function syncChild(childThreadId: string, ctx: AdapterContext): void {
+    reducePendingChildStream(childThreadId);
+    cancelEmptyChildStreamTimer();
+    publishChild(childThreadId, ctx);
+  }
+
   /**
-   * Publish a child at a readable cadence while it streams. Sending the full
-   * nested snapshot every animation frame made React repeatedly traverse the
-   * same conversation and could grow WebView2 to several gigabytes.
+   * Reduce and publish all streaming children at a readable shared cadence.
+   * Besides keeping React away from token frequency, this makes the number of
+   * timers and paint opportunities independent of the fleet size.
    */
-  function scheduleChildSync(childThreadId: string, ctx: AdapterContext): void {
+  function scheduleChildStream(
+    childThreadId: string,
+    key: string,
+    event: AgentEvent,
+    ctx: AdapterContext,
+  ): void {
+    let streams = pendingChildStreamEvents.get(childThreadId);
+    if (!streams) {
+      streams = new Map();
+      pendingChildStreamEvents.set(childThreadId, streams);
+    }
+    streams.set(key, mergeChildStreamEvent(streams.get(key), event));
     if (childStreamPublishMs <= 0) {
-      syncChild(childThreadId, ctx);
+      flushChildStreams(ctx);
       return;
     }
-    if (childSyncTimers.has(childThreadId)) return;
-    const timer = setTimeout(() => {
-      childSyncTimers.delete(childThreadId);
-      syncChild(childThreadId, ctx);
+    if (childStreamFlushTimer !== null) return;
+    childStreamFlushTimer = setTimeout(() => {
+      childStreamFlushTimer = null;
+      flushChildStreams(ctx);
     }, childStreamPublishMs);
-    childSyncTimers.set(childThreadId, timer);
   }
 
   function emitChild(
@@ -601,13 +682,17 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     if (event.type === "status" || event.type === "turn-end") {
       child.hasLiveStatus = true;
     }
-    child.state = applyEvent(child.state, event);
-    const streaming =
-      event.type === "assistant-delta" ||
-      event.type === "thinking-delta" ||
-      (event.type === "tool" && event.outputDelta !== undefined);
-    if (streaming) scheduleChildSync(childThreadId, ctx);
-    else syncChild(childThreadId, ctx);
+    const streamKey = childStreamEventKey(event);
+    if (streamKey) {
+      scheduleChildStream(childThreadId, streamKey, event, ctx);
+      return;
+    }
+    // Preserve protocol order: a completion must settle text that arrived
+    // immediately before it, even if the cadence timer has not fired yet.
+    reducePendingChildStream(childThreadId);
+    cancelEmptyChildStreamTimer();
+    child.state = reduceChildEvent(child.state, event);
+    publishChild(childThreadId, ctx);
   }
 
   function childContext(childThreadId: string, ctx: AdapterContext): AdapterContext {
