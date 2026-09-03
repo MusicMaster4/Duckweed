@@ -70,8 +70,11 @@ does not clear the notification.
 For a completion in the selected pane, Duckweed waits one minute and sends the
 notification only if there has been no focused app interaction since the
 completion. Focusing Duckweed, hovering while its window is active, switching
-tabs or panes, typing, clicking, or scrolling all count as activity. The Android companion also suppresses and marks as read a
-completion for the conversation currently visible on the phone.
+tabs or panes, typing, clicking, or scrolling all count as activity. Both grace
+periods run in the native desktop process, so minimizing Duckweed or putting its
+WebView in the background does not suspend mobile delivery. The Android
+companion also suppresses and marks as read a completion for the conversation
+currently visible on the phone.
 
 The main companion navigation contains **Activity**, **Projects**, and
 **Conversations**. Connection management, sync health, and updates live in

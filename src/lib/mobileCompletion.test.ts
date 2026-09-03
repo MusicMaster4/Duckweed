@@ -3,7 +3,6 @@ import { describe, expect, test } from "bun:test";
 import {
   completionDetailsFromState,
   mobileCompletionDelay,
-  shouldSendDelayedMobileCompletion,
 } from "./mobileCompletion";
 import { emptyUsage, type AgentSessionState } from "./agents/types";
 
@@ -72,62 +71,8 @@ describe("mobile completion details", () => {
 });
 
 describe("delayed mobile completion delivery", () => {
-  test("sends a background completion only while its desktop unread mark remains", () => {
-    expect(shouldSendDelayedMobileCompletion({
-      unreadAtCompletion: true,
-      unreadNow: true,
-      lastInteractionAt: null,
-      completedAt: 60_000,
-    })).toBe(true);
-    expect(shouldSendDelayedMobileCompletion({
-      unreadAtCompletion: true,
-      unreadNow: false,
-      lastInteractionAt: null,
-      completedAt: 60_000,
-    })).toBe(false);
-  });
-
-  test("keeps an unread background completion despite activity elsewhere", () => {
-    expect(shouldSendDelayedMobileCompletion({
-      unreadAtCompletion: true,
-      unreadNow: true,
-      lastInteractionAt: 60_001,
-      completedAt: 60_000,
-    })).toBe(true);
-  });
-
   test("uses thirty seconds for unread marks and one minute for selected terminals", () => {
     expect(mobileCompletionDelay(true)).toBe(30_000);
     expect(mobileCompletionDelay(false)).toBe(60_000);
-  });
-
-  test("notifies an unattended selected terminal after one minute", () => {
-    expect(shouldSendDelayedMobileCompletion({
-      unreadAtCompletion: false,
-      unreadNow: false,
-      lastInteractionAt: 59_999,
-      completedAt: 60_000,
-    })).toBe(true);
-    expect(shouldSendDelayedMobileCompletion({
-      unreadAtCompletion: false,
-      unreadNow: false,
-      lastInteractionAt: null,
-      completedAt: 60_000,
-    })).toBe(true);
-  });
-
-  test("does not notify after any desktop app interaction", () => {
-    expect(shouldSendDelayedMobileCompletion({
-      unreadAtCompletion: false,
-      unreadNow: false,
-      lastInteractionAt: 60_001,
-      completedAt: 60_000,
-    })).toBe(false);
-    expect(shouldSendDelayedMobileCompletion({
-      unreadAtCompletion: false,
-      unreadNow: false,
-      lastInteractionAt: 60_000,
-      completedAt: 60_000,
-    })).toBe(false);
   });
 });

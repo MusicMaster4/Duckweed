@@ -73,8 +73,11 @@ import {
   frontendReady,
   listShells,
   mobileAckCommand,
+  mobileCancelCompletion,
+  mobileCancelSelectedCompletions,
+  mobileCancelTerminalCompletions,
   mobilePollCommands,
-  mobileSendCompletion,
+  mobileScheduleCompletion,
   mobileSendWorkspace,
   mobileStatus,
   portsList,
@@ -86,6 +89,7 @@ import {
   watchProject,
   type AppPort,
   type LaunchIntent,
+  type MobileScheduledCompletionDelivery,
   type ShellIntegrationStatus,
 } from "./lib/ipc";
 import { cKeyAction, isFullscreenHotkey } from "./lib/platform";
@@ -128,10 +132,7 @@ import {
 } from "./lib/processActivity";
 import { setCompletionTaskbarBadge } from "./lib/taskbarCompletion";
 import type { AgentTarget, ScheduledSend, SubmitDelivery } from "./lib/scheduledSend";
-import {
-  mobileCompletionDelay,
-  shouldSendDelayedMobileCompletion,
-} from "./lib/mobileCompletion";
+import { mobileCompletionDelay } from "./lib/mobileCompletion";
 import {
   fitMobileWorkspaceSnapshot,
   MOBILE_WORKSPACE_CONVERSATION_BUDGET_BYTES,
@@ -467,7 +468,10 @@ export default function App() {
   completionHighlightsRef.current = completionHighlights;
   const completionFlashSeq = useRef(0);
   const completionFlashTimers = useRef(new Map<string, number>());
-  const mobileCompletionTimers = useRef(new Map<string, number>());
+  const pendingMobileCompletions = useRef(new Map<string, {
+    termId: string;
+    selected: boolean;
+  }>());
   const lastDesktopInteractionAt = useRef<number | null>(null);
   const scheduledSendsRef = useRef(scheduledSends);
   scheduledSendsRef.current = scheduledSends;
@@ -585,7 +589,36 @@ export default function App() {
     });
   }, []);
 
+  const cancelPendingMobileCompletionsForTerm = useCallback((termId: string) => {
+    let hadPending = false;
+    for (const [key, completion] of pendingMobileCompletions.current) {
+      if (completion.termId !== termId) continue;
+      pendingMobileCompletions.current.delete(key);
+      hadPending = true;
+    }
+    if (hadPending) {
+      void mobileCancelTerminalCompletions(termId).catch((error) => {
+        console.error("cancel mobile completion notification", error);
+      });
+    }
+  }, []);
+
+  const cancelPendingSelectedMobileCompletions = useCallback(() => {
+    let hadPending = false;
+    for (const [key, completion] of pendingMobileCompletions.current) {
+      if (!completion.selected) continue;
+      pendingMobileCompletions.current.delete(key);
+      hadPending = true;
+    }
+    if (hadPending) {
+      void mobileCancelSelectedCompletions().catch((error) => {
+        console.error("cancel selected mobile completion notification", error);
+      });
+    }
+  }, []);
+
   const acknowledgeTerm = useCallback((termId: string) => {
+    cancelPendingMobileCompletionsForTerm(termId);
     setMobileAlertUnread(termId, false);
     setUnreadTermIds((prev) => {
       const next = acknowledgeCompletion(prev, termId);
@@ -593,7 +626,7 @@ export default function App() {
       unreadTermIdsRef.current = next;
       return next;
     });
-  }, [setMobileAlertUnread]);
+  }, [cancelPendingMobileCompletionsForTerm, setMobileAlertUnread]);
 
   const acknowledgeTermFromMobile = useCallback((termId: string, completionSeq: number | null) => {
     const meta = terminals.getMeta(termId);
@@ -644,6 +677,7 @@ export default function App() {
   useEffect(() => {
     return observeDesktopActivity(window, () => document.hasFocus(), () => {
       lastDesktopInteractionAt.current = Date.now();
+      cancelPendingSelectedMobileCompletions();
       setMobileAlertTermIds((previous) => {
         if (previous.size === 0) return previous;
         const next = new Set<string>();
@@ -651,7 +685,36 @@ export default function App() {
         return next;
       });
     });
-  }, []);
+  }, [cancelPendingSelectedMobileCompletions]);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+    void listen<MobileScheduledCompletionDelivery>(
+      "mobile:completion-delivered",
+      ({ payload }) => {
+        pendingMobileCompletions.current.delete(payload.key);
+        if (payload.result.failed > 0) {
+          console.error("mobile completion notification", payload.result.errors.join("; "));
+        }
+        if (
+          !payload.selected ||
+          payload.result.sent === 0 ||
+          !terminals.getMeta(payload.terminalId) ||
+          (lastDesktopInteractionAt.current !== null &&
+            lastDesktopInteractionAt.current >= payload.completedAt)
+        ) return;
+        setMobileAlertUnread(payload.terminalId, true);
+      },
+    ).then((stop) => {
+      if (disposed) stop();
+      else unlisten = stop;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [setMobileAlertUnread]);
 
   /** Selected pane while the user is actually looking at the window (flash vs unread). */
   const isFocusedTerm = useCallback(
@@ -771,11 +834,6 @@ export default function App() {
     if (flashTimer !== undefined) {
       window.clearTimeout(flashTimer);
       completionFlashTimers.current.delete(term);
-    }
-    for (const [key, timer] of mobileCompletionTimers.current) {
-      if (!key.startsWith(`${term}:`)) continue;
-      window.clearTimeout(timer);
-      mobileCompletionTimers.current.delete(key);
     }
     setCompletionFlashes((previous) => {
       if (!previous.has(term)) return previous;
@@ -1398,25 +1456,24 @@ export default function App() {
           unreadOnDesktop: true,
           completionSeq: current.completionSeq,
         } as const;
-        const timer = window.setTimeout(() => {
-          mobileCompletionTimers.current.delete(completionKey);
-          if (!shouldSendDelayedMobileCompletion({
-            unreadAtCompletion,
-            unreadNow: unreadTermIdsRef.current.has(termId),
-            lastInteractionAt: lastDesktopInteractionAt.current,
-            completedAt,
-          })) return;
-          if (!unreadAtCompletion) setMobileAlertUnread(termId, true);
-          void mobileSendCompletion(message).then((result) => {
-            if (!unreadAtCompletion && result.sent === 0) {
-              setMobileAlertUnread(termId, false);
-            }
-          }).catch((error) => {
-            if (!unreadAtCompletion) setMobileAlertUnread(termId, false);
-            console.error("mobile completion notification", error);
-          });
-        }, mobileCompletionDelay(unreadAtCompletion));
-        mobileCompletionTimers.current.set(completionKey, timer);
+        const selected = !unreadAtCompletion;
+        pendingMobileCompletions.current.set(completionKey, { termId, selected });
+        void mobileScheduleCompletion(
+          completionKey,
+          message,
+          mobileCompletionDelay(unreadAtCompletion),
+          selected,
+          completedAt,
+        ).then(() => {
+          // A pane can be reviewed while native scheduling is still crossing
+          // IPC. Repeat the exact-key cancellation once registration finishes.
+          if (!pendingMobileCompletions.current.has(completionKey)) {
+            void mobileCancelCompletion(completionKey);
+          }
+        }).catch((error) => {
+          pendingMobileCompletions.current.delete(completionKey);
+          console.error("schedule mobile completion notification", error);
+        });
       }
       // Every eligible completion gets one cue. The shared audio player
       // coalesces simultaneous finishes, so several agents returning together
@@ -2847,10 +2904,6 @@ export default function App() {
         window.clearTimeout(timer);
       }
       completionFlashTimers.current.clear();
-      for (const timer of mobileCompletionTimers.current.values()) {
-        window.clearTimeout(timer);
-      }
-      mobileCompletionTimers.current.clear();
     },
     [],
   );
