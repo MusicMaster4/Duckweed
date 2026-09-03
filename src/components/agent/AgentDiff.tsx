@@ -80,36 +80,6 @@ function dirname(path: string): string {
   return parts.join("/");
 }
 
-const LANGUAGE_BY_EXTENSION: Record<string, string> = {
-  css: "CSS",
-  go: "Go",
-  html: "HTML",
-  java: "Java",
-  js: "JavaScript",
-  json: "JSON",
-  jsx: "JSX",
-  kt: "Kotlin",
-  md: "Markdown",
-  py: "Python",
-  rb: "Ruby",
-  rs: "Rust",
-  scss: "SCSS",
-  sh: "Shell",
-  sql: "SQL",
-  ts: "TypeScript",
-  tsx: "TSX",
-  vue: "Vue",
-  xml: "XML",
-  yaml: "YAML",
-  yml: "YAML",
-};
-
-function languageForPath(path: string): string | null {
-  const file = basename(path);
-  const extension = file.includes(".") ? file.split(".").pop()?.toLowerCase() : null;
-  return extension ? LANGUAGE_BY_EXTENSION[extension] ?? extension.toUpperCase() : null;
-}
-
 /** One file's change, as the agent proposed or applied it. */
 export function AgentDiff({ change }: { change: AgentFileChange }) {
   const [expanded, setExpanded] = useState(false);
@@ -121,7 +91,6 @@ export function AgentDiff({ change }: { change: AgentFileChange }) {
   const folded = !expanded && rows.length > COLLAPSE_AFTER;
   const visible = folded ? rows.slice(0, COLLAPSE_AFTER) : rows;
   const directory = dirname(change.path);
-  const language = languageForPath(change.path);
 
   return (
     <div className="agent-diff">
@@ -130,7 +99,6 @@ export function AgentDiff({ change }: { change: AgentFileChange }) {
           {directory && <span className="agent-diff-dir">{directory}/</span>}
           {basename(change.path)}
         </span>
-        {language && <span className="agent-diff-language">{language}</span>}
         {change.insertions > 0 && <span className="agent-diff-add">+{change.insertions}</span>}
         {change.deletions > 0 && <span className="agent-diff-del">−{change.deletions}</span>}
       </div>

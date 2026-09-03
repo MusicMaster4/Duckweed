@@ -8815,19 +8815,6 @@ body.is-resizing * {
   color: var(--text-faint);
 }
 
-.agent-diff-language {
-  flex: none;
-  padding: 1px 6px;
-  border: 1px solid rgba(255, 255, 255, 0.075);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.035);
-  color: var(--text-faint);
-  font-size: 9px;
-  font-weight: 600;
-  letter-spacing: 0.035em;
-  text-transform: uppercase;
-}
-
 .agent-diff:hover .agent-diff-head {
   background: rgba(255, 255, 255, 0.045);
 }
