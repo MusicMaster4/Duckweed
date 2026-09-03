@@ -70,6 +70,8 @@ interface CodexGoal {
 const MAX_GOAL_OBJECTIVE_CHARS = 4_000;
 const RESUME_PAGE_SIZE = 100;
 const MAX_RESUMED_TURNS = 500;
+/** Subagent detail is lazy and intentionally bounded independently of root history. */
+const CHILD_HISTORY_PAGE_SIZE = 8;
 const FAST_SERVICE_TIER = "priority";
 const DEFAULT_SERVICE_TIER = "default";
 /** Matches the native log monitor's guard for Codex auto-continuations. */
@@ -407,6 +409,13 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
   let childDiscoveryInFlight: Promise<void> | null = null;
   let childDiscoveryRequested = false;
   let childDiscoveryShouldSynthesize = false;
+  /**
+   * Replaying persisted collaboration items must not recursively fetch every
+   * referenced child. A resumed fleet can contain many large transcripts, and
+   * the old eager `thread/read(includeTurns: true)` path loaded all of them at
+   * once before the user opened a single detail panel.
+   */
+  let persistedHistoryReplayDepth = 0;
   /** Ephemeral `/side` and `/btw` forks, kept outside the main transcript. */
   const sideThreads = new Map<string, CodexSideThread>();
   let pendingSideThread: CodexSideThread | null = null;
@@ -743,6 +752,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     force = false,
     queueIfActive = false,
   ): Promise<boolean> {
+    if (persistedHistoryReplayDepth > 0) return Promise.resolve(false);
     if (!force && hydratedChildren.has(childThreadId)) return Promise.resolve(true);
     const active = hydratingChildren.get(childThreadId);
     if (active) {
@@ -758,17 +768,30 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       return refresh;
     }
 
-    const hydration = request(ctx, "thread/read", {
+    const metadataRequestId = nextId++;
+    const hydration = requestWithTimeout(ctx, metadataRequestId, "thread/read", {
       threadId: childThreadId,
-      includeTurns: true,
+      includeTurns: false,
     })
-      .then((result) => {
+      .then(async (result) => {
         const thread = asRecord(result.thread) ?? result;
         const child = childFor(childThreadId);
         child.label =
           asString(thread.agentNickname) ?? asString(thread.nickname) ?? child.label;
         child.role = asString(thread.agentRole) ?? asString(thread.role) ?? child.role;
         child.model = asString(thread.model) ?? child.model;
+
+        let turns = asArray(thread.turns);
+        if (turns.length === 0) {
+          const pageRequestId = nextId++;
+          const page = await requestWithTimeout(ctx, pageRequestId, "thread/turns/list", {
+            threadId: childThreadId,
+            limit: CHILD_HISTORY_PAGE_SIZE,
+            sortDirection: "desc",
+            itemsView: "full",
+          });
+          turns = asArray(page.data).reverse();
+        }
         const status = threadStatus(thread.status) ?? "idle";
         if (
           status === "working" &&
@@ -776,12 +799,12 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         ) {
           // The parent collaboration item independently reported this child as
           // running, so its coarse thread status is corroborated here.
-          child.currentTurnId ??= hydratedTurnId(thread, true);
+          child.currentTurnId ??= hydratedTurnId({ ...thread, turns }, true);
         } else if (!child.hasLiveStatus) {
           child.currentTurnId = null;
         }
 
-        // A thread/read response is a replacement snapshot. Replaying it on
+        // The metadata read plus bounded page form a replacement snapshot. Replaying it on
         // top of the existing state appended every historical message again
         // each time completion, status, or focus requested a refresh. Build a
         // fresh state so repeated reads are idempotent, then publish once.
@@ -793,21 +816,26 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
             hydratedState = applyEvent(hydratedState, event);
           },
         };
-        for (const rawTurn of asArray(thread.turns)) {
-          const turn = asRecord(rawTurn);
-          if (!turn) continue;
-          for (const rawItem of asArray(turn.items)) {
-            const item = asRecord(rawItem);
-            if (!item) continue;
-            if (replayUserMessage(item, nested)) continue;
-            handleItem(item, true, nested, hydratedStreamed);
-            const itemId = asString(item.id);
-            if (itemId && item.type === "agentMessage") {
-              hydratedStreamed.add(`am-${itemId}`);
-            } else if (itemId && item.type === "reasoning") {
-              hydratedStreamed.add(`rs-${itemId}`);
+        persistedHistoryReplayDepth += 1;
+        try {
+          for (const rawTurn of turns) {
+            const turn = asRecord(rawTurn);
+            if (!turn) continue;
+            for (const rawItem of asArray(turn.items)) {
+              const item = asRecord(rawItem);
+              if (!item) continue;
+              if (replayUserMessage(item, nested)) continue;
+              handleItem(item, true, nested, hydratedStreamed);
+              const itemId = asString(item.id);
+              if (itemId && item.type === "agentMessage") {
+                hydratedStreamed.add(`am-${itemId}`);
+              } else if (itemId && item.type === "reasoning") {
+                hydratedStreamed.add(`rs-${itemId}`);
+              }
             }
           }
+        } finally {
+          persistedHistoryReplayDepth -= 1;
         }
         // Live status events can overtake thread/read. Never flash a completed
         // child back to working because an older snapshot arrived late.
@@ -872,6 +900,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     ctx: AdapterContext,
     synthesizeMissing: boolean,
     liveStatus = false,
+    hydrateTranscript = true,
   ): string | null {
     const childThreadId = asString(rawThread.id);
     if (!childThreadId || childThreadId === threadId) return null;
@@ -926,7 +955,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
 
     if (child.callId) {
       syncChild(childThreadId, ctx);
-      void hydrateChild(childThreadId, ctx);
+      if (hydrateTranscript) void hydrateChild(childThreadId, ctx);
     }
     return childThreadId;
   }
@@ -956,7 +985,11 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
           for (const rawThread of asArray(result.data)) {
             const childThread = asRecord(rawThread);
             if (!childThread) continue;
-            adoptChildThread(childThread, ctx, synthesize);
+            // Treat the server-side filter as a convenience, not a trust
+            // boundary. Adopting an unrelated thread here would fetch its
+            // transcript and can multiply resume traffic dramatically.
+            if (asString(childThread.parentThreadId) !== parentThreadId) continue;
+            adoptChildThread(childThread, ctx, synthesize, false, !synthesize);
           }
         } catch {
           // Older app-server builds can stream child events without supporting
@@ -1771,6 +1804,11 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         const kind = asString(item.kind) ?? "interacted";
         const agentPath = asString(item.agentPath);
         const agentThreadId = asString(item.agentThreadId);
+        // Codex also reports activity for the root participant during a
+        // collaboration run. Registering that row as a child makes every
+        // later root event look nested and used to trigger a full root-history
+        // read for each fleet update.
+        if (agentThreadId === threadId || agentPath === "/root" || agentPath === "/") return;
         if (agentThreadId) {
           adoptChildThread(
             {
@@ -1891,15 +1929,20 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     ctx.emit({ type: "transcript" });
     streamed.clear();
 
-    for (const rawTurn of turns) {
-      const turn = asRecord(rawTurn);
-      if (!turn) continue;
-      for (const rawItem of asArray(turn.items)) {
-        const item = asRecord(rawItem);
-        if (!item) continue;
-        if (replayUserMessage(item, ctx)) continue;
-        handleItem(item, true, ctx);
+    persistedHistoryReplayDepth += 1;
+    try {
+      for (const rawTurn of turns) {
+        const turn = asRecord(rawTurn);
+        if (!turn) continue;
+        for (const rawItem of asArray(turn.items)) {
+          const item = asRecord(rawItem);
+          if (!item) continue;
+          if (replayUserMessage(item, ctx)) continue;
+          handleItem(item, true, ctx);
+        }
       }
+    } finally {
+      persistedHistoryReplayDepth -= 1;
     }
   }
 

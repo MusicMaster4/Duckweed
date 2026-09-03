@@ -1728,6 +1728,78 @@ describe("codex adapter", () => {
     });
   });
 
+  test("hydrates only a bounded recent page for a child transcript", async () => {
+    const h = harness();
+    await h.handshake();
+    h.notify("item/started", {
+      threadId: "thread_1",
+      item: {
+        id: "sub-bounded-history",
+        type: "collabAgentToolCall",
+        tool: "spawnAgent",
+        status: "inProgress",
+        receiverThreadIds: ["thread_child_bounded"],
+        prompt: "Inspect a large history",
+        agentsStates: { thread_child_bounded: { status: "running" } },
+      },
+    });
+
+    const read = h.sent.findLast((message) => message.method === "thread/read") as {
+      id: number;
+      params: unknown;
+    };
+    expect(read.params).toEqual({ threadId: "thread_child_bounded", includeTurns: false });
+    h.feed({
+      jsonrpc: "2.0",
+      id: read.id,
+      result: {
+        thread: {
+          id: "thread_child_bounded",
+          status: { type: "active" },
+          turns: [],
+        },
+      },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const page = h.sent.findLast((message) => message.method === "thread/turns/list") as {
+      id: number;
+      params: unknown;
+    };
+    expect(page.params).toEqual({
+      threadId: "thread_child_bounded",
+      limit: 8,
+      sortDirection: "desc",
+      itemsView: "full",
+    });
+    h.feed({
+      jsonrpc: "2.0",
+      id: page.id,
+      result: {
+        data: [
+          {
+            id: "newer-turn",
+            items: [{ id: "newer-answer", type: "agentMessage", text: "Newer" }],
+          },
+          {
+            id: "older-turn",
+            items: [{ id: "older-answer", type: "agentMessage", text: "Older" }],
+          },
+        ],
+        nextCursor: "more-history-exists",
+      },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(h.state().items[0]?.subagent?.items).toEqual([
+      expect.objectContaining({ kind: "assistant", text: "Older" }),
+      expect.objectContaining({ kind: "assistant", text: "Newer" }),
+    ]);
+    expect(h.sent.filter((message) => message.method === "thread/turns/list")).toHaveLength(1);
+  });
+
   test("refreshes persisted child messages when the subagent is inspected", async () => {
     const h = harness();
     await h.handshake();
@@ -1757,6 +1829,13 @@ describe("codex adapter", () => {
         },
       },
     });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const initialPage = h.sent.findLast(
+      (message) => message.method === "thread/turns/list",
+    ) as { id: number };
+    h.feed({ jsonrpc: "2.0", id: initialPage.id, result: { data: [], nextCursor: null } });
     await Promise.resolve();
     await Promise.resolve();
 
@@ -1872,7 +1951,6 @@ describe("codex adapter", () => {
     });
     await Promise.resolve();
     await Promise.resolve();
-
     expect(h.events.length - before).toBe(1);
     expect(h.state().items[0]?.subagent?.items.length).toBe(3);
   });
@@ -1980,6 +2058,25 @@ describe("codex adapter", () => {
     });
   });
 
+  test("does not register the root participant as its own subagent", async () => {
+    const h = harness();
+    await h.handshake();
+
+    h.notify("item/started", {
+      threadId: "thread_1",
+      item: {
+        id: "root-collab-activity",
+        type: "subAgentActivity",
+        kind: "interacted",
+        agentThreadId: "thread_1",
+        agentPath: "/root",
+      },
+    });
+
+    expect(h.state().items).toHaveLength(0);
+    expect(h.sent.filter((message) => message.method === "thread/read")).toHaveLength(0);
+  });
+
   test("replaces a subagent path with its nickname without requiring inspection", async () => {
     const h = harness();
     await h.handshake();
@@ -2020,6 +2117,12 @@ describe("codex adapter", () => {
         },
       },
     });
+    await Promise.resolve();
+    await Promise.resolve();
+    const page = h.sent.findLast((message) => message.method === "thread/turns/list") as {
+      id: number;
+    };
+    h.feed({ jsonrpc: "2.0", id: page.id, result: { data: [], nextCursor: null } });
     await Promise.resolve();
     await Promise.resolve();
 
@@ -2882,6 +2985,77 @@ describe("codex adapter", () => {
       method: "turn/start",
       params: expect.objectContaining({ threadId: "thread_old" }),
     });
+  });
+
+  test("does not eagerly hydrate a resumed fleet or adopt unrelated threads", async () => {
+    const h = harness();
+    await h.handshake();
+    const resumed = h.adapter.resume?.("thread_fleet", h.ctx);
+    const resumeCall = h.sent.findLast((message) => message.method === "thread/resume") as {
+      id: number;
+    };
+    const fleet = Array.from({ length: 40 }, (_, index) => ({
+      id: `spawn-${index}`,
+      type: "collabAgentToolCall",
+      tool: "spawnAgent",
+      status: "completed",
+      receiverThreadIds: [`thread_child_${index}`],
+      prompt: `Inspect area ${index}`,
+      agentsStates: { [`thread_child_${index}`]: { status: "completed" } },
+    }));
+    h.feed({
+      jsonrpc: "2.0",
+      id: resumeCall.id,
+      result: {
+        thread: {
+          id: "thread_fleet",
+          sessionId: "sess_fleet",
+          status: { type: "idle" },
+          turns: [],
+        },
+        initialTurnsPage: {
+          data: [{ id: "fleet-turn", status: "completed", items: fleet }],
+          nextCursor: null,
+        },
+      },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(await resumed).toBe(true);
+    expect(h.sent.filter((message) => message.method === "thread/read")).toHaveLength(0);
+
+    const discovery = h.sent.findLast((message) => message.method === "thread/list") as {
+      id: number;
+    };
+    h.feed({
+      jsonrpc: "2.0",
+      id: discovery.id,
+      result: {
+        data: [
+          {
+            id: "thread_child_0",
+            parentThreadId: "thread_fleet",
+            preview: "Inspect area 0",
+            status: { type: "idle" },
+          },
+          {
+            id: "unrelated_large_thread",
+            parentThreadId: "some_other_root",
+            preview: "Unrelated conversation",
+            status: { type: "idle" },
+          },
+        ],
+      },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(h.sent.filter((message) => message.method === "thread/read")).toHaveLength(0);
+    expect(
+      h.state().items.some(
+        (item) => item.kind === "tool" && item.subagent?.threadId === "unrelated_large_thread",
+      ),
+    ).toBe(false);
   });
 
   test("hydrates paginated history in order, including image-only prompts", async () => {
