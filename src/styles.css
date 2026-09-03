@@ -4106,6 +4106,34 @@ body.is-dragging-prompt * {
 }
 
 /*
+ * Identify a completion trigger before it is selected. This is deliberately a
+ * separate layer from the rose completion outline so hovering never changes or
+ * acknowledges completion state. The short transition makes adjacent agents
+ * easy to compare while moving through the menu.
+ */
+.pane::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border: 2px solid var(--amber);
+  border-radius: var(--pane-radius, 0);
+  pointer-events: none;
+  z-index: 8;
+  opacity: 0;
+  transition: opacity 50ms ease;
+}
+
+.pane.is-agent-target-highlighted::before {
+  opacity: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pane::before {
+    transition: none;
+  }
+}
+
+/*
  * A completion in the focused pane is informational rather than unread. It
  * fades in for 500ms, holds for 500ms, then fades away for 500ms.
  */

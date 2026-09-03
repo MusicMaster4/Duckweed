@@ -428,6 +428,7 @@ export default function App() {
   const [workingAgentTermIds, setWorkingAgentTermIds] = useState<Set<string>>(
     () => new Set(),
   );
+  const [highlightedAgentTermId, setHighlightedAgentTermId] = useState<string | null>(null);
   const [openAgentCount, setOpenAgentCount] = useState(0);
   const [scheduledSends, setScheduledSends] = useState<Map<string, ScheduledSend>>(
     () => new Map(),
@@ -3765,6 +3766,8 @@ export default function App() {
       onClose: closePaneById,
       onToggleZoom: toggleZoom,
       agentTargets,
+      highlightedAgentTermId,
+      onAgentTargetHover: setHighlightedAgentTermId,
       scheduledSends,
       onScheduleSend: scheduleSend,
       onCancelSchedule: cancelSchedule,
@@ -3777,6 +3780,7 @@ export default function App() {
       activeTab?.zoomedLeaf,
       acknowledgeTerm,
       agentTargets,
+      highlightedAgentTermId,
       activatePane,
       beforeScheduledSubmit,
       browseActiveProject,

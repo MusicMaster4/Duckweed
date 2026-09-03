@@ -44,6 +44,9 @@ export interface PaneTreeShared {
   onClose: (leafId: string) => void;
   onToggleZoom: (leafId: string) => void;
   agentTargets: readonly AgentTarget[];
+  /** Agent pane temporarily identified by hovering its completion-trigger item. */
+  highlightedAgentTermId: string | null;
+  onAgentTargetHover: (termId: string | null) => void;
   scheduledSends: ReadonlyMap<string, ScheduledSend>;
   onScheduleSend: (termId: string, target: AgentTarget) => void;
   onCancelSchedule: (termId: string) => void;
@@ -111,6 +114,7 @@ export const PaneTree = memo(function PaneTree({
         edges={edges}
         unread={shared.unreadTerms.has(node.term)}
         completionFlash={shared.completionFlashes.get(node.term) ?? null}
+        agentTargetHighlighted={shared.highlightedAgentTermId === node.term}
         project={shared.project}
         recents={shared.recents}
         onBrowseProject={shared.onBrowseProject}
@@ -121,6 +125,7 @@ export const PaneTree = memo(function PaneTree({
         onClose={() => shared.onClose(node.id)}
         onToggleZoom={() => shared.onToggleZoom(node.id)}
         agentTargets={shared.agentTargets}
+        onAgentTargetHover={shared.onAgentTargetHover}
         scheduledSend={shared.scheduledSends.get(node.term) ?? null}
         onScheduleSend={shared.onScheduleSend}
         onCancelSchedule={shared.onCancelSchedule}
