@@ -10207,23 +10207,41 @@ body.is-resizing * {
   min-width: 0;
 }
 
-.agent-composer-mirror {
-  position: absolute;
-  z-index: 0;
-  inset: 0;
+.agent-composer-mirror,
+.agent-composer-input {
+  box-sizing: border-box;
   max-height: 220px;
   margin: 0;
   padding: 4px 2px;
   border: 0;
-  overflow: hidden;
   white-space: pre-wrap;
   word-break: break-word;
   overflow-wrap: anywhere;
-  pointer-events: none;
-  color: var(--text);
   font-family: var(--font-mono);
   font-size: var(--terminal-font-size);
+  font-weight: 400;
+  font-style: normal;
+  font-variant: normal;
+  font-kerning: none;
+  font-variant-ligatures: none;
+  letter-spacing: normal;
+  word-spacing: normal;
+  text-indent: 0;
+  text-transform: none;
+  tab-size: 8;
   line-height: 1.5;
+}
+
+.agent-composer-mirror {
+  position: absolute;
+  z-index: 0;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  pointer-events: none;
+  color: var(--text);
 }
 
 .agent-composer-token {
@@ -10257,20 +10275,11 @@ body.is-resizing * {
   display: block;
   width: 100%;
   min-width: 0;
-  max-height: 220px;
-  margin: 0;
-  padding: 4px 2px;
-  border: 0;
   background: transparent;
   color: var(--text);
   /* Match the shell command editor and the terminal caret — house green. */
   caret-color: var(--accent);
-  font-family: var(--font-mono);
-  font-size: var(--terminal-font-size);
-  line-height: 1.5;
-  white-space: pre-wrap;
-  word-break: break-word;
-  overflow-wrap: anywhere;
+  overflow: auto;
   resize: none;
   outline: none;
   user-select: text;
