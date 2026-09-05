@@ -35,7 +35,7 @@ function harness(
 ) {
   const events: AgentEvent[] = [];
   const sent: Record<string, unknown>[] = [];
-  const adapter = createCodexAdapter(adapterOptions);
+  const adapter = createCodexAdapter({ childStreamPublishMs: 0, ...adapterOptions });
   const ctx: AdapterContext = {
     cwd: "H:/project",
     launch: { ...launch, ...overrides },
@@ -1482,6 +1482,72 @@ describe("codex adapter", () => {
     });
   });
 
+  test("reduces concurrent child token streams once per shared cadence", async () => {
+    let childReductions = 0;
+    const h = harness(
+      {},
+      {
+        completionQuietMs: 0,
+        childStreamPublishMs: 15,
+        childEventReducer: (state, event) => {
+          childReductions += 1;
+          return applyEvent(state, event);
+        },
+      },
+    );
+    await h.handshake();
+
+    const childIds = ["thread_child_a", "thread_child_b", "thread_child_c"];
+    childIds.forEach((childThreadId, index) => {
+      h.notify("item/started", {
+        threadId: "thread_1",
+        item: {
+          id: `sub-burst-${index}`,
+          type: "collabAgentToolCall",
+          tool: "spawnAgent",
+          status: "inProgress",
+          receiverThreadIds: [childThreadId],
+          prompt: `Inspect area ${index}`,
+          agentsStates: { [childThreadId]: { status: "running" } },
+        },
+      });
+      h.notify("turn/started", {
+        threadId: childThreadId,
+        turn: { id: `child-turn-${index}` },
+      });
+    });
+
+    childReductions = 0;
+    childIds.forEach((childThreadId, index) => {
+      for (let token = 0; token < 120; token += 1) {
+        h.notify("item/agentMessage/delta", {
+          threadId: childThreadId,
+          turnId: `child-turn-${index}`,
+          itemId: `child-answer-${index}`,
+          delta: String.fromCharCode(97 + index),
+        });
+      }
+    });
+
+    // The old path ran the reducer 360 times here, repeatedly copying three
+    // growing strings before its paint timer had a chance to help.
+    expect(childReductions).toBe(0);
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    expect(childReductions).toBe(childIds.length);
+
+    for (const [index, childThreadId] of childIds.entries()) {
+      const child = h
+        .state()
+        .items.find((item) => item.kind === "tool" && item.subagent?.threadId === childThreadId);
+      expect(child?.subagent?.items).toContainEqual(
+        expect.objectContaining({
+          kind: "assistant",
+          text: String.fromCharCode(97 + index).repeat(120),
+        }),
+      );
+    }
+  });
+
   test("links a spawn when the child thread id arrives in thread/started", async () => {
     const h = harness();
     await h.handshake();
@@ -1662,6 +1728,78 @@ describe("codex adapter", () => {
     });
   });
 
+  test("hydrates only a bounded recent page for a child transcript", async () => {
+    const h = harness();
+    await h.handshake();
+    h.notify("item/started", {
+      threadId: "thread_1",
+      item: {
+        id: "sub-bounded-history",
+        type: "collabAgentToolCall",
+        tool: "spawnAgent",
+        status: "inProgress",
+        receiverThreadIds: ["thread_child_bounded"],
+        prompt: "Inspect a large history",
+        agentsStates: { thread_child_bounded: { status: "running" } },
+      },
+    });
+
+    const read = h.sent.findLast((message) => message.method === "thread/read") as {
+      id: number;
+      params: unknown;
+    };
+    expect(read.params).toEqual({ threadId: "thread_child_bounded", includeTurns: false });
+    h.feed({
+      jsonrpc: "2.0",
+      id: read.id,
+      result: {
+        thread: {
+          id: "thread_child_bounded",
+          status: { type: "active" },
+          turns: [],
+        },
+      },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const page = h.sent.findLast((message) => message.method === "thread/turns/list") as {
+      id: number;
+      params: unknown;
+    };
+    expect(page.params).toEqual({
+      threadId: "thread_child_bounded",
+      limit: 8,
+      sortDirection: "desc",
+      itemsView: "full",
+    });
+    h.feed({
+      jsonrpc: "2.0",
+      id: page.id,
+      result: {
+        data: [
+          {
+            id: "newer-turn",
+            items: [{ id: "newer-answer", type: "agentMessage", text: "Newer" }],
+          },
+          {
+            id: "older-turn",
+            items: [{ id: "older-answer", type: "agentMessage", text: "Older" }],
+          },
+        ],
+        nextCursor: "more-history-exists",
+      },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(h.state().items[0]?.subagent?.items).toEqual([
+      expect.objectContaining({ kind: "assistant", text: "Older" }),
+      expect.objectContaining({ kind: "assistant", text: "Newer" }),
+    ]);
+    expect(h.sent.filter((message) => message.method === "thread/turns/list")).toHaveLength(1);
+  });
+
   test("refreshes persisted child messages when the subagent is inspected", async () => {
     const h = harness();
     await h.handshake();
@@ -1691,6 +1829,13 @@ describe("codex adapter", () => {
         },
       },
     });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const initialPage = h.sent.findLast(
+      (message) => message.method === "thread/turns/list",
+    ) as { id: number };
+    h.feed({ jsonrpc: "2.0", id: initialPage.id, result: { data: [], nextCursor: null } });
     await Promise.resolve();
     await Promise.resolve();
 
@@ -1736,6 +1881,202 @@ describe("codex adapter", () => {
     );
   });
 
+  test("sends attached images to the ephemeral /side turn", async () => {
+    const h = harness();
+    await h.handshake();
+
+    expect(h.adapter.commandSupportsImages?.("/side inspect this")).toBe(true);
+    expect(h.adapter.command?.("/side inspect this", h.ctx, [image])).toBe("handled");
+    expect(h.state().sideQuestion).toMatchObject({
+      question: "inspect this",
+      images: [image],
+      status: "asking",
+    });
+
+    h.feed({ jsonrpc: "2.0", id: 4, result: { thread: { id: "side_image" } } });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(h.sent.at(-1)).toMatchObject({
+      method: "turn/start",
+      params: {
+        threadId: "side_image",
+        input: [
+          { type: "text", text: "inspect this" },
+          { type: "image", url: image.dataUrl },
+        ],
+      },
+    });
+  });
+
+  test("publishes a hydrated child transcript atomically", async () => {
+    const h = harness();
+    await h.handshake();
+    h.notify("item/started", {
+      threadId: "thread_1",
+      item: {
+        id: "sub-batched",
+        type: "collabAgentToolCall",
+        tool: "spawnAgent",
+        status: "inProgress",
+        receiverThreadIds: ["thread_child_batched"],
+        prompt: "Inspect several files",
+        agentsStates: { thread_child_batched: { status: "running" } },
+      },
+    });
+
+    const read = h.sent.findLast((message) => message.method === "thread/read") as {
+      id: number;
+    };
+    const before = h.events.length;
+    h.feed({
+      jsonrpc: "2.0",
+      id: read.id,
+      result: {
+        thread: {
+          id: "thread_child_batched",
+          status: { type: "active" },
+          turns: [
+            {
+              id: "child-turn",
+              items: [
+                { id: "thought", type: "reasoning", summary: ["Checking files"] },
+                { id: "cmd", type: "commandExecution", command: "rg --files", status: "completed" },
+                { id: "answer", type: "agentMessage", text: "Inspection complete." },
+              ],
+            },
+          ],
+        },
+      },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(h.events.length - before).toBe(1);
+    expect(h.state().items[0]?.subagent?.items.length).toBe(3);
+  });
+
+  test("replaces repeated child snapshots instead of appending them again", async () => {
+    const h = harness();
+    await h.handshake();
+    h.notify("item/started", {
+      threadId: "thread_1",
+      item: {
+        id: "sub-idempotent",
+        type: "collabAgentToolCall",
+        tool: "spawnAgent",
+        status: "inProgress",
+        receiverThreadIds: ["thread_child_idempotent"],
+        prompt: "Inspect without duplication",
+        agentsStates: { thread_child_idempotent: { status: "running" } },
+      },
+    });
+
+    const snapshot = {
+      thread: {
+        id: "thread_child_idempotent",
+        status: { type: "active" },
+        turns: [
+          {
+            id: "child-turn",
+            items: [
+              {
+                id: "child-user",
+                type: "userMessage",
+                content: [{ type: "text", text: "Check the parser" }],
+              },
+              { id: "child-answer", type: "agentMessage", text: "Parser checked." },
+            ],
+          },
+        ],
+      },
+    };
+
+    const firstRead = h.sent.findLast((message) => message.method === "thread/read") as {
+      id: number;
+    };
+    h.feed({ jsonrpc: "2.0", id: firstRead.id, result: snapshot });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const refresh = h.adapter.inspectSubagent?.(
+      "sub-idempotent",
+      "thread_child_idempotent",
+      h.ctx,
+    );
+    for (let attempt = 0; attempt < 5; attempt += 1) await Promise.resolve();
+    const secondRead = h.sent.findLast((message) => message.method === "thread/read") as {
+      id: number;
+    };
+    h.feed({ jsonrpc: "2.0", id: secondRead.id, result: snapshot });
+    expect(await refresh).toBe(true);
+
+    const childItems = h.state().items[0]?.subagent?.items ?? [];
+    expect(childItems).toHaveLength(2);
+    expect(childItems.filter((item) => item.kind === "user")).toHaveLength(1);
+    expect(childItems.filter((item) => item.kind === "assistant")).toHaveLength(1);
+    expect(childItems.find((item) => item.kind === "assistant")).toMatchObject({
+      text: "Parser checked.",
+    });
+  });
+
+  test("does not regress a completed child to a stale active snapshot", async () => {
+    const h = harness();
+    await h.handshake();
+    h.notify("item/completed", {
+      threadId: "thread_1",
+      item: {
+        id: "sub-stale-status",
+        type: "collabAgentToolCall",
+        tool: "spawnAgent",
+        status: "completed",
+        receiverThreadIds: ["thread_child_stale"],
+        prompt: "Inspect status ordering",
+        agentsStates: { thread_child_stale: { status: "completed" } },
+      },
+    });
+
+    const read = h.sent.findLast((message) => message.method === "thread/read") as {
+      id: number;
+    };
+    h.feed({
+      jsonrpc: "2.0",
+      id: read.id,
+      result: {
+        thread: {
+          id: "thread_child_stale",
+          status: { type: "active" },
+          turns: [],
+        },
+      },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(h.state().items[0]).toMatchObject({
+      status: "done",
+      subagent: { activity: "Delegated work completed" },
+    });
+  });
+
+  test("does not register the root participant as its own subagent", async () => {
+    const h = harness();
+    await h.handshake();
+
+    h.notify("item/started", {
+      threadId: "thread_1",
+      item: {
+        id: "root-collab-activity",
+        type: "subAgentActivity",
+        kind: "interacted",
+        agentThreadId: "thread_1",
+        agentPath: "/root",
+      },
+    });
+
+    expect(h.state().items).toHaveLength(0);
+    expect(h.sent.filter((message) => message.method === "thread/read")).toHaveLength(0);
+  });
+
   test("replaces a subagent path with its nickname without requiring inspection", async () => {
     const h = harness();
     await h.handshake();
@@ -1776,6 +2117,12 @@ describe("codex adapter", () => {
         },
       },
     });
+    await Promise.resolve();
+    await Promise.resolve();
+    const page = h.sent.findLast((message) => message.method === "thread/turns/list") as {
+      id: number;
+    };
+    h.feed({ jsonrpc: "2.0", id: page.id, result: { data: [], nextCursor: null } });
     await Promise.resolve();
     await Promise.resolve();
 
@@ -2019,6 +2366,56 @@ describe("codex adapter", () => {
       path: "src/app.ts",
       insertions: 2,
       deletions: 1,
+    });
+  });
+
+  test("treats an added file body as a new file, not a context-only patch", async () => {
+    const h = harness();
+    await h.handshake();
+    h.notify("item/fileChange/patchUpdated", {
+      itemId: "f-add",
+      changes: [
+        {
+          path: "src/new.ts",
+          kind: { type: "add" },
+          diff: "export const n = 1;\nexport const m = 2;",
+        },
+      ],
+    });
+
+    const tool = h.state().items[0];
+    expect(tool.kind === "tool" && tool.changes[0]).toMatchObject({
+      path: "src/new.ts",
+      before: null,
+      after: "export const n = 1;\nexport const m = 2;",
+      diff: null,
+      insertions: 2,
+      deletions: 0,
+    });
+  });
+
+  test("treats a deleted file body as a full-file removal", async () => {
+    const h = harness();
+    await h.handshake();
+    h.notify("item/fileChange/patchUpdated", {
+      itemId: "f-del",
+      changes: [
+        {
+          path: "src/gone.ts",
+          kind: { type: "delete" },
+          diff: "old\nfile",
+        },
+      ],
+    });
+
+    const tool = h.state().items[0];
+    expect(tool.kind === "tool" && tool.changes[0]).toMatchObject({
+      path: "src/gone.ts",
+      before: "old\nfile",
+      after: null,
+      diff: null,
+      insertions: 0,
+      deletions: 2,
     });
   });
 
@@ -2549,6 +2946,105 @@ describe("codex adapter", () => {
     expect(h.state().status).toBe("idle");
   });
 
+  test("keeps follow-up activity visible when active status precedes its turn-start notification", async () => {
+    const h = harness({}, { completionQuietMs: 20 });
+    await h.handshake();
+    h.notify("turn/started", { threadId: "thread_1", turn: { id: "old" } });
+    h.notify("turn/completed", { threadId: "thread_1", turn: { id: "old", status: "completed" } });
+    h.notify("thread/status/changed", { threadId: "thread_1", status: { type: "active" } });
+    h.notify("turn/started", { threadId: "thread_1", turn: { id: "next" } });
+    h.notify("item/reasoning/textDelta", {
+      threadId: "thread_1", turnId: "next", itemId: "progress", delta: "Checking the fix.",
+    });
+    h.notify("item/started", {
+      threadId: "thread_1", turnId: "next",
+      item: { id: "check", type: "commandExecution", command: "bun test", status: "inProgress" },
+    });
+    h.notify("item/fileChange/patchUpdated", {
+      threadId: "thread_1", turnId: "next", itemId: "patch",
+      changes: [{ path: "example.ts", kind: { type: "update" },
+        diff: "--- a/example.ts\n+++ b/example.ts\n@@ -1 +1 @@\n-old\n+new\n" }],
+    });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(h.state().items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "thinking", text: "Checking the fix." }),
+      expect.objectContaining({ kind: "tool", command: "bun test" }),
+      expect.objectContaining({ kind: "tool", changes: expect.arrayContaining([
+        expect.objectContaining({ path: "example.ts" }),
+      ]) }),
+    ]));
+    h.adapter.interrupt(h.ctx);
+    expect(h.sent.at(-1)).toMatchObject({ method: "turn/interrupt", params: { turnId: "next" } });
+  });
+
+  test("shows the next turn after completion races with an accepted steer", async () => {
+    const h = harness();
+    await h.handshake();
+    h.notify("turn/started", { threadId: "thread_1", turn: { id: "steered" } });
+    const steering = h.adapter.steer?.({ text: "check the diff too", images: [] }, h.ctx);
+    const steer = h.sent.at(-1) as { id: number };
+    h.notify("turn/completed", {
+      threadId: "thread_1", turn: { id: "steered", status: "completed" },
+    });
+    h.feed({ jsonrpc: "2.0", id: steer.id, result: { turnId: "steered" } });
+    await expect(steering).resolves.toBe(true);
+    h.notify("turn/started", { threadId: "thread_1", turn: { id: "continued" } });
+    h.notify("turn/plan/updated", {
+      threadId: "thread_1", turnId: "continued",
+      plan: [{ step: "Check the diff", status: "inProgress" }],
+    });
+    expect(h.state().items.at(-1)).toMatchObject({ kind: "plan" });
+    h.notify("turn/completed", {
+      threadId: "thread_1", turn: { id: "steered", status: "completed" },
+    });
+    expect(h.state().status).toBe("working");
+    h.notify("turn/completed", {
+      threadId: "thread_1", turn: { id: "continued", status: "completed" },
+    });
+    expect(h.state().status).toBe("idle");
+  });
+
+  test("does not let late interrupted-turn frames consume queued follow-ups", async () => {
+    const h = harness();
+    await h.handshake();
+    h.notify("turn/started", { threadId: "thread_1", turn: { id: "stopped" } });
+    h.adapter.interrupt(h.ctx);
+    const interrupt = h.sent.at(-1) as { id: number };
+    h.feed({ jsonrpc: "2.0", id: interrupt.id, result: {} });
+    await Promise.resolve();
+    h.adapter.prompt({ text: "queued fix", images: [] }, h.ctx);
+    h.notify("turn/completed", {
+      threadId: "thread_1", turn: { id: "stopped", status: "interrupted" },
+    });
+    h.notify("turn/started", { threadId: "thread_1", turn: { id: "stopped" } });
+    expect(h.events.filter((event) => event.type === "turn-end")).toHaveLength(1);
+    h.notify("turn/started", { threadId: "thread_1", turn: { id: "followup" } });
+    h.notify("item/agentMessage/delta", {
+      threadId: "thread_1", turnId: "followup", itemId: "update", delta: "Running the checks.",
+    });
+    expect(h.state().items.at(-1)).toMatchObject({ kind: "assistant", text: "Running the checks." });
+  });
+
+  test("does not resurrect an interrupted turn from its delayed start response", async () => {
+    const h = harness();
+    await h.handshake();
+    h.adapter.prompt({ text: "first", images: [] }, h.ctx);
+    const start = h.sent.at(-1) as { id: number };
+    h.notify("turn/started", { threadId: "thread_1", turn: { id: "stopped" } });
+    h.adapter.interrupt(h.ctx);
+    const interrupt = h.sent.at(-1) as { id: number };
+    h.feed({ jsonrpc: "2.0", id: interrupt.id, result: {} });
+    await Promise.resolve();
+    h.feed({ jsonrpc: "2.0", id: start.id, result: { turn: { id: "stopped" } } });
+    await Promise.resolve();
+    h.adapter.prompt({ text: "continue", images: [] }, h.ctx);
+    h.notify("turn/started", { threadId: "thread_1", turn: { id: "continued" } });
+    h.notify("item/reasoning/textDelta", {
+      threadId: "thread_1", turnId: "continued", itemId: "progress", delta: "Applying the fix.",
+    });
+    expect(h.state().items.at(-1)).toMatchObject({ kind: "thinking", text: "Applying the fix." });
+  });
+
   test("reports a refused handshake instead of a blank pane", async () => {
     const h = harness();
     h.adapter.start(h.ctx);
@@ -2638,6 +3134,77 @@ describe("codex adapter", () => {
       method: "turn/start",
       params: expect.objectContaining({ threadId: "thread_old" }),
     });
+  });
+
+  test("does not eagerly hydrate a resumed fleet or adopt unrelated threads", async () => {
+    const h = harness();
+    await h.handshake();
+    const resumed = h.adapter.resume?.("thread_fleet", h.ctx);
+    const resumeCall = h.sent.findLast((message) => message.method === "thread/resume") as {
+      id: number;
+    };
+    const fleet = Array.from({ length: 40 }, (_, index) => ({
+      id: `spawn-${index}`,
+      type: "collabAgentToolCall",
+      tool: "spawnAgent",
+      status: "completed",
+      receiverThreadIds: [`thread_child_${index}`],
+      prompt: `Inspect area ${index}`,
+      agentsStates: { [`thread_child_${index}`]: { status: "completed" } },
+    }));
+    h.feed({
+      jsonrpc: "2.0",
+      id: resumeCall.id,
+      result: {
+        thread: {
+          id: "thread_fleet",
+          sessionId: "sess_fleet",
+          status: { type: "idle" },
+          turns: [],
+        },
+        initialTurnsPage: {
+          data: [{ id: "fleet-turn", status: "completed", items: fleet }],
+          nextCursor: null,
+        },
+      },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(await resumed).toBe(true);
+    expect(h.sent.filter((message) => message.method === "thread/read")).toHaveLength(0);
+
+    const discovery = h.sent.findLast((message) => message.method === "thread/list") as {
+      id: number;
+    };
+    h.feed({
+      jsonrpc: "2.0",
+      id: discovery.id,
+      result: {
+        data: [
+          {
+            id: "thread_child_0",
+            parentThreadId: "thread_fleet",
+            preview: "Inspect area 0",
+            status: { type: "idle" },
+          },
+          {
+            id: "unrelated_large_thread",
+            parentThreadId: "some_other_root",
+            preview: "Unrelated conversation",
+            status: { type: "idle" },
+          },
+        ],
+      },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(h.sent.filter((message) => message.method === "thread/read")).toHaveLength(0);
+    expect(
+      h.state().items.some(
+        (item) => item.kind === "tool" && item.subagent?.threadId === "unrelated_large_thread",
+      ),
+    ).toBe(false);
   });
 
   test("hydrates paginated history in order, including image-only prompts", async () => {

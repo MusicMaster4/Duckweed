@@ -64,7 +64,11 @@ winreg = "0.55"
 # WebView2's own (no-op, in a frameless window) browser fullscreen.
 webview2-com = "0.38"
 windows-core = "0.61"
-windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm"] }
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_System_Com",
+] }
 
 [target.'cfg(unix)'.dependencies]
 # GUI launches do not inherit PATH additions from shell startup files. Without

@@ -16,6 +16,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -74,6 +75,8 @@ struct Process {
 #[derive(Default)]
 struct AgentProcInner {
     processes: Mutex<HashMap<String, Arc<Mutex<Process>>>>,
+    protocol_frames: AtomicU64,
+    protocol_bytes: AtomicU64,
 }
 
 #[derive(Clone, Default)]
@@ -93,6 +96,16 @@ impl AgentProcManager {
     /// Number of coding-agent sessions currently owned by the custom UI.
     pub fn open_count(&self) -> usize {
         self.inner.processes.lock().unwrap().len()
+    }
+
+    /// Aggregate protocol traffic since this Duckweed process started.
+    /// Content is deliberately not retained; crash diagnostics only need the
+    /// volume that preceded a renderer failure.
+    pub fn traffic_totals(&self) -> (u64, u64) {
+        (
+            self.inner.protocol_frames.load(Ordering::Relaxed),
+            self.inner.protocol_bytes.load(Ordering::Relaxed),
+        )
     }
 
     /// Append one protocol line to the agent's stdin.
@@ -398,6 +411,7 @@ pub fn start(
 
     if let Some(stdout) = stdout {
         let channel = on_frame.clone();
+        let metrics = Arc::clone(&manager.inner);
         let thread_id = id.clone();
         std::thread::Builder::new()
             .name(format!("agent-out-{thread_id}"))
@@ -405,17 +419,19 @@ pub fn start(
                 let mut reader = BufReader::with_capacity(64 * 1024, stdout);
                 let mut buffer = Vec::new();
                 loop {
-                    buffer.clear();
-                    match reader.read_until(b'\n', &mut buffer) {
+                    match read_bounded_line(&mut reader, &mut buffer, MAX_LINE_BYTES) {
                         Ok(0) | Err(_) => break,
                         Ok(_) => {
                             let line = trimmed_line(&buffer, MAX_LINE_BYTES);
                             if line.is_empty() {
                                 continue;
                             }
+                            let bytes = line.len() as u64;
                             if channel.send(AgentFrame::Stdout { line }).is_err() {
                                 break;
                             }
+                            metrics.protocol_frames.fetch_add(1, Ordering::Relaxed);
+                            metrics.protocol_bytes.fetch_add(bytes, Ordering::Relaxed);
                         }
                     }
                 }
@@ -432,8 +448,7 @@ pub fn start(
                 let mut reader = BufReader::new(stderr);
                 let mut buffer = Vec::new();
                 loop {
-                    buffer.clear();
-                    match reader.read_until(b'\n', &mut buffer) {
+                    match read_bounded_line(&mut reader, &mut buffer, MAX_STDERR_LINE_BYTES) {
                         Ok(0) | Err(_) => break,
                         Ok(_) => {
                             let line = trimmed_line(&buffer, MAX_STDERR_LINE_BYTES);
@@ -483,6 +498,38 @@ fn manager_handle(manager: &AgentProcManager, id: &str) -> Option<Arc<Mutex<Proc
     manager.inner.processes.lock().unwrap().get(id).cloned()
 }
 
+/// Read through one complete line while retaining at most `limit` bytes.
+///
+/// `BufRead::read_until` only lets callers truncate after the delimiter is
+/// found, so a malformed or very large JSON response could allocate the whole
+/// line first. Codex child hydration returns full transcripts on one JSONL
+/// line, making that behavior especially costly when several children finish
+/// together. This reader keeps the retained buffer bounded and drains the tail
+/// in the `BufReader`'s fixed-size chunks.
+fn read_bounded_line<R: BufRead>(
+    reader: &mut R,
+    buffer: &mut Vec<u8>,
+    limit: usize,
+) -> std::io::Result<usize> {
+    buffer.clear();
+    let mut total = 0usize;
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            return Ok(total);
+        }
+        let newline = available.iter().position(|byte| *byte == b'\n');
+        let consumed = newline.map_or(available.len(), |index| index + 1);
+        let retained = consumed.min(limit.saturating_sub(buffer.len()));
+        buffer.extend_from_slice(&available[..retained]);
+        reader.consume(consumed);
+        total = total.saturating_add(consumed);
+        if newline.is_some() {
+            return Ok(total);
+        }
+    }
+}
+
 /// Decode one raw line, dropping the line terminator and any oversize tail.
 fn trimmed_line(buffer: &[u8], limit: usize) -> String {
     let slice = &buffer[..buffer.len().min(limit)];
@@ -504,6 +551,21 @@ mod tests {
     fn truncates_a_runaway_line_instead_of_forwarding_it_whole() {
         let huge = vec![b'x'; 128];
         assert_eq!(trimmed_line(&huge, 16).len(), 16);
+    }
+
+    #[test]
+    fn drains_a_runaway_line_without_retaining_its_tail() {
+        use std::io::Cursor;
+
+        let mut input = vec![b'x'; 128];
+        input.extend_from_slice(b"\nnext\n");
+        let mut reader = BufReader::with_capacity(8, Cursor::new(input));
+        let mut buffer = Vec::new();
+
+        assert_eq!(read_bounded_line(&mut reader, &mut buffer, 16).unwrap(), 129);
+        assert_eq!(buffer, vec![b'x'; 16]);
+        assert_eq!(read_bounded_line(&mut reader, &mut buffer, 16).unwrap(), 5);
+        assert_eq!(buffer, b"next\n");
     }
 
     #[test]

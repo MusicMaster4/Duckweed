@@ -480,6 +480,35 @@ describe("claude adapter", () => {
     });
   });
 
+  test("turns a Write tool into a new-file change", () => {
+    const h = harness();
+    h.feed({
+      type: "assistant",
+      message: {
+        content: [
+          {
+            type: "tool_use",
+            id: "toolu_write",
+            name: "Write",
+            input: {
+              file_path: "src/new.ts",
+              content: "one\ntwo",
+            },
+          },
+        ],
+      },
+    });
+
+    const tool = h.state().items[0];
+    expect(tool.kind === "tool" && tool.changes[0]).toMatchObject({
+      path: "src/new.ts",
+      before: null,
+      after: "one\ntwo",
+      insertions: 2,
+      deletions: 0,
+    });
+  });
+
   test("lifts TodoWrite out of the tool list into the plan row", () => {
     const h = harness();
     h.feed({

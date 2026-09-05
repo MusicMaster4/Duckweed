@@ -14,6 +14,7 @@ import { applyEvent, type AgentEvent } from "../events";
 import type { AgentLaunch } from "../launch";
 import {
   emptyUsage,
+  makeChange,
   makePatchChange,
   toolKind,
   type AgentAccessMode,
@@ -70,10 +71,14 @@ interface CodexGoal {
 const MAX_GOAL_OBJECTIVE_CHARS = 4_000;
 const RESUME_PAGE_SIZE = 100;
 const MAX_RESUMED_TURNS = 500;
+/** Subagent detail is lazy and intentionally bounded independently of root history. */
+const CHILD_HISTORY_PAGE_SIZE = 8;
 const FAST_SERVICE_TIER = "priority";
 const DEFAULT_SERVICE_TIER = "default";
 /** Matches the native log monitor's guard for Codex auto-continuations. */
 const ROOT_COMPLETION_QUIET_MS = 800;
+/** Child transcripts are detail views, not a 60 fps animation surface. */
+const DEFAULT_CHILD_STREAM_PUBLISH_MS = 125;
 /**
  * Codex `thread/resume` has no server-side timeout. A thread left `active`
  * with no running turn never answers, which used to leave the pane loading
@@ -104,6 +109,10 @@ function pickSideAnswer(messages: Map<string, CodexSideMessage>): string {
 interface CodexAdapterOptions {
   /** Test seam; production uses the same 800 ms quiet window as raw Codex. */
   completionQuietMs?: number;
+  /** Test seam; production batches nested transcript reduction and paints to this cadence. */
+  childStreamPublishMs?: number;
+  /** Test seam for verifying that child token bursts are reduced in bounded batches. */
+  childEventReducer?: (state: AgentSessionState, event: AgentEvent) => AgentSessionState;
   /**
    * How long `thread/resume` and history pages may sit unanswered before
    * Duckweed cancels them. Codex can hang forever on a stale-active thread;
@@ -239,6 +248,8 @@ interface ChildThread {
   prompt: string | null;
   activity: string | null;
   currentTurnId: string | null;
+  /** A streamed/collaboration status outranks the eventually-consistent thread/read snapshot. */
+  hasLiveStatus: boolean;
   streamed: Set<string>;
   state: AgentSessionState;
 }
@@ -264,20 +275,39 @@ interface CodexSideThread {
   sideQuestion: AgentSideQuestion;
 }
 
-/** Codex sends a unified patch per changed file. */
+/**
+ * Codex file changes: add/delete carry the raw file body, updates carry a
+ * unified patch. Feeding the body through the patch renderer would paint every
+ * line as context instead of the green/red the git diff uses for new/removed
+ * files.
+ */
+function patchKind(raw: unknown): "add" | "delete" | "update" {
+  if (raw === "add" || raw === "delete") return raw;
+  const type = asString(asRecord(raw)?.type);
+  if (type === "add" || type === "delete") return type;
+  return "update";
+}
+
 function readFileChanges(raw: unknown): AgentFileChange[] {
   return asArray(raw)
     .map((entry) => asRecord(entry))
     .filter((change): change is Record<string, unknown> => change !== null)
     .map((change) => {
       const path = asString(change.path) ?? "";
-      return makePatchChange(path, asString(change.diff) ?? "");
+      const diff = asString(change.diff) ?? "";
+      const kind = patchKind(change.kind);
+      if (kind === "add") return makeChange(path, null, diff);
+      if (kind === "delete") return makeChange(path, diff, null);
+      return makePatchChange(path, diff);
     })
     .filter((change) => change.path);
 }
 
 export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdapter {
   const completionQuietMs = options.completionQuietMs ?? ROOT_COMPLETION_QUIET_MS;
+  const childStreamPublishMs =
+    options.childStreamPublishMs ?? DEFAULT_CHILD_STREAM_PUBLISH_MS;
+  const reduceChildEvent = options.childEventReducer ?? applyEvent;
   const resumeTimeoutMs = options.resumeTimeoutMs ?? RESUME_RPC_TIMEOUT_MS;
   let nextId = 1;
   const pending = new Map<RequestKey, Pending>();
@@ -305,6 +335,8 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
    * terminal notifications, while a new auto-continuation can cancel it.
    */
   let rootPendingCompletion: { turnId: string | null } | null = null;
+  /** A provider boundary survives cancellation of the UI's completion timer. */
+  let rootTurnCompletionObserved = false;
   /** Same-turn input makes the first final answer non-terminal. */
   let rootSteerRequestsInFlight = 0;
   let rootTurnWasSteered = false;
@@ -384,9 +416,25 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
   const hydratingChildren = new Map<string, Promise<boolean>>();
   /** Queue one explicit refresh when focus arrives during an automatic read. */
   const queuedChildRefreshes = new Map<string, Promise<boolean>>();
+  /**
+   * Token deltas waiting to be reduced, grouped by child and logical stream.
+   * Reducing every token immediately repeatedly copied the growing string for
+   * every active child. With a busy Codex fleet that quadratic allocation was
+   * enough to exhaust WebView2's renderer before the paint throttle helped.
+   */
+  const pendingChildStreamEvents = new Map<string, Map<string, AgentEvent>>();
+  /** One shared timer keeps a fleet on one cadence instead of N staggered timers. */
+  let childStreamFlushTimer: ReturnType<typeof setTimeout> | null = null;
   let childDiscoveryInFlight: Promise<void> | null = null;
   let childDiscoveryRequested = false;
   let childDiscoveryShouldSynthesize = false;
+  /**
+   * Replaying persisted collaboration items must not recursively fetch every
+   * referenced child. A resumed fleet can contain many large transcripts, and
+   * the old eager `thread/read(includeTurns: true)` path loaded all of them at
+   * once before the user opened a single detail panel.
+   */
+  let persistedHistoryReplayDepth = 0;
   /** Ephemeral `/side` and `/btw` forks, kept outside the main transcript. */
   const sideThreads = new Map<string, CodexSideThread>();
   let pendingSideThread: CodexSideThread | null = null;
@@ -420,6 +468,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     rootTurnMayBeActive = false;
     rootTurnStatusConfirmed = false;
     rootPendingCompletion = null;
+    rootTurnCompletionObserved = false;
     rootSteerRequestsInFlight = 0;
     rootTurnWasSteered = false;
     rootCompletionSeenDuringSteer = undefined;
@@ -492,6 +541,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       prompt: null,
       activity: null,
       currentTurnId: null,
+      hasLiveStatus: false,
       streamed: new Set<string>(),
       state: newChildState(childThreadId),
     };
@@ -528,7 +578,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     return "pending";
   }
 
-  function syncChild(childThreadId: string, ctx: AdapterContext): void {
+  function publishChild(childThreadId: string, ctx: AdapterContext): void {
     const child = children.get(childThreadId);
     if (!child?.callId) return;
     const status = childToolStatus(child.state.status);
@@ -558,14 +608,120 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     });
   }
 
+  function childStreamEventKey(event: AgentEvent): string | null {
+    if (event.type === "assistant-delta" || event.type === "thinking-delta") {
+      return `${event.type}:${event.id}`;
+    }
+    if (event.type === "tool" && event.outputDelta !== undefined) {
+      return `tool-output:${event.callId}`;
+    }
+    return null;
+  }
+
+  function mergeChildStreamEvent(
+    previous: AgentEvent | undefined,
+    event: AgentEvent,
+  ): AgentEvent {
+    if (!previous || previous.type !== event.type) return event;
+    if (
+      (event.type === "assistant-delta" || event.type === "thinking-delta") &&
+      (previous.type === "assistant-delta" || previous.type === "thinking-delta")
+    ) {
+      return { ...event, text: previous.text + event.text };
+    }
+    if (event.type === "tool" && previous.type === "tool") {
+      return {
+        ...event,
+        outputDelta: (previous.outputDelta ?? "") + (event.outputDelta ?? ""),
+      };
+    }
+    return event;
+  }
+
+  /** Apply one child's queued token burst without publishing intermediate states. */
+  function reducePendingChildStream(childThreadId: string): boolean {
+    const events = pendingChildStreamEvents.get(childThreadId);
+    if (!events) return false;
+    pendingChildStreamEvents.delete(childThreadId);
+    const child = childFor(childThreadId);
+    for (const event of events.values()) {
+      child.state = reduceChildEvent(child.state, event);
+    }
+    return true;
+  }
+
+  function cancelEmptyChildStreamTimer(): void {
+    if (pendingChildStreamEvents.size > 0 || childStreamFlushTimer === null) return;
+    clearTimeout(childStreamFlushTimer);
+    childStreamFlushTimer = null;
+  }
+
+  function flushChildStreams(ctx: AdapterContext): void {
+    if (childStreamFlushTimer !== null) {
+      clearTimeout(childStreamFlushTimer);
+      childStreamFlushTimer = null;
+    }
+    const childThreadIds = [...pendingChildStreamEvents.keys()];
+    for (const childThreadId of childThreadIds) {
+      if (reducePendingChildStream(childThreadId)) publishChild(childThreadId, ctx);
+    }
+  }
+
+  /** Flush pending deltas before snapshots or metadata publish the same child. */
+  function syncChild(childThreadId: string, ctx: AdapterContext): void {
+    reducePendingChildStream(childThreadId);
+    cancelEmptyChildStreamTimer();
+    publishChild(childThreadId, ctx);
+  }
+
+  /**
+   * Reduce and publish all streaming children at a readable shared cadence.
+   * Besides keeping React away from token frequency, this makes the number of
+   * timers and paint opportunities independent of the fleet size.
+   */
+  function scheduleChildStream(
+    childThreadId: string,
+    key: string,
+    event: AgentEvent,
+    ctx: AdapterContext,
+  ): void {
+    let streams = pendingChildStreamEvents.get(childThreadId);
+    if (!streams) {
+      streams = new Map();
+      pendingChildStreamEvents.set(childThreadId, streams);
+    }
+    streams.set(key, mergeChildStreamEvent(streams.get(key), event));
+    if (childStreamPublishMs <= 0) {
+      flushChildStreams(ctx);
+      return;
+    }
+    if (childStreamFlushTimer !== null) return;
+    childStreamFlushTimer = setTimeout(() => {
+      childStreamFlushTimer = null;
+      flushChildStreams(ctx);
+    }, childStreamPublishMs);
+  }
+
   function emitChild(
     childThreadId: string,
     event: AgentEvent,
     ctx: AdapterContext,
   ): void {
     const child = childFor(childThreadId);
-    child.state = applyEvent(child.state, event);
-    syncChild(childThreadId, ctx);
+    if (event.type === "status" || event.type === "turn-end") {
+      child.hasLiveStatus = true;
+    }
+    const streamKey = childStreamEventKey(event);
+    if (streamKey) {
+      scheduleChildStream(childThreadId, streamKey, event, ctx);
+      return;
+    }
+    // Preserve protocol order: a completion must settle text that arrived
+    // immediately before it, even if the cadence timer has not fired yet.
+    reducePendingChildStream(childThreadId);
+    cancelEmptyChildStreamTimer();
+    child.state = reduceChildEvent(child.state, event);
+    publishChild(childThreadId, ctx);
   }
 
   function childContext(childThreadId: string, ctx: AdapterContext): AdapterContext {
@@ -614,11 +770,13 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     childThreadId: string,
     ctx: AdapterContext,
     force = false,
+    queueIfActive = false,
   ): Promise<boolean> {
+    if (persistedHistoryReplayDepth > 0) return Promise.resolve(false);
     if (!force && hydratedChildren.has(childThreadId)) return Promise.resolve(true);
     const active = hydratingChildren.get(childThreadId);
     if (active) {
-      if (!force) return active;
+      if (!force || !queueIfActive) return active;
       const queued = queuedChildRefreshes.get(childThreadId);
       if (queued) return queued;
       const refresh = active
@@ -630,45 +788,91 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       return refresh;
     }
 
-    const hydration = request(ctx, "thread/read", {
+    const metadataRequestId = nextId++;
+    const hydration = requestWithTimeout(ctx, metadataRequestId, "thread/read", {
       threadId: childThreadId,
-      includeTurns: true,
+      includeTurns: false,
     })
-      .then((result) => {
+      .then(async (result) => {
         const thread = asRecord(result.thread) ?? result;
         const child = childFor(childThreadId);
         child.label =
           asString(thread.agentNickname) ?? asString(thread.nickname) ?? child.label;
         child.role = asString(thread.agentRole) ?? asString(thread.role) ?? child.role;
         child.model = asString(thread.model) ?? child.model;
+
+        let turns = asArray(thread.turns);
+        if (turns.length === 0) {
+          const pageRequestId = nextId++;
+          const page = await requestWithTimeout(ctx, pageRequestId, "thread/turns/list", {
+            threadId: childThreadId,
+            limit: CHILD_HISTORY_PAGE_SIZE,
+            sortDirection: "desc",
+            itemsView: "full",
+          });
+          turns = asArray(page.data).reverse();
+        }
         const status = threadStatus(thread.status) ?? "idle";
-        if (status === "working") {
+        if (
+          status === "working" &&
+          (!child.hasLiveStatus || child.state.status === "working")
+        ) {
           // The parent collaboration item independently reported this child as
           // running, so its coarse thread status is corroborated here.
-          child.currentTurnId ??= hydratedTurnId(thread, true);
-        } else {
+          child.currentTurnId ??= hydratedTurnId({ ...thread, turns }, true);
+        } else if (!child.hasLiveStatus) {
           child.currentTurnId = null;
         }
 
-        const nested = childContext(childThreadId, ctx);
-        for (const rawTurn of asArray(thread.turns)) {
-          const turn = asRecord(rawTurn);
-          if (!turn) continue;
-          for (const rawItem of asArray(turn.items)) {
-            const item = asRecord(rawItem);
-            if (!item) continue;
-            if (replayUserMessage(item, nested)) continue;
-            handleItem(item, true, nested, child.streamed);
-          }
-        }
-        emitChild(
-          childThreadId,
-          {
-            type: "status",
-            status,
+        // The metadata read plus bounded page form a replacement snapshot. Replaying it on
+        // top of the existing state appended every historical message again
+        // each time completion, status, or focus requested a refresh. Build a
+        // fresh state so repeated reads are idempotent, then publish once.
+        let hydratedState = newChildState(childThreadId);
+        const hydratedStreamed = new Set<string>();
+        const nested: AdapterContext = {
+          ...ctx,
+          emit: (event) => {
+            hydratedState = applyEvent(hydratedState, event);
           },
-          ctx,
-        );
+        };
+        persistedHistoryReplayDepth += 1;
+        try {
+          for (const rawTurn of turns) {
+            const turn = asRecord(rawTurn);
+            if (!turn) continue;
+            for (const rawItem of asArray(turn.items)) {
+              const item = asRecord(rawItem);
+              if (!item) continue;
+              if (replayUserMessage(item, nested)) continue;
+              handleItem(item, true, nested, hydratedStreamed);
+              const itemId = asString(item.id);
+              if (itemId && item.type === "agentMessage") {
+                hydratedStreamed.add(`am-${itemId}`);
+              } else if (itemId && item.type === "reasoning") {
+                hydratedStreamed.add(`rs-${itemId}`);
+              }
+            }
+          }
+        } finally {
+          persistedHistoryReplayDepth -= 1;
+        }
+        // Live status events can overtake thread/read. Never flash a completed
+        // child back to working because an older snapshot arrived late.
+        if (!child.hasLiveStatus) {
+          hydratedState = applyEvent(hydratedState, { type: "status", status });
+        } else {
+          hydratedState = {
+            ...hydratedState,
+            status: child.state.status,
+            error: child.state.error,
+            workStartedAt: child.state.workStartedAt,
+            lastWorkedForMs: child.state.lastWorkedForMs,
+          };
+        }
+        child.state = hydratedState;
+        child.streamed = hydratedStreamed;
+        syncChild(childThreadId, ctx);
         hydratedChildren.add(childThreadId);
         return true;
       })
@@ -715,6 +919,8 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     rawThread: Record<string, unknown>,
     ctx: AdapterContext,
     synthesizeMissing: boolean,
+    liveStatus = false,
+    hydrateTranscript = true,
   ): string | null {
     const childThreadId = asString(rawThread.id);
     if (!childThreadId || childThreadId === threadId) return null;
@@ -731,7 +937,8 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     child.prompt = preview ?? child.prompt;
 
     const status = threadStatus(rawThread.status);
-    if (status) {
+    if (status && (liveStatus || !child.hasLiveStatus)) {
+      if (liveStatus) child.hasLiveStatus = true;
       child.state = applyEvent(child.state, { type: "status", status });
     }
 
@@ -768,7 +975,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
 
     if (child.callId) {
       syncChild(childThreadId, ctx);
-      void hydrateChild(childThreadId, ctx);
+      if (hydrateTranscript) void hydrateChild(childThreadId, ctx);
     }
     return childThreadId;
   }
@@ -798,7 +1005,11 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
           for (const rawThread of asArray(result.data)) {
             const childThread = asRecord(rawThread);
             if (!childThread) continue;
-            adoptChildThread(childThread, ctx, synthesize);
+            // Treat the server-side filter as a convenience, not a trust
+            // boundary. Adopting an unrelated thread here would fetch its
+            // transcript and can multiply resume traffic dramatically.
+            if (asString(childThread.parentThreadId) !== parentThreadId) continue;
+            adoptChildThread(childThread, ctx, synthesize, false, !synthesize);
           }
         } catch {
           // Older app-server builds can stream child events without supporting
@@ -1129,12 +1340,13 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     command: "/side" | "/btw",
     question: string,
     ctx: AdapterContext,
+    images: AgentImageAttachment[] = [],
   ): void {
-    if (!question) {
+    if (!question && images.length === 0) {
       ctx.emit({
         type: "notice",
         tone: "error",
-        text: `Usage: ${command} <your question>`,
+        text: `Usage: ${command} <your question or attached image>`,
       });
       return;
     }
@@ -1164,6 +1376,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         id: `codex-side-${sideSequence}`,
         command,
         question,
+        images: [...images],
         answer: "",
         status: "asking",
       },
@@ -1189,7 +1402,13 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         sideThreads.set(sideThreadId, side);
         const started = await request(ctx, "turn/start", {
           threadId: sideThreadId,
-          input: [{ type: "text", text: question }],
+          input: [
+            ...(question ? [{ type: "text", text: question }] : []),
+            ...images.map((image) => ({
+              type: "image",
+              url: imagePayloadDataUrl(image),
+            })),
+          ],
           approvalPolicy: "never",
           sandboxPolicy: { type: "readOnly" },
           ...(currentModel ? { model: currentModel } : {}),
@@ -1555,6 +1774,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
             child.prompt = prompt ?? child.prompt;
             child.activity = activity ? oneLine(activity, 120) : child.activity;
             if (childStatus && childStatus !== "pending") {
+              child.hasLiveStatus = true;
               child.state = applyEvent(child.state, {
                 type: "status",
                 status:
@@ -1604,6 +1824,11 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         const kind = asString(item.kind) ?? "interacted";
         const agentPath = asString(item.agentPath);
         const agentThreadId = asString(item.agentThreadId);
+        // Codex also reports activity for the root participant during a
+        // collaboration run. Registering that row as a child makes every
+        // later root event look nested and used to trigger a full root-history
+        // read for each fleet update.
+        if (agentThreadId === threadId || agentPath === "/root" || agentPath === "/") return;
         if (agentThreadId) {
           adoptChildThread(
             {
@@ -1615,6 +1840,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
           );
           const child = childFor(agentThreadId);
           child.activity = kind.replace(/([a-z])([A-Z])/g, "$1 $2");
+          child.hasLiveStatus = true;
           child.state = applyEvent(child.state, {
             type: "status",
             status: kind === "interrupted" ? "error" : kind === "started" ? "working" : "idle",
@@ -1712,7 +1938,9 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     const images = content
       .map((entry, index) => replayImage(entry, itemId, index))
       .filter((image): image is AgentImageAttachment => image !== null);
-    if (text || images.length) ctx.emit({ type: "user", text, images });
+    if (text || images.length) {
+      ctx.emit({ type: "user", id: `history-user-${itemId}`, text, images });
+    }
     return true;
   }
 
@@ -1721,15 +1949,20 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     ctx.emit({ type: "transcript" });
     streamed.clear();
 
-    for (const rawTurn of turns) {
-      const turn = asRecord(rawTurn);
-      if (!turn) continue;
-      for (const rawItem of asArray(turn.items)) {
-        const item = asRecord(rawItem);
-        if (!item) continue;
-        if (replayUserMessage(item, ctx)) continue;
-        handleItem(item, true, ctx);
+    persistedHistoryReplayDepth += 1;
+    try {
+      for (const rawTurn of turns) {
+        const turn = asRecord(rawTurn);
+        if (!turn) continue;
+        for (const rawItem of asArray(turn.items)) {
+          const item = asRecord(rawItem);
+          if (!item) continue;
+          if (replayUserMessage(item, ctx)) continue;
+          handleItem(item, true, ctx);
+        }
       }
+    } finally {
+      persistedHistoryReplayDepth -= 1;
     }
   }
 
@@ -1779,16 +2012,19 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         const turn = asRecord(params.turn);
         const startedTurnId = asString(turn?.id);
         const continuesAfterPendingCompletion = Boolean(
-          rootPendingCompletion &&
+          (rootPendingCompletion || rootTurnCompletionObserved) &&
           startedTurnId &&
-          startedTurnId !== currentTurnId,
+          startedTurnId !== currentTurnId &&
+          !completedRootTurnIds.has(startedTurnId),
         );
         if (!continuesAfterPendingCompletion && rootTurnSignalIsStale(startedTurnId)) return;
         if (startedTurnId !== currentTurnId) {
+          rememberRootTurnCompleted(currentTurnId);
           rootTurnWasSteered = false;
           rootCompletionSeenDuringSteer = undefined;
         }
         cancelPendingRootCompletion();
+        rootTurnCompletionObserved = false;
         currentTurnId = startedTurnId;
         rootTurnMayBeActive = true;
         rootTurnStatusConfirmed = true;
@@ -1799,6 +2035,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         const turn = asRecord(params.turn);
         const completedTurnId = asString(turn?.id);
         if (rootTurnSignalIsStale(completedTurnId)) return;
+        rootTurnCompletionObserved = true;
         const error = asRecord(turn?.error);
         if (error) {
           ctx.emit({
@@ -1994,7 +2231,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         !currentTurnId ||
         eventTurnId === currentTurnId ||
         Boolean(
-          rootPendingCompletion &&
+          (rootPendingCompletion || rootTurnCompletionObserved) &&
           eventTurnId &&
           !completedRootTurnIds.has(eventTurnId),
         )
@@ -2020,7 +2257,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     switch (method) {
       case "thread/started": {
         const thread = asRecord(params.thread);
-        if (thread) adoptChildThread(thread, ctx, false);
+        if (thread) adoptChildThread(thread, ctx, false, true);
         return;
       }
       case "turn/started": {
@@ -2584,12 +2821,16 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       });
   }
 
-  function handleCommand(text: string, ctx: AdapterContext): AgentCommandResult {
+  function handleCommand(
+    text: string,
+    ctx: AdapterContext,
+    images: AgentImageAttachment[] = [],
+  ): AgentCommandResult {
     const space = text.search(/\s/);
     const name = (space < 0 ? text : text.slice(0, space)).toLowerCase();
     const arg = space < 0 ? "" : text.slice(space + 1).trim();
     if (name === "/side" || name === "/btw") {
-      startSideQuestion(name, arg, ctx);
+      startSideQuestion(name, arg, ctx, images);
       return "handled";
     }
     ctx.emit({ type: "user", text });
@@ -2784,6 +3025,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     prompt: (prompt, ctx) => {
       if (!threadId) return;
       cancelPendingRootCompletion();
+      rootTurnCompletionObserved = false;
       rootTurnWasSteered = false;
       rootCompletionSeenDuringSteer = undefined;
       ctx.emit({ type: "user", text: prompt.text, images: prompt.images });
@@ -2911,13 +3153,13 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         const child = childFor(childThreadId);
         child.callId ??= callId;
         syncChild(childThreadId, ctx);
-        return hydrateChild(childThreadId, ctx, true);
+        return hydrateChild(childThreadId, ctx, true, true);
       }
 
       await discoverChildThreads(ctx);
       const linked = [...children.entries()].find(([, child]) => child.callId === callId);
       if (!linked) return false;
-      return hydrateChild(linked[0], ctx, true);
+      return hydrateChild(linked[0], ctx, true, true);
     },
 
     promptSubagent: async (childThreadId, prompt, ctx) => {
@@ -2965,6 +3207,8 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
 
     command: handleCommand,
 
+    commandSupportsImages: (text) => /^\/(?:side|btw)(?:\s|$)/i.test(text.trim()),
+
     commandAvailableDuringTurn: (text) => {
       const trimmed = text.trim();
       // `/goal pause` has to land while the provider is working. `/side` and
@@ -3008,6 +3252,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
      */
     resume: (sessionId, ctx) => {
       cancelPendingRootCompletion();
+      rootTurnCompletionObserved = false;
       hydratingResume = true;
       resumeAborted = false;
       ctx.emit({ type: "history-loading", loading: true });
@@ -3224,6 +3469,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       if (!threadId || !currentTurnId) {
         // Working without an interruptible turn is stale adapter state. Let the
         // session recover instead of leaving a Stop button that cannot work.
+        settleRootTurn(null);
         ctx.emit({ type: "turn-end" });
         return;
       }
@@ -3231,14 +3477,16 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       void request(ctx, "turn/interrupt", { threadId, turnId })
         .then(() => {
           if (currentTurnId !== turnId) return;
-          currentTurnId = null;
+          cancelPendingRootCompletion();
+          settleRootTurn(turnId);
           ctx.emit({ type: "turn-end" });
         })
         .catch(() => {
           // The turn may have finished between the click and the call. Either
           // way, keeping the local session marked as working would be stale.
           if (currentTurnId !== turnId) return;
-          currentTurnId = null;
+          cancelPendingRootCompletion();
+          settleRootTurn(turnId);
           ctx.emit({ type: "turn-end" });
         });
     },

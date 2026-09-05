@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 
 import type { AgentFrame, AgentSpawnOptions } from "../ipc";
 import type { AgentLaunch } from "./launch";
+import type { AgentImageAttachment } from "./types";
 
 const store = new Map<string, string>();
 const stubWindow = {
@@ -100,6 +101,14 @@ const codexLaunch: AgentLaunch = {
   ...grokLaunch,
   agent: "codex",
   program: "codex",
+};
+
+const image: AgentImageAttachment = {
+  id: "image-1",
+  name: "screenshot.png",
+  mimeType: "image/png",
+  dataUrl: "data:image/png;base64,aGVsbG8=",
+  size: 5,
 };
 
 function rpc(value: unknown): Record<string, unknown> {
@@ -356,5 +365,61 @@ describe("Custom agent UI sessions", () => {
     } finally {
       unsubscribe();
     }
+  });
+
+  test("routes /side with an image into a fork instead of the main Codex turn", async () => {
+    expect(await session.start("t-codex-side-image", codexLaunch, "H:/project")).toBeNull();
+    await codexHandshake();
+    const beforeSubmit = sent.length;
+
+    session.submit("t-codex-side-image", "/side inspect this", [image]);
+    await flush();
+
+    const submitted = sent.slice(beforeSubmit).map(rpc);
+    const fork = submitted.find((message) => message.method === "thread/fork");
+    expect(fork).toBeDefined();
+    expect(submitted.some((message) => message.method === "turn/start")).toBe(false);
+    expect(session.get("t-codex-side-image")?.sideQuestion).toMatchObject({
+      question: "inspect this",
+      images: [image],
+    });
+
+    feed({ jsonrpc: "2.0", id: fork?.id, result: { thread: { id: "side_image" } } });
+    await flush();
+
+    const sideTurn = sent.map(rpc).find(
+      (message) =>
+        message.method === "turn/start" &&
+        (message.params as Record<string, unknown>)?.threadId === "side_image",
+    );
+    expect(sideTurn).toMatchObject({
+      params: {
+        input: [
+          { type: "text", text: "inspect this" },
+          { type: "image", url: image.dataUrl },
+        ],
+      },
+    });
+  });
+
+  test("runs image-backed /side immediately while the main Codex turn is working", async () => {
+    expect(await session.start("t-codex-side-image-working", codexLaunch, "H:/project")).toBeNull();
+    await codexHandshake();
+    session.submit("t-codex-side-image-working", "keep working");
+    await flush();
+    expect(session.get("t-codex-side-image-working")?.status).toBe("working");
+    const beforeSide = sent.length;
+
+    session.submit("t-codex-side-image-working", "/side inspect this", [image]);
+    await flush();
+
+    const sideMessages = sent.slice(beforeSide).map(rpc);
+    expect(sideMessages.some((message) => message.method === "thread/fork")).toBe(true);
+    expect(session.get("t-codex-side-image-working")?.pending).toEqual([]);
+    expect(session.get("t-codex-side-image-working")?.sideQuestion).toMatchObject({
+      question: "inspect this",
+      images: [image],
+      status: "asking",
+    });
   });
 });

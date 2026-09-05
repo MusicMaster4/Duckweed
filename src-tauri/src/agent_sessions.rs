@@ -40,7 +40,7 @@ const HEAD_BYTES: u64 = 256 * 1024;
 const MAX_TITLE: usize = 160;
 /// A resumed transcript stays bounded so one long-running chat cannot freeze a pane.
 const MAX_TRANSCRIPT_ITEMS: usize = 1_000;
-const MAX_TRANSCRIPT_TEXT: usize = 400_000;
+const MAX_TRANSCRIPT_TEXT: usize = 160_000;
 const MAX_TRANSCRIPT_TOOL_OUTPUT: usize = 20_000;
 
 /// One resumable conversation.

@@ -4,6 +4,7 @@ import {
   distanceFromBottom,
   isAtScrollBottom,
   shouldShowJumpToBottom,
+  syncObservedChildren,
 } from "./agentScroll";
 
 describe("agent surface scrolling", () => {
@@ -31,5 +32,21 @@ describe("agent surface scrolling", () => {
 
   test("never shows the jump control when the transcript does not overflow", () => {
     expect(shouldShowJumpToBottom(metrics(0, 400, 500), true)).toBe(false);
+  });
+
+  test("unobserves transcript roots removed during subagent navigation", () => {
+    const parent = { id: "parent" };
+    const child = { id: "child" };
+    const observed = new Set([parent]);
+    const calls: string[] = [];
+    const observer = {
+      observe: (target: { id: string }) => calls.push(`observe:${target.id}`),
+      unobserve: (target: { id: string }) => calls.push(`unobserve:${target.id}`),
+    };
+
+    syncObservedChildren(observer, observed, [child]);
+
+    expect(calls).toEqual(["unobserve:parent", "observe:child"]);
+    expect([...observed]).toEqual([child]);
   });
 });

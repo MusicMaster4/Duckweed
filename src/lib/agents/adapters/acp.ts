@@ -777,7 +777,7 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
         capabilities: {
           inputs: {
             text: true,
-            image: supportsImages,
+            image: supportsImages || supportsEmbeddedContext,
             file: supportsEmbeddedContext,
             embeddedContext: supportsEmbeddedContext,
             skill: agent === "grok",
@@ -1320,13 +1320,28 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
 
   function promptContent(prompt: AgentPrompt) {
     const providerText = promptTextWithLocalSkills(prompt);
+    // Grok currently declines ACP image blocks but accepts the same binary
+    // payload as embedded context. Keep the native block for agents that
+    // advertise it, then fall back to ACP's resource representation.
+    const imageContent = supportsImages
+      ? prompt.images.map((image) => ({
+          type: "image",
+          data: imagePayloadBase64(image),
+          mimeType: image.mimeType,
+        }))
+      : supportsEmbeddedContext
+        ? prompt.images.map((image) => ({
+            type: "resource",
+            resource: {
+              uri: `attachment://duckweed/${encodeURIComponent(image.id)}/${encodeURIComponent(image.name)}`,
+              blob: imagePayloadBase64(image),
+              mimeType: image.mimeType,
+            },
+          }))
+        : [];
     return [
       ...(providerText ? [{ type: "text", text: providerText }] : []),
-      ...(supportsImages ? prompt.images : []).map((image) => ({
-        type: "image",
-        data: imagePayloadBase64(image),
-        mimeType: image.mimeType,
-      })),
+      ...imageContent,
       ...(supportsEmbeddedContext
         ? (prompt.parts ?? []).flatMap((part) => {
             if (part.type === "file") {
@@ -1471,7 +1486,7 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
 
     prompt: (prompt, ctx) => {
       if (!sessionId) return;
-      if (prompt.images.length && !supportsImages) {
+      if (prompt.images.length && !supportsImages && !supportsEmbeddedContext) {
         ctx.emit({
           type: "notice",
           tone: "error",

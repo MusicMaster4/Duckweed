@@ -60,6 +60,8 @@ export type AgentEvent =
   /** The user's own message, echoed into the transcript. */
   | {
       type: "user";
+      /** Stable provider id for replayed history. Live prompts generate one locally. */
+      id?: string;
       text: string;
       images?: AgentImageAttachment[];
       /** This message steered the active turn instead of starting a new one. */
@@ -135,14 +137,77 @@ export type AgentEvent =
 const MAX_TOOL_OUTPUT = 20_000;
 
 /** Cap a streamed block so one runaway response cannot grow without bound. */
-const MAX_TEXT = 400_000;
+const MAX_TEXT = 160_000;
+
+/** Child detail is auxiliary UI and must never be able to evict the parent chat. */
+const MAX_CHILD_ITEMS = 160;
+const MAX_CHILD_TEXT = 1_000_000;
+const MAX_TOOL_CHANGES = 8;
+const MAX_CHANGE_TEXT = 40_000;
+
+function itemTextSize(item: AgentItem): number {
+  if (item.kind === "user") {
+    return (
+      item.text.length +
+      (item.images ?? []).reduce(
+        (total, image) =>
+          total + image.dataUrl.length + (image.thumbnailDataUrl?.length ?? 0),
+        0,
+      )
+    );
+  }
+  if (item.kind === "assistant" || item.kind === "thinking" || item.kind === "notice") {
+    return item.text.length;
+  }
+  if (item.kind === "plan") {
+    return item.steps.reduce((total, step) => total + step.text.length, 0);
+  }
+  return (
+    item.output.length +
+    (item.command?.length ?? 0) +
+    item.changes.reduce(
+      (total, change) =>
+        total +
+        change.path.length +
+        (change.before?.length ?? 0) +
+        (change.after?.length ?? 0) +
+        (change.diff?.length ?? 0),
+      0,
+    ) +
+    (item.subagent?.items?.reduce((total, nested) => total + itemTextSize(nested), 0) ?? 0)
+  );
+}
+
+function boundChildItems(items: AgentItem[]): AgentItem[] {
+  let start = items.length;
+  let text = 0;
+  while (start > 0 && items.length - start < MAX_CHILD_ITEMS) {
+    const size = itemTextSize(items[start - 1]);
+    if (start < items.length && text + size > MAX_CHILD_TEXT) break;
+    text += size;
+    start -= 1;
+  }
+  return start === 0 ? items : items.slice(start);
+}
 
 function clampEnd(text: string, limit: number): string {
   return text.length <= limit ? text : `…${text.slice(text.length - limit)}`;
 }
 
+function boundChanges(changes: AgentFileChange[]): AgentFileChange[] {
+  return changes.slice(-MAX_TOOL_CHANGES).map((change) => ({
+    ...change,
+    before: change.before === null ? null : clampEnd(change.before, MAX_CHANGE_TEXT),
+    after: change.after === null ? null : clampEnd(change.after, MAX_CHANGE_TEXT),
+    diff: change.diff === null ? null : clampEnd(change.diff, MAX_CHANGE_TEXT),
+  }));
+}
+
+let itemSequence = 0;
+
 function nextId(state: AgentSessionState): string {
-  return `i${state.items.length}-${Date.now().toString(36)}`;
+  itemSequence += 1;
+  return `i${state.items.length}-${Date.now().toString(36)}-${itemSequence.toString(36)}`;
 }
 
 function workTimingAfterStatus(
@@ -311,6 +376,18 @@ function mergeSubagentMeta(
  * that is what `useSyncExternalStore` compares.
  */
 export function applyEvent(state: AgentSessionState, event: AgentEvent): AgentSessionState {
+  const next = reduceEvent(state, event);
+  if (next === state) return next;
+  // Root messages are the conversation, not a cache. The previous global
+  // bound made a large delegated item remove every earlier user and assistant
+  // message from the screen. Only independently recoverable child detail is
+  // windowed here; the provider still owns its full transcript on disk.
+  if (!next.termId.startsWith("subagent:")) return next;
+  const items = boundChildItems(next.items);
+  return items === next.items ? next : { ...next, items };
+}
+
+function reduceEvent(state: AgentSessionState, event: AgentEvent): AgentSessionState {
   switch (event.type) {
     case "session":
       return {
@@ -382,7 +459,7 @@ export function applyEvent(state: AgentSessionState, event: AgentEvent): AgentSe
           ...state.items.filter((item) => item.kind !== "notice" || !item.transient),
           {
             kind: "user",
-            id: nextId(state),
+            id: event.id ?? nextId(state),
             at: Date.now(),
             text: event.text,
             images: event.images ? [...event.images] : [],
@@ -482,7 +559,7 @@ export function applyEvent(state: AgentSessionState, event: AgentEvent): AgentSe
               status: event.status ?? "running",
               command: event.command ?? null,
               output: clampEnd(event.output ?? event.outputDelta ?? "", MAX_TOOL_OUTPUT),
-              changes: event.changes ?? [],
+              changes: event.changes ? boundChanges(event.changes) : [],
               ...(subagent ? { subagent } : {}),
             },
           ],
@@ -505,7 +582,7 @@ export function applyEvent(state: AgentSessionState, event: AgentEvent): AgentSe
         status: event.status ?? current.status,
         command: event.command === undefined ? current.command : event.command,
         output: clampEnd(output, MAX_TOOL_OUTPUT),
-        changes: event.changes ?? current.changes,
+        changes: event.changes ? boundChanges(event.changes) : current.changes,
         subagent: mergeSubagentMeta(
           current.subagent,
           event.subagent,
@@ -621,7 +698,9 @@ export function applyEvent(state: AgentSessionState, event: AgentEvent): AgentSe
     case "permission":
       return {
         ...state,
-        permission: event.permission,
+        permission: event.permission
+          ? { ...event.permission, changes: boundChanges(event.permission.changes) }
+          : null,
         status: event.permission ? "waiting" : state.status === "waiting" ? "working" : state.status,
       };
 
