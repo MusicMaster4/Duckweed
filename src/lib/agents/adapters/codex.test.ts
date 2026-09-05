@@ -2946,6 +2946,105 @@ describe("codex adapter", () => {
     expect(h.state().status).toBe("idle");
   });
 
+  test("keeps follow-up activity visible when active status precedes its turn-start notification", async () => {
+    const h = harness({}, { completionQuietMs: 20 });
+    await h.handshake();
+    h.notify("turn/started", { threadId: "thread_1", turn: { id: "old" } });
+    h.notify("turn/completed", { threadId: "thread_1", turn: { id: "old", status: "completed" } });
+    h.notify("thread/status/changed", { threadId: "thread_1", status: { type: "active" } });
+    h.notify("turn/started", { threadId: "thread_1", turn: { id: "next" } });
+    h.notify("item/reasoning/textDelta", {
+      threadId: "thread_1", turnId: "next", itemId: "progress", delta: "Checking the fix.",
+    });
+    h.notify("item/started", {
+      threadId: "thread_1", turnId: "next",
+      item: { id: "check", type: "commandExecution", command: "bun test", status: "inProgress" },
+    });
+    h.notify("item/fileChange/patchUpdated", {
+      threadId: "thread_1", turnId: "next", itemId: "patch",
+      changes: [{ path: "example.ts", kind: { type: "update" },
+        diff: "--- a/example.ts\n+++ b/example.ts\n@@ -1 +1 @@\n-old\n+new\n" }],
+    });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(h.state().items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "thinking", text: "Checking the fix." }),
+      expect.objectContaining({ kind: "tool", command: "bun test" }),
+      expect.objectContaining({ kind: "tool", changes: expect.arrayContaining([
+        expect.objectContaining({ path: "example.ts" }),
+      ]) }),
+    ]));
+    h.adapter.interrupt(h.ctx);
+    expect(h.sent.at(-1)).toMatchObject({ method: "turn/interrupt", params: { turnId: "next" } });
+  });
+
+  test("shows the next turn after completion races with an accepted steer", async () => {
+    const h = harness();
+    await h.handshake();
+    h.notify("turn/started", { threadId: "thread_1", turn: { id: "steered" } });
+    const steering = h.adapter.steer?.({ text: "check the diff too", images: [] }, h.ctx);
+    const steer = h.sent.at(-1) as { id: number };
+    h.notify("turn/completed", {
+      threadId: "thread_1", turn: { id: "steered", status: "completed" },
+    });
+    h.feed({ jsonrpc: "2.0", id: steer.id, result: { turnId: "steered" } });
+    await expect(steering).resolves.toBe(true);
+    h.notify("turn/started", { threadId: "thread_1", turn: { id: "continued" } });
+    h.notify("turn/plan/updated", {
+      threadId: "thread_1", turnId: "continued",
+      plan: [{ step: "Check the diff", status: "inProgress" }],
+    });
+    expect(h.state().items.at(-1)).toMatchObject({ kind: "plan" });
+    h.notify("turn/completed", {
+      threadId: "thread_1", turn: { id: "steered", status: "completed" },
+    });
+    expect(h.state().status).toBe("working");
+    h.notify("turn/completed", {
+      threadId: "thread_1", turn: { id: "continued", status: "completed" },
+    });
+    expect(h.state().status).toBe("idle");
+  });
+
+  test("does not let late interrupted-turn frames consume queued follow-ups", async () => {
+    const h = harness();
+    await h.handshake();
+    h.notify("turn/started", { threadId: "thread_1", turn: { id: "stopped" } });
+    h.adapter.interrupt(h.ctx);
+    const interrupt = h.sent.at(-1) as { id: number };
+    h.feed({ jsonrpc: "2.0", id: interrupt.id, result: {} });
+    await Promise.resolve();
+    h.adapter.prompt({ text: "queued fix", images: [] }, h.ctx);
+    h.notify("turn/completed", {
+      threadId: "thread_1", turn: { id: "stopped", status: "interrupted" },
+    });
+    h.notify("turn/started", { threadId: "thread_1", turn: { id: "stopped" } });
+    expect(h.events.filter((event) => event.type === "turn-end")).toHaveLength(1);
+    h.notify("turn/started", { threadId: "thread_1", turn: { id: "followup" } });
+    h.notify("item/agentMessage/delta", {
+      threadId: "thread_1", turnId: "followup", itemId: "update", delta: "Running the checks.",
+    });
+    expect(h.state().items.at(-1)).toMatchObject({ kind: "assistant", text: "Running the checks." });
+  });
+
+  test("does not resurrect an interrupted turn from its delayed start response", async () => {
+    const h = harness();
+    await h.handshake();
+    h.adapter.prompt({ text: "first", images: [] }, h.ctx);
+    const start = h.sent.at(-1) as { id: number };
+    h.notify("turn/started", { threadId: "thread_1", turn: { id: "stopped" } });
+    h.adapter.interrupt(h.ctx);
+    const interrupt = h.sent.at(-1) as { id: number };
+    h.feed({ jsonrpc: "2.0", id: interrupt.id, result: {} });
+    await Promise.resolve();
+    h.feed({ jsonrpc: "2.0", id: start.id, result: { turn: { id: "stopped" } } });
+    await Promise.resolve();
+    h.adapter.prompt({ text: "continue", images: [] }, h.ctx);
+    h.notify("turn/started", { threadId: "thread_1", turn: { id: "continued" } });
+    h.notify("item/reasoning/textDelta", {
+      threadId: "thread_1", turnId: "continued", itemId: "progress", delta: "Applying the fix.",
+    });
+    expect(h.state().items.at(-1)).toMatchObject({ kind: "thinking", text: "Applying the fix." });
+  });
+
   test("reports a refused handshake instead of a blank pane", async () => {
     const h = harness();
     h.adapter.start(h.ctx);

@@ -335,6 +335,8 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
    * terminal notifications, while a new auto-continuation can cancel it.
    */
   let rootPendingCompletion: { turnId: string | null } | null = null;
+  /** A provider boundary survives cancellation of the UI's completion timer. */
+  let rootTurnCompletionObserved = false;
   /** Same-turn input makes the first final answer non-terminal. */
   let rootSteerRequestsInFlight = 0;
   let rootTurnWasSteered = false;
@@ -466,6 +468,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     rootTurnMayBeActive = false;
     rootTurnStatusConfirmed = false;
     rootPendingCompletion = null;
+    rootTurnCompletionObserved = false;
     rootSteerRequestsInFlight = 0;
     rootTurnWasSteered = false;
     rootCompletionSeenDuringSteer = undefined;
@@ -2009,16 +2012,19 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         const turn = asRecord(params.turn);
         const startedTurnId = asString(turn?.id);
         const continuesAfterPendingCompletion = Boolean(
-          rootPendingCompletion &&
+          (rootPendingCompletion || rootTurnCompletionObserved) &&
           startedTurnId &&
-          startedTurnId !== currentTurnId,
+          startedTurnId !== currentTurnId &&
+          !completedRootTurnIds.has(startedTurnId),
         );
         if (!continuesAfterPendingCompletion && rootTurnSignalIsStale(startedTurnId)) return;
         if (startedTurnId !== currentTurnId) {
+          rememberRootTurnCompleted(currentTurnId);
           rootTurnWasSteered = false;
           rootCompletionSeenDuringSteer = undefined;
         }
         cancelPendingRootCompletion();
+        rootTurnCompletionObserved = false;
         currentTurnId = startedTurnId;
         rootTurnMayBeActive = true;
         rootTurnStatusConfirmed = true;
@@ -2029,6 +2035,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         const turn = asRecord(params.turn);
         const completedTurnId = asString(turn?.id);
         if (rootTurnSignalIsStale(completedTurnId)) return;
+        rootTurnCompletionObserved = true;
         const error = asRecord(turn?.error);
         if (error) {
           ctx.emit({
@@ -2224,7 +2231,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         !currentTurnId ||
         eventTurnId === currentTurnId ||
         Boolean(
-          rootPendingCompletion &&
+          (rootPendingCompletion || rootTurnCompletionObserved) &&
           eventTurnId &&
           !completedRootTurnIds.has(eventTurnId),
         )
@@ -3018,6 +3025,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     prompt: (prompt, ctx) => {
       if (!threadId) return;
       cancelPendingRootCompletion();
+      rootTurnCompletionObserved = false;
       rootTurnWasSteered = false;
       rootCompletionSeenDuringSteer = undefined;
       ctx.emit({ type: "user", text: prompt.text, images: prompt.images });
@@ -3244,6 +3252,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
      */
     resume: (sessionId, ctx) => {
       cancelPendingRootCompletion();
+      rootTurnCompletionObserved = false;
       hydratingResume = true;
       resumeAborted = false;
       ctx.emit({ type: "history-loading", loading: true });
@@ -3460,6 +3469,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       if (!threadId || !currentTurnId) {
         // Working without an interruptible turn is stale adapter state. Let the
         // session recover instead of leaving a Stop button that cannot work.
+        settleRootTurn(null);
         ctx.emit({ type: "turn-end" });
         return;
       }
@@ -3467,14 +3477,16 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       void request(ctx, "turn/interrupt", { threadId, turnId })
         .then(() => {
           if (currentTurnId !== turnId) return;
-          currentTurnId = null;
+          cancelPendingRootCompletion();
+          settleRootTurn(turnId);
           ctx.emit({ type: "turn-end" });
         })
         .catch(() => {
           // The turn may have finished between the click and the call. Either
           // way, keeping the local session marked as working would be stale.
           if (currentTurnId !== turnId) return;
-          currentTurnId = null;
+          cancelPendingRootCompletion();
+          settleRootTurn(turnId);
           ctx.emit({ type: "turn-end" });
         });
     },
