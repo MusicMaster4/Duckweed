@@ -382,6 +382,30 @@ describe("acp adapter", () => {
     });
   });
 
+  test("treats an empty previous version as a new file", async () => {
+    const h = harness();
+    await h.handshake();
+    h.update({
+      sessionUpdate: "tool_call",
+      toolCallId: "call_new",
+      title: "Write src/new.ts",
+      kind: "edit",
+      status: "completed",
+      content: [
+        { type: "diff", path: "src/new.ts", oldText: "", newText: "one\ntwo" },
+      ],
+    });
+
+    const tool = h.state().items[0];
+    expect(tool.kind === "tool" && tool.changes[0]).toMatchObject({
+      path: "src/new.ts",
+      before: null,
+      after: "one\ntwo",
+      insertions: 2,
+      deletions: 0,
+    });
+  });
+
   test("keeps the plan as one live checklist", async () => {
     const h = harness();
     await h.handshake();

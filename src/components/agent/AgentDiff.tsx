@@ -14,11 +14,12 @@ const COLLAPSE_AFTER = 24;
 /**
  * Split a unified patch into rows.
  *
- * Codex hands over a patch it already computed, so there is nothing to diff —
- * only the file headers to drop, since the path is already in the row above.
+ * Updates hand over a patch the agent already computed, so there is nothing to
+ * diff, only the file headers to drop. Add/delete bodies have no +/- markers;
+ * those become additions so a new file paints green like the git diff.
  */
 function rowsFromPatch(patch: string): Row[] {
-  return patch
+  const rows = patch
     .split("\n")
     .filter((line, index, all) => !(index === all.length - 1 && line === ""))
     .filter((line) => !line.startsWith("+++") && !line.startsWith("---") && !line.startsWith("diff "))
@@ -28,6 +29,12 @@ function rowsFromPatch(patch: string): Row[] {
       if (line.startsWith("-")) return { kind: "del" as const, text: line.slice(1) };
       return { kind: "ctx" as const, text: line.startsWith(" ") ? line.slice(1) : line };
     });
+  // A new-file body with no unified-diff markers (Codex `kind: add`) should
+  // still render as additions, the same way the git diff paints a new file.
+  if (rows.some((row) => row.kind === "add" || row.kind === "del")) return rows;
+  return rows
+    .filter((row) => row.kind !== "meta")
+    .map((row) => ({ kind: "add" as const, text: row.text }));
 }
 
 /**
@@ -39,7 +46,7 @@ function rowsFromPatch(patch: string): Row[] {
  * the render path while an agent streams edits.
  */
 function rowsFromTexts(before: string | null, after: string | null): Row[] {
-  if (before === null) {
+  if (!before) {
     return (after ?? "").split("\n").map((text) => ({ kind: "add" as const, text }));
   }
   if (after === null) {

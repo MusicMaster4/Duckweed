@@ -2369,6 +2369,56 @@ describe("codex adapter", () => {
     });
   });
 
+  test("treats an added file body as a new file, not a context-only patch", async () => {
+    const h = harness();
+    await h.handshake();
+    h.notify("item/fileChange/patchUpdated", {
+      itemId: "f-add",
+      changes: [
+        {
+          path: "src/new.ts",
+          kind: { type: "add" },
+          diff: "export const n = 1;\nexport const m = 2;",
+        },
+      ],
+    });
+
+    const tool = h.state().items[0];
+    expect(tool.kind === "tool" && tool.changes[0]).toMatchObject({
+      path: "src/new.ts",
+      before: null,
+      after: "export const n = 1;\nexport const m = 2;",
+      diff: null,
+      insertions: 2,
+      deletions: 0,
+    });
+  });
+
+  test("treats a deleted file body as a full-file removal", async () => {
+    const h = harness();
+    await h.handshake();
+    h.notify("item/fileChange/patchUpdated", {
+      itemId: "f-del",
+      changes: [
+        {
+          path: "src/gone.ts",
+          kind: { type: "delete" },
+          diff: "old\nfile",
+        },
+      ],
+    });
+
+    const tool = h.state().items[0];
+    expect(tool.kind === "tool" && tool.changes[0]).toMatchObject({
+      path: "src/gone.ts",
+      before: "old\nfile",
+      after: null,
+      diff: null,
+      insertions: 0,
+      deletions: 2,
+    });
+  });
+
   test("turns the plan notification into a checklist", async () => {
     const h = harness();
     await h.handshake();

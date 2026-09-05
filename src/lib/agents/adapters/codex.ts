@@ -14,6 +14,7 @@ import { applyEvent, type AgentEvent } from "../events";
 import type { AgentLaunch } from "../launch";
 import {
   emptyUsage,
+  makeChange,
   makePatchChange,
   toolKind,
   type AgentAccessMode,
@@ -274,14 +275,30 @@ interface CodexSideThread {
   sideQuestion: AgentSideQuestion;
 }
 
-/** Codex sends a unified patch per changed file. */
+/**
+ * Codex file changes: add/delete carry the raw file body, updates carry a
+ * unified patch. Feeding the body through the patch renderer would paint every
+ * line as context instead of the green/red the git diff uses for new/removed
+ * files.
+ */
+function patchKind(raw: unknown): "add" | "delete" | "update" {
+  if (raw === "add" || raw === "delete") return raw;
+  const type = asString(asRecord(raw)?.type);
+  if (type === "add" || type === "delete") return type;
+  return "update";
+}
+
 function readFileChanges(raw: unknown): AgentFileChange[] {
   return asArray(raw)
     .map((entry) => asRecord(entry))
     .filter((change): change is Record<string, unknown> => change !== null)
     .map((change) => {
       const path = asString(change.path) ?? "";
-      return makePatchChange(path, asString(change.diff) ?? "");
+      const diff = asString(change.diff) ?? "";
+      const kind = patchKind(change.kind);
+      if (kind === "add") return makeChange(path, null, diff);
+      if (kind === "delete") return makeChange(path, diff, null);
+      return makePatchChange(path, diff);
     })
     .filter((change) => change.path);
 }

@@ -698,9 +698,11 @@ export function countChanges(
   before: string | null,
   after: string | null,
 ): { insertions: number; deletions: number } {
-  const oldLines = before === null ? [] : before.split("\n");
+  const oldLines = !before ? [] : before.split("\n");
   const newLines = after === null ? [] : after.split("\n");
-  if (before === null) return { insertions: newLines.length, deletions: 0 };
+  // Empty previous content is a new file: every surviving line is an insertion,
+  // matching how the git diff paints untracked/added files.
+  if (!before) return { insertions: after === null ? 0 : newLines.length, deletions: 0 };
   if (after === null) return { insertions: 0, deletions: oldLines.length };
 
   // Trim the shared head and tail, then treat the rest as replaced. That is
@@ -729,7 +731,8 @@ export function makeChange(
   before: string | null,
   after: string | null,
 ): AgentFileChange {
-  return { path, before, after, diff: null, ...countChanges(before, after) };
+  const previous = before === "" ? null : before;
+  return { path, before: previous, after, diff: null, ...countChanges(previous, after) };
 }
 
 /** Wrap a unified patch the agent computed itself. */
