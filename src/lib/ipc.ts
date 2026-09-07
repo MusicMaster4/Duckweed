@@ -240,6 +240,14 @@ export interface MobileSendResult {
   errors: string[];
 }
 
+export interface MobileScheduledCompletionDelivery {
+  key: string;
+  terminalId: string;
+  selected: boolean;
+  completedAt: number;
+  result: MobileSendResult;
+}
+
 /** Paired phones and any QR code that is still waiting to be scanned. */
 export const mobileStatus = () =>
   invoke<MobileNotificationStatus>("mobile_status");
@@ -257,6 +265,34 @@ export const mobileDeviceRemove = (id: string) =>
 
 export const mobileSendCompletion = (message: MobileCompletionMessage) =>
   invoke<MobileSendResult>("mobile_send_completion", { message });
+
+/**
+ * Delay completion delivery in the native process. WebView timers can be
+ * suspended while Duckweed is minimized, which is exactly when mobile alerts
+ * must remain reliable.
+ */
+export const mobileScheduleCompletion = (
+  key: string,
+  message: MobileCompletionMessage,
+  delayMs: number,
+  selected: boolean,
+  completedAt: number,
+) => invoke<void>("mobile_schedule_completion", {
+  key,
+  message,
+  delayMs,
+  selected,
+  completedAt,
+});
+
+export const mobileCancelTerminalCompletions = (terminalId: string) =>
+  invoke<void>("mobile_cancel_terminal_completions", { terminalId });
+
+export const mobileCancelCompletion = (key: string) =>
+  invoke<void>("mobile_cancel_completion", { key });
+
+export const mobileCancelSelectedCompletions = () =>
+  invoke<void>("mobile_cancel_selected_completions");
 
 // React effects can restart while a previous encrypted snapshot is still in
 // flight. Keep sends ordered across effect lifetimes so an older "working"
@@ -388,6 +424,9 @@ export const gitBranches = (path: string) => invoke<Branches>("git_branches", { 
 
 export const gitCheckout = (path: string, branch: string) =>
   invoke<void>("git_checkout", { path, branch });
+
+/** Restore tracked files and permanently remove untracked files. */
+export const gitDiscardAll = (path: string) => invoke<void>("git_discard_all", { path });
 
 /** Counts only — cheap enough to poll while the window has focus. */
 export const gitDiffStats = (path: string) => invoke<DiffStats>("git_diff_stats", { path });

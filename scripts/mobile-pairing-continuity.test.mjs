@@ -146,6 +146,21 @@ describe("mobile pairing continuity", () => {
     expect(ipc).toContain("mobileWorkspaceSendQueue");
   });
 
+  test("completion delays keep running while the WebView is suspended", () => {
+    const desktop = read("src/App.tsx");
+    const ipc = read("src/lib/ipc.ts");
+    const native = read("src-tauri/src/mobile_push.rs");
+    const main = read("src-tauri/src/main.rs");
+
+    expect(desktop).toContain("mobileScheduleCompletion(");
+    expect(desktop).not.toContain("mobileCompletionTimers");
+    expect(ipc).toContain('invoke<void>("mobile_schedule_completion"');
+    expect(native).toContain("std::thread::sleep(Duration::from_millis(delay_ms))");
+    expect(native).toContain("cancel_terminal(&terminal_id)");
+    expect(native).toContain("cancel_selected()");
+    expect(main).toContain("mobile_push::mobile_schedule_completion");
+  });
+
   test("workspace snapshots retain compact readable conversation history", () => {
     const desktop = read("src/App.tsx");
     const worker = read(

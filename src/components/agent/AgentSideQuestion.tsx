@@ -1,4 +1,5 @@
 import type { AgentSideQuestion as SideQuestion } from "../../lib/agents/types";
+import { AgentImageAttachments } from "./AgentImageAttachments";
 import { AssistantMarkdown } from "./official/OfficialShared";
 
 interface Props {
@@ -52,7 +53,10 @@ export function AgentSideQuestion({ question, onDismiss }: Props) {
       </header>
 
       <div className="agent-side-question-body">
-        <p className="agent-side-question-prompt">{question.question}</p>
+        {question.question && <p className="agent-side-question-prompt">{question.question}</p>}
+        {question.images && question.images.length > 0 && (
+          <AgentImageAttachments images={question.images} />
+        )}
         {question.answer ? (
           <div
             className={`agent-side-question-answer${failed ? " is-error" : ""}`}

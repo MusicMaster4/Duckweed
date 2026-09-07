@@ -1,5 +1,5 @@
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import {
   activeFileMention,
@@ -16,6 +16,7 @@ import {
   type FileMention,
 } from "../../lib/agentComposer";
 import { highlightAgentComposer } from "../../lib/agentComposerSyntax";
+import { syncTextareaMirror } from "../../lib/textareaMirror";
 import * as bus from "../../lib/bus";
 import {
   GUIDED_ARG_COMMANDS,
@@ -443,17 +444,43 @@ export function AgentComposer({
 
   // Grow with the text rather than scrolling a two-line box: a prompt is
   // usually a paragraph, and the composer is the only place to write it.
-  useLayoutEffect(() => {
+  const resizeInput = useCallback(() => {
     const node = ref.current;
-    if (!node) return;
+    if (!node || node.clientWidth <= 0) return;
     node.style.height = "auto";
     const lineHeight = parseFloat(getComputedStyle(node).lineHeight) || 20;
     node.style.height = `${Math.min(node.scrollHeight, lineHeight * MAX_ROWS)}px`;
     if (mirrorRef.current) {
-      mirrorRef.current.scrollTop = node.scrollTop;
-      mirrorRef.current.scrollLeft = node.scrollLeft;
+      syncTextareaMirror(node, mirrorRef.current);
     }
-  }, [value]);
+  }, [ref]);
+
+  useLayoutEffect(resizeInput, [value, ended, resizeInput]);
+
+  // Pane resizing and font changes can alter wrapping without changing value.
+  useLayoutEffect(() => {
+    const node = ref.current;
+    const editor = node?.parentElement;
+    if (!node || !editor) return;
+    let previousWidth = -1;
+    const observer = new ResizeObserver(([entry]) => {
+      if (entry.contentRect.width !== previousWidth) {
+        previousWidth = entry.contentRect.width;
+        resizeInput();
+      }
+      if (mirrorRef.current) syncTextareaMirror(node, mirrorRef.current);
+    });
+    observer.observe(editor);
+    resizeInput();
+    return () => observer.disconnect();
+  }, [ref, ended, showPaintedText, resizeInput]);
+
+  useEffect(() => terminals.subscribeSettings(resizeInput), [resizeInput]);
+
+  useEffect(() => {
+    document.fonts.addEventListener("loadingdone", resizeInput);
+    return () => document.fonts.removeEventListener("loadingdone", resizeInput);
+  }, [resizeInput]);
 
   // Same registry the shell composer uses: pane activation, paste shortcuts,
   // and App's "keep OS focus on the active terminal" effect all call
@@ -986,6 +1013,8 @@ export function AgentComposer({
                   {token.text}
                 </span>
               ))}
+              {/* Preserve the final empty line and its native scroll range. */}
+              {value.endsWith("\n") ? "\u200b" : null}
             </div>
           )}
           <textarea

@@ -1008,3 +1008,7 @@
     transform: none;
   }
 }
+.agent-sub-nested-timeline > * {
+  content-visibility: auto;
+  contain-intrinsic-block-size: auto 72px;
+}

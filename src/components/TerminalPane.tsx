@@ -33,6 +33,8 @@ interface Props {
   /** Bitmask of the sides sitting on the rounded outer frame — see PaneTree. */
   edges: number;
   completionFlash: CompletionFlash | null;
+  /** Yellow identification outline shown while this agent is hovered in another pane's tools menu. */
+  agentTargetHighlighted: boolean;
   /** Background completion not reviewed yet — drives the pane outline, not a header dot. */
   unread: boolean;
   /** Folder of the tab this pane belongs to — the empty state offers to set it. */
@@ -44,6 +46,7 @@ interface Props {
   onClose: () => void;
   onToggleZoom: () => void;
   agentTargets: readonly AgentTarget[];
+  onAgentTargetHover: (termId: string | null) => void;
   scheduledSend: ScheduledSend | null;
   onScheduleSend: (termId: string, target: AgentTarget) => void;
   onCancelSchedule: (termId: string) => void;
@@ -75,6 +78,7 @@ export const TerminalPane = memo(function TerminalPane({
   highlight,
   edges,
   completionFlash,
+  agentTargetHighlighted,
   unread,
   project,
   recents,
@@ -84,6 +88,7 @@ export const TerminalPane = memo(function TerminalPane({
   onClose,
   onToggleZoom,
   agentTargets,
+  onAgentTargetHover,
   scheduledSend,
   onScheduleSend,
   onCancelSchedule,
@@ -124,8 +129,11 @@ export const TerminalPane = memo(function TerminalPane({
       if (e.key === "Escape") setToolsMenu(null);
     };
     window.addEventListener("keydown", dismiss, true);
-    return () => window.removeEventListener("keydown", dismiss, true);
-  }, [toolsMenu]);
+    return () => {
+      window.removeEventListener("keydown", dismiss, true);
+      onAgentTargetHover(null);
+    };
+  }, [toolsMenu, onAgentTargetHover]);
 
   const showCopyToast = (x: number, y: number) => {
     if (copyToastTimer.current != null) window.clearTimeout(copyToastTimer.current);
@@ -245,6 +253,7 @@ export const TerminalPane = memo(function TerminalPane({
         effectiveRaw ? "is-raw" : "is-editor",
         blank ? "is-blank" : "",
         unread ? "is-unread" : "",
+        agentTargetHighlighted ? "is-agent-target-highlighted" : "",
         scheduledSend ? "is-waiting" : "",
       ]
         .filter(Boolean)
@@ -539,7 +548,12 @@ export const TerminalPane = memo(function TerminalPane({
                       role="menuitemradio"
                       aria-checked={selected}
                       className={`menu-item pane-tools-target${selected ? " is-current" : ""}`}
+                      onPointerEnter={() => onAgentTargetHover(target.termId)}
+                      onPointerLeave={() => onAgentTargetHover(null)}
+                      onFocus={() => onAgentTargetHover(target.termId)}
+                      onBlur={() => onAgentTargetHover(null)}
                       onClick={() => {
+                        onAgentTargetHover(null);
                         onScheduleSend(node.term, target);
                         setToolsMenu(null);
                       }}

@@ -382,6 +382,30 @@ describe("acp adapter", () => {
     });
   });
 
+  test("treats an empty previous version as a new file", async () => {
+    const h = harness();
+    await h.handshake();
+    h.update({
+      sessionUpdate: "tool_call",
+      toolCallId: "call_new",
+      title: "Write src/new.ts",
+      kind: "edit",
+      status: "completed",
+      content: [
+        { type: "diff", path: "src/new.ts", oldText: "", newText: "one\ntwo" },
+      ],
+    });
+
+    const tool = h.state().items[0];
+    expect(tool.kind === "tool" && tool.changes[0]).toMatchObject({
+      path: "src/new.ts",
+      before: null,
+      after: "one\ntwo",
+      insertions: 2,
+      deletions: 0,
+    });
+  });
+
   test("keeps the plan as one live checklist", async () => {
     const h = harness();
     await h.handshake();
@@ -891,6 +915,62 @@ describe("acp adapter", () => {
       },
     });
     expect(h.state().items[0]).toMatchObject({ kind: "user", images: [image] });
+  });
+
+  test("sends images as embedded resources when the agent rejects native image blocks", async () => {
+    const h = harness();
+    await h.handshake({
+      agentCapabilities: {
+        promptCapabilities: { image: false, embeddedContext: true },
+      },
+    });
+
+    h.adapter.prompt({ text: "Describe this", images: [image] }, h.ctx);
+
+    expect(h.sent.at(-1)).toMatchObject({
+      method: "session/prompt",
+      params: {
+        prompt: [
+          { type: "text", text: "Describe this" },
+          {
+            type: "resource",
+            resource: {
+              uri: "attachment://duckweed/image-1/screenshot.png",
+              blob: "aGVsbG8=",
+              mimeType: "image/png",
+            },
+          },
+        ],
+      },
+    });
+    expect(h.state().capabilities?.inputs.image).toBe(true);
+    expect(
+      h.events.some(
+        (event) => event.type === "notice" && event.text.includes("does not accept image input"),
+      ),
+    ).toBe(false);
+  });
+
+  test("reports unsupported images only when ACP offers no binary fallback", async () => {
+    const h = harness();
+    await h.handshake({
+      agentCapabilities: {
+        promptCapabilities: { image: false, embeddedContext: false },
+      },
+    });
+
+    h.adapter.prompt({ text: "Describe this", images: [image] }, h.ctx);
+
+    expect(h.sent.at(-1)).toMatchObject({
+      method: "session/prompt",
+      params: { prompt: [{ type: "text", text: "Describe this" }] },
+    });
+    expect(h.state().capabilities?.inputs.image).toBe(false);
+    expect(
+      h.events.some(
+        (event) => event.type === "notice" && event.text.includes("does not accept image input"),
+      ),
+    ).toBe(true);
   });
 
   test("cancels the session on interrupt", async () => {

@@ -140,6 +140,35 @@ pub fn checkout(path: &str, branch: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Restore every tracked path and remove files Git does not track.
+///
+/// This intentionally leaves ignored files alone. They are not shown in the
+/// changes panel, and deleting build outputs or local environment files would
+/// make "discard all" reach beyond what the user just reviewed.
+pub fn discard_all(path: &str) -> Result<(), String> {
+    let root = repo_root(path)?;
+
+    if git(&root, &["rev-parse", "--verify", "--quiet", "HEAD"]).is_ok() {
+        // A hard reset restores both the index and working tree. In particular,
+        // files newly added to the index disappear instead of being left behind
+        // as untracked files after the reset.
+        git(&root, &["reset", "--hard", "HEAD"])?;
+    } else if !git(&root, &["ls-files", "-z"])
+        .unwrap_or_default()
+        .is_empty()
+    {
+        // An unborn branch has no HEAD to reset to. Everything in its index is
+        // new, so remove those paths from the index and disk before cleaning the
+        // remaining untracked files.
+        git(&root, &["rm", "-r", "-f", "--", "."])?;
+    }
+
+    // `-d` includes new directories; ignored paths and nested repositories are
+    // deliberately preserved by Git's default clean rules.
+    git(&root, &["clean", "-f", "-d"])?;
+    Ok(())
+}
+
 // --------------------------------------------------------------------- diffs
 
 /// Git's empty tree. A repo whose first commit has not happened yet has no
@@ -808,6 +837,57 @@ mod tests {
         assert_eq!(diff.stats.files, 2);
         assert_eq!((diff.stats.insertions, diff.stats.deletions), (3, 0));
         assert_eq!(diff.files[1].status, "added");
+    }
+
+    #[test]
+    fn discard_all_restores_tracked_files_and_deletes_new_ones() {
+        let repo = TempRepo::new("discard");
+        repo.write(".gitignore", "ignored.log\n");
+        repo.write("edited.txt", "before\n");
+        repo.write("removed.txt", "keep me\n");
+        repo.git(&["add", "-A"]);
+        repo.git(&["commit", "-m", "first"]);
+
+        repo.write("edited.txt", "after\n");
+        std::fs::remove_file(repo.dir.join("removed.txt")).expect("remove tracked file");
+        repo.write("staged.txt", "staged\n");
+        repo.git(&["add", "staged.txt"]);
+        std::fs::create_dir_all(repo.dir.join("new-dir")).expect("new dir");
+        repo.write("new-dir/loose.txt", "loose\n");
+        repo.write("ignored.log", "local\n");
+
+        discard_all(repo.path()).expect("discard all");
+
+        assert_eq!(
+            std::fs::read_to_string(repo.dir.join("edited.txt"))
+                .unwrap()
+                .replace("\r\n", "\n"),
+            "before\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.dir.join("removed.txt"))
+                .unwrap()
+                .replace("\r\n", "\n"),
+            "keep me\n"
+        );
+        assert!(!repo.dir.join("staged.txt").exists());
+        assert!(!repo.dir.join("new-dir").exists());
+        assert!(repo.dir.join("ignored.log").exists());
+        assert_eq!(diff(repo.path()).unwrap().stats.files, 0);
+    }
+
+    #[test]
+    fn discard_all_clears_an_unborn_repository() {
+        let repo = TempRepo::new("discard-unborn");
+        repo.write("staged.txt", "staged\n");
+        repo.git(&["add", "staged.txt"]);
+        repo.write("loose.txt", "loose\n");
+
+        discard_all(repo.path()).expect("discard all");
+
+        assert!(!repo.dir.join("staged.txt").exists());
+        assert!(!repo.dir.join("loose.txt").exists());
+        assert_eq!(diff(repo.path()).unwrap().stats.files, 0);
     }
 
     #[test]

@@ -46,7 +46,7 @@ const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 /// How far back the duty cycle looks. Kept inside [`RECENT_DAYS`] so every row
 /// it reads still has five-minute resolution rather than a collapsed day.
 const DUTY_DAYS: i64 = 7;
-const INDEX_VERSION: u32 = 1;
+const INDEX_VERSION: u32 = 2;
 
 // ---------------------------------------------------------------- tokens
 
@@ -86,6 +86,8 @@ impl Tokens {
 /// One aggregated bucket: a time slot, a model, and what it cost.
 #[derive(Clone, Serialize, Deserialize)]
 struct Row {
+    #[serde(default)]
+    pricing: pricing::Context,
     /// Bucket start in epoch ms — a five-minute slot, or local midnight once
     /// the row has been collapsed.
     at: i64,
@@ -402,7 +404,7 @@ pub fn scan(
         entry.size = job.size;
         entry.offset = new_offset;
 
-        let mut fresh: HashMap<(i64, String), Row> = HashMap::new();
+        let mut fresh: HashMap<(i64, String, pricing::Context), Row> = HashMap::new();
         for record in records {
             if record.dedup != 0 && !seen.insert(record.dedup) {
                 continue;
@@ -413,8 +415,9 @@ pub fn scan(
             entry.last_at = entry.last_at.max(record.at);
             let slot = bucket(record.at, recent_cutoff);
             let row = fresh
-                .entry((slot, record.model.clone()))
+                .entry((slot, record.model.clone(), record.pricing))
                 .or_insert_with(|| Row {
+                    pricing: record.pricing,
                     at: slot,
                     model: record.model.clone(),
                     tokens: Tokens::default(),
@@ -468,7 +471,9 @@ pub fn scan(
             let (rates, priced) = pricing::lookup(&row.model, overrides);
             // An agent that priced the call itself knows better than a table
             // of list prices does.
-            let cost = row.reported_cost.unwrap_or_else(|| rates.cost(&row.tokens));
+            let cost = row
+                .reported_cost
+                .unwrap_or_else(|| row.pricing.cost(&row.model, rates, &row.tokens));
             last_used
                 .entry(agent_id)
                 .and_modify(|last| *last = (*last).max(row.at))
@@ -732,12 +737,13 @@ fn compact(index: &mut Index, recent_cutoff: i64, now: i64) -> bool {
             continue;
         }
         changed = true;
-        let mut merged: HashMap<(i64, String), Row> = HashMap::new();
+        let mut merged: HashMap<(i64, String, pricing::Context), Row> = HashMap::new();
         for row in entry.rows.drain(..) {
             let at = bucket(row.at, recent_cutoff);
             let slot = merged
-                .entry((at, row.model.clone()))
+                .entry((at, row.model.clone(), row.pricing))
                 .or_insert_with(|| Row {
+                    pricing: row.pricing,
                     at,
                     model: row.model.clone(),
                     tokens: Tokens::default(),
@@ -939,6 +945,70 @@ mod tests {
     }
 
     #[test]
+    fn codex_sums_account_histories_without_rebilling_copies_or_mixing_tiers() {
+        let dir =
+            std::env::temp_dir().join(format!("duckweed-codex-accounts-{}", uuid::Uuid::new_v4()));
+        let home = dir.join("home");
+        let sessions = home.join(".codex/sessions");
+        let archive = home.join(".codex/archived_sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::create_dir_all(&archive).unwrap();
+        let now = chrono::Utc::now();
+        let transcript = |account: &str, tier: &str, at: String| {
+            let meta = serde_json::json!({"type":"session_meta","payload":{"account_id":account}});
+            let context = serde_json::json!({"type":"turn_context","payload":{"model":"gpt-6-astra","service_tier":tier}});
+            let event = serde_json::json!({"timestamp":at,"type":"event_msg","payload":{"type":"token_count","info":{
+                "total_token_usage":{"input_tokens":1000,"output_tokens":100},
+                "last_token_usage":{"input_tokens":1000,"output_tokens":100}
+            }}});
+            format!("{meta}\n{context}\n{event}\n{event}\n")
+        };
+        let first = transcript("account-a", "default", now.to_rfc3339());
+        std::fs::write(sessions.join("a.jsonl"), &first).unwrap();
+        std::fs::write(archive.join("copy.jsonl"), &first).unwrap();
+        std::fs::write(
+            sessions.join("b.jsonl"),
+            transcript(
+                "account-b",
+                "fast",
+                (now - chrono::Duration::seconds(1)).to_rfc3339(),
+            ),
+        )
+        .unwrap();
+        let state = UsageState::default();
+        let query = Query {
+            days: 7,
+            refresh: false,
+        };
+        let overrides = Overrides::new();
+        let cold = scan(
+            &home,
+            &dir.join("index.json"),
+            &overrides,
+            &state,
+            &query,
+            &|_, _| {},
+        )
+        .unwrap();
+        assert_eq!(cold.totals.tokens.input, 2000);
+        assert_eq!(cold.totals.requests, 2);
+        // $0.015 standard + $0.030 Fast, with neither repeated snapshots nor copies.
+        assert!((cold.totals.cost - 0.045).abs() < 1e-9);
+        let warm = scan(
+            &home,
+            &dir.join("index.json"),
+            &overrides,
+            &state,
+            &query,
+            &|_, _| {},
+        )
+        .unwrap();
+        assert_eq!(warm.scan.files_read, 0);
+        assert_eq!(warm.totals.cost, cold.totals.cost);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn proxied_turns_are_split_out_of_claude_code() {
         let dir = std::env::temp_dir().join(format!("duckweed-claudex-{}", std::process::id()));
         let home = dir.join("home");
@@ -1001,10 +1071,7 @@ mod tests {
         // Proxies have no account-wide limit source of their own, so the
         // quota surface omits them instead of drawing a permanent unavailable
         // card (the usage totals above still keep the agent visible).
-        assert!(snapshot
-            .quotas
-            .iter()
-            .all(|quota| quota.agent != "claudex"));
+        assert!(snapshot.quotas.iter().all(|quota| quota.agent != "claudex"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1019,6 +1086,7 @@ mod tests {
             files: HashMap::new(),
         };
         let make = |at: i64| Row {
+            pricing: pricing::Context::default(),
             at,
             model: "claude-opus-5".into(),
             tokens: Tokens {
@@ -1066,6 +1134,7 @@ mod tests {
         };
         let rows = vec![
             Row {
+                pricing: pricing::Context::default(),
                 at: bucket(now - 60 * 60 * 1000, recent_cutoff),
                 model: "m".into(),
                 tokens: Tokens::default(),
@@ -1073,6 +1142,7 @@ mod tests {
                 reported_cost: None,
             },
             Row {
+                pricing: pricing::Context::default(),
                 at: bucket(now - 30 * 60 * 1000, recent_cutoff),
                 model: "m".into(),
                 tokens: Tokens::default(),
@@ -1232,6 +1302,7 @@ mod tests {
                 size: 9,
                 offset: 9,
                 rows: vec![Row {
+                    pricing: pricing::Context::default(),
                     at: 1000,
                     model: "claude-opus-5".into(),
                     tokens: Tokens {

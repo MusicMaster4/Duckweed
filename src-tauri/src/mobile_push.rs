@@ -4,9 +4,11 @@
 //! the encryption secret on the phone through the QR code and keeps desktop
 //! credentials in the operating-system credential store.
 
+use std::collections::HashMap;
 use std::error::Error as _;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aes_gcm::aead::{Aead, Payload};
@@ -19,7 +21,7 @@ use reqwest::blocking::{Client, RequestBuilder, Response};
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 use uuid::Uuid;
 
 const DEFAULT_RELAY_URL: &str = "https://duckweed-notification-relay.idealmusic18.workers.dev";
@@ -34,6 +36,7 @@ const PRESENCE_INTERVAL: Duration = Duration::from_secs(30);
 
 static FILE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static HTTP_CLIENT: OnceLock<Result<Client, String>> = OnceLock::new();
+static SCHEDULED_COMPLETIONS: OnceLock<Mutex<ScheduledCompletionRegistry>> = OnceLock::new();
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -535,7 +538,7 @@ struct RemoteCommandList {
     commands: Vec<RemoteCommandEnvelope>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SendResult {
     pub sent: usize,
@@ -1309,6 +1312,86 @@ fn presence_blocking(app: &AppHandle) -> Result<SendResult, String> {
     Ok(result)
 }
 
+#[derive(Debug)]
+struct ScheduledCompletion {
+    terminal_id: String,
+    selected: bool,
+    cancelled: Arc<AtomicBool>,
+}
+
+#[derive(Default)]
+struct ScheduledCompletionRegistry {
+    pending: HashMap<String, ScheduledCompletion>,
+}
+
+impl ScheduledCompletionRegistry {
+    fn insert(&mut self, key: String, terminal_id: String, selected: bool) -> Arc<AtomicBool> {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        if let Some(previous) = self.pending.insert(
+            key,
+            ScheduledCompletion {
+                terminal_id,
+                selected,
+                cancelled: cancelled.clone(),
+            },
+        ) {
+            previous.cancelled.store(true, Ordering::Release);
+        }
+        cancelled
+    }
+
+    fn cancel_terminal(&mut self, terminal_id: &str) {
+        self.pending.retain(|_, completion| {
+            if completion.terminal_id != terminal_id {
+                return true;
+            }
+            completion.cancelled.store(true, Ordering::Release);
+            false
+        });
+    }
+
+    fn cancel_key(&mut self, key: &str) {
+        if let Some(completion) = self.pending.remove(key) {
+            completion.cancelled.store(true, Ordering::Release);
+        }
+    }
+
+    fn cancel_selected(&mut self) {
+        self.pending.retain(|_, completion| {
+            if !completion.selected {
+                return true;
+            }
+            completion.cancelled.store(true, Ordering::Release);
+            false
+        });
+    }
+
+    fn take_if_active(&mut self, key: &str, cancelled: &Arc<AtomicBool>) -> bool {
+        let active = self.pending.get(key).is_some_and(|completion| {
+            Arc::ptr_eq(&completion.cancelled, cancelled)
+                && !completion.cancelled.load(Ordering::Acquire)
+        });
+        if active {
+            self.pending.remove(key);
+        }
+        active
+    }
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ScheduledCompletionDelivery {
+    key: String,
+    terminal_id: String,
+    selected: bool,
+    completed_at: i64,
+    result: SendResult,
+}
+
+fn scheduled_completions() -> &'static Mutex<ScheduledCompletionRegistry> {
+    SCHEDULED_COMPLETIONS.get_or_init(|| Mutex::new(ScheduledCompletionRegistry::default()))
+}
+
 /// Keep mobile presence independent from WebView timers. Windows can suspend
 /// animation frames and JavaScript intervals while the app is minimized, but
 /// the native process remains responsible for the paired desktop connection.
@@ -1433,6 +1516,68 @@ fn send_blocking(app: &AppHandle, message: CompletionMessage) -> Result<SendResu
     Ok(result)
 }
 
+fn schedule_completion(
+    app: AppHandle,
+    key: String,
+    message: CompletionMessage,
+    delay_ms: u64,
+    selected: bool,
+    completed_at: i64,
+) -> Result<(), String> {
+    if key.trim().is_empty() || key.len() > 512 {
+        return Err("invalid mobile completion key".into());
+    }
+    if delay_ms > 5 * 60 * 1000 {
+        return Err("mobile completion delay is too long".into());
+    }
+    let terminal_id = message
+        .terminal_id
+        .clone()
+        .filter(|id| !id.trim().is_empty())
+        .ok_or("scheduled mobile completion requires a terminal")?;
+    let cancelled = scheduled_completions().lock().unwrap().insert(
+        key.clone(),
+        terminal_id.clone(),
+        selected,
+    );
+    let thread_key = key.clone();
+    std::thread::Builder::new()
+        .name("mobile-completion-delay".into())
+        .spawn(move || {
+            std::thread::sleep(Duration::from_millis(delay_ms));
+            let active = scheduled_completions()
+                .lock()
+                .unwrap()
+                .take_if_active(&thread_key, &cancelled);
+            if !active {
+                return;
+            }
+            let result = match send_blocking(&app, message) {
+                Ok(result) => result,
+                Err(error) => SendResult {
+                    sent: 0,
+                    failed: 1,
+                    errors: vec![error],
+                },
+            };
+            let _ = app.emit(
+                "mobile:completion-delivered",
+                ScheduledCompletionDelivery {
+                    key: thread_key,
+                    terminal_id,
+                    selected,
+                    completed_at,
+                    result,
+                },
+            );
+        })
+        .map(|_| ())
+        .map_err(|error| {
+            scheduled_completions().lock().unwrap().pending.remove(&key);
+            error.to_string()
+        })
+}
+
 async fn blocking<T, F>(job: F) -> Result<T, String>
 where
     T: Send + 'static,
@@ -1469,6 +1614,36 @@ pub async fn mobile_send_completion(
     message: CompletionMessage,
 ) -> Result<SendResult, String> {
     blocking(move || send_blocking(&app, message)).await
+}
+
+#[tauri::command]
+pub fn mobile_schedule_completion(
+    app: AppHandle,
+    key: String,
+    message: CompletionMessage,
+    delay_ms: u64,
+    selected: bool,
+    completed_at: i64,
+) -> Result<(), String> {
+    schedule_completion(app, key, message, delay_ms, selected, completed_at)
+}
+
+#[tauri::command]
+pub fn mobile_cancel_terminal_completions(terminal_id: String) {
+    scheduled_completions()
+        .lock()
+        .unwrap()
+        .cancel_terminal(&terminal_id);
+}
+
+#[tauri::command]
+pub fn mobile_cancel_completion(key: String) {
+    scheduled_completions().lock().unwrap().cancel_key(&key);
+}
+
+#[tauri::command]
+pub fn mobile_cancel_selected_completions() {
+    scheduled_completions().lock().unwrap().cancel_selected();
 }
 
 #[tauri::command]
@@ -1524,9 +1699,33 @@ mod tests {
     use super::{
         bounded_preview_plaintext, client, decrypt, encrypt, encrypt_with_nonce,
         encrypted_ciphertext_len, pairing_is_gone, pairing_proof, truncate_utf8,
-        workspace_collapse_key, PlainRemoteCommand, WorkspaceUsageLimit, MAX_PREVIEW_CIPHERTEXT,
-        MAX_WORKSPACE_PLAINTEXT_BYTES,
+        workspace_collapse_key, PlainRemoteCommand, ScheduledCompletionRegistry,
+        WorkspaceUsageLimit, MAX_PREVIEW_CIPHERTEXT, MAX_WORKSPACE_PLAINTEXT_BYTES,
     };
+
+    #[test]
+    fn selected_activity_cancels_only_selected_mobile_completions() {
+        let mut registry = ScheduledCompletionRegistry::default();
+        let background = registry.insert("background".into(), "term-1".into(), false);
+        let selected = registry.insert("selected".into(), "term-2".into(), true);
+
+        registry.cancel_selected();
+
+        assert!(!registry.take_if_active("selected", &selected));
+        assert!(registry.take_if_active("background", &background));
+    }
+
+    #[test]
+    fn reviewing_a_terminal_cancels_its_native_mobile_delay() {
+        let mut registry = ScheduledCompletionRegistry::default();
+        let reviewed = registry.insert("reviewed".into(), "term-1".into(), false);
+        let untouched = registry.insert("untouched".into(), "term-2".into(), false);
+
+        registry.cancel_terminal("term-1");
+
+        assert!(!registry.take_if_active("reviewed", &reviewed));
+        assert!(registry.take_if_active("untouched", &untouched));
+    }
 
     #[test]
     fn workspace_usage_limits_keep_the_desktop_forecast() {

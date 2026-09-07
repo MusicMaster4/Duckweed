@@ -3701,3 +3701,13 @@ button.chatgpt-thinking-row.is-selected {
   background: rgba(255, 255, 255, 0.026);
   box-shadow: 0 5px 14px rgba(0, 0, 0, 0.08);
 }
+.official-transcript > .official-message,
+.official-transcript > .official-answer-layer,
+.official-transcript > .agent-activity-cluster,
+.official-transcript > .official-plan {
+  /* Keep the full conversation in the DOM while letting WebView2 skip paint
+     and layout work for rows far outside the viewport. The `auto` fallback
+     remembers the measured height, so revisiting old messages does not jump. */
+  content-visibility: auto;
+  contain-intrinsic-block-size: auto 96px;
+}

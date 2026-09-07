@@ -51,8 +51,14 @@
   --scrollbar-thumb-hover: rgba(255, 255, 255, 0.3);
   --scrollbar-track: transparent;
 
-  /* Hairline between Warp-style command blocks (matches former chrome 1px). */
-  --block-separator: rgba(255, 255, 255, 0.16);
+  /* Command blocks read as an execution ledger: quiet at rest, explicit when
+     hovered, selected, running, or failed. */
+  --block-separator: rgba(255, 255, 255, 0.11);
+  --block-header: color-mix(in srgb, var(--bg-pane) 98.2%, white 1.8%);
+  --block-hover: rgba(255, 255, 255, 0.028);
+  --block-selected: rgba(123, 224, 90, 0.065);
+  --block-selected-border: rgba(123, 224, 90, 0.76);
+  --block-failed: rgba(242, 104, 111, 0.075);
 
   font-synthesis: none;
 }
@@ -4100,6 +4106,34 @@ body.is-dragging-prompt * {
 }
 
 /*
+ * Identify a completion trigger before it is selected. This is deliberately a
+ * separate layer from the rose completion outline so hovering never changes or
+ * acknowledges completion state. The short transition makes adjacent agents
+ * easy to compare while moving through the menu.
+ */
+.pane::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border: 2px solid var(--amber);
+  border-radius: var(--pane-radius, 0);
+  pointer-events: none;
+  z-index: 8;
+  opacity: 0;
+  transition: opacity 50ms ease;
+}
+
+.pane.is-agent-target-highlighted::before {
+  opacity: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pane::before {
+    transition: none;
+  }
+}
+
+/*
  * A completion in the focused pane is informational rather than unread. It
  * fades in for 500ms, holds for 500ms, then fades away for 500ms.
  */
@@ -5096,46 +5130,209 @@ body.is-dragging-prompt * {
   top: 0;
   left: 0;
   box-sizing: border-box;
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
   margin: 0;
-  padding: 0 6px;
+  padding: 0 10px 0 8px;
   overflow: hidden;
   white-space: pre;
-  text-overflow: ellipsis;
   pointer-events: none;
   /* Opaque so the PS prompt underneath never bleeds through. */
-  background: var(--bg-pane);
+  background: var(--block-header);
   color: var(--text);
   font-family: var(--font-mono);
   font-size: var(--terminal-font-size, 13.5px);
   font-weight: 500;
   letter-spacing: var(--terminal-letter-spacing, 1px);
+  transition:
+    background-color 100ms ease,
+    box-shadow 100ms ease;
   will-change: transform;
 }
 
+.command-block-prompt {
+  width: 12px;
+  flex: none;
+  color: var(--accent);
+  font-weight: 700;
+  text-align: center;
+}
+
+.command-block-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: pre;
+}
+
+.command-block-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+  margin-left: auto;
+  color: var(--text-faint);
+  font-family: "Inter", "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  max-width: 0;
+  overflow: hidden;
+  opacity: 0;
+  white-space: nowrap;
+  transition:
+    max-width 100ms ease,
+    opacity 100ms ease;
+}
+
+.command-block-cmd.is-hovered {
+  background: color-mix(in srgb, var(--bg-pane) 97.2%, white 2.8%);
+}
+
 .command-block-cmd.is-selected {
-  /* Same soft green wash as the select overlay, so the command row matches. */
-  background: color-mix(in srgb, var(--bg-pane) 88%, var(--accent) 12%);
+  background: color-mix(in srgb, var(--bg-pane) 93.5%, var(--accent) 6.5%);
+}
+
+.command-block-cmd.is-failed {
+  background: color-mix(in srgb, var(--bg-pane) 92.5%, var(--rose) 7.5%);
+}
+
+.command-block-cmd.is-failed.is-selected {
+  background: color-mix(
+    in srgb,
+    color-mix(in srgb, var(--bg-pane) 93.5%, var(--accent) 6.5%) 94%,
+    var(--rose) 6%
+  );
+}
+
+.command-block-cmd.is-running .command-block-status,
+.command-block-cmd.is-failed .command-block-status,
+.command-block-cmd.is-hovered .command-block-status,
+.command-block-cmd.is-selected .command-block-status,
+.command-block-cmd.is-sticky .command-block-status {
+  max-width: 180px;
+  opacity: 1;
+}
+
+.command-block-cmd.is-running .command-block-status::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: command-block-running 1.15s ease-in-out infinite alternate;
+}
+
+.command-block-cmd.is-failed .command-block-status {
+  color: var(--rose);
+}
+
+.command-block-cmd.is-sticky {
+  background: color-mix(in srgb, var(--bg-elevated) 72%, var(--bg-pane) 28%);
+  box-shadow: inset 0 -1px var(--border-strong);
+}
+
+.command-block-cmd.is-sticky.is-selected {
+  box-shadow: inset 0 -1px var(--border-strong);
+}
+
+@keyframes command-block-running {
+  from {
+    opacity: 0.38;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .command-block-cmd.is-running .command-block-status::before {
+    animation: none;
+  }
 }
 
 /*
- * Soft green wash over a clicked/keyboard-selected chunk. Nothing else — no
- * border, no card. pointer-events none so wheel scroll and free-range drag
- * still reach xterm. Painted instead of selectLines over thousands of rows
- * (which jumped the viewport and froze tall cargo output).
+ * Warp treats a selected block as an atomic object. The outside border and quiet
+ * fill make that boundary explicit without turning every command into a card.
+ * pointer-events none keeps wheel scroll and free-range drag owned by xterm.
  */
 .command-block-select-overlay {
   position: absolute;
-  z-index: 2;
+  z-index: 6;
+  top: 0;
+  left: 0;
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  pointer-events: none;
+  border: 2px solid var(--block-selected-border);
+  background: transparent;
+  will-change: transform;
+}
+
+.command-block-select-fill {
+  position: absolute;
+  z-index: 3;
   top: 0;
   left: 0;
   margin: 0;
   padding: 0;
   pointer-events: none;
-  background: color-mix(in srgb, transparent 88%, var(--accent) 12%);
+  background: var(--block-selected);
   will-change: transform;
 }
 
-/* Hairline on the exact boundary between terminal rows. */
+.command-block-select-overlay.is-clipped-top {
+  border-top-color: transparent;
+}
+
+.command-block-select-overlay.is-clipped-bottom {
+  border-bottom-color: transparent;
+}
+
+.command-block-hover-overlay {
+  position: absolute;
+  z-index: 2;
+  top: 0;
+  left: 0;
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  background: var(--block-hover);
+  pointer-events: none;
+  will-change: transform;
+}
+
+.command-block-hover-overlay.is-clipped-top {
+  border-top-color: transparent;
+}
+
+.command-block-hover-overlay.is-clipped-bottom {
+  border-bottom-color: transparent;
+}
+
+/* Failed blocks keep Warp's low-opacity wash and a stronger left flag pole. */
+.command-block-state-overlay {
+  position: absolute;
+  z-index: 1;
+  top: 0;
+  left: 0;
+  margin: 0;
+  padding: 0;
+  pointer-events: none;
+  will-change: transform;
+}
+
+.command-block-state-overlay.is-failed {
+  background: var(--block-failed);
+  box-shadow: inset 3px 0 var(--rose);
+}
+
+/* Optical gutter centered on the boundary between terminal rows. */
 .command-block-separator {
   position: absolute;
   z-index: 5;
@@ -5145,12 +5342,18 @@ body.is-dragging-prompt * {
   padding: 0;
   border: none;
   pointer-events: none;
-  background: var(--block-separator);
+  background: var(--bg-pane);
   will-change: transform;
 }
 
 .command-block-separator::after {
-  content: none;
+  content: "";
+  position: absolute;
+  top: 3px;
+  right: 0;
+  left: 0;
+  height: 1px;
+  background: var(--block-separator);
 }
 
 /* Hides the idle shell prompt under the last block in editor mode. */
@@ -6308,6 +6511,104 @@ body.is-resizing * {
 .changes-btn:hover {
   background: var(--hover);
   color: var(--text);
+}
+
+.changes-btn.is-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  padding: 0;
+}
+
+.changes-btn.is-icon svg {
+  width: 14px;
+  height: 14px;
+  fill: currentColor;
+}
+
+.changes-actions {
+  position: relative;
+  flex: none;
+}
+
+.changes-actions-menu {
+  position: absolute;
+  top: calc(100% + 5px);
+  right: 0;
+  z-index: 5;
+  min-width: 160px;
+  padding: 4px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--bg-elevated);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.45);
+}
+
+.changes-actions-menu button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 30px;
+  padding: 6px 8px;
+  border-radius: 5px;
+  color: var(--text-muted);
+  font-size: 11.5px;
+  text-align: left;
+}
+
+.changes-actions-menu button:hover:not(:disabled) {
+  background: rgba(242, 104, 111, 0.1);
+  color: var(--rose);
+}
+
+.changes-actions-menu button.is-danger {
+  color: var(--rose);
+}
+
+.changes-actions-menu button:disabled {
+  cursor: default;
+  opacity: 0.38;
+}
+
+.changes-actions-menu svg {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.25;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.changes-error,
+.changes-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--border);
+  font-size: 11.5px;
+}
+
+.changes-error {
+  color: var(--rose);
+  background: rgba(242, 104, 111, 0.07);
+}
+
+.changes-error span {
+  flex: 1;
+}
+
+.changes-error button {
+  color: inherit;
+}
+
+.changes-progress {
+  color: var(--text-faint);
 }
 
 /* The one part of the panel that scrolls: it takes whatever the two headers
@@ -8542,19 +8843,6 @@ body.is-resizing * {
   color: var(--text-faint);
 }
 
-.agent-diff-language {
-  flex: none;
-  padding: 1px 6px;
-  border: 1px solid rgba(255, 255, 255, 0.075);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.035);
-  color: var(--text-faint);
-  font-size: 9px;
-  font-weight: 600;
-  letter-spacing: 0.035em;
-  text-transform: uppercase;
-}
-
 .agent-diff:hover .agent-diff-head {
   background: rgba(255, 255, 255, 0.045);
 }
@@ -9451,6 +9739,14 @@ body.is-resizing * {
   user-select: text;
 }
 
+.agent-side-question-body > .agent-image-strip {
+  margin-top: 7px;
+}
+
+.agent-side-question-body > .agent-image-strip:first-child {
+  margin-top: 0;
+}
+
 .agent-side-question-answer {
   margin-top: 8px;
   color: var(--text);
@@ -9911,23 +10207,41 @@ body.is-resizing * {
   min-width: 0;
 }
 
-.agent-composer-mirror {
-  position: absolute;
-  z-index: 0;
-  inset: 0;
+.agent-composer-mirror,
+.agent-composer-input {
+  box-sizing: border-box;
   max-height: 220px;
   margin: 0;
   padding: 4px 2px;
   border: 0;
-  overflow: hidden;
   white-space: pre-wrap;
   word-break: break-word;
   overflow-wrap: anywhere;
-  pointer-events: none;
-  color: var(--text);
   font-family: var(--font-mono);
   font-size: var(--terminal-font-size);
+  font-weight: 400;
+  font-style: normal;
+  font-variant: normal;
+  font-kerning: none;
+  font-variant-ligatures: none;
+  letter-spacing: normal;
+  word-spacing: normal;
+  text-indent: 0;
+  text-transform: none;
+  tab-size: 8;
   line-height: 1.5;
+}
+
+.agent-composer-mirror {
+  position: absolute;
+  z-index: 0;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  pointer-events: none;
+  color: var(--text);
 }
 
 .agent-composer-token {
@@ -9961,20 +10275,11 @@ body.is-resizing * {
   display: block;
   width: 100%;
   min-width: 0;
-  max-height: 220px;
-  margin: 0;
-  padding: 4px 2px;
-  border: 0;
   background: transparent;
   color: var(--text);
   /* Match the shell command editor and the terminal caret — house green. */
   caret-color: var(--accent);
-  font-family: var(--font-mono);
-  font-size: var(--terminal-font-size);
-  line-height: 1.5;
-  white-space: pre-wrap;
-  word-break: break-word;
-  overflow-wrap: anywhere;
+  overflow: auto;
   resize: none;
   outline: none;
   user-select: text;
@@ -11941,4 +12246,86 @@ body.is-dragging-rail * {
     left: 42%;
     opacity: 0.45;
   }
+}
+/* Last-resort surface for startup and render failures. */
+.app-recovery {
+  width: 100%;
+  height: 100%;
+  display: grid;
+  place-items: center;
+  padding: 32px;
+  color: #e6ebe7;
+  background: #0f120f;
+}
+
+.app-recovery-card {
+  width: min(520px, 100%);
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 18px 16px;
+  padding: 24px;
+  border: 1px solid #2d352f;
+  border-radius: 12px;
+  background: #171c18;
+}
+
+.app-recovery-mark {
+  width: 38px;
+  height: 38px;
+  display: grid;
+  place-items: center;
+  border-radius: 9px;
+  color: #b8ddb9;
+  background: #263128;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.app-recovery h1 {
+  margin: 0 0 6px;
+  font-size: 18px;
+  line-height: 1.25;
+}
+
+.app-recovery p {
+  margin: 0;
+  color: #aeb8b0;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.app-recovery pre {
+  grid-column: 1 / -1;
+  max-height: 120px;
+  margin: 0;
+  padding: 12px;
+  overflow: auto;
+  border-radius: 7px;
+  color: #c5cec7;
+  background: #101411;
+  font: 11px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.app-recovery button {
+  grid-column: 2;
+  justify-self: end;
+  min-height: 34px;
+  padding: 0 14px;
+  border: 1px solid #789b7b;
+  border-radius: 7px;
+  color: #f2f6f2;
+  background: #3f6844;
+  font: inherit;
+  cursor: pointer;
+}
+
+.app-recovery button:hover {
+  background: #4b7851;
+}
+
+.app-recovery button:focus-visible {
+  outline: 2px solid #a7caaa;
+  outline-offset: 2px;
 }

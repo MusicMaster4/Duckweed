@@ -14,11 +14,12 @@ const COLLAPSE_AFTER = 24;
 /**
  * Split a unified patch into rows.
  *
- * Codex hands over a patch it already computed, so there is nothing to diff —
- * only the file headers to drop, since the path is already in the row above.
+ * Updates hand over a patch the agent already computed, so there is nothing to
+ * diff, only the file headers to drop. Add/delete bodies have no +/- markers;
+ * those become additions so a new file paints green like the git diff.
  */
 function rowsFromPatch(patch: string): Row[] {
-  return patch
+  const rows = patch
     .split("\n")
     .filter((line, index, all) => !(index === all.length - 1 && line === ""))
     .filter((line) => !line.startsWith("+++") && !line.startsWith("---") && !line.startsWith("diff "))
@@ -28,6 +29,12 @@ function rowsFromPatch(patch: string): Row[] {
       if (line.startsWith("-")) return { kind: "del" as const, text: line.slice(1) };
       return { kind: "ctx" as const, text: line.startsWith(" ") ? line.slice(1) : line };
     });
+  // A new-file body with no unified-diff markers (Codex `kind: add`) should
+  // still render as additions, the same way the git diff paints a new file.
+  if (rows.some((row) => row.kind === "add" || row.kind === "del")) return rows;
+  return rows
+    .filter((row) => row.kind !== "meta")
+    .map((row) => ({ kind: "add" as const, text: row.text }));
 }
 
 /**
@@ -39,7 +46,7 @@ function rowsFromPatch(patch: string): Row[] {
  * the render path while an agent streams edits.
  */
 function rowsFromTexts(before: string | null, after: string | null): Row[] {
-  if (before === null) {
+  if (!before) {
     return (after ?? "").split("\n").map((text) => ({ kind: "add" as const, text }));
   }
   if (after === null) {
@@ -80,36 +87,6 @@ function dirname(path: string): string {
   return parts.join("/");
 }
 
-const LANGUAGE_BY_EXTENSION: Record<string, string> = {
-  css: "CSS",
-  go: "Go",
-  html: "HTML",
-  java: "Java",
-  js: "JavaScript",
-  json: "JSON",
-  jsx: "JSX",
-  kt: "Kotlin",
-  md: "Markdown",
-  py: "Python",
-  rb: "Ruby",
-  rs: "Rust",
-  scss: "SCSS",
-  sh: "Shell",
-  sql: "SQL",
-  ts: "TypeScript",
-  tsx: "TSX",
-  vue: "Vue",
-  xml: "XML",
-  yaml: "YAML",
-  yml: "YAML",
-};
-
-function languageForPath(path: string): string | null {
-  const file = basename(path);
-  const extension = file.includes(".") ? file.split(".").pop()?.toLowerCase() : null;
-  return extension ? LANGUAGE_BY_EXTENSION[extension] ?? extension.toUpperCase() : null;
-}
-
 /** One file's change, as the agent proposed or applied it. */
 export function AgentDiff({ change }: { change: AgentFileChange }) {
   const [expanded, setExpanded] = useState(false);
@@ -121,7 +98,6 @@ export function AgentDiff({ change }: { change: AgentFileChange }) {
   const folded = !expanded && rows.length > COLLAPSE_AFTER;
   const visible = folded ? rows.slice(0, COLLAPSE_AFTER) : rows;
   const directory = dirname(change.path);
-  const language = languageForPath(change.path);
 
   return (
     <div className="agent-diff">
@@ -130,7 +106,6 @@ export function AgentDiff({ change }: { change: AgentFileChange }) {
           {directory && <span className="agent-diff-dir">{directory}/</span>}
           {basename(change.path)}
         </span>
-        {language && <span className="agent-diff-language">{language}</span>}
         {change.insertions > 0 && <span className="agent-diff-add">+{change.insertions}</span>}
         {change.deletions > 0 && <span className="agent-diff-del">−{change.deletions}</span>}
       </div>

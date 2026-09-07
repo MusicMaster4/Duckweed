@@ -1,6 +1,7 @@
 import type { IMarker, Terminal } from "@xterm/xterm";
 
 import { nextBlockSelection, type BlockNavAction } from "./blockNav";
+import { highlightCommand } from "./commandSyntax";
 
 /**
  * Warp-style command blocks for the editor flow.
@@ -30,10 +31,14 @@ export interface CommandBlock {
   cmdEl: HTMLDivElement | null;
   /** Lazily mounted full-width hairline above the block. */
   sepEl: HTMLDivElement | null;
+  /** Lazily mounted state wash and failure rail spanning the visible block. */
+  stateEl: HTMLDivElement | null;
   /** Exact lifecycle timing when supplied by OSC 133 shell integration. */
   startedAt: number;
   completedAt: number | null;
   exitCode: number | null;
+  /** Composer block still waiting for the shell's matching OSC 133 start. */
+  awaitingShellConfirmation: boolean;
 }
 
 export class BlockTracker {
@@ -41,6 +46,7 @@ export class BlockTracker {
   private nextId = 1;
   private press: { x: number; y: number; line: number } | null = null;
   private selectedId: number | null = null;
+  private hoveredId: number | null = null;
   private readonly onMouseDown: (e: MouseEvent) => void;
   private readonly onMouseUp: (e: MouseEvent) => void;
   private readonly onMouseMove: (e: MouseEvent) => void;
@@ -54,6 +60,10 @@ export class BlockTracker {
    * scroll on tall cargo/build output).
    */
   private readonly selectOverlay: HTMLDivElement;
+  /** Selection tint kept below command headers and the optical separator. */
+  private readonly selectFill: HTMLDivElement;
+  /** Quiet outline that makes the atomic block under the pointer legible. */
+  private readonly hoverOverlay: HTMLDivElement;
   /**
    * Blocks whose command chrome was visible during the previous layout.
    * Keeping this small set lets scrolling hide stale overlays without walking
@@ -88,19 +98,38 @@ export class BlockTracker {
     this.promptCover.hidden = true;
     this.host.appendChild(this.promptCover);
 
+    this.selectFill = document.createElement("div");
+    this.selectFill.className = "command-block-select-fill";
+    this.selectFill.setAttribute("role", "presentation");
+    this.selectFill.hidden = true;
+    this.host.appendChild(this.selectFill);
+
     this.selectOverlay = document.createElement("div");
     this.selectOverlay.className = "command-block-select-overlay";
     this.selectOverlay.setAttribute("role", "presentation");
     this.selectOverlay.hidden = true;
     this.host.appendChild(this.selectOverlay);
 
+    this.hoverOverlay = document.createElement("div");
+    this.hoverOverlay.className = "command-block-hover-overlay";
+    this.hoverOverlay.setAttribute("role", "presentation");
+    this.hoverOverlay.hidden = true;
+    this.host.appendChild(this.hoverOverlay);
+
     this.onMouseDown = (e) => this.handleMouseDown(e);
     this.onMouseUp = (e) => this.handleMouseUp(e);
     this.onMouseMove = (e) => this.handleMouseMove(e);
     this.onMouseLeave = () => {
       this.press = null;
+      this.setHovered(null);
     };
-    this.onScroll = () => this.scheduleLayout();
+    this.onScroll = () => {
+      // The row beneath a stationary pointer changes while scrolling. Hide the
+      // hover affordance until the next pointer move instead of letting it
+      // follow an old block through the viewport.
+      this.setHovered(null);
+      this.scheduleLayout();
+    };
 
     // Bubble phase so the empty-space capture handler in terminals can refuse
     // dead rows first; we only see clicks that landed on real content.
@@ -112,7 +141,11 @@ export class BlockTracker {
   }
 
   /** Open a block for a submitted command at the current logical prompt line. */
-  open(command: string, startedAt = Date.now()): void {
+  open(
+    command: string,
+    startedAt = Date.now(),
+    source: "submission" | "shell" = "submission",
+  ): void {
     // No editorMode guard: submits only ever come from the composer, and a
     // busy→idle race (the native busy poll lags a ^C) must not drop the block
     // — that left the raw `PS path> cmd` echo uncovered for good. Command
@@ -122,16 +155,32 @@ export class BlockTracker {
     // A new command replaces any prior chunk selection.
     if (this.selectedId !== null) {
       this.selectedId = null;
+      this.selectFill.hidden = true;
       this.selectOverlay.hidden = true;
     }
-    // Editor submissions open before the PTY write. Bash/zsh preexec (and
-    // often PowerShell) emit OSC 133;C after the command row is committed and
-    // the cursor has advanced. Merge the in-flight block by command text so
-    // the shell confirmation does not create a duplicate on the output row.
+    // Editor submissions open before the PTY write. Bash/zsh preexec emits
+    // OSC 133;C after the command row is committed. Only that shell event may
+    // confirm the pending block. A second composer submission with identical
+    // text is a real new run and must always get its own marker and block.
     const last = this.blocks[this.blocks.length - 1];
-    if (last && last.completedAt === null && last.command === command) {
+    if (
+      source === "shell" &&
+      last?.awaitingShellConfirmation &&
+      last.completedAt === null &&
+      last.command === command
+    ) {
       last.startedAt = startedAt;
+      last.awaitingShellConfirmation = false;
       return;
+    }
+    if (last) {
+      last.awaitingShellConfirmation = false;
+      // PowerShell has no OSC 133 integration. Reaching another submission is
+      // still a reliable boundary for the previous command, even without an
+      // exit code from the shell.
+      if (source === "submission" && last.completedAt === null) {
+        last.completedAt = startedAt;
+      }
     }
     // A PowerShell prompt can already be wrapped before the command is echoed.
     // A marker at the cursor would then sit on a continuation row, which xterm
@@ -158,9 +207,11 @@ export class BlockTracker {
       start,
       cmdEl: null,
       sepEl: null,
+      stateEl: null,
       startedAt,
       completedAt: null,
       exitCode: null,
+      awaitingShellConfirmation: source === "submission",
     };
 
     this.blocks.push(block);
@@ -174,6 +225,7 @@ export class BlockTracker {
     if (!block || block.completedAt !== null) return;
     block.completedAt = completedAt;
     block.exitCode = exitCode;
+    block.awaitingShellConfirmation = false;
     this.scheduleLayout();
   }
 
@@ -189,15 +241,20 @@ export class BlockTracker {
     this.visibleBlocks.clear();
     this.press = null;
     this.selectedId = null;
+    this.hoveredId = null;
     this.promptCover.hidden = true;
+    this.selectFill.hidden = true;
     this.selectOverlay.hidden = true;
+    this.hoverOverlay.hidden = true;
     this.clearXtermSelection();
   }
 
   dispose(): void {
     this.clear();
     this.promptCover.remove();
+    this.selectFill.remove();
     this.selectOverlay.remove();
+    this.hoverOverlay.remove();
     this.scrollDisposable.dispose();
     if (this.layoutRaf !== null) {
       cancelAnimationFrame(this.layoutRaf);
@@ -286,32 +343,71 @@ export class BlockTracker {
       // Cover every physical row in a wrapped command echo. Keeping the div at
       // its real buffer position also clips a partially visible header cleanly
       // when its first row has just scrolled above the viewport.
-      const headerOnScreen = commandEndRow >= 0 && coverRow < rows;
+      // Warp keeps a compact command header visible while the output of a tall
+      // block scrolls underneath it. Do the same once the real command row is
+      // above the viewport, but only while this block still owns visible rows.
+      const sticky = commandEndRow < 0 && range.end >= viewportY;
+      const headerOnScreen = sticky || (commandEndRow >= 0 && coverRow < rows);
       if (headerOnScreen) {
         visibleBlocks.add(block);
         const { cmdEl, sepEl } = this.ensureBlockChrome(block, i > 0);
         const rowsBeforeCommand = range.start - coverStart;
         const headerRows = commandEnd - coverStart + 1;
-        const y = offsetY + coverRow * cellHeight;
+        const y = sticky ? offsetY : offsetY + coverRow * cellHeight;
+        const failed = hasFailed(block);
+        const hovered = this.editorMode && block.id === this.hoveredId;
         cmdEl.hidden = false;
-        cmdEl.classList.toggle(
-          "is-selected",
-          this.editorMode && block.id === this.selectedId,
-        );
+        cmdEl.classList.toggle("is-selected", this.editorMode && block.id === this.selectedId);
+        cmdEl.classList.toggle("is-hovered", hovered && block.id !== this.selectedId);
+        cmdEl.classList.toggle("is-sticky", sticky);
+        cmdEl.classList.toggle("is-running", block.completedAt === null);
+        cmdEl.classList.toggle("is-failed", failed);
+        cmdEl.classList.toggle("is-complete", block.completedAt !== null && !failed);
+        const statusEl = cmdEl.querySelector<HTMLElement>(".command-block-status");
+        if (statusEl) {
+          const duration =
+            block.completedAt === null
+              ? ""
+              : formatBlockDuration(block.completedAt - block.startedAt);
+          statusEl.textContent = failed
+            ? `exit ${block.exitCode}${duration ? ` · ${duration}` : ""}`
+            : block.completedAt === null
+              ? "running"
+              : duration;
+        }
         cmdEl.style.transform = `translate3d(0, ${y}px, 0)`;
         cmdEl.style.width = `${fullWidth}px`;
-        cmdEl.style.height = `${headerRows * cellHeight}px`;
-        cmdEl.style.padding = `${rowsBeforeCommand * cellHeight}px 6px 0`;
+        cmdEl.style.height = `${(sticky ? 1 : headerRows) * cellHeight}px`;
+        cmdEl.style.padding = sticky
+          ? "0 10px"
+          : `${rowsBeforeCommand * cellHeight}px 10px 0 8px`;
         cmdEl.style.lineHeight = `${cellHeight}px`;
 
+        if (failed) {
+          const stateEl = this.ensureBlockState(block);
+          stateEl.classList.add("is-failed");
+          this.layoutRangeOverlay(
+            stateEl,
+            range,
+            fullWidth,
+            offsetY,
+            cellHeight,
+            viewportY,
+            rows,
+          );
+        } else if (block.stateEl) {
+          block.stateEl.remove();
+          block.stateEl = null;
+        }
+
         if (sepEl) {
-          // A terminal grid has no real inter-row gap. Keep the separator on
-          // the exact boundary so it never cuts through previous output.
-          if (i > 0 && this.editorMode && coverRow >= 0 && coverRow < rows) {
+          // A terminal grid has no real inter-row gap. Center a narrow opaque
+          // band on the boundary to create equal breathing room on both sides.
+          if (i > 0 && this.editorMode && !sticky && coverRow >= 0 && coverRow < rows) {
             sepEl.hidden = false;
-            sepEl.style.transform = `translate3d(0, ${y}px, 0)`;
+            sepEl.style.transform = `translate3d(0, ${y - 3}px, 0)`;
             sepEl.style.width = `${fullWidth}px`;
-            sepEl.style.height = "1px";
+            sepEl.style.height = "7px";
           } else {
             sepEl.hidden = true;
           }
@@ -331,9 +427,12 @@ export class BlockTracker {
     if (this.editorMode) {
       this.layoutPromptCover(fullWidth, offsetY, cellHeight, viewportY, rows);
       this.layoutSelectOverlay(fullWidth, offsetY, cellHeight, viewportY, rows);
+      this.layoutHoverOverlay(fullWidth, offsetY, cellHeight, viewportY, rows);
     } else {
       this.promptCover.hidden = true;
+      this.selectFill.hidden = true;
       this.selectOverlay.hidden = true;
+      this.hoverOverlay.hidden = true;
     }
   }
 
@@ -372,7 +471,10 @@ export class BlockTracker {
       // Drop selection + hairlines immediately so a TUI never gets even one
       // frame with a rule painted through mid-output that rewrote those lines.
       this.selectedId = null;
+      this.hoveredId = null;
+      this.selectFill.hidden = true;
       this.selectOverlay.hidden = true;
+      this.hoverOverlay.hidden = true;
       this.promptCover.hidden = true;
       for (const block of this.visibleBlocks) {
         if (block.sepEl) block.sepEl.hidden = true;
@@ -526,6 +628,7 @@ export class BlockTracker {
   dismissNavSelection(): void {
     if (this.selectedId === null) return;
     this.selectedId = null;
+    this.selectFill.hidden = true;
     this.selectOverlay.hidden = true;
     this.scheduleLayout();
   }
@@ -536,6 +639,7 @@ export class BlockTracker {
       return;
     }
     this.selectedId = null;
+    this.selectFill.hidden = true;
     this.selectOverlay.hidden = true;
     this.clearXtermSelection();
     this.scheduleLayout();
@@ -559,8 +663,22 @@ export class BlockTracker {
       const cmdEl = document.createElement("div");
       cmdEl.className = "command-block-cmd";
       cmdEl.setAttribute("role", "presentation");
+      const promptEl = document.createElement("span");
+      promptEl.className = "command-block-prompt";
+      promptEl.textContent = "›";
+      const textEl = document.createElement("span");
+      textEl.className = "command-block-text";
       // One-line label: multi-line buffers collapse to one visual row for now.
-      cmdEl.textContent = block.command.replace(/\s+/g, " ").trim();
+      const displayCommand = block.command.replace(/\s+/g, " ").trim();
+      for (const token of highlightCommand(displayCommand)) {
+        const tokenEl = document.createElement("span");
+        tokenEl.className = `command-token token-${token.kind}`;
+        tokenEl.textContent = token.text;
+        textEl.appendChild(tokenEl);
+      }
+      const statusEl = document.createElement("span");
+      statusEl.className = "command-block-status";
+      cmdEl.append(promptEl, textEl, statusEl);
       cmdEl.hidden = true;
       this.host.appendChild(cmdEl);
       block.cmdEl = cmdEl;
@@ -576,11 +694,24 @@ export class BlockTracker {
     return { cmdEl: block.cmdEl, sepEl: block.sepEl };
   }
 
+  private ensureBlockState(block: CommandBlock): HTMLDivElement {
+    if (block.stateEl) return block.stateEl;
+    const stateEl = document.createElement("div");
+    stateEl.className = "command-block-state-overlay";
+    stateEl.setAttribute("role", "presentation");
+    stateEl.hidden = true;
+    this.host.appendChild(stateEl);
+    block.stateEl = stateEl;
+    return stateEl;
+  }
+
   private releaseBlockChrome(block: CommandBlock): void {
     block.cmdEl?.remove();
     block.sepEl?.remove();
+    block.stateEl?.remove();
     block.cmdEl = null;
     block.sepEl = null;
+    block.stateEl = null;
   }
 
   private hideChrome(): void {
@@ -589,7 +720,9 @@ export class BlockTracker {
     }
     this.visibleBlocks.clear();
     this.promptCover.hidden = true;
+    this.selectFill.hidden = true;
     this.selectOverlay.hidden = true;
+    this.hoverOverlay.hidden = true;
   }
 
   /** True while we are clearing/setting xterm selection ourselves. */
@@ -663,34 +796,104 @@ export class BlockTracker {
     rows: number,
   ): void {
     if (this.selectedId === null) {
+      this.selectFill.hidden = true;
       this.selectOverlay.hidden = true;
       return;
     }
     const block = this.blocks.find((b) => b.id === this.selectedId);
     if (!block) {
+      this.selectFill.hidden = true;
       this.selectOverlay.hidden = true;
       return;
     }
     const range = this.range(block);
     if (!range) {
+      this.selectFill.hidden = true;
       this.selectOverlay.hidden = true;
       return;
     }
 
-    // Soft tint over the visible slice of the block, including the command row.
+    this.layoutRangeOverlay(
+      this.selectFill,
+      range,
+      fullWidth,
+      offsetY,
+      cellHeight,
+      viewportY,
+      rows,
+    );
+    this.layoutRangeOverlay(
+      this.selectOverlay,
+      range,
+      fullWidth,
+      offsetY,
+      cellHeight,
+      viewportY,
+      rows,
+      2,
+    );
+  }
+
+  private layoutHoverOverlay(
+    fullWidth: number,
+    offsetY: number,
+    cellHeight: number,
+    viewportY: number,
+    rows: number,
+  ): void {
+    if (this.hoveredId === null || this.hoveredId === this.selectedId) {
+      this.hoverOverlay.hidden = true;
+      return;
+    }
+    const block = this.blocks.find((candidate) => candidate.id === this.hoveredId);
+    const range = block ? this.range(block) : null;
+    if (!range) {
+      this.hoverOverlay.hidden = true;
+      return;
+    }
+    this.layoutRangeOverlay(
+      this.hoverOverlay,
+      range,
+      fullWidth,
+      offsetY,
+      cellHeight,
+      viewportY,
+      rows,
+      1,
+    );
+  }
+
+  /** Position an overlay on only the visible slice of a semantic block. */
+  private layoutRangeOverlay(
+    element: HTMLDivElement,
+    range: { start: number; end: number },
+    fullWidth: number,
+    offsetY: number,
+    cellHeight: number,
+    viewportY: number,
+    rows: number,
+    outset = 0,
+  ): void {
     const startRow = range.start - viewportY;
     const endRow = range.end - viewportY;
     const visStart = Math.max(0, startRow);
     const visEnd = Math.min(rows - 1, endRow);
     if (visEnd < visStart) {
-      this.selectOverlay.hidden = true;
+      element.hidden = true;
       return;
     }
-
-    this.selectOverlay.hidden = false;
-    this.selectOverlay.style.transform = `translate3d(0, ${offsetY + visStart * cellHeight}px, 0)`;
-    this.selectOverlay.style.width = `${fullWidth}px`;
-    this.selectOverlay.style.height = `${(visEnd - visStart + 1) * cellHeight}px`;
+    element.hidden = false;
+    element.classList.toggle("is-clipped-top", startRow < 0);
+    element.classList.toggle("is-clipped-bottom", endRow >= rows);
+    const topOutset = startRow < 0 ? 0 : outset;
+    const bottomOutset = endRow >= rows ? 0 : outset;
+    element.style.transform = `translate3d(${-outset}px, ${
+      offsetY + visStart * cellHeight - topOutset
+    }px, 0)`;
+    element.style.width = `${fullWidth + outset * 2}px`;
+    element.style.height = `${
+      (visEnd - visStart + 1) * cellHeight + topOutset + bottomOutset
+    }px`;
   }
 
   private layoutPromptCover(
@@ -801,13 +1004,30 @@ export class BlockTracker {
    * left a stuck block tint while xterm was selecting underneath.
    */
   private handleMouseMove(e: MouseEvent): void {
+    if (!this.editorMode || this.term.modes.mouseTrackingMode !== "none") {
+      this.setHovered(null);
+      return;
+    }
     const press = this.press;
-    if (!press || this.selectedId === null) return;
-    const dx = e.clientX - press.x;
-    const dy = e.clientY - press.y;
-    if (dx * dx + dy * dy <= 25) return;
-    this.press = null;
-    this.dismissNavSelection();
+    if (press && this.selectedId !== null) {
+      const dx = e.clientX - press.x;
+      const dy = e.clientY - press.y;
+      if (dx * dx + dy * dy > 25) {
+        this.press = null;
+        this.setHovered(null);
+        this.dismissNavSelection();
+        return;
+      }
+    }
+    const line = bufferLineFromEvent(this.term, this.host, e);
+    this.setHovered(line === null ? null : this.atLine(line)?.id ?? null);
+  }
+
+  private setHovered(id: number | null): void {
+    if (this.hoveredId === id) return;
+    this.hoveredId = id;
+    if (id === null) this.hoverOverlay.hidden = true;
+    this.scheduleLayout();
   }
 
   private handleMouseUp(e: MouseEvent): void {
@@ -841,7 +1061,37 @@ export class BlockTracker {
 function disposeBlock(block: CommandBlock): void {
   block.cmdEl?.remove();
   block.sepEl?.remove();
+  block.stateEl?.remove();
   block.start.dispose();
+}
+
+/** Match Warp's failure treatment: interrupts and SIGPIPE are not errors. */
+function hasFailed(block: CommandBlock): boolean {
+  return (
+    block.completedAt !== null &&
+    block.exitCode !== null &&
+    block.exitCode !== 0 &&
+    block.exitCode !== 130 &&
+    block.exitCode !== 141
+  );
+}
+
+/** Compact timing label for block headers. */
+export function formatBlockDuration(durationMs: number): string {
+  const ms = Math.max(0, durationMs);
+  if (ms < 1000) return `${Math.max(1, Math.round(ms))} ms`;
+  if (ms < 60_000) {
+    const seconds = ms / 1000;
+    return `${seconds < 10 ? seconds.toFixed(1) : Math.round(seconds)} s`;
+  }
+  if (ms < 3_600_000) {
+    const minutes = Math.floor(ms / 60_000);
+    const seconds = Math.floor((ms % 60_000) / 1000);
+    return `${minutes}m ${seconds.toString().padStart(2, "0")}s`;
+  }
+  const hours = Math.floor(ms / 3_600_000);
+  const minutes = Math.floor((ms % 3_600_000) / 60_000);
+  return `${hours}h ${minutes.toString().padStart(2, "0")}m`;
 }
 
 /**

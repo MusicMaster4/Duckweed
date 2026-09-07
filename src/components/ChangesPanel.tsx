@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 
-import { gitDiff, gitFileDiff } from "../lib/ipc";
+import { gitDiff, gitDiscardAll, gitFileDiff } from "../lib/ipc";
+import { confirmCloseRunning, getConfirmClose } from "../lib/confirmClose";
 import type { Diff, DiffHunk, FileDiff, ProjectInfo } from "../lib/types";
 import { AsciiAmbient } from "./AsciiAmbient";
 
@@ -54,6 +55,20 @@ const CompareIcon = () => (
       strokeLinecap="round"
       strokeLinejoin="round"
     />
+  </svg>
+);
+
+const MoreIcon = () => (
+  <svg viewBox="0 0 16 16" aria-hidden="true">
+    <circle cx="3" cy="8" r="1" />
+    <circle cx="8" cy="8" r="1" />
+    <circle cx="13" cy="8" r="1" />
+  </svg>
+);
+
+const DiscardIcon = () => (
+  <svg viewBox="0 0 16 16" aria-hidden="true">
+    <path d="M3 4.5h10M6 4.5V3h4v1.5M5 6.5v6M8 6.5v6M11 6.5v6M4 4.5l.7 9h6.6l.7-9" />
   </svg>
 );
 
@@ -168,6 +183,10 @@ export function ChangesPanel({ project, onClose }: Props) {
   /** Full-context copies, fetched once per file and kept for the toggle back. */
   const [full, setFull] = useState<Record<string, FileDiff>>({});
   const [copied, setCopied] = useState<string | null>(null);
+  const [actionsOpen, setActionsOpen] = useState(false);
+  const [discarding, setDiscarding] = useState(false);
+  const [discardError, setDiscardError] = useState<string | null>(null);
+  const actionsRef = useRef<HTMLDivElement>(null);
   /** Files already sized up once, so a refresh cannot re-fold what was opened. */
   const judged = useRef(new Set<string>());
   /** Monotonic token so an older gitDiff cannot overwrite a newer one. */
@@ -246,13 +265,28 @@ export function ChangesPanel({ project, onClose }: Props) {
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
+      // The app-level confirmation owns Escape while it is visible.
+      if (getConfirmClose()) return;
       e.preventDefault();
       e.stopPropagation();
+      if (actionsOpen) {
+        setActionsOpen(false);
+        return;
+      }
       onClose();
     };
     window.addEventListener("keydown", onKeyDown, true);
     return () => window.removeEventListener("keydown", onKeyDown, true);
-  }, [onClose]);
+  }, [actionsOpen, onClose]);
+
+  useEffect(() => {
+    if (!actionsOpen) return;
+    const closeOutside = (event: PointerEvent) => {
+      if (!actionsRef.current?.contains(event.target as Node)) setActionsOpen(false);
+    };
+    window.addEventListener("pointerdown", closeOutside, true);
+    return () => window.removeEventListener("pointerdown", closeOutside, true);
+  }, [actionsOpen]);
 
   const files = load.kind === "ready" ? load.diff.files : [];
 
@@ -302,6 +336,43 @@ export function ChangesPanel({ project, onClose }: Props) {
 
   const allClosed = files.length > 0 && files.every((f) => closed.has(f.path));
   const stats = load.kind === "ready" ? load.diff.stats : null;
+
+  const discardAll = useCallback(async () => {
+    setActionsOpen(false);
+    const newFiles = files.filter(
+      (file) => file.status === "added" || file.status === "untracked",
+    ).length;
+    const fileLabel = `${files.length} file${files.length === 1 ? "" : "s"}`;
+    const newFileWarning = newFiles > 0
+      ? ` ${newFiles} new file${newFiles === 1 ? "" : "s"} will be permanently deleted.`
+      : "";
+    const confirmed = await confirmCloseRunning({
+      title: "Discard all changes?",
+      message: `Discard changes in ${fileLabel}? Tracked files will be restored.${newFileWarning} This cannot be undone.`,
+      confirmLabel: "Discard all",
+    });
+    if (!confirmed) return;
+
+    setDiscarding(true);
+    setDiscardError(null);
+    try {
+      await gitDiscardAll(project.path);
+      diffCache.delete(project.path);
+      judged.current = new Set();
+      setClosed(new Set());
+      setExpanded(new Set());
+      setFull({});
+      reload();
+    } catch (error: unknown) {
+      setDiscardError(String(error));
+      // Reset or clean can fail after making partial progress. Re-read the
+      // repository so the panel never keeps showing the pre-discard snapshot.
+      diffCache.delete(project.path);
+      reload();
+    } finally {
+      setDiscarding(false);
+    }
+  }, [files, project.path, reload]);
 
   const body = useMemo(
     () =>
@@ -410,6 +481,33 @@ export function ChangesPanel({ project, onClose }: Props) {
           <button type="button" className="changes-btn" title="Re-read the working tree" onClick={reload}>
             refresh
           </button>
+          <div className="changes-actions" ref={actionsRef}>
+            <button
+              type="button"
+              className="changes-btn is-icon"
+              title="Repository actions"
+              aria-label="Repository actions"
+              aria-haspopup="menu"
+              aria-expanded={actionsOpen}
+              onClick={() => setActionsOpen((open) => !open)}
+            >
+              <MoreIcon />
+            </button>
+            {actionsOpen && (
+              <div className="changes-actions-menu" role="menu">
+                <button
+                  type="button"
+                  className="is-danger"
+                  role="menuitem"
+                  disabled={discarding || files.length === 0}
+                  onClick={() => void discardAll()}
+                >
+                  <DiscardIcon />
+                  <span>Discard all</span>
+                </button>
+              </div>
+            )}
+          </div>
           <button type="button" className="changes-btn" title="Close (Esc)" onClick={onClose}>
             ✕
           </button>
@@ -428,6 +526,17 @@ export function ChangesPanel({ project, onClose }: Props) {
             </button>
           )}
         </div>
+
+        {discardError && (
+          <div className="changes-error" role="alert">
+            <span>{discardError}</span>
+            <button type="button" onClick={() => setDiscardError(null)} aria-label="Dismiss error">
+              ×
+            </button>
+          </div>
+        )}
+
+        {discarding && <div className="changes-progress">discarding changes...</div>}
 
         <div className="changes-body">
           {load.kind === "loading" && <div className="diff-empty">reading the working tree…</div>}

@@ -1457,7 +1457,7 @@ function create(id: string, opts: TerminalStartOptions): Session {
       const command = event.command?.replace(/\r\n/g, "\n").replace(/\r/g, "\n") ?? null;
       const startedAt = Date.now();
       if (command?.trim()) {
-        session.blocks.open(command, startedAt);
+        session.blocks.open(command, startedAt, "shell");
         commandHistory.record(command, session.cwd || null);
         recordLocalHistory(session, command);
         markRan(session);

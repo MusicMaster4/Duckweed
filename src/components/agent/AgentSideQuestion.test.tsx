@@ -44,6 +44,30 @@ describe("agent side question", () => {
     expect(html).not.toContain('aria-busy="true"');
   });
 
+  test("shows images attached to the side question", () => {
+    const html = renderToStaticMarkup(
+      <AgentSideQuestion
+        question={{
+          ...base,
+          command: "/side",
+          images: [
+            {
+              id: "image-1",
+              name: "screenshot.png",
+              mimeType: "image/png",
+              dataUrl: "data:image/png;base64,aGVsbG8=",
+              size: 5,
+            },
+          ],
+        }}
+        onDismiss={() => {}}
+      />,
+    );
+
+    expect(html).toContain('aria-label="1 attached image"');
+    expect(html).toContain('alt="screenshot.png"');
+  });
+
   test("uses an explicit fallback when the provider returns no error text", () => {
     const html = renderToStaticMarkup(
       <AgentSideQuestion question={{ ...base, status: "error" }} onDismiss={() => {}} />,

@@ -1,6 +1,7 @@
 import { createRoot } from "react-dom/client";
 
 import { NativeTitleTooltips } from "./components/Tooltip";
+import { AppErrorBoundary, RecoveryScreen } from "./components/AppErrorBoundary";
 import { restoreDurableStorage } from "./lib/durableStorage";
 import "@xterm/xterm/css/xterm.css";
 import "./styles.css";
@@ -19,10 +20,10 @@ async function start() {
     const container = document.getElementById("root");
     if (!container) throw new Error("missing #root");
     createRoot(container).render(
-      <>
+      <AppErrorBoundary>
         <AgentExperiencePreview />
         <NativeTitleTooltips />
-      </>,
+      </AppErrorBoundary>,
     );
     return;
   }
@@ -40,11 +41,18 @@ async function start() {
   // Deliberately not wrapped in StrictMode: its double-mount would spawn two
   // shells per pane in development.
   createRoot(container).render(
-    <>
+    <AppErrorBoundary>
       <App />
       <NativeTitleTooltips />
-    </>,
+    </AppErrorBoundary>,
   );
 }
 
-void start();
+void start().catch((error) => {
+  console.error("Duckweed failed to start", error);
+  const container = document.getElementById("root");
+  if (container) createRoot(container).render(<RecoveryScreen error={error} />);
+  // The native window starts hidden. A startup failure must still become a
+  // visible recovery screen instead of looking like an app that never opened.
+  void import("./lib/ipc").then(({ frontendReady }) => frontendReady()).catch(() => {});
+});
