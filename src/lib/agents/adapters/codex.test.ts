@@ -2977,6 +2977,45 @@ describe("codex adapter", () => {
     expect(h.sent.at(-1)).toMatchObject({ method: "turn/interrupt", params: { turnId: "next" } });
   });
 
+  test("shows continuation messages and tools before its turn-start frame", async () => {
+    const h = harness({}, { completionQuietMs: 20 });
+    await h.handshake();
+    h.notify("turn/started", { threadId: "thread_1", turn: { id: "old" } });
+    h.notify("turn/completed", { threadId: "thread_1", turn: { id: "old" } });
+    h.notify("thread/status/changed", { threadId: "thread_1", status: { type: "active" } });
+    h.notify("item/agentMessage/delta", {
+      threadId: "thread_1", turnId: "new", itemId: "message", delta: "Checking deployment storage.",
+    });
+    h.notify("item/started", {
+      threadId: "thread_1", turnId: "new",
+      item: { id: "tool", type: "commandExecution", command: "git status", status: "inProgress" },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(h.state().items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ text: "Checking deployment storage." }),
+      expect.objectContaining({ kind: "tool", command: "git status" }),
+    ]));
+    expect(h.state().status).toBe("working");
+    h.adapter.interrupt(h.ctx);
+    expect(h.sent.at(-1)).toMatchObject({ method: "turn/interrupt", params: { turnId: "new" } });
+  });
+
+  test("accepts a new root start when the previous completion was lost", async () => {
+    const h = harness();
+    await h.handshake();
+    h.notify("turn/started", { threadId: "thread_1", turn: { id: "old" } });
+    h.notify("turn/started", { threadId: "thread_1", turn: { id: "new" } });
+    h.notify("item/agentMessage/delta", {
+      threadId: "thread_1", turnId: "new", itemId: "message", delta: "Running checks.",
+    });
+    h.notify("turn/started", { threadId: "thread_1", turn: { id: "old" } });
+    h.notify("turn/completed", { threadId: "thread_1", turn: { id: "old" } });
+    expect(h.state().items.at(-1)).toMatchObject({ text: "Running checks." });
+    expect(h.state().status).toBe("working");
+    h.adapter.interrupt(h.ctx);
+    expect(h.sent.at(-1)).toMatchObject({ method: "turn/interrupt", params: { turnId: "new" } });
+  });
+
   test("shows the next turn after completion races with an accepted steer", async () => {
     const h = harness();
     await h.handshake();

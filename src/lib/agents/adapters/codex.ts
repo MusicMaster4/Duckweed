@@ -2011,13 +2011,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         // turn completed. Keep the original user-owned stretch open.
         const turn = asRecord(params.turn);
         const startedTurnId = asString(turn?.id);
-        const continuesAfterPendingCompletion = Boolean(
-          (rootPendingCompletion || rootTurnCompletionObserved) &&
-          startedTurnId &&
-          startedTurnId !== currentTurnId &&
-          !completedRootTurnIds.has(startedTurnId),
-        );
-        if (!continuesAfterPendingCompletion && rootTurnSignalIsStale(startedTurnId)) return;
+        if (startedTurnId && completedRootTurnIds.has(startedTurnId)) return;
         if (startedTurnId !== currentTurnId) {
           rememberRootTurnCompleted(currentTurnId);
           rootTurnWasSteered = false;
@@ -2227,15 +2221,9 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     const turn = asRecord(params.turn);
     const eventTurnId = asString(params.turnId) ?? asString(turn?.id);
     if (method === "turn/started") {
-      return (
-        !currentTurnId ||
-        eventTurnId === currentTurnId ||
-        Boolean(
-          (rootPendingCompletion || rootTurnCompletionObserved) &&
-          eventTurnId &&
-          !completedRootTurnIds.has(eventTurnId),
-        )
-      );
+      // A new root start is authoritative even when the preceding completion
+      // was missed. Retired IDs still protect against delayed old starts.
+      return !eventTurnId || !completedRootTurnIds.has(eventTurnId);
     }
     if (currentTurnId && eventTurnId && eventTurnId !== currentTurnId) return false;
     if (method === "turn/completed" && !currentTurnId && eventTurnId) {
@@ -3018,6 +3006,24 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       // A notification from the conversation Duckweed just switched away
       // from is neither the new root nor one of its children.
       if (eventThreadId && threadId && eventThreadId !== threadId) return;
+      // A continuation can emit items before turn/started (or lose that frame).
+      // Reconcile its identity before the stale-turn filter discards live work.
+      const incomingTurnId = asString(params.turnId) ?? asString(asRecord(params.turn)?.id);
+      if (
+        incomingTurnId && incomingTurnId !== currentTurnId &&
+        !completedRootTurnIds.has(incomingTurnId) &&
+        (rootPendingCompletion || rootTurnCompletionObserved) &&
+        (method.startsWith("item/") || method === "turn/plan/updated" || method === "turn/started")
+      ) {
+        rememberRootTurnCompleted(currentTurnId);
+        cancelPendingRootCompletion();
+        currentTurnId = incomingTurnId;
+        rootTurnCompletionObserved = false;
+        rootTurnMayBeActive = true;
+        rootTurnStatusConfirmed = true;
+        rootTurnWasSteered = false;
+        ctx.emit({ type: "status", status: "working" });
+      }
       if (!notificationBelongsToRoot(method, params)) return;
       handleNotification(method, params, ctx);
     },

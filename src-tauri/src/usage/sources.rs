@@ -23,6 +23,7 @@ use super::Tokens;
 
 /// One model request, normalized across agents.
 pub struct Record {
+    pub pricing: super::pricing::Context,
     /// When the request completed, epoch milliseconds.
     pub at: i64,
     pub model: String,
@@ -76,7 +77,7 @@ pub static AGENTS: &[Agent] = &[
         label: "Codex CLI",
         vendor: "OpenAI",
         format: Format::Append,
-        caveat: None,
+        caveat: Some("Estimated API token cost across local account histories, not subscription charges. Uses standard rates when the log omits the service tier; excludes separate tool fees."),
     },
     Agent {
         id: "gemini",
@@ -154,6 +155,13 @@ pub fn discover(agent_id: &str, home: &Path) -> Vec<PathBuf> {
         "codex" => {
             collect(&home.join(".codex/sessions"), "jsonl", &mut out);
             collect(&home.join(".codex/archived_sessions"), "jsonl", &mut out);
+            if let Some(root) = std::env::var_os("CODEX_HOME").filter(|root| !root.is_empty()) {
+                let root = PathBuf::from(root);
+                collect(&root.join("sessions"), "jsonl", &mut out);
+                collect(&root.join("archived_sessions"), "jsonl", &mut out);
+            }
+            out.sort();
+            out.dedup();
         }
         "gemini" => {
             // ~/.gemini/tmp/<project hash>/chats/session-*.json
@@ -299,7 +307,7 @@ fn collect_matching(
 pub fn parse(agent_id: &str, path: &Path, offset: u64) -> (Vec<Record>, u64) {
     match agent_id {
         "claude" => lines(path, offset, "\"usage\"", claude_line),
-        "codex" => lines(path, offset, "token_count", codex_line),
+        "codex" => codex_lines(path, offset),
         "grok" => lines(path, offset, "\"usage\"", grok_line),
         "kimi" => lines(path, offset, "\"usage\"", kimi_line),
         "antigravity" => lines(path, offset, "\"timestamp\"", antigravity_line),
@@ -543,6 +551,7 @@ fn pi_line(value: &Value) -> Option<Vec<Record>> {
         .unwrap_or_else(|| format!("{at}:{model}:{}", tokens.total()));
 
     Some(vec![Record {
+        pricing: super::pricing::Context::default(),
         at,
         model,
         tokens,
@@ -589,12 +598,85 @@ fn claude_line(value: &Value) -> Option<Vec<Record>> {
         s(value, "requestId").unwrap_or_default()
     );
     Some(vec![Record {
+        pricing: super::pricing::Context::default(),
         at,
         model: model.to_string(),
         tokens,
         reported_cost: None,
         dedup: if key == ":" { 0 } else { hash(&key) },
     }])
+}
+
+/// Recover model context before the append offset. Repeated quota snapshots
+/// contain the previous call's usage and must not bill that call again.
+fn codex_lines(path: &Path, offset: u64) -> (Vec<Record>, u64) {
+    let Ok(file) = File::open(path) else {
+        return (Vec::new(), offset);
+    };
+    let mut reader = BufReader::with_capacity(1 << 18, file);
+    let mut model = String::from("unknown");
+    let mut previous_total: Option<Value> = None;
+    let mut service_tier = String::new();
+    let mut position = 0u64;
+    let mut buf = String::new();
+    let mut out = Vec::new();
+    loop {
+        buf.clear();
+        let Ok(n) = reader.read_line(&mut buf) else {
+            break;
+        };
+        if n == 0 || !buf.ends_with('\n') {
+            break;
+        }
+        position += n as u64;
+        if !buf.contains("turn_context") && !buf.contains("token_count") {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(&buf) else {
+            continue;
+        };
+        let payload = &value["payload"];
+        if s(&value, "type") == Some("turn_context") {
+            if let Some(name) = s(payload, "model") {
+                model = name.to_string();
+            }
+            service_tier = s(payload, "service_tier").unwrap_or_default().to_string();
+            continue;
+        }
+        let total = payload
+            .get("info")
+            .and_then(|info| info.get("total_token_usage"))
+            .filter(|total| total.is_object());
+        if let Some(total) = total {
+            if previous_total.as_ref() == Some(total) {
+                continue;
+            }
+            previous_total = Some(total.clone());
+        }
+        if position <= offset {
+            continue;
+        }
+        if let Some(records) = codex_line(&value) {
+            for mut record in records {
+                if record.model == "unknown" {
+                    record.model = model.clone();
+                }
+                record.pricing = super::pricing::Context::for_request(
+                    &record.model,
+                    &service_tier,
+                    &record.tokens,
+                );
+                // Archived and forked rollouts may contain the same event.
+                record.dedup = hash(&format!(
+                    "codex:{}:{}",
+                    s(&value, "timestamp").unwrap_or_default(),
+                    payload["info"]
+                ));
+                out.push(record);
+            }
+        }
+    }
+    (out, position)
 }
 
 /// `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`
@@ -614,7 +696,9 @@ fn codex_line(value: &Value) -> Option<Vec<Record>> {
     let cache_read = u(last, "cached_input_tokens");
     let reasoning = u(last, "reasoning_output_tokens");
     let tokens = Tokens {
-        input: u(last, "input_tokens").saturating_sub(cache_read),
+        input: u(last, "input_tokens")
+            .saturating_sub(cache_read)
+            .saturating_sub(u(last, "cache_write_input_tokens")),
         output: u(last, "output_tokens").saturating_sub(reasoning),
         reasoning,
         cache_read,
@@ -624,10 +708,11 @@ fn codex_line(value: &Value) -> Option<Vec<Record>> {
         return None;
     }
     Some(vec![Record {
+        pricing: super::pricing::Context::default(),
         at,
         model: s(payload, "model")
             .or_else(|| s(value, "model"))
-            .unwrap_or("gpt-5.6")
+            .unwrap_or("unknown")
             .to_string(),
         tokens,
         reported_cost: None,
@@ -659,6 +744,7 @@ fn grok_line(value: &Value) -> Option<Vec<Record>> {
         let cache_read = u(block, "cachedReadTokens");
         let reasoning = u(block, "reasoningTokens");
         Record {
+            pricing: super::pricing::Context::default(),
             at,
             model: model.to_string(),
             tokens: Tokens {
@@ -731,6 +817,7 @@ fn kimi_line(value: &Value) -> Option<Vec<Record>> {
         return None;
     }
     Some(vec![Record {
+        pricing: super::pricing::Context::default(),
         at,
         model: s(value, "model")
             .or_else(|| value.get("response").and_then(|r| s(r, "model")))
@@ -751,6 +838,7 @@ fn antigravity_line(value: &Value) -> Option<Vec<Record>> {
     let at = value.get("timestamp").and_then(Value::as_i64)?;
     value.get("display")?;
     Some(vec![Record {
+        pricing: super::pricing::Context::default(),
         at,
         model: "antigravity".into(),
         tokens: Tokens::default(),
@@ -793,6 +881,7 @@ fn gemini_file(value: &Value, _path: &Path) -> Vec<Record> {
             None => format!("{session}:{index}"),
         };
         out.push(Record {
+            pricing: super::pricing::Context::default(),
             at,
             model: s(message, "model").unwrap_or("gemini-3-pro").to_string(),
             tokens,
@@ -843,8 +932,11 @@ fn opencode_file(value: &Value, _path: &Path) -> Vec<Record> {
         .unwrap_or_else(|| "unknown".to_string());
     // Prefer the message id; fall back to a stable hash of the payload so
     // rows without an id still dedup across JSON ↔ SQLite migrations.
-    let dedup = s(value, "id").map(hash).unwrap_or_else(|| hash(&format!("{model}:{at}:{}", tokens.total())));
+    let dedup = s(value, "id")
+        .map(hash)
+        .unwrap_or_else(|| hash(&format!("{model}:{at}:{}", tokens.total())));
     vec![Record {
+        pricing: super::pricing::Context::default(),
         at,
         model,
         tokens,
@@ -915,6 +1007,7 @@ fn droid_file(value: &Value, path: &Path) -> Vec<Record> {
         .or_else(|| s(value, "apiProviderLock"))
         .unwrap_or("unknown");
     vec![Record {
+        pricing: super::pricing::Context::default(),
         at: file_mtime_ms(path),
         model: format!("droid/{model}"),
         tokens,
@@ -959,6 +1052,7 @@ fn kilocode_file(value: &Value, _path: &Path) -> Vec<Record> {
             .or_else(|| s(&inner, "apiProtocol"))
             .unwrap_or("unknown");
         out.push(Record {
+            pricing: super::pricing::Context::default(),
             at,
             model: format!("kilocode/{provider}"),
             tokens,
@@ -1077,6 +1171,50 @@ mod tests {
     }
 
     #[test]
+    fn codex_restores_context_on_append_and_skips_repeated_usage() {
+        use std::io::Write;
+        let path =
+            std::env::temp_dir().join(format!("duckweed-codex-{}.jsonl", uuid::Uuid::new_v4()));
+        let context = serde_json::json!({"type":"turn_context","payload":{"model":"gpt-6-astra","service_tier":"fast"}});
+        let event = |n| {
+            serde_json::json!({"timestamp":"2026-09-07T12:00:00Z","type":"event_msg","payload":{
+                "type":"token_count","info":{"total_token_usage":{"input_tokens":n},
+                "last_token_usage":{"input_tokens":300000,"cached_input_tokens":180000,"cache_write_input_tokens":20000,"output_tokens":10000,"reasoning_output_tokens":2000}}
+            }})
+        };
+        std::fs::write(
+            &path,
+            format!("{context}\n{}\n{}\n", event(300000), event(300000)),
+        )
+        .unwrap();
+        let (rows, offset) = codex_lines(&path, 0);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].model, "gpt-6-astra");
+        assert_eq!(rows[0].tokens.input, 100000);
+        assert_eq!(rows[0].tokens.total(), 310000);
+        assert!(rows[0].pricing.long);
+        assert_eq!(rows[0].pricing.tier, 1);
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        writeln!(file, "{}\n{}", event(300000), event(600000)).unwrap();
+        let (appended, next) = codex_lines(&path, offset);
+        assert_eq!(appended.len(), 1);
+        assert_eq!(appended[0].model, "gpt-6-astra");
+        assert_eq!(appended[0].pricing.tier, 1);
+        assert_ne!(appended[0].dedup, rows[0].dedup);
+        let switched =
+            serde_json::json!({"type":"turn_context","payload":{"model":"gpt-5.6-luna"}});
+        writeln!(file, "{switched}\n{}", event(900000)).unwrap();
+        let (changed, _) = codex_lines(&path, next);
+        assert_eq!(changed[0].model, "gpt-5.6-luna");
+        assert_eq!(changed[0].pricing.tier, 0);
+        drop(file);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn grok_splits_a_turn_across_its_models() {
         let value: Value = serde_json::from_str(
             r#"{"timestamp":1783905046,"params":{"update":{"sessionUpdate":"turn_completed",
@@ -1128,10 +1266,7 @@ mod tests {
 
     #[test]
     fn opencode_sqlite_reads_assistant_usage_rows() {
-        let dir = std::env::temp_dir().join(format!(
-            "duckweed-opencode-db-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("duckweed-opencode-db-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("opencode.db");

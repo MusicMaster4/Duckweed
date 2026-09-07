@@ -13,6 +13,50 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+/// Keep per-request billing conditions separate when aggregating tokens.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Context {
+    pub long: bool,
+    /// 0 = standard, 1 = Fast, 2 = Flex/Batch.
+    pub tier: u8,
+}
+
+impl Context {
+    pub fn for_request(model: &str, tier: &str, tokens: &crate::usage::Tokens) -> Self {
+        let model = normalize(model);
+        let long_capable = model.starts_with("gpt-6-astra")
+            || model.starts_with("gpt-5.6-")
+            || model == "gpt-5.5"
+            || model == "gpt-5.5-pro"
+            || model == "gpt-5.4"
+            || model == "gpt-5.4-pro";
+        Self {
+            long: long_capable && tokens.input + tokens.cache_read + tokens.cache_write > 272_000,
+            tier: match tier {
+                "priority" | "fast" => 1,
+                "flex" | "batch" => 2,
+                _ => 0,
+            },
+        }
+    }
+
+    pub fn cost(self, model: &str, mut rates: Rates, tokens: &crate::usage::Tokens) -> f64 {
+        if self.long {
+            rates.input *= 2.0;
+            rates.cache_read *= 2.0;
+            rates.cache_write *= 2.0;
+            rates.output *= 1.5;
+        }
+        let multiplier = match self.tier {
+            1 if normalize(model) == "gpt-5.5" => 2.5,
+            1 => 2.0,
+            2 => 0.5,
+            _ => 1.0,
+        };
+        rates.cost(tokens) * multiplier
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Rates {
     pub input: f64,
@@ -79,9 +123,20 @@ static TABLE: &[Entry] = &[
     e("claude-3-haiku", 0.25, 1.25),
     e("claude-haiku", 1.0, 5.0),
     // ---- OpenAI / Codex ----
-    e("gpt-5.6", 1.25, 10.0),
-    e("gpt-5.5", 1.25, 10.0),
-    e("gpt-5.2", 1.25, 10.0),
+    // https://developers.openai.com/api/docs/pricing (2026-09-07).
+    e("gpt-6-astra", 10.0, 50.0),
+    e("gpt-5.6-sol", 4.0, 20.0),
+    e("gpt-5.6-terra", 2.0, 12.0),
+    e("gpt-5.6-luna", 0.2, 1.2),
+    e("gpt-5.5-pro", 30.0, 180.0),
+    e("gpt-5.5", 5.0, 30.0),
+    e("gpt-5.4-pro", 30.0, 180.0),
+    e("gpt-5.4-mini", 0.75, 4.5),
+    e("gpt-5.4-nano", 0.2, 1.25),
+    e("gpt-5.4", 2.5, 15.0),
+    e("gpt-5.3-codex", 1.75, 14.0),
+    e("gpt-5.2-pro", 21.0, 168.0),
+    e("gpt-5.2", 1.75, 14.0),
     e("gpt-5.1", 1.25, 10.0),
     e("gpt-5-codex", 1.25, 10.0),
     e("gpt-5-mini", 0.25, 2.0),
@@ -167,10 +222,26 @@ pub fn lookup(model: &str, overrides: &Overrides) -> (Rates, bool) {
     }
     let best = TABLE
         .iter()
-        .filter(|(fragment, _, _)| key.contains(fragment))
+        .filter(|(fragment, _, _)| {
+            key.match_indices(fragment).any(|(start, _)| {
+                // Do not price a new numbered family using an older prefix.
+                key.as_bytes()
+                    .get(start + fragment.len())
+                    .map_or(true, |next| *next != b'.' && !next.is_ascii_digit())
+            })
+        })
         .max_by_key(|(fragment, _, _)| fragment.len());
     match best {
-        Some(&(_, input, output)) => (Rates::new(input, output), true),
+        Some(&(fragment, input, output)) => {
+            let mut rates = Rates::new(input, output);
+            rates.cache_read = match fragment {
+                "gpt-4.1" | "gpt-4.1-mini" | "o3" | "o4-mini" => input * 0.25,
+                "gpt-4o" | "gpt-4o-mini" | "o3-mini" => input * 0.5,
+                "gpt-5.5-pro" | "gpt-5.4-pro" | "gpt-5.2-pro" => 0.0,
+                _ => rates.cache_read,
+            };
+            (rates, true)
+        }
         None => (Rates::new(0.0, 0.0), false),
     }
 }
@@ -186,6 +257,42 @@ pub fn known_models() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn current_codex_models_and_request_conditions() {
+        let none = Overrides::new();
+        for (model, input, output) in [
+            ("gpt-6-astra", 10.0, 50.0),
+            ("gpt-5.6-sol", 4.0, 20.0),
+            ("gpt-5.6-terra", 2.0, 12.0),
+            ("gpt-5.6-luna", 0.2, 1.2),
+            ("gpt-5.5", 5.0, 30.0),
+            ("gpt-5.3-codex", 1.75, 14.0),
+        ] {
+            let (rates, known) = lookup(model, &none);
+            assert!(known);
+            assert_eq!((rates.input, rates.output), (input, output));
+        }
+        assert!(!lookup("gpt-5.7", &none).1);
+        assert!(!lookup("gpt-5.6", &none).1);
+        let tokens = crate::usage::Tokens {
+            input: 100_000,
+            cache_read: 180_000,
+            cache_write: 20_000,
+            output: 8_000,
+            reasoning: 2_000,
+        };
+        let (rates, _) = lookup("gpt-6-astra", &none);
+        let context = Context::for_request("gpt-6-astra", "fast", &tokens);
+        assert!(context.long);
+        // Long input/cache rates plus long output rate, then Fast's 2x.
+        assert!((context.cost("gpt-6-astra", rates, &tokens) - 7.22).abs() < 1e-9);
+        let boundary = crate::usage::Tokens {
+            input: 272_000,
+            ..Default::default()
+        };
+        assert!(!Context::for_request("gpt-6-astra", "", &boundary).long);
+    }
 
     #[test]
     fn strips_provider_prefixes() {
