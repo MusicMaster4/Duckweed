@@ -232,6 +232,18 @@ async function accessToken(env: Env): Promise<{ projectId: string; token: string
   return { projectId: account.project_id, token };
 }
 
+export function androidPushConfig(data: Record<string, string>, collapseKey?: string | null) {
+  // These existing routing keys identify silent syncs without decrypting content.
+  // High priority silent traffic can cause FCM to deprioritize future alerts.
+  const silent = collapseKey === `workspace:${data.pair_id}`
+    || (collapseKey === data.pair_id && data.message_id === data.pair_id);
+  return {
+    priority: silent ? "normal" : "high",
+    ttl: "604800s",
+    ...(collapseKey ? { collapse_key: collapseKey } : {}),
+  };
+}
+
 async function sendFcm(
   env: Env,
   token: string,
@@ -249,11 +261,7 @@ async function sendFcm(
       message: {
         token,
         data,
-        android: {
-          priority: "high",
-          ttl: "604800s",
-          ...(collapseKey ? { collapse_key: collapseKey } : {}),
-        },
+        android: androidPushConfig(data, collapseKey),
       },
     }),
   });

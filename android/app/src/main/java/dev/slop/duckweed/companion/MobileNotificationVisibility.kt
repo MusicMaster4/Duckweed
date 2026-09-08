@@ -1,6 +1,8 @@
 package dev.slop.duckweed.companion
 
+import android.app.KeyguardManager
 import android.content.Context
+import android.os.PowerManager
 
 data class MobileNotificationUiState(
     val appVisible: Boolean = false,
@@ -11,8 +13,10 @@ data class MobileNotificationUiState(
 fun shouldSuppressVisibleConversationNotification(
     state: MobileNotificationUiState,
     message: CompletionRecord,
+    deviceInteractive: Boolean = true,
+    keyguardLocked: Boolean = false,
 ): Boolean =
-    state.appVisible &&
+    state.appVisible && deviceInteractive && !keyguardLocked &&
         (message.kind == "completed" || message.kind == "attention") &&
         message.pairId != null &&
         message.terminalId != null &&
@@ -48,8 +52,13 @@ object MobileNotificationVisibility {
         state = state.copy(pairId = null, terminalId = null)
     }
 
-    fun isViewing(message: CompletionRecord): Boolean =
-        shouldSuppressVisibleConversationNotification(state, message)
+    fun isViewing(context: Context, message: CompletionRecord): Boolean =
+        shouldSuppressVisibleConversationNotification(
+            state,
+            message,
+            deviceInteractive = context.getSystemService(PowerManager::class.java)?.isInteractive == true,
+            keyguardLocked = context.getSystemService(KeyguardManager::class.java)?.isKeyguardLocked != false,
+        )
 
     /**
      * Store the response normally, but consume its alert as a synchronized
@@ -60,7 +69,9 @@ object MobileNotificationVisibility {
         store: MessageStore,
         message: CompletionRecord,
     ): Boolean {
-        if (!isViewing(message)) return false
+        // Activity lifecycle callbacks can lag behind the screen locking.
+        // Never consume an unseen response or send its read receipt in that gap.
+        if (!isViewing(context, message)) return false
         val pairId = message.pairId ?: return false
         val terminalId = message.terminalId ?: return false
         val wasUnread = store.message(message.id)?.readAt == null

@@ -76,6 +76,14 @@ WebView in the background does not suspend mobile delivery. The Android
 companion also suppresses and marks as read a completion for the conversation
 currently visible on the phone.
 
+Conversation alert suppression also checks that the screen is interactive and
+the keyguard is unlocked, so locking the phone cannot consume an unseen response
+or send its read receipt before Activity lifecycle callbacks run. The relay sends
+silent workspace and presence syncs at normal FCM priority and reserves high
+priority for alerts. This avoids silent traffic causing FCM to deprioritize
+alerts during Doze. Alert previews are decrypted and displayed directly in the
+FCM callback without waiting for the full-response background fetch.
+
 The main companion navigation contains **Activity**, **Projects**, and
 **Conversations**. Connection management, sync health, and updates live in
 **Settings**. The header reports whether a desktop heartbeat is current, and
