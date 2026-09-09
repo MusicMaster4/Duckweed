@@ -793,7 +793,7 @@ export function StillWorking({
 
   return (
     <div
-      className="agent-activity-cluster agent-still-working"
+      className="agent-activity-cluster agent-still-working is-live"
       data-variant={variant}
       role="status"
       aria-label={activeDuration ? `${message}. ${activeDuration}` : message}
@@ -1048,7 +1048,10 @@ export const ActivityHistory = memo(function ActivityHistory({
   if (!thoughts.length && !tools.length && !rosterAnchorId && !working) return null;
 
   return (
-    <div className="agent-activity-cluster" data-variant={variant}>
+    <div
+      className={`agent-activity-cluster${working ? " is-live" : ""}`}
+      data-variant={variant}
+    >
       {(thoughts.length > 0 || working) && (
         <ThinkingHistory
           thoughts={thoughts}

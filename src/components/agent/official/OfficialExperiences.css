@@ -18,7 +18,9 @@
 
 /* Long transcripts keep their full DOM and accessibility tree, but Chromium
    can skip layout and paint for turns that are far outside the viewport. The
-   auto size remembers each measured turn and prevents scroll jumps on revisit. */
+   auto size remembers each measured turn and prevents scroll jumps on revisit.
+   Live rows are excluded: a growing Thinking cluster that is skipped at the
+   96px placeholder never paints later traces, tools, or the answer. */
 .official-transcript > .official-user-turn,
 .official-transcript > .official-answer,
 .official-transcript > .official-answer-layer,
@@ -27,6 +29,12 @@
 .official-transcript > .agent-activity-cluster {
   content-visibility: auto;
   contain-intrinsic-size: auto 96px;
+}
+
+.official-transcript > .agent-activity-cluster.is-live,
+.official-transcript > .official-answer.is-streaming {
+  content-visibility: visible;
+  contain-intrinsic-size: unset;
 }
 
 /* New conversational turns arrive with a short, spatially quiet handoff. */
@@ -3700,14 +3708,4 @@ button.chatgpt-thinking-row.is-selected {
   border-color: rgba(255, 255, 255, 0.075);
   background: rgba(255, 255, 255, 0.026);
   box-shadow: 0 5px 14px rgba(0, 0, 0, 0.08);
-}
-.official-transcript > .official-message,
-.official-transcript > .official-answer-layer,
-.official-transcript > .agent-activity-cluster,
-.official-transcript > .official-plan {
-  /* Keep the full conversation in the DOM while letting WebView2 skip paint
-     and layout work for rows far outside the viewport. The `auto` fallback
-     remembers the measured height, so revisiting old messages does not jump. */
-  content-visibility: auto;
-  contain-intrinsic-block-size: auto 96px;
 }

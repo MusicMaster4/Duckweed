@@ -2946,6 +2946,47 @@ describe("codex adapter", () => {
     expect(h.state().status).toBe("idle");
   });
 
+  test("shows follow-up work when a new prompt races the previous turn's quiet window", async () => {
+    const h = harness({}, { completionQuietMs: 20 });
+    await h.handshake();
+    h.adapter.prompt({ text: "first task", images: [] }, h.ctx);
+    h.notify("turn/started", { threadId: "thread_1", turn: { id: "old" } });
+    h.notify("item/reasoning/textDelta", {
+      threadId: "thread_1", turnId: "old", itemId: "old-thought", delta: "Looking at the first case.",
+    });
+    h.notify("turn/completed", { threadId: "thread_1", turn: { id: "old", status: "completed" } });
+
+    // The previous turn is still the adapter's current id during the quiet
+    // window. A follow-up prompt must not keep that id, or every item from the
+    // new turn is dropped and the pane stays on the first Thinking placeholder.
+    h.adapter.prompt({ text: "now the second case", images: [] }, h.ctx);
+    h.notify("item/reasoning/textDelta", {
+      threadId: "thread_1", turnId: "next", itemId: "next-thought", delta: "Checking the other case.",
+    });
+    h.notify("item/started", {
+      threadId: "thread_1", turnId: "next",
+      item: { id: "next-cmd", type: "commandExecution", command: "bun test", status: "inProgress" },
+    });
+    h.notify("item/completed", {
+      threadId: "thread_1",
+      turnId: "next",
+      item: {
+        id: "next-answer",
+        type: "agentMessage",
+        phase: "final_answer",
+        text: "Both cases are green.",
+      },
+    });
+
+    expect(h.state().items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "thinking", text: "Checking the other case." }),
+      expect.objectContaining({ kind: "tool", command: "bun test" }),
+      expect.objectContaining({ kind: "assistant", text: "Both cases are green." }),
+    ]));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(h.state().status).toBe("idle");
+  });
+
   test("keeps follow-up activity visible when active status precedes its turn-start notification", async () => {
     const h = harness({}, { completionQuietMs: 20 });
     await h.handshake();

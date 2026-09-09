@@ -3008,11 +3008,16 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       if (eventThreadId && threadId && eventThreadId !== threadId) return;
       // A continuation can emit items before turn/started (or lose that frame).
       // Reconcile its identity before the stale-turn filter discards live work.
+      // A user prompt also clears the previous completion flags, so an
+      // unconfirmed new turn has to be adopted the same way or its items stay
+      // dropped and the pane freezes on the empty Thinking placeholder.
       const incomingTurnId = asString(params.turnId) ?? asString(asRecord(params.turn)?.id);
+      const awaitingUnconfirmedRootTurn =
+        rootTurnMayBeActive && !rootTurnStatusConfirmed;
       if (
         incomingTurnId && incomingTurnId !== currentTurnId &&
         !completedRootTurnIds.has(incomingTurnId) &&
-        (rootPendingCompletion || rootTurnCompletionObserved) &&
+        (rootPendingCompletion || rootTurnCompletionObserved || awaitingUnconfirmedRootTurn) &&
         (method.startsWith("item/") || method === "turn/plan/updated" || method === "turn/started")
       ) {
         rememberRootTurnCompleted(currentTurnId);
@@ -3034,6 +3039,11 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       rootTurnCompletionObserved = false;
       rootTurnWasSteered = false;
       rootCompletionSeenDuringSteer = undefined;
+      // Retire the previous turn immediately. Leaving its id current while
+      // this request is unconfirmed makes every item from the new turn look
+      // stale, which freezes the transcript on the empty Thinking stage.
+      if (currentTurnId) rememberRootTurnCompleted(currentTurnId);
+      currentTurnId = null;
       ctx.emit({ type: "user", text: prompt.text, images: prompt.images });
       ctx.emit({ type: "status", status: "working" });
       rootTurnMayBeActive = true;

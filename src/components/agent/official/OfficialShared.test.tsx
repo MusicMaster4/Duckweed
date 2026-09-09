@@ -565,6 +565,22 @@ describe("official agent presentation", () => {
     });
   }
 
+  test("marks a live Codex thinking cluster so WebView2 cannot skip its paint", () => {
+    const html = renderAgentActivity("codex", [
+      { kind: "user", id: "user", at: 1, text: "Inspect" },
+      {
+        kind: "thinking",
+        id: "thinking-live",
+        at: 2,
+        text: "Checking the first path.",
+        streaming: true,
+      },
+    ]);
+
+    expect(html).toContain("agent-activity-cluster is-live");
+    expect(html).toContain("Checking the first path.");
+  });
+
   test("keeps the thinking animation active through running and completed tool calls", () => {
     for (const toolStatus of ["running", "done"] as const) {
       const html = renderAgentActivity("claude", [

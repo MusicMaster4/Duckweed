@@ -19,6 +19,20 @@ describe("official experience styles", () => {
     expect(runningMarker?.[1]).toContain("overflow: visible");
   });
 
+  test("does not skip paint for a live Thinking cluster", async () => {
+    const css = await Bun.file(`${import.meta.dir}/OfficialExperiences.css`).text();
+    const skipped = css.match(
+      /\.official-transcript > \.agent-activity-cluster\s*\{([^}]*)\}/,
+    );
+    const live = css.match(
+      /\.official-transcript > \.agent-activity-cluster\.is-live[\s\S]*?\{([^}]*)\}/,
+    );
+
+    expect(skipped?.[1]).toContain("content-visibility: auto");
+    expect(live?.[1]).toContain("content-visibility: visible");
+    expect(live?.[1]).not.toContain("content-visibility: auto");
+  });
+
   test("centers pending plan step numbers on their ink box, not the em-square", async () => {
     const css = await Bun.file(`${import.meta.dir}/OfficialExperiences.css`).text();
     const marker = css.match(/\.official-plan-step-mark\s*\{([^}]*)\}/);
