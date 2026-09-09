@@ -1978,6 +1978,9 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       rootTurnMayBeActive &&
       (method.startsWith("item/") || method === "turn/plan/updated")
     ) {
+      // A final message can introduce a question or be followed by more work.
+      // Only provider boundaries remain authoritative once live output resumes.
+      if (!rootTurnCompletionObserved) cancelPendingRootCompletion();
       // Live root output proves that an uncertain resume really rejoined work.
       // It lets the later thread-idle fallback finish the turn even if both
       // turn boundary notifications were the frames that went missing.
@@ -2087,6 +2090,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         handleItem(item, true, ctx);
         if (
           rootTurnMayBeActive &&
+          questions.size === 0 &&
           asString(item.type) === "agentMessage" &&
           asString(item.phase) === "final_answer"
         ) {
@@ -2393,6 +2397,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     params: Record<string, unknown>,
     ctx: AdapterContext,
   ): void {
+    cancelPendingRootCompletion();
     const permissionId = `question-${String(id)}`;
     questions.set(permissionId, { id, kind: "user-input" });
     const items = asArray(params.questions)
@@ -2435,6 +2440,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     params: Record<string, unknown>,
     ctx: AdapterContext,
   ): void {
+    cancelPendingRootCompletion();
     const permissionId = `mcp-${String(id)}`;
     const mode = asString(params.mode);
     const schema = asRecord(params.requestedSchema);

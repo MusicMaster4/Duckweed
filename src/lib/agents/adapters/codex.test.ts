@@ -2660,6 +2660,50 @@ describe("codex adapter", () => {
     expect(h.events.filter((event) => event.type === "turn-end")).toHaveLength(2);
   });
 
+  test.each([true, false])("keeps question responses streaming when the final message arrives first: %s", async (finalFirst) => {
+    const h = harness({}, { completionQuietMs: 10 });
+    await h.handshake();
+    h.adapter.prompt({ text: "Ask before continuing", images: [] }, h.ctx);
+    h.notify("turn/started", {
+      threadId: "thread_1",
+      turn: { id: "turn_question", status: "inProgress", items: [] },
+    });
+    const final = () => h.notify("item/completed", {
+      threadId: "thread_1", turnId: "turn_question",
+      item: { id: "question_intro", type: "agentMessage", phase: "final_answer", text: "Which approach?" },
+    });
+    if (finalFirst) final();
+    h.feed({
+      jsonrpc: "2.0", id: "input_1", method: "item/tool/requestUserInput",
+      params: { threadId: "thread_1", turnId: "turn_question", questions: [
+        { id: "approach", header: "Approach", question: "Which approach?", options: [] },
+      ] },
+    });
+    if (!finalFirst) final();
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(h.state().permission?.id).toBe("question-input_1");
+    expect(h.events.filter((event) => event.type === "turn-end")).toHaveLength(0);
+    h.adapter.answer?.("question-input_1", [{ questionId: "approach", labels: [], custom: "Continue" }], h.ctx);
+    expect(h.sent.at(-1)).toMatchObject({ id: "input_1", result: { answers: { approach: { answers: ["Continue"] } } } });
+    h.notify("item/agentMessage/delta", {
+      threadId: "thread_1", turnId: "turn_question", itemId: "continued", delta: "Applying your choice.",
+    });
+    h.notify("item/started", {
+      threadId: "thread_1", turnId: "turn_question",
+      item: { id: "cmd_after_question", type: "commandExecution", command: "bun test", status: "inProgress" },
+    });
+    expect(h.state().status).toBe("working");
+    expect(h.state().permission).toBeNull();
+    expect(h.state().items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "assistant", text: "Applying your choice." }),
+      expect.objectContaining({ kind: "tool", status: "running" }),
+    ]));
+    h.notify("turn/completed", { threadId: "thread_1", turn: { id: "turn_question", status: "completed" } });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(h.state().status).toBe("idle");
+    expect(h.events.filter((event) => event.type === "turn-end")).toHaveLength(1);
+  });
+
   test("uses the final-answer item when both boundary notifications are missing", async () => {
     const h = harness({}, { completionQuietMs: 10 });
     await h.handshake();
