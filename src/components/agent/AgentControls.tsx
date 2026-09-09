@@ -69,7 +69,7 @@ export function AgentControls({ session, onSelect, placement = "composer" }: Pro
       return efforts.map((effort) => ({
         id: effort,
         label: formatEffortLabel(effort),
-        detail: null,
+        detail: formatEffortDetail(effort),
         current: selectedEffort === effort,
       }));
     }
@@ -400,7 +400,23 @@ function displayModelLabel(current: string, models: AgentModelChoice[]): string 
 
 function formatEffortLabel(value: string): string {
   if (!value) return value;
-  if (value.toLowerCase() === "ultracode") return "Ultracode";
-  if (value.toLowerCase() === "xhigh") return "XHigh";
+  const lower = value.toLowerCase().replace(/[_-]/g, "");
+  if (lower === "ultracode") return "Ultracode";
+  if (lower === "xhigh") return "XHigh";
   return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+function formatEffortDetail(value: string): string | null {
+  switch (value.toLowerCase().replace(/[_-]/g, "")) {
+    case "xhigh":
+      return "Maximum reasoning depth";
+    case "high":
+      return "Deeper thinking";
+    case "medium":
+      return "Balanced";
+    case "low":
+      return "Faster, lighter reasoning";
+    default:
+      return null;
+  }
 }
