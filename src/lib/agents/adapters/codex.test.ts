@@ -2704,7 +2704,7 @@ describe("codex adapter", () => {
     expect(h.events.filter((event) => event.type === "turn-end")).toHaveLength(1);
   });
 
-  test("uses the final-answer item when both boundary notifications are missing", async () => {
+  test("waits for provider completion after a final-answer item", async () => {
     const h = harness({}, { completionQuietMs: 10 });
     await h.handshake();
     h.adapter.prompt({ text: "finish visibly", images: [] }, h.ctx);
@@ -2737,11 +2737,75 @@ describe("codex adapter", () => {
     });
     await new Promise((resolve) => setTimeout(resolve, 20));
 
+    expect(h.state().status).toBe("working");
+    expect(h.events.filter((event) => event.type === "turn-end")).toHaveLength(0);
+    h.notify("thread/status/changed", {
+      threadId: "thread_1",
+      status: { type: "idle" },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
     expect(h.state().status).toBe("idle");
     expect(h.events.filter((event) => event.type === "turn-end")).toHaveLength(1);
   });
 
-  test("keeps the active turn steerable while a final-answer fallback is quiet", async () => {
+  test.each(["async", undefined])("keeps background work and replies streaming after a question with delivery %s", async (delivery) => {
+    const h = harness({}, { completionQuietMs: 10 });
+    await h.handshake();
+    h.adapter.prompt({ text: "Update the website", images: [] }, h.ctx);
+    h.notify("turn/started", {
+      threadId: "thread_1", turn: { id: "background", status: "inProgress" },
+    });
+    // request_user_input_async is an agentMessage, not a blocking server
+    // request. Its final_answer phase does not end the provider turn.
+    h.notify("item/completed", {
+      threadId: "thread_1", turnId: "background",
+      item: {
+        id: "asset_question", type: "agentMessage", phase: "final_answer", delivery,
+        text: "Where are the reference images?",
+        questions: [{ title: "Where are the reference images?" }],
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(h.state().status).toBe("working");
+    expect(h.events.filter((event) => event.type === "turn-end")).toHaveLength(0);
+    h.notify("item/started", {
+      threadId: "thread_1", turnId: "background",
+      item: { id: "research", type: "commandExecution", command: "rg --files", status: "inProgress" },
+    });
+    expect(h.state().items).toContainEqual(expect.objectContaining({ kind: "tool", status: "running" }));
+
+    const steering = h.adapter.steer?.({ text: "The images are in Assets", images: [] }, h.ctx);
+    const steer = h.sent.at(-1) as { id: number };
+    expect(steer).toMatchObject({ method: "turn/steer", params: { expectedTurnId: "background" } });
+    h.feed({ jsonrpc: "2.0", id: steer.id, result: { turnId: "background" } });
+    await expect(steering).resolves.toBe(true);
+    // A steer has no new turn/started notification. Every subsequent item
+    // must remain visible under the same provider turn id.
+    h.notify("item/reasoning/textDelta", {
+      threadId: "thread_1", turnId: "background", itemId: "after_reply", delta: "Inspecting Assets.",
+    });
+    h.notify("item/completed", {
+      threadId: "thread_1", turnId: "background",
+      item: { id: "research", type: "commandExecution", command: "rg --files", status: "completed", aggregatedOutput: "Assets/image.png", exitCode: 0 },
+    });
+    h.notify("item/completed", {
+      threadId: "thread_1", turnId: "background",
+      item: { id: "reply", type: "agentMessage", phase: "commentary", text: "I found the images." },
+    });
+    expect(h.state().items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "user", text: "The images are in Assets" }),
+      expect.objectContaining({ kind: "thinking", text: "Inspecting Assets." }),
+      expect.objectContaining({ kind: "tool", status: "done" }),
+      expect.objectContaining({ kind: "assistant", text: "I found the images." }),
+    ]));
+    expect(h.sent.filter((message) => message.method === "turn/start")).toHaveLength(1);
+    h.notify("turn/completed", { threadId: "thread_1", turn: { id: "background", status: "completed" } });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(h.state().status).toBe("idle");
+    expect(h.events.filter((event) => event.type === "turn-end")).toHaveLength(1);
+  });
+
+  test("keeps the active turn steerable after a final-answer item", async () => {
     const h = harness({}, { completionQuietMs: 20 });
     await h.handshake();
     h.adapter.prompt({ text: "inspect the failure", images: [] }, h.ctx);
@@ -2807,7 +2871,7 @@ describe("codex adapter", () => {
     expect(h.events.filter((event) => event.type === "turn-end")).toHaveLength(1);
   });
 
-  test("interrupts the provider turn while a final-answer fallback is quiet", async () => {
+  test("interrupts the provider turn after a final-answer item", async () => {
     const h = harness({}, { completionQuietMs: 20 });
     await h.handshake();
     h.adapter.prompt({ text: "run the check", images: [] }, h.ctx);
@@ -3027,6 +3091,7 @@ describe("codex adapter", () => {
       expect.objectContaining({ kind: "tool", command: "bun test" }),
       expect.objectContaining({ kind: "assistant", text: "Both cases are green." }),
     ]));
+    h.notify("turn/completed", { threadId: "thread_1", turn: { id: "next", status: "completed" } });
     await new Promise((resolve) => setTimeout(resolve, 30));
     expect(h.state().status).toBe("idle");
   });

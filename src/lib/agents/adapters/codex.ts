@@ -337,7 +337,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
   let rootPendingCompletion: { turnId: string | null } | null = null;
   /** A provider boundary survives cancellation of the UI's completion timer. */
   let rootTurnCompletionObserved = false;
-  /** Same-turn input makes the first final answer non-terminal. */
+  /** Keep provider completion addressable while same-turn input is pending. */
   let rootSteerRequestsInFlight = 0;
   let rootTurnWasSteered = false;
   let rootCompletionSeenDuringSteer: string | null | undefined;
@@ -2088,23 +2088,12 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         const itemTurnId = asString(params.turnId);
         if (rootTurnSignalIsStale(itemTurnId)) return;
         handleItem(item, true, ctx);
-        if (
-          rootTurnMayBeActive &&
-          questions.size === 0 &&
-          asString(item.type) === "agentMessage" &&
-          asString(item.phase) === "final_answer"
-        ) {
-          // `final_answer` is a semantic terminal signal in the Codex schema.
-          // Use it when the visible answer arrives but the turn-completed and
-          // thread-idle frames are missing, which would otherwise strand the
-          // pane in working and suppress both completion effects.
-          if (rootSteerRequestsInFlight > 0) {
-            rootCompletionSeenDuringSteer = itemTurnId;
-          } else if (!rootTurnWasSteered) {
-            rootCompletionVersion += 1;
-            scheduleRootCompletion(itemTurnId, ctx);
-          }
-        }
+        // A completed message is not a completed turn. In particular,
+        // request_user_input_async emits final_answer with delivery: "async"
+        // while tools keep running, without a blocking request in questions.
+        // Retiring its turn id here would silently discard all later output
+        // and route the user's reply to turn/start instead of turn/steer.
+        // Only turn/completed or thread idle may schedule root completion.
         return;
       }
       case "item/agentMessage/delta": {
