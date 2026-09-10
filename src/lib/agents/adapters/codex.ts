@@ -69,8 +69,11 @@ interface CodexGoal {
 }
 
 const MAX_GOAL_OBJECTIVE_CHARS = 4_000;
-const RESUME_PAGE_SIZE = 100;
+const RESUME_PAGE_SIZE = 50;
 const MAX_RESUMED_TURNS = 500;
+const HISTORY_ITEM_PAGE_SIZE = 25;
+const MAX_HISTORY_ITEMS = 1_000;
+const MAX_HISTORY_DETAIL_BYTES = 4 * 1024 * 1024;
 /** Subagent detail is lazy and intentionally bounded independently of root history. */
 const CHILD_HISTORY_PAGE_SIZE = 8;
 const FAST_SERVICE_TIER = "priority";
@@ -1098,7 +1101,9 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       initialTurnsPage: {
         limit: RESUME_PAGE_SIZE,
         sortDirection: "desc",
-        itemsView: "full",
+        // Conversation summaries retain user messages and final answers without
+        // replaying megabytes of tool output through the native line limit.
+        itemsView: "summary",
       },
     };
   }
@@ -1964,6 +1969,64 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     } finally {
       persistedHistoryReplayDepth -= 1;
     }
+  }
+
+  /** Tool details are optional hydration, never a prerequisite for continuing. */
+  async function hydrateResumedItems(
+    turns: unknown[],
+    targetId: string,
+    generation: number,
+    ctx: AdapterContext,
+  ): Promise<void> {
+    if (!turns.some((turn) => asRecord(turn)?.itemsView === "summary")) return;
+    const completionVersion = rootCompletionVersion;
+    const stillCurrent = () => threadId === targetId && rootTurnGeneration === generation &&
+      rootCompletionVersion === completionVersion && !rootTurnMayBeActive && !hydratingResume;
+    const entries: Record<string, unknown>[] = [];
+    const cursors = new Set<string>();
+    let cursor: string | null = null;
+    let bytes = 0;
+    try {
+      do {
+        if (!stillCurrent()) return;
+        const page = await requestWithTimeout(ctx, nextId++, "thread/items/list", {
+          threadId: targetId, cursor, limit: HISTORY_ITEM_PAGE_SIZE, sortDirection: "desc",
+        });
+        if (!stillCurrent()) return;
+        const data = asArray(page.data);
+        bytes += JSON.stringify(data).length;
+        if (bytes > MAX_HISTORY_DETAIL_BYTES) break;
+        for (const entry of data) {
+          const record = asRecord(entry);
+          if (record) entries.push(record);
+        }
+        cursor = asString(page.nextCursor);
+        if (cursor && cursors.has(cursor)) break;
+        if (cursor) cursors.add(cursor);
+      } while (cursor && entries.length < MAX_HISTORY_ITEMS);
+    } catch {
+      // Old servers or oversized tool items can fail independently of resume.
+    }
+    if (!stillCurrent() || !entries.length) return;
+    const byTurn = new Map<string, unknown[]>();
+    for (const entry of entries.reverse()) {
+      const turnId = asString(entry.turnId);
+      const item = asRecord(entry.item);
+      if (!turnId || !item) continue;
+      const items = byTurn.get(turnId) ?? [];
+      items.push(item);
+      byTurn.set(turnId, items);
+    }
+    replayTurns(turns.map((rawTurn) => {
+      const turn = asRecord(rawTurn);
+      const items = byTurn.get(asString(turn?.id) ?? "");
+      if (!turn || !items) return rawTurn;
+      const ids = new Set(items.map((item) => asRecord(item)?.id));
+      // A bounded detail page can stop in the middle of an older turn. Keep
+      // its summary prompts even when their full items are outside the page.
+      const missing = asArray(turn.items).filter((item) => !ids.has(asRecord(item)?.id));
+      return { ...turn, items: [...missing, ...items] };
+    }), ctx);
   }
 
   function handleNotification(method: string, params: Record<string, unknown>, ctx: AdapterContext) {
@@ -3254,7 +3317,8 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
 
     /**
      * `thread/resume` keeps the running process. Newer app-server builds page
-     * the transcript, so hydrate bounded full-detail pages before replaying it.
+     * the transcript. Load conversation summaries first and fetch tool details
+     * in small item pages after the composer is available.
      *
      * Codex can leave a thread `active` with no running turn after an aborted
      * session. `thread/resume` then never answers. Time out, fork a copy (the
@@ -3294,6 +3358,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         resumeRequestId = forkRequestId;
         const forked = await requestWithTimeout(ctx, forkRequestId, "thread/fork", {
           threadId: hungId,
+          excludeTurns: true,
           cwd: ctx.cwd,
           ...threadAccessParams(currentAccess),
           ...(currentModel ? { model: currentModel } : {}),
@@ -3327,8 +3392,11 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
           ? asString(initialPage?.nextCursor)
           : asString(result.turnsBackwardsCursor);
         const descending = paginated || cursor !== null;
+        const seenCursors = new Set<string>();
         while (cursor && turns.length < MAX_RESUMED_TURNS) {
           throwIfResumeAborted();
+          if (seenCursors.has(cursor)) break;
+          seenCursors.add(cursor);
           const pageRequestId = nextId++;
           resumeRequestId = pageRequestId;
           try {
@@ -3337,7 +3405,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
               cursor,
               limit: Math.min(RESUME_PAGE_SIZE, MAX_RESUMED_TURNS - turns.length),
               sortDirection: "desc",
-              itemsView: "full",
+              itemsView: "summary",
             });
             turns.push(...asArray(page.data));
             cursor = asString(page.nextCursor);
@@ -3421,12 +3489,14 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         // released on idle, or one typed against a live resumed turn, can
         // fork the now-complete thread instead of racing it.
         hydratingResume = false;
+        const detailGeneration = rootTurnGeneration;
         if (!completionAlreadyObserved) {
           ctx.emit({
             type: "status",
             status: rootTurnMayBeActive ? "working" : "idle",
           });
         }
+        void hydrateResumedItems(chronologicalTurns, threadId!, detailGeneration, ctx);
         return true;
       };
 

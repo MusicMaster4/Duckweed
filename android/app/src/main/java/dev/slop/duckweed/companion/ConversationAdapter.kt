@@ -120,7 +120,7 @@ class ConversationAdapter(
             delivery.visibility = if (deliveryState == null) View.GONE else View.VISIBLE
             delivery.text = when (deliveryState) {
                 "sending" -> "Sending securely..."
-                "sent" -> "Waiting for desktop..."
+                "sent" -> "Sent. Waiting for desktop..."
                 "received" -> "Desktop is updating..."
                 "delivered" -> "Updated on desktop"
                 "failed" -> "Not sent. Tap to retry"

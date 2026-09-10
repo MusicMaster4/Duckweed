@@ -1,6 +1,7 @@
 package dev.slop.duckweed.companion
 
 import android.content.Context
+import android.os.Build
 import androidx.work.Constraints
 import androidx.work.ExistingWorkPolicy
 import androidx.work.NetworkType
@@ -8,6 +9,7 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.Worker
 import androidx.work.WorkerParameters
+import androidx.work.OutOfQuotaPolicy
 
 class ReadSyncWorker(context: Context, parameters: WorkerParameters) : Worker(context, parameters) {
     override fun doWork(): Result {
@@ -41,6 +43,11 @@ object ReadSyncScheduler {
 
     fun enqueue(context: Context) {
         val request = OneTimeWorkRequestBuilder<ReadSyncWorker>()
+            .apply {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
+                }
+            }
             .setConstraints(
                 Constraints.Builder()
                     .setRequiredNetworkType(NetworkType.CONNECTED)

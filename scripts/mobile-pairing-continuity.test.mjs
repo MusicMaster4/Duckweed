@@ -87,7 +87,8 @@ describe("mobile pairing continuity", () => {
 
     expect(desktop).toContain('window.addEventListener("duckweed:mobile-refresh", refreshed)');
     expect(desktop).toContain("refreshUsageLimits(0)");
-    expect(desktop).toContain("pollDelay = commands.length > 0 ? 1_200 : Math.min(4_000, pollDelay * 1.5)");
+    expect(desktop).toContain('listen("mobile:sync-tick", () => { void poll(); })');
+    expect(native).toContain('tick_app.emit("mobile:sync-tick", ())');
     expect(desktop).not.toContain("mobileSendPresence()");
     expect(native).toContain("pub fn start_presence_monitor(app: AppHandle)");
     expect(native).toContain("PRESENCE_INTERVAL.saturating_sub(started.elapsed())");

@@ -63,6 +63,11 @@ encrypted read receipt through the relay, which removes the red unread marker
 from the matching desktop terminal. If the phone is temporarily offline, the
 companion keeps the receipt locally and retries it when connectivity returns.
 Opening the notification or conversation performs the same synchronized read.
+Explicit desktop reads also carry the completion sequence through workspace
+sync. Android stores that sequence alongside the read timestamp, so a delayed
+push cannot revive a response that was already read or clear a newer response
+when the desktop and phone clocks differ. A delayed preview cannot overwrite
+the full response already downloaded on the phone.
 For a completion outside the visible desktop pane, Duckweed waits 30 seconds
 before sending the phone notification. If the red unread outline is cleared
 during that interval, no notification is sent. Activity in a different pane
@@ -106,6 +111,14 @@ message; large images are resized on the phone before the complete prompt is
 encrypted. Outgoing bubbles distinguish sending, relay acceptance, desktop
 receipt, and failure. A failed bubble can be tapped to retry with the same
 idempotent command identity.
+The composer paints outgoing messages before encryption or network submission.
+Conversation history is read and decrypted off the UI thread, and sending uses
+a separate queue from background refreshes and delivery checks. Delivery states
+only advance after confirmation, even if network callbacks arrive out of order.
+While a conversation is open, the companion checks the relay every three seconds
+and downloads pending updates directly, without waiting for an FCM wake-up.
+The desktop polls from native sync events so minimizing its window does not
+suspend command pickup or queued workspace updates.
 The desktop republishes the encrypted workspace periodically and whenever its
 terminal state changes. Pull down on **Responses** or **Projects** to request an
 immediate refresh from a running paired desktop.
@@ -261,3 +274,10 @@ update feed. The default is `stable`.
 
 The debug APK is written to
 `android/app/build/outputs/apk/debug/app-debug.apk`.
+
+With an Android emulator connected, run the device regression suite with
+`gradle -p android :app:connectedDebugAndroidTest`. It exercises real SQLite and
+Keystore storage, migration from the previous schema, delayed notifications,
+out-of-order delivery confirmation, and immediate composer feedback with a
+blocked network queue and 250 encrypted history entries. Use an isolated test
+emulator because the suite replaces the companion's message database with fixtures.

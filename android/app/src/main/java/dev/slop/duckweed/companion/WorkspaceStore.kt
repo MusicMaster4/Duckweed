@@ -149,6 +149,7 @@ class WorkspaceStore(private val context: Context) {
                         .put("terminalRows", terminal.terminalRows)
                         .put("unreadOnDesktop", terminal.unreadOnDesktop)
                         .put("completionSeq", terminal.completionSeq)
+                        .put("readCompletionSeq", terminal.readCompletionSeq)
                         .put("commands", commands)
                         .put("activity", activity)
                         .put("conversation", conversation)
@@ -230,6 +231,7 @@ class WorkspaceStore(private val context: Context) {
                                     null
                                 },
                                 completionSeq = terminal.optLong("completionSeq"),
+                                readCompletionSeq = if (terminal.isNull("readCompletionSeq")) null else terminal.optLong("readCompletionSeq"),
                                 commands = (0 until commandsJson.length()).mapNotNull { commandIndex ->
                                     val command = commandsJson.optJSONObject(commandIndex) ?: return@mapNotNull null
                                     val name = command.optString("name").trim()

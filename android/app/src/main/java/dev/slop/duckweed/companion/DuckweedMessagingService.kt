@@ -43,7 +43,8 @@ class DuckweedMessagingService : FirebaseMessagingService() {
         WorkspaceStore(this).markPresence(pairId, System.currentTimeMillis())
         if (preview.kind != "workspace" && preview.kind != "presence") {
             val store = MessageStore(this)
-            store.put(preview)
+            // A delayed preview must not replace an already downloaded answer.
+            store.put(preview, previewOnly = true)
             if (MobileNotificationVisibility.consumeIfVisible(this, store, preview)) {
                 // The response is already on screen. Its read receipt also
                 // clears the matching unread marker on the desktop.

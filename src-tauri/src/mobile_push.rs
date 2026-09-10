@@ -173,6 +173,8 @@ pub struct WorkspaceTerminal {
     #[serde(default)]
     pub completion_seq: u64,
     #[serde(default)]
+    pub read_completion_seq: Option<u64>,
+    #[serde(default)]
     pub commands: Vec<WorkspaceSlashCommand>,
     #[serde(default)]
     pub activity: Vec<WorkspaceAgentActivity>,
@@ -1396,6 +1398,15 @@ fn scheduled_completions() -> &'static Mutex<ScheduledCompletionRegistry> {
 /// animation frames and JavaScript intervals while the app is minimized, but
 /// the native process remains responsible for the paired desktop connection.
 pub fn start_presence_monitor(app: AppHandle) -> std::io::Result<()> {
+    let tick_app = app.clone();
+    std::thread::Builder::new()
+        .name("mobile-sync-tick".into())
+        .spawn(move || loop {
+            // Native events keep input and queued workspace updates moving
+            // while Windows throttles a minimized WebView's JavaScript timers.
+            let _ = tick_app.emit("mobile:sync-tick", ());
+            std::thread::sleep(Duration::from_millis(1_200));
+        })?;
     std::thread::Builder::new()
         .name("mobile-presence".into())
         .spawn(move || loop {

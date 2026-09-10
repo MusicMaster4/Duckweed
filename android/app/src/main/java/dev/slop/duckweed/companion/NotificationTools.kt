@@ -49,6 +49,7 @@ object NotificationTools {
 
     fun show(context: Context, message: CompletionRecord): Boolean {
         if (!NotificationPreference.isEnabled(context)) return false
+        if (message.readAt != null || MessageStore(context).use { it.isMessageRead(message.id) }) return false
         if (MobileNotificationVisibility.isViewing(context, message)) return false
         if (
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&

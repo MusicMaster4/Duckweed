@@ -3254,9 +3254,9 @@ describe("codex adapter", () => {
       threadId: "thread_old",
       excludeTurns: true,
       initialTurnsPage: {
-        limit: 100,
+        limit: 50,
         sortDirection: "desc",
-        itemsView: "full",
+        itemsView: "summary",
       },
     });
 
@@ -3451,9 +3451,9 @@ describe("codex adapter", () => {
     expect(pageCall.params).toEqual({
       threadId: "thread_paged",
       cursor: "older-turns",
-      limit: 100,
+      limit: 50,
       sortDirection: "desc",
-      itemsView: "full",
+      itemsView: "summary",
     });
     h.feed({
       jsonrpc: "2.0",
@@ -3994,6 +3994,43 @@ describe("codex adapter", () => {
       text: "thread not found",
     });
     expect(h.state()).toMatchObject({ status: "idle", loadingHistory: false });
+  });
+
+  test.each([false, true])("opens summary history before tool details arrive, with a new turn: %s", async (startNewTurn) => {
+    const h = harness();
+    await h.handshake();
+    const resumed = h.adapter.resume?.("summary-thread", h.ctx);
+    const request = h.sent.findLast((message) => message.method === "thread/resume")!;
+    const user = { type: "userMessage", id: "stored-user", content: [{ type: "text", text: "Inspect the project" }] };
+    const answer = { type: "agentMessage", id: "stored-answer", text: "Inspection complete." };
+    h.feed({ id: request.id, result: {
+      thread: { id: "summary-thread", turns: [] },
+      initialTurnsPage: { data: [{ id: "stored-turn", status: "completed", itemsView: "summary", items: [user, answer] }], nextCursor: null },
+    } });
+    expect(await resumed).toBe(true);
+    expect(h.state()).toMatchObject({ loadingHistory: false, status: "idle" });
+    expect(h.state().items).toEqual([
+      expect.objectContaining({ kind: "user", text: "Inspect the project" }),
+      expect.objectContaining({ kind: "assistant", text: "Inspection complete." }),
+    ]);
+    const details = h.sent.findLast((message) => message.method === "thread/items/list")!;
+    expect(details.params).toMatchObject({ limit: 25, sortDirection: "desc" });
+    if (startNewTurn) h.adapter.prompt({ text: "Now fix it", images: [] }, h.ctx);
+    h.feed({ id: details.id, result: { data: [
+      { turnId: "stored-turn", item: answer },
+      { turnId: "stored-turn", item: { type: "commandExecution", id: "stored-tool", command: "rg --files", status: "completed", aggregatedOutput: "src/main.ts" } },
+      { turnId: "stored-turn", item: user },
+    ], nextCursor: null } });
+    await Promise.resolve();
+    await Promise.resolve();
+    if (startNewTurn) {
+      expect(h.state().status).toBe("working");
+      expect(h.state().items.at(-1)).toMatchObject({ kind: "user", text: "Now fix it" });
+      expect(h.state().items.some((item) => item.kind === "tool")).toBe(false);
+    } else {
+      expect(h.state().items.map((item) => item.kind)).toEqual(["user", "tool", "assistant"]);
+      expect(h.state().status).toBe("idle");
+    }
   });
 
   test("says so when a thread cannot be resumed", async () => {

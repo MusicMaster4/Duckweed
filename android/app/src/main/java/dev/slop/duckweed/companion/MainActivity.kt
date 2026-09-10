@@ -131,7 +131,14 @@ class MainActivity : AppCompatActivity() {
         ::showPendingNotice,
     )
     private val executor = Executors.newSingleThreadExecutor()
+    private val commandExecutor = Executors.newSingleThreadExecutor()
+    private val syncExecutor = Executors.newFixedThreadPool(2)
     private val storageExecutor = Executors.newSingleThreadExecutor()
+    private var conversationHistoryKey: Pair<String, String>? = null
+    private var conversationHistory: List<CompletionRecord> = emptyList()
+    private var conversationHistoryLoading = false
+    private var conversationHistoryReloadPending = false
+    private val outgoingMessages = mutableMapOf<String, CompletionRecord>()
     private lateinit var draftStore: DraftStore
     private lateinit var pendingActionStore: PendingMobileActionStore
     private var pendingMobileActions: List<PendingMobileAction> = emptyList()
@@ -175,7 +182,7 @@ class MainActivity : AppCompatActivity() {
             refreshWorkspaces()
             refreshUsageLimits()
             refreshConversationAvailability()
-            connectionDot.postDelayed(this, 30_000)
+            connectionDot.postDelayed(this, if (conversationDetail.visibility == View.VISIBLE) 3_000 else 15_000)
         }
     }
 
@@ -498,6 +505,9 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         if (::connectionDot.isInitialized) connectionDot.removeCallbacks(connectionTicker)
         executor.shutdownNow()
+        // Let already accepted submissions finish when the Activity is recreated.
+        commandExecutor.shutdown()
+        syncExecutor.shutdownNow()
         storageExecutor.shutdownNow()
         super.onDestroy()
     }
@@ -841,9 +851,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showPendingNotifications() {
+        if (isFinishing || isDestroyed) return
         executor.execute {
             val store = MessageStore(this)
             store.pendingNotifications().asReversed().forEach { message ->
+                if (!store.isNotificationPending(message.id)) return@forEach
                 if (MobileNotificationVisibility.consumeIfVisible(this, store, message)) {
                     return@forEach
                 }
@@ -1088,6 +1100,7 @@ class MainActivity : AppCompatActivity() {
         val credentials = SecretStore.loadAll(this)
         if (credentials.isEmpty()) return
         FirebaseMessaging.getInstance().token.addOnSuccessListener { token ->
+            if (isFinishing || isDestroyed) return@addOnSuccessListener
             executor.execute {
                 credentials.forEach { pairing ->
                     runCatching { RelayClient.refreshFcmToken(pairing, token) }
@@ -1097,6 +1110,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun refreshRemoteState() {
+        if (isFinishing || isDestroyed) return
         if (remoteStateLoading) {
             remoteStateReloadPending = true
             return
@@ -1142,23 +1156,26 @@ class MainActivity : AppCompatActivity() {
      * delayed or dropped by Android battery management.
      */
     private fun recoverPendingRelayMessages() {
+        if (isFinishing || isDestroyed) return
         if (!relayRecoveryRunning.compareAndSet(false, true)) return
         val credentials = SecretStore.loadAll(this)
         if (credentials.isEmpty()) {
             relayRecoveryRunning.set(false)
             return
         }
-        executor.execute {
+        syncExecutor.execute {
             try {
                 credentials.forEach { pairing ->
                     runCatching { RelayClient.pendingMessages(pairing) }
                         .getOrDefault(emptyList())
                         .forEach { pending ->
-                            MessageFetchScheduler.enqueue(
-                                applicationContext,
-                                pairing.pairId,
-                                pending.id,
-                            )
+                            runCatching {
+                                MessageFetchWorker.fetchAndStore(applicationContext, pairing, pending.id)
+                            }.onFailure { error ->
+                                if (error !is RelayHttpException || error.status != 404) {
+                                    MessageFetchScheduler.enqueue(applicationContext, pairing.pairId, pending.id)
+                                }
+                            }
                         }
                 }
             } finally {
@@ -1400,7 +1417,43 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun refreshConversation() {
+    private fun loadConversationHistory(target: ConversationTarget) {
+        if (isFinishing || isDestroyed) return
+        if (conversationHistoryLoading) {
+            conversationHistoryReloadPending = true
+            return
+        }
+        conversationHistoryLoading = true
+        val key = Pair(target.pairId, target.terminal.id)
+        storageExecutor.execute {
+            val result = runCatching { MessageStore(this).use { it.conversation(key.first, key.second) } }
+            runOnUiThread {
+                conversationHistoryLoading = false
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                if (selectedTarget?.let { Pair(it.pairId, it.terminal.id) } == key) {
+                    result.onSuccess { messages ->
+                        conversationHistoryKey = key
+                        conversationHistory = messages
+                        messages.forEach { message ->
+                            val optimistic = outgoingMessages[message.id]?.deliveryState
+                            if (optimistic != null && message.deliveryState != null &&
+                                MobileSyncPolicy.nextDeliveryState(optimistic, message.deliveryState) == message.deliveryState) {
+                                outgoingMessages.remove(message.id)
+                            }
+                        }
+                        refreshConversation(reloadHistory = false)
+                    }
+                }
+                if (conversationHistoryReloadPending) {
+                    conversationHistoryReloadPending = false
+                    if (conversationDetail.visibility == View.VISIBLE) refreshConversation()
+                }
+            }
+        }
+    }
+
+    private fun refreshConversation(reloadHistory: Boolean = true) {
+        if (isFinishing || isDestroyed) return
         val legacy = legacyResponse
         if (legacy != null) {
             findViewById<TextView>(R.id.conversation_title).text = legacy.agent
@@ -1418,6 +1471,7 @@ class MainActivity : AppCompatActivity() {
             return
         }
         val target = selectedTarget ?: return
+        if (reloadHistory) loadConversationHistory(target)
         val terminalMode = target.terminal.mode == "terminal"
         val synced = target.terminal.conversation.map { message ->
             CompletionRecord(
@@ -1437,7 +1491,12 @@ class MainActivity : AppCompatActivity() {
                 streaming = message.streaming,
             )
         }
-        val stored = MessageStore(this).conversation(target.pairId, target.terminal.id)
+        val cached = if (conversationHistoryKey == Pair(target.pairId, target.terminal.id)) {
+            conversationHistory
+        } else emptyList()
+        val stored = (cached + outgoingMessages.values.filter {
+            it.pairId == target.pairId && it.terminalId == target.terminal.id
+        }).associateBy { it.id }.values.sortedBy { it.sentAt }
         val messages = if (terminalMode) {
             emptyList()
         } else {
@@ -1449,7 +1508,13 @@ class MainActivity : AppCompatActivity() {
                 .filter { it.kind == "user" && it.deliveryState == "delivered" }
                 .mapNotNull { storedById[it.id] }
                 .filter { it.deliveryState == "sent" || it.deliveryState == "received" }
-                .forEach { MessageStore(this).updateOutgoingState(it.id, "delivered") }
+                .toList().takeIf { it.isNotEmpty() }?.let { delivered ->
+                    storageExecutor.execute {
+                        MessageStore(this).use { store ->
+                            delivered.forEach { store.updateOutgoingState(it.id, "delivered") }
+                        }
+                    }
+                }
         }
         val isAgent = target.terminal.agent != null
         val thinking = isAgent && target.terminal.status == "working"
@@ -2510,6 +2575,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun requestRemoteRefresh(showSpinner: Boolean = true) {
+        if (isFinishing || isDestroyed) return
         val credentials = SecretStore.loadAll(this)
         if (credentials.isEmpty()) {
             finishRemoteRefresh()
@@ -2529,6 +2595,7 @@ class MainActivity : AppCompatActivity() {
                 runCatching { RelayClient.requestWorkspaceRefresh(pairing) }
             }
             responsesRefresh.postDelayed({
+                if (isFinishing || isDestroyed) return@postDelayed
                 refreshRemoteState()
                 finishRemoteRefresh()
             }, 10_000)
@@ -2561,25 +2628,34 @@ class MainActivity : AppCompatActivity() {
         val commandId = UUID.randomUUID().toString()
         val sentAt = System.currentTimeMillis()
         conversationSend.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
-        MessageStore(this).putOutgoing(
-            target,
-            commandId,
-            sentAt,
-            text,
-            attachments,
+        val outgoing = CompletionRecord(
+            id = commandId,
+            pairId = target.pairId,
+            projectId = target.projectId,
+            terminalId = target.terminal.id,
+            terminalTitle = target.terminal.title,
+            sentAt = sentAt,
+            agent = "You",
+            project = target.projectName,
+            kind = "user",
+            response = text,
+            durationMs = null,
+            attachments = attachments,
             deliveryState = "sending",
         )
+        outgoingMessages[commandId] = outgoing
         draftStore.clear(target.pairId, target.terminal.id)
         selectedDraftAttachment = null
         conversationInput.text.clear()
         renderDraftAttachment()
         conversationShouldStickToBottom = true
-        refreshConversation()
+        refreshConversation(reloadHistory = false)
         if (target.terminal.mode == "terminal") {
             findViewById<TextView>(R.id.conversation_status).text = "Sending input securely..."
         }
-        executor.execute {
+        commandExecutor.execute {
             runCatching {
+                MessageStore(this).use { it.put(outgoing) }
                 RelayClient.sendCommand(
                     credentials,
                     target.projectId,
@@ -2592,6 +2668,8 @@ class MainActivity : AppCompatActivity() {
             }.onSuccess {
                 MessageStore(this).updateOutgoingState(commandId, "sent")
                 runOnUiThread {
+                    if (isFinishing || isDestroyed) return@runOnUiThread
+                    outgoingMessages[commandId] = outgoing.copy(deliveryState = "sent")
                     if (target.terminal.mode == "terminal") {
                         findViewById<TextView>(R.id.conversation_status).text =
                             "Input delivered. Waiting for terminal output..."
@@ -2611,6 +2689,10 @@ class MainActivity : AppCompatActivity() {
                     error.message ?: "Could not send this message.",
                 )
                 runOnUiThread {
+                    if (isFinishing || isDestroyed) return@runOnUiThread
+                    outgoingMessages[commandId] = outgoing.copy(
+                        deliveryState = "failed", deliveryError = error.message,
+                    )
                     refreshConversation()
                 }
             }
@@ -2633,10 +2715,11 @@ class MainActivity : AppCompatActivity() {
             return
         }
         conversationList.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
-        MessageStore(this).updateOutgoingState(message.id, "sending")
-        refreshConversation()
-        executor.execute {
+        outgoingMessages[message.id] = message.copy(deliveryState = "sending", deliveryError = null)
+        refreshConversation(reloadHistory = false)
+        commandExecutor.execute {
             runCatching {
+                MessageStore(this).updateOutgoingState(message.id, "sending")
                 RelayClient.sendCommand(
                     credentials,
                     projectId,
@@ -2649,6 +2732,8 @@ class MainActivity : AppCompatActivity() {
             }.onSuccess {
                 MessageStore(this).updateOutgoingState(message.id, "sent")
                 runOnUiThread {
+                    if (isFinishing || isDestroyed) return@runOnUiThread
+                    outgoingMessages[message.id] = message.copy(deliveryState = "sent", deliveryError = null)
                     refreshConversation()
                     trackDelivery(
                         message.id,
@@ -2664,7 +2749,11 @@ class MainActivity : AppCompatActivity() {
                     "failed",
                     error.message ?: "Could not send this message.",
                 )
-                runOnUiThread { refreshConversation() }
+                runOnUiThread {
+                    if (isFinishing || isDestroyed) return@runOnUiThread
+                    outgoingMessages[message.id] = message.copy(deliveryState = "failed", deliveryError = error.message)
+                    refreshConversation()
+                }
             }
         }
     }
@@ -2689,18 +2778,22 @@ class MainActivity : AppCompatActivity() {
                 deliveryChecks.remove(messageId)
                 return@postDelayed
             }
-            executor.execute {
+            syncExecutor.execute {
                 val credentials = SecretStore.load(this, pairId)
                 val delivered = credentials?.let {
                     runCatching { !RelayClient.isCommandPending(it, messageId) }.getOrNull()
                 }
+                if (delivered == true) {
+                    MessageStore(this).use {
+                        it.updateOutgoingState(messageId, if (awaitWorkspaceConfirmation) "received" else "delivered")
+                    }
+                }
                 runOnUiThread {
+                    if (isFinishing || isDestroyed) return@runOnUiThread
                     when {
                         delivered == true -> {
-                            MessageStore(this).updateOutgoingState(
-                                messageId,
-                                if (awaitWorkspaceConfirmation) "received" else "delivered",
-                            )
+                            recoverPendingRelayMessages()
+                            outgoingMessages.remove(messageId)
                             deliveryChecks.remove(messageId)
                             if (conversationDetail.visibility == View.VISIBLE) refreshConversation()
                         }
@@ -2714,7 +2807,7 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
             }
-        }, if (attempt == 0) 1_200L else 3_000L)
+        }, if (attempt == 0) 400L else 1_200L)
     }
 
     private fun persistCurrentDraft() {

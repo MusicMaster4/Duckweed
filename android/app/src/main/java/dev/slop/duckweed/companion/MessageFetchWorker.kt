@@ -1,12 +1,14 @@
 package dev.slop.duckweed.companion
 
 import android.content.Context
+import android.os.Build
 import androidx.work.Data
 import androidx.work.ExistingWorkPolicy
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.Worker
 import androidx.work.WorkerParameters
 import androidx.work.WorkManager
+import androidx.work.OutOfQuotaPolicy
 
 class MessageFetchWorker(context: Context, parameters: WorkerParameters) : Worker(context, parameters) {
     override fun doWork(): Result {
@@ -14,6 +16,22 @@ class MessageFetchWorker(context: Context, parameters: WorkerParameters) : Worke
         val messageId = inputData.getString(MESSAGE_ID) ?: return Result.failure()
         val credentials = SecretStore.load(applicationContext, pairId) ?: return Result.failure()
         return try {
+            fetchAndStore(applicationContext, credentials, messageId)
+            Result.success()
+        } catch (error: Exception) {
+            // A newer workspace can replace an older relay payload, and a
+            // foreground fetch can acknowledge it before this worker starts.
+            if (error is RelayHttpException && error.status == 404) Result.success()
+            else if (runAttemptCount < 6) Result.retry() else Result.failure()
+        }
+    }
+
+    companion object {
+        const val PAIR_ID = "pair_id"
+        const val MESSAGE_ID = "message_id"
+
+        fun fetchAndStore(applicationContext: Context, credentials: PairCredentials, messageId: String) {
+            val pairId = credentials.pairId
             val envelope = RelayClient.fetch(credentials, messageId)
             val message = Crypto.decrypt(credentials, messageId, "payload", envelope)
             val receivedAt = System.currentTimeMillis()
@@ -50,15 +68,7 @@ class MessageFetchWorker(context: Context, parameters: WorkerParameters) : Worke
             }
             RelayClient.acknowledge(credentials, messageId)
             NotificationTools.announceChanged(applicationContext)
-            Result.success()
-        } catch (_: Exception) {
-            if (runAttemptCount < 6) Result.retry() else Result.failure()
         }
-    }
-
-    companion object {
-        const val PAIR_ID = "pair_id"
-        const val MESSAGE_ID = "message_id"
     }
 }
 
@@ -70,6 +80,11 @@ object MessageFetchScheduler {
             .build()
         val work = OneTimeWorkRequestBuilder<MessageFetchWorker>()
             .setInputData(input)
+            .apply {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
+                }
+            }
             .build()
         WorkManager.getInstance(context.applicationContext).enqueueUniqueWork(
             "duckweed-message-$pairId-$messageId",

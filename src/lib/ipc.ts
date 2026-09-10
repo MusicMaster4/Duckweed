@@ -84,6 +84,7 @@ export interface MobileTerminalSnapshot {
   unreadOnDesktop: boolean;
   /** Current terminal completion identity, used to reject stale read receipts. */
   completionSeq: number;
+  readCompletionSeq?: number | null;
   /** Slash commands currently available in this agent session. */
   commands: MobileSlashCommandSnapshot[];
   /** Recent reasoning, plan, and tool steps shown inline with the conversation. */

@@ -157,6 +157,31 @@ async function codexHandshake(sessionId = "01900000-0000-7000-8000-000000000001"
 const session = await import("./session");
 
 describe("Custom agent UI sessions", () => {
+  test("restores prompt navigation from resumed Codex turns and replaces the previous conversation", async () => {
+    const termId = "resumed-prompt-history";
+    await session.start(termId, codexLaunch, "H:/project");
+    await codexHandshake();
+    for (const [threadId, prompts] of [
+      ["old-one", ["First command", "Second command", "Second command"]],
+      ["old-two", ["Different conversation"]],
+    ] as const) {
+      const resuming = session.resume(termId, threadId);
+      await flush();
+      const request = sent.map(rpc).findLast((message) => message.method === "thread/resume");
+      feed({ id: request?.id, result: { thread: {
+        id: threadId,
+        turns: prompts.map((text, index) => ({
+          id: `turn-${index}`, status: "completed",
+          items: [{ type: "userMessage", id: `user-${index}`, content: [{ type: "text", text }] }],
+        })),
+      } } });
+      await resuming;
+      expect(session.localPromptHistory(termId)).toEqual([...new Set(prompts)]);
+    }
+    session.submit(termId, "New follow-up");
+    expect(session.localPromptHistory(termId)).toEqual(["Different conversation", "New follow-up"]);
+  });
+
   beforeEach(() => {
     sent.length = 0;
     spawn = null;
