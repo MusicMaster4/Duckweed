@@ -529,6 +529,7 @@ fn pi_line(value: &Value) -> Option<Vec<Record>> {
         reasoning: 0,
         cache_read: u(usage, "cacheRead"),
         cache_write: u(usage, "cacheWrite"),
+        cache_write_1h: 0,
     };
     if tokens.total() == 0 {
         return None;
@@ -585,6 +586,11 @@ fn claude_line(value: &Value) -> Option<Vec<Record>> {
         reasoning: 0,
         cache_read: u(usage, "cache_read_input_tokens"),
         cache_write: u(usage, "cache_creation_input_tokens"),
+        cache_write_1h: usage
+            .get("cache_creation")
+            .map(|creation| u(creation, "ephemeral_1h_input_tokens"))
+            .unwrap_or(0)
+            .min(u(usage, "cache_creation_input_tokens")),
     };
     if tokens.total() == 0 {
         return None;
@@ -598,11 +604,18 @@ fn claude_line(value: &Value) -> Option<Vec<Record>> {
         s(value, "requestId").unwrap_or_default()
     );
     Some(vec![Record {
-        pricing: super::pricing::Context::default(),
+        pricing: super::pricing::Context::for_request(
+            model,
+            s(usage, "speed").unwrap_or(""),
+            &tokens,
+        ),
         at,
         model: model.to_string(),
         tokens,
-        reported_cost: None,
+        reported_cost: value
+            .get("costUSD")
+            .and_then(Value::as_f64)
+            .filter(|cost| cost.is_finite() && *cost >= 0.0),
         dedup: if key == ":" { 0 } else { hash(&key) },
     }])
 }
@@ -629,10 +642,13 @@ fn codex_lines(path: &Path, offset: u64) -> (Vec<Record>, u64) {
             break;
         }
         position += n as u64;
-        if !buf.contains("turn_context") && !buf.contains("token_count") {
+        if !buf.contains("turn_context")
+            && !buf.contains("token_count")
+            && !buf.contains("thread_settings_applied")
+        {
             continue;
         }
-        let Ok(value) = serde_json::from_str::<Value>(&buf) else {
+        let Ok(mut value) = serde_json::from_str::<Value>(&buf) else {
             continue;
         };
         let payload = &value["payload"];
@@ -640,18 +656,56 @@ fn codex_lines(path: &Path, offset: u64) -> (Vec<Record>, u64) {
             if let Some(name) = s(payload, "model") {
                 model = name.to_string();
             }
-            service_tier = s(payload, "service_tier").unwrap_or_default().to_string();
+            if let Some(tier) = s(payload, "service_tier") {
+                service_tier = tier.to_string();
+            }
+            continue;
+        }
+        if s(&value, "type") != Some("event_msg") {
+            continue;
+        }
+        if s(payload, "type") == Some("thread_settings_applied") {
+            if let Some(tier) = payload
+                .get("thread_settings")
+                .and_then(|settings| s(settings, "service_tier"))
+            {
+                service_tier = tier.to_string();
+            }
+            continue;
+        }
+        if s(payload, "type") != Some("token_count") {
             continue;
         }
         let total = payload
             .get("info")
             .and_then(|info| info.get("total_token_usage"))
             .filter(|total| total.is_object());
+        let mut delta = None;
         if let Some(total) = total {
             if previous_total.as_ref() == Some(total) {
                 continue;
             }
+            if !payload["info"]["last_token_usage"].is_object() {
+                let mut fields = serde_json::Map::new();
+                for key in [
+                    "input_tokens",
+                    "cached_input_tokens",
+                    "cache_write_input_tokens",
+                    "output_tokens",
+                    "reasoning_output_tokens",
+                ] {
+                    let before = previous_total.as_ref().map(|t| u(t, key)).unwrap_or(0);
+                    fields.insert(
+                        key.into(),
+                        Value::from(u(total, key).saturating_sub(before)),
+                    );
+                }
+                delta = Some(Value::Object(fields));
+            }
             previous_total = Some(total.clone());
+        }
+        if let Some(delta) = delta {
+            value["payload"]["info"]["last_token_usage"] = delta;
         }
         if position <= offset {
             continue;
@@ -670,7 +724,7 @@ fn codex_lines(path: &Path, offset: u64) -> (Vec<Record>, u64) {
                 record.dedup = hash(&format!(
                     "codex:{}:{}",
                     s(&value, "timestamp").unwrap_or_default(),
-                    payload["info"]
+                    value["payload"]["info"]
                 ));
                 out.push(record);
             }
@@ -693,16 +747,19 @@ fn codex_line(value: &Value) -> Option<Vec<Record>> {
 
     // OpenAI nests both subsets: cached input inside `input_tokens`, reasoning
     // inside `output_tokens`. Split them so nothing is counted twice.
-    let cache_read = u(last, "cached_input_tokens");
-    let reasoning = u(last, "reasoning_output_tokens");
+    let cache_read = u(last, "cached_input_tokens").min(u(last, "input_tokens"));
+    let cache_write =
+        u(last, "cache_write_input_tokens").min(u(last, "input_tokens").saturating_sub(cache_read));
+    let reasoning = u(last, "reasoning_output_tokens").min(u(last, "output_tokens"));
     let tokens = Tokens {
         input: u(last, "input_tokens")
             .saturating_sub(cache_read)
-            .saturating_sub(u(last, "cache_write_input_tokens")),
+            .saturating_sub(cache_write),
         output: u(last, "output_tokens").saturating_sub(reasoning),
         reasoning,
         cache_read,
-        cache_write: u(last, "cache_write_input_tokens"),
+        cache_write,
+        cache_write_1h: 0,
     };
     if tokens.total() == 0 {
         return None;
@@ -711,6 +768,7 @@ fn codex_line(value: &Value) -> Option<Vec<Record>> {
         pricing: super::pricing::Context::default(),
         at,
         model: s(payload, "model")
+            .or_else(|| payload.get("info").and_then(|info| s(info, "model")))
             .or_else(|| s(value, "model"))
             .unwrap_or("unknown")
             .to_string(),
@@ -753,6 +811,7 @@ fn grok_line(value: &Value) -> Option<Vec<Record>> {
                 reasoning,
                 cache_read,
                 cache_write: u(block, "cacheWriteTokens"),
+                cache_write_1h: 0,
             },
             reported_cost: None,
             dedup,
@@ -802,9 +861,16 @@ fn kimi_line(value: &Value) -> Option<Vec<Record>> {
                 .map(|d| u(d, "cached_tokens"))
                 .unwrap_or(0),
         );
-    let input = u(usage, "prompt_tokens")
-        .max(u(usage, "input_tokens"))
-        .saturating_sub(cache_read);
+    let input = if usage.get("cache_read_input_tokens").is_some()
+        || usage.get("cache_creation_input_tokens").is_some()
+    {
+        // Anthropic's input excludes cache, unlike OpenAI-compatible usage.
+        u(usage, "input_tokens")
+    } else {
+        u(usage, "prompt_tokens")
+            .max(u(usage, "input_tokens"))
+            .saturating_sub(cache_read)
+    };
     let output = u(usage, "completion_tokens").max(u(usage, "output_tokens"));
     let tokens = Tokens {
         input,
@@ -812,6 +878,7 @@ fn kimi_line(value: &Value) -> Option<Vec<Record>> {
         reasoning: 0,
         cache_read,
         cache_write: u(usage, "cache_creation_input_tokens"),
+        cache_write_1h: 0,
     };
     if tokens.total() == 0 {
         return None;
@@ -864,12 +931,24 @@ fn gemini_file(value: &Value, _path: &Path) -> Vec<Record> {
         let Some(at) = s(message, "timestamp").and_then(iso_ms) else {
             continue;
         };
+        let input = u(usage, "input");
+        let cached = u(usage, "cached");
+        let inclusive_total = input + u(usage, "output") + u(usage, "thoughts") + u(usage, "tool");
+        // Gemini CLI versions log both inclusive and already-exclusive input.
+        // The reported total disambiguates them, as in ccusage's session parser.
         let tokens = Tokens {
-            input: u(usage, "input"),
+            input: if cached > 0
+                && usage.get("total").and_then(Value::as_u64) == Some(inclusive_total)
+            {
+                input.saturating_sub(cached)
+            } else {
+                input
+            } + u(usage, "tool"),
             output: u(usage, "output"),
             reasoning: u(usage, "thoughts"),
             cache_read: u(usage, "cached"),
             cache_write: 0,
+            cache_write_1h: 0,
         };
         if tokens.total() == 0 {
             continue;
@@ -881,7 +960,11 @@ fn gemini_file(value: &Value, _path: &Path) -> Vec<Record> {
             None => format!("{session}:{index}"),
         };
         out.push(Record {
-            pricing: super::pricing::Context::default(),
+            pricing: super::pricing::Context::for_request(
+                s(message, "model").unwrap_or("unknown"),
+                "",
+                &tokens,
+            ),
             at,
             model: s(message, "model").unwrap_or("gemini-3-pro").to_string(),
             tokens,
@@ -918,6 +1001,7 @@ fn opencode_file(value: &Value, _path: &Path) -> Vec<Record> {
         reasoning: u(usage, "reasoning"),
         cache_read: cache.map(|c| u(c, "read")).unwrap_or(0),
         cache_write: cache.map(|c| u(c, "write")).unwrap_or(0),
+        cache_write_1h: 0,
     };
     if tokens.total() == 0 {
         return Vec::new();
@@ -996,6 +1080,7 @@ fn droid_file(value: &Value, path: &Path) -> Vec<Record> {
         reasoning: u(usage, "thinkingTokens"),
         cache_read: u(usage, "cacheReadTokens"),
         cache_write: u(usage, "cacheCreationTokens"),
+        cache_write_1h: 0,
     };
     if tokens.total() == 0 {
         return Vec::new();
@@ -1042,6 +1127,7 @@ fn kilocode_file(value: &Value, _path: &Path) -> Vec<Record> {
             reasoning: 0,
             cache_read: u(&inner, "cacheReads"),
             cache_write: u(&inner, "cacheWrites"),
+            cache_write_1h: 0,
         };
         if tokens.total() == 0 {
             continue;
@@ -1070,6 +1156,97 @@ mod tests {
     fn one(json: &str, f: fn(&Value) -> Option<Vec<Record>>) -> Record {
         let value: Value = serde_json::from_str(json).unwrap();
         f(&value).unwrap().into_iter().next().unwrap()
+    }
+
+    #[test]
+    fn claude_prices_one_hour_cache_without_counting_it_twice() {
+        let record = one(
+            r#"{"type":"assistant","timestamp":"2026-09-10T12:00:00Z",
+            "message":{"model":"claude-sonnet-5","usage":{"input_tokens":1000000,
+            "output_tokens":1000000,"cache_creation_input_tokens":1000000,
+            "cache_creation":{"ephemeral_5m_input_tokens":400000,"ephemeral_1h_input_tokens":600000}}}}"#,
+            claude_line,
+        );
+        assert_eq!(record.tokens.total(), 3_000_000);
+        assert_eq!(record.tokens.cache_write_1h, 600_000);
+        let (rates, _) = super::super::pricing::lookup(&record.model, &Default::default());
+        // 2 input + 10 output + 0.4 * 2.5 short writes + 0.6 * 4 long writes.
+        assert!((record.pricing.cost(&record.model, rates, &record.tokens) - 15.4).abs() < 1e-9);
+    }
+
+    #[test]
+    fn gemini_accepts_both_cache_conventions() {
+        for (input, total) in [(1000, 1150), (200, 1150)] {
+            let value = serde_json::json!({"sessionId":"s", "messages":[{
+                "id":"m", "model":"gemini-2.5-pro", "timestamp":"2026-09-10T12:00:00Z",
+                "tokens":{"input":input,"cached":800,"output":100,"thoughts":50,"total":total}
+            }]});
+            let record = gemini_file(&value, Path::new("x")).remove(0);
+            assert_eq!(record.tokens.input, 200);
+            assert_eq!(record.tokens.total(), 1150);
+            let (rates, _) = super::super::pricing::lookup(&record.model, &Default::default());
+            assert!(
+                (record.pricing.cost(&record.model, rates, &record.tokens) - 0.00185).abs() < 1e-9
+            );
+        }
+    }
+
+    #[test]
+    fn kimi_does_not_subtract_cache_from_anthropic_input() {
+        let value = serde_json::json!({"timestamp":"2026-09-10T12:00:00Z", "model":"claude-sonnet-5",
+            "usage":{"input_tokens":200,"cache_read_input_tokens":800,"output_tokens":100}});
+        let record = kimi_line(&value).unwrap().remove(0);
+        assert_eq!(record.tokens.input, 200);
+        assert_eq!(record.tokens.total(), 1100);
+    }
+
+    #[test]
+    fn codex_settings_and_cumulative_only_events_survive_append() {
+        use std::io::Write;
+        let path = std::env::temp_dir().join(format!(
+            "duckweed-codex-delta-{}.jsonl",
+            uuid::Uuid::new_v4()
+        ));
+        let context = serde_json::json!({"type":"turn_context","payload":{"model":"gpt-6-astra"}});
+        let settings = |tier| serde_json::json!({"type":"event_msg","payload":{"type":"thread_settings_applied","thread_settings":{"service_tier":tier}}});
+        let event = |input, cached, output| {
+            serde_json::json!({"type":"event_msg","timestamp":"2026-09-10T12:00:00Z",
+            "payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":input,"cached_input_tokens":cached,"output_tokens":output}}}})
+        };
+        std::fs::write(
+            &path,
+            format!(
+                "{context}\n{}\n{}\n",
+                settings("priority"),
+                event(1000, 800, 100)
+            ),
+        )
+        .unwrap();
+        let (records, offset) = codex_lines(&path, 0);
+        assert_eq!(records[0].tokens.total(), 1100);
+        assert_eq!(records[0].pricing.tier, 1);
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        writeln!(
+            file,
+            "{}\n{context}\n{}\n{}\n{}",
+            event(1000, 800, 100),
+            event(1500, 1200, 200),
+            settings("default"),
+            event(2000, 1600, 300)
+        )
+        .unwrap();
+        drop(file);
+        let (added, _) = codex_lines(&path, offset);
+        assert_eq!(added.len(), 2);
+        assert_eq!(added[0].tokens.input, 100);
+        assert_eq!(added[0].tokens.cache_read, 400);
+        assert_eq!(added[0].tokens.output, 100);
+        assert_eq!(added[0].pricing.tier, 1);
+        assert_eq!(added[1].pricing.tier, 0);
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
@@ -1209,7 +1386,8 @@ mod tests {
         writeln!(file, "{switched}\n{}", event(900000)).unwrap();
         let (changed, _) = codex_lines(&path, next);
         assert_eq!(changed[0].model, "gpt-5.6-luna");
-        assert_eq!(changed[0].pricing.tier, 0);
+        // A model-only context does not reset the recorded service tier.
+        assert_eq!(changed[0].pricing.tier, 1);
         drop(file);
         std::fs::remove_file(path).unwrap();
     }

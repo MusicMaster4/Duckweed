@@ -166,7 +166,7 @@ export function StatisticsTool({ tabs, panes, projects }: Props) {
       <div className="statistics-scroll">
         <article className="statistics-card">
           <header>
-            <span className="statistics-card-title">Estimated cost</span>
+            <span className="statistics-card-title" title="Estimated API token cost from local logs, not subscription charges or quota consumption. Separate tool fees are excluded.">Estimated cost</span>
             {pace !== null && (
               <em className="statistics-pace" title="At this session's pace">
                 {paceLabel(pace)}
