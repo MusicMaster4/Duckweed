@@ -4,13 +4,16 @@ import android.content.Intent
 import android.content.ContentValues
 import android.Manifest
 import android.os.Build
+import android.os.PowerManager
 import android.app.NotificationManager
 import android.content.Context
 import android.content.ContextWrapper
 import com.google.firebase.messaging.RemoteMessage
 import android.widget.EditText
+import android.widget.TextView
 import android.view.View
 import android.graphics.Bitmap
+import android.graphics.Rect
 import androidx.recyclerview.widget.RecyclerView
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -44,6 +47,8 @@ class MobileExperienceTest {
         context.deleteDatabase("duckweed-messages.db")
         WorkspaceStore(context).remove(pairId)
         MobileNotificationVisibility.activityStopped()
+        NotificationPreference.setEnabled(context, true)
+        context.getSystemService(NotificationManager::class.java).cancelAll()
     }
 
     private fun message(seq: Long, sentAt: Long, response: String = "Response $seq") = CompletionRecord(
@@ -63,6 +68,152 @@ class MobileExperienceTest {
             )),
         )),
     )
+
+    @Test
+    fun openingSettingsKeepsUnreadNotificationsAvailable() {
+        NotificationTools.createChannel(context)
+        val unread = message(10, System.currentTimeMillis()).copy(soundCue = 0)
+        MessageStore(context).use {
+            it.put(unread)
+            NotificationTools.deliverPending(context, it, unread)
+        }
+        val manager = context.getSystemService(NotificationManager::class.java)
+        awaitCondition { manager.activeNotifications.any { it.id == unread.id.hashCode() } }
+        ActivityScenario.launch<MainActivity>(Intent(context, MainActivity::class.java)).use { scenario ->
+            scenario.onActivity { activity ->
+                activity.findViewById<View>(R.id.settings_button).performClick()
+                val health = activity.findViewById<TextView>(R.id.notification_health)
+                assertTrue(health.isShown)
+                assertTrue(health.text.contains("Android notifications are allowed."))
+            }
+            awaitCondition {
+                var settled = false
+                scenario.onActivity {
+                    val page = it.findViewById<View>(R.id.connections_page)
+                    settled = page.isShown && page.alpha == 1f &&
+                        it.findViewById<View>(R.id.responses_page).visibility == View.GONE
+                }
+                settled
+            }
+            scenario.onActivity { activity ->
+                val health = activity.findViewById<TextView>(R.id.notification_health)
+                health.requestRectangleOnScreen(Rect(0, 0, health.width, health.height), true)
+            }
+            instrumentation.waitForIdleSync()
+            assertTrue(manager.activeNotifications.any { it.id == unread.id.hashCode() })
+            manager.cancelAll()
+            awaitCondition { manager.activeNotifications.isEmpty() }
+            instrumentation.uiAutomation.takeScreenshot()?.let { screenshot ->
+                File(context.getExternalFilesDir(null), "mobile-notification-settings.png").outputStream().use {
+                    screenshot.compress(Bitmap.CompressFormat.PNG, 100, it)
+                }
+                screenshot.recycle()
+            }
+        }
+    }
+
+    @Test
+    fun firebaseCallbackPostsAnAudibleNotificationWithTheScreenOff() {
+        val credentials = PairCredentials(pairId, "https://127.0.0.1:1", "A".repeat(43), "B".repeat(43), "test-device", "Test device")
+        SecretStore.save(context, credentials)
+        NotificationTools.createChannel(context)
+        val id = UUID.randomUUID().toString()
+        val plain = JSONObject().put("version", 1).put("id", id).put("sentAt", System.currentTimeMillis())
+            .put("agent", "Codex").put("project", "Mobile regression").put("kind", "completed")
+            .put("terminalId", terminalId).put("completionSeq", 8).put("unreadOnDesktop", true)
+            .put("soundCue", 0).put("response", "Ready while the screen is off")
+        val encrypted = Crypto.encrypt(credentials, id, "preview", plain.toString().toByteArray())
+        val service = DuckweedMessagingService()
+        ContextWrapper::class.java.getDeclaredMethod("attachBaseContext", Context::class.java).apply {
+            isAccessible = true
+            invoke(service, context)
+        }
+        // Retain stale foreground state to exercise the lifecycle race at lock.
+        MobileNotificationVisibility.activityStarted()
+        MobileNotificationVisibility.showConversation(pairId, terminalId)
+        try {
+            instrumentation.uiAutomation.executeShellCommand("input keyevent 223").close()
+            awaitCondition { !context.getSystemService(PowerManager::class.java).isInteractive }
+            service.onMessageReceived(RemoteMessage.Builder("screen-off-regression").setData(mapOf(
+                "version" to "1", "pair_id" to pairId, "message_id" to id,
+                "preview_nonce" to encrypted.nonce, "preview_ciphertext" to encrypted.ciphertext,
+            )).build())
+            val manager = context.getSystemService(NotificationManager::class.java)
+            awaitCondition { manager.activeNotifications.any { it.id == id.hashCode() } }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val posted = manager.activeNotifications.single { it.id == id.hashCode() }
+                val channel = manager.getNotificationChannel(posted.notification.channelId)
+                assertEquals(NotificationManager.IMPORTANCE_HIGH, channel.importance)
+                assertNotNull(channel.sound)
+            }
+            MessageStore(context).use {
+                assertNull(it.message(id)?.readAt)
+                assertTrue(it.pendingReadSyncs().isEmpty())
+            }
+        } finally {
+            MobileNotificationVisibility.activityStopped()
+            instrumentation.uiAutomation.executeShellCommand("input keyevent 224").close()
+            instrumentation.uiAutomation.executeShellCommand("wm dismiss-keyguard").close()
+        }
+    }
+
+    @Test
+    fun recoveryAlertsOnceAndDoesNotReplayAfterAlertsAreEnabled() {
+        NotificationTools.createChannel(context)
+        val manager = context.getSystemService(NotificationManager::class.java)
+        val recovered = message(8, System.currentTimeMillis()).copy(soundCue = 0)
+        MessageStore(context).use { store ->
+            store.put(recovered)
+            NotificationTools.deliverPending(context, store, recovered)
+            awaitCondition { manager.activeNotifications.size == 1 }
+            assertFalse(store.isNotificationPending(recovered.id))
+            manager.cancelAll()
+            awaitCondition { manager.activeNotifications.isEmpty() }
+            NotificationTools.deliverPending(context, store, recovered)
+            assertTrue(manager.activeNotifications.isEmpty())
+
+            val muted = message(9, recovered.sentAt + 1)
+            NotificationPreference.setEnabled(context, false)
+            store.put(muted)
+            NotificationTools.deliverPending(context, store, muted)
+            NotificationPreference.setEnabled(context, true)
+            NotificationTools.deliverPending(context, store, muted)
+            assertTrue(manager.activeNotifications.isEmpty())
+        }
+    }
+
+    @Test
+    fun notificationSoundsResolveByNameAndSurviveChannelRecreation() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        NotificationTools.createChannel(context)
+        val manager = context.getSystemService(NotificationManager::class.java)
+        val before = (0..5).map { manager.getNotificationChannel("agent-completions-v3-$it").sound }
+        before.forEach { uri ->
+            assertEquals("raw", uri.pathSegments.first())
+            context.contentResolver.openInputStream(uri).use { stream ->
+                assertNotNull(stream)
+                assertTrue(stream!!.read() >= 0)
+            }
+        }
+        NotificationTools.createChannel(context)
+        assertEquals(before, (0..5).map { manager.getNotificationChannel("agent-completions-v3-$it").sound })
+    }
+
+    @Test
+    fun heartbeatDoesNotRewriteEncryptedWorkspaceAndSurvivesOlderSnapshots() {
+        val workspace = WorkspaceStore(context)
+        workspace.put(snapshot(7, null, true, 1_000), receivedAt = 1_000)
+        val preferences = context.getSharedPreferences("duckweed-workspaces", Context.MODE_PRIVATE)
+        val before = preferences.getString(pairId, null)
+        assertTrue(workspace.markPresence(pairId, 5_000))
+        assertEquals(before, preferences.getString(pairId, null))
+        assertFalse(workspace.markPresence(pairId, 4_000))
+        workspace.put(snapshot(8, null, true, 2_000), receivedAt = 2_000)
+        assertEquals(5_000L, workspace.all().single { it.pairId == pairId }.lastSeenAt)
+        workspace.remove(pairId)
+        workspace.put(snapshot(9, null, true, 3_000), receivedAt = 3_000)
+        assertEquals(3_000L, workspace.all().single { it.pairId == pairId }.lastSeenAt)
+    }
 
     @Test
     fun databaseUpgradePreservesExistingEncryptedHistoryAndReadState() {
@@ -224,29 +375,43 @@ class MobileExperienceTest {
         ActivityScenario.launch<MainActivity>(intent).use { scenario ->
             awaitCondition {
                 var visible = false
-                scenario.onActivity { visible = it.findViewById<EditText>(R.id.conversation_input).isShown }
+                scenario.onActivity {
+                    val input = it.findViewById<EditText>(R.id.conversation_input)
+                    visible = input.isShown && input.isEnabled &&
+                        it.findViewById<RecyclerView>(R.id.conversation_list).adapter!!.itemCount >= 250
+                }
                 visible
             }
             val release = CountDownLatch(1)
             val blocked = CountDownLatch(1)
+            val draftsBlocked = CountDownLatch(1)
+            var before = 0
             try {
                 scenario.onActivity { activity ->
                     val field = MainActivity::class.java.getDeclaredField("commandExecutor").apply { isAccessible = true }
                     (field.get(activity) as ExecutorService).execute { blocked.countDown(); release.await(15, TimeUnit.SECONDS) }
                 }
                 assertTrue(blocked.await(3, TimeUnit.SECONDS))
+                DraftStore.io.execute { draftsBlocked.countDown(); release.await(15, TimeUnit.SECONDS) }
+                assertTrue(draftsBlocked.await(3, TimeUnit.SECONDS))
                 scenario.onActivity { activity ->
                     val input = activity.findViewById<EditText>(R.id.conversation_input)
                     val list = activity.findViewById<RecyclerView>(R.id.conversation_list)
                     input.setText("Immediate optimistic send")
-                    val before = list.adapter!!.itemCount
+                    before = list.adapter!!.itemCount
                     val started = System.nanoTime()
                     assertTrue(activity.findViewById<View>(R.id.conversation_send).performClick())
                     val elapsedMs = (System.nanoTime() - started) / 1_000_000
                     android.util.Log.i("DuckweedRegression", "Optimistic send callback: ${elapsedMs}ms")
                     assertEquals("", input.text.toString())
-                    assertEquals(before + 1, list.adapter!!.itemCount)
                     assertTrue("Send blocked the UI for ${elapsedMs}ms", elapsedMs < 500)
+                }
+                awaitCondition {
+                    var painted = false
+                    scenario.onActivity {
+                        painted = it.findViewById<RecyclerView>(R.id.conversation_list).adapter!!.itemCount == before + 1
+                    }
+                    painted
                 }
                 MessageStore(context).use { store ->
                     assertFalse(store.conversation(pairId, terminalId).any { it.response == "Immediate optimistic send" })

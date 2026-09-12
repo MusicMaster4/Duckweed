@@ -42,20 +42,23 @@ class DuckweedMessagingService : FirebaseMessagingService() {
         // that just arrived into an "offline" state.
         WorkspaceStore(this).markPresence(pairId, System.currentTimeMillis())
         if (preview.kind != "workspace" && preview.kind != "presence") {
-            val store = MessageStore(this)
-            // A delayed preview must not replace an already downloaded answer.
-            store.put(preview, previewOnly = true)
-            if (MobileNotificationVisibility.consumeIfVisible(this, store, preview)) {
-                // The response is already on screen. Its read receipt also
-                // clears the matching unread marker on the desktop.
-            } else if (!NotificationPreference.isEnabled(this) || preview.unreadOnDesktop == false) {
-                store.markNotified(preview.id, preview.sentAt)
-            } else if (store.isNotificationPending(preview.id) && NotificationTools.show(this, preview)) {
-                store.markNotified(preview.id)
+            NotificationHealth.recordDelivery(this, remoteMessage)
+            MessageStore(this).use { store ->
+                // A delayed preview must not replace an already downloaded answer.
+                store.put(preview, previewOnly = true)
+                NotificationTools.deliverPending(this, store, preview)
             }
         }
         NotificationTools.announceChanged(this)
 
-        MessageFetchScheduler.enqueue(this, pairId, messageId)
+        MessageFetchScheduler.enqueue(
+            this, pairId, messageId,
+            expedited = remoteMessage.priority == RemoteMessage.PRIORITY_HIGH,
+        )
+    }
+
+    override fun onDestroy() {
+        executor.shutdown()
+        super.onDestroy()
     }
 }

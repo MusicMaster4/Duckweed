@@ -112,6 +112,12 @@ encrypted. Outgoing bubbles distinguish sending, relay acceptance, desktop
 receipt, and failure. A failed bubble can be tapped to retry with the same
 idempotent command identity.
 The composer paints outgoing messages before encryption or network submission.
+Pairing credentials are resolved by the send queue, and encrypted draft reads,
+writes, and clears use an ordered background queue that survives Activity
+recreation. Long conversation lists calculate their updates off the UI thread;
+rendered response Markdown is cached and outgoing text appears immediately at
+full contrast. Returning to a conversation restores its saved draft without
+blocking navigation.
 Conversation history is read and decrypted off the UI thread, and sending uses
 a separate queue from background refreshes and delivery checks. Delivery states
 only advance after confirmation, even if network callbacks arrive out of order.
@@ -126,6 +132,42 @@ immediate refresh from a running paired desktop.
 Completion notifications use the same six bundled Duckweed cues as the desktop.
 The desktop selects one cue for the completion and includes only its numeric cue
 identifier inside the encrypted payload, so Android plays the exact same cue.
+**Send test** explicitly includes the first sound cue to test audio as well as
+delivery. Sound channels reference resource names instead of numeric IDs that
+can change between APKs. New channels inherit the previous channel's importance,
+muted state, and custom sound when migrating from an older build.
+
+### Alerts with the screen off
+
+The FCM callback displays the decrypted preview before fetching the response or
+loading approval actions. Heartbeats update a small local timestamp separately
+from the encrypted workspace, so a notification does not wait for every terminal
+and conversation to be decrypted and re-encrypted. Only work triggered by an
+actually high-priority push requests expedited background execution; silent
+workspace traffic does not consume that quota. Relay recovery uses the same
+notification/read checks as push delivery, including for completion messages,
+and cannot replay an alert that has already been delivered or suppressed.
+
+Opening the app keeps unrelated notifications available until their conversation
+is read. An app hidden behind Duckweed's biometric lock cannot consume a response
+as visible. Foreground polling stops when the Activity stops.
+
+**Settings > Background alerts** reports Android notification permission, muted
+sound channels, phone volume, Do Not Disturb, background restrictions, and battery
+optimization. It also records the last received high-priority alert locally and
+reports when Firebase delivered it at a lower priority. No response content or
+credentials are included in these diagnostics. The notification and battery
+buttons open Android settings; the app does not override the user's choices.
+
+For a real-device check, use desktop **Send test** with the phone screen off and
+again after the phone has remained idle. Keep network connectivity available and
+check Background alerts if delivery waits until wake-up. FCM attempts immediate
+delivery of high-priority alerts during Doze, but Android/OEM restrictions and
+FCM deprioritization can still delay delivery. A powered-off or force-stopped
+phone/app cannot be used as an immediate-delivery test.
+
+References: [FCM priority and Doze](https://firebase.google.com/docs/cloud-messaging/android-message-priority),
+[Android channel sound persistence](https://developer.android.com/reference/android/app/NotificationChannel#setSound(android.net.Uri,%20android.media.AudioAttributes)).
 
 The same companion can pair with either desktop channel. Its own update feed is
 fixed by the APK that was installed: stable builds only pull stable updates and
@@ -281,3 +323,9 @@ Keystore storage, migration from the previous schema, delayed notifications,
 out-of-order delivery confirmation, and immediate composer feedback with a
 blocked network queue and 250 encrypted history entries. Use an isolated test
 emulator because the suite replaces the companion's message database with fixtures.
+The suite also exercises the FCM callback with the screen off, missed-push alert
+recovery, named sound resources, lightweight heartbeat updates, and composer
+feedback while both network submission and draft persistence are blocked. The
+screen-off test checks that Android receives an unread notification with an
+audible channel; it does not measure production FCM transport latency or physical
+speaker output on a particular phone.

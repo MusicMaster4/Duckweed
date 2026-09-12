@@ -6,6 +6,7 @@ import org.json.JSONObject
 
 class WorkspaceStore(private val context: Context) {
     private val preferences = context.getSharedPreferences("duckweed-workspaces", Context.MODE_PRIVATE)
+    private val presence = context.getSharedPreferences("duckweed-workspace-presence", Context.MODE_PRIVATE)
 
     fun put(snapshot: WorkspaceSnapshot, receivedAt: Long = System.currentTimeMillis()): Boolean =
         synchronized(STORE_LOCK) { putLocked(snapshot, receivedAt) }
@@ -268,32 +269,27 @@ class WorkspaceStore(private val context: Context) {
                 },
             )
         }.getOrNull()
+    }.map { snapshot ->
+        snapshot.copy(presenceAt = maxOf(snapshot.lastSeenAt, presence.getLong(snapshot.pairId, 0L)))
     }.sortedByDescending { it.updatedAt }
 
     fun markPresence(pairId: String, at: Long): Boolean =
-        synchronized(STORE_LOCK) { markPresenceLocked(pairId, at) }
+        synchronized(PRESENCE_LOCK) { markPresenceLocked(pairId, at) }
 
     private fun markPresenceLocked(pairId: String, at: Long): Boolean {
-        val stored = preferences.getString(pairId, null) ?: return false
-        val json = runCatching {
-            JSONObject(String(SecretStore.decryptLocal(stored), Charsets.UTF_8))
-        }.getOrNull() ?: return false
-        val previous = if (json.has("presenceAt") && !json.isNull("presenceAt")) {
-            json.optLong("presenceAt")
-        } else {
-            json.optLong("updatedAt")
-        }
+        // A heartbeat must not decrypt and re-encrypt every terminal and message
+        // before an FCM callback can display an alert. This sidecar contains only
+        // an opaque pairing identifier and a local receipt timestamp.
+        val previous = presence.getLong(pairId, 0L)
         if (at <= previous) return false
-        json.put("presenceAt", at)
-        preferences.edit()
-            .putString(pairId, SecretStore.encryptLocal(json.toString().toByteArray(Charsets.UTF_8)))
-            .apply()
+        presence.edit().putLong(pairId, at).apply()
         return true
     }
 
     fun remove(pairId: String) {
         synchronized(STORE_LOCK) {
             preferences.edit().remove(pairId).apply()
+            synchronized(PRESENCE_LOCK) { presence.edit().remove(pairId).apply() }
         }
     }
 
@@ -302,5 +298,6 @@ class WorkspaceStore(private val context: Context) {
         // different threads. Serialize their read-modify-write operations so
         // an older snapshot cannot win a race against a fresh heartbeat.
         private val STORE_LOCK = Any()
+        private val PRESENCE_LOCK = Any()
     }
 }

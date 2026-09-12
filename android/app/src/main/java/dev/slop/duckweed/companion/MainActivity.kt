@@ -140,6 +140,8 @@ class MainActivity : AppCompatActivity() {
     private var conversationHistoryReloadPending = false
     private val outgoingMessages = mutableMapOf<String, CompletionRecord>()
     private lateinit var draftStore: DraftStore
+    private var draftLoading = false
+    private var draftGeneration = 0L
     private lateinit var pendingActionStore: PendingMobileActionStore
     private var pendingMobileActions: List<PendingMobileAction> = emptyList()
     private var receiverRegistered = false
@@ -407,6 +409,12 @@ class MainActivity : AppCompatActivity() {
         })
 
         combineSettingsSections()
+        findViewById<View>(R.id.notification_settings_button).setOnClickListener {
+            NotificationHealth.openNotificationSettings(this)
+        }
+        findViewById<View>(R.id.battery_settings_button).setOnClickListener {
+            NotificationHealth.openBatterySettings(this)
+        }
         configureNavigation()
         configureNotificationToggle()
         configureAppLockToggle()
@@ -428,22 +436,13 @@ class MainActivity : AppCompatActivity() {
         refreshPairingStatus()
         refreshPushRegistration()
         refreshRemoteState()
-        connectionDot.post(connectionTicker)
     }
 
     override fun onStart() {
         super.onStart()
-        MobileNotificationVisibility.activityStarted()
-        if (conversationDetail.visibility == View.VISIBLE) {
-            val target = selectedTarget
-            val response = legacyResponse
-            MobileNotificationVisibility.showConversation(
-                target?.pairId ?: response?.pairId,
-                target?.terminal?.id ?: response?.terminalId,
-            )
-        } else {
-            MobileNotificationVisibility.hideConversation()
-        }
+        syncNotificationVisibility()
+        connectionDot.removeCallbacks(connectionTicker)
+        connectionDot.post(connectionTicker)
         if (!receiverRegistered) {
             ContextCompat.registerReceiver(
                 this,
@@ -463,6 +462,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onStop() {
         persistCurrentDraft()
+        connectionDot.removeCallbacks(connectionTicker)
         MobileNotificationVisibility.activityStopped()
         if (isAppLockEnabled() && !appLockPromptVisible && !isChangingConfigurations) {
             appUnlocked = false
@@ -478,7 +478,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        NotificationTools.cancelAll(this)
+        refreshNotificationHealth()
         requestAppUnlockIfNeeded()
         syncNotificationToggle()
         refreshRemoteState()
@@ -612,6 +612,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun showPage(page: Page) {
         persistCurrentDraft()
+        if (page == Page.SETTINGS) refreshNotificationHealth()
         val previousPage = selectedPage
         selectedProject = null
         selectedTarget = null
@@ -762,6 +763,8 @@ class MainActivity : AppCompatActivity() {
             onSuccess = {
                 appUnlocked = true
                 appRoot.visibility = View.VISIBLE
+                syncNotificationVisibility()
+                openIntentResponse()
             },
         )
     }
@@ -842,6 +845,7 @@ class MainActivity : AppCompatActivity() {
         NotificationPreference.isEnabled(this) && !needsNotificationPermission()
 
     private fun syncNotificationToggle() {
+        refreshNotificationHealth()
         if (!::notificationsToggle.isInitialized) return
         val active = notificationsAreActive()
         if (notificationsToggle.isChecked == active) return
@@ -850,16 +854,33 @@ class MainActivity : AppCompatActivity() {
         syncingNotificationsToggle = false
     }
 
+    private fun syncNotificationVisibility() {
+        if (isAppLockEnabled() && !appUnlocked) {
+            MobileNotificationVisibility.activityStopped()
+            return
+        }
+        MobileNotificationVisibility.activityStarted()
+        if (conversationDetail.visibility == View.VISIBLE) {
+            MobileNotificationVisibility.showConversation(
+                selectedTarget?.pairId ?: legacyResponse?.pairId,
+                selectedTarget?.terminal?.id ?: legacyResponse?.terminalId,
+            )
+        } else {
+            MobileNotificationVisibility.hideConversation()
+        }
+    }
+
+    private fun refreshNotificationHealth() {
+        findViewById<TextView>(R.id.notification_health)?.text = NotificationHealth.describe(this)
+    }
+
     private fun showPendingNotifications() {
         if (isFinishing || isDestroyed) return
         executor.execute {
-            val store = MessageStore(this)
-            store.pendingNotifications().asReversed().forEach { message ->
-                if (!store.isNotificationPending(message.id)) return@forEach
-                if (MobileNotificationVisibility.consumeIfVisible(this, store, message)) {
-                    return@forEach
+            MessageStore(this).use { store ->
+                store.pendingNotifications().asReversed().forEach { message ->
+                    NotificationTools.deliverPending(this, store, message)
                 }
-                if (NotificationTools.show(this, message)) store.markNotified(message.id)
             }
         }
     }
@@ -1203,6 +1224,7 @@ class MainActivity : AppCompatActivity() {
         refreshWorkspaces(snapshots, unreadKeys)
         refreshConnectionHealth(snapshots)
         refreshUsageLimits(snapshots)
+        if (selectedPage == Page.SETTINGS) refreshNotificationHealth()
         if (conversationDetail.visibility == View.VISIBLE) refreshConversation()
         openIntentResponse()
     }
@@ -1374,13 +1396,14 @@ class MainActivity : AppCompatActivity() {
         readCompletionSeq: Long? = target.terminal.completionSeq,
     ) {
         persistCurrentDraft()
-        val cleared = MessageStore(this).markConversationRead(
-            target.pairId,
-            target.terminal.id,
-            readCompletionSeq,
-        )
-        NotificationTools.cancelIds(this, cleared)
-        ReadSyncScheduler.enqueue(this)
+        val readAt = System.currentTimeMillis()
+        storageExecutor.execute {
+            val cleared = MessageStore(this).use {
+                it.markConversationRead(target.pairId, target.terminal.id, readCompletionSeq, at = readAt)
+            }
+            NotificationTools.cancelIds(this, cleared)
+            ReadSyncScheduler.enqueue(this)
+        }
         messageAdapter.markConversationRead(target.pairId, target.terminal.id)
         unreadConversationKeys = unreadConversationKeys - Pair(target.pairId, target.terminal.id)
         terminalAdapter.markRead(target.pairId, target.terminal.id)
@@ -1392,10 +1415,28 @@ class MainActivity : AppCompatActivity() {
         conversationShouldStickToBottom = true
         terminalShouldStickToBottom = true
         conversationTerminal.scrollTo(0, 0)
-        val draft = draftStore.load(target.pairId, target.terminal.id)
-        selectedDraftAttachment = draft.attachment.takeIf { target.terminal.mode == "conversation" }
-        conversationInput.setText(draft.text)
-        conversationInput.setSelection(conversationInput.text.length)
+        val generation = ++draftGeneration
+        draftLoading = true
+        selectedDraftAttachment = null
+        conversationInput.text.clear()
+        conversationInput.isEnabled = false
+        conversationAttach.isEnabled = false
+        DraftStore.io.execute {
+            val draft = draftStore.load(target.pairId, target.terminal.id)
+            runOnUiThread {
+                if (isFinishing || isDestroyed || generation != draftGeneration ||
+                    selectedTarget?.let { it.pairId == target.pairId && it.terminal.id == target.terminal.id } != true
+                ) return@runOnUiThread
+                draftLoading = false
+                selectedDraftAttachment = draft.attachment.takeIf { target.terminal.mode == "conversation" }
+                conversationInput.setText(draft.text)
+                conversationInput.setSelection(conversationInput.text.length)
+                conversationInput.isEnabled = true
+                conversationAttach.isEnabled = true
+                renderDraftAttachment()
+                refreshConversationAvailability()
+            }
+        }
         renderDraftAttachment()
         projectDetail.visibility = View.GONE
         setDetailChrome(true)
@@ -1405,6 +1446,8 @@ class MainActivity : AppCompatActivity() {
 
     private fun closeConversation() {
         persistCurrentDraft()
+        draftGeneration++
+        draftLoading = false
         MobileNotificationVisibility.hideConversation()
         selectedTarget = null
         selectedDraftAttachment = null
@@ -1547,7 +1590,13 @@ class MainActivity : AppCompatActivity() {
             agentWorking = thinking && desktopOnline,
             thinkingId = target.terminal.id,
         )
-        conversationAdapter.submit(timeline)
+        conversationAdapter.submit(timeline) {
+            if (selectedTarget?.let { it.pairId == target.pairId && it.terminal.id == target.terminal.id } == true &&
+                shouldScrollToBottom && conversationShouldStickToBottom && timeline.isNotEmpty()
+            ) {
+                conversationList.scrollToPosition(timeline.lastIndex)
+            }
+        }
         conversationList.visibility = if (terminalMode) View.GONE else View.VISIBLE
         conversationTerminal.visibility = if (terminalMode) View.VISIBLE else View.GONE
         if (terminalMode) renderTerminalOutput(target.terminal.terminalOutput)
@@ -1564,11 +1613,6 @@ class MainActivity : AppCompatActivity() {
                     awaitWorkspaceConfirmation = !terminalMode,
                 )
             }
-        if (shouldScrollToBottom && timeline.isNotEmpty()) {
-            conversationList.post {
-                conversationList.scrollToPosition(timeline.lastIndex)
-            }
-        }
     }
 
     private fun projectWithPendingActions(pairId: String, project: RemoteProject): RemoteProject {
@@ -2228,7 +2272,9 @@ class MainActivity : AppCompatActivity() {
         conversationComposer.visibility = if (canCompose) View.VISIBLE else View.GONE
         conversationAttach.visibility =
             if (canCompose && target.terminal.mode == "conversation") View.VISIBLE else View.GONE
-        conversationInput.hint = if (target.terminal.mode == "terminal") {
+        conversationInput.hint = if (draftLoading) {
+            "Loading draft..."
+        } else if (target.terminal.mode == "terminal") {
             "Send input to terminal"
         } else {
             "Message this agent"
@@ -2624,7 +2670,6 @@ class MainActivity : AppCompatActivity() {
             showDesktopOffline()
             return
         }
-        val credentials = SecretStore.load(this, target.pairId) ?: return
         val commandId = UUID.randomUUID().toString()
         val sentAt = System.currentTimeMillis()
         conversationSend.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
@@ -2644,7 +2689,8 @@ class MainActivity : AppCompatActivity() {
             deliveryState = "sending",
         )
         outgoingMessages[commandId] = outgoing
-        draftStore.clear(target.pairId, target.terminal.id)
+        conversationInput.removeCallbacks(draftPersistRunnable)
+        DraftStore.io.execute { draftStore.clear(target.pairId, target.terminal.id) }
         selectedDraftAttachment = null
         conversationInput.text.clear()
         renderDraftAttachment()
@@ -2656,6 +2702,8 @@ class MainActivity : AppCompatActivity() {
         commandExecutor.execute {
             runCatching {
                 MessageStore(this).use { it.put(outgoing) }
+                val credentials = SecretStore.load(this, target.pairId)
+                    ?: error("Desktop pairing is no longer available. Pair this desktop again.")
                 RelayClient.sendCommand(
                     credentials,
                     target.projectId,
@@ -2708,7 +2756,6 @@ class MainActivity : AppCompatActivity() {
             showDesktopOffline()
             return
         }
-        val credentials = SecretStore.load(this, pairId) ?: return
         val text = message.response.orEmpty()
         if (text.isBlank() && message.attachments.none { it.dataUrl != null }) {
             Toast.makeText(this, "This image is no longer available to retry.", Toast.LENGTH_LONG).show()
@@ -2720,6 +2767,8 @@ class MainActivity : AppCompatActivity() {
         commandExecutor.execute {
             runCatching {
                 MessageStore(this).updateOutgoingState(message.id, "sending")
+                val credentials = SecretStore.load(this, pairId)
+                    ?: error("Desktop pairing is no longer available. Pair this desktop again.")
                 RelayClient.sendCommand(
                     credentials,
                     projectId,
@@ -2824,12 +2873,10 @@ class MainActivity : AppCompatActivity() {
 
     private fun writeCurrentDraft() {
         if (!::draftStore.isInitialized || !::conversationInput.isInitialized) return
+        if (draftLoading) return
         val target = selectedTarget ?: return
-        draftStore.save(
-            target.pairId,
-            target.terminal.id,
-            ConversationDraft(conversationInput.text.toString(), selectedDraftAttachment),
-        )
+        val draft = ConversationDraft(conversationInput.text.toString(), selectedDraftAttachment)
+        DraftStore.io.execute { draftStore.save(target.pairId, target.terminal.id, draft) }
     }
 
     private fun renderDraftAttachment() {
@@ -2850,6 +2897,7 @@ class MainActivity : AppCompatActivity() {
         if (!::conversationSend.isInitialized || !::conversationInput.isInitialized) return
         val target = selectedTarget
         conversationSend.isEnabled =
+            !draftLoading &&
             target != null &&
             target.terminal.status != "exited" &&
             isDesktopOnline(target.pairId) &&
@@ -2858,6 +2906,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun openIntentResponse() {
+        if (isAppLockEnabled() && !appUnlocked) return
         val messageId = intent.getStringExtra("message_id") ?: return
         val message = MessageStore(this).response(messageId) ?: return
         intent.removeExtra("message_id")

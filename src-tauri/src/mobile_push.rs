@@ -1696,7 +1696,7 @@ pub async fn mobile_send_test(app: AppHandle) -> Result<SendResult, String> {
                     "Pairing works. Future agent responses will appear here securely.".into(),
                 ),
                 duration_ms: None,
-                sound_cue: None,
+                sound_cue: Some(0),
                 unread_on_desktop: true,
                 completion_seq: None,
             },

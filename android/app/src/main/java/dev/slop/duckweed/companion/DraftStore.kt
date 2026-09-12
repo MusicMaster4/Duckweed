@@ -2,6 +2,7 @@ package dev.slop.duckweed.companion
 
 import android.content.Context
 import org.json.JSONObject
+import java.util.concurrent.Executors
 
 data class ConversationDraft(
     val text: String,
@@ -56,4 +57,9 @@ class DraftStore(context: Context) {
     }
 
     private fun key(pairId: String, terminalId: String): String = "$pairId:$terminalId"
+
+    companion object {
+        // Preserve save/clear/load order across Activity recreation.
+        val io = Executors.newSingleThreadExecutor()
+    }
 }

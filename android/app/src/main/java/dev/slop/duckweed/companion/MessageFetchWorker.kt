@@ -49,21 +49,18 @@ class MessageFetchWorker(context: Context, parameters: WorkerParameters) : Worke
                 // Tests, completions, and attention messages are authenticated
                 // desktop traffic too, so they also renew the connection.
                 workspaceStore.markPresence(pairId, receivedAt)
-                val store = MessageStore(applicationContext)
-                store.put(message)
-                val consumed = MobileNotificationVisibility.consumeIfVisible(
-                    applicationContext,
-                    store,
-                    message,
-                )
-                val unread = store.message(message.id)?.readAt == null
-                if (consumed || !unread) {
-                    NotificationTools.cancelIds(applicationContext, listOf(message.id))
-                } else if (
-                    message.kind == "attention" &&
-                    NotificationPreference.isEnabled(applicationContext)
-                ) {
-                    NotificationTools.show(applicationContext, message)
+                MessageStore(applicationContext).use { store ->
+                    store.put(message)
+                    NotificationTools.deliverPending(applicationContext, store, message)
+                    val unread = store.message(message.id)?.readAt == null
+                    if (!unread) {
+                        NotificationTools.cancelIds(applicationContext, listOf(message.id))
+                    } else if (
+                        message.kind == "attention" &&
+                        NotificationPreference.isEnabled(applicationContext)
+                    ) {
+                        NotificationTools.refreshApprovalActions(applicationContext)
+                    }
                 }
             }
             RelayClient.acknowledge(credentials, messageId)
@@ -73,7 +70,7 @@ class MessageFetchWorker(context: Context, parameters: WorkerParameters) : Worke
 }
 
 object MessageFetchScheduler {
-    fun enqueue(context: Context, pairId: String, messageId: String) {
+    fun enqueue(context: Context, pairId: String, messageId: String, expedited: Boolean = false) {
         val input = Data.Builder()
             .putString(MessageFetchWorker.PAIR_ID, pairId)
             .putString(MessageFetchWorker.MESSAGE_ID, messageId)
@@ -81,7 +78,7 @@ object MessageFetchScheduler {
         val work = OneTimeWorkRequestBuilder<MessageFetchWorker>()
             .setInputData(input)
             .apply {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                if (expedited && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                     setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
                 }
             }

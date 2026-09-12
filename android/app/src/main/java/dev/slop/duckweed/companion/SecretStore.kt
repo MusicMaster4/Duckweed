@@ -16,7 +16,10 @@ object SecretStore {
     private const val ALIAS = "duckweed-companion-pairing"
     private const val PREFERENCES = "duckweed-secure-pairing"
     private const val VALUE = "credentials"
+    private var cachedValue: String? = null
+    private var cachedCredentials: List<PairCredentials> = emptyList()
 
+    @Synchronized
     private fun key(): SecretKey {
         val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
         (store.getKey(ALIAS, null) as? SecretKey)?.let { return it }
@@ -77,14 +80,18 @@ object SecretStore {
     fun loadAll(context: Context): List<PairCredentials> = runCatching {
         val stored = context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
             .getString(VALUE, null) ?: return emptyList()
+        if (stored == cachedValue) return cachedCredentials
         val raw = String(decryptLocal(stored), Charsets.UTF_8)
-        if (raw.trimStart().startsWith("[")) {
+        val credentials = if (raw.trimStart().startsWith("[")) {
             val json = JSONArray(raw)
             (0 until json.length()).map { fromJson(json.getJSONObject(it)) }
         } else {
             // Migrate credentials written by versions that only supported one desktop.
             listOf(fromJson(JSONObject(raw)))
         }
+        cachedValue = stored
+        cachedCredentials = credentials
+        credentials
     }.getOrDefault(emptyList())
 
     @Synchronized
@@ -99,6 +106,8 @@ object SecretStore {
 
     @Synchronized
     fun clear(context: Context) {
+        cachedValue = null
+        cachedCredentials = emptyList()
         context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
             .edit()
             .remove(VALUE)
