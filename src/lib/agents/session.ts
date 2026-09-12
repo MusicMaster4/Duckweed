@@ -1294,6 +1294,17 @@ export function submit(
   dispatch(session, prompt);
 }
 
+/** Control a persisted goal without consuming the composer's unsent draft. */
+export function controlGoal(termId: string, action: "resume" | "pause"): void {
+  const session = sessions.get(termId);
+  if (!session || session.disposed || session.configuring ||
+      session.state.agent !== "codex" || !session.state.goal ||
+      session.state.goal.status === "complete" || session.state.loadingHistory ||
+      ["starting", "exited", "error"].includes(session.state.status)) return;
+  const result = session.adapter.command?.(`/goal ${action}`, session.context);
+  if (result === "handled-turn") claimHandledTurn(session);
+}
+
 /** Whether the current provider exposes same-turn steering. */
 export function canSteer(termId: string): boolean {
   const session = sessions.get(termId);

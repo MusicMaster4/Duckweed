@@ -8252,6 +8252,40 @@ body.is-resizing * {
   stroke-linecap: round;
 }
 
+.agent-goal-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+
+.agent-goal-status {
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.agent-goal-action {
+  padding: 3px 6px;
+  border: 1px solid color-mix(in srgb, var(--agent-accent) 24%, transparent);
+  border-radius: 5px;
+  color: var(--agent-accent);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.agent-goal-action:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--agent-accent) 11%, transparent);
+}
+
+.agent-goal-action:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+@media (max-width: 700px) {
+  .agent-goal-status { display: none; }
+}
+
 .agent-goal-indicator {
   display: grid;
   width: 22px;
