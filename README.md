@@ -455,7 +455,10 @@ query Claude's official usage endpoint with the local Claude Code session.
 The Ports tool's **Share publicly** action creates a temporary HTTPS address
 through an outbound SSH tunnel when OpenSSH is installed. Duckweed falls back
 to Cloudflare Quick Tunnels or ngrok when needed. Anyone with that address can reach
-the selected local HTTP server over the internet. Public links are intended for
+the selected local HTTP server and backend ports owned by sessions in the same
+tab over the internet. Share the frontend once: browser calls to localhost APIs,
+WebSockets and event streams go through that same HTTPS link. Start the frontend
+and backend in panes of the same tab before sharing. Public links are intended for
 development and testing, not production. Duckweed shows the link only after an
 end-to-end readiness check reaches its local proxy. It stops the tunnel when you
 stop sharing, close the owning process, or exit the app.
