@@ -100,6 +100,21 @@ function escapeHtmlText(value: string): string {
 }
 
 describe("official agent presentation", () => {
+  test("keeps OpenCode answer modules live until the response settles", () => {
+    for (const streaming of [true, false]) {
+      const items: AgentItem[] = [{
+        id: "answer", at: 1, kind: "assistant", text: "The response is growing.", streaming,
+      }];
+      const session = activitySession("opencode", items);
+      const render = () => renderToStaticMarkup(<OpenCodeExperience session={session} items={items} />);
+      const liveAnswer = /<section class="oc-mod"[^>]*data-live="true"/;
+      if (streaming) expect(render()).toMatch(liveAnswer);
+      else expect(render()).not.toMatch(liveAnswer);
+      session.status = "idle";
+      if (!streaming) expect(render()).not.toContain('data-live="true"');
+    }
+  });
+
   beforeEach(() => {
     resetPreparingMessageAssignmentsForTests();
     // Pin the rare Thinking-label swap off so presentation tests stay stable.

@@ -1,6 +1,13 @@
 import { describe, expect, test } from "bun:test";
 
 describe("official experience styles", () => {
+  test("keeps live OpenCode modules measurable for automatic scrolling", async () => {
+    const css = await Bun.file(`${import.meta.dir}/../provider/ProviderExperience.css`).text();
+    const live = css.match(/\.oc-lanes > \.oc-mod\[data-live\]\s*\{([^}]*)\}/);
+    expect(live?.[1]).toContain("content-visibility: visible");
+    expect(live?.[1]).toContain("contain-intrinsic-size: unset");
+  });
+
   test("leaves the transcript trailing gutter to the shared scroll surface", async () => {
     const officialCss = await Bun.file(`${import.meta.dir}/OfficialExperiences.css`).text();
     const providerCss = await Bun.file(`${import.meta.dir}/../provider/ProviderExperience.css`).text();

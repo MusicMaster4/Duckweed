@@ -420,7 +420,10 @@ const OpenCodeModule = memo(function OpenCodeModule({
   continuedIds: Set<string>;
   liveAssistantId: string | null;
 }) {
-  const live = module.items.some(isLive);
+  const live = module.items.some((item) =>
+    isLive(item) ||
+    (item.kind === "assistant" && item.streaming),
+  );
   const failed = module.items.some((item) => item.kind === "tool" && item.status === "error");
   return (
     <section
