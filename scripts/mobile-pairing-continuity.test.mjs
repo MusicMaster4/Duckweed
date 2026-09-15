@@ -36,20 +36,22 @@ describe("mobile pairing continuity", () => {
     expect(activity).toContain("RelayClient.refreshFcmToken(pairing, token)");
   });
 
-  test("opening the companion clears its delivered notifications", () => {
+  test("opening the companion preserves alerts until their conversation is read", () => {
     const activity = read(
       "android/app/src/main/java/dev/slop/duckweed/companion/MainActivity.kt",
     );
-    const notifications = read(
-      "android/app/src/main/java/dev/slop/duckweed/companion/NotificationTools.kt",
+    const visibility = read(
+      "android/app/src/main/java/dev/slop/duckweed/companion/MobileNotificationVisibility.kt",
     );
 
-    expect(activity).toContain(
-      "override fun onResume() {\n        super.onResume()\n        NotificationTools.cancelAll(this)",
-    );
-    expect(notifications).toContain(
-      "NotificationManagerCompat.from(context).cancelAll()",
-    );
+    const resume = activity.split("override fun onResume() {")[1]?.split("override fun onNewIntent")[0];
+    expect(resume).toBeDefined();
+    expect(resume).not.toContain("NotificationTools.cancelAll");
+    expect(resume).not.toContain("dismissPendingNotifications");
+    expect(activity).toContain("NotificationTools.cancelIds(this, cleared)");
+    expect(visibility).toContain("if (!isViewing(context, message)) return false");
+    expect(visibility).toContain("store.markConversationRead(");
+    expect(visibility).toContain("NotificationTools.cancelIds(context, (cleared + message.id).distinct())");
   });
 
   test("logging responses is independent from notification delivery", () => {
@@ -62,11 +64,18 @@ describe("mobile pairing continuity", () => {
     const store = read(
       "android/app/src/main/java/dev/slop/duckweed/companion/MessageStore.kt",
     );
-
-    expect(service.indexOf("store.put(preview)")).toBeLessThan(
-      service.indexOf("NotificationPreference.isEnabled(this)"),
+    const notifications = read(
+      "android/app/src/main/java/dev/slop/duckweed/companion/NotificationTools.kt",
     );
-    expect(service).toContain("store.markNotified(preview.id, preview.sentAt)");
+
+    const stored = service.indexOf("store.put(preview, previewOnly = true)");
+    const delivered = service.indexOf("NotificationTools.deliverPending(this, store, preview)");
+    expect(stored).toBeGreaterThanOrEqual(0);
+    expect(delivered).toBeGreaterThan(stored);
+    expect(notifications).toContain(
+      "if (!NotificationPreference.isEnabled(context) || message.unreadOnDesktop == false)",
+    );
+    expect(notifications).toContain("store.markNotified(message.id, message.sentAt)");
     expect(activity).toContain("store.dismissPendingNotifications()");
     expect(activity).toContain("latestForOpenAgents(openAgentTerminals, 50)");
     expect(store).toContain("fun latestForOpenAgents(");
@@ -87,7 +96,8 @@ describe("mobile pairing continuity", () => {
 
     expect(desktop).toContain('window.addEventListener("duckweed:mobile-refresh", refreshed)');
     expect(desktop).toContain("refreshUsageLimits(0)");
-    expect(desktop).toContain("pollDelay = commands.length > 0 ? 1_200 : Math.min(4_000, pollDelay * 1.5)");
+    expect(desktop).toContain('listen("mobile:sync-tick", () => { void poll(); })');
+    expect(native).toContain('tick_app.emit("mobile:sync-tick", ())');
     expect(desktop).not.toContain("mobileSendPresence()");
     expect(native).toContain("pub fn start_presence_monitor(app: AppHandle)");
     expect(native).toContain("PRESENCE_INTERVAL.saturating_sub(started.elapsed())");

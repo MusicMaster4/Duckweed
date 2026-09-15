@@ -5,6 +5,26 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class MobileNotificationVisibilityTest {
+    @Test
+    fun `locked or sleeping phone never consumes visible conversation alerts`() {
+        val state = MobileNotificationUiState(true, "desktop-1", "terminal-1")
+        for (kind in listOf("completed", "attention")) {
+            val message = completion(kind = kind)
+            assertFalse(shouldSuppressVisibleConversationNotification(
+                state, message, deviceInteractive = false, keyguardLocked = false,
+            ))
+            assertFalse(shouldSuppressVisibleConversationNotification(
+                state, message, deviceInteractive = true, keyguardLocked = true,
+            ))
+            assertFalse(shouldSuppressVisibleConversationNotification(
+                state, message, deviceInteractive = false, keyguardLocked = true,
+            ))
+            assertTrue(shouldSuppressVisibleConversationNotification(
+                state, message, deviceInteractive = true, keyguardLocked = false,
+            ))
+        }
+    }
+
     private fun completion(
         pairId: String? = "desktop-1",
         terminalId: String? = "terminal-1",

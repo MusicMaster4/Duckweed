@@ -2379,6 +2379,13 @@ button.oc-sub-head:hover {
   contain-intrinsic-size: auto 88px;
 }
 
+/* Streaming rows must keep their real height even outside the viewport so
+   the scroll surface's ResizeObserver can continue following new output. */
+.oc-lanes > .oc-mod[data-live] {
+  content-visibility: visible;
+  contain-intrinsic-size: unset;
+}
+
 /* Cross-provider visual polish. */
 .cx,
 .oc {

@@ -88,7 +88,7 @@ interface Session {
   draft: string;
   draftImages: AgentImageAttachment[];
   /**
-   * Prompts submitted in this pane only (oldest first). Used by ↑/↓ history
+   * Prompts from the current conversation (oldest first). Used by ↑/↓ history
    * in the custom agent composer — same idea as the shell's per-pane history.
    */
   promptHistory: string[];
@@ -328,7 +328,7 @@ function recordPromptHistory(session: Session, text: string): void {
 }
 
 /**
- * Prompts submitted in this agent pane, oldest first — for ↑/↓ history.
+ * Prompts from this conversation, including resumed turns, oldest first.
  * Distinct from the follow-up queue and from the transcript items.
  */
 export function localPromptHistory(termId: string): readonly string[] {
@@ -781,6 +781,18 @@ function emitNow(session: Session, event: AgentEvent): void {
     });
   }
   session.state = next;
+
+  // A provider replay replaces the conversation, including its composer history.
+  // Record incoming user turns too, so resumed sessions and remote prompts are
+  // available to Up/Down navigation without leaking prompts from another thread.
+  if (event.type === "transcript") {
+    session.promptHistory = [];
+    for (const item of next.items) {
+      if (item.kind === "user") recordPromptHistory(session, item.text);
+    }
+  } else if (event.type === "user") {
+    recordPromptHistory(session, event.text);
+  }
 
   // A resume waiting on the handshake goes first: a prompt released into the
   // new session must land in the conversation the user asked to continue.
@@ -1280,6 +1292,17 @@ export function submit(
     return;
   }
   dispatch(session, prompt);
+}
+
+/** Control a persisted goal without consuming the composer's unsent draft. */
+export function controlGoal(termId: string, action: "resume" | "pause"): void {
+  const session = sessions.get(termId);
+  if (!session || session.disposed || session.configuring ||
+      session.state.agent !== "codex" || !session.state.goal ||
+      session.state.goal.status === "complete" || session.state.loadingHistory ||
+      ["starting", "exited", "error"].includes(session.state.status)) return;
+  const result = session.adapter.command?.(`/goal ${action}`, session.context);
+  if (result === "handled-turn") claimHandledTurn(session);
 }
 
 /** Whether the current provider exposes same-turn steering. */

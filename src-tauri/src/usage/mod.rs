@@ -40,13 +40,11 @@ use sources::{Format, Record};
 const SLOT_MS: i64 = 5 * 60 * 1000;
 /// How long buckets stay at five-minute resolution before collapsing to daily.
 const RECENT_DAYS: i64 = 8;
-/// How long a file's request ids are kept for cross-file duplicate detection.
-const DEDUP_DAYS: i64 = 30;
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 /// How far back the duty cycle looks. Kept inside [`RECENT_DAYS`] so every row
 /// it reads still has five-minute resolution rather than a collapsed day.
 const DUTY_DAYS: i64 = 7;
-const INDEX_VERSION: u32 = 2;
+const INDEX_VERSION: u32 = 3;
 
 // ---------------------------------------------------------------- tokens
 
@@ -65,6 +63,9 @@ pub struct Tokens {
     pub cache_read: u64,
     #[serde(default)]
     pub cache_write: u64,
+    /// Subset of cache_write with a one-hour TTL. Never add to total tokens.
+    #[serde(default)]
+    pub cache_write_1h: u64,
 }
 
 impl Tokens {
@@ -78,6 +79,7 @@ impl Tokens {
         self.reasoning += other.reasoning;
         self.cache_read += other.cache_read;
         self.cache_write += other.cache_write;
+        self.cache_write_1h += other.cache_write_1h;
     }
 }
 
@@ -108,10 +110,11 @@ struct FileIndex {
     offset: u64,
     #[serde(default)]
     rows: Vec<Row>,
-    /// Request-id hashes, dropped once the file falls out of the dedup window.
+    /// Keep request identities as long as the indexed file exists. Archives
+    /// and resumed sessions can replay requests older than the visible range.
     #[serde(default)]
     ids: Vec<u64>,
-    /// Newest record in the file, for pruning `ids`.
+    /// Newest record in the file.
     #[serde(default)]
     last_at: i64,
 }
@@ -357,14 +360,38 @@ pub fn scan(
         }
     }
 
+    // A rewritten/deleted owner can remove requests that a reused mirror had
+    // previously skipped. Rebuild that source so surviving copies can own them.
+    let current_keys: HashSet<&str> = jobs.iter().map(|job| job.key.as_str()).collect();
+    let removed = index
+        .files
+        .keys()
+        .any(|key| !current_keys.contains(key.as_str()));
+    let rebuild: HashSet<&str> = jobs
+        .iter()
+        .filter(|job| matches!(job.plan, Plan::Full) && index.files.contains_key(&job.key))
+        .map(|job| job.agent)
+        .collect();
+    if removed {
+        index
+            .files
+            .retain(|key, _| current_keys.contains(key.as_str()));
+        index_dirty = true;
+    }
+    for job in &mut jobs {
+        if removed || rebuild.contains(job.agent) {
+            job.plan = Plan::Full;
+        }
+    }
+
     // --- seed dedup from files we are not re-reading ---------------------
     // Only ids that survive here; a full re-parse must forget its own ids
     // first or it would dedup against the copy it is replacing.
-    let mut seen: HashSet<u64> = HashSet::new();
+    let mut seen: HashSet<(&str, u64)> = HashSet::new();
     for job in &jobs {
         if matches!(job.plan, Plan::Reuse | Plan::Extend(_)) {
             if let Some(entry) = index.files.get(&job.key) {
-                seen.extend(entry.ids.iter().copied());
+                seen.extend(entry.ids.iter().map(|id| (job.agent, *id)));
             }
         }
     }
@@ -404,9 +431,13 @@ pub fn scan(
         entry.size = job.size;
         entry.offset = new_offset;
 
-        let mut fresh: HashMap<(i64, String, pricing::Context), Row> = HashMap::new();
-        for record in records {
-            if record.dedup != 0 && !seen.insert(record.dedup) {
+        let mut fresh: HashMap<(i64, String, pricing::Context, bool), Row> = HashMap::new();
+        for mut record in records {
+            // Apply context thresholds before aggregation for every source,
+            // including fallback estimates when a provider omitted its cost.
+            record.pricing.long =
+                pricing::Context::for_request(&record.model, "", &record.tokens).long;
+            if record.dedup != 0 && !seen.insert((job.agent, record.dedup)) {
                 continue;
             }
             if record.dedup != 0 {
@@ -415,7 +446,12 @@ pub fn scan(
             entry.last_at = entry.last_at.max(record.at);
             let slot = bucket(record.at, recent_cutoff);
             let row = fresh
-                .entry((slot, record.model.clone(), record.pricing))
+                .entry((
+                    slot,
+                    record.model.clone(),
+                    record.pricing,
+                    record.reported_cost.is_some(),
+                ))
                 .or_insert_with(|| Row {
                     pricing: record.pricing,
                     at: slot,
@@ -503,6 +539,7 @@ pub fn scan(
                     .entry((agent_id, row.model.clone()))
                     .or_insert((Totals::default(), priced || row.reported_cost.is_some()));
                 model_entry.0.add(&row.tokens, cost, row.requests);
+                model_entry.1 &= priced || row.reported_cost.is_some();
                 by_day
                     .entry(day_start(row.at))
                     .or_default()
@@ -714,21 +751,15 @@ fn parse_all(jobs: &[&Job], emit: &(dyn Fn(u32, u32) + Sync)) -> Vec<(Vec<Record
     out
 }
 
-/// Collapse aged five-minute rows into daily ones and drop stale dedup ids.
+/// Collapse aged five-minute rows into daily ones, preserving request ids.
 /// Compact old rows and report whether the persisted index actually changed.
 ///
 /// Warm scans commonly touch no transcripts. Returning a dirty bit lets the
 /// caller avoid rewriting a multi-megabyte index merely because Settings was
 /// reopened.
-fn compact(index: &mut Index, recent_cutoff: i64, now: i64) -> bool {
-    let dedup_cutoff = now - DEDUP_DAYS * DAY_MS;
+fn compact(index: &mut Index, recent_cutoff: i64, _now: i64) -> bool {
     let mut changed = false;
     for entry in index.files.values_mut() {
-        if entry.last_at < dedup_cutoff && !entry.ids.is_empty() {
-            entry.ids.clear();
-            entry.ids.shrink_to_fit();
-            changed = true;
-        }
         let needs_collapse = entry
             .rows
             .iter()
@@ -737,11 +768,16 @@ fn compact(index: &mut Index, recent_cutoff: i64, now: i64) -> bool {
             continue;
         }
         changed = true;
-        let mut merged: HashMap<(i64, String, pricing::Context), Row> = HashMap::new();
+        let mut merged: HashMap<(i64, String, pricing::Context, bool), Row> = HashMap::new();
         for row in entry.rows.drain(..) {
             let at = bucket(row.at, recent_cutoff);
             let slot = merged
-                .entry((at, row.model.clone(), row.pricing))
+                .entry((
+                    at,
+                    row.model.clone(),
+                    row.pricing,
+                    row.reported_cost.is_some(),
+                ))
                 .or_insert_with(|| Row {
                     pricing: row.pricing,
                     at,
@@ -792,6 +828,94 @@ mod tests {
     use super::*;
 
     #[test]
+    fn mixed_reported_and_estimated_costs_survive_compaction_and_reload() {
+        let dir =
+            std::env::temp_dir().join(format!("duckweed-mixed-cost-{}", uuid::Uuid::new_v4()));
+        let home = dir.join("home");
+        let sessions = home.join(".claude/projects/test");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let at = (chrono::Utc::now() - chrono::Duration::days(12)).to_rfc3339();
+        let make = |id: &str, cost: Option<f64>| {
+            serde_json::json!({"type":"assistant","timestamp":at,"requestId":id,"costUSD":cost,
+            "message":{"id":id,"model":"claude-sonnet-5","usage":{"input_tokens":1000000,"output_tokens":1000000}}})
+        };
+        std::fs::write(
+            sessions.join("a.jsonl"),
+            format!(
+                "{}\n{}\n{}\n",
+                make("a", Some(7.0)),
+                make("b", None),
+                make("c", Some(0.0))
+            ),
+        )
+        .unwrap();
+        let index_path = dir.join("index.json");
+        for refresh in [false, true] {
+            let snapshot = scan(
+                &home,
+                &index_path,
+                &Overrides::new(),
+                &UsageState::default(),
+                &Query { days: 30, refresh },
+                &|_, _| {},
+            )
+            .unwrap();
+            assert_eq!(snapshot.totals.requests, 3);
+            assert_eq!(snapshot.totals.tokens.total(), 6_000_000);
+            // One reported $7 call, one $12 estimate, one explicitly free call.
+            assert!((snapshot.totals.cost - 19.0).abs() < 1e-9);
+            assert!((snapshot.days.iter().map(|d| d.totals.cost).sum::<f64>() - 19.0).abs() < 1e-9);
+            assert!((snapshot.models[0].totals.cost - 19.0).abs() < 1e-9);
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn old_archive_copies_and_deleted_owners_do_not_change_totals() {
+        let dir = std::env::temp_dir().join(format!("duckweed-old-dedup-{}", uuid::Uuid::new_v4()));
+        let home = dir.join("home");
+        let sessions = home.join(".claude/projects/test");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let at = (chrono::Utc::now() - chrono::Duration::days(45)).to_rfc3339();
+        let line = serde_json::json!({"type":"assistant","timestamp":at,"requestId":"r",
+            "message":{"id":"m","model":"claude-sonnet-5","usage":{"input_tokens":1000000}}});
+        let original = sessions.join("a.jsonl");
+        std::fs::write(&original, format!("{line}\n")).unwrap();
+        let index_path = dir.join("index.json");
+        let state = UsageState::default();
+        let query = Query {
+            days: 90,
+            refresh: false,
+        };
+        let check = || {
+            let snapshot = scan(
+                &home,
+                &index_path,
+                &Overrides::new(),
+                &state,
+                &query,
+                &|_, _| {},
+            )
+            .unwrap();
+            assert_eq!(snapshot.totals.requests, 1);
+            assert_eq!(snapshot.totals.tokens.input, 1_000_000);
+            assert!((snapshot.totals.cost - 2.0).abs() < 1e-9);
+            snapshot.scan.files_read
+        };
+        check();
+        std::fs::copy(&original, sessions.join("b.jsonl")).unwrap();
+        check();
+        std::fs::remove_file(original).unwrap();
+        check();
+        assert_eq!(
+            check(),
+            0,
+            "deleted files must not force every warm scan to rebuild"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn recent_timestamps_land_in_five_minute_slots() {
         let now = now_ms();
         let cutoff = now - RECENT_DAYS * DAY_MS;
@@ -822,6 +946,7 @@ mod tests {
             reasoning: 4,
             cache_read: 8,
             cache_write: 16,
+            cache_write_1h: 0,
         };
         assert_eq!(tokens.total(), 31);
     }

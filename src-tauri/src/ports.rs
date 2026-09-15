@@ -19,6 +19,10 @@ use crate::agent_proc::AgentProcManager;
 use crate::process_tree::{self, ProcessInfo};
 use crate::pty::PtyManager;
 
+#[path = "port_sharing.rs"]
+mod sharing;
+type RouteResolver = Arc<dyn Fn(u16) -> Option<Vec<String>> + Send + Sync>;
+
 #[derive(Clone, Debug)]
 struct Listener {
     address: String,
@@ -148,6 +152,7 @@ impl PortManager {
         target_port: u16,
         target_address: &str,
         tools_dir: &Path,
+        routes: RouteResolver,
     ) -> Result<ForwardInfo, String> {
         let _start_guard = self.inner.start_lock.lock().map_err(err)?;
         if let Some(existing) = self
@@ -158,7 +163,8 @@ impl PortManager {
             return Ok(existing);
         }
 
-        let (proxy, proxy_port) = start_origin_proxy(target_address, target_port)?;
+        let (proxy, proxy_port) =
+            start_origin_proxy_with_routes(target_address, target_port, routes)?;
         let (child, url) = match start_public_tunnel(proxy_port, tools_dir) {
             Ok(tunnel) => tunnel,
             Err(error) => {
@@ -221,9 +227,18 @@ impl OriginProxy {
     }
 }
 
+#[cfg(test)]
 fn start_origin_proxy(
     target_address: &str,
     target_port: u16,
+) -> Result<(OriginProxy, u16), String> {
+    start_origin_proxy_with_routes(target_address, target_port, Arc::new(|_| None))
+}
+
+fn start_origin_proxy_with_routes(
+    target_address: &str,
+    target_port: u16,
+    routes: RouteResolver,
 ) -> Result<(OriginProxy, u16), String> {
     let listener = TcpListener::bind(("127.0.0.1", 0))
         .map_err(|error| format!("could not prepare public sharing: {error}"))?;
@@ -245,6 +260,7 @@ fn start_origin_proxy(
                 host_header,
                 thread_stop,
                 thread_connections,
+                routes,
             )
         })
         .map_err(err)?;
@@ -258,6 +274,7 @@ fn origin_proxy_loop(
     host_header: String,
     stop: Arc<AtomicBool>,
     connections: ActiveConnections,
+    routes: RouteResolver,
 ) {
     let mut next_id = 0_u64;
     while !stop.load(Ordering::Acquire) {
@@ -287,6 +304,7 @@ fn origin_proxy_loop(
                 let connection_list = Arc::clone(&connections);
                 let connection_addresses = addresses.clone();
                 let connection_host = host_header.clone();
+                let connection_routes = Arc::clone(&routes);
                 std::thread::spawn(move || {
                     proxy_http_connection(
                         client,
@@ -296,6 +314,7 @@ fn origin_proxy_loop(
                         id,
                         connection_stop,
                         connection_list,
+                        connection_routes,
                     )
                 });
             }
@@ -315,7 +334,9 @@ fn proxy_http_connection(
     id: u64,
     stop: Arc<AtomicBool>,
     connections: ActiveConnections,
+    routes: RouteResolver,
 ) {
+    let _ = client.set_read_timeout(Some(Duration::from_secs(15)));
     let (head, trailing) = match read_request_head(&mut client) {
         Ok(request) => request,
         Err(_) => {
@@ -324,18 +345,40 @@ fn proxy_http_connection(
             return;
         }
     };
+    let _ = client.set_read_timeout(None);
     if is_tunnel_readiness_request(&head) {
         let _ = client.write_all(
-            b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 14\r\nCache-Control: no-store\r\nConnection: close\r\n\r\nduckweed-ready",
         );
         remove_connection(&connections, id);
         let _ = client.shutdown(Shutdown::Write);
         return;
     }
+    let primary_port = target_port;
+    let public_request = head.clone();
+    let (head, target_port, route_addresses) =
+        match sharing::route_request(&head, target_port, &routes) {
+            Ok(route) => route,
+            Err(_) => {
+                let _ = client.write_all(
+                    b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
+                remove_connection(&connections, id);
+                return;
+            }
+        };
+    let addresses = route_addresses.as_deref().unwrap_or(addresses);
+    let route_host = format!("localhost:{target_port}");
+    let host_header = if route_addresses.is_some() {
+        &route_host
+    } else {
+        host_header
+    };
     let target = addresses
         .iter()
         .find_map(|address| TcpStream::connect((address.as_str(), target_port)).ok());
     let Some(mut target) = target else {
+        let _ = client.write_all(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 24\r\nConnection: close\r\n\r\nLocal server unavailable");
         remove_connection(&connections, id);
         let _ = client.shutdown(Shutdown::Both);
         return;
@@ -359,7 +402,7 @@ fn proxy_http_connection(
         return;
     }
 
-    proxy_both_directions(client, target);
+    proxy_both_directions(client, target, &public_request, primary_port);
     remove_connection(&connections, id);
 }
 
@@ -388,6 +431,12 @@ fn read_request_head(stream: &mut TcpStream) -> io::Result<(Vec<u8>, Vec<u8>)> {
         }
         received.extend_from_slice(&chunk[..count]);
         if let Some(end) = received.windows(4).position(|window| window == b"\r\n\r\n") {
+            if end + 4 > MAX_HEAD {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "HTTP request headers are too large",
+                ));
+            }
             let trailing = received.split_off(end + 4);
             return Ok((received, trailing));
         }
@@ -401,7 +450,8 @@ fn read_request_head(stream: &mut TcpStream) -> io::Result<(Vec<u8>, Vec<u8>)> {
 }
 
 fn rewrite_request_head(head: &[u8], host: &str) -> io::Result<Vec<u8>> {
-    let raw = std::str::from_utf8(head)
+    let head = sharing::prepare_request(head, host)?;
+    let raw = std::str::from_utf8(&head)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid HTTP request headers"))?;
     let upgrade = raw.lines().any(|line| {
         line.split_once(':')
@@ -437,7 +487,7 @@ fn rewrite_request_head(head: &[u8], host: &str) -> io::Result<Vec<u8>> {
     Ok(output.into_bytes())
 }
 
-fn proxy_both_directions(client: TcpStream, target: TcpStream) {
+fn proxy_both_directions(client: TcpStream, target: TcpStream, request: &[u8], port: u16) {
     let Ok(mut client_reader) = client.try_clone() else {
         return;
     };
@@ -446,10 +496,11 @@ fn proxy_both_directions(client: TcpStream, target: TcpStream) {
     };
     let upstream = std::thread::spawn(move || {
         let _ = io::copy(&mut client_reader, &mut target_writer);
+        let _ = target_writer.shutdown(Shutdown::Write);
     });
     let mut target_reader = target;
     let mut client_writer = client;
-    let _ = io::copy(&mut target_reader, &mut client_writer);
+    let _ = sharing::forward_response(&mut target_reader, &mut client_writer, request, port);
     let _ = client_writer.shutdown(Shutdown::Both);
     let _ = upstream.join();
 }
@@ -615,7 +666,17 @@ fn wait_for_reachable_public_url(url: &str) -> Result<(), String> {
             .header("ngrok-skip-browser-warning", "duckweed")
             .send()
         {
-            Ok(response) if response.status() == reqwest::StatusCode::NO_CONTENT => return Ok(()),
+            Ok(response) if response.status() == reqwest::StatusCode::OK => {
+                if response
+                    .text()
+                    .map(|body| body == "duckweed-ready")
+                    .unwrap_or(false)
+                {
+                    return Ok(());
+                }
+                last_error =
+                    "the provider returned a page instead of reaching Duckweed".to_string();
+            }
             Ok(response) => {
                 last_error = format!(
                     "the tunnel readiness check returned HTTP {}",
@@ -706,22 +767,6 @@ fn lookup_public_dns(host: &str) -> PublicDns {
     }
 }
 
-fn wait_for_public_dns(url: &str) -> Result<(), String> {
-    let host = reqwest::Url::parse(url)
-        .map_err(err)?
-        .host_str()
-        .ok_or_else(|| "the tunnel helper returned an invalid public address".to_string())?
-        .to_string();
-    let deadline = std::time::Instant::now() + Duration::from_secs(8);
-    while std::time::Instant::now() < deadline {
-        if matches!(lookup_public_dns(&host), PublicDns::Addresses(_)) {
-            return Ok(());
-        }
-        std::thread::sleep(Duration::from_millis(350));
-    }
-    Err("the tunnel provider did not publish its hostname in public DNS".to_string())
-}
-
 fn start_ssh_tunnel(proxy_port: u16, tools_dir: &Path) -> Result<(Child, String), String> {
     let ssh = executable_on_path("ssh").ok_or_else(|| "OpenSSH is not installed".to_string())?;
     std::fs::create_dir_all(tools_dir).map_err(err)?;
@@ -752,11 +797,7 @@ fn start_ssh_tunnel(proxy_port: u16, tools_dir: &Path) -> Result<(Child, String)
     ]);
     let (mut child, lines) = spawn_tunnel_process(command)?;
     match wait_for_tunnel_url(&mut child, lines) {
-        // localhost.run emits the address only after accepting the reverse
-        // forward. Its edge can close Duckweed's synthetic 204 probe with an
-        // incomplete HTTP message even while normal browser requests work, so
-        // that probe must not tear down an otherwise usable SSH tunnel.
-        Ok(url) => match wait_for_public_dns(&url) {
+        Ok(url) => match wait_for_reachable_public_url(&url) {
             Ok(()) => Ok((child, url)),
             Err(error) => {
                 let _ = child.kill();
@@ -1126,6 +1167,7 @@ pub fn forward(
     agents: &AgentProcManager,
     manager: &PortManager,
     tools_dir: &Path,
+    mut owner_ids: Vec<String>,
 ) -> Result<ForwardInfo, String> {
     let current = snapshot(terminals, agents, manager);
     if !current
@@ -1140,7 +1182,27 @@ pub fn forward(
         .iter()
         .find(|entry| entry.pid == pid && entry.port == port)
         .ok_or_else(|| "that port is no longer owned by a Duckweed process".to_string())?;
-    manager.start(pid, port, &target.address, tools_dir)
+    owner_ids.push(target.owner_id.clone());
+    let terminals = terminals.clone();
+    let agents = agents.clone();
+    // Recheck live ownership on each dependency request. Never turn a shared
+    // frontend into an unrestricted proxy to the computer's other services.
+    let routes: RouteResolver = Arc::new(move |requested_port| {
+        let processes = process_tree::process_snapshot();
+        let owners = owner_map(&processes, &terminals, &agents);
+        let listeners = platform_listeners();
+        let listener = listeners.iter().find(|entry| {
+            entry.port == requested_port
+                && owners
+                    .get(&entry.pid)
+                    .is_some_and(|owner| owner_ids.contains(&owner.id))
+                && !processes.iter().any(|process| {
+                    process.pid == entry.pid && is_internal_cli_listener(&process.name)
+                })
+        })?;
+        Some(origin_addresses(&listener.address))
+    });
+    manager.start(pid, port, &target.address, tools_dir, routes)
 }
 
 fn kill_process_tree(pid: u32) -> Result<(), String> {
@@ -1469,6 +1531,53 @@ mod tests {
     }
 
     #[test]
+    fn shared_frontend_routes_backend_uploads_and_rejects_other_ports() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let backend = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let backend_port = backend.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = backend.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let (head, mut body) = read_request_head(&mut stream).unwrap();
+            let mut rest = vec![0; 7 - body.len()];
+            stream.read_exact(&mut rest).unwrap();
+            body.extend(rest);
+            assert_eq!(body, b"payload");
+            assert!(head.starts_with(b"POST /api?test=1 HTTP/1.1"));
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .unwrap();
+        });
+        let routes: RouteResolver =
+            Arc::new(move |port| (port == backend_port).then(|| vec!["127.0.0.1".into()]));
+        let (proxy, proxy_port) =
+            start_origin_proxy_with_routes("127.0.0.1", 3000, routes).unwrap();
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let response = client
+            .post(format!(
+                "http://127.0.0.1:{proxy_port}/.duckweed/port/{backend_port}/api?test=1"
+            ))
+            .body("payload")
+            .send()
+            .unwrap();
+        assert_eq!(response.text().unwrap(), "ok");
+        let response = client
+            .get(format!(
+                "http://127.0.0.1:{proxy_port}/.duckweed/port/1/private"
+            ))
+            .send()
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
+        proxy.stop();
+        server.join().unwrap();
+    }
+
+    #[test]
     #[ignore = "requires a tunnel helper and internet access"]
     fn public_tunnel_is_reachable_end_to_end() {
         let origin = TcpListener::bind(("127.0.0.1", 0)).unwrap();
@@ -1484,7 +1593,18 @@ mod tests {
                 .unwrap();
         });
 
-        let (proxy, proxy_port) = start_origin_proxy("127.0.0.1", origin_port).unwrap();
+        let backend = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let backend_port = backend.local_addr().unwrap().port();
+        let backend_server = std::thread::spawn(move || {
+            let (mut stream, _) = backend.accept().unwrap();
+            let (head, _) = read_request_head(&mut stream).unwrap();
+            assert!(head.starts_with(b"GET /api HTTP/1.1"));
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}").unwrap();
+        });
+        let routes: RouteResolver =
+            Arc::new(move |port| (port == backend_port).then(|| vec!["127.0.0.1".into()]));
+        let (proxy, proxy_port) =
+            start_origin_proxy_with_routes("127.0.0.1", origin_port, routes).unwrap();
         let tools = std::env::temp_dir().join("duckweed-missing-tools");
         let (mut child, url) = start_public_tunnel(proxy_port, &tools).unwrap();
         let host = reqwest::Url::parse(&url)
@@ -1492,21 +1612,28 @@ mod tests {
             .host_str()
             .unwrap()
             .to_string();
-        let PublicDns::Addresses(addresses) = lookup_public_dns(&host) else {
+        let PublicDns::Addresses(_) = lookup_public_dns(&host) else {
             panic!("public DNS did not resolve {host}");
         };
         let client = reqwest::blocking::Client::builder()
-            .resolve_to_addrs(&host, &addresses)
+            .timeout(Duration::from_secs(15))
             .build()
             .unwrap();
         let response = client.get(&url).send().unwrap();
         assert_eq!(response.status(), reqwest::StatusCode::OK);
         assert_eq!(response.text().unwrap(), "duckweed-public");
+        let response = client
+            .get(format!("{url}/.duckweed/port/{backend_port}/api"))
+            .send()
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert_eq!(response.text().unwrap(), "{\"ok\":true}");
 
         let _ = child.kill();
         let _ = child.wait();
         proxy.stop();
         server.join().unwrap();
+        backend_server.join().unwrap();
     }
 
     #[test]

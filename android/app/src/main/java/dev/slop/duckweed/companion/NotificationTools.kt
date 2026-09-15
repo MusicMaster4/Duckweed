@@ -17,7 +17,7 @@ import androidx.core.content.ContextCompat
 
 object NotificationTools {
     private const val SILENT_CHANNEL_ID = "agent-completions-v2-silent"
-    private const val SOUND_CHANNEL_PREFIX = "agent-completions-v2-"
+    private const val SOUND_CHANNEL_PREFIX = "agent-completions-v3-"
     const val ACTION_MESSAGES_CHANGED = "dev.slop.duckweed.companion.MESSAGES_CHANGED"
 
     fun createChannel(context: Context) {
@@ -34,22 +34,53 @@ object NotificationTools {
         }
         manager.createNotificationChannel(silent)
         completionSounds.forEachIndexed { index, sound ->
+            val id = "$SOUND_CHANNEL_PREFIX$index"
+            if (manager.getNotificationChannel(id) != null) return@forEachIndexed
+            val previous = manager.getNotificationChannel("agent-completions-v2-$index")
             val channel = NotificationChannel(
-                "$SOUND_CHANNEL_PREFIX$index",
-                context.getString(R.string.notification_channel_name),
-                NotificationManager.IMPORTANCE_HIGH,
+                id,
+                "${context.getString(R.string.notification_channel_name)} ${index + 1}",
+                previous?.importance ?: NotificationManager.IMPORTANCE_HIGH,
             ).apply {
                 description = context.getString(R.string.notification_channel_description)
                 lockscreenVisibility = android.app.Notification.VISIBILITY_PRIVATE
-                setSound(soundUri(context, sound), notificationAudioAttributes)
+                // Channel sounds are immutable. Preserve user choices while
+                // migrating bundled sounds away from unstable numeric IDs.
+                val oldSound = previous?.sound
+                val bundled = oldSound?.scheme == "android.resource" &&
+                    oldSound.authority == context.packageName
+                val customized = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
+                    previous?.hasUserSetSound() == true
+                setSound(
+                    if (previous == null || (bundled && !customized)) soundUri(context, sound) else oldSound,
+                    previous?.audioAttributes ?: notificationAudioAttributes,
+                )
+                if (previous != null) {
+                    enableVibration(previous.shouldVibrate())
+                    previous.vibrationPattern?.let { setVibrationPattern(it) }
+                    setShowBadge(previous.canShowBadge())
+                    lockscreenVisibility = previous.lockscreenVisibility
+                }
             }
             manager.createNotificationChannel(channel)
         }
     }
 
-    fun show(context: Context, message: CompletionRecord): Boolean {
+    /** Also used by relay recovery when the push wake-up was lost. */
+    @Synchronized
+    fun deliverPending(context: Context, store: MessageStore, message: CompletionRecord) {
+        if (MobileNotificationVisibility.consumeIfVisible(context, store, message)) return
+        if (!NotificationPreference.isEnabled(context) || message.unreadOnDesktop == false) {
+            store.markNotified(message.id, message.sentAt)
+        } else if (store.isNotificationPending(message.id) && show(context, message, includeApprovalActions = false)) {
+            store.markNotified(message.id)
+        }
+    }
+
+    fun show(context: Context, message: CompletionRecord, includeApprovalActions: Boolean = true): Boolean {
         if (!NotificationPreference.isEnabled(context)) return false
-        if (MobileNotificationVisibility.isViewing(message)) return false
+        if (message.readAt != null || MessageStore(context).use { it.isMessageRead(message.id) }) return false
+        if (MobileNotificationVisibility.isViewing(context, message)) return false
         if (
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
@@ -68,6 +99,13 @@ object NotificationTools {
         val channelId = message.soundCue?.takeIf { it in completionSounds.indices }
             ?.let { "$SOUND_CHANNEL_PREFIX$it" }
             ?: SILENT_CHANNEL_ID
+        if (!NotificationManagerCompat.from(context).areNotificationsEnabled()) return false
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val manager = context.getSystemService(NotificationManager::class.java)
+            // WorkManager may be the first process entry point after an update.
+            if (manager.getNotificationChannel(channelId) == null) createChannel(context)
+            if (manager.getNotificationChannel(channelId)?.importance == NotificationManager.IMPORTANCE_NONE) return false
+        }
         val publicVersion = NotificationCompat.Builder(context, channelId)
             .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle("Duckweed agent update")
@@ -94,7 +132,9 @@ object NotificationTools {
             .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
             .setPublicVersion(publicVersion)
         readAction(context, message)?.let(builder::addAction)
-        approvalActions(context, message).forEach(builder::addAction)
+        // Loading all encrypted workspaces is deferred until after the initial
+        // alert. The full-payload worker adds approval actions silently.
+        if (includeApprovalActions) approvalActions(context, message).forEach(builder::addAction)
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
             message.soundCue?.let { completionSounds.getOrNull(it) }
                 ?.let { builder.setSound(soundUri(context, it)) }
@@ -190,7 +230,7 @@ object NotificationTools {
             .map { it.id }
             .toSet()
         if (activeIds.isEmpty()) return
-        MessageStore(context).latest()
+        MessageStore(context).use { it.latest() }
             .filter { it.kind == "attention" && it.id.hashCode() in activeIds }
             .forEach { show(context, it) }
     }
@@ -214,6 +254,6 @@ object NotificationTools {
         .build()
 
     private fun soundUri(context: Context, resource: Int): Uri = Uri.parse(
-        "${android.content.ContentResolver.SCHEME_ANDROID_RESOURCE}://${context.packageName}/$resource",
+        "${android.content.ContentResolver.SCHEME_ANDROID_RESOURCE}://${context.packageName}/raw/${context.resources.getResourceEntryName(resource)}",
     )
 }

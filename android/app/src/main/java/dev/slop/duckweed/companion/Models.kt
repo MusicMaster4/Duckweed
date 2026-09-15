@@ -92,6 +92,7 @@ data class RemoteTerminal(
     val terminalRows: Int? = null,
     val unreadOnDesktop: Boolean? = null,
     val completionSeq: Long = 0,
+    val readCompletionSeq: Long? = null,
     val commands: List<RemoteSlashCommand> = emptyList(),
     val activity: List<RemoteAgentActivity> = emptyList(),
     val conversation: List<RemoteConversationMessage> = emptyList(),

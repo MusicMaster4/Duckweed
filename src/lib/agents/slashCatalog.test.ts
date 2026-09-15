@@ -183,6 +183,7 @@ describe("effortsFor / shortModelLabel", () => {
     expect(shortModelLabel("opencode/claude-haiku-4-5")).toBe("Haiku 4.5");
     expect(shortModelLabel("claude-opus-5[1m]")).toBe("Opus 5 (1M)");
     expect(shortModelLabel("grok-4.5")).toBe("Grok 4.5");
+    expect(shortModelLabel("grok-4.6")).toBe("Grok 4.6");
     expect(shortModelLabel("gpt-5.6-sol")).toBe("GPT-5.6 Sol");
     expect(shortModelLabel("or/selected")).toBe("OpenRouter");
   });

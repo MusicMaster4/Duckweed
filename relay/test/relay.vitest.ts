@@ -1,7 +1,7 @@
 import { env } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vitest";
 
-import worker, { handleRequest, type Env } from "../src/index";
+import worker, { androidPushConfig, handleRequest, type Env } from "../src/index";
 
 const encoder = new TextEncoder();
 
@@ -27,6 +27,20 @@ function request(path: string, method = "GET", token?: string, value?: unknown, 
 }
 
 describe("encrypted notification relay", () => {
+  it("reserves high priority for alerts and sends silent syncs at normal priority", () => {
+    const data = { pair_id: "desktop-1", message_id: "completion-1" };
+    expect(androidPushConfig(data)).toEqual({ priority: "high", ttl: "604800s" });
+    expect(androidPushConfig(data, "workspace:desktop-1")).toEqual({
+      priority: "normal", ttl: "604800s", collapse_key: "workspace:desktop-1",
+    });
+    expect(androidPushConfig({ ...data, message_id: data.pair_id }, data.pair_id)).toEqual({
+      priority: "normal", ttl: "604800s", collapse_key: data.pair_id,
+    });
+    expect(androidPushConfig(data, "completion-1").priority).toBe("high");
+    expect(androidPushConfig(data, "workspace:other-desktop").priority).toBe("high");
+    expect(androidPushConfig(data, data.pair_id).priority).toBe("high");
+  });
+
   it("pairs, pushes only encrypted data, retrieves the payload, and acknowledges it", async () => {
     const pairId = "10000000-0000-4000-8000-000000000001";
     const messageId = "20000000-0000-4000-8000-000000000002";

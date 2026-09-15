@@ -400,7 +400,9 @@ function displayModelLabel(current: string, models: AgentModelChoice[]): string 
 
 function formatEffortLabel(value: string): string {
   if (!value) return value;
-  if (value.toLowerCase() === "ultracode") return "Ultracode";
-  if (value.toLowerCase() === "xhigh") return "XHigh";
+  const lower = value.toLowerCase().replace(/[_-]/g, "");
+  if (lower === "ultracode") return "Ultracode";
+  if (lower === "xhigh") return "XHigh";
   return value.charAt(0).toUpperCase() + value.slice(1);
 }
+

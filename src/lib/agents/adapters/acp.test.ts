@@ -102,6 +102,78 @@ const GROK_MODEL_STATE = {
   ],
 };
 
+/** Grok 1.0.24+ handshake: grok-4.6 lists xhigh; grok-4.5 does not. */
+const GROK_46_MODEL_STATE = {
+  currentModelId: "grok-4.6",
+  availableModels: [
+    {
+      modelId: "grok-4.6",
+      name: "Grok 4.6",
+      _meta: {
+        supportsReasoningEffort: true,
+        reasoningEffort: "high",
+        reasoningEfforts: [
+          {
+            id: "xhigh",
+            value: "xhigh",
+            label: "Extra High Effort",
+            description: "Highest effort and reasoning level",
+            default: false,
+          },
+          {
+            id: "high",
+            value: "high",
+            label: "High Effort",
+            default: true,
+          },
+          { id: "medium", value: "medium", label: "Medium Effort" },
+          { id: "low", value: "low", label: "Low Effort" },
+        ],
+      },
+    },
+    {
+      modelId: "grok-4.5",
+      name: "Grok 4.5",
+      _meta: {
+        supportsReasoningEffort: true,
+        reasoningEffort: "high",
+        reasoningEfforts: [
+          { id: "high", value: "high", label: "High Effort", default: true },
+          { id: "medium", value: "medium", label: "Medium Effort" },
+          { id: "low", value: "low", label: "Low Effort" },
+        ],
+      },
+    },
+  ],
+};
+
+const GROK_46_CONFIG_OPTIONS = [
+  {
+    id: "model",
+    name: "Model",
+    category: "model",
+    type: "select",
+    currentValue: "grok-4.6",
+    options: [
+      { value: "grok-4.6", name: "Grok 4.6" },
+      { value: "grok-4.5", name: "Grok 4.5" },
+    ],
+  },
+  {
+    id: "reasoning_effort",
+    name: "Reasoning Effort",
+    category: "thought_level",
+    type: "select",
+    currentValue: "high",
+    options: [
+      { value: "xhigh", name: "Extra High Effort", description: "Highest effort and reasoning level" },
+      { value: "high", name: "High Effort" },
+      { value: "medium", name: "Medium Effort" },
+      { value: "low", name: "Low Effort" },
+    ],
+  },
+];
+
 describe("acp adapter", () => {
   test("opens a session and reports itself ready", async () => {
     const h = harness();
@@ -1243,6 +1315,115 @@ describe("acp adapter", () => {
       tone: "error",
       text: 'Unknown model "gpt-5". Try /model to list what is available.',
     });
+  });
+
+  test("reads Grok 4.6 xhigh from modelState and configOptions without stamping it onto 4.5", async () => {
+    const h = harness();
+    await h.handshake(
+      { _meta: { modelState: GROK_46_MODEL_STATE } },
+      { models: GROK_46_MODEL_STATE, configOptions: GROK_46_CONFIG_OPTIONS },
+    );
+    const state = h.state();
+    expect(state.model).toBe("grok-4.6");
+    expect(state.effort).toBe("high");
+    expect(state.models.find((model) => model.id === "grok-4.6")?.efforts).toEqual([
+      "xhigh",
+      "high",
+      "medium",
+      "low",
+    ]);
+    expect(state.models.find((model) => model.id === "grok-4.5")?.efforts).toEqual([
+      "high",
+      "medium",
+      "low",
+    ]);
+  });
+
+  test("reads effort rows that only carry value, the Grok catalog shape", async () => {
+    const h = harness();
+    await h.handshake({
+      _meta: {
+        modelState: {
+          currentModelId: "grok-4.6",
+          availableModels: [
+            {
+              modelId: "grok-4.6",
+              name: "Grok 4.6",
+              _meta: {
+                reasoningEffort: "high",
+                reasoningEfforts: [
+                  { value: "xhigh", label: "Extra High Effort" },
+                  { value: "high", label: "High Effort" },
+                  { value: "medium" },
+                  { value: "low" },
+                ],
+              },
+            },
+          ],
+        },
+      },
+    });
+    expect(h.state().models.find((model) => model.id === "grok-4.6")?.efforts).toEqual([
+      "xhigh",
+      "high",
+      "medium",
+      "low",
+    ]);
+  });
+
+  test("switches Grok effort through reasoning_effort, not OpenCode's effort id", async () => {
+    const h = harness();
+    await h.handshake(
+      { _meta: { modelState: GROK_46_MODEL_STATE } },
+      { models: GROK_46_MODEL_STATE, configOptions: GROK_46_CONFIG_OPTIONS },
+    );
+
+    expect(h.adapter.command?.("/effort xhigh", h.ctx)).toBe("handled");
+    expect(h.sent.at(-1)).toMatchObject({
+      method: "session/set_config_option",
+      params: { sessionId: "s1", configId: "reasoning_effort", value: "xhigh" },
+    });
+    h.feed({
+      jsonrpc: "2.0",
+      id: 3,
+      result: {
+        configOptions: GROK_46_CONFIG_OPTIONS.map((option) =>
+          option.id === "reasoning_effort" ? { ...option, currentValue: "xhigh" } : option,
+        ),
+      },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(h.state().effort).toBe("xhigh");
+  });
+
+  test("keeps the live effort when Grok refreshes the model catalog", async () => {
+    const h = harness();
+    await h.handshake(
+      { _meta: { modelState: GROK_46_MODEL_STATE } },
+      { models: GROK_46_MODEL_STATE, configOptions: GROK_46_CONFIG_OPTIONS },
+    );
+    const changing = Promise.resolve(h.adapter.configure?.("effort", "xhigh", h.ctx));
+    await Promise.resolve();
+    h.feed({
+      jsonrpc: "2.0",
+      id: 3,
+      result: {
+        configOptions: GROK_46_CONFIG_OPTIONS.map((option) =>
+          option.id === "reasoning_effort" ? { ...option, currentValue: "xhigh" } : option,
+        ),
+      },
+    });
+    expect(await changing).toBe(true);
+    expect(h.state().effort).toBe("xhigh");
+
+    h.feed({
+      jsonrpc: "2.0",
+      method: "_x.ai/models/update",
+      params: GROK_46_MODEL_STATE,
+    });
+    expect(h.state().effort).toBe("xhigh");
+    expect(h.state().models.find((model) => model.id === "grok-4.6")?.efforts).toContain("xhigh");
   });
 
   test("switches effort with /effort through set_mode", async () => {

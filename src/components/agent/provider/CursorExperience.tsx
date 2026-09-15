@@ -3,6 +3,7 @@ import { memo, useMemo, useState } from "react";
 import type { AgentItem, ToolItem, ToolStatus } from "../../../lib/agents/types";
 import { AgentAsciiLoader } from "../AgentAsciiLoader";
 import { AgentImageAttachments } from "../AgentImageAttachments";
+import { AgentMessageText } from "../AgentMessageText";
 import { MessageCopyButton } from "../MessageCopyButton";
 import { SubagentBoardAnchor, SubagentBoardForActivities } from "../subagents/SubagentBoard";
 import { useSubagentUi } from "../subagents/SubagentUiContext";
@@ -331,7 +332,7 @@ const CursorNode = memo(function CursorNode({
           <>
             <div className="cx-user-bubble">
               <AgentImageAttachments images={item.images ?? []} />
-              {item.text && <p className="cx-said">{item.text}</p>}
+              {item.text && <p className="cx-said"><AgentMessageText text={item.text} /></p>}
             </div>
             {item.text && <MessageCopyButton text={item.text} />}
           </>

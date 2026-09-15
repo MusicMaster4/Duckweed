@@ -157,7 +157,7 @@ export function UsagePanel({ openAgentCount }: Props) {
   );
   const format = metric === "cost" ? formatUsd : formatTokens;
   const formatAxis = metric === "cost" ? formatUsdAxis : formatTokens;
-  const unit = metric === "cost" ? "spent" : "tokens";
+  const unit = metric === "cost" ? "estimated cost" : "tokens";
 
   /** Only agents with something to show get a colour and a stack slot. */
   const series: Series[] = useMemo(() => {
@@ -328,7 +328,7 @@ export function UsagePanel({ openAgentCount }: Props) {
           <StatTile
             label={`Spend, last ${snapshot.range_days} days`}
             value={formatUsd(totals?.cost ?? 0)}
-            detail="Estimated from list prices"
+            detail="API estimate, not subscription charges"
             trend={costTrend}
           />
           <StatTile
@@ -352,7 +352,7 @@ export function UsagePanel({ openAgentCount }: Props) {
       </section>
 
       <section className="settings-section usage-section">
-        <h2>{metric === "cost" ? "Spend" : "Tokens"} per day</h2>
+        <h2>{metric === "cost" ? "Estimated cost" : "Tokens"} per day</h2>
         <Legend series={series} />
         <StackedColumns
           columns={columns}

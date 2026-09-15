@@ -69,8 +69,11 @@ interface CodexGoal {
 }
 
 const MAX_GOAL_OBJECTIVE_CHARS = 4_000;
-const RESUME_PAGE_SIZE = 100;
+const RESUME_PAGE_SIZE = 50;
 const MAX_RESUMED_TURNS = 500;
+const HISTORY_ITEM_PAGE_SIZE = 25;
+const MAX_HISTORY_ITEMS = 1_000;
+const MAX_HISTORY_DETAIL_BYTES = 4 * 1024 * 1024;
 /** Subagent detail is lazy and intentionally bounded independently of root history. */
 const CHILD_HISTORY_PAGE_SIZE = 8;
 const FAST_SERVICE_TIER = "priority";
@@ -337,7 +340,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
   let rootPendingCompletion: { turnId: string | null } | null = null;
   /** A provider boundary survives cancellation of the UI's completion timer. */
   let rootTurnCompletionObserved = false;
-  /** Same-turn input makes the first final answer non-terminal. */
+  /** Keep provider completion addressable while same-turn input is pending. */
   let rootSteerRequestsInFlight = 0;
   let rootTurnWasSteered = false;
   let rootCompletionSeenDuringSteer: string | null | undefined;
@@ -1098,7 +1101,9 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       initialTurnsPage: {
         limit: RESUME_PAGE_SIZE,
         sortDirection: "desc",
-        itemsView: "full",
+        // Conversation summaries retain user messages and final answers without
+        // replaying megabytes of tool output through the native line limit.
+        itemsView: "summary",
       },
     };
   }
@@ -1966,6 +1971,64 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     }
   }
 
+  /** Tool details are optional hydration, never a prerequisite for continuing. */
+  async function hydrateResumedItems(
+    turns: unknown[],
+    targetId: string,
+    generation: number,
+    ctx: AdapterContext,
+  ): Promise<void> {
+    if (!turns.some((turn) => asRecord(turn)?.itemsView === "summary")) return;
+    const completionVersion = rootCompletionVersion;
+    const stillCurrent = () => threadId === targetId && rootTurnGeneration === generation &&
+      rootCompletionVersion === completionVersion && !rootTurnMayBeActive && !hydratingResume;
+    const entries: Record<string, unknown>[] = [];
+    const cursors = new Set<string>();
+    let cursor: string | null = null;
+    let bytes = 0;
+    try {
+      do {
+        if (!stillCurrent()) return;
+        const page = await requestWithTimeout(ctx, nextId++, "thread/items/list", {
+          threadId: targetId, cursor, limit: HISTORY_ITEM_PAGE_SIZE, sortDirection: "desc",
+        });
+        if (!stillCurrent()) return;
+        const data = asArray(page.data);
+        bytes += JSON.stringify(data).length;
+        if (bytes > MAX_HISTORY_DETAIL_BYTES) break;
+        for (const entry of data) {
+          const record = asRecord(entry);
+          if (record) entries.push(record);
+        }
+        cursor = asString(page.nextCursor);
+        if (cursor && cursors.has(cursor)) break;
+        if (cursor) cursors.add(cursor);
+      } while (cursor && entries.length < MAX_HISTORY_ITEMS);
+    } catch {
+      // Old servers or oversized tool items can fail independently of resume.
+    }
+    if (!stillCurrent() || !entries.length) return;
+    const byTurn = new Map<string, unknown[]>();
+    for (const entry of entries.reverse()) {
+      const turnId = asString(entry.turnId);
+      const item = asRecord(entry.item);
+      if (!turnId || !item) continue;
+      const items = byTurn.get(turnId) ?? [];
+      items.push(item);
+      byTurn.set(turnId, items);
+    }
+    replayTurns(turns.map((rawTurn) => {
+      const turn = asRecord(rawTurn);
+      const items = byTurn.get(asString(turn?.id) ?? "");
+      if (!turn || !items) return rawTurn;
+      const ids = new Set(items.map((item) => asRecord(item)?.id));
+      // A bounded detail page can stop in the middle of an older turn. Keep
+      // its summary prompts even when their full items are outside the page.
+      const missing = asArray(turn.items).filter((item) => !ids.has(asRecord(item)?.id));
+      return { ...turn, items: [...missing, ...items] };
+    }), ctx);
+  }
+
   function handleNotification(method: string, params: Record<string, unknown>, ctx: AdapterContext) {
     const notificationTurnId = asString(params.turnId);
     if (
@@ -1978,6 +2041,9 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       rootTurnMayBeActive &&
       (method.startsWith("item/") || method === "turn/plan/updated")
     ) {
+      // A final message can introduce a question or be followed by more work.
+      // Only provider boundaries remain authoritative once live output resumes.
+      if (!rootTurnCompletionObserved) cancelPendingRootCompletion();
       // Live root output proves that an uncertain resume really rejoined work.
       // It lets the later thread-idle fallback finish the turn even if both
       // turn boundary notifications were the frames that went missing.
@@ -2085,22 +2151,12 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         const itemTurnId = asString(params.turnId);
         if (rootTurnSignalIsStale(itemTurnId)) return;
         handleItem(item, true, ctx);
-        if (
-          rootTurnMayBeActive &&
-          asString(item.type) === "agentMessage" &&
-          asString(item.phase) === "final_answer"
-        ) {
-          // `final_answer` is a semantic terminal signal in the Codex schema.
-          // Use it when the visible answer arrives but the turn-completed and
-          // thread-idle frames are missing, which would otherwise strand the
-          // pane in working and suppress both completion effects.
-          if (rootSteerRequestsInFlight > 0) {
-            rootCompletionSeenDuringSteer = itemTurnId;
-          } else if (!rootTurnWasSteered) {
-            rootCompletionVersion += 1;
-            scheduleRootCompletion(itemTurnId, ctx);
-          }
-        }
+        // A completed message is not a completed turn. In particular,
+        // request_user_input_async emits final_answer with delivery: "async"
+        // while tools keep running, without a blocking request in questions.
+        // Retiring its turn id here would silently discard all later output
+        // and route the user's reply to turn/start instead of turn/steer.
+        // Only turn/completed or thread idle may schedule root completion.
         return;
       }
       case "item/agentMessage/delta": {
@@ -2393,6 +2449,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     params: Record<string, unknown>,
     ctx: AdapterContext,
   ): void {
+    cancelPendingRootCompletion();
     const permissionId = `question-${String(id)}`;
     questions.set(permissionId, { id, kind: "user-input" });
     const items = asArray(params.questions)
@@ -2435,6 +2492,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     params: Record<string, unknown>,
     ctx: AdapterContext,
   ): void {
+    cancelPendingRootCompletion();
     const permissionId = `mcp-${String(id)}`;
     const mode = asString(params.mode);
     const schema = asRecord(params.requestedSchema);
@@ -3008,11 +3066,16 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       if (eventThreadId && threadId && eventThreadId !== threadId) return;
       // A continuation can emit items before turn/started (or lose that frame).
       // Reconcile its identity before the stale-turn filter discards live work.
+      // A user prompt also clears the previous completion flags, so an
+      // unconfirmed new turn has to be adopted the same way or its items stay
+      // dropped and the pane freezes on the empty Thinking placeholder.
       const incomingTurnId = asString(params.turnId) ?? asString(asRecord(params.turn)?.id);
+      const awaitingUnconfirmedRootTurn =
+        rootTurnMayBeActive && !rootTurnStatusConfirmed;
       if (
         incomingTurnId && incomingTurnId !== currentTurnId &&
         !completedRootTurnIds.has(incomingTurnId) &&
-        (rootPendingCompletion || rootTurnCompletionObserved) &&
+        (rootPendingCompletion || rootTurnCompletionObserved || awaitingUnconfirmedRootTurn) &&
         (method.startsWith("item/") || method === "turn/plan/updated" || method === "turn/started")
       ) {
         rememberRootTurnCompleted(currentTurnId);
@@ -3034,6 +3097,11 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       rootTurnCompletionObserved = false;
       rootTurnWasSteered = false;
       rootCompletionSeenDuringSteer = undefined;
+      // Retire the previous turn immediately. Leaving its id current while
+      // this request is unconfirmed makes every item from the new turn look
+      // stale, which freezes the transcript on the empty Thinking stage.
+      if (currentTurnId) rememberRootTurnCompleted(currentTurnId);
+      currentTurnId = null;
       ctx.emit({ type: "user", text: prompt.text, images: prompt.images });
       ctx.emit({ type: "status", status: "working" });
       rootTurnMayBeActive = true;
@@ -3249,7 +3317,8 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
 
     /**
      * `thread/resume` keeps the running process. Newer app-server builds page
-     * the transcript, so hydrate bounded full-detail pages before replaying it.
+     * the transcript. Load conversation summaries first and fetch tool details
+     * in small item pages after the composer is available.
      *
      * Codex can leave a thread `active` with no running turn after an aborted
      * session. `thread/resume` then never answers. Time out, fork a copy (the
@@ -3289,6 +3358,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         resumeRequestId = forkRequestId;
         const forked = await requestWithTimeout(ctx, forkRequestId, "thread/fork", {
           threadId: hungId,
+          excludeTurns: true,
           cwd: ctx.cwd,
           ...threadAccessParams(currentAccess),
           ...(currentModel ? { model: currentModel } : {}),
@@ -3322,8 +3392,11 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
           ? asString(initialPage?.nextCursor)
           : asString(result.turnsBackwardsCursor);
         const descending = paginated || cursor !== null;
+        const seenCursors = new Set<string>();
         while (cursor && turns.length < MAX_RESUMED_TURNS) {
           throwIfResumeAborted();
+          if (seenCursors.has(cursor)) break;
+          seenCursors.add(cursor);
           const pageRequestId = nextId++;
           resumeRequestId = pageRequestId;
           try {
@@ -3332,7 +3405,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
               cursor,
               limit: Math.min(RESUME_PAGE_SIZE, MAX_RESUMED_TURNS - turns.length),
               sortDirection: "desc",
-              itemsView: "full",
+              itemsView: "summary",
             });
             turns.push(...asArray(page.data));
             cursor = asString(page.nextCursor);
@@ -3416,12 +3489,14 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         // released on idle, or one typed against a live resumed turn, can
         // fork the now-complete thread instead of racing it.
         hydratingResume = false;
+        const detailGeneration = rootTurnGeneration;
         if (!completionAlreadyObserved) {
           ctx.emit({
             type: "status",
             status: rootTurnMayBeActive ? "working" : "idle",
           });
         }
+        void hydrateResumedItems(chronologicalTurns, threadId!, detailGeneration, ctx);
         return true;
       };
 

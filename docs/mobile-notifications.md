@@ -63,6 +63,11 @@ encrypted read receipt through the relay, which removes the red unread marker
 from the matching desktop terminal. If the phone is temporarily offline, the
 companion keeps the receipt locally and retries it when connectivity returns.
 Opening the notification or conversation performs the same synchronized read.
+Explicit desktop reads also carry the completion sequence through workspace
+sync. Android stores that sequence alongside the read timestamp, so a delayed
+push cannot revive a response that was already read or clear a newer response
+when the desktop and phone clocks differ. A delayed preview cannot overwrite
+the full response already downloaded on the phone.
 For a completion outside the visible desktop pane, Duckweed waits 30 seconds
 before sending the phone notification. If the red unread outline is cleared
 during that interval, no notification is sent. Activity in a different pane
@@ -75,6 +80,14 @@ periods run in the native desktop process, so minimizing Duckweed or putting its
 WebView in the background does not suspend mobile delivery. The Android
 companion also suppresses and marks as read a completion for the conversation
 currently visible on the phone.
+
+Conversation alert suppression also checks that the screen is interactive and
+the keyguard is unlocked, so locking the phone cannot consume an unseen response
+or send its read receipt before Activity lifecycle callbacks run. The relay sends
+silent workspace and presence syncs at normal FCM priority and reserves high
+priority for alerts. This avoids silent traffic causing FCM to deprioritize
+alerts during Doze. Alert previews are decrypted and displayed directly in the
+FCM callback without waiting for the full-response background fetch.
 
 The main companion navigation contains **Activity**, **Projects**, and
 **Conversations**. Connection management, sync health, and updates live in
@@ -98,6 +111,20 @@ message; large images are resized on the phone before the complete prompt is
 encrypted. Outgoing bubbles distinguish sending, relay acceptance, desktop
 receipt, and failure. A failed bubble can be tapped to retry with the same
 idempotent command identity.
+The composer paints outgoing messages before encryption or network submission.
+Pairing credentials are resolved by the send queue, and encrypted draft reads,
+writes, and clears use an ordered background queue that survives Activity
+recreation. Long conversation lists calculate their updates off the UI thread;
+rendered response Markdown is cached and outgoing text appears immediately at
+full contrast. Returning to a conversation restores its saved draft without
+blocking navigation.
+Conversation history is read and decrypted off the UI thread, and sending uses
+a separate queue from background refreshes and delivery checks. Delivery states
+only advance after confirmation, even if network callbacks arrive out of order.
+While a conversation is open, the companion checks the relay every three seconds
+and downloads pending updates directly, without waiting for an FCM wake-up.
+The desktop polls from native sync events so minimizing its window does not
+suspend command pickup or queued workspace updates.
 The desktop republishes the encrypted workspace periodically and whenever its
 terminal state changes. Pull down on **Responses** or **Projects** to request an
 immediate refresh from a running paired desktop.
@@ -105,6 +132,42 @@ immediate refresh from a running paired desktop.
 Completion notifications use the same six bundled Duckweed cues as the desktop.
 The desktop selects one cue for the completion and includes only its numeric cue
 identifier inside the encrypted payload, so Android plays the exact same cue.
+**Send test** explicitly includes the first sound cue to test audio as well as
+delivery. Sound channels reference resource names instead of numeric IDs that
+can change between APKs. New channels inherit the previous channel's importance,
+muted state, and custom sound when migrating from an older build.
+
+### Alerts with the screen off
+
+The FCM callback displays the decrypted preview before fetching the response or
+loading approval actions. Heartbeats update a small local timestamp separately
+from the encrypted workspace, so a notification does not wait for every terminal
+and conversation to be decrypted and re-encrypted. Only work triggered by an
+actually high-priority push requests expedited background execution; silent
+workspace traffic does not consume that quota. Relay recovery uses the same
+notification/read checks as push delivery, including for completion messages,
+and cannot replay an alert that has already been delivered or suppressed.
+
+Opening the app keeps unrelated notifications available until their conversation
+is read. An app hidden behind Duckweed's biometric lock cannot consume a response
+as visible. Foreground polling stops when the Activity stops.
+
+**Settings > Background alerts** reports Android notification permission, muted
+sound channels, phone volume, Do Not Disturb, background restrictions, and battery
+optimization. It also records the last received high-priority alert locally and
+reports when Firebase delivered it at a lower priority. No response content or
+credentials are included in these diagnostics. The notification and battery
+buttons open Android settings; the app does not override the user's choices.
+
+For a real-device check, use desktop **Send test** with the phone screen off and
+again after the phone has remained idle. Keep network connectivity available and
+check Background alerts if delivery waits until wake-up. FCM attempts immediate
+delivery of high-priority alerts during Doze, but Android/OEM restrictions and
+FCM deprioritization can still delay delivery. A powered-off or force-stopped
+phone/app cannot be used as an immediate-delivery test.
+
+References: [FCM priority and Doze](https://firebase.google.com/docs/cloud-messaging/android-message-priority),
+[Android channel sound persistence](https://developer.android.com/reference/android/app/NotificationChannel#setSound(android.net.Uri,%20android.media.AudioAttributes)).
 
 The same companion can pair with either desktop channel. Its own update feed is
 fixed by the APK that was installed: stable builds only pull stable updates and
@@ -253,3 +316,16 @@ update feed. The default is `stable`.
 
 The debug APK is written to
 `android/app/build/outputs/apk/debug/app-debug.apk`.
+
+With an Android emulator connected, run the device regression suite with
+`gradle -p android :app:connectedDebugAndroidTest`. It exercises real SQLite and
+Keystore storage, migration from the previous schema, delayed notifications,
+out-of-order delivery confirmation, and immediate composer feedback with a
+blocked network queue and 250 encrypted history entries. Use an isolated test
+emulator because the suite replaces the companion's message database with fixtures.
+The suite also exercises the FCM callback with the screen off, missed-push alert
+recovery, named sound resources, lightweight heartbeat updates, and composer
+feedback while both network submission and draft persistence are blocked. The
+screen-off test checks that Android receives an unread notification with an
+audible channel; it does not measure production FCM transport latency or physical
+speaker output on a particular phone.
