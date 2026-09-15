@@ -10282,15 +10282,18 @@ body.is-resizing * {
   color: var(--text);
 }
 
-.agent-composer-token.token-command {
+.agent-composer-token.token-command,
+.agent-message-token.token-command {
   color: var(--accent-strong);
 }
 
-.agent-composer-token.token-file {
+.agent-composer-token.token-file,
+.agent-message-token.token-file {
   color: #8cc4ff;
 }
 
-.agent-composer-token.token-skill {
+.agent-composer-token.token-skill,
+.agent-message-token.token-skill {
   color: #c792ea;
 }
 

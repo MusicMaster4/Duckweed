@@ -13,6 +13,7 @@ import { openUrl } from "../../../lib/ipc";
 import { AgentAsciiLoader } from "../AgentAsciiLoader";
 import { AgentDiff } from "../AgentDiff";
 import { AgentImageAttachments } from "../AgentImageAttachments";
+import { AgentMessageText } from "../AgentMessageText";
 import { MessageCopyButton } from "../MessageCopyButton";
 import { AgentProviderIcon } from "../AgentProviderIcon";
 import { SubagentBoardAnchor } from "../subagents/SubagentBoard";
@@ -511,7 +512,7 @@ export const MessageItem = memo(function MessageItem({
       >
         <article className={`official-user official-user--${variant}`}>
           <AgentImageAttachments images={item.images ?? []} />
-          {item.text && <p>{item.text}</p>}
+          {item.text && <p><AgentMessageText text={item.text} /></p>}
         </article>
         {item.text && <MessageCopyButton text={item.text} />}
       </div>
