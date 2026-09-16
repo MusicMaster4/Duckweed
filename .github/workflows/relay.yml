@@ -1,6 +1,14 @@
 name: Deploy notification relay
 
 on:
+  # Both desktop channels use this relay. Publishing an APK does not update it.
+  push:
+    branches:
+      - main
+      - testing
+    paths:
+      - "relay/**"
+      - ".github/workflows/relay.yml"
   workflow_dispatch:
 
 permissions:

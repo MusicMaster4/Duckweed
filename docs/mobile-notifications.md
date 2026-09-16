@@ -166,6 +166,14 @@ delivery of high-priority alerts during Doze, but Android/OEM restrictions and
 FCM deprioritization can still delay delivery. A powered-off or force-stopped
 phone/app cannot be used as an immediate-delivery test.
 
+The priority policy runs on the Cloudflare relay, not in the APK. Updating the
+companion alone cannot fix an older relay that sends silent syncs at high
+priority. Deploy the relay from the branch containing the fix. Firebase evaluates
+the previous seven days of delivery behavior per app installation, so an
+installation already deprioritized by silent traffic may not recover immediately
+after deployment. Background alerts reports whether received alerts are still
+being delivered at a lower priority.
+
 References: [FCM priority and Doze](https://firebase.google.com/docs/cloud-messaging/android-message-priority),
 [Android channel sound persistence](https://developer.android.com/reference/android/app/NotificationChannel#setSound(android.net.Uri,%20android.media.AudioAttributes)).
 
@@ -248,7 +256,11 @@ Use a Workers Free account. A payment method is not required.
 5. Save the account ID as the GitHub variable `CLOUDFLARE_ACCOUNT_ID`.
 6. Run the **Deploy notification relay** GitHub Actions workflow. It tests the
    Worker, applies D1 migrations, uploads the FCM credential as an encrypted
-   Worker secret, and deploys the relay.
+   Worker secret, and deploys the relay. Select the branch containing the intended
+   relay version when running it manually. Changes under `relay/` or to this
+   workflow on `main` and `testing` also trigger deployment. Both app channels
+   share this backend, so relay changes must remain compatible with installed
+   clients. Desktop and APK releases alone do not deploy the relay.
 7. Save the resulting endpoint as the repository variable
    `DUCKWEED_RELAY_URL`. This deployment uses
    `https://duckweed-notification-relay.idealmusic18.workers.dev`.
