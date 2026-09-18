@@ -8,7 +8,7 @@ import org.json.JSONObject
 import org.json.JSONArray
 import java.util.UUID
 
-class MessageStore(context: Context) : SQLiteOpenHelper(context, "duckweed-messages.db", null, 6) {
+class MessageStore(context: Context) : SQLiteOpenHelper(context, "duckweed-messages.db", null, 7) {
     override fun onCreate(database: SQLiteDatabase) {
         database.execSQL(
             """
@@ -20,7 +20,8 @@ class MessageStore(context: Context) : SQLiteOpenHelper(context, "duckweed-messa
               read_at INTEGER,
               pair_id TEXT,
               terminal_id TEXT,
-              kind TEXT
+              kind TEXT,
+              completion_seq INTEGER
             )
             """.trimIndent(),
         )
@@ -28,7 +29,7 @@ class MessageStore(context: Context) : SQLiteOpenHelper(context, "duckweed-messa
         database.execSQL("CREATE INDEX messages_conversation ON messages(pair_id, terminal_id, sent_at DESC)")
         database.execSQL("CREATE INDEX messages_unread ON messages(read_at, kind, pair_id, terminal_id)")
         database.execSQL(
-            "CREATE TABLE conversation_reads (pair_id TEXT NOT NULL, terminal_id TEXT NOT NULL, read_at INTEGER NOT NULL, PRIMARY KEY(pair_id, terminal_id))",
+            "CREATE TABLE conversation_reads (pair_id TEXT NOT NULL, terminal_id TEXT NOT NULL, read_at INTEGER NOT NULL, completion_seq INTEGER, PRIMARY KEY(pair_id, terminal_id))",
         )
         createPendingReadSyncs(database)
     }
@@ -57,9 +58,22 @@ class MessageStore(context: Context) : SQLiteOpenHelper(context, "duckweed-messa
             )
         }
         if (oldVersion < 6) createPendingReadSyncs(database)
+        if (oldVersion < 7) database.execSQL("ALTER TABLE conversation_reads ADD COLUMN completion_seq INTEGER")
+        if (oldVersion < 7) database.execSQL("ALTER TABLE messages ADD COLUMN completion_seq INTEGER")
     }
 
-    fun put(message: CompletionRecord) {
+    fun put(message: CompletionRecord, previewOnly: Boolean = false) {
+        val database = writableDatabase
+        database.beginTransaction()
+        try {
+            if (!previewOnly || !recordExists(database, message.id)) putLocked(message)
+            database.setTransactionSuccessful()
+        } finally {
+            database.endTransaction()
+        }
+    }
+
+    private fun putLocked(message: CompletionRecord) {
         val state = deliveryState(message.id)
         val readAt = state.readAt
             ?: message.readAt
@@ -68,7 +82,12 @@ class MessageStore(context: Context) : SQLiteOpenHelper(context, "duckweed-messa
                 val pairId = message.pairId
                 val terminalId = message.terminalId
                 pairId != null && terminalId != null &&
-                    it <= conversationReadAt(writableDatabase, pairId, terminalId)
+                    MobileSyncPolicy.isCompletionAlreadyRead(
+                        message.completionSeq,
+                        conversationReadSeq(writableDatabase, pairId, terminalId),
+                        it,
+                        conversationReadAt(writableDatabase, pairId, terminalId),
+                    )
             }
         if (message.unreadOnDesktop == false && message.pairId != null && message.terminalId != null) {
             markConversationReadThrough(
@@ -76,6 +95,7 @@ class MessageStore(context: Context) : SQLiteOpenHelper(context, "duckweed-messa
                 message.pairId,
                 message.terminalId,
                 message.sentAt,
+                message.completionSeq,
             )
         }
         writableDatabase.insertWithOnConflict(
@@ -133,6 +153,7 @@ class MessageStore(context: Context) : SQLiteOpenHelper(context, "duckweed-messa
             put("pair_id", message.pairId)
             put("terminal_id", message.terminalId)
             put("kind", message.kind)
+            if (message.completionSeq != null) put("completion_seq", message.completionSeq)
             if (notifiedAt != null) put("notified_at", notifiedAt)
             if (readAt != null) put("read_at", readAt)
         }
@@ -166,8 +187,8 @@ class MessageStore(context: Context) : SQLiteOpenHelper(context, "duckweed-messa
         var messageIds = emptyList<String>()
         database.beginTransaction()
         try {
-            messageIds = unreadMessageIds(database, pairId, terminalId, at)
-            markConversationReadThrough(database, pairId, terminalId, at)
+            messageIds = unreadMessageIds(database, pairId, terminalId, at, completionSeq)
+            markConversationReadThrough(database, pairId, terminalId, at, completionSeq)
             // Explicit reads are idempotent and must always reach the desktop.
             // The local row may already be read when a full payload or workspace
             // update races the notification action, but the desktop can still
@@ -243,7 +264,11 @@ class MessageStore(context: Context) : SQLiteOpenHelper(context, "duckweed-messa
         return keys
     }
 
-    fun isNotificationPending(messageId: String): Boolean = notifiedAt(messageId) == null
+    fun isNotificationPending(messageId: String): Boolean = deliveryState(messageId).let {
+        MobileSyncPolicy.isNotificationPending(it.notifiedAt, it.readAt)
+    }
+
+    fun isMessageRead(messageId: String): Boolean = deliveryState(messageId).readAt != null
 
     fun dismissPendingNotifications(at: Long = System.currentTimeMillis()) {
         writableDatabase.update(
@@ -255,7 +280,7 @@ class MessageStore(context: Context) : SQLiteOpenHelper(context, "duckweed-messa
     }
 
     fun pendingNotifications(): List<CompletionRecord> =
-        read("notified_at IS NULL").filter { it.kind == "completed" || it.kind == "attention" }
+        read("notified_at IS NULL AND read_at IS NULL").filter { it.kind == "completed" || it.kind == "attention" }
 
     fun latest(): List<CompletionRecord> =
         read(
@@ -329,7 +354,19 @@ class MessageStore(context: Context) : SQLiteOpenHelper(context, "duckweed-messa
     }
 
     fun updateOutgoingState(messageId: String, state: String, error: String? = null) {
+        val database = writableDatabase
+        database.beginTransaction()
+        try {
+            updateOutgoingStateLocked(messageId, state, error)
+            database.setTransactionSuccessful()
+        } finally {
+            database.endTransaction()
+        }
+    }
+
+    private fun updateOutgoingStateLocked(messageId: String, state: String, error: String?) {
         val current = message(messageId) ?: return
+        if (MobileSyncPolicy.nextDeliveryState(current.deliveryState, state) != state) return
         val attachments = if (state == "sent" || state == "delivered") {
             current.attachments.map { it.copy(dataUrl = null) }
         } else {
@@ -375,6 +412,8 @@ class MessageStore(context: Context) : SQLiteOpenHelper(context, "duckweed-messa
                             message.id == latestAssistantId,
                             message.sentAt,
                             mobileReadAt,
+                            terminal.completionSeq,
+                            conversationReadSeq(database, snapshot.pairId, terminal.id),
                         )
                         val record = CompletionRecord(
                             id = id,
@@ -414,18 +453,21 @@ class MessageStore(context: Context) : SQLiteOpenHelper(context, "duckweed-messa
                             arrayOf(id),
                         )
                     }
-                    if (terminal.unreadOnDesktop == false) {
+                    if (terminal.unreadOnDesktop == false || terminal.readCompletionSeq != null) {
+                        val through = if (terminal.unreadOnDesktop == false) snapshot.updatedAt else 0L
                         clearedNotificationIds += unreadMessageIds(
                             database,
                             snapshot.pairId,
                             terminal.id,
-                            snapshot.updatedAt,
+                            through,
+                            terminal.readCompletionSeq,
                         )
                         markConversationReadThrough(
                             database,
                             snapshot.pairId,
                             terminal.id,
-                            snapshot.updatedAt,
+                            through,
+                            terminal.readCompletionSeq,
                         )
                     }
                 }
@@ -524,8 +566,6 @@ class MessageStore(context: Context) : SQLiteOpenHelper(context, "duckweed-messa
         }
     }
 
-    private fun notifiedAt(messageId: String): Long? = deliveryState(messageId).notifiedAt
-
     private fun prune(database: SQLiteDatabase) {
         database.execSQL(
             "DELETE FROM messages WHERE id NOT IN (SELECT id FROM messages ORDER BY sent_at DESC LIMIT 500)",
@@ -568,22 +608,26 @@ class MessageStore(context: Context) : SQLiteOpenHelper(context, "duckweed-messa
         pairId: String,
         terminalId: String,
         at: Long,
+        completionSeq: Long? = null,
     ) {
         database.update(
             "messages",
             ContentValues().apply { put("read_at", at) },
-            "pair_id = ? AND terminal_id = ? AND read_at IS NULL AND sent_at <= ?",
-            arrayOf(pairId, terminalId, at.toString()),
+            "pair_id = ? AND terminal_id = ? AND read_at IS NULL AND ${readBoundary(completionSeq)}",
+            arrayOf(pairId, terminalId, *readBoundaryArgs(at, completionSeq)),
         )
         val previous = conversationReadAt(database, pairId, terminalId)
-        if (at <= previous) return
+        val previousSeq = conversationReadSeq(database, pairId, terminalId)
+        val nextSeq = listOfNotNull(previousSeq, completionSeq).maxOrNull()
+        if (at <= previous && nextSeq == previousSeq) return
         database.insertWithOnConflict(
             "conversation_reads",
             null,
             ContentValues().apply {
                 put("pair_id", pairId)
                 put("terminal_id", terminalId)
-                put("read_at", at)
+                put("read_at", maxOf(at, previous))
+                if (nextSeq != null) put("completion_seq", nextSeq)
             },
             SQLiteDatabase.CONFLICT_REPLACE,
         )
@@ -601,18 +645,26 @@ class MessageStore(context: Context) : SQLiteOpenHelper(context, "duckweed-messa
             "1",
         ).use { it.moveToFirst() }
 
+    private fun conversationReadSeq(database: SQLiteDatabase, pairId: String, terminalId: String): Long? =
+        database.query(
+            "conversation_reads", arrayOf("completion_seq"),
+            "pair_id = ? AND terminal_id = ?", arrayOf(pairId, terminalId),
+            null, null, null, "1",
+        ).use { if (it.moveToFirst() && !it.isNull(0)) it.getLong(0) else null }
+
     private fun unreadMessageIds(
         database: SQLiteDatabase,
         pairId: String,
         terminalId: String,
         through: Long,
+        completionSeq: Long? = null,
     ): List<String> {
         val ids = mutableListOf<String>()
         database.query(
             "messages",
             arrayOf("id"),
-            "pair_id = ? AND terminal_id = ? AND read_at IS NULL AND kind IN (?, ?) AND sent_at <= ?",
-            arrayOf(pairId, terminalId, "completed", "attention", through.toString()),
+            "pair_id = ? AND terminal_id = ? AND read_at IS NULL AND kind IN (?, ?) AND ${readBoundary(completionSeq)}",
+            arrayOf(pairId, terminalId, "completed", "attention", *readBoundaryArgs(through, completionSeq)),
             null,
             null,
             null,
@@ -621,6 +673,15 @@ class MessageStore(context: Context) : SQLiteOpenHelper(context, "duckweed-messa
         }
         return ids
     }
+
+    private fun readBoundary(completionSeq: Long?): String = if (completionSeq == null) {
+        "sent_at <= ?"
+    } else {
+        "((completion_seq IS NOT NULL AND completion_seq <= ?) OR (completion_seq IS NULL AND sent_at <= ?))"
+    }
+
+    private fun readBoundaryArgs(at: Long, completionSeq: Long?): Array<String> =
+        if (completionSeq == null) arrayOf(at.toString()) else arrayOf(completionSeq.toString(), at.toString())
 
     private fun backfillRoutingColumns(database: SQLiteDatabase) {
         database.query(

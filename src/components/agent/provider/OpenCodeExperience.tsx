@@ -2,6 +2,7 @@ import { memo, useMemo, useState } from "react";
 
 import type { AgentItem, AgentPlanStep, ToolItem, ToolStatus } from "../../../lib/agents/types";
 import { AgentImageAttachments } from "../AgentImageAttachments";
+import { AgentMessageText } from "../AgentMessageText";
 import { MessageCopyButton } from "../MessageCopyButton";
 import { SubagentBoardAnchor, SubagentBoardForActivities } from "../subagents/SubagentBoard";
 import { useSubagentUi } from "../subagents/SubagentUiContext";
@@ -371,7 +372,7 @@ const OpenCodeItem = memo(function OpenCodeItem({
         <div className="oc-user-turn" data-message-enter>
           <div className="oc-user-bubble">
             <AgentImageAttachments images={item.images ?? []} />
-            {item.text && <p className="oc-said">{item.text}</p>}
+            {item.text && <p className="oc-said"><AgentMessageText text={item.text} /></p>}
           </div>
           {item.text && <MessageCopyButton text={item.text} />}
         </div>
@@ -420,7 +421,10 @@ const OpenCodeModule = memo(function OpenCodeModule({
   continuedIds: Set<string>;
   liveAssistantId: string | null;
 }) {
-  const live = module.items.some(isLive);
+  const live = module.items.some((item) =>
+    isLive(item) ||
+    (item.kind === "assistant" && item.streaming),
+  );
   const failed = module.items.some((item) => item.kind === "tool" && item.status === "error");
   return (
     <section

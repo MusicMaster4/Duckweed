@@ -31,7 +31,17 @@ impl Context {
             || model == "gpt-5.4"
             || model == "gpt-5.4-pro";
         Self {
-            long: long_capable && tokens.input + tokens.cache_read + tokens.cache_write > 272_000,
+            long: tokens.input + tokens.cache_read + tokens.cache_write
+                > if long_capable {
+                    272_000
+                } else if model.starts_with("gemini-2.5-pro")
+                    || model.starts_with("gemini-3-pro")
+                    || model.starts_with("gemini-3.1-pro")
+                {
+                    200_000
+                } else {
+                    u64::MAX
+                },
             tier: match tier {
                 "priority" | "fast" => 1,
                 "flex" | "batch" => 2,
@@ -48,6 +58,16 @@ impl Context {
             rates.output *= 1.5;
         }
         let multiplier = match self.tier {
+            1 if normalize(model).starts_with("claude-") => {
+                if ["claude-opus-5", "claude-opus-4-8"]
+                    .iter()
+                    .any(|name| normalize(model).starts_with(name))
+                {
+                    2.0
+                } else {
+                    1.0
+                }
+            }
             1 if normalize(model) == "gpt-5.5" => 2.5,
             1 => 2.0,
             2 => 0.5,
@@ -83,7 +103,8 @@ impl Rates {
         (t.input as f64 * self.input
             + (t.output + t.reasoning) as f64 * self.output
             + t.cache_read as f64 * self.cache_read
-            + t.cache_write as f64 * self.cache_write)
+            + t.cache_write.saturating_sub(t.cache_write_1h) as f64 * self.cache_write
+            + t.cache_write_1h.min(t.cache_write) as f64 * self.input * 2.0)
             / m
     }
 }
@@ -103,6 +124,8 @@ const fn e(fragment: &'static str, input: f64, output: f64) -> Entry {
 /// fragment length, not position.
 static TABLE: &[Entry] = &[
     // ---- Anthropic ----
+    e("claude-fable-5-1", 10.0, 50.0),
+    e("claude-mythos-5-1", 10.0, 50.0),
     e("claude-fable-5", 10.0, 50.0),
     e("claude-mythos", 10.0, 50.0),
     e("claude-opus-5", 5.0, 25.0),
@@ -114,7 +137,7 @@ static TABLE: &[Entry] = &[
     e("claude-opus-4", 15.0, 75.0),
     e("claude-3-opus", 15.0, 75.0),
     e("claude-opus", 5.0, 25.0),
-    e("claude-sonnet-5", 3.0, 15.0),
+    e("claude-sonnet-5", 2.0, 10.0),
     e("claude-sonnet", 3.0, 15.0),
     e("claude-3-7-sonnet", 3.0, 15.0),
     e("claude-3-5-sonnet", 3.0, 15.0),
@@ -137,6 +160,7 @@ static TABLE: &[Entry] = &[
     e("gpt-5.3-codex", 1.75, 14.0),
     e("gpt-5.2-pro", 21.0, 168.0),
     e("gpt-5.2", 1.75, 14.0),
+    e("gpt-5.1-codex-mini", 0.25, 2.0),
     e("gpt-5.1", 1.25, 10.0),
     e("gpt-5-codex", 1.25, 10.0),
     e("gpt-5-mini", 0.25, 2.0),
@@ -189,7 +213,11 @@ pub fn normalize(model: &str) -> String {
     let lower = model.trim().to_ascii_lowercase();
     // Keep only the last path segment; providers stack up to two prefixes.
     let tail = lower.rsplit('/').next().unwrap_or(&lower);
-    tail.to_string()
+    if tail.starts_with("claude-") {
+        tail.replace('.', "-")
+    } else {
+        tail.to_string()
+    }
 }
 
 /// User-supplied rates, keyed by the same normalized model id.
@@ -235,7 +263,8 @@ pub fn lookup(model: &str, overrides: &Overrides) -> (Rates, bool) {
         Some(&(fragment, input, output)) => {
             let mut rates = Rates::new(input, output);
             rates.cache_read = match fragment {
-                "gpt-4.1" | "gpt-4.1-mini" | "o3" | "o4-mini" => input * 0.25,
+                "claude-fable-5-1" | "claude-mythos-5-1" => input * 0.025,
+                "gpt-4.1" | "gpt-4.1-mini" | "o3" | "o4-mini" | "codex-mini" => input * 0.25,
                 "gpt-4o" | "gpt-4o-mini" | "o3-mini" => input * 0.5,
                 "gpt-5.5-pro" | "gpt-5.4-pro" | "gpt-5.2-pro" => 0.0,
                 _ => rates.cache_read,
@@ -259,9 +288,51 @@ mod tests {
     use super::*;
 
     #[test]
+    fn gemini_long_context_is_decided_per_request() {
+        let (rates, _) = lookup("gemini-2.5-pro", &Overrides::new());
+        let mut tokens = crate::usage::Tokens {
+            input: 100_000,
+            cache_read: 100_000,
+            output: 1000,
+            ..Default::default()
+        };
+        assert!(!Context::for_request("gemini-2.5-pro", "", &tokens).long);
+        tokens.input += 1;
+        let context = Context::for_request("gemini-2.5-pro", "", &tokens);
+        assert!(context.long);
+        assert!((context.cost("gemini-2.5-pro", rates, &tokens) - 0.2900025).abs() < 1e-9);
+    }
+
+    #[test]
+    fn current_claude_rates_and_fast_eligibility() {
+        let overrides = Overrides::new();
+        let (sonnet, _) = lookup("claude-sonnet-5", &overrides);
+        assert_eq!((sonnet.input, sonnet.output), (2.0, 10.0));
+        let (fable, _) = lookup("claude-fable-5.1", &overrides);
+        assert_eq!(fable.cache_read, 0.25);
+        let tokens = crate::usage::Tokens {
+            input: 1_000_000,
+            ..Default::default()
+        };
+        for (model, cost) in [
+            ("claude-opus-5", 10.0),
+            ("claude-opus-4-8", 10.0),
+            ("claude-opus-4-6", 5.0),
+        ] {
+            let (rates, _) = lookup(model, &overrides);
+            assert_eq!(
+                Context::for_request(model, "fast", &tokens).cost(model, rates, &tokens),
+                cost
+            );
+        }
+    }
+
+    #[test]
     fn current_codex_models_and_request_conditions() {
         let none = Overrides::new();
+        assert_eq!(lookup("codex-mini-latest", &none).0.cache_read, 0.375);
         for (model, input, output) in [
+            ("gpt-5.1-codex-mini", 0.25, 2.0),
             ("gpt-6-astra", 10.0, 50.0),
             ("gpt-5.6-sol", 4.0, 20.0),
             ("gpt-5.6-terra", 2.0, 12.0),
@@ -279,6 +350,7 @@ mod tests {
             input: 100_000,
             cache_read: 180_000,
             cache_write: 20_000,
+            cache_write_1h: 0,
             output: 8_000,
             reasoning: 2_000,
         };
@@ -341,6 +413,7 @@ mod tests {
             reasoning: 500_000,
             cache_read: 1_000_000,
             cache_write: 1_000_000,
+            cache_write_1h: 0,
         };
         // 10 + 50 (1M output-rate tokens) + 1 (read) + 12.5 (write)
         assert!((rates.cost(&tokens) - 73.5).abs() < 1e-9);

@@ -134,6 +134,7 @@ object Crypto {
                             null
                         },
                         completionSeq = terminal.optLong("completionSeq"),
+                        readCompletionSeq = if (terminal.isNull("readCompletionSeq")) null else terminal.optLong("readCompletionSeq"),
                         commands = (0 until commandsJson.length()).mapNotNull { commandIndex ->
                             val command = commandsJson.optJSONObject(commandIndex) ?: return@mapNotNull null
                             val name = command.optString("name").trim()

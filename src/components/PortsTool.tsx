@@ -263,8 +263,11 @@ export function PortsTool({ ownerNames, onSnapshot }: Props) {
                     <button
                       type="button"
                       className="port-primary"
+                      title="Share this app and its backend ports in this tab through one public link"
                       disabled={isBusy}
-                      onClick={() => void run(key, () => portForward(port.pid, port.port))}
+                      onClick={() =>
+                        void run(key, () => portForward(port.pid, port.port, [...ownerNames.keys()]))
+                      }
                     >
                       {busy === key ? "Creating public link..." : "Share publicly"}
                     </button>

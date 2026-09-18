@@ -437,6 +437,7 @@ export default function App() {
   unreadTermIdsRef.current = unreadTermIds;
   const mobileAlertTermIdsRef = useRef(mobileAlertTermIds);
   mobileAlertTermIdsRef.current = mobileAlertTermIds;
+  const readCompletionSeqsRef = useRef(new Map<string, number>());
   const completionFlashesRef = useRef(completionFlashes);
   completionFlashesRef.current = completionFlashes;
   const [toolsWidth, setToolsWidth] = useState(
@@ -608,6 +609,8 @@ export default function App() {
     let hadPending = false;
     for (const [key, completion] of pendingMobileCompletions.current) {
       if (!completion.selected) continue;
+      const seq = terminals.getMeta(completion.termId)?.completionSeq;
+      if (seq !== undefined) readCompletionSeqsRef.current.set(completion.termId, seq);
       pendingMobileCompletions.current.delete(key);
       hadPending = true;
     }
@@ -615,10 +618,13 @@ export default function App() {
       void mobileCancelSelectedCompletions().catch((error) => {
         console.error("cancel selected mobile completion notification", error);
       });
+      window.dispatchEvent(new Event("duckweed:mobile-read"));
     }
   }, []);
 
   const acknowledgeTerm = useCallback((termId: string) => {
+    const completionSeq = terminals.getMeta(termId)?.completionSeq;
+    if (completionSeq !== undefined) readCompletionSeqsRef.current.set(termId, completionSeq);
     cancelPendingMobileCompletionsForTerm(termId);
     setMobileAlertUnread(termId, false);
     setUnreadTermIds((prev) => {
@@ -627,6 +633,7 @@ export default function App() {
       unreadTermIdsRef.current = next;
       return next;
     });
+    window.dispatchEvent(new Event("duckweed:mobile-read"));
   }, [cancelPendingMobileCompletionsForTerm, setMobileAlertUnread]);
 
   const acknowledgeTermFromMobile = useCallback((termId: string, completionSeq: number | null) => {
@@ -679,6 +686,10 @@ export default function App() {
     return observeDesktopActivity(window, () => document.hasFocus(), () => {
       lastDesktopInteractionAt.current = Date.now();
       cancelPendingSelectedMobileCompletions();
+      for (const termId of mobileAlertTermIdsRef.current) {
+        const seq = terminals.getMeta(termId)?.completionSeq;
+        if (seq !== undefined) readCompletionSeqsRef.current.set(termId, seq);
+      }
       setMobileAlertTermIds((previous) => {
         if (previous.size === 0) return previous;
         const next = new Set<string>();
@@ -694,11 +705,12 @@ export default function App() {
     void listen<MobileScheduledCompletionDelivery>(
       "mobile:completion-delivered",
       ({ payload }) => {
-        pendingMobileCompletions.current.delete(payload.key);
+        const wasPending = pendingMobileCompletions.current.delete(payload.key);
         if (payload.result.failed > 0) {
           console.error("mobile completion notification", payload.result.errors.join("; "));
         }
         if (
+          !wasPending ||
           !payload.selected ||
           payload.result.sent === 0 ||
           !terminals.getMeta(payload.terminalId) ||
@@ -977,6 +989,8 @@ export default function App() {
     let hasPairedDevice = false;
 
     const publish = (urgent = false) => {
+      if (stopped) return;
+      if (timer) window.clearTimeout(timer);
       timer = 0;
       if (publishing) {
         publishQueued = true;
@@ -1066,6 +1080,7 @@ export default function App() {
                 unreadTermIdsRef.current.has(node.term) ||
                 mobileAlertTermIdsRef.current.has(node.term),
               completionSeq: meta.completionSeq,
+              readCompletionSeq: readCompletionSeqsRef.current.get(node.term) ?? null,
               commands: [...(session?.commands ?? [])]
                 .sort((left, right) => {
                   const priority = (name: string) =>
@@ -1188,6 +1203,8 @@ export default function App() {
       schedule();
     };
     const retry = () => schedule(1_000);
+    const read = () => publish(true);
+    window.addEventListener("duckweed:mobile-read", read);
     window.addEventListener("duckweed:mobile-paired", paired);
     window.addEventListener("duckweed:mobile-refresh", refreshed);
     window.addEventListener("duckweed:mobile-sync-retry", retry);
@@ -1195,6 +1212,9 @@ export default function App() {
     // state directly from the protocol event, even when browser timers and
     // animation frames are paused by a minimized desktop window.
     const offTurnEnds = agentSessions.subscribeTurnEnd(() => publish(true));
+    const syncTick = listen("mobile:sync-tick", () => {
+      if (timer || publishQueued) publish(true);
+    });
     // Keep phone meters on the same live provider reading as the desktop Usage
     // panel, not the snapshot from when the pairing was first opened.
     const usagePoll = window.setInterval(() => {
@@ -1215,7 +1235,9 @@ export default function App() {
       window.removeEventListener("duckweed:mobile-paired", paired);
       window.removeEventListener("duckweed:mobile-refresh", refreshed);
       window.removeEventListener("duckweed:mobile-sync-retry", retry);
+      window.removeEventListener("duckweed:mobile-read", read);
       offTurnEnds();
+      void syncTick.then((off) => off());
       offAgents();
       offTerminals.forEach((off) => off());
       offTerminalOutput.forEach((off) => off());
@@ -1227,9 +1249,7 @@ export default function App() {
   useEffect(() => {
     if (!TAURI_RUNTIME) return;
     let stopped = false;
-    let timer = 0;
     let polling = false;
-    let pollDelay = 1_200;
     const handling = new Set<string>();
     const applied = new Set<string>();
 
@@ -1238,9 +1258,6 @@ export default function App() {
       polling = true;
       try {
         const commands = await mobilePollCommands();
-        // Mobile input is interactive. A 30-second idle backoff made a send
-        // look broken even when it was merely waiting in the relay queue.
-        pollDelay = commands.length > 0 ? 1_200 : Math.min(4_000, pollDelay * 1.5);
         for (const command of commands) {
           const key = `${command.deviceId}:${command.commandId}`;
           if (handling.has(key)) continue;
@@ -1334,14 +1351,14 @@ export default function App() {
         if (!stopped) console.error("mobile command sync", error);
       } finally {
         polling = false;
-        if (!stopped) timer = window.setTimeout(poll, pollDelay);
       }
     };
 
+    const syncTick = listen("mobile:sync-tick", () => { void poll(); });
     void poll();
     return () => {
       stopped = true;
-      if (timer) window.clearTimeout(timer);
+      void syncTick.then((off) => off());
     };
   }, []);
 

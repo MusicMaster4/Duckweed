@@ -587,7 +587,7 @@ export function shortModelLabel(model: string): string {
   const full = model.toLowerCase();
   if (full === "or/selected" || full === "or\\selected") return "OpenRouter";
   if (full === "gpt-5.6-sol" || full === "gpt-5.6") return "GPT-5.6 Sol";
-  if (full === "grok-4.5") return "Grok 4.5";
+  if (/^grok-\d/.test(full)) return `Grok ${full.slice("grok-".length)}`;
 
   const slash = model.lastIndexOf("/");
   const base = slash >= 0 ? model.slice(slash + 1) : model;
@@ -603,7 +603,7 @@ export function shortModelLabel(model: string): string {
   if (lower === "best") return "Best";
   if (lower === "opusplan") return "Opus Plan";
   if (lower === "gpt-5.6-sol" || lower === "gpt-5.6") return "GPT-5.6 Sol";
-  if (lower === "grok-4.5") return "Grok 4.5";
+  if (/^grok-\d/.test(lower)) return `Grok ${lower.slice("grok-".length)}`;
   // OpenCode Zen labels often arrive as the full id; keep the tail readable.
   return base.replace(/^claude-/, "").replace(/-/g, " ");
 }

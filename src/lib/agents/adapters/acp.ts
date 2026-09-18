@@ -43,10 +43,13 @@ import {
  * Slash commands: names an agent advertises (`availableCommands`) are sent
  * back as plain `session/prompt` text — the agent intercepts them (verified:
  * grok answers in 0 tokens). `/model` and `/effort` are never advertised, so
- * they are wired to RPCs instead: `session/set_model` (grok and opencode both
- * validate the id) and grok's `session/set_mode`, where a "mode" is a
- * reasoning effort. Anything unknown is refused locally rather than spending
- * a model turn on it — grok happily chats about a `/model` typo.
+ * they are wired to RPCs instead: `session/set_model` (or `session/set_config_option`
+ * when the agent publishes `configOptions`) and Grok's effort selector.
+ * Grok 1.0.24+ exposes effort as `configId: "reasoning_effort"` (category
+ * `thought_level`) with per-model rows that include `xhigh` on grok-4.6.
+ * Older Grok builds still take `session/set_mode`. Anything unknown is refused
+ * locally rather than spending a model turn on it — grok happily chats about
+ * a `/model` typo.
  */
 
 const PROTOCOL_VERSION = 1;
@@ -72,6 +75,22 @@ const ACP_STATUS: Record<string, ToolStatus> = {
   completed: "done",
   failed: "error",
 };
+
+/** Canonical effort token: Grok catalog rows use `value`, older ACP rows use `id`. */
+function effortToken(entry: Record<string, unknown>): string {
+  return asString(entry.value) ?? asString(entry.id) ?? "";
+}
+
+function isEffortConfigOption(entry: Record<string, unknown>): boolean {
+  const id = (asString(entry.id) ?? "").toLowerCase();
+  const category = (asString(entry.category) ?? "").toLowerCase();
+  return (
+    category === "thought_level" ||
+    id === "effort" ||
+    id === "reasoning" ||
+    id === "reasoning_effort"
+  );
+}
 
 /** Pull display text and diffs out of a tool call's content blocks. */
 function readToolContent(blocks: unknown[]): { text: string; changes: AgentFileChange[] } {
@@ -314,11 +333,14 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
   let currentEffort: string | null = null;
   /**
    * OpenCode advertises effort as a `configOptions` entry (`id: "effort"`,
-   * category `thought_level`) rather than Grok's `session/set_mode`. When
-   * present, model/effort changes go through `session/set_config_option` so
-   * the response can refresh the option list (effort levels depend on model).
+   * category `thought_level`). Grok 1.0.24+ does the same with
+   * `id: "reasoning_effort"`. When present, model/effort changes go through
+   * `session/set_config_option` so the response can refresh the option list
+   * (effort levels depend on model). Older Grok still uses `session/set_mode`.
    */
   let usesConfigOptions = false;
+  /** `configId` for the thought-level option, when the agent publishes one. */
+  let effortConfigId: string | null = null;
   /**
    * Slash commands an agent intercepts can legitimately produce no output
    * (grok's `/context` renders in its TUI only). When a slash turn comes
@@ -498,11 +520,15 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
     }));
   }
 
-  function readModelState(raw: unknown): {
+  function readModelState(
+    raw: unknown,
+    opts: { sessionEffort?: boolean } = {},
+  ): {
     model?: string;
     effort?: string;
     models?: ReturnType<typeof modelsForUi>;
   } {
+    const applyEffort = opts.sessionEffort !== false;
     const state = asRecord(raw);
     if (!state) return {};
     const current = asString(state.currentModelId);
@@ -518,7 +544,7 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
           efforts: asArray(meta?.reasoningEfforts)
             .map((entry) => asRecord(entry))
             .filter((effort): effort is Record<string, unknown> => effort !== null)
-            .map((effort) => asString(effort.id) ?? "")
+            .map((effort) => effortToken(effort))
             .filter(Boolean),
         };
       })
@@ -526,7 +552,7 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
     if (models.length) availableModels = models;
     if (current) currentModelId = current;
     const active = entries.find((model) => asString(model.modelId) === currentModelId);
-    const effort = asString(asRecord(active?._meta)?.reasoningEffort);
+    const effort = applyEffort ? asString(asRecord(active?._meta)?.reasoningEffort) : null;
     if (effort) currentEffort = effort;
     return {
       ...(current ? { model: current } : {}),
@@ -556,38 +582,54 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
     const modelOption = options.find(
       (entry) => entry.category === "model" || asString(entry.id) === "model",
     );
-    const effortOption = options.find(
-      (entry) =>
-        entry.category === "thought_level" ||
-        asString(entry.id) === "effort" ||
-        asString(entry.id) === "reasoning",
-    );
+    const effortOption = options.find(isEffortConfigOption);
+    if (effortOption) {
+      effortConfigId = asString(effortOption.id) ?? effortConfigId ?? "effort";
+    }
 
     const efforts = effortOption
       ? asArray(effortOption.options)
           .map((entry) => asRecord(entry))
           .filter((entry): entry is Record<string, unknown> => entry !== null)
-          .map((entry) => asString(entry.value) ?? "")
+          .map((entry) => effortToken(entry))
           .filter(Boolean)
       : [];
 
     if (modelOption) {
       const current = asString(modelOption.currentValue);
-      const models = asArray(modelOption.options)
+      const listed = asArray(modelOption.options)
         .map((entry) => asRecord(entry))
         .filter((model): model is Record<string, unknown> => model !== null)
         .map((model) => ({
           id: asString(model.value) ?? "",
           name: asString(model.name) ?? asString(model.value) ?? "",
-          // Effort levels are per active model on the wire, but the picker
-          // needs them on the current row; attach the live list to every
-          // entry so switching model keeps the effort chip usable until the
-          // next configOptions refresh replaces it.
-          efforts: [...efforts],
         }))
         .filter((model) => model.id);
-      if (models.length) availableModels = models;
       if (current) currentModelId = current;
+      if (listed.length) {
+        if (availableModels.length) {
+          // Grok already sent per-model effort lists on modelState. Keep those
+          // (grok-4.6 has xhigh, grok-4.5 does not) and only refresh names.
+          const known = new Map(availableModels.map((model) => [model.id, model]));
+          availableModels = listed.map((model) => {
+            const existing = known.get(model.id);
+            return existing
+              ? { ...existing, name: model.name || existing.name }
+              : { ...model, efforts: [...efforts] };
+          });
+        } else {
+          // OpenCode: effort levels are per active model on the wire, but the
+          // picker needs them on the current row; attach the live list to every
+          // entry so switching model keeps the effort chip usable until the
+          // next configOptions refresh replaces it.
+          availableModels = listed.map((model) => ({ ...model, efforts: [...efforts] }));
+        }
+      }
+      if (efforts.length && currentModelId) {
+        availableModels = availableModels.map((model) =>
+          model.id === currentModelId ? { ...model, efforts: [...efforts] } : model,
+        );
+      }
     } else if (efforts.length && currentModelId) {
       // Only effort changed; stamp the new list onto the active model.
       availableModels = availableModels.map((model) =>
@@ -646,7 +688,7 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
     if (usesConfigOptions) {
       const result = await request(ctx, "session/set_config_option", {
         sessionId,
-        configId: "effort",
+        configId: effortConfigId ?? "effort",
         value: level,
       });
       currentEffort = level;
@@ -1070,6 +1112,30 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
       }
       case "current_mode_update":
         return;
+      case "model_changed": {
+        const model = asString(update.model_id) ?? asString(update.modelId);
+        const effort =
+          asString(update.reasoning_effort) ?? asString(update.reasoningEffort);
+        if (model) currentModelId = model;
+        if (effort) currentEffort = effort;
+        if (model || effort) {
+          ctx.emit({
+            type: "session",
+            ...(model ? { model } : {}),
+            ...(effort ? { effort } : {}),
+          });
+        }
+        return;
+      }
+      case "config_option_update": {
+        applyConfigResult(
+          {
+            configOptions: update.configOptions ?? params.configOptions ?? update.options,
+          },
+          ctx,
+        );
+        return;
+      }
       default:
         return;
     }
@@ -1463,6 +1529,13 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
         method === "_x.ai/session_notification"
       ) {
         handleSessionUpdate(params, ctx);
+        return;
+      }
+      if (method === "_x.ai/models/update") {
+        // Catalog refresh. `_meta.reasoningEffort` here is the model's default,
+        // not the live session effort — keep the current chip as the user set it.
+        const update = readModelState(params, { sessionEffort: false });
+        if (Object.keys(update).length) ctx.emit({ type: "session", ...update });
         return;
       }
       if (method === "_x.ai/mcp/servers_updated") {

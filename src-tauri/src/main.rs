@@ -471,6 +471,7 @@ async fn port_forward(
     ports: State<'_, PortManager>,
     pid: u32,
     port: u16,
+    owner_ids: Option<Vec<String>>,
 ) -> Result<ForwardInfo, String> {
     let ptys = ptys.inner().clone();
     let agents = agents.inner().clone();
@@ -480,7 +481,13 @@ async fn port_forward(
         .app_data_dir()
         .map_err(|error| error.to_string())?
         .join("tools");
-    blocking(move || ports::forward(pid, port, &ptys, &agents, &ports, &tools_dir)).await
+    blocking(move || {
+        ports::forward(
+            pid, port, &ptys, &agents, &ports, &tools_dir,
+            owner_ids.unwrap_or_default(),
+        )
+    })
+    .await
 }
 
 #[tauri::command]

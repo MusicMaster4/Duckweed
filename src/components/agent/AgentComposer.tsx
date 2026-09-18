@@ -262,8 +262,16 @@ export function AgentComposer({
     : null;
   const paintedTokens = useMemo(() => highlightAgentComposer(value), [value]);
   const showPaintedText = paintedTokens.some((token) => token.kind !== "plain");
+  // Workspace results must not wait for the remote app inventory. Keep actual
+  // app matches first, but let files replace an empty/loading app picker.
+  const availableExtensionMenu =
+    providerExtensionMenu?.prefix === "@" &&
+    !providerExtensionMenu.rows.length &&
+    mention && mentionKey !== dismissedMention && fileRows.length
+      ? null
+      : providerExtensionMenu;
   const menu: Menu | null =
-    (extensionKey !== dismissedMention ? providerExtensionMenu : null) ??
+    (extensionKey !== dismissedMention ? availableExtensionMenu : null) ??
     (mention && mentionKey !== dismissedMention && fileRows.length
       ? { kind: "files", mention, rows: fileRows }
       : commandMenu);
@@ -280,6 +288,7 @@ export function AgentComposer({
       !providerExtensionMenu ||
       session.status === "starting" ||
       loaded ||
+      session.extensionsError ||
       session.extensionsLoading
     ) {
       return;
@@ -292,6 +301,7 @@ export function AgentComposer({
   }, [
     providerExtensionMenu?.prefix,
     session.extensionsLoaded,
+    session.extensionsError,
     session.extensionsLoading,
     session.localSkillsLoaded,
     session.status,
@@ -418,6 +428,10 @@ export function AgentComposer({
     agents.setDraft(session.termId, "");
     agents.setDraftImages(session.termId, []);
   };
+
+  useEffect(() => {
+    if (active) void loadWorkspaceIndex(session.cwd);
+  }, [active, session.cwd]);
 
   useEffect(() => {
     if (!mention || mentionKey === dismissedMention) {

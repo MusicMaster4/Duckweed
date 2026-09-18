@@ -13,6 +13,7 @@ const stubWindow = {
   },
   cancelAnimationFrame: () => {},
   setTimeout: globalThis.setTimeout.bind(globalThis),
+  clearTimeout: globalThis.clearTimeout.bind(globalThis),
   localStorage: {
     getItem: (key: string) => store.get(key) ?? null,
     setItem: (key: string, value: string) => {
@@ -156,6 +157,31 @@ async function codexHandshake(sessionId = "01900000-0000-7000-8000-000000000001"
 const session = await import("./session");
 
 describe("Custom agent UI sessions", () => {
+  test("restores prompt navigation from resumed Codex turns and replaces the previous conversation", async () => {
+    const termId = "resumed-prompt-history";
+    await session.start(termId, codexLaunch, "H:/project");
+    await codexHandshake();
+    for (const [threadId, prompts] of [
+      ["old-one", ["First command", "Second command", "Second command"]],
+      ["old-two", ["Different conversation"]],
+    ] as const) {
+      const resuming = session.resume(termId, threadId);
+      await flush();
+      const request = sent.map(rpc).findLast((message) => message.method === "thread/resume");
+      feed({ id: request?.id, result: { thread: {
+        id: threadId,
+        turns: prompts.map((text, index) => ({
+          id: `turn-${index}`, status: "completed",
+          items: [{ type: "userMessage", id: `user-${index}`, content: [{ type: "text", text }] }],
+        })),
+      } } });
+      await resuming;
+      expect(session.localPromptHistory(termId)).toEqual([...new Set(prompts)]);
+    }
+    session.submit(termId, "New follow-up");
+    expect(session.localPromptHistory(termId)).toEqual(["Different conversation", "New follow-up"]);
+  });
+
   beforeEach(() => {
     sent.length = 0;
     spawn = null;
@@ -166,6 +192,57 @@ describe("Custom agent UI sessions", () => {
   afterEach(() => {
     session.stopAll();
     session.setFollowupMode("queue");
+  });
+
+  test.each(["steer", "queue"] as const)("preserves Codex background activity after an async question in %s mode", async (mode) => {
+    const termId = `codex-async-${mode}`;
+    const threadId = "async-thread";
+    expect(await session.start(termId, codexLaunch, "H:/project")).toBeNull();
+    await codexHandshake(threadId);
+    session.setFollowupMode(mode);
+    session.submit(termId, "Update the website");
+    await flush();
+    const start = sent.map(rpc).find((message) => message.method === "turn/start");
+    feed({ id: start?.id, result: { turn: { id: "background" } } });
+    feed({ method: "turn/started", params: { threadId, turn: { id: "background", status: "inProgress" } } });
+    feed({
+      method: "item/completed",
+      params: { threadId, turnId: "background", item: {
+        id: "question", type: "agentMessage", phase: "final_answer", delivery: "async",
+        text: "Where are the reference images?", questions: [{ title: "Where are the reference images?" }],
+      } },
+    });
+    // Reproduce a human reply after the production completion quiet window.
+    await new Promise((resolve) => setTimeout(resolve, 850));
+    expect(session.get(termId)?.status).toBe("working");
+    session.submit(termId, "The images are in Assets");
+    await flush();
+    expect(sent.map(rpc).filter((message) => message.method === "turn/start")).toHaveLength(1);
+    if (mode === "steer") {
+      const steer = sent.map(rpc).find((message) => message.method === "turn/steer");
+      expect(steer).toMatchObject({ params: { threadId, expectedTurnId: "background" } });
+      feed({ id: steer?.id, result: { turnId: "background" } });
+      await flush();
+      expect(session.get(termId)?.pending).toHaveLength(0);
+    } else {
+      expect(session.get(termId)?.pending).toHaveLength(1);
+    }
+    feed({ method: "item/started", params: { threadId, turnId: "background", item: {
+      id: "inspect", type: "commandExecution", command: "rg --files Assets", status: "inProgress",
+    } } });
+    feed({ method: "item/agentMessage/delta", params: {
+      threadId, turnId: "background", itemId: "progress", delta: "Inspecting the images.",
+    } });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(session.get(termId)?.status).toBe("working");
+    expect(session.get(termId)?.items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "tool", command: "rg --files Assets", status: "running" }),
+      expect.objectContaining({ kind: "assistant", text: "Inspecting the images." }),
+    ]));
+    feed({ method: "turn/completed", params: { threadId, turn: { id: "background", status: "completed" } } });
+    await new Promise((resolve) => setTimeout(resolve, 850));
+    expect(session.get(termId)?.status).toBe(mode === "queue" ? "working" : "idle");
+    expect(sent.map(rpc).filter((message) => message.method === "turn/start")).toHaveLength(mode === "queue" ? 2 : 1);
   });
 
   test("does not overlay GROK_CONFIG follow_up_behavior when spawning Grok", async () => {

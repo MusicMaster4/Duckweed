@@ -100,6 +100,21 @@ function escapeHtmlText(value: string): string {
 }
 
 describe("official agent presentation", () => {
+  test("keeps OpenCode answer modules live until the response settles", () => {
+    for (const streaming of [true, false]) {
+      const items: AgentItem[] = [{
+        id: "answer", at: 1, kind: "assistant", text: "The response is growing.", streaming,
+      }];
+      const session = activitySession("opencode", items);
+      const render = () => renderToStaticMarkup(<OpenCodeExperience session={session} items={items} />);
+      const liveAnswer = /<section class="oc-mod"[^>]*data-live="true"/;
+      if (streaming) expect(render()).toMatch(liveAnswer);
+      else expect(render()).not.toMatch(liveAnswer);
+      session.status = "idle";
+      if (!streaming) expect(render()).not.toContain('data-live="true"');
+    }
+  });
+
   beforeEach(() => {
     resetPreparingMessageAssignmentsForTests();
     // Pin the rare Thinking-label swap off so presentation tests stay stable.
@@ -564,6 +579,22 @@ describe("official agent presentation", () => {
       }
     });
   }
+
+  test("marks a live Codex thinking cluster so WebView2 cannot skip its paint", () => {
+    const html = renderAgentActivity("codex", [
+      { kind: "user", id: "user", at: 1, text: "Inspect" },
+      {
+        kind: "thinking",
+        id: "thinking-live",
+        at: 2,
+        text: "Checking the first path.",
+        streaming: true,
+      },
+    ]);
+
+    expect(html).toContain("agent-activity-cluster is-live");
+    expect(html).toContain("Checking the first path.");
+  });
 
   test("keeps the thinking animation active through running and completed tool calls", () => {
     for (const toolStatus of ["running", "done"] as const) {

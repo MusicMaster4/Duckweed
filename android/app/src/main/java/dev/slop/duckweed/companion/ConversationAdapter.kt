@@ -4,6 +4,8 @@ import android.content.res.ColorStateList
 import android.graphics.Typeface
 import android.text.Spannable
 import android.text.SpannableStringBuilder
+import android.text.Spanned
+import android.util.LruCache
 import android.text.format.DateUtils
 import android.text.style.ForegroundColorSpan
 import android.view.Gravity
@@ -15,31 +17,29 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.core.content.ContextCompat
 import androidx.recyclerview.widget.DiffUtil
+import androidx.recyclerview.widget.ListAdapter
 import androidx.recyclerview.widget.RecyclerView
 import io.noties.markwon.Markwon
 
 class ConversationAdapter(
     private val onRetry: (CompletionRecord) -> Unit,
     private val onPending: () -> Unit,
-) : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
-    private var rows: List<ConversationTimelineItem> = emptyList()
+) : ListAdapter<ConversationTimelineItem, RecyclerView.ViewHolder>(object : DiffUtil.ItemCallback<ConversationTimelineItem>() {
+    override fun areItemsTheSame(old: ConversationTimelineItem, new: ConversationTimelineItem) = old.id == new.id
+    override fun areContentsTheSame(old: ConversationTimelineItem, new: ConversationTimelineItem) = old == new
+}) {
+    private val rows get() = currentList
     private var markdown: Markwon? = null
+    private val renderedMarkdown = object : LruCache<String, Spanned>(256_000) {
+        override fun sizeOf(key: String, value: Spanned) = key.length + value.length
+    }
     private val expandedActivity = mutableSetOf<String>()
 
-    fun submit(next: List<ConversationTimelineItem>) {
-        if (next == rows) return
-        val previous = rows
-        val diff = DiffUtil.calculateDiff(object : DiffUtil.Callback() {
-            override fun getOldListSize(): Int = previous.size
-            override fun getNewListSize(): Int = next.size
-            override fun areItemsTheSame(oldItemPosition: Int, newItemPosition: Int): Boolean =
-                previous[oldItemPosition].id == next[newItemPosition].id
-            override fun areContentsTheSame(oldItemPosition: Int, newItemPosition: Int): Boolean =
-                previous[oldItemPosition] == next[newItemPosition]
-        })
-        rows = next
-        expandedActivity.retainAll(next.mapTo(mutableSetOf()) { it.id })
-        diff.dispatchUpdatesTo(this)
+    fun submit(next: List<ConversationTimelineItem>, committed: () -> Unit = {}) {
+        submitList(next) {
+            expandedActivity.retainAll(currentList.mapTo(mutableSetOf()) { it.id })
+            committed()
+        }
     }
 
     override fun getItemViewType(position: Int): Int = when (rows[position]) {
@@ -100,28 +100,36 @@ class ConversationAdapter(
             author.setTextColor(
                 ContextCompat.getColor(
                     itemView.context,
-                    if (outgoing) R.color.duckweed_text_dim else R.color.duckweed_accent,
+                    if (outgoing) R.color.duckweed_text else R.color.duckweed_accent,
                 ),
             )
-            markdown.setMarkdown(
-                text,
-                message.response
-                    ?: "This terminal session did not expose a structured final response.",
-            )
+            val body = message.response
+                ?: "This terminal session did not expose a structured final response."
+            if (outgoing) {
+                text.text = body
+            } else {
+                val rendered = renderedMarkdown.get(body) ?: markdown.toMarkdown(body).also {
+                    renderedMarkdown.put(body, it)
+                }
+                markdown.setParsedMarkdown(text, rendered)
+            }
             val messageAttachment = message.attachments.firstOrNull()
             text.visibility = if (message.response.isNullOrBlank() && messageAttachment != null) View.GONE else View.VISIBLE
             attachment.visibility = if (messageAttachment == null) View.GONE else View.VISIBLE
             attachment.text = messageAttachment?.name
             time.text = relativeTime(message.sentAt)
+            time.setTextColor(ContextCompat.getColor(
+                itemView.context, if (outgoing) R.color.duckweed_text else R.color.duckweed_text_faint,
+            ))
             val deliveryState = if (outgoing) message.deliveryState else null
             val pending = deliveryState == "sending" ||
                 deliveryState == "sent" || deliveryState == "received"
-            bubble.alpha = if (pending) PENDING_ALPHA else 1f
+            bubble.alpha = 1f
             delivery.visibility = if (deliveryState == null) View.GONE else View.VISIBLE
             delivery.text = when (deliveryState) {
                 "sending" -> "Sending securely..."
-                "sent" -> "Waiting for desktop..."
-                "received" -> "Desktop is updating..."
+                "sent" -> "Sent. Waiting for desktop..."
+                "received" -> "Received by desktop"
                 "delivered" -> "Updated on desktop"
                 "failed" -> "Not sent. Tap to retry"
                 else -> deliveryState
@@ -129,7 +137,11 @@ class ConversationAdapter(
             delivery.setTextColor(
                 ContextCompat.getColor(
                     itemView.context,
-                    if (deliveryState == "failed") R.color.duckweed_error else R.color.duckweed_text_faint,
+                    when {
+                        deliveryState == "failed" -> R.color.duckweed_error
+                        outgoing -> R.color.duckweed_text
+                        else -> R.color.duckweed_text_faint
+                    },
                 ),
             )
             val retryable = outgoing && deliveryState == "failed"
@@ -137,6 +149,7 @@ class ConversationAdapter(
             bubble.isFocusable = retryable || pending
             bubble.contentDescription = when {
                 retryable -> "Message not sent. Double tap to retry."
+                deliveryState == "sending" -> "Sending message securely."
                 pending -> "Message sent. Waiting for the desktop to update."
                 else -> null
             }
@@ -332,6 +345,5 @@ class ConversationAdapter(
         private const val VIEW_MESSAGE = 0
         private const val VIEW_ACTIVITY = 1
         private const val EXPANDED_DIFF_LINES = 80
-        private const val PENDING_ALPHA = 0.48f
     }
 }

@@ -50,6 +50,31 @@ describe("agent access control", () => {
   });
 });
 
+describe("Grok effort picker", () => {
+  test("labels xhigh as XHigh for Grok 4.6", () => {
+    const grok = session("opencode");
+    grok.agent = "grok";
+    grok.label = "Grok Build";
+    grok.mark = "GR";
+    grok.model = "grok-4.6";
+    grok.effort = "xhigh";
+    grok.models = [
+      {
+        id: "grok-4.6",
+        label: "Grok 4.6",
+        efforts: ["xhigh", "high", "medium", "low"],
+      },
+    ];
+
+    const html = renderToStaticMarkup(
+      <AgentControls session={grok} onSelect={() => {}} />,
+    );
+
+    expect(html).toContain("Grok 4.6");
+    expect(html).toContain("XHigh");
+  });
+});
+
 describe("next-message agent controls", () => {
   test("shows a staged model without replacing the active model", () => {
     const staged = session("opencode");

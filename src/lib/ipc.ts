@@ -84,6 +84,7 @@ export interface MobileTerminalSnapshot {
   unreadOnDesktop: boolean;
   /** Current terminal completion identity, used to reject stale read receipts. */
   completionSeq: number;
+  readCompletionSeq?: number | null;
   /** Slash commands currently available in this agent session. */
   commands: MobileSlashCommandSnapshot[];
   /** Recent reasoning, plan, and tool steps shown inline with the conversation. */
@@ -358,8 +359,8 @@ export const portClose = (pid: number, port: number) =>
   invoke<void>("port_close", { pid, port });
 
 /** Expose a local HTTP listener through a temporary public tunnel. */
-export const portForward = (pid: number, port: number) =>
-  invoke<PortForward>("port_forward", { pid, port });
+export const portForward = (pid: number, port: number, ownerIds: string[] = []) =>
+  invoke<PortForward>("port_forward", { pid, port, ownerIds });
 
 export const portForwardStop = (id: string) =>
   invoke<void>("port_forward_stop", { id });

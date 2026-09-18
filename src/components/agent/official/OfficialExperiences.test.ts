@@ -1,6 +1,13 @@
 import { describe, expect, test } from "bun:test";
 
 describe("official experience styles", () => {
+  test("keeps live OpenCode modules measurable for automatic scrolling", async () => {
+    const css = await Bun.file(`${import.meta.dir}/../provider/ProviderExperience.css`).text();
+    const live = css.match(/\.oc-lanes > \.oc-mod\[data-live\]\s*\{([^}]*)\}/);
+    expect(live?.[1]).toContain("content-visibility: visible");
+    expect(live?.[1]).toContain("contain-intrinsic-size: unset");
+  });
+
   test("leaves the transcript trailing gutter to the shared scroll surface", async () => {
     const officialCss = await Bun.file(`${import.meta.dir}/OfficialExperiences.css`).text();
     const providerCss = await Bun.file(`${import.meta.dir}/../provider/ProviderExperience.css`).text();
@@ -17,6 +24,20 @@ describe("official experience styles", () => {
     );
 
     expect(runningMarker?.[1]).toContain("overflow: visible");
+  });
+
+  test("does not skip paint for a live Thinking cluster", async () => {
+    const css = await Bun.file(`${import.meta.dir}/OfficialExperiences.css`).text();
+    const skipped = css.match(
+      /\.official-transcript > \.agent-activity-cluster\s*\{([^}]*)\}/,
+    );
+    const live = css.match(
+      /\.official-transcript > \.agent-activity-cluster\.is-live[\s\S]*?\{([^}]*)\}/,
+    );
+
+    expect(skipped?.[1]).toContain("content-visibility: auto");
+    expect(live?.[1]).toContain("content-visibility: visible");
+    expect(live?.[1]).not.toContain("content-visibility: auto");
   });
 
   test("centers pending plan step numbers on their ink box, not the em-square", async () => {

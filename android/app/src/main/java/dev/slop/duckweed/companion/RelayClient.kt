@@ -9,6 +9,8 @@ import java.net.URL
 import java.security.SecureRandom
 import java.util.UUID
 
+class RelayHttpException(val status: Int, message: String) : IOException(message)
+
 object RelayClient {
     private val tokenPattern = Regex("^[A-Za-z0-9_-]{32,256}$")
 
@@ -345,7 +347,7 @@ object RelayClient {
             val content = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
             if (status !in 200..299) {
                 val detail = runCatching { JSONObject(content).optString("error") }.getOrNull()
-                throw IOException(detail?.takeIf { it.isNotBlank() } ?: "Relay returned HTTP $status")
+                throw RelayHttpException(status, detail?.takeIf { it.isNotBlank() } ?: "Relay returned HTTP $status")
             }
             return if (content.isBlank()) JSONObject() else JSONObject(content)
         } finally {

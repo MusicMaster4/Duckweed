@@ -12,6 +12,7 @@ android {
         applicationId = "dev.slop.duckweed.companion"
         minSdk = 23
         targetSdk = 36
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         versionCode = (providers.gradleProperty("duckweedVersionCode").orNull ?: "1").toInt()
         versionName = providers.gradleProperty("duckweedVersionName").orNull ?: "0.1.0"
         val updateChannel = providers.gradleProperty("duckweedChannel").orNull ?: "stable"
@@ -87,4 +88,7 @@ dependencies {
     implementation("io.noties.markwon:core:4.6.2")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20250517")
+    androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation("androidx.test:core:1.6.1")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
 }

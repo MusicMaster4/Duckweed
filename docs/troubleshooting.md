@@ -80,6 +80,29 @@ Install the other channel manually if you want to switch. You can also start a
 manual check from the version chip or from **Check for updates** in the command
 palette.
 
+## A shared app opens but its backend does not work
+
+Run the frontend and backend in panes of the same Duckweed tab, then share the
+frontend port. Duckweed routes browser `fetch`, XMLHttpRequest, WebSocket,
+EventSource and beacon calls to `localhost`, `127.0.0.1` and `::1` through the
+public link. Backend ports are checked against the tab's live process owners.
+A backend started later in an existing pane is also available; if you add a new
+pane after sharing, stop sharing and create the link again.
+
+Server-side calls from Next.js to Python already run on the PC and keep their
+normal local addresses. Browser-side calls are adapted by a script inserted
+before the app's scripts. HTML must allow scripts and honor `Accept-Encoding:
+identity` for this adaptation. Calls made inside workers, hardcoded local asset
+URLs in markup, custom hostnames and HTTPS-only local backends need the app's
+own same-origin reverse proxy configuration. OAuth providers may also require
+the temporary public callback URL in their settings.
+
+If the link itself fails, create a fresh share and keep Duckweed and the local
+servers running. Duckweed checks an HTTP response through the public tunnel
+before displaying a link. A network change or provider outage can still break
+an existing tunnel. A 403 on `/.duckweed/port/` means that port is outside the
+shared tab; a 502 means the local server is unavailable.
+
 ## Still stuck?
 
 Open a [bug report](https://github.com/MusicMaster4/Duckweed/issues/new?template=bug_report.yml)

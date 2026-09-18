@@ -721,7 +721,13 @@ export function AgentSurface({
             </span>
           </Tooltip>
         )}
-        <AgentGoalIndicator goal={session.goal} />
+        <AgentGoalIndicator
+          goal={session.goal}
+          disabled={ended || session.status === "starting" || session.loadingHistory}
+          onAction={session.agent === "codex"
+            ? (action) => agents.controlGoal(termId, action)
+            : undefined}
+        />
         <button
           ref={runtimePanelButtonRef}
           type="button"
