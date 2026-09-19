@@ -731,6 +731,8 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
     ctx: AdapterContext,
   ): boolean {
     if (method !== "fs/read_text_file" && method !== "fs/write_text_file") return false;
+    // Grok must retain its native filesystem tools, including binary reads.
+    if (agent === "grok") return false;
     const requested = asString(params.path);
     const path = requested ? resolveClientPath(ctx.cwd, requested) : null;
     if (!path) {
@@ -786,10 +788,15 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
       const initialized = await request(ctx, "initialize", {
         protocolVersion: PROTOCOL_VERSION,
         clientCapabilities: {
-          // ACP file services stay confined to the launched workspace. This
-          // lets remote agents request context without exposing arbitrary
-          // paths from the user's machine.
-          fs: { readTextFile: Boolean(ctx.files), writeTextFile: Boolean(ctx.files) },
+          // Grok routes read_file through this text-only service when enabled,
+          // losing native image handling, large-file reads, and access to its
+          // own skills and temporary attachments outside the workspace. Keep
+          // both file operations native, under Grok's permission policy. Other
+          // ACP agents retain the workspace-scoped client file service.
+          fs: {
+            readTextFile: agent !== "grok" && Boolean(ctx.files),
+            writeTextFile: agent !== "grok" && Boolean(ctx.files),
+          },
           terminal: false,
         },
         clientInfo: { name: "duckweed", title: "Duckweed", version: "0.1.0" },
