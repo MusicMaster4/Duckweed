@@ -133,7 +133,7 @@ import {
   type ProcessState,
 } from "./lib/processActivity";
 import { setCompletionTaskbarBadge } from "./lib/taskbarCompletion";
-import type { AgentTarget, ScheduledSend, SubmitDelivery } from "./lib/scheduledSend";
+import type { AgentTarget, ScheduledSend, SubmitDelivery, TimedSend } from "./lib/scheduledSend";
 import { mobileCompletionDelay } from "./lib/mobileCompletion";
 import {
   fitMobileWorkspaceSnapshot,
@@ -435,6 +435,7 @@ export default function App() {
   const [scheduledSends, setScheduledSends] = useState<Map<string, ScheduledSend>>(
     () => new Map(),
   );
+  const [timedSends, setTimedSends] = useState<Map<string, TimedSend>>(() => new Map());
   const unreadTermIdsRef = useRef(unreadTermIds);
   unreadTermIdsRef.current = unreadTermIds;
   const mobileAlertTermIdsRef = useRef(mobileAlertTermIds);
@@ -479,6 +480,8 @@ export default function App() {
   const lastDesktopInteractionAt = useRef<number | null>(null);
   const scheduledSendsRef = useRef(scheduledSends);
   scheduledSendsRef.current = scheduledSends;
+  const timedSendsRef = useRef(timedSends);
+  timedSendsRef.current = timedSends;
   /** Dirty flag for the lifted file editor (file switches confirm through this). */
   const editorDirtyRef = useRef(false);
   const processState = useRef(new Map<string, ProcessState>());
@@ -833,6 +836,12 @@ export default function App() {
 
   const releaseTerm = useCallback((term: string) => {
     terminals.dispose(term);
+    if (timedSendsRef.current.has(term)) {
+      const nextTimedSends = new Map(timedSendsRef.current);
+      nextTimedSends.delete(term);
+      timedSendsRef.current = nextTimedSends;
+      setTimedSends(nextTimedSends);
+    }
     spawnOpts.current.delete(term);
     processState.current.delete(term);
     const previousSchedules = scheduledSendsRef.current;
@@ -885,6 +894,22 @@ export default function App() {
     setScheduledSends(next);
   }, []);
 
+  const scheduleTimedSend = useCallback((termId: string, send: TimedSend) => {
+    if (!send.text.trim() || !Number.isFinite(send.at) || send.at <= Date.now()) return;
+    const next = new Map(timedSendsRef.current);
+    next.set(termId, send);
+    timedSendsRef.current = next;
+    setTimedSends(next);
+  }, []);
+
+  const cancelTimedSend = useCallback((termId: string) => {
+    if (!timedSendsRef.current.has(termId)) return;
+    const next = new Map(timedSendsRef.current);
+    next.delete(termId);
+    timedSendsRef.current = next;
+    setTimedSends(next);
+  }, []);
+
   const sendDraftNow = useCallback(
     (
       termId: string,
@@ -913,6 +938,56 @@ export default function App() {
     },
     [],
   );
+
+  // A timed message is separate from the visible composer draft. Restore that
+  // draft after using the same submit route as a manual Enter.
+  const sendTimedMessage = useCallback((termId: string, text: string) => {
+    const agent = agentSessions.get(termId);
+    if (agent) {
+      if (agent.status === "exited" || agent.status === "error") return;
+      const draft = agentSessions.getDraft(termId);
+      const images = agentSessions.getDraftImages(termId);
+      agentSessions.submit(termId, text);
+      agentSessions.setDraft(termId, draft);
+      agentSessions.setDraftImages(termId, images);
+      return;
+    }
+    const meta = terminals.getMeta(termId);
+    if (!meta || meta.exited) return;
+    const draft = terminals.getDraft(termId);
+    if (meta.agent || meta.busy) terminals.writeRaw(termId, `${text}\r`);
+    else terminals.submitCommand(termId, text);
+    terminals.setDraft(termId, draft);
+  }, []);
+
+  useEffect(() => {
+    if (timedSends.size === 0) return;
+    let timer = 0;
+    const checkDue = () => {
+      const due = [...timedSendsRef.current].filter(([, send]) => send.at <= Date.now());
+      if (due.length > 0) {
+        const next = new Map(timedSendsRef.current);
+        for (const [termId] of due) next.delete(termId);
+        timedSendsRef.current = next;
+        setTimedSends(next);
+        for (const [termId, send] of due) sendTimedMessage(termId, send.text);
+        return;
+      }
+      const nextAt = Math.min(...[...timedSendsRef.current.values()].map((send) => send.at));
+      window.clearTimeout(timer);
+      if (Number.isFinite(nextAt)) {
+        timer = window.setTimeout(checkDue, Math.max(0, Math.min(nextAt - Date.now(), 30_000)));
+      }
+    };
+    checkDue();
+    window.addEventListener("focus", checkDue);
+    document.addEventListener("visibilitychange", checkDue);
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener("focus", checkDue);
+      document.removeEventListener("visibilitychange", checkDue);
+    };
+  }, [timedSends, sendTimedMessage]);
 
   const completeScheduledSendsForTarget = useCallback(
     (targetTermId: string) => {
@@ -3791,8 +3866,11 @@ export default function App() {
       highlightedAgentTermId,
       onAgentTargetHover: setHighlightedAgentTermId,
       scheduledSends,
+      timedSends,
       onScheduleSend: scheduleSend,
       onCancelSchedule: cancelSchedule,
+      onScheduleTimedSend: scheduleTimedSend,
+      onCancelTimedSend: cancelTimedSend,
       onBeforeSubmit: beforeScheduledSubmit,
       onStartDrag,
       onResize: resizeSplitSizes,
@@ -3807,6 +3885,7 @@ export default function App() {
       beforeScheduledSubmit,
       browseActiveProject,
       cancelSchedule,
+      cancelTimedSend,
       closePaneById,
       completionFlashes,
       finishPaneMotion,
@@ -3820,7 +3899,9 @@ export default function App() {
       recents,
       resizeSplitSizes,
       scheduleSend,
+      scheduleTimedSend,
       scheduledSends,
+      timedSends,
       spawnFor,
       splitAt,
       toggleZoom,

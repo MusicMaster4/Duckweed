@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 
-import { BarList, Legend, Meter, StackedColumns, StatTile, TableView } from "./UsageCharts";
+import { BarList, Legend, StackedColumns, StatTile, TableView } from "./UsageCharts";
+import { QuotaCards } from "./QuotaCards";
 import type { BarRow, Column, Series } from "./UsageCharts";
 import {
   RANGES,
@@ -9,19 +10,15 @@ import {
   agentColor,
   dayFull,
   dayTick,
-  describeForecast,
   formatBytes,
   formatExact,
-  formatQuotaValue,
   formatTokens,
   formatUsd,
   formatUsdAxis,
   cachedUsage,
   loadSettings,
   prefetchUsage,
-  quotaRemaining,
   saveSettings,
-  untilReset,
   type Metric,
   type Snapshot,
   type UsageSettings,
@@ -398,48 +395,7 @@ export function UsagePanel({ openAgentCount }: Props) {
         <h2>Quota management</h2>
         <p className="usage-sub">Live limits reported by each provider.</p>
         {snapshot.quotas.length > 0 ? (
-          <div className="usage-quota-grid">
-            {snapshot.quotas.map((quota) => (
-              <article
-                key={quota.agent}
-                className={`usage-quota ${quota.source === "unavailable" ? "is-unavailable" : ""}`}
-              >
-                <header>
-                  <span className="usage-quota-name">
-                    <i style={{ background: agentColor(quota.agent) }} aria-hidden="true" />
-                    {quota.label}
-                  </span>
-                  {quota.plan && (
-                    <span className="usage-quota-plan" title={`Plan: ${quota.plan}`}>
-                      {quota.plan}
-                    </span>
-                  )}
-                </header>
-                {quota.limits.map((limit) => {
-                  const remaining = quotaRemaining(limit);
-                  const forecast = describeForecast(limit, now);
-                  return (
-                    <div key={limit.id} className="usage-quota-row">
-                      <Meter
-                        label={limit.label}
-                        value={formatQuotaValue(remaining, limit.unit)}
-                        percent={Math.max(0, 100 - limit.percent)}
-                        {...(limit.resets_at
-                          ? { hint: `resets ${untilReset(limit.resets_at, now)}` }
-                          : {})}
-                      />
-                      <p className={`usage-quota-forecast is-${forecast.tone}`}>
-                        <i aria-hidden="true" />
-                        <span>{forecast.text}</span>
-                        {forecast.detail && <small>{forecast.detail}</small>}
-                      </p>
-                    </div>
-                  );
-                })}
-                {quota.message && <p className="usage-quota-message">{quota.message}</p>}
-              </article>
-            ))}
-          </div>
+          <QuotaCards quotas={snapshot.quotas} now={now} />
         ) : (
           <div className="usage-empty">No agent activity in this period.</div>
         )}

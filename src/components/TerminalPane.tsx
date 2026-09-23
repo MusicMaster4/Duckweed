@@ -4,7 +4,7 @@ import { createPortal } from "react-dom";
 import * as bus from "../lib/bus";
 import type { CompletionFlash } from "../lib/completionHighlights";
 import { edgeRadius } from "../lib/layout";
-import type { AgentTarget, ScheduledSend, SubmitDelivery } from "../lib/scheduledSend";
+import type { AgentTarget, ScheduledSend, SubmitDelivery, TimedSend } from "../lib/scheduledSend";
 import type { AgentImageAttachment } from "../lib/agents/types";
 import * as terminals from "../lib/terminals";
 import type { DropZone, LeafNode, ProjectInfo } from "../lib/types";
@@ -17,6 +17,13 @@ import { SearchBar } from "./SearchBar";
 type CopyToast = { x: number; y: number; id: number };
 type TitleMenu = { x: number; y: number };
 type ToolsMenu = { left: number; top: number };
+type ToolsView = "home" | "completion" | "timed";
+
+function localDateTime(timestamp: number): string {
+  const date = new Date(timestamp);
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
 
 interface Props {
   node: LeafNode;
@@ -48,8 +55,11 @@ interface Props {
   agentTargets: readonly AgentTarget[];
   onAgentTargetHover: (termId: string | null) => void;
   scheduledSend: ScheduledSend | null;
+  timedSend: TimedSend | null;
   onScheduleSend: (termId: string, target: AgentTarget) => void;
   onCancelSchedule: (termId: string) => void;
+  onScheduleTimedSend: (termId: string, send: TimedSend) => void;
+  onCancelTimedSend: (termId: string) => void;
   onBeforeSubmit: (
     termId: string,
     text: string,
@@ -90,8 +100,11 @@ export const TerminalPane = memo(function TerminalPane({
   agentTargets,
   onAgentTargetHover,
   scheduledSend,
+  timedSend,
   onScheduleSend,
   onCancelSchedule,
+  onScheduleTimedSend,
+  onCancelTimedSend,
   onBeforeSubmit,
   onDragHandle,
   onBrowseProject,
@@ -106,6 +119,10 @@ export const TerminalPane = memo(function TerminalPane({
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleMenu, setTitleMenu] = useState<TitleMenu | null>(null);
   const [toolsMenu, setToolsMenu] = useState<ToolsMenu | null>(null);
+  const [toolsView, setToolsView] = useState<ToolsView>("home");
+  const [timedMessage, setTimedMessage] = useState("");
+  const [timedAt, setTimedAt] = useState("");
+  const [timedError, setTimedError] = useState("");
 
   useEffect(
     () => () => {
@@ -254,7 +271,7 @@ export const TerminalPane = memo(function TerminalPane({
         blank ? "is-blank" : "",
         unread ? "is-unread" : "",
         agentTargetHighlighted ? "is-agent-target-highlighted" : "",
-        scheduledSend ? "is-waiting" : "",
+        scheduledSend || timedSend ? "is-waiting" : "",
       ]
         .filter(Boolean)
         .join(" ")}
@@ -330,7 +347,7 @@ export const TerminalPane = memo(function TerminalPane({
           <span className="pane-spacer" />
           <button
             type="button"
-            className={`pane-btn pane-tools-btn${scheduledSend ? " is-active" : ""}`}
+            className={`pane-btn pane-tools-btn${scheduledSend || timedSend ? " is-active" : ""}`}
             title="Terminal tools"
             aria-label="Terminal tools"
             aria-haspopup="menu"
@@ -342,9 +359,10 @@ export const TerminalPane = memo(function TerminalPane({
                 return;
               }
               const rect = e.currentTarget.getBoundingClientRect();
+              setToolsView("home");
               setToolsMenu({
-                left: Math.max(8, Math.min(rect.right - 258, window.innerWidth - 266)),
-                top: Math.max(8, Math.min(rect.bottom + 5, window.innerHeight - 300)),
+                left: Math.max(8, Math.min(rect.right - 292, window.innerWidth - 300)),
+                top: Math.max(8, Math.min(rect.bottom + 5, window.innerHeight - 360)),
               });
             }}
           >
@@ -510,59 +528,118 @@ export const TerminalPane = memo(function TerminalPane({
             <div className="menu-backdrop" onPointerDown={() => setToolsMenu(null)} />
             <div
               className="menu pane-tools-menu"
-              role="menu"
+              role={toolsView === "timed" ? "dialog" : "menu"}
+              aria-label={toolsView === "timed" ? "Schedule message" : undefined}
               style={{ left: toolsMenu.left, top: toolsMenu.top }}
             >
-              <div className="menu-section-label">Tools</div>
-              {scheduledSend && (
-                <div className="pane-tools-scheduled" role="status">
-                  <span className="pane-tools-scheduled-mark" aria-hidden="true" />
-                  <span>
-                    Scheduled for <strong>{scheduledSend.targetLabel}</strong>
-                  </span>
-                  <button
-                    type="button"
-                    className="pane-tools-cancel"
-                    onClick={() => {
-                      onCancelSchedule(node.term);
-                      setToolsMenu(null);
-                    }}
-                  >
-                    Cancel
+              {toolsView === "home" ? (
+                <>
+                  <div className="menu-section-label">Tools</div>
+                  {scheduledSend && (
+                    <div className="pane-tools-scheduled" role="status">
+                      <span className="pane-tools-scheduled-mark" aria-hidden="true" />
+                      <span>Send draft when <strong>{scheduledSend.targetLabel}</strong> finishes</span>
+                      <button type="button" className="pane-tools-cancel" onClick={() => onCancelSchedule(node.term)}>Cancel</button>
+                    </div>
+                  )}
+                  {timedSend && (
+                    <div className="pane-tools-scheduled" role="status">
+                      <span className="pane-tools-scheduled-mark" aria-hidden="true" />
+                      <span>Message at <strong>{new Date(timedSend.at).toLocaleString("en-US", { dateStyle: "medium", timeStyle: "short" })}</strong></span>
+                      <button type="button" className="pane-tools-cancel" onClick={() => onCancelTimedSend(node.term)}>Cancel</button>
+                    </div>
+                  )}
+                  <button type="button" role="menuitem" className="menu-item pane-tools-option" onClick={() => setToolsView("completion")}>
+                    <span>Send on agent completion</span>
+                    <span className="menu-hint">Send the current draft when another agent finishes.</span>
                   </button>
-                </div>
-              )}
-              <div className="menu-section-label">Send on agent completion</div>
-              <div className="menu-hint pane-tools-description">
-                Send the current draft after another working agent finishes.
-              </div>
-              {availableAgentTargets.length === 0 ? (
-                <div className="menu-empty">No other agents are working in this tab.</div>
+                  <button type="button" role="menuitem" className="menu-item pane-tools-option" onClick={() => {
+                    setTimedMessage(timedSend?.text ?? "");
+                    setTimedAt(timedSend ? localDateTime(timedSend.at) : localDateTime(Math.ceil((Date.now() + 5 * 60_000) / 60_000) * 60_000));
+                    setTimedError("");
+                    setToolsView("timed");
+                  }}>
+                    <span>Schedule message</span>
+                    <span className="menu-hint">Write a message to send at a chosen time.</span>
+                  </button>
+                </>
+              ) : toolsView === "completion" ? (
+                <>
+                  <button type="button" className="pane-tools-back" onClick={() => setToolsView("home")}>‹ Tools</button>
+                  <div className="menu-section-label">Send on agent completion</div>
+                  <div className="menu-hint pane-tools-description">Send the current draft after another working agent finishes.</div>
+                  {availableAgentTargets.length === 0 ? (
+                    <div className="menu-empty">No other agents are working in this tab.</div>
+                  ) : availableAgentTargets.map((target) => {
+                    const selected = scheduledSend?.targetTermId === target.termId;
+                    return (
+                      <button
+                        key={target.termId}
+                        type="button"
+                        role="menuitemradio"
+                        aria-checked={selected}
+                        className={`menu-item pane-tools-target${selected ? " is-current" : ""}`}
+                        onPointerEnter={() => onAgentTargetHover(target.termId)}
+                        onPointerLeave={() => onAgentTargetHover(null)}
+                        onFocus={() => onAgentTargetHover(target.termId)}
+                        onBlur={() => onAgentTargetHover(null)}
+                        onClick={() => {
+                          onAgentTargetHover(null);
+                          onScheduleSend(node.term, target);
+                          setToolsMenu(null);
+                        }}
+                      >
+                        <span>{target.label}</span>
+                        <span className="menu-hint">{target.detail}</span>
+                      </button>
+                    );
+                  })}
+                </>
               ) : (
-                availableAgentTargets.map((target) => {
-                  const selected = scheduledSend?.targetTermId === target.termId;
-                  return (
+                <>
+                  <button type="button" className="pane-tools-back" onClick={() => setToolsView("home")}>‹ Tools</button>
+                  <div className="menu-section-label">Schedule message</div>
+                  <form noValidate className="pane-tools-form" onSubmit={(event) => {
+                    event.preventDefault();
+                    const at = new Date(timedAt).getTime();
+                    if (!timedMessage.trim()) {
+                      setTimedError("Enter a message to schedule.");
+                      return;
+                    }
+                    if (!Number.isFinite(at) || at <= Date.now()) {
+                      setTimedError("Choose a future date and time.");
+                      return;
+                    }
+                    onScheduleTimedSend(node.term, { text: timedMessage, at });
+                    setToolsMenu(null);
+                  }}>
+                    <label htmlFor={`timed-message-${node.id}`}>Message</label>
+                    <textarea
+                      id={`timed-message-${node.id}`}
+                      autoFocus
+                      rows={4}
+                      value={timedMessage}
+                      onChange={(event) => { setTimedMessage(event.target.value); setTimedError(""); }}
+                      placeholder="Type a message..."
+                    />
+                    <label htmlFor={`timed-at-${node.id}`}>Send at</label>
+                    <input
+                      id={`timed-at-${node.id}`}
+                      type="datetime-local"
+                      value={timedAt}
+                      min={localDateTime(Date.now())}
+                      onChange={(event) => { setTimedAt(event.target.value); setTimedError(""); }}
+                    />
+                    {timedError && <div className="pane-tools-form-error" role="alert">{timedError}</div>}
+                    <div className="pane-tools-form-hint">Uses your local time. Duckweed must stay open.</div>
                     <button
-                      key={target.termId}
-                      type="button"
-                      role="menuitemradio"
-                      aria-checked={selected}
-                      className={`menu-item pane-tools-target${selected ? " is-current" : ""}`}
-                      onPointerEnter={() => onAgentTargetHover(target.termId)}
-                      onPointerLeave={() => onAgentTargetHover(null)}
-                      onFocus={() => onAgentTargetHover(target.termId)}
-                      onBlur={() => onAgentTargetHover(null)}
-                      onClick={() => {
-                        onAgentTargetHover(null);
-                        onScheduleSend(node.term, target);
-                        setToolsMenu(null);
-                      }}
+                      type="submit"
+                      className="pane-tools-submit"
                     >
-                      <span>{target.label}</span>
-                      <span className="menu-hint">{target.detail}</span>
+                      {timedSend ? "Update schedule" : "Schedule message"}
                     </button>
-                  );
-                })
+                  </form>
+                </>
               )}
             </div>
           </>,

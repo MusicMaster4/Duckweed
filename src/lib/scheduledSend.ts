@@ -11,4 +11,10 @@ export interface ScheduledSend {
   targetLabel: string;
 }
 
+/** A message captured now and submitted to its terminal at a local time. */
+export interface TimedSend {
+  text: string;
+  at: number;
+}
+
 export type SubmitDelivery = "default" | "alternate";
