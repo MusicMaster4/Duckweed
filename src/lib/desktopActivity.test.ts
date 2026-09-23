@@ -3,6 +3,27 @@ import { describe, expect, test } from "bun:test";
 import { DESKTOP_ACTIVITY_EVENTS, observeDesktopActivity } from "./desktopActivity";
 
 describe("desktop activity observation", () => {
+  test("automatic field focus does not cancel a pending mobile alert", () => {
+    const target = new EventTarget();
+    const field = new EventTarget();
+    let focused = true;
+    let pending = true;
+    const stop = observeDesktopActivity(target, () => focused, () => { pending = false; });
+
+    // Model window's capture listener receiving focus targeted at a child.
+    for (const active of [true, false]) {
+      focused = active;
+      const event = new Event("focus");
+      Object.defineProperty(event, "target", { value: field });
+      target.dispatchEvent(event);
+      expect(pending).toBe(true);
+    }
+
+    target.dispatchEvent(new Event("focus"));
+    expect(pending).toBe(false);
+    stop();
+  });
+
   test("counts cursor movement and every other supported input while focused", () => {
     const target = new EventTarget();
     const seen: string[] = [];

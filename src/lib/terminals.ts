@@ -176,9 +176,6 @@ interface Session extends TermMeta {
   agentUiRestore: {
     ran: boolean;
     processStartedAt: number | null;
-    completionSeq: number;
-    completionStartedAt: number | null;
-    lastAgentCompletionAt: number;
     /** Raw shell text echoed before Enter was intercepted. */
     rawLaunchText: string | null;
   } | null;
@@ -680,9 +677,6 @@ function startAgentUi(
   session.agentUiRestore = {
     ran: restoreRan,
     processStartedAt: session.processStartedAt,
-    completionSeq: session.completionSeq,
-    completionStartedAt: session.completionStartedAt,
-    lastAgentCompletionAt: session.lastAgentCompletionAt,
     rawLaunchText,
   };
 
@@ -735,10 +729,10 @@ export function closeAgentUi(id: string): void {
   if (restore) {
     session.ran = restore.ran;
     session.processStartedAt = restore.processStartedAt;
-    session.completionSeq = restore.completionSeq;
-    session.completionStartedAt = restore.completionStartedAt;
-    session.lastAgentCompletionAt = restore.lastAgentCompletionAt;
   }
+  // Completion identity belongs to the terminal, across agent launches. The
+  // phone retains its read sequence, so rewinding it would suppress new turns
+  // as already read and let stale read receipts acknowledge later responses.
   notifySession(id);
   focus(id);
 }

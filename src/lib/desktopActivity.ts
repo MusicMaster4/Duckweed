@@ -23,9 +23,10 @@ export const DESKTOP_ACTIVITY_EVENTS = [
 /**
  * Observe meaningful local input while the app window has focus.
  *
- * The focus event itself always counts. Other events are ignored while the
- * native window is inactive so background hover traffic cannot suppress every
- * delayed mobile notification.
+ * Only focus on the window itself counts. Captured focus events from fields
+ * can be caused by automatic composer or approval-card focus without input.
+ * Other events are ignored while the native window is inactive so background
+ * hover traffic cannot suppress every delayed mobile notification.
  */
 export function observeDesktopActivity(
   target: EventTarget,
@@ -33,7 +34,11 @@ export function observeDesktopActivity(
   onActivity: () => void,
 ): () => void {
   const recordActivity: EventListener = (event) => {
-    if (event.type === "focus" || hasFocus()) onActivity();
+    if (event.type === "focus") {
+      if (event.target === target) onActivity();
+      return;
+    }
+    if (hasFocus()) onActivity();
   };
   const options: AddEventListenerOptions = { capture: true, passive: true };
 
