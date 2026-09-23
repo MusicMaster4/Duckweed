@@ -1,4 +1,4 @@
-import { mergeCommands } from "./slashCatalog";
+import { mergeCommands, refreshClaudeModelLabels } from "./slashCatalog";
 import type {
   AgentAccessMode,
   AgentFileChange,
@@ -402,7 +402,11 @@ function reduceEvent(state: AgentSessionState, event: AgentEvent): AgentSessionS
         commands: event.commands ? mergeCommands(state.commands, event.commands) : state.commands,
         // A non-empty list wins; adapters re-emit the full set whenever it
         // changes rather than patching individual rows.
-        models: event.models && event.models.length ? event.models : state.models,
+        models: event.models && event.models.length
+          ? event.models
+          : state.agent === "claude" && state.program !== "claudex" && event.model
+            ? refreshClaudeModelLabels(state.models, event.model)
+            : state.models,
         capabilities: event.capabilities ?? state.capabilities,
       };
 

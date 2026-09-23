@@ -593,9 +593,14 @@ export function shortModelLabel(model: string): string {
   const base = slash >= 0 ? model.slice(slash + 1) : model;
   // Claude-style ids: `claude-opus-5[1m]` / `opus[1m]` → readable short form.
   const lower = base.toLowerCase();
-  if (lower.includes("fable")) return lower.includes("1m") ? "Fable 5 (1M)" : "Fable 5";
+  const versioned = /^claude-(fable|opus|sonnet|haiku)-(\d+(?:[.-]\d+)?)(?=-|\[|$)/.exec(lower);
+  if (versioned) {
+    const name = versioned[1][0].toUpperCase() + versioned[1].slice(1);
+    return `${name} ${versioned[2].replace("-", ".")}${lower.includes("[1m]") ? " (1M)" : ""}`;
+  }
+  if (lower.includes("fable")) return lower.includes("1m") ? "Fable 5.1 (1M)" : "Fable 5.1";
   if (lower.includes("opus") && !lower.includes("plan")) {
-    return lower.includes("1m") ? "Opus 5 (1M)" : "Opus 5";
+    return lower.includes("1m") ? "Opus 5.5 (1M)" : "Opus 5.5";
   }
   if (lower.includes("sonnet")) return lower.includes("1m") ? "Sonnet 5 (1M)" : "Sonnet 5";
   if (lower.includes("haiku")) return "Haiku 4.5";

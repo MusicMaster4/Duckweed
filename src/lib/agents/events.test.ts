@@ -9,6 +9,7 @@ import {
   type TurnAnnounceInput,
   type TurnEndInput,
 } from "./events";
+import { fallbackModels } from "./slashCatalog";
 import { emptyUsage, type AgentSessionState } from "./types";
 
 function blank(): AgentSessionState {
@@ -141,6 +142,17 @@ describe("tool subagent metadata", () => {
         ],
       },
     });
+  });
+});
+
+describe("Claude model inventory", () => {
+  test("updates the picker when init reports a newer model version", () => {
+    const state = blank();
+    state.models = fallbackModels("claude");
+    const updated = applyEvent(state, { type: "session", model: "claude-opus-5-6-20260923[1m]" });
+    expect(updated.model).toBe("claude-opus-5-6-20260923[1m]");
+    expect(updated.models.find((model) => model.id === "opus[1m]")?.label).toBe("Opus 5.6 (1M context)");
+    expect(updated.models.find((model) => model.id === "opus")?.label).toBe("Opus 5.6");
   });
 });
 

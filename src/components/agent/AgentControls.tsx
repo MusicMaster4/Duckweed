@@ -372,7 +372,7 @@ function isCurrentModel(current: string | null, model: AgentModelChoice): boolea
   const label = model.label.toLowerCase();
   if (id === cur || label === cur) return true;
   if (id.endsWith(`/${cur}`) || cur.endsWith(`/${id}`)) return true;
-  // Claude: settings `opus[1m]` vs init `claude-opus-5[1m]` vs picker `opus[1m]`.
+  // Claude: settings `opus[1m]` vs init `claude-opus-5-5[1m]` vs picker `opus[1m]`.
   // Compare family + optional 1m flag only — never substring-match full ids
   // (that would mark opus-4-8 as current for opus-5).
   const familyOf = (value: string): string | null => {
@@ -386,8 +386,8 @@ function isCurrentModel(current: string | null, model: AgentModelChoice): boolea
     const curOneM = cur.includes("1m") || cur.includes("[1m]");
     const idOneM = id.includes("1m") || id.includes("[1m]");
     // Alias `opus` matches any non-1m opus id; `opus[1m]` only the 1m variants.
-    if (id === family || id === `${family}[1m]`) return curOneM === idOneM || id === family;
-    if (cur === family || cur === `${family}[1m]`) return curOneM === idOneM || cur === family;
+    if (id === family || id === `${family}[1m]`) return curOneM === idOneM;
+    if (cur === family || cur === `${family}[1m]`) return curOneM === idOneM;
   }
   return false;
 }

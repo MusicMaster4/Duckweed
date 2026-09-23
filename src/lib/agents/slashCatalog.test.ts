@@ -10,6 +10,7 @@ import {
   INLINE_ARG_COMMANDS,
   isNewChatCommand,
   mergeCommands,
+  refreshClaudeModelLabels,
 } from "./slashCatalog";
 import { effortsFor, shortModelLabel } from "./types";
 
@@ -113,13 +114,24 @@ describe("slashCatalog", () => {
 
   test("claude seeds the real CLI model aliases and effort levels", () => {
     const models = fallbackModels("claude");
-    expect(models.map((model) => model.id)).toContain("opus[1m]");
-    expect(models.map((model) => model.id)).toContain("fable");
-    expect(models.map((model) => model.id)).toContain("default");
+    expect(models.map((model) => model.id)).toEqual([
+      "default", "opus", "fable", "sonnet", "haiku", "opus[1m]",
+    ]);
+    expect(models.find((model) => model.id === "opus")?.label).toBe("Opus 5.5");
+    expect(models.find((model) => model.id === "opus[1m]")?.label).toBe("Opus 5.5 (1M context)");
+    expect(models.find((model) => model.id === "fable")?.label).toBe("Fable 5.1");
     expect(models[0].efforts).toEqual(
       expect.arrayContaining(["low", "medium", "high", "xhigh", "max", "auto", "ultracode"]),
     );
     expect(fallbackModels("codex")).toEqual([]);
+  });
+
+  test("refreshes Claude aliases from a versioned init id without touching other families", () => {
+    const models = refreshClaudeModelLabels(fallbackModels("claude"), "claude-opus-5-6-20260923[1m]");
+    expect(models.find((model) => model.id === "opus")?.label).toBe("Opus 5.6");
+    expect(models.find((model) => model.id === "opus[1m]")?.label).toBe("Opus 5.6 (1M context)");
+    expect(models.find((model) => model.id === "fable")?.label).toBe("Fable 5.1");
+    expect(refreshClaudeModelLabels(models, "gpt-5.6-sol")).toBe(models);
   });
 
   test("claudex seeds proxy models instead of Anthropic aliases", () => {
@@ -182,6 +194,7 @@ describe("effortsFor / shortModelLabel", () => {
   test("shortens provider-prefixed and Claude model ids", () => {
     expect(shortModelLabel("opencode/claude-haiku-4-5")).toBe("Haiku 4.5");
     expect(shortModelLabel("claude-opus-5[1m]")).toBe("Opus 5 (1M)");
+    expect(shortModelLabel("claude-opus-5-5-20260923[1m]")).toBe("Opus 5.5 (1M)");
     expect(shortModelLabel("grok-4.5")).toBe("Grok 4.5");
     expect(shortModelLabel("grok-4.6")).toBe("Grok 4.6");
     expect(shortModelLabel("gpt-5.6-sol")).toBe("GPT-5.6 Sol");
