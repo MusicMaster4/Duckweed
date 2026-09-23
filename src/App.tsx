@@ -45,8 +45,10 @@ import * as checklist from "./lib/checklist";
 import * as powerWatch from "./lib/powerWatch";
 import type { BusyEntry } from "./lib/powerWatch";
 import { agentHasUnfinishedWork } from "./lib/agents/activity";
+import { AGENTS, AGENT_IDS } from "./lib/agents/catalog";
 import * as agentSessions from "./lib/agents/session";
-import type { AgentImageAttachment } from "./lib/agents/types";
+import type { AgentId, AgentImageAttachment } from "./lib/agents/types";
+import { agentUiPreferences } from "./lib/agents/uiPreferences";
 import { handleUnattendedPermission } from "./lib/agents/autoApproval";
 import {
   confirmCloseRunning,
@@ -320,7 +322,7 @@ function boot() {
     completionHighlights: true,
     completionSoundEnabled: true,
     tintWorkspaceWithTabColor: false,
-    customAgentUi: true,
+    customAgentUi: agentUiPreferences(),
     agentFollowupMode: "queue" as const,
     autoApproveLockedRequests: false,
     inputMode: "editor" as terminals.InputMode,
@@ -2930,9 +2932,9 @@ export default function App() {
     setCompletionSoundEnabled((prev) => !prev);
   }, []);
 
-  const toggleCustomAgentUi = useCallback(() => {
+  const toggleCustomAgentUi = useCallback((agent: AgentId) => {
     setCustomAgentUi((prev) => {
-      const next = !prev;
+      const next = { ...prev, [agent]: !prev[agent] };
       terminals.setAgentUi(next);
       return next;
     });
@@ -3541,14 +3543,17 @@ export default function App() {
         hint: "Ctrl+Shift+H",
         run: toggleHighlight,
       },
-      {
-        id: "view.agentui",
-        group: "View",
-        title: customAgentUi ? "Turn off Custom Agent UI" : "Turn on Custom Agent UI",
-        subtitle: "Choose the interface for new agent launches; current sessions keep running",
-        run: toggleCustomAgentUi,
-      },
     ];
+
+    for (const agent of AGENT_IDS) {
+      actions.push({
+        id: `view.agentui.${agent}`,
+        group: "View",
+        title: `Turn ${customAgentUi[agent] ? "off" : "on"} Custom Agent UI for ${AGENTS[agent].label}`,
+        subtitle: "Applies to new sessions; current sessions keep running",
+        run: () => toggleCustomAgentUi(agent),
+      });
+    }
 
     for (const info of shells) {
       actions.push({

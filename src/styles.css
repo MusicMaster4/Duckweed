@@ -973,6 +973,10 @@ svg.tab-glyph-fill path {
   background: var(--hover);
 }
 
+.settings-agent-option {
+  padding-left: 22px;
+}
+
 .settings-stepper {
   display: grid;
   grid-template-columns: 26px 52px 26px;
