@@ -54,7 +54,6 @@ const CLAUDE_TOKEN_URLS: &[&str] = &[
     "https://console.anthropic.com/v1/oauth/token",
     "https://platform.claude.com/v1/oauth/token",
 ];
-const CLAUDE_CACHE_TTL: Duration = Duration::from_secs(60);
 /// Refresh a little early so a scan mid-expiry still has a usable access token.
 const CLAUDE_ACCESS_SKEW_MS: i64 = 60_000;
 
@@ -95,9 +94,6 @@ const MIN_BURN_PER_HOUR: f64 = 0.25;
 /// pace; across a week you do not, and pretending otherwise is what makes a
 /// weekly forecast say "gone by Tuesday 3am".
 const DUTY_MIN_WINDOW_MS: i64 = 24 * 60 * 60 * 1000;
-/// Avoid starting a second short-lived Grok dashboard when the Usage panel
-/// and its refresh timer land on the same fresh provider reading.
-const GROK_REFRESH_TTL_MS: i64 = 15 * 1000;
 /// The dashboard fetches billing during startup, normally in under a second.
 /// Keep the probe bounded so a broken or offline CLI cannot stall Usage.
 const GROK_REFRESH_TIMEOUT: Duration = Duration::from_secs(3);
@@ -588,15 +584,12 @@ fn reported_for_with_codex_session(
     match agent_id {
         "claude" => claude_quota(home),
         "codex" => codex_quota(home, latest_codex_session),
-        "grok" => grok_quota(home),
+        "grok" => {
+            refresh_grok_credit_snapshot(home);
+            grok_quota(home)
+        }
         _ => None,
     }
-}
-
-struct ClaudeCacheEntry {
-    checked_at: Instant,
-    value: Option<Quota>,
-    last_success: Option<Quota>,
 }
 
 struct ClaudeAccess {
@@ -604,7 +597,7 @@ struct ClaudeAccess {
     subscription_type: Option<String>,
 }
 
-static CLAUDE_CACHE: OnceLock<Mutex<HashMap<PathBuf, ClaudeCacheEntry>>> = OnceLock::new();
+static CLAUDE_LAST_SUCCESS: OnceLock<Mutex<HashMap<PathBuf, Quota>>> = OnceLock::new();
 static TLS_PROVIDER: OnceLock<()> = OnceLock::new();
 /// Serialise credential refresh: Claude rotates refresh tokens, so two scans
 /// racing with the same token would leave only one of them valid.
@@ -620,30 +613,16 @@ static CLAUDE_CREDENTIALS_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 /// opening Claude Code first — the user already signed in there.
 fn claude_quota(home: &Path) -> Option<Quota> {
     let key = home.to_path_buf();
-    let cache = CLAUDE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Ok(guard) = cache.lock() {
-        if let Some(entry) = guard.get(&key) {
-            if entry.checked_at.elapsed() < CLAUDE_CACHE_TTL {
-                return entry.value.clone().or_else(|| entry.last_success.clone());
-            }
-        }
-    }
-
     let fetched = fetch_claude_quota(home);
-    let mut fallback = None;
+    let cache = CLAUDE_LAST_SUCCESS.get_or_init(|| Mutex::new(HashMap::new()));
     if let Ok(mut guard) = cache.lock() {
-        fallback = guard.get(&key).and_then(|entry| entry.last_success.clone());
-        let last_success = fetched.clone().or_else(|| fallback.clone());
-        guard.insert(
-            key,
-            ClaudeCacheEntry {
-                checked_at: Instant::now(),
-                value: fetched.clone(),
-                last_success,
-            },
-        );
+        if let Some(quota) = fetched.as_ref() {
+            guard.insert(key, quota.clone());
+            return Some(quota.clone());
+        }
+        return guard.get(&key).cloned();
     }
-    fetched.or(fallback)
+    fetched
 }
 
 fn fetch_claude_quota(home: &Path) -> Option<Quota> {
@@ -663,8 +642,8 @@ fn fetch_claude_quota(home: &Path) -> Option<Quota> {
         .error_for_status()
         .ok()?;
     let payload: Value = response.json().ok()?;
-    // Stamped here, not at read time: this answer is cached for minutes, and
-    // every later reader must know it describes this moment, not theirs.
+    // Stamp the provider response at fetch time. If a later scan falls back to
+    // this successful result, `observed_at` still shows when it was fetched.
     let fetched_at = Utc::now().timestamp_millis();
     claude_quota_from_payload(&payload, access.subscription_type, fetched_at)
 }
@@ -1195,7 +1174,8 @@ fn grok_quota(home: &Path) -> Option<Quota> {
 }
 
 /// Ask Grok Build to refresh the billing snapshot that its `/usage` view and
-/// Duckweed both read.
+/// Duckweed both read. Each scan that reads Grok's quota calls this before
+/// parsing the snapshot.
 ///
 /// `grok agent stdio`, which powers Duckweed's custom agent UI, stopped
 /// fetching billing data during startup in recent Grok releases. Merely
@@ -1204,7 +1184,7 @@ fn grok_quota(home: &Path) -> Option<Quota> {
 /// starts. It requires a terminal, so run it in a private PTY, wait only until
 /// a newer snapshot appears, and always terminate the helper process. No model
 /// prompt is sent and no inference credits are consumed.
-pub fn refresh_grok_credit_snapshot(home: &Path) {
+fn refresh_grok_credit_snapshot(home: &Path) {
     let log = home.join(".grok/logs/unified.jsonl");
     let auth = home.join(".grok/auth.json");
     if !log.is_file() || !auth.is_file() {
@@ -1214,10 +1194,6 @@ pub fn refresh_grok_credit_snapshot(home: &Path) {
     let before = latest_grok_credit_config(home)
         .as_ref()
         .and_then(grok_credit_observed_at);
-    let now = Utc::now().timestamp_millis();
-    if before.is_some_and(|at| now.saturating_sub(at) < GROK_REFRESH_TTL_MS) {
-        return;
-    }
 
     let Some(program) = crate::agent_proc::resolve_program("grok") else {
         return;
