@@ -7,9 +7,11 @@ import { Channel } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import { agentHasUnfinishedWork } from "./agents/activity";
+import { AGENT_IDS } from "./agents/catalog";
 import { parseAgentLaunch } from "./agents/launch";
 import * as agentSessions from "./agents/session";
 import type { AgentId } from "./agents/types";
+import { agentUiPreferences, type AgentUiPreferences } from "./agents/uiPreferences";
 import { canNavigateBlocks } from "./blockNav";
 import { BlockTracker } from "./blocks";
 import * as commandHistory from "./commandHistory";
@@ -174,9 +176,6 @@ interface Session extends TermMeta {
   agentUiRestore: {
     ran: boolean;
     processStartedAt: number | null;
-    completionSeq: number;
-    completionStartedAt: number | null;
-    lastAgentCompletionAt: number;
     /** Raw shell text echoed before Enter was intercepted. */
     rawLaunchText: string | null;
   } | null;
@@ -221,14 +220,14 @@ let inputMode: InputMode = "editor";
 let fontSize = 13.5;
 let highlightEnabled = true;
 /**
- * Replace a recognised agent CLI with duckweed's own interface for it.
+ * Replace enabled agent CLIs with duckweed's own interface.
  *
  * On by default: every agent this covers ships a headless protocol that says
  * far more than its TUI can draw into a terminal grid, and the interception is
  * narrow enough (a bare launch, an agent that is installed) that the shell
  * still gets everything else.
  */
-let agentUiEnabled = true;
+let agentUiEnabled = agentUiPreferences();
 const TAURI_RUNTIME = "__TAURI_INTERNALS__" in window;
 const FONT_FAMILY =
   '"CaskaydiaCove Nerd Font", "Cascadia Code", "JetBrains Mono", "Fira Code", Consolas, "Courier New", monospace';
@@ -670,17 +669,14 @@ function startAgentUi(
   restoreRan = session.ran,
   rawLaunchText: string | null = null,
 ): boolean {
-  if (!agentUiEnabled || !TAURI_RUNTIME) return false;
+  if (!TAURI_RUNTIME) return false;
   if (session.exited || session.agentUi) return false;
   const launch = parseAgentLaunch(command);
-  if (!launch || !agentSessions.isAvailable(launch)) return false;
+  if (!launch || !agentUiEnabled[launch.agent] || !agentSessions.isAvailable(launch)) return false;
 
   session.agentUiRestore = {
     ran: restoreRan,
     processStartedAt: session.processStartedAt,
-    completionSeq: session.completionSeq,
-    completionStartedAt: session.completionStartedAt,
-    lastAgentCompletionAt: session.lastAgentCompletionAt,
     rawLaunchText,
   };
 
@@ -733,10 +729,10 @@ export function closeAgentUi(id: string): void {
   if (restore) {
     session.ran = restore.ran;
     session.processStartedAt = restore.processStartedAt;
-    session.completionSeq = restore.completionSeq;
-    session.completionStartedAt = restore.completionStartedAt;
-    session.lastAgentCompletionAt = restore.lastAgentCompletionAt;
   }
+  // Completion identity belongs to the terminal, across agent launches. The
+  // phone retains its read sequence, so rewinding it would suppress new turns
+  // as already read and let stale read receipts acknowledge later responses.
   notifySession(id);
   focus(id);
 }
@@ -2193,24 +2189,24 @@ export function getHighlight(): boolean {
 }
 
 /**
- * Turn the custom agent UI on or off.
+ * Choose which agents use the custom UI for new launches.
  *
  * This is a launch preference, not a session-lifetime control. Existing custom
  * sessions keep their interface and process until the user exits them, just as
  * enabling the preference does not replace an agent already running in its
  * terminal UI.
  */
-export function setAgentUi(enabled: boolean): void {
-  if (agentUiEnabled === enabled) return;
-  agentUiEnabled = enabled;
-  if (enabled) {
+export function setAgentUi(enabled: AgentUiPreferences): void {
+  if (AGENT_IDS.every((id) => agentUiEnabled[id] === enabled[id])) return;
+  agentUiEnabled = { ...enabled };
+  if (AGENT_IDS.some((id) => enabled[id])) {
     void agentSessions.probeAvailability();
   }
   notifySettings();
 }
 
-export function getAgentUi(): boolean {
-  return agentUiEnabled;
+export function getAgentUi(agent: AgentId): boolean {
+  return agentUiEnabled[agent];
 }
 
 export function clear(id: string): void {

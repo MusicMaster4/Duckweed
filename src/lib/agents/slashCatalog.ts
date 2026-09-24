@@ -1,4 +1,4 @@
-import type { AgentId, AgentModelChoice, AgentUsage } from "./types";
+import { shortModelLabel, type AgentId, type AgentModelChoice, type AgentUsage } from "./types";
 
 const LOCAL_COMMANDS = [
   {
@@ -93,8 +93,8 @@ const FALLBACKS: Record<AgentId, { name: string; description: string }[]> = {
 
 /**
  * Claude's stream-json init never lists switchable models, only the one in
- * use. These aliases are exactly what bare `/model` advertises (verified
- * against claude 2.1.220): short names, 1M variants, and plan-gated extras.
+ * use. These aliases are what bare `/model` advertises: short names and 1M
+ * variants. Refresh their labels from the model id reported by system/init.
  *
  * Effort levels match `/effort` usage plus `ultracode` (needs dynamic
  * workflows / plan — still listed so the picker mirrors the CLI; rejected
@@ -103,16 +103,25 @@ const FALLBACKS: Record<AgentId, { name: string; description: string }[]> = {
 const CLAUDE_EFFORTS = ["low", "medium", "high", "xhigh", "max", "auto", "ultracode"];
 const CLAUDE_MODELS: AgentModelChoice[] = [
   { id: "default", label: "Default (recommended)", efforts: CLAUDE_EFFORTS },
+  { id: "opus", label: "Opus 5.5", efforts: CLAUDE_EFFORTS },
+  { id: "fable", label: "Fable 5.1", efforts: CLAUDE_EFFORTS },
   { id: "sonnet", label: "Sonnet 5", efforts: CLAUDE_EFFORTS },
-  { id: "fable", label: "Fable 5", efforts: CLAUDE_EFFORTS },
-  { id: "opus", label: "Opus 5", efforts: CLAUDE_EFFORTS },
   { id: "haiku", label: "Haiku 4.5", efforts: CLAUDE_EFFORTS },
-  { id: "opus[1m]", label: "Opus 5 (1M context)", efforts: CLAUDE_EFFORTS },
-  { id: "sonnet[1m]", label: "Sonnet 5 (1M context)", efforts: CLAUDE_EFFORTS },
-  { id: "fable[1m]", label: "Fable 5 (1M context)", efforts: CLAUDE_EFFORTS },
-  { id: "best", label: "Best available", efforts: CLAUDE_EFFORTS },
-  { id: "opusplan", label: "Opus Plan", efforts: CLAUDE_EFFORTS },
+  { id: "opus[1m]", label: "Opus 5.5 (1M context)", efforts: CLAUDE_EFFORTS },
 ];
+
+/** Update both alias labels when Claude reports a versioned model in init. */
+export function refreshClaudeModelLabels(models: AgentModelChoice[], id: string): AgentModelChoice[] {
+  const match = /^claude-(opus|sonnet|fable|haiku)-(\d+(?:[.-]\d+)?)(?=-|\[|$)/i.exec(id);
+  if (!match) return models;
+  const family = match[1].toLowerCase();
+  const version = match[2].replace("-", ".");
+  const name = `${family[0].toUpperCase()}${family.slice(1)} ${version}`;
+  return models.map((model) => {
+    if (model.id !== family && model.id !== `${family}[1m]`) return model;
+    return { ...model, label: `${name}${model.id.endsWith("[1m]") ? " (1M context)" : ""}` };
+  });
+}
 
 /**
  * Models Claudex exposes through CLIProxyAPI. The real Claude Code binary is
@@ -135,11 +144,10 @@ export function claudeModelLabel(id: string): string {
   if (exact) return exact.label;
   const claudex = CLAUDEX_MODELS.find((model) => model.id.toLowerCase() === lower);
   if (claudex) return claudex.label;
-  // Full ids from system/init: `claude-opus-5[1m]`, `claude-sonnet-5`, …
-  if (lower.includes("fable")) return lower.includes("1m") ? "Fable 5 (1M context)" : "Fable 5";
-  if (lower.includes("opus")) return lower.includes("1m") ? "Opus 5 (1M context)" : "Opus 5";
-  if (lower.includes("sonnet")) return lower.includes("1m") ? "Sonnet 5 (1M context)" : "Sonnet 5";
-  if (lower.includes("haiku")) return "Haiku 4.5";
+  // Full ids from system/init carry the real version, unlike their aliases.
+  if (/^claude-(?:fable|opus|sonnet|haiku)-\d/.test(lower)) {
+    return shortModelLabel(id).replace(" (1M)", " (1M context)");
+  }
   if (lower === "gpt-5.6-sol" || lower === "gpt-5.6") return "GPT-5.6 Sol";
   if (lower === "grok-4.5") return "Grok 4.5 (Grok Build)";
   if (lower === "or/selected") return "OpenRouter (selected)";

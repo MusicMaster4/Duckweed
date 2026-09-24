@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { emptyUsage, type AgentSessionState } from "../../lib/agents/types";
+import { fallbackModels } from "../../lib/agents/slashCatalog";
 import { AgentControls } from "./AgentControls";
 
 function session(agent: AgentSessionState["agent"]): AgentSessionState {
@@ -76,6 +77,15 @@ describe("Grok effort picker", () => {
 });
 
 describe("next-message agent controls", () => {
+  test("shows the 1M Claude model rather than matching the ordinary Opus alias first", () => {
+    const claude = session("claude");
+    claude.model = "claude-opus-5-5-20260923[1m]";
+    claude.models = fallbackModels("claude");
+    const html = renderToStaticMarkup(<AgentControls session={claude} onSelect={() => {}} />);
+    expect(html).toContain("Opus 5.5 (1M context)");
+    expect(html).not.toContain('>Opus 5.5</span>');
+  });
+
   test("shows a staged model without replacing the active model", () => {
     const staged = session("opencode");
     staged.model = "opencode/big-pickle";

@@ -2,7 +2,7 @@ import { Fragment, memo, useRef, useState } from "react";
 
 import { ALL_EDGES, edgesForChild, resizeSplit } from "../lib/layout";
 import type { CompletionFlash } from "../lib/completionHighlights";
-import type { AgentTarget, ScheduledSend, SubmitDelivery } from "../lib/scheduledSend";
+import type { AgentTarget, ScheduledSend, SubmitDelivery, TimedSend } from "../lib/scheduledSend";
 import type { AgentImageAttachment } from "../lib/agents/types";
 import type { DropZone, LayoutNode, LeafNode, ProjectInfo, SplitNode } from "../lib/types";
 import type { DragState } from "../hooks/useDragPane";
@@ -48,8 +48,11 @@ export interface PaneTreeShared {
   highlightedAgentTermId: string | null;
   onAgentTargetHover: (termId: string | null) => void;
   scheduledSends: ReadonlyMap<string, ScheduledSend>;
+  timedSends: ReadonlyMap<string, TimedSend>;
   onScheduleSend: (termId: string, target: AgentTarget) => void;
   onCancelSchedule: (termId: string) => void;
+  onScheduleTimedSend: (termId: string, send: TimedSend) => void;
+  onCancelTimedSend: (termId: string) => void;
   onBeforeSubmit: (
     termId: string,
     text: string,
@@ -127,8 +130,11 @@ export const PaneTree = memo(function PaneTree({
         agentTargets={shared.agentTargets}
         onAgentTargetHover={shared.onAgentTargetHover}
         scheduledSend={shared.scheduledSends.get(node.term) ?? null}
+        timedSend={shared.timedSends.get(node.term) ?? null}
         onScheduleSend={shared.onScheduleSend}
         onCancelSchedule={shared.onCancelSchedule}
+        onScheduleTimedSend={shared.onScheduleTimedSend}
+        onCancelTimedSend={shared.onCancelTimedSend}
         onBeforeSubmit={shared.onBeforeSubmit}
         onDragHandle={(e) => shared.onStartDrag(e, node)}
       />

@@ -32,7 +32,7 @@ const PROVIDERS: Array<{
   model: string;
 }> = [
   { id: "codex", label: "Codex", mark: "CX", accent: "#9aa5b1", model: "GPT-5.6 Sol" },
-  { id: "claude", label: "Claude Code", mark: "CC", accent: "#d97757", model: "Opus 5" },
+  { id: "claude", label: "Claude Code", mark: "CC", accent: "#d97757", model: "Opus 5.5" },
   { id: "grok", label: "Grok Build", mark: "GR", accent: "#7ea6ff", model: "Grok 4.6" },
   { id: "cursor", label: "Cursor Agent", mark: "CU", accent: "#d4d4d4", model: "Composer" },
   { id: "opencode", label: "OpenCode", mark: "OC", accent: "#7be05a", model: "Default" },

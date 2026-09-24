@@ -416,9 +416,10 @@ The longer list in [Agent usage](#agent-usage) includes tools whose local
 transcripts Duckweed can measure even when they do not have a custom agent
 interface. Usage scanning support does not imply custom-interface support.
 
-Turn off **Custom Agent UI** from the command palette whenever you prefer to use
-an agent's original terminal interface for new launches. Existing sessions keep
-their current interface and continue running until you exit them.
+Choose which agents use **Custom Agent UI** in **Settings → Agents**, or toggle
+an individual agent from the command palette. Disabled agents open in their
+original terminal interface on new launches. Existing sessions keep their
+current interface and continue running until you exit them.
 
 ## Agent usage
 

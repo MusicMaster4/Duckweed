@@ -973,6 +973,10 @@ svg.tab-glyph-fill path {
   background: var(--hover);
 }
 
+.settings-agent-option {
+  padding-left: 22px;
+}
+
 .settings-stepper {
   display: grid;
   grid-template-columns: 26px 52px 26px;
@@ -2436,6 +2440,61 @@ body.is-dragging-prompt * {
   color: var(--text);
   font-weight: 600;
   font-variant-numeric: tabular-nums;
+}
+
+/* Quota cards keep the same meters as Usage, stacked on the tool's narrow rail. */
+.statistics-quotas .usage-quota-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  margin-top: 6px;
+}
+
+.statistics-quotas .usage-quota {
+  min-width: 0;
+  min-height: 0;
+  gap: 10px;
+  padding: 8px 0 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.statistics-quotas .usage-quota:first-child {
+  padding-top: 0;
+}
+
+.statistics-quotas .usage-quota + .usage-quota {
+  margin-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.statistics-quotas .usage-quota > header,
+.statistics-quotas .viz-meter-head {
+  flex-wrap: wrap;
+  gap: 3px 6px;
+}
+
+.statistics-quotas .usage-quota-name {
+  min-width: 0;
+}
+
+.statistics-quotas .usage-quota-plan {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.statistics-quotas .viz-meter-value {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 2px 5px;
+  min-width: 0;
+  text-align: right;
+}
+
+.statistics-quotas .usage-quota-message {
+  overflow-wrap: anywhere;
 }
 
 .ports-count {
@@ -5648,10 +5707,88 @@ body.is-resizing * {
 }
 
 .pane-tools-menu {
-  width: 258px;
-  min-width: 258px;
-  max-height: min(360px, calc(100vh - 16px));
+  width: 292px;
+  min-width: 292px;
+  max-height: min(400px, calc(100vh - 16px));
 }
+
+.pane-tools-option {
+  gap: 3px;
+  padding: 9px 10px;
+  color: var(--text);
+  font-size: 12px;
+}
+
+.pane-tools-option .menu-hint {
+  white-space: normal;
+  line-height: 1.3;
+}
+
+.pane-tools-back {
+  margin: 2px 4px 4px;
+  padding: 3px 6px;
+  border-radius: 5px;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.pane-tools-back:hover { background: var(--hover); color: var(--text); }
+
+.pane-tools-form {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 6px 9px 9px;
+}
+
+.pane-tools-form label {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.pane-tools-form textarea,
+.pane-tools-form input {
+  width: 100%;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  outline: none;
+  background: var(--bg-pane);
+  color: var(--text);
+  font: 12px var(--font-mono);
+  color-scheme: dark;
+}
+
+.pane-tools-form textarea { min-height: 80px; resize: vertical; line-height: 1.45; }
+.pane-tools-form textarea:focus,
+.pane-tools-form input:focus { border-color: var(--accent-line); }
+.pane-tools-form textarea::placeholder { color: var(--text-faint); }
+
+.pane-tools-form-hint {
+  color: var(--text-faint);
+  font-size: 10.5px;
+  line-height: 1.3;
+}
+
+.pane-tools-form-error {
+  color: var(--rose);
+  font-size: 10.5px;
+  line-height: 1.3;
+}
+
+.pane-tools-submit {
+  align-self: flex-end;
+  margin-top: 3px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: var(--accent);
+  color: var(--bg);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.pane-tools-submit:hover:not(:disabled) { filter: brightness(1.08); }
+.pane-tools-submit:disabled { opacity: 0.4; cursor: default; }
 
 .pane-tools-description {
   padding: 2px 10px 7px;

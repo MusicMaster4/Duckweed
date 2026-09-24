@@ -26,7 +26,7 @@ Duckweed does not install agent CLIs for you.
 1. Open a regular terminal outside Duckweed.
 2. Run the agent command there and complete its own sign-in or configuration.
 3. Close and reopen Duckweed so it can discover the command on your `PATH`.
-4. Check **Custom Agent UI** in the command palette.
+4. Check that **Custom Agent UI** is enabled for that agent in **Settings → Agents**.
 
 The original terminal interface remains available even when a custom interface
 is enabled.

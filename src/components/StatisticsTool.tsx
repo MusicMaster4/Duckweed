@@ -9,10 +9,12 @@ import {
   tokensOf,
   type SessionAgent,
 } from "../lib/sessionUsage";
-import { agentColor, compactNumber, formatUsd } from "../lib/usage";
+import { agentColor, cachedUsage, compactNumber, formatUsd, prefetchUsage, type Quota } from "../lib/usage";
+import { QuotaCards } from "./QuotaCards";
 
 /** Agents drawn on their own in the split; the rest collapse into one bar. */
 const NAMED_AGENTS = 4;
+const QUOTA_RANGE_DAYS = 7;
 
 interface Props {
   tabs: number;
@@ -109,6 +111,11 @@ export function StatisticsTool({ tabs, panes, projects }: Props) {
   const [now, setNow] = useState(Date.now());
   /** The pace is an average, so a second-by-second redraw is only noise. */
   const [paceAt, setPaceAt] = useState(now);
+  const [quotaNow, setQuotaNow] = useState(now);
+  const [quotas, setQuotas] = useState<Quota[] | null>(
+    () => cachedUsage(QUOTA_RANGE_DAYS)?.quotas ?? null,
+  );
+  const [quotaError, setQuotaError] = useState(false);
   const [servers, setServers] = useState<number | null>(null);
   const usage = useSyncExternalStore(subscribeSessionUsage, getSessionUsage, getSessionUsage);
   const savedCommands = useSyncExternalStore(
@@ -120,9 +127,34 @@ export function StatisticsTool({ tabs, panes, projects }: Props) {
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
     const slow = window.setInterval(() => setPaceAt(Date.now()), 20_000);
+    const quotaClock = window.setInterval(() => setQuotaNow(Date.now()), 30_000);
     return () => {
       window.clearInterval(timer);
       window.clearInterval(slow);
+      window.clearInterval(quotaClock);
+    };
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    const refresh = (maxAgeMs: number) => {
+      void prefetchUsage(QUOTA_RANGE_DAYS, maxAgeMs).then(
+        (snapshot) => {
+          if (disposed) return;
+          setQuotas(snapshot.quotas);
+          setQuotaNow(Date.now());
+          setQuotaError(false);
+        },
+        () => {
+          if (!disposed) setQuotaError(true);
+        },
+      );
+    };
+    refresh(60_000);
+    const timer = window.setInterval(() => refresh(0), 60_000);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
     };
   }, []);
 
@@ -233,6 +265,23 @@ export function StatisticsTool({ tabs, panes, projects }: Props) {
             </ul>
           </article>
         )}
+
+        <article className="statistics-card statistics-quotas">
+          <header>
+            <span className="statistics-card-title">Quota management</span>
+          </header>
+          {quotas && quotas.length > 0 ? (
+            <QuotaCards quotas={quotas} now={quotaNow} />
+          ) : (
+            <p className="statistics-note">
+              {quotaError
+                ? "Quota data unavailable"
+                : quotas
+                  ? "No provider quotas available"
+                  : "Reading quotas..."}
+            </p>
+          )}
+        </article>
       </div>
     </section>
   );

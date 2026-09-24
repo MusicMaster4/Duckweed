@@ -10,7 +10,9 @@ import {
 import type { ShellIntegrationStatus } from "../lib/ipc";
 import type { InputMode } from "../lib/terminals";
 import type { ShellInfo } from "../lib/types";
-import type { AgentFollowupMode } from "../lib/agents/types";
+import type { AgentFollowupMode, AgentId } from "../lib/agents/types";
+import { AGENTS, AGENT_IDS } from "../lib/agents/catalog";
+import type { AgentUiPreferences } from "../lib/agents/uiPreferences";
 import type { Channel } from "../lib/version";
 
 interface Props {
@@ -27,8 +29,8 @@ interface Props {
   dailyUsedMs: number;
   /** Recognised agent sessions currently open across all workspace panes. */
   openAgentCount: number;
-  /** Draw Duckweed's own interface over a recognised coding-agent CLI. */
-  customAgentUi: boolean;
+  /** Draw Duckweed's own interface for enabled coding-agent CLIs. */
+  customAgentUi: AgentUiPreferences;
   agentFollowupMode: AgentFollowupMode;
   autoApproveLockedRequests: boolean;
   confirmCloseRunning: boolean;
@@ -46,7 +48,7 @@ interface Props {
   onToggleTintWorkspaceWithTabColor: () => void;
   onToggleWellbeing: () => void;
   onDailyLimitMinutes: (minutes: number) => void;
-  onToggleCustomAgentUi: () => void;
+  onToggleCustomAgentUi: (agent: AgentId) => void;
   onAgentFollowupMode: (mode: AgentFollowupMode) => void;
   onAutoApproveLockedRequests: (enabled: boolean) => void;
   onToggleConfirmCloseRunning: () => void;
@@ -234,6 +236,9 @@ export function SettingsMenu({
   const searching = normalizedQuery.length > 0;
   searchingRef.current = searching;
   const matches = (text: string) => !searching || text.toLowerCase().includes(normalizedQuery);
+  const agentUiHit = matches("custom agent ui coding agent interface overlay cli harness");
+  const agentUiAgentHit = (agent: AgentId) =>
+    matches(`${AGENTS[agent].label} ${AGENTS[agent].binaries.join(" ")}`);
   const showAppearance =
     (section === "General" || section === "Appearance" || searching) &&
     (matches("appearance font size terminal text command editor") ||
@@ -257,9 +262,7 @@ export function SettingsMenu({
       matches("reset suggestions ghost autocomplete history learning clear forget"));
   const showAgents =
     (section === "General" || section === "Agents" || searching) &&
-    (matches(
-      "custom agent ui claude code codex cursor grok opencode coding agent interface overlay cli",
-    ) ||
+    (agentUiHit || AGENT_IDS.some(agentUiAgentHit) ||
       matches(
         "active turn messages follow-up queue steer send now alt shift enter agent delivery",
       ) ||
@@ -606,23 +609,33 @@ export function SettingsMenu({
             <>
             <section className="settings-section">
               <h2>Agents</h2>
-              {matches(
-                "custom agent ui claude code codex cursor grok opencode coding agent interface overlay cli",
-              ) && (
-                <button
-                  type="button"
-                  className="settings-row settings-action"
-                  onClick={onToggleCustomAgentUi}
-                >
-                  <span className="settings-copy">
-                    <strong>Custom Agent UI</strong>
-                    <span>
-                      Use thinking, tool calls, and live diffs for new Claude Code, Codex,
-                      Cursor, Grok, and OpenCode sessions. Current sessions keep running
+              {(agentUiHit || AGENT_IDS.some(agentUiAgentHit)) && (
+                <>
+                  <div className="settings-row">
+                    <span className="settings-copy">
+                      <strong>Custom Agent UI</strong>
+                      <span>
+                        Choose which agents use Duckweed's interface for thinking, tool calls,
+                        and live diffs. Changes apply to new sessions; current sessions keep running
+                      </span>
                     </span>
-                  </span>
-                  <Toggle enabled={customAgentUi} />
-                </button>
+                  </div>
+                  {AGENT_IDS.filter((agent) => agentUiHit || agentUiAgentHit(agent)).map((agent) => (
+                    <button
+                      key={agent}
+                      type="button"
+                      className="settings-row settings-action settings-agent-option"
+                      aria-pressed={customAgentUi[agent]}
+                      onClick={() => onToggleCustomAgentUi(agent)}
+                    >
+                      <span className="settings-copy">
+                        <strong>{AGENTS[agent].label}</strong>
+                        <span>New sessions started with {AGENTS[agent].binaries[0]}</span>
+                      </span>
+                      <Toggle enabled={customAgentUi[agent]} />
+                    </button>
+                  ))}
+                </>
               )}
               {matches(
                 "active turn messages follow-up queue steer send now alt shift enter agent delivery",

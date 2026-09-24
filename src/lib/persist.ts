@@ -3,6 +3,7 @@ import { newTermId, type InputMode } from "./terminals";
 import type { LayoutNode, Tab } from "./types";
 import { saveDurably } from "./durableStorage";
 import type { AgentFollowupMode } from "./agents/types";
+import { agentUiPreferences, type AgentUiPreferences } from "./agents/uiPreferences";
 
 const KEY = "duckweed:state:v1";
 const MAX_RECENTS = 12;
@@ -45,10 +46,10 @@ export interface Persisted {
   /** Tint the workspace frame and status bar with the active tab's colour. */
   tintWorkspaceWithTabColor: boolean;
   /**
-   * Draw duckweed's own interface over a recognised coding-agent CLI instead
-   * of its terminal UI.
+   * Choose which recognised coding-agent CLIs use Duckweed's interface instead
+   * of their terminal UI on new launches.
    */
-  customAgentUi: boolean;
+  customAgentUi: AgentUiPreferences;
   /** Default delivery for messages submitted while an agent turn is active. */
   agentFollowupMode: AgentFollowupMode;
   /**
@@ -141,8 +142,8 @@ export function load(): Persisted | null {
         typeof parsed.tintWorkspaceWithTabColor === "boolean"
           ? parsed.tintWorkspaceWithTabColor
           : false,
-      // Default on, including for saves written before the setting existed.
-      customAgentUi: typeof parsed.customAgentUi === "boolean" ? parsed.customAgentUi : true,
+      // Older saves used one boolean for all harnesses.
+      customAgentUi: agentUiPreferences(parsed.customAgentUi),
       agentFollowupMode: parsed.agentFollowupMode === "steer" ? "steer" : "queue",
       // Never infer consent from an older save.
       autoApproveLockedRequests: parsed.autoApproveLockedRequests === true,
@@ -169,7 +170,7 @@ export function save(state: {
   completionHighlights: boolean;
   completionSoundEnabled: boolean;
   tintWorkspaceWithTabColor: boolean;
-  customAgentUi: boolean;
+  customAgentUi: AgentUiPreferences;
   agentFollowupMode: AgentFollowupMode;
   autoApproveLockedRequests: boolean;
   inputMode: InputMode;

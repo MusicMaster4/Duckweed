@@ -201,6 +201,59 @@ describe("acp adapter", () => {
     });
   });
 
+  test("keeps Grok filesystem tools native even with the UI file service installed", async () => {
+    const h = harness();
+    const calls: string[] = [];
+    h.ctx.files = {
+      readText: async (path) => {
+        calls.push(path);
+        return { content: "", binary: true, tooLarge: false };
+      },
+      writeText: async (path) => { calls.push(path); },
+    };
+    await h.handshake();
+    expect(h.sent[0]).toMatchObject({
+      params: { clientCapabilities: {
+        fs: { readTextFile: false, writeTextFile: false }, terminal: false,
+      } },
+    });
+    for (const [id, method, path] of [
+      [71, "fs/read_text_file", "H:/project/screenshot.png"],
+      [72, "fs/read_text_file", "C:/Users/test/.grok/skills/design/SKILL.md"],
+      [73, "fs/write_text_file", "H:/project/nested/new.txt"],
+    ] as const) {
+      h.feed({ jsonrpc: "2.0", id, method, params: { path, content: "test" } });
+      expect(h.sent.at(-1)).toMatchObject({ id, error: { code: -32601 } });
+    }
+    expect(calls).toEqual([]);
+  });
+
+  for (const agent of ["cursor", "opencode"] as const) {
+    test(`preserves ${agent} client text reads and writes`, async () => {
+      const h = harness({ agent });
+      const writes: string[] = [];
+      h.ctx.files = {
+        readText: async () => ({ content: "one\ntwo\nthree\n", binary: false, tooLarge: false }),
+        writeText: async (path, content) => { writes.push(`${path}:${content}`); },
+      };
+      await h.handshake();
+      expect(h.sent[0]).toMatchObject({
+        params: { clientCapabilities: { fs: { readTextFile: true, writeTextFile: true } } },
+      });
+      h.feed({ jsonrpc: "2.0", id: 71, method: "fs/read_text_file",
+        params: { path: "a.txt", line: 2, limit: 1 } });
+      await Promise.resolve();
+      expect(h.sent.at(-1)).toMatchObject({ id: 71, result: { content: "two\n" } });
+      h.feed({ jsonrpc: "2.0", id: 72, method: "fs/write_text_file",
+        params: { path: "a.txt", content: "updated" } });
+      await Promise.resolve();
+      expect(writes).toEqual(["H:/project/a.txt:updated"]);
+      h.feed({ jsonrpc: "2.0", id: 73, method: "fs/read_text_file",
+        params: { path: "../outside.txt" } });
+      expect(h.sent.at(-1)).toMatchObject({ id: 73, error: { code: -32602 } });
+    });
+  }
+
   test("surfaces a failed session as an error rather than a silent pane", async () => {
     const h = harness();
     h.adapter.start(h.ctx);

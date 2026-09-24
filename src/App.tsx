@@ -45,8 +45,10 @@ import * as checklist from "./lib/checklist";
 import * as powerWatch from "./lib/powerWatch";
 import type { BusyEntry } from "./lib/powerWatch";
 import { agentHasUnfinishedWork } from "./lib/agents/activity";
+import { AGENTS, AGENT_IDS } from "./lib/agents/catalog";
 import * as agentSessions from "./lib/agents/session";
-import type { AgentImageAttachment } from "./lib/agents/types";
+import type { AgentId, AgentImageAttachment } from "./lib/agents/types";
+import { agentUiPreferences } from "./lib/agents/uiPreferences";
 import { handleUnattendedPermission } from "./lib/agents/autoApproval";
 import {
   confirmCloseRunning,
@@ -131,7 +133,7 @@ import {
   type ProcessState,
 } from "./lib/processActivity";
 import { setCompletionTaskbarBadge } from "./lib/taskbarCompletion";
-import type { AgentTarget, ScheduledSend, SubmitDelivery } from "./lib/scheduledSend";
+import type { AgentTarget, ScheduledSend, SubmitDelivery, TimedSend } from "./lib/scheduledSend";
 import { mobileCompletionDelay } from "./lib/mobileCompletion";
 import {
   fitMobileWorkspaceSnapshot,
@@ -320,7 +322,7 @@ function boot() {
     completionHighlights: true,
     completionSoundEnabled: true,
     tintWorkspaceWithTabColor: false,
-    customAgentUi: true,
+    customAgentUi: agentUiPreferences(),
     agentFollowupMode: "queue" as const,
     autoApproveLockedRequests: false,
     inputMode: "editor" as terminals.InputMode,
@@ -433,6 +435,7 @@ export default function App() {
   const [scheduledSends, setScheduledSends] = useState<Map<string, ScheduledSend>>(
     () => new Map(),
   );
+  const [timedSends, setTimedSends] = useState<Map<string, TimedSend>>(() => new Map());
   const unreadTermIdsRef = useRef(unreadTermIds);
   unreadTermIdsRef.current = unreadTermIds;
   const mobileAlertTermIdsRef = useRef(mobileAlertTermIds);
@@ -477,6 +480,8 @@ export default function App() {
   const lastDesktopInteractionAt = useRef<number | null>(null);
   const scheduledSendsRef = useRef(scheduledSends);
   scheduledSendsRef.current = scheduledSends;
+  const timedSendsRef = useRef(timedSends);
+  timedSendsRef.current = timedSends;
   /** Dirty flag for the lifted file editor (file switches confirm through this). */
   const editorDirtyRef = useRef(false);
   const processState = useRef(new Map<string, ProcessState>());
@@ -831,6 +836,12 @@ export default function App() {
 
   const releaseTerm = useCallback((term: string) => {
     terminals.dispose(term);
+    if (timedSendsRef.current.has(term)) {
+      const nextTimedSends = new Map(timedSendsRef.current);
+      nextTimedSends.delete(term);
+      timedSendsRef.current = nextTimedSends;
+      setTimedSends(nextTimedSends);
+    }
     spawnOpts.current.delete(term);
     processState.current.delete(term);
     const previousSchedules = scheduledSendsRef.current;
@@ -883,6 +894,22 @@ export default function App() {
     setScheduledSends(next);
   }, []);
 
+  const scheduleTimedSend = useCallback((termId: string, send: TimedSend) => {
+    if (!send.text.trim() || !Number.isFinite(send.at) || send.at <= Date.now()) return;
+    const next = new Map(timedSendsRef.current);
+    next.set(termId, send);
+    timedSendsRef.current = next;
+    setTimedSends(next);
+  }, []);
+
+  const cancelTimedSend = useCallback((termId: string) => {
+    if (!timedSendsRef.current.has(termId)) return;
+    const next = new Map(timedSendsRef.current);
+    next.delete(termId);
+    timedSendsRef.current = next;
+    setTimedSends(next);
+  }, []);
+
   const sendDraftNow = useCallback(
     (
       termId: string,
@@ -911,6 +938,56 @@ export default function App() {
     },
     [],
   );
+
+  // A timed message is separate from the visible composer draft. Restore that
+  // draft after using the same submit route as a manual Enter.
+  const sendTimedMessage = useCallback((termId: string, text: string) => {
+    const agent = agentSessions.get(termId);
+    if (agent) {
+      if (agent.status === "exited" || agent.status === "error") return;
+      const draft = agentSessions.getDraft(termId);
+      const images = agentSessions.getDraftImages(termId);
+      agentSessions.submit(termId, text);
+      agentSessions.setDraft(termId, draft);
+      agentSessions.setDraftImages(termId, images);
+      return;
+    }
+    const meta = terminals.getMeta(termId);
+    if (!meta || meta.exited) return;
+    const draft = terminals.getDraft(termId);
+    if (meta.agent || meta.busy) terminals.writeRaw(termId, `${text}\r`);
+    else terminals.submitCommand(termId, text);
+    terminals.setDraft(termId, draft);
+  }, []);
+
+  useEffect(() => {
+    if (timedSends.size === 0) return;
+    let timer = 0;
+    const checkDue = () => {
+      const due = [...timedSendsRef.current].filter(([, send]) => send.at <= Date.now());
+      if (due.length > 0) {
+        const next = new Map(timedSendsRef.current);
+        for (const [termId] of due) next.delete(termId);
+        timedSendsRef.current = next;
+        setTimedSends(next);
+        for (const [termId, send] of due) sendTimedMessage(termId, send.text);
+        return;
+      }
+      const nextAt = Math.min(...[...timedSendsRef.current.values()].map((send) => send.at));
+      window.clearTimeout(timer);
+      if (Number.isFinite(nextAt)) {
+        timer = window.setTimeout(checkDue, Math.max(0, Math.min(nextAt - Date.now(), 30_000)));
+      }
+    };
+    checkDue();
+    window.addEventListener("focus", checkDue);
+    document.addEventListener("visibilitychange", checkDue);
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener("focus", checkDue);
+      document.removeEventListener("visibilitychange", checkDue);
+    };
+  }, [timedSends, sendTimedMessage]);
 
   const completeScheduledSendsForTarget = useCallback(
     (targetTermId: string) => {
@@ -2930,9 +3007,9 @@ export default function App() {
     setCompletionSoundEnabled((prev) => !prev);
   }, []);
 
-  const toggleCustomAgentUi = useCallback(() => {
+  const toggleCustomAgentUi = useCallback((agent: AgentId) => {
     setCustomAgentUi((prev) => {
-      const next = !prev;
+      const next = { ...prev, [agent]: !prev[agent] };
       terminals.setAgentUi(next);
       return next;
     });
@@ -3541,14 +3618,17 @@ export default function App() {
         hint: "Ctrl+Shift+H",
         run: toggleHighlight,
       },
-      {
-        id: "view.agentui",
-        group: "View",
-        title: customAgentUi ? "Turn off Custom Agent UI" : "Turn on Custom Agent UI",
-        subtitle: "Choose the interface for new agent launches; current sessions keep running",
-        run: toggleCustomAgentUi,
-      },
     ];
+
+    for (const agent of AGENT_IDS) {
+      actions.push({
+        id: `view.agentui.${agent}`,
+        group: "View",
+        title: `Turn ${customAgentUi[agent] ? "off" : "on"} Custom Agent UI for ${AGENTS[agent].label}`,
+        subtitle: "Applies to new sessions; current sessions keep running",
+        run: () => toggleCustomAgentUi(agent),
+      });
+    }
 
     for (const info of shells) {
       actions.push({
@@ -3786,8 +3866,11 @@ export default function App() {
       highlightedAgentTermId,
       onAgentTargetHover: setHighlightedAgentTermId,
       scheduledSends,
+      timedSends,
       onScheduleSend: scheduleSend,
       onCancelSchedule: cancelSchedule,
+      onScheduleTimedSend: scheduleTimedSend,
+      onCancelTimedSend: cancelTimedSend,
       onBeforeSubmit: beforeScheduledSubmit,
       onStartDrag,
       onResize: resizeSplitSizes,
@@ -3802,6 +3885,7 @@ export default function App() {
       beforeScheduledSubmit,
       browseActiveProject,
       cancelSchedule,
+      cancelTimedSend,
       closePaneById,
       completionFlashes,
       finishPaneMotion,
@@ -3815,7 +3899,9 @@ export default function App() {
       recents,
       resizeSplitSizes,
       scheduleSend,
+      scheduleTimedSend,
       scheduledSends,
+      timedSends,
       spawnFor,
       splitAt,
       toggleZoom,
