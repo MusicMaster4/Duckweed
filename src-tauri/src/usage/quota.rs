@@ -12,15 +12,15 @@
 //! rate. Every millisecond of that history is discounted by its age on an
 //! exponential curve, so a session that just picked up (or just stopped) moves
 //! the estimate quickly without the number jumping as samples cross a
-//! threshold. How far back the curve reaches scales with the limit's own
-//! window: an hour for a five-hour window, most of a day for a weekly one.
+//! threshold. All limit lengths use a five-minute half-life: the latest five,
+//! ten and fifteen minutes carry about 50%, 75% and 87.5% of the weight.
+//! Older history provides a diminishing baseline, even for weekly limits.
 //!
-//! A short measurement is not a trend, so the recent pace is blended with the
-//! window's own average — utilization divided by the time elapsed since the
-//! window opened — in proportion to how much evidence the recent samples
-//! actually carry. Ten minutes of burn, or a rise no larger than the
-//! provider's own rounding step, counts for little; half an hour of steady
-//! movement counts for nearly everything.
+//! While history is being collected, blend the recent rate with the window
+//! average. Fifteen minutes of observations earn 95% of the estimate, including
+//! unchanged readings: confirmed idle time must lower the pace, rather than
+//! resurrecting an old average. Cached readings never count as idle evidence,
+//! and observations older than fifteen minutes cannot support a live forecast.
 //!
 //! The result is reported two ways, because they answer different questions.
 //! `per_hour` and `usage_hours_left` are per hour of *use*: keep working like
@@ -63,13 +63,12 @@ const MIN_LOOKBACK_MS: i64 = 60 * 60 * 1000;
 /// Even a monthly limit reads the last day, not the last week: beyond this,
 /// "recent" stops meaning anything.
 const MAX_LOOKBACK_MS: i64 = 24 * 60 * 60 * 1000;
-/// A sample's weight halves every `lookback / this`. At the one-hour lookback
-/// that is 20 minutes, so the last quarter hour dominates while the rest of
-/// the hour still anchors the estimate.
-const HALF_LIFE_DIVISOR: f64 = 3.0;
-/// Observed time at which the recent pace is trusted about half as much as the
-/// window average. Below it the estimate is shrunk toward that average.
-const SHRINK_SPAN_MS: f64 = 30.0 * 60.0 * 1000.0;
+/// Recency must mean the same thing for hourly, weekly and monthly limits.
+const BURN_HALF_LIFE_MS: f64 = 5.0 * 60.0 * 1000.0;
+/// Recent evidence earns 63% trust after five minutes and 95% after fifteen.
+const SHRINK_SPAN_MS: f64 = 5.0 * 60.0 * 1000.0;
+/// A cached snapshot is not evidence of the current consumption rate.
+const MAX_FORECAST_AGE_MS: i64 = 15 * 60 * 1000;
 /// Providers report utilization in coarse steps. A rise no bigger than this
 /// could be one rounding step rather than real burn, so it earns little trust.
 const QUANTUM_PERCENT: f64 = 1.0;
@@ -118,7 +117,7 @@ pub struct QuotaForecast {
     /// Utilization points consumed per hour of continued use.
     pub per_hour: f64,
     /// `recent` = measured from the sample history, `window` = average since
-    /// this window opened (used when nothing burned recently), `blended` =
+    /// this window opened (used before recent history is available), `blended` =
     /// both, when the recent measurement is too thin to stand alone.
     pub basis: String,
     /// How much of `per_hour` came from the live measurement, 0–1. Lets the UI
@@ -333,11 +332,9 @@ fn record_samples(quota: &Quota, history: &mut QuotaHistory, now: i64) {
 /// What happens to one limit next: how much use is left in it, when it would
 /// empty, and where it lands by the time its window resets.
 ///
-/// The recent burn rate answers "am I about to lose this session"; the window
-/// average answers "how am I doing overall". Neither is discarded — they are
-/// blended by how much evidence the recent samples carry, so a burst that
-/// started ten minutes ago nudges the estimate instead of replacing it, and
-/// half an hour of steady work takes it over almost entirely.
+/// Recent observations dominate after fifteen minutes, whether consumption
+/// speeds up, slows down or stops. The window average anchors the estimate
+/// only while the recent observation history is still being established.
 ///
 /// The blended pace is per hour of *use*. That is the number the remaining
 /// allowance is divided by, because "how much more work does this buy" is a
@@ -352,6 +349,9 @@ fn forecast_for(
     now: i64,
     duty: Option<f64>,
 ) -> Option<QuotaForecast> {
+    if now.saturating_sub(observed_at) > MAX_FORECAST_AGE_MS {
+        return None;
+    }
     let remaining = (100.0 - limit.percent).max(0.0);
     if remaining <= EXHAUSTED_REMAINING {
         return Some(QuotaForecast {
@@ -379,9 +379,7 @@ fn forecast_for(
     if per_hour < MIN_BURN_PER_HOUR {
         return None;
     }
-    // "window" is reserved for an estimate the live samples barely touched —
-    // the card says "idle this hour" on the strength of it, and a quarter of a
-    // live burst is not idle.
+    // Retain the source metadata while recent observations take over.
     let basis = if average.is_none() || confidence >= 0.7 {
         "recent"
     } else if confidence <= 0.1 {
@@ -432,9 +430,7 @@ fn window_average_per_hour(limit: &QuotaLimit, now: i64) -> Option<f64> {
         return None;
     }
     let elapsed = limit.window_ms? - (limit.resets_at? - now);
-    if elapsed < MIN_EVIDENCE_MS
-        || (elapsed < MIN_SPAN_MS && limit.percent <= QUANTUM_PERCENT)
-    {
+    if elapsed < MIN_EVIDENCE_MS || (elapsed < MIN_SPAN_MS && limit.percent <= QUANTUM_PERCENT) {
         // A few minutes or a single rounded reporting step is too little to
         // extrapolate. Meaningful consumption after five minutes is enough to
         // restart an estimate when a known window has just reset.
@@ -448,8 +444,7 @@ fn window_average_per_hour(limit: &QuotaLimit, now: i64) -> Option<f64> {
 struct RecentBurn {
     /// Utilization points per hour.
     per_hour: f64,
-    /// 0–1. Rises with observed time and with how far the rise clears the
-    /// provider's own rounding step.
+    /// 0 to 1. Rises with observed time, including confirmed flat readings.
     confidence: f64,
 }
 
@@ -515,11 +510,10 @@ fn recent_burn(
         return None;
     }
 
-    let tau = (lookback as f64 / HALF_LIFE_DIVISOR) / std::f64::consts::LN_2;
+    let tau = BURN_HALF_LIFE_MS / std::f64::consts::LN_2;
     let mut weighted_delta = 0.0;
     let mut weighted_span = 0.0;
     let mut covered = 0i64;
-    let mut observed_delta = 0.0;
     for pair in series.windows(2) {
         let ((from_at, from_percent), (to_at, to_percent)) = (pair[0], pair[1]);
         let full_span = to_at - from_at;
@@ -536,7 +530,6 @@ fn recent_burn(
             continue;
         }
         covered += to_at - from_at;
-        observed_delta += rate * (to_at - from_at) as f64;
         let weight = age_weight(from_at, to_at, now, tau);
         weighted_delta += rate * weight;
         weighted_span += weight;
@@ -547,18 +540,18 @@ fn recent_burn(
     }
 
     let per_hour = weighted_delta / weighted_span * 3_600_000.0;
-    // Time observed buys confidence, and so does clearing the reporting step:
-    // a single 1-point tick over half an hour is as likely to be rounding as
-    // burn, and should not set the pace on its own.
-    let span_trust = covered as f64 / (covered as f64 + SHRINK_SPAN_MS);
-    let delta_trust = observed_delta / (observed_delta + QUANTUM_PERCENT);
+    // Flat provider readings are evidence too. Confidence based on positive
+    // deltas would hand control back to the old average whenever usage stops.
+    // Integrating over time (with a five-minute evidence floor) also prevents
+    // polling frequency from amplifying rounded percentage updates.
+    let confidence = 1.0 - (-(covered as f64) / SHRINK_SPAN_MS).exp();
     Some(RecentBurn {
         per_hour: if per_hour < MIN_BURN_PER_HOUR {
             0.0
         } else {
             per_hour
         },
-        confidence: (span_trust * delta_trust).clamp(0.0, 1.0),
+        confidence: confidence.clamp(0.0, 1.0),
     })
 }
 
@@ -822,7 +815,11 @@ fn refresh_claude_oauth(refresh_token: &str) -> Option<Value> {
             continue;
         }
         if let Ok(payload) = response.json::<Value>() {
-            if payload.get("access_token").and_then(Value::as_str).is_some() {
+            if payload
+                .get("access_token")
+                .and_then(Value::as_str)
+                .is_some()
+            {
                 return Some(payload);
             }
         }
@@ -1130,8 +1127,7 @@ fn live_codex_rate_limits() -> Option<(i64, Vec<Value>)> {
                 let _ = sender.send(message.get("result").cloned());
                 break;
             }
-        })
-    {
+        }) {
         Ok(reader) => reader,
         Err(_) => {
             stop_codex_app_server(&mut child, pid);
@@ -1249,10 +1245,9 @@ fn refresh_grok_credit_snapshot(home: &Path) {
     // terminal answers DSR automatically; this private PTY has no emulator,
     // so answer the query when it arrives. The same thread drains TUI output
     // so the PTY buffer cannot fill before billing is fetched.
-    if let (Ok(mut reader), Ok(mut writer)) = (
-        pair.master.try_clone_reader(),
-        pair.master.take_writer(),
-    ) {
+    if let (Ok(mut reader), Ok(mut writer)) =
+        (pair.master.try_clone_reader(), pair.master.take_writer())
+    {
         std::thread::spawn(move || {
             let mut buffer = [0_u8; 4096];
             let mut suffix = Vec::new();
@@ -1753,10 +1748,8 @@ mod tests {
 
         let forecast = quota.limits[0].forecast.as_ref().expect("forecast");
         assert_eq!(forecast.basis, "recent");
-        // The last quarter hour carries e^0→e^-0.52 of the curve — 46% of the
-        // hour's total weight — so 10 points there read as ~18.5%/h, not the
-        // flat 10%/h an unweighted hour would report.
-        assert!((forecast.per_hour - 18.53).abs() < 0.05, "{forecast:?}");
+        // A five-minute half-life gives the last quarter hour 87.5% weight.
+        assert!((forecast.per_hour - 35.01).abs() < 0.05, "{forecast:?}");
     }
 
     /// The weight curve must be smooth. Banded weights made the displayed pace
@@ -1796,10 +1789,9 @@ mod tests {
         );
     }
 
-    /// A burst that started ten minutes ago is a hint, not a trend. It should
-    /// move the estimate off the window average without replacing it.
+    /// Ten minutes of substantial usage should already dominate the old average.
     #[test]
-    fn a_short_burst_is_blended_with_the_window_average_not_trusted_whole() {
+    fn ten_minutes_of_usage_dominate_the_window_average() {
         let now = 1_700_000_000_000i64;
         let minute = 60 * 1000;
         let mut history = QuotaHistory {
@@ -1818,17 +1810,16 @@ mod tests {
         apply_estimate(&mut quota, &mut history, now, None);
 
         let forecast = quota.limits[0].forecast.as_ref().expect("forecast");
-        assert_eq!(forecast.basis, "blended");
+        assert_eq!(forecast.basis, "recent");
         assert!(
-            forecast.per_hour > 12.5 && forecast.per_hour < 35.0,
-            "expected a hedge between 10 and 60, got {forecast:?}"
+            forecast.per_hour > 53.0 && forecast.per_hour < 54.0,
+            "expected the recent 60 percent per hour to dominate, got {forecast:?}"
         );
     }
 
-    /// Utilization arrives rounded. A lone step of it, however long the span,
-    /// must not set the pace on its own.
+    /// A small sustained rate remains useful evidence for a weekly quota.
     #[test]
-    fn a_single_reporting_step_barely_moves_the_estimate() {
+    fn a_slow_observed_hour_is_not_overridden_by_the_window_average() {
         let now = 1_700_000_000_000i64;
         let mut history = QuotaHistory {
             samples: vec![QuotaSample {
@@ -1846,10 +1837,10 @@ mod tests {
 
         let forecast = quota.limits[0].forecast.as_ref().expect("forecast");
         assert!(
-            forecast.confidence < 0.35,
-            "one step should not be trusted: {forecast:?}"
+            forecast.confidence > 0.99,
+            "an observed hour should dominate: {forecast:?}"
         );
-        assert!(forecast.per_hour < 0.75, "{forecast:?}");
+        assert!((forecast.per_hour - 1.0).abs() < 0.01, "{forecast:?}");
     }
 
     /// A weekly limit burning hard right now still reports that pace — the
@@ -1963,7 +1954,7 @@ mod tests {
         quota.limits[0].window_ms = None;
         let uncut = recent_burn("claude", now, &quota.limits[0], &history, now).expect("burn");
         assert!(
-            uncut.per_hour < cut.per_hour - 2.0,
+            uncut.per_hour < cut.per_hour - 0.1,
             "the stale reading should still weigh on the fallback: {} vs {}",
             uncut.per_hour,
             cut.per_hour
@@ -2127,10 +2118,9 @@ mod tests {
         assert!(quota.limits[1].forecast.is_none());
     }
 
-    /// The old behaviour here was a card that just said "stable". With a window
-    /// length in hand, an idle limit still reports the pace it was filled at.
+    /// Confirmed inactivity must not fall back to an old, faster window average.
     #[test]
-    fn idle_limit_falls_back_to_the_window_average() {
+    fn idle_limit_does_not_resurrect_the_window_average() {
         let now = 1_700_000_000_000i64;
         let mut history = QuotaHistory {
             samples: vec![QuotaSample {
@@ -2146,14 +2136,136 @@ mod tests {
         quota.limits[0].resets_at = Some(now + 60 * 60 * 1000);
         apply_estimate(&mut quota, &mut history, now, None);
 
-        let forecast = quota.limits[0].forecast.as_ref().expect("forecast");
-        assert_eq!(forecast.basis, "window");
-        assert!((forecast.per_hour - 10.0).abs() < 0.01, "{forecast:?}");
-        // 60% left at 10%/h is 6h, well past the reset an hour from now, so the
-        // window refills first and the projection stays under the cap.
-        let eta_h = (forecast.runs_out_at.expect("eta") - now) as f64 / 3_600_000.0;
-        assert!((eta_h - 6.0).abs() < 0.05, "expected ~6h, got {eta_h}");
-        assert!((forecast.projected_percent.expect("projection") - 50.0).abs() < 0.01);
+        assert!(quota.limits[0].forecast.is_none());
+    }
+
+    /// Every provider and quota window must respond equally to a changed pace.
+    #[test]
+    fn recent_changes_dominate_every_provider_and_window() {
+        let now = 1_700_000_000_000i64;
+        let minute = 60_000;
+        for agent in ["claude", "codex", "grok"] {
+            for window in [5 * HOUR, 7 * 24 * HOUR, 30 * 24 * HOUR] {
+                for (old_rate, new_rate) in [(4.0, 40.0), (40.0, 4.0), (40.0, 0.0)] {
+                    let mut history = QuotaHistory::default();
+                    let mut percent = 10.0;
+                    for elapsed in 0..=60 {
+                        if elapsed > 0 {
+                            percent += if elapsed <= 45 { old_rate } else { new_rate } / 60.0;
+                        }
+                        history.samples.push(QuotaSample {
+                            at: now - (60 - elapsed) * minute,
+                            agent: agent.into(),
+                            limit_id: "pool".into(),
+                            percent,
+                        });
+                    }
+                    let mut quota = sample_quota(agent, vec![("pool", percent)]);
+                    quota.limits[0].window_ms = Some(window);
+                    quota.limits[0].resets_at = Some(now + window / 2);
+                    apply_estimate(&mut quota, &mut history, now, None);
+                    let forecast = quota.limits[0].forecast.as_ref().expect("forecast");
+                    let expected = 0.125 * old_rate + 0.875 * new_rate;
+                    assert!(
+                        (forecast.per_hour - expected).abs() < 0.02,
+                        "{agent}, {window}, {old_rate} -> {new_rate}: {forecast:?}"
+                    );
+                    assert!(
+                        (forecast.usage_hours_left.unwrap()
+                            - (100.0 - percent) / forecast.per_hour)
+                            .abs()
+                            < 0.001
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn five_ten_and_fifteen_minutes_have_progressively_more_influence() {
+        let now = 1_700_000_000_000i64;
+        for (minutes, share) in [(5, 0.5), (10, 0.75), (15, 0.875), (30, 0.984375)] {
+            let mut history = QuotaHistory {
+                samples: [60, minutes]
+                    .into_iter()
+                    .map(|ago| QuotaSample {
+                        at: now - ago * 60_000,
+                        agent: "claude".into(),
+                        limit_id: "pool".into(),
+                        percent: 20.0,
+                    })
+                    .collect(),
+            };
+            let mut quota = sample_quota("claude", vec![("pool", 20.0 + minutes as f64)]);
+            apply_estimate(&mut quota, &mut history, now, None);
+            let forecast = quota.limits[0].forecast.as_ref().unwrap();
+            assert!(
+                (forecast.per_hour - 60.0 * share).abs() < 0.02,
+                "{forecast:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_two_hour_plateau_cannot_keep_an_old_countdown_alive() {
+        let now = 1_700_000_000_000i64;
+        let mut history = QuotaHistory {
+            samples: (0..=120)
+                .step_by(2)
+                .map(|ago| QuotaSample {
+                    at: now - ago * 60_000,
+                    agent: "claude".into(),
+                    limit_id: "pool".into(),
+                    percent: 88.0,
+                })
+                .collect(),
+        };
+        let mut quota = sample_quota("claude", vec![("pool", 88.0)]);
+        quota.limits[0].window_ms = Some(5 * HOUR);
+        quota.limits[0].resets_at = Some(now + 2 * HOUR);
+        apply_estimate(&mut quota, &mut history, now, None);
+        assert!(quota.limits[0].forecast.is_none());
+    }
+
+    #[test]
+    fn stale_snapshots_cannot_rebase_the_same_eta_forever() {
+        let now = 1_700_000_000_000i64;
+        let mut history = QuotaHistory {
+            samples: vec![QuotaSample {
+                at: now - HOUR,
+                agent: "codex".into(),
+                limit_id: "pool".into(),
+                percent: 30.0,
+            }],
+        };
+        let mut quota = sample_quota("codex", vec![("pool", 88.0)]);
+        quota.observed_at = Some(now - 16 * 60_000);
+        quota.limits[0].window_ms = Some(5 * HOUR);
+        quota.limits[0].resets_at = Some(now + 2 * HOUR);
+        apply_estimate(&mut quota, &mut history, now, None);
+        assert!(quota.limits[0].forecast.is_none());
+    }
+
+    #[test]
+    fn histories_are_isolated_by_agent_and_limit() {
+        let now = 1_700_000_000_000i64;
+        let mut history = QuotaHistory { samples: vec![] };
+        for (agent, id, percent) in [
+            ("claude", "pool", 80.0),
+            ("codex", "pool", 10.0),
+            ("claude", "other", 10.0),
+        ] {
+            history.samples.push(QuotaSample {
+                at: now - HOUR,
+                agent: agent.into(),
+                limit_id: id.into(),
+                percent,
+            });
+        }
+        let mut quota = sample_quota("claude", vec![("pool", 90.0), ("other", 40.0)]);
+        apply_estimate(&mut quota, &mut history, now, None);
+        assert!((quota.limits[0].forecast.as_ref().unwrap().per_hour - 10.0).abs() < 0.01);
+        assert!((quota.limits[1].forecast.as_ref().unwrap().per_hour - 30.0).abs() < 0.01);
     }
 
     #[test]
