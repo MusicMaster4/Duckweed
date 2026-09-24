@@ -72,10 +72,12 @@ const MAX_FORECAST_AGE_MS: i64 = 15 * 60 * 1000;
 /// Providers report utilization in coarse steps. A rise no bigger than this
 /// could be one rounding step rather than real burn, so it earns little trust.
 const QUANTUM_PERCENT: f64 = 1.0;
-/// Below this much observed time there is no measurement at all.
+/// Recent sample history needs this much observed time to establish a pace.
 const MIN_EVIDENCE_MS: i64 = 5 * 60 * 1000;
-/// Preferred observation span for the window average. A shorter span is used
-/// only when it clears both the live-evidence and reporting-noise floors.
+/// A new window with meaningful usage can establish an initial pace sooner.
+const MIN_EARLY_WINDOW_MS: i64 = 60 * 1000;
+/// Preferred observation span for the window average. A shorter span needs
+/// meaningful utilization so one rounded reporting step cannot set the pace.
 const MIN_SPAN_MS: i64 = 15 * 60 * 1000;
 /// Utilization drop of this many points counts as a window reset. Only used
 /// when the provider gives no window length to cut on exactly.
@@ -430,10 +432,12 @@ fn window_average_per_hour(limit: &QuotaLimit, now: i64) -> Option<f64> {
         return None;
     }
     let elapsed = limit.window_ms? - (limit.resets_at? - now);
-    if elapsed < MIN_EVIDENCE_MS || (elapsed < MIN_SPAN_MS && limit.percent <= QUANTUM_PERCENT) {
-        // A few minutes or a single rounded reporting step is too little to
-        // extrapolate. Meaningful consumption after five minutes is enough to
-        // restart an estimate when a known window has just reset.
+    if elapsed < MIN_EARLY_WINDOW_MS
+        || (elapsed < MIN_SPAN_MS && limit.percent <= QUANTUM_PERCENT)
+    {
+        // A single rounded reporting step is too little to extrapolate, but
+        // substantial usage after a reset need not wait five minutes before
+        // the pace and remaining time can be shown.
         return None;
     }
     let per_hour = limit.percent / (elapsed as f64 / 3_600_000.0);
