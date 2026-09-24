@@ -151,7 +151,7 @@ export function StatisticsTool({ tabs, panes, projects }: Props) {
       );
     };
     refresh(60_000);
-    const timer = window.setInterval(() => refresh(0), 60_000);
+    const timer = window.setInterval(() => refresh(0), 30_000);
     return () => {
       disposed = true;
       window.clearInterval(timer);
