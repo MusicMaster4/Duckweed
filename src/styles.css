@@ -5746,7 +5746,6 @@ body.is-resizing * {
   font-size: 11px;
 }
 
-.pane-tools-form textarea,
 .pane-tools-form input {
   width: 100%;
   padding: 8px;
@@ -5759,10 +5758,7 @@ body.is-resizing * {
   color-scheme: dark;
 }
 
-.pane-tools-form textarea { min-height: 80px; resize: vertical; line-height: 1.45; }
-.pane-tools-form textarea:focus,
 .pane-tools-form input:focus { border-color: var(--accent-line); }
-.pane-tools-form textarea::placeholder { color: var(--text-faint); }
 
 .pane-tools-form-hint {
   color: var(--text-faint);

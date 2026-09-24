@@ -11,9 +11,8 @@ export interface ScheduledSend {
   targetLabel: string;
 }
 
-/** A message captured now and submitted to its terminal at a local time. */
+/** A local time to submit the terminal's current draft. */
 export interface TimedSend {
-  text: string;
   at: number;
 }
 

@@ -44,7 +44,7 @@ const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 /// How far back the duty cycle looks. Kept inside [`RECENT_DAYS`] so every row
 /// it reads still has five-minute resolution rather than a collapsed day.
 const DUTY_DAYS: i64 = 7;
-const INDEX_VERSION: u32 = 3;
+const INDEX_VERSION: u32 = 4;
 
 // ---------------------------------------------------------------- tokens
 
