@@ -305,6 +305,28 @@ function workflowLaunch(
   };
 }
 
+function backgroundAgentId(
+  frame: Record<string, unknown>,
+  output: string,
+): string | null | undefined {
+  const result =
+    asRecord(frame.toolUseResult) ??
+    asRecord(frame.tool_use_result) ??
+    asRecord(frame.tool_result);
+  if (
+    asString(result?.status) !== "async_launched" &&
+    !/Async agent launched successfully/i.test(output)
+  ) return undefined;
+  return (
+    asString(result?.agentId) ??
+    asString(result?.agent_id) ??
+    asString(result?.taskId) ??
+    asString(result?.task_id) ??
+    /(?:Agent|Task) ID:\s*(\S+)/i.exec(output)?.[1] ??
+    null
+  );
+}
+
 function taskNotification(text: string): {
   taskId: string;
   status: "completed" | "failed" | "stopped";
@@ -510,6 +532,7 @@ export function createClaudeAdapter(): AgentAdapter {
   /** Background dynamic workflows remain running after their launch tool returns. */
   const workflowsByCallId = new Map<string, TrackedWorkflow>();
   const workflowCallByTaskId = new Map<string, string>();
+  const backgroundAgentCallByTaskId = new Map<string, string>();
   let latestWorkflowCallId: string | null = null;
   /** Goal state before an optimistic create/update, restored if the tool fails. */
   const goalToolUndo = new Map<string, AgentGoal | null>();
@@ -1024,22 +1047,33 @@ export function createClaudeAdapter(): AgentAdapter {
     // raw stream. Match text by its ordinal among text blocks, not by the
     // absolute content index, so the authoritative copy updates the streamed
     // item instead of creating a duplicate beside it.
-    const streamedTextBlocks = [...blocks.entries()]
+    const streamedBlocks = [...blocks.entries()]
       .sort(([left], [right]) => left - right)
-      .map(([, block]) => block)
-      .filter((block) => block.kind === "text");
+      .map(([, block]) => block);
+    const streamedTextBlocks = streamedBlocks.filter((block) => block.kind === "text");
+    const streamedThinkingBlocks = streamedBlocks.filter((block) => block.kind === "thinking");
     let textIndex = 0;
+    let thinkingIndex = 0;
     for (const [index, raw] of asArray(message.content).entries()) {
       const block = asRecord(raw);
       if (!block) continue;
       const blockType = asString(block.type);
       if (blockType === "text") {
-        const text = asString(block.text);
-        if (!text) continue;
         const streamed = streamedTextBlocks[textIndex];
         textIndex += 1;
+        const text = asString(block.text);
+        if (!text) continue;
         const id = streamed?.id ?? `${fallbackMessageId}-b${index}`;
         ctx.emit({ type: "assistant-snapshot", id, text });
+        continue;
+      }
+      if (blockType === "thinking") {
+        const streamed = streamedThinkingBlocks[thinkingIndex];
+        thinkingIndex += 1;
+        const text = asString(block.thinking);
+        if (!text) continue;
+        const id = streamed?.id ?? `${fallbackMessageId}-b${index}`;
+        ctx.emit({ type: "thinking-snapshot", id, text });
         continue;
       }
       if (blockType !== "tool_use") continue;
@@ -1050,6 +1084,9 @@ export function createClaudeAdapter(): AgentAdapter {
       tools.set(callId, { name, partialInput: "" });
       settleTool(callId, name, input, ctx);
     }
+    // A later settled message may arrive without stream events. Never match it
+    // against the previous message's content-block ids.
+    blocks.clear();
 
     const backgroundWorkflowRunning = [...workflowsByCallId.values()].some(
       (workflow) => workflow.taskId !== null && workflow.status === "running",
@@ -1217,6 +1254,20 @@ export function createClaudeAdapter(): AgentAdapter {
         }
         continue;
       }
+      if (!failed && known && toolKind(known.name) === "task") {
+        const agentId = backgroundAgentId(frame, output);
+        if (agentId !== undefined) {
+          if (agentId) backgroundAgentCallByTaskId.set(agentId, callId);
+          ctx.emit({
+            type: "tool",
+            callId,
+            status: "running",
+            output,
+            subagent: { activity: "Working" },
+          });
+          continue;
+        }
+      }
       trackTaskResult(
         ROOT_TASK_SCOPE,
         callId,
@@ -1244,6 +1295,23 @@ export function createClaudeAdapter(): AgentAdapter {
   function handleTaskNotification(text: string, ctx: AdapterContext): void {
     const notification = taskNotification(text);
     if (!notification) return;
+    const agentCallId = backgroundAgentCallByTaskId.get(notification.taskId);
+    if (agentCallId) {
+      ctx.emit({
+        type: "tool",
+        callId: agentCallId,
+        status: notification.status === "completed" ? "done" : "error",
+        ...(notification.summary ? { output: notification.summary } : {}),
+        subagent: {
+          activity:
+            notification.summary ||
+            (notification.status === "completed"
+              ? "Delegated work completed"
+              : "Delegated work failed"),
+        },
+      });
+      return;
+    }
     const callId = workflowCallByTaskId.get(notification.taskId);
     if (!callId) return;
     const workflow = workflowsByCallId.get(callId);

@@ -222,6 +222,8 @@ describe("statistics and ports panels", () => {
     expect(html).toContain("Panes");
     expect(html).toContain(">5<");
     expect(html).toContain("Quota management");
+    expect(html.indexOf("Estimated cost")).toBeLessThan(html.indexOf("Quota management"));
+    expect(html.indexOf("Quota management")).toBeLessThan(html.indexOf("Workspace"));
   });
 
   test("statistics says a quiet session is quiet rather than showing a stale number", () => {

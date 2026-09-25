@@ -2704,6 +2704,70 @@ describe("codex adapter", () => {
     expect(h.events.filter((event) => event.type === "turn-end")).toHaveLength(1);
   });
 
+  test("does not call a child complete when its metadata omits status", async () => {
+    const h = harness();
+    await h.handshake();
+    h.notify("item/completed", {
+      threadId: "thread_1",
+      item: {
+        id: "sub-no-status",
+        type: "collabAgentToolCall",
+        tool: "spawnAgent",
+        status: "completed",
+        receiverThreadIds: ["thread_child_no_status"],
+        prompt: "Inspect the renderer",
+      },
+    });
+    const read = h.sent.findLast((message) => message.method === "thread/read") as { id: number };
+    h.feed({
+      jsonrpc: "2.0",
+      id: read.id,
+      result: { thread: { id: "thread_child_no_status", turns: [{ id: "turn-child", items: [] }] } },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(h.state().items[0]).toMatchObject({ kind: "tool", status: "pending" });
+  });
+
+  test("keeps an interacting child running until a terminal activity arrives", async () => {
+    const h = harness();
+    await h.handshake();
+    h.notify("item/started", {
+      threadId: "thread_1",
+      item: {
+        id: "child-activity",
+        type: "subAgentActivity",
+        kind: "started",
+        agentThreadId: "thread_child_activity",
+        agentPath: "/root/artist",
+      },
+    });
+    h.notify("item/completed", {
+      threadId: "thread_1",
+      item: {
+        id: "child-activity",
+        type: "subAgentActivity",
+        kind: "interacted",
+        agentThreadId: "thread_child_activity",
+        agentPath: "/root/artist",
+      },
+    });
+    expect(h.state().items[0]).toMatchObject({ kind: "tool", status: "running" });
+
+    h.notify("item/completed", {
+      threadId: "thread_1",
+      item: {
+        id: "child-activity",
+        type: "subAgentActivity",
+        kind: "completed",
+        agentThreadId: "thread_child_activity",
+        agentPath: "/root/artist",
+      },
+    });
+    expect(h.state().items[0]).toMatchObject({ kind: "tool", status: "done" });
+  });
+
   test("waits for provider completion after a final-answer item", async () => {
     const h = harness({}, { completionQuietMs: 10 });
     await h.handshake();

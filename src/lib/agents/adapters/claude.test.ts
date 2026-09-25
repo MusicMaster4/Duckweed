@@ -198,6 +198,65 @@ describe("claude adapter", () => {
     ]);
   });
 
+  test("recovers thinking from a settled message when partial events are missing", () => {
+    const h = harness();
+    h.feed({
+      type: "assistant",
+      message: {
+        id: "settled-thinking",
+        content: [
+          { type: "thinking", thinking: "Checking the affected paths." },
+          { type: "text", text: "I found the affected paths." },
+        ],
+      },
+    });
+
+    expect(h.state().items.map((item) => [item.kind, item.text])).toEqual([
+      ["thinking", "Checking the affected paths."],
+      ["assistant", "I found the affected paths."],
+    ]);
+  });
+
+  test("settled thinking completes its streamed block without a duplicate", () => {
+    const h = harness();
+    h.feed({ type: "stream_event", event: { type: "message_start" } });
+    for (const frame of streamBlock(0, { type: "thinking" }, [
+      { type: "thinking_delta", thinking: "Checking" },
+    ])) h.feed(frame);
+    h.feed({
+      type: "assistant",
+      message: {
+        id: "thinking-message",
+        content: [{ type: "thinking", thinking: "Checking the affected paths." }],
+      },
+    });
+
+    expect(h.state().items).toEqual([
+      expect.objectContaining({
+        kind: "thinking", id: "m1-b0", text: "Checking the affected paths.", streaming: false,
+      }),
+    ]);
+  });
+
+  test("settled messages without stream events do not overwrite earlier blocks", () => {
+    const h = harness();
+    h.feed({ type: "stream_event", event: { type: "message_start" } });
+    for (const frame of streamBlock(0, { type: "text" }, [
+      { type: "text_delta", text: "First update." },
+    ])) h.feed(frame);
+    h.feed({
+      type: "assistant",
+      message: { id: "first", content: [{ type: "text", text: "First update." }] },
+    });
+    h.feed({
+      type: "assistant",
+      message: { id: "second", content: [{ type: "text", text: "Second update." }] },
+    });
+
+    expect(h.state().items.filter((item) => item.kind === "assistant").map((item) => item.text))
+      .toEqual(["First update.", "Second update."]);
+  });
+
   test("keeps interim comments single across tool rounds", () => {
     const h = harness();
     const comments = [
@@ -308,6 +367,49 @@ describe("claude adapter", () => {
         prompt: "Find the fixture that breaks the parser",
         model: "haiku",
       },
+    });
+  });
+
+  test("keeps an asynchronously launched Agent running until its task notification", () => {
+    const h = harness();
+    h.feed({
+      type: "assistant",
+      message: {
+        content: [{
+          type: "tool_use",
+          id: "agent-background",
+          name: "Agent",
+          input: { description: "Author the shots", prompt: "Build the animations" },
+        }],
+      },
+    });
+    h.feed({
+      type: "user",
+      message: {
+        content: [{
+          type: "tool_result",
+          tool_use_id: "agent-background",
+          content: "Async agent launched successfully. Agent ID: agent-42",
+        }],
+      },
+      toolUseResult: { status: "async_launched", agentId: "agent-42" },
+    });
+    h.feed({ type: "result", subtype: "success", is_error: false });
+
+    expect(h.state().items[0]).toMatchObject({
+      kind: "tool",
+      status: "running",
+      subagent: { activity: "Working" },
+    });
+
+    h.feed({
+      type: "queue-operation",
+      content: "<task-notification><task-id>agent-42</task-id><status>completed</status><summary>All shots rendered</summary></task-notification>",
+    });
+    expect(h.state().items[0]).toMatchObject({
+      kind: "tool",
+      status: "done",
+      output: "All shots rendered",
     });
   });
 

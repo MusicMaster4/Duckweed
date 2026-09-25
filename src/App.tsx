@@ -895,7 +895,7 @@ export default function App() {
   }, []);
 
   const scheduleTimedSend = useCallback((termId: string, send: TimedSend) => {
-    if (!send.text.trim() || !Number.isFinite(send.at) || send.at <= Date.now()) return;
+    if (!Number.isFinite(send.at) || send.at <= Date.now()) return;
     const next = new Map(timedSendsRef.current);
     next.set(termId, send);
     timedSendsRef.current = next;
@@ -939,27 +939,6 @@ export default function App() {
     [],
   );
 
-  // A timed message is separate from the visible composer draft. Restore that
-  // draft after using the same submit route as a manual Enter.
-  const sendTimedMessage = useCallback((termId: string, text: string) => {
-    const agent = agentSessions.get(termId);
-    if (agent) {
-      if (agent.status === "exited" || agent.status === "error") return;
-      const draft = agentSessions.getDraft(termId);
-      const images = agentSessions.getDraftImages(termId);
-      agentSessions.submit(termId, text);
-      agentSessions.setDraft(termId, draft);
-      agentSessions.setDraftImages(termId, images);
-      return;
-    }
-    const meta = terminals.getMeta(termId);
-    if (!meta || meta.exited) return;
-    const draft = terminals.getDraft(termId);
-    if (meta.agent || meta.busy) terminals.writeRaw(termId, `${text}\r`);
-    else terminals.submitCommand(termId, text);
-    terminals.setDraft(termId, draft);
-  }, []);
-
   useEffect(() => {
     if (timedSends.size === 0) return;
     let timer = 0;
@@ -970,7 +949,12 @@ export default function App() {
         for (const [termId] of due) next.delete(termId);
         timedSendsRef.current = next;
         setTimedSends(next);
-        for (const [termId, send] of due) sendTimedMessage(termId, send.text);
+        for (const [termId] of due) {
+          const agent = agentSessions.get(termId);
+          const text = agent ? agentSessions.getDraft(termId) : terminals.getDraft(termId);
+          const images = agent ? agentSessions.getDraftImages(termId) : [];
+          if (hasSendablePayload(text, images)) sendDraftNow(termId, text, images);
+        }
         return;
       }
       const nextAt = Math.min(...[...timedSendsRef.current.values()].map((send) => send.at));
@@ -987,7 +971,7 @@ export default function App() {
       window.removeEventListener("focus", checkDue);
       document.removeEventListener("visibilitychange", checkDue);
     };
-  }, [timedSends, sendTimedMessage]);
+  }, [timedSends, sendDraftNow]);
 
   const completeScheduledSendsForTarget = useCallback(
     (targetTermId: string) => {

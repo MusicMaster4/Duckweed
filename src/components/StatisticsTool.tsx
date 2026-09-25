@@ -151,7 +151,7 @@ export function StatisticsTool({ tabs, panes, projects }: Props) {
       );
     };
     refresh(60_000);
-    const timer = window.setInterval(() => refresh(0), 60_000);
+    const timer = window.setInterval(() => refresh(0), 30_000);
     return () => {
       disposed = true;
       window.clearInterval(timer);
@@ -233,6 +233,23 @@ export function StatisticsTool({ tabs, panes, projects }: Props) {
           )}
         </article>
 
+        <article className="statistics-card statistics-quotas">
+          <header>
+            <span className="statistics-card-title">Quota management</span>
+          </header>
+          {quotas && quotas.length > 0 ? (
+            <QuotaCards quotas={quotas} now={quotaNow} />
+          ) : (
+            <p className="statistics-note">
+              {quotaError
+                ? "Quota data unavailable"
+                : quotas
+                  ? "No provider quotas available"
+                  : "Reading quotas..."}
+            </p>
+          )}
+        </article>
+
         <article className="statistics-card">
           <header>
             <span className="statistics-card-title">Workspace</span>
@@ -265,23 +282,6 @@ export function StatisticsTool({ tabs, panes, projects }: Props) {
             </ul>
           </article>
         )}
-
-        <article className="statistics-card statistics-quotas">
-          <header>
-            <span className="statistics-card-title">Quota management</span>
-          </header>
-          {quotas && quotas.length > 0 ? (
-            <QuotaCards quotas={quotas} now={quotaNow} />
-          ) : (
-            <p className="statistics-note">
-              {quotaError
-                ? "Quota data unavailable"
-                : quotas
-                  ? "No provider quotas available"
-                  : "Reading quotas..."}
-            </p>
-          )}
-        </article>
       </div>
     </section>
   );

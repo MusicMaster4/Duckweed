@@ -815,7 +815,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
           });
           turns = asArray(page.data).reverse();
         }
-        const status = threadStatus(thread.status) ?? "idle";
+        const status = threadStatus(thread.status);
         if (
           status === "working" &&
           (!child.hasLiveStatus || child.state.status === "working")
@@ -862,7 +862,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         }
         // Live status events can overtake thread/read. Never flash a completed
         // child back to working because an older snapshot arrived late.
-        if (!child.hasLiveStatus) {
+        if (!child.hasLiveStatus && status) {
           hydratedState = applyEvent(hydratedState, { type: "status", status });
         } else {
           hydratedState = {
@@ -1827,6 +1827,12 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       }
       case "subAgentActivity": {
         const kind = asString(item.kind) ?? "interacted";
+        const activityStatus: ToolStatus =
+          kind === "completed" || kind === "finished"
+            ? "done"
+            : kind === "interrupted" || kind === "failed"
+              ? "error"
+              : "running";
         const agentPath = asString(item.agentPath);
         const agentThreadId = asString(item.agentThreadId);
         // Codex also reports activity for the root participant during a
@@ -1848,7 +1854,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
           child.hasLiveStatus = true;
           child.state = applyEvent(child.state, {
             type: "status",
-            status: kind === "interrupted" ? "error" : kind === "started" ? "working" : "idle",
+            status: activityStatus === "error" ? "error" : activityStatus === "done" ? "idle" : "working",
           });
           if (child.callId) {
             syncChild(agentThreadId, ctx);
@@ -1868,7 +1874,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
           name: "subagent",
           tool: "task",
           title: agentPath ? `Subagent ${agentPath}` : "Subagent activity",
-          status: kind === "interrupted" ? "error" : kind === "started" ? "running" : "done",
+          status: activityStatus,
           output: [
             agentThreadId ? `Thread: ${agentThreadId}` : "",
             kind ? `Activity: ${kind}` : "",

@@ -552,7 +552,7 @@ fn pi_line(value: &Value) -> Option<Vec<Record>> {
         .unwrap_or_else(|| format!("{at}:{model}:{}", tokens.total()));
 
     Some(vec![Record {
-        pricing: super::pricing::Context::default(),
+        pricing: super::pricing::Context::for_request(&model, "", &tokens),
         at,
         model,
         tokens,
@@ -801,18 +801,19 @@ fn grok_line(value: &Value) -> Option<Vec<Record>> {
     let one = |model: &str, block: &Value, dedup: u64| {
         let cache_read = u(block, "cachedReadTokens");
         let reasoning = u(block, "reasoningTokens");
+        let tokens = Tokens {
+            input: u(block, "inputTokens").saturating_sub(cache_read),
+            output: u(block, "outputTokens").saturating_sub(reasoning),
+            reasoning,
+            cache_read,
+            cache_write: u(block, "cacheWriteTokens"),
+            cache_write_1h: 0,
+        };
         Record {
-            pricing: super::pricing::Context::default(),
+            pricing: super::pricing::Context::for_request(model, "", &tokens),
             at,
             model: model.to_string(),
-            tokens: Tokens {
-                input: u(block, "inputTokens").saturating_sub(cache_read),
-                output: u(block, "outputTokens").saturating_sub(reasoning),
-                reasoning,
-                cache_read,
-                cache_write: u(block, "cacheWriteTokens"),
-                cache_write_1h: 0,
-            },
+            tokens,
             reported_cost: None,
             dedup,
         }
@@ -883,13 +884,13 @@ fn kimi_line(value: &Value) -> Option<Vec<Record>> {
     if tokens.total() == 0 {
         return None;
     }
+    let model = s(value, "model")
+        .or_else(|| value.get("response").and_then(|r| s(r, "model")))
+        .unwrap_or("kimi-k2");
     Some(vec![Record {
-        pricing: super::pricing::Context::default(),
+        pricing: super::pricing::Context::for_request(model, "", &tokens),
         at,
-        model: s(value, "model")
-            .or_else(|| value.get("response").and_then(|r| s(r, "model")))
-            .unwrap_or("kimi-k2")
-            .to_string(),
+        model: model.to_string(),
         tokens,
         reported_cost: None,
         dedup: s(value, "id").map(hash).unwrap_or(0),
@@ -1020,7 +1021,7 @@ fn opencode_file(value: &Value, _path: &Path) -> Vec<Record> {
         .map(hash)
         .unwrap_or_else(|| hash(&format!("{model}:{at}:{}", tokens.total())));
     vec![Record {
-        pricing: super::pricing::Context::default(),
+        pricing: super::pricing::Context::for_request(&model, "", &tokens),
         at,
         model,
         tokens,
@@ -1198,6 +1199,36 @@ mod tests {
         let record = kimi_line(&value).unwrap().remove(0);
         assert_eq!(record.tokens.input, 200);
         assert_eq!(record.tokens.total(), 1100);
+    }
+
+    #[test]
+    fn gpt_6_long_context_is_priced_across_agent_formats() {
+        let pi = serde_json::json!({"type":"message","timestamp":"2026-09-24T12:00:00Z",
+            "message":{"model":"gpt-6-sol","timestamp":1790251200000i64,
+                "usage":{"input":300_000,"output":1}}});
+        let claude = serde_json::json!({"type":"assistant","timestamp":"2026-09-24T12:00:00Z",
+            "message":{"model":"gpt-6-sol","usage":{"input_tokens":300_000,"output_tokens":1}}});
+        let grok = serde_json::json!({"timestamp":1790251200,
+            "params":{"update":{"usage":{"modelUsage":{"gpt-6-sol":{
+                "inputTokens":300_000,"outputTokens":1}}}}}});
+        let kimi = serde_json::json!({"timestamp":"2026-09-24T12:00:00Z","model":"gpt-6-sol",
+            "usage":{"input_tokens":300_000,"output_tokens":1}});
+        let opencode = serde_json::json!({"role":"assistant","modelID":"openai/gpt-6-sol",
+            "time":{"completed":1790251200000i64},"tokens":{"input":300_000,"output":1}});
+        for record in [
+            pi_line(&pi).unwrap().remove(0),
+            claude_line(&claude).unwrap().remove(0),
+            grok_line(&grok).unwrap().remove(0),
+            kimi_line(&kimi).unwrap().remove(0),
+            opencode_file(&opencode, Path::new("x")).remove(0),
+        ] {
+            assert!(record.pricing.long, "{}", record.model);
+            let (rates, known) = super::super::pricing::lookup(&record.model, &Default::default());
+            assert!(known, "{}", record.model);
+            assert!(
+                (record.pricing.cost(&record.model, rates, &record.tokens) - 1.200015).abs() < 1e-9
+            );
+        }
     }
 
     #[test]

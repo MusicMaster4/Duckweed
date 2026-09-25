@@ -74,6 +74,7 @@ export type AgentEvent =
    * of waiting for every already-generated delta to be painted.
    */
   | { type: "assistant-snapshot"; id: string; text: string }
+  | { type: "thinking-snapshot"; id: string; text: string }
   | { type: "assistant-end"; id: string }
   | { type: "thinking-delta"; id: string; text: string }
   | { type: "thinking-end"; id: string }
@@ -502,8 +503,10 @@ function reduceEvent(state: AgentSessionState, event: AgentEvent): AgentSessionS
       return { ...state, items };
     }
 
-    case "assistant-snapshot": {
-      const index = findStreaming(state, "assistant", event.id);
+    case "assistant-snapshot":
+    case "thinking-snapshot": {
+      const kind = event.type === "assistant-snapshot" ? "assistant" : "thinking";
+      const index = findStreaming(state, kind, event.id);
       if (index < 0) {
         return {
           ...state,
@@ -511,7 +514,7 @@ function reduceEvent(state: AgentSessionState, event: AgentEvent): AgentSessionS
           items: [
             ...state.items,
             {
-              kind: "assistant",
+              kind,
               id: event.id,
               at: Date.now(),
               text: clampEnd(event.text, MAX_TEXT),
