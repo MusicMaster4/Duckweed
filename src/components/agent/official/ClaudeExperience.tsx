@@ -10,9 +10,34 @@ import {
   MessageItem,
   PlanTracker,
   ProviderEmpty,
-  shortAssistantUpdatesAsThinking,
+  StillWorking,
   type ExperienceProps,
 } from "./OfficialShared";
+
+/** Claude's text blocks are user-visible progress, even when they are brief. */
+function interimAssistantIds(items: ExperienceProps["items"], working: boolean): Set<string> {
+  const ids = continuedAssistantIds(items);
+  let turnStart = 0;
+  const markTurn = (end: number, active: boolean) => {
+    const assistants = items.slice(turnStart, end).filter((item) => item.kind === "assistant");
+    for (const item of assistants.slice(0, active ? undefined : -1)) ids.add(item.id);
+  };
+  for (let index = 0; index < items.length; index += 1) {
+    if (items[index].kind !== "user") continue;
+    markTurn(index, false);
+    turnStart = index;
+  }
+  markTurn(items.length, working);
+  return ids;
+}
+
+function compactUpdate(text: string): boolean {
+  let length = 0;
+  for (const _character of text) {
+    if (++length > 110) return false;
+  }
+  return true;
+}
 
 export function ClaudeExperience({
   items,
@@ -24,18 +49,15 @@ export function ClaudeExperience({
   program,
   cwd,
 }: ExperienceProps) {
-  const transcriptItems = useMemo(
-    () => shortAssistantUpdatesAsThinking(items, status === "working", 110),
-    [items, status],
-  );
+  const transcriptItems = items;
   const groups = useMemo(() => activityGroups(transcriptItems), [transcriptItems]);
   const answerIds = useMemo(
     () => new Set(groups.flatMap((group) => (group.answerId ? [group.answerId] : []))),
     [groups],
   );
   const continuedIds = useMemo(
-    () => continuedAssistantIds(transcriptItems),
-    [transcriptItems],
+    () => interimAssistantIds(transcriptItems, status === "working" || status === "waiting"),
+    [transcriptItems, status],
   );
   const liveAssistantId = useMemo(
     () => activeAssistantId(transcriptItems, status === "working"),
@@ -58,7 +80,16 @@ export function ClaudeExperience({
   for (const group of groups) {
     if (group.firstIndex > latestUserIndex) liveGroup = group;
   }
-  const needsEmptyLiveTrace = status === "working" && !liveGroup;
+  let latestLiveContent: (typeof transcriptItems)[number] | undefined;
+  for (let index = transcriptItems.length - 1; index > latestUserIndex; index -= 1) {
+    const item = transcriptItems[index];
+    if (item.kind === "assistant" || item.kind === "thinking" || item.kind === "tool") {
+      latestLiveContent = item;
+      break;
+    }
+  }
+  const needsStillWorking = status === "working" && latestLiveContent?.kind === "assistant";
+  const needsEmptyLiveTrace = status === "working" && !liveGroup && !needsStillWorking;
   const liveUserId =
     latestUserIndex >= 0 ? transcriptItems[latestUserIndex]?.id : "session-start";
 
@@ -107,6 +138,7 @@ export function ClaudeExperience({
           if (
             item.kind === "assistant" &&
             answerIds.has(item.id) &&
+            !continuedIds.has(item.id) &&
             status !== "working"
           ) {
             return (
@@ -125,7 +157,9 @@ export function ClaudeExperience({
               variant="claude"
               className={
                 item.kind === "assistant" && continuedIds.has(item.id)
-                  ? "is-interim-update"
+                  ? compactUpdate(item.text)
+                    ? "is-compact-update"
+                    : "is-interim-update"
                   : item.kind === "assistant" &&
                       status === "working" &&
                       liveGroup?.answerId === item.id
@@ -144,6 +178,12 @@ export function ClaudeExperience({
             variant="claude"
             working
             clusterId={`${termId}:live:${liveUserId}`}
+          />
+        )}
+        {needsStillWorking && (
+          <StillWorking
+            variant="claude"
+            clusterId={`${termId}:still:${liveUserId}`}
           />
         )}
       </div>

@@ -1024,22 +1024,33 @@ export function createClaudeAdapter(): AgentAdapter {
     // raw stream. Match text by its ordinal among text blocks, not by the
     // absolute content index, so the authoritative copy updates the streamed
     // item instead of creating a duplicate beside it.
-    const streamedTextBlocks = [...blocks.entries()]
+    const streamedBlocks = [...blocks.entries()]
       .sort(([left], [right]) => left - right)
-      .map(([, block]) => block)
-      .filter((block) => block.kind === "text");
+      .map(([, block]) => block);
+    const streamedTextBlocks = streamedBlocks.filter((block) => block.kind === "text");
+    const streamedThinkingBlocks = streamedBlocks.filter((block) => block.kind === "thinking");
     let textIndex = 0;
+    let thinkingIndex = 0;
     for (const [index, raw] of asArray(message.content).entries()) {
       const block = asRecord(raw);
       if (!block) continue;
       const blockType = asString(block.type);
       if (blockType === "text") {
-        const text = asString(block.text);
-        if (!text) continue;
         const streamed = streamedTextBlocks[textIndex];
         textIndex += 1;
+        const text = asString(block.text);
+        if (!text) continue;
         const id = streamed?.id ?? `${fallbackMessageId}-b${index}`;
         ctx.emit({ type: "assistant-snapshot", id, text });
+        continue;
+      }
+      if (blockType === "thinking") {
+        const streamed = streamedThinkingBlocks[thinkingIndex];
+        thinkingIndex += 1;
+        const text = asString(block.thinking);
+        if (!text) continue;
+        const id = streamed?.id ?? `${fallbackMessageId}-b${index}`;
+        ctx.emit({ type: "thinking-snapshot", id, text });
         continue;
       }
       if (blockType !== "tool_use") continue;
@@ -1050,6 +1061,9 @@ export function createClaudeAdapter(): AgentAdapter {
       tools.set(callId, { name, partialInput: "" });
       settleTool(callId, name, input, ctx);
     }
+    // A later settled message may arrive without stream events. Never match it
+    // against the previous message's content-block ids.
+    blocks.clear();
 
     const backgroundWorkflowRunning = [...workflowsByCallId.values()].some(
       (workflow) => workflow.taskId !== null && workflow.status === "running",
