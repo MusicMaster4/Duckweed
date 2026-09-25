@@ -370,6 +370,49 @@ describe("claude adapter", () => {
     });
   });
 
+  test("keeps an asynchronously launched Agent running until its task notification", () => {
+    const h = harness();
+    h.feed({
+      type: "assistant",
+      message: {
+        content: [{
+          type: "tool_use",
+          id: "agent-background",
+          name: "Agent",
+          input: { description: "Author the shots", prompt: "Build the animations" },
+        }],
+      },
+    });
+    h.feed({
+      type: "user",
+      message: {
+        content: [{
+          type: "tool_result",
+          tool_use_id: "agent-background",
+          content: "Async agent launched successfully. Agent ID: agent-42",
+        }],
+      },
+      toolUseResult: { status: "async_launched", agentId: "agent-42" },
+    });
+    h.feed({ type: "result", subtype: "success", is_error: false });
+
+    expect(h.state().items[0]).toMatchObject({
+      kind: "tool",
+      status: "running",
+      subagent: { activity: "Working" },
+    });
+
+    h.feed({
+      type: "queue-operation",
+      content: "<task-notification><task-id>agent-42</task-id><status>completed</status><summary>All shots rendered</summary></task-notification>",
+    });
+    expect(h.state().items[0]).toMatchObject({
+      kind: "tool",
+      status: "done",
+      output: "All shots rendered",
+    });
+  });
+
   test("attributes complete child messages and tools through parent_tool_use_id", () => {
     const h = harness();
     h.feed({
