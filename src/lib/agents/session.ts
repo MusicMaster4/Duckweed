@@ -1,4 +1,5 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
+import { workspaceRecovery, type AgentRecovery } from "../workspaceRecovery";
 
 import {
   agentProcCloseStdin,
@@ -99,6 +100,8 @@ interface Session {
    * ask on.
    */
   pendingResume: { id: string; title: string } | null;
+  restoring: boolean;
+  recovery: AgentRecovery | null;
   /** Coalesces streamed deltas into one notification per frame. */
   notifyHandle: number | null;
   /** Coalesces reducer work too, so a fast stream cannot outrun WebView2's GC. */
@@ -123,6 +126,13 @@ interface Session {
   deferredTurnEnd: TurnAnnounceInput | null;
   /** A picker command is negotiating with the CLI without becoming a chat turn. */
   configuring: boolean;
+  preparing: {
+    id: string;
+    prompt: AgentPrompt;
+    echoed: boolean;
+    model: string | null;
+    effort: string | null;
+  } | null;
   /** Tracks whether a provider-native config turn such as Claude `/effort` worked. */
   configurationTurn: {
     kind: "model" | "effort";
@@ -142,6 +152,64 @@ interface Session {
 }
 
 const sessions = new Map<string, Session>();
+const recoveryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+function checkpoint(session: Session): void {
+  const timer = recoveryTimers.get(session.termId);
+  if (timer) clearTimeout(timer);
+  recoveryTimers.delete(session.termId);
+  if (session.disposed) return;
+  // Empty Codex threads have an id but no resumable rollout on disk yet.
+  const sessionId = session.pendingResume?.id ??
+    (session.restoring ? session.launch.resumeId :
+      session.state.agent === "codex" && !session.state.items.some((item) => item.kind === "user")
+        ? null : session.state.sessionId);
+  workspaceRecovery.update(session.termId, { agent: {
+    launch: {
+      ...session.launch,
+      prompt: null,
+      resume: false,
+      model: session.state.nextModel ?? session.preparing?.model ?? session.state.model,
+      effort: session.state.nextEffort ?? session.preparing?.effort ?? session.state.effort,
+      accessMode: session.state.accessMode,
+    },
+    cwd: session.state.cwd,
+    sessionId,
+    draft: session.draft,
+    images: session.draftImages,
+    history: session.promptHistory,
+    queued: [
+      ...(session.preparing ? [{
+        id: session.preparing.id, prompt: session.preparing.prompt, echoed: session.preparing.echoed,
+      }] : []),
+      ...session.queued,
+    ],
+    items: session.restoring && session.recovery ? session.recovery.items : session.state.items,
+    usage: session.state.usage,
+    goal: session.state.goal,
+    serviceTier: session.state.serviceTier,
+  } });
+}
+
+export function flushRecovery(): void {
+  for (const session of sessions.values()) {
+    flushStreamEvents(session);
+    checkpoint(session);
+  }
+}
+
+function scheduleCheckpoint(session: Session): void {
+  if (!session.disposed && !recoveryTimers.has(session.termId)) {
+    recoveryTimers.set(session.termId, setTimeout(() => checkpoint(session), 250));
+  }
+}
+
+/** Scheduled sends must wait until the original conversation is ready. */
+export function readyForScheduledSend(termId: string): boolean {
+  const session = sessions.get(termId);
+  return !!session && !session.disposed && !session.pendingResume && !session.restoring &&
+    !session.state.loadingHistory && session.state.status === "idle";
+}
 let followupMode: AgentFollowupMode = "queue";
 let queuedPromptSequence = 0;
 
@@ -300,7 +368,9 @@ export function getDraft(termId: string): string {
 
 export function setDraft(termId: string, text: string): void {
   const session = sessions.get(termId);
-  if (session) session.draft = text;
+  if (!session) return;
+  session.draft = text;
+  checkpoint(session);
 }
 
 export function getDraftImages(termId: string): AgentImageAttachment[] {
@@ -309,7 +379,9 @@ export function getDraftImages(termId: string): AgentImageAttachment[] {
 
 export function setDraftImages(termId: string, images: AgentImageAttachment[]): void {
   const session = sessions.get(termId);
-  if (session) session.draftImages = [...images];
+  if (!session) return;
+  session.draftImages = [...images];
+  checkpoint(session);
 }
 
 /** Max prompts kept for per-pane ↑/↓ history in the agent composer. */
@@ -342,6 +414,7 @@ function announce(termId: string): void {
 }
 
 function notify(session: Session): void {
+  scheduleCheckpoint(session);
   if (session.notifyHandle !== null) return;
   session.notifyHandle = runtimeWindow.requestAnimationFrame(() => {
     session.notifyHandle = null;
@@ -351,6 +424,7 @@ function notify(session: Session): void {
 
 /** Flush any pending notification immediately — used when a session ends. */
 function notifyNow(session: Session): void {
+  scheduleCheckpoint(session);
   if (session.notifyHandle !== null) {
     runtimeWindow.cancelAnimationFrame(session.notifyHandle);
     session.notifyHandle = null;
@@ -627,6 +701,7 @@ function dispatch(session: Session, prompt: AgentPrompt, echoUser = true): void 
   const effort = session.state.nextEffort ?? null;
   const previousModel = session.state.model;
   const previousEffort = session.state.effort;
+  session.preparing = { id: nextQueuedPromptId(), prompt, echoed: !echoUser, model, effort };
   session.state = {
     ...session.state,
     nextModel: null,
@@ -663,6 +738,8 @@ function dispatch(session: Session, prompt: AgentPrompt, echoUser = true): void 
     session.configuring = false;
     session.configurationTurn = null;
     if (session.state.status === "exited" || session.state.status === "error") {
+      session.preparing = null;
+      queuePrompt(session, prompt, !echoUser);
       notify(session);
       return;
     }
@@ -682,10 +759,12 @@ function dispatch(session: Session, prompt: AgentPrompt, echoUser = true): void 
         model: session.state.model,
         effort: session.state.effort,
       });
+      session.preparing = null;
       queuePrompt(session, prompt, !echoUser);
       notify(session);
       return;
     }
+    session.preparing = null;
     dispatchNow(session, prompt, echoUser);
     notify(session);
   })();
@@ -818,7 +897,8 @@ function emitNow(session: Session, event: AgentEvent): void {
   // running, waits here. Exactly one is released per idle moment: every
   // protocol we speak runs one turn at a time, so pushing the whole backlog
   // would just make the agent reject the rest.
-  const releasingQueued = next.status === "idle" && session.queued.length > 0;
+  const releasingQueued = next.status === "idle" && !session.restoring &&
+    !next.loadingHistory && session.queued.length > 0;
   const turnEndState = {
     before,
     after: next.status,
@@ -895,6 +975,9 @@ function emitNow(session: Session, event: AgentEvent): void {
   if (deferredToAnnounce && isAnnounceableTurn(deferredToAnnounce)) {
     announceTurnEnd(session);
   }
+  if (["session", "status", "user", "queue", "unqueue", "resumed", "turn-end"].includes(event.type)) {
+    checkpoint(session);
+  }
 }
 
 function handleFrame(session: Session, frame: AgentFrame): void {
@@ -941,6 +1024,7 @@ export async function start(
   termId: string,
   launch: AgentLaunch,
   cwd: string,
+  recovery?: AgentRecovery,
 ): Promise<string | null> {
   if (sessions.has(termId)) return null;
   if (!TAURI_RUNTIME) return "the custom agent UI needs the desktop app";
@@ -955,7 +1039,7 @@ export async function start(
     ...(launch.model ? { model: launch.model } : {}),
     ...(launch.effort ? { effort: launch.effort } : {}),
   });
-  launch = withRememberedPreferences(launch);
+  launch = recovery ? launch : withRememberedPreferences(launch);
 
   const definition = AGENTS[launch.agent];
   const adapter = createAdapter(launch.agent);
@@ -967,7 +1051,7 @@ export async function start(
   // the conversation the user meant to continue. It can also let an opening
   // prompt start on the blank thread before a late resume swaps `threadId`
   // underneath the active turn.
-  const startupResume: { id: string; title: string } | null = launch.resumeId
+  const startupResume: { id: string; title: string } | null = adapter.resume && launch.resumeId
     ? { id: launch.resumeId, title: "" }
     : null;
   const startupResumeLookup =
@@ -986,11 +1070,13 @@ export async function start(
     adapter,
     launch,
     stderr: [],
-    queued: [],
-    draft: "",
-    draftImages: [],
-    promptHistory: [],
+    queued: recovery?.queued.map((entry) => ({ ...entry, echoed: false })) ?? [],
+    draft: recovery?.draft ?? "",
+    draftImages: recovery?.images ?? [],
+    promptHistory: recovery?.history ?? [],
     pendingResume: startupResume,
+    restoring: !!startupResume,
+    recovery: recovery ?? null,
     notifyHandle: null,
     streamFlushHandle: null,
     streamEvents: new Map(),
@@ -998,6 +1084,7 @@ export async function start(
     userInitiatedTurn: false,
     deferredTurnEnd: null,
     configuring: false,
+    preparing: null,
     configurationTurn: null,
     interactionEpoch: 0,
     exitArmedUntil: 0,
@@ -1017,17 +1104,19 @@ export async function start(
       cwd,
       model: seedModel,
       effort: launch.effort,
-      serviceTier: null,
+      serviceTier: recovery?.serviceTier ?? null,
       accessMode: launch.accessMode ?? "default",
       // Live model lists from the adapter replace this; Claude/Claudex start
       // with their known aliases so the picker works before the first turn.
       models: fallbackModels(launch.agent, launch.program),
-      sessionId: null,
-      goal: null,
-      items: [],
-      pending: [],
+      sessionId: recovery?.sessionId ?? null,
+      goal: recovery?.goal ?? null,
+      items: recovery?.items.map((item) =>
+        item.kind === "assistant" || item.kind === "thinking" ? { ...item, streaming: false } : item
+      ) ?? [],
+      pending: recovery?.queued.map((entry) => ({ ...entry.prompt, id: entry.id })) ?? [],
       permission: null,
-      usage: emptyUsage(),
+      usage: recovery?.usage ?? emptyUsage(),
       error: null,
       // Live advertisements merge over this list as they arrive; the composer
       // never has to wait on the protocol to answer `/`.
@@ -1038,7 +1127,7 @@ export async function start(
       extensionsLoading: false,
       extensionsError: null,
       runtimeTasks: [],
-      started: false,
+      started: !!recovery?.items.length,
       exitArmed: false,
     },
     context: {
@@ -1067,12 +1156,16 @@ export async function start(
   };
 
   sessions.set(termId, session);
+  checkpoint(session);
   announce(termId);
 
   const channel = new Channel<AgentFrame>();
   channel.onmessage = (frame) => handleFrame(session, frame);
 
   try {
+    // A WebView crash can leave the old native process alive under this id.
+    if (recovery) await agentProcStop(termId).catch(() => {});
+    if (session.disposed) return null;
     await agentProcStart(
       termId,
       {
@@ -1095,6 +1188,10 @@ export async function start(
     );
   } catch (error) {
     if (sessions.get(termId) !== session) return null;
+    if (recovery) {
+      emit(session, { type: "status", status: "error", error: `Could not restore agent: ${String(error)}` });
+      return null;
+    }
     sessions.delete(termId);
     announce(termId);
     return error instanceof Error ? error.message : String(error);
@@ -1202,6 +1299,7 @@ export function submit(
 ): void {
   const session = sessions.get(termId);
   if (!session || session.disposed) return;
+  if (session.state.status === "exited" || session.state.status === "error") return;
   const trimmed = text.trim();
   if (!trimmed && images.length === 0) return;
   const extensions = session.state.extensions ?? [];
@@ -1233,7 +1331,6 @@ export function submit(
   }
   session.draft = "";
   session.draftImages = [];
-  if (session.state.status === "exited" || session.state.status === "error") return;
   // Record before usage/queue/steer paths so ↑ can recall it like a shell command.
   recordPromptHistory(session, trimmed);
   if (images.length === 0 && /^\/logout$/i.test(trimmed)) {
@@ -1559,7 +1656,25 @@ async function applyResume(session: Session, sessionId: string, title: string): 
   // keeps ownership until its real completion arrives.
   session.interrupted = false;
   session.userInitiatedTurn = true;
-  const attempt = session.adapter.resume?.(sessionId, session.context);
+  session.restoring = true;
+  session.launch = { ...session.launch, resumeId: sessionId };
+  const failed = () => {
+    session.userInitiatedTurn = false;
+    if (session.recovery) {
+      session.state = { ...session.state, items: session.recovery.items, sessionId };
+    }
+    emit(session, {
+      type: "status", status: "error",
+      error: "Could not restore the saved conversation. Your draft and schedule have been kept.",
+    });
+  };
+  let attempt;
+  try {
+    attempt = session.adapter.resume?.(sessionId, session.context);
+  } catch {
+    failed();
+    return;
+  }
   if (attempt === false || attempt === undefined) {
     session.userInitiatedTurn = false;
     // An ACP agent that never advertised `loadSession`, and no CLI flag to fall
@@ -1569,13 +1684,14 @@ async function applyResume(session: Session, sessionId: string, title: string): 
       tone: "error",
       text: `${session.state.label} cannot resume a session from the custom UI.`,
     });
+    failed();
     return;
   }
-  if (await attempt) {
+  if (await Promise.resolve(attempt).catch(() => false)) {
+    session.restoring = false;
+    session.recovery = null;
     emit(session, { type: "resumed", sessionId, title });
-  } else if (session.state.status !== "working" && session.state.status !== "waiting") {
-    session.userInitiatedTurn = false;
-  }
+  } else failed();
 }
 
 /**
@@ -1775,6 +1891,10 @@ export function stop(termId: string): void {
   const session = sessions.get(termId);
   if (!session) return;
   session.disposed = true;
+  const recoveryTimer = recoveryTimers.get(termId);
+  if (recoveryTimer) clearTimeout(recoveryTimer);
+  recoveryTimers.delete(termId);
+  workspaceRecovery.update(termId, { agent: null });
   sessions.delete(termId);
   if (TAURI_RUNTIME) {
     // Agents that end on EOF get the chance to shut down cleanly; the kill

@@ -139,8 +139,9 @@ fn webview_failed_reason_name(code: i32) -> &'static str {
     }
 }
 
-const DURABLE_SETTING_KEYS: [&str; 10] = [
+const DURABLE_SETTING_KEYS: [&str; 11] = [
     "duckweed:state:v1",
+    "duckweed:workspace-recovery:v1",
     "duckweed:usage:v1",
     // Ghost-text unlearning table — must match frontend DURABLE_KEYS or restore
     // aborts when seeding WebView feedback into app-data and never reaches history.
@@ -265,17 +266,27 @@ fn settings_save(
 
     settings.insert(key, value);
     let raw = serde_json::to_vec_pretty(&settings).map_err(|error| error.to_string())?;
+    write_settings_file(&path, &raw)
+}
+
+fn write_settings_file(path: &Path, raw: &[u8]) -> Result<(), String> {
     let parent = path.parent().ok_or("settings path has no parent")?;
     std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
 
     let temporary = path.with_extension("json.tmp");
     let backup = path.with_extension("json.bak");
-    std::fs::write(&temporary, raw).map_err(|error| error.to_string())?;
+    {
+        use std::io::Write;
+        let mut file = std::fs::File::create(&temporary).map_err(|error| error.to_string())?;
+        file.write_all(raw).map_err(|error| error.to_string())?;
+        file.sync_all().map_err(|error| error.to_string())?;
+    }
     if path.exists() {
         std::fs::copy(&path, &backup).map_err(|error| error.to_string())?;
-        std::fs::remove_file(&path).map_err(|error| error.to_string())?;
     }
-    std::fs::rename(&temporary, &path).map_err(|error| error.to_string())
+    // Rename replaces the previous file atomically, including on Windows.
+    // Never unlink the live snapshot before its replacement is ready.
+    std::fs::rename(&temporary, path).map_err(|error| error.to_string())
 }
 
 async fn blocking<T, F>(job: F) -> Result<T, String>
@@ -1294,6 +1305,23 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn settings_checkpoint_replaces_existing_file_and_keeps_a_readable_backup() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let directory = std::env::temp_dir().join(format!("duckweed-settings-{}-{unique}", std::process::id()));
+        let path = directory.join("durable-settings.json");
+        write_settings_file(&path, br#"{"draft":"first"}"#).unwrap();
+        write_settings_file(&path, br#"{"draft":"latest"}"#).unwrap();
+        assert_eq!(read_settings(&path).get("draft").unwrap(), "latest");
+        assert!(!path.with_extension("json.tmp").exists());
+        std::fs::write(&path, "damaged").unwrap();
+        assert_eq!(read_settings(&path).get("draft").unwrap(), "first");
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_file(path.with_extension("json.bak")).unwrap();
+        std::fs::remove_dir(directory).unwrap();
+    }
 
     fn commands(raw: &str) -> Vec<String> {
         parse_history(raw).into_iter().map(|e| e.command).collect()

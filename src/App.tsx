@@ -128,6 +128,8 @@ import {
 import { toggleFullscreen } from "./lib/window";
 import { DEFAULT_TOOLS_WIDTH, load, pushRecent, rehydrate, save } from "./lib/persist";
 import { flushDurableStorage } from "./lib/durableStorage";
+import { workspaceRecovery } from "./lib/workspaceRecovery";
+import { deliverDueSends } from "./lib/scheduledSend";
 import {
   shouldPlayCompletionSound,
   shouldSignalCompletion,
@@ -253,8 +255,8 @@ function boot() {
         id: entry.id ?? uid("tab"),
         title: entry.title || `Terminal ${i + 1}`,
         root,
-        activeLeaf: leaves(root)[0].id,
-        zoomedLeaf: null,
+        activeLeaf: leaves(root).find((node) => node.id === entry.activeLeaf)?.id ?? leaves(root)[0].id,
+        zoomedLeaf: leaves(root).find((node) => node.id === entry.zoomedLeaf)?.id ?? null,
         project: entry.project ? provisionalProject(entry.project) : null,
         pinned: entry.pinned === true,
         color: entry.color ?? null,
@@ -265,7 +267,10 @@ function boot() {
     const index = Math.min(Math.max(0, saved.activeTabIndex), tabs.length - 1);
     const startupLayout = getDefaultLayout();
     const startupTab = tabs[index];
-    if (startupLayout && startupTab.project) {
+    // A template can seed a legacy layout-only save, but must never replace
+    // recoverable panes, drafts or schedules.
+    if (startupLayout && startupTab.project &&
+        !leaves(startupTab.root).some((node) => workspaceRecovery.get(node.term))) {
       const root = instantiateLayout(startupLayout.root, (command) => {
         const term = terminals.newTermId();
         startupSpawns.set(term, {
@@ -275,12 +280,7 @@ function boot() {
         });
         return leaf(term);
       });
-      tabs[index] = {
-        ...startupTab,
-        root,
-        activeLeaf: leaves(root)[0].id,
-        zoomedLeaf: null,
-      };
+      tabs[index] = { ...startupTab, root, activeLeaf: leaves(root)[0].id, zoomedLeaf: null };
     }
     return {
       tabs,
@@ -435,9 +435,18 @@ export default function App() {
   const [highlightedAgentTermId, setHighlightedAgentTermId] = useState<string | null>(null);
   const [openAgentCount, setOpenAgentCount] = useState(0);
   const [scheduledSends, setScheduledSends] = useState<Map<string, ScheduledSend>>(
-    () => new Map(),
+    () => new Map(initial.tabs.flatMap((tab) => leaves(tab.root).flatMap((node) => {
+      const send = workspaceRecovery.get(node.term)?.scheduled;
+      const targetExists = initial.tabs.some((owner) => leaves(owner.root).some((pane) => pane.term === send?.targetTermId));
+      return send && targetExists ? [[node.term, send] as const] : [];
+    }))),
   );
-  const [timedSends, setTimedSends] = useState<Map<string, TimedSend>>(() => new Map());
+  const [timedSends, setTimedSends] = useState<Map<string, TimedSend>>(
+    () => new Map(initial.tabs.flatMap((tab) => leaves(tab.root).flatMap((node) => {
+      const send = workspaceRecovery.get(node.term)?.timed;
+      return send ? [[node.term, send] as const] : [];
+    }))),
+  );
   const unreadTermIdsRef = useRef(unreadTermIds);
   unreadTermIdsRef.current = unreadTermIds;
   const mobileAlertTermIdsRef = useRef(mobileAlertTermIds);
@@ -838,6 +847,7 @@ export default function App() {
 
   const releaseTerm = useCallback((term: string) => {
     terminals.dispose(term);
+    workspaceRecovery.remove(term);
     if (timedSendsRef.current.has(term)) {
       const nextTimedSends = new Map(timedSendsRef.current);
       nextTimedSends.delete(term);
@@ -884,6 +894,7 @@ export default function App() {
     if (current?.targetTermId === target.termId && current.targetLabel === targetLabel) return;
     const next = new Map(scheduledSendsRef.current);
     next.set(termId, { targetTermId: target.termId, targetLabel });
+    workspaceRecovery.update(termId, { scheduled: next.get(termId) });
     scheduledSendsRef.current = next;
     setScheduledSends(next);
   }, []);
@@ -892,6 +903,7 @@ export default function App() {
     if (!scheduledSendsRef.current.has(termId)) return;
     const next = new Map(scheduledSendsRef.current);
     next.delete(termId);
+    workspaceRecovery.update(termId, { scheduled: null });
     scheduledSendsRef.current = next;
     setScheduledSends(next);
   }, []);
@@ -900,6 +912,7 @@ export default function App() {
     if (!Number.isFinite(send.at) || send.at <= Date.now()) return;
     const next = new Map(timedSendsRef.current);
     next.set(termId, send);
+    workspaceRecovery.update(termId, { timed: send });
     timedSendsRef.current = next;
     setTimedSends(next);
   }, []);
@@ -908,6 +921,7 @@ export default function App() {
     if (!timedSendsRef.current.has(termId)) return;
     const next = new Map(timedSendsRef.current);
     next.delete(termId);
+    workspaceRecovery.update(termId, { timed: null });
     timedSendsRef.current = next;
     setTimedSends(next);
   }, []);
@@ -923,6 +937,7 @@ export default function App() {
       if (agent) {
         if (agent.status === "exited" || agent.status === "error") return false;
         agentSessions.submit(termId, text, images, delivery);
+        agentSessions.flushRecovery();
         bus.emit("term:clear-draft", { termId });
         return true;
       }
@@ -945,24 +960,25 @@ export default function App() {
     if (timedSends.size === 0) return;
     let timer = 0;
     const checkDue = () => {
-      const due = [...timedSendsRef.current].filter(([, send]) => send.at <= Date.now());
-      if (due.length > 0) {
-        const next = new Map(timedSendsRef.current);
-        for (const [termId] of due) next.delete(termId);
+      const previous = timedSendsRef.current;
+      const next = deliverDueSends(previous, Date.now(), (termId) => {
+        if (dailyLockedRef.current || !terminals.readyForScheduledSend(termId)) return false;
+        const agent = agentSessions.get(termId);
+        const text = agent ? agentSessions.getDraft(termId) : terminals.getDraft(termId);
+        const images = agent ? agentSessions.getDraftImages(termId) : [];
+        return hasSendablePayload(text, images) && sendDraftNow(termId, text, images);
+      });
+      if (next.size !== previous.size) {
+        for (const termId of previous.keys()) {
+          if (!next.has(termId)) workspaceRecovery.update(termId, { timed: null });
+        }
         timedSendsRef.current = next;
         setTimedSends(next);
-        for (const [termId] of due) {
-          const agent = agentSessions.get(termId);
-          const text = agent ? agentSessions.getDraft(termId) : terminals.getDraft(termId);
-          const images = agent ? agentSessions.getDraftImages(termId) : [];
-          if (hasSendablePayload(text, images)) sendDraftNow(termId, text, images);
-        }
-        return;
       }
       const nextAt = Math.min(...[...timedSendsRef.current.values()].map((send) => send.at));
       window.clearTimeout(timer);
       if (Number.isFinite(nextAt)) {
-        timer = window.setTimeout(checkDue, Math.max(0, Math.min(nextAt - Date.now(), 30_000)));
+        timer = window.setTimeout(checkDue, Math.max(250, Math.min(nextAt - Date.now(), 30_000)));
       }
     };
     checkDue();
@@ -986,23 +1002,43 @@ export default function App() {
       const waiting = [...scheduledSendsRef.current].filter(
         ([, scheduled]) => scheduled.targetTermId === targetTermId,
       );
-      for (const [sourceTermId] of waiting) {
+      for (const [sourceTermId, scheduled] of waiting) {
+        if (!scheduled.triggered) {
+          const next = new Map(scheduledSendsRef.current);
+          next.set(sourceTermId, { ...scheduled, triggered: true });
+          workspaceRecovery.update(sourceTermId, { scheduled: next.get(sourceTermId) });
+          scheduledSendsRef.current = next;
+          setScheduledSends(next);
+        }
+        if (!terminals.readyForScheduledSend(sourceTermId)) continue;
         const sourceAgent = agentSessions.get(sourceTermId);
         const text = sourceAgent
           ? agentSessions.getDraft(sourceTermId)
           : terminals.getDraft(sourceTermId);
         const images = sourceAgent ? agentSessions.getDraftImages(sourceTermId) : [];
+        if (!hasSendablePayload(text, images) || !sendDraftNow(sourceTermId, text, images)) continue;
         const next = new Map(scheduledSendsRef.current);
         next.delete(sourceTermId);
+        workspaceRecovery.update(sourceTermId, { scheduled: null });
         scheduledSendsRef.current = next;
         setScheduledSends(next);
-        if (hasSendablePayload(text, images)) {
-          sendDraftNow(sourceTermId, text, images);
-        }
       }
     },
     [sendDraftNow],
   );
+
+  useEffect(() => {
+    if (![...scheduledSends.values()].some((send) => send.triggered)) return;
+    const retry = () => {
+      if (dailyLockedRef.current) return;
+      for (const send of scheduledSendsRef.current.values()) {
+        if (send.triggered) completeScheduledSendsForTarget(send.targetTermId);
+      }
+    };
+    const timer = window.setInterval(retry, 500);
+    retry();
+    return () => window.clearInterval(timer);
+  }, [scheduledSends, completeScheduledSendsForTarget]);
 
   const beforeScheduledSubmit = useCallback(
     (
@@ -1649,6 +1685,8 @@ export default function App() {
   }, []);
 
   const firePowerAction = useCallback(async (action: powerWatch.PowerAction) => {
+    saveWorkspaceRef.current();
+    agentSessions.flushRecovery();
     await flushDurableStorage();
     await powerAction(action);
   }, [acknowledgeTermFromMobile]);
@@ -1745,7 +1783,9 @@ export default function App() {
   useEffect(() => {
     if (!TAURI_RUNTIME || lockoutBusy.length > 0) return;
     if (!backgroundExitRequestedRef.current) return;
-    void exit(0);
+    saveWorkspaceRef.current();
+    agentSessions.flushRecovery();
+    void flushDurableStorage().then(() => exit(0));
   }, [lockoutBusy.length]);
 
   const continueLockedInBackground = useCallback(() => {
@@ -2819,34 +2859,33 @@ export default function App() {
     });
   }, []);
 
-  // Persist the arrangement (never the processes). Debounced because dragging a
-  // divider produces a state update per pointer move.
-  useEffect(() => {
+  const saveWorkspaceRef = useRef<() => void>(() => {});
+  saveWorkspaceRef.current = () => {
     if (!booted) return;
-    const id = window.setTimeout(
-      () =>
-        save({
-          project: lastProject.current,
-          recents,
-          fontSize,
-          shell,
-          highlight,
-          completionHighlights,
-          completionSoundEnabled,
-          tintWorkspaceWithTabColor,
-          customAgentUi,
-          agentFollowupMode,
-          autoApproveLockedRequests,
-          inputMode,
-          confirmCloseRunning: confirmCloseRunningPref,
-          toolsOpen,
-          toolsWidth,
-          tabs,
-          activeTabId,
-        }),
-      400,
-    );
-    return () => window.clearTimeout(id);
+    save({
+      project: lastProject.current,
+      recents,
+      fontSize,
+      shell,
+      highlight,
+      completionHighlights,
+      completionSoundEnabled,
+      tintWorkspaceWithTabColor,
+      customAgentUi,
+      agentFollowupMode,
+      autoApproveLockedRequests,
+      inputMode,
+      confirmCloseRunning: confirmCloseRunningPref,
+      toolsOpen,
+      toolsWidth,
+      tabs,
+      activeTabId,
+    });
+  };
+
+  // Save every committed workspace change, without depending on a clean exit.
+  useEffect(() => {
+    saveWorkspaceRef.current();
   }, [
     booted,
     project,
@@ -2867,6 +2906,15 @@ export default function App() {
     tabs,
     activeTabId,
   ]);
+
+  useEffect(() => {
+    if (!booted) return;
+    workspaceRecovery.prune(termIds);
+    if (dailyLocked) return;
+    for (const termId of termIds) {
+      if (workspaceRecovery.get(termId)) terminals.restore(termId, spawnFor(termId));
+    }
+  }, [booted, dailyLocked, termIdsKey, spawnFor]);
 
   // A closed tab takes its checklist with it. Deferred to a settled tab list so
   // an intermediate state during a reorder or a close cannot drop a live list.
@@ -2895,7 +2943,14 @@ export default function App() {
   }, [focusKey, currentTab]);
 
   useEffect(() => {
-    const cleanup = () => terminals.disposeAll();
+    const cleanup = () => {
+      saveWorkspaceRef.current();
+      agentSessions.flushRecovery();
+      // Killing processes is cleanup, not a request to forget the open panes.
+      workspaceRecovery.freeze();
+      void flushDurableStorage();
+      terminals.disposeAll();
+    };
     window.addEventListener("beforeunload", cleanup);
     return () => window.removeEventListener("beforeunload", cleanup);
   }, []);
@@ -2907,6 +2962,9 @@ export default function App() {
     let unlisten: (() => void) | undefined;
     void getCurrentWindow()
       .onCloseRequested(async (event) => {
+        saveWorkspaceRef.current();
+        agentSessions.flushRecovery();
+        await flushDurableStorage();
         if (dailyLockedRef.current) {
           const busy = probeActivity();
           if (busy.length > 0) {
@@ -2928,6 +2986,11 @@ export default function App() {
           allowDontShowAgain: true,
         });
         if (!ok) event.preventDefault();
+        else {
+          saveWorkspaceRef.current();
+          agentSessions.flushRecovery();
+          await flushDurableStorage();
+        }
       })
       .then((fn) => {
         if (disposed) fn();

@@ -2,7 +2,7 @@ import { readTabGroup } from "./tabGroups";
 import { uid } from "./layout";
 import { newTermId, type InputMode } from "./terminals";
 import type { LayoutNode, Tab, TabGroup } from "./types";
-import { saveDurably } from "./durableStorage";
+import { readStoredValue, saveDurably } from "./durableStorage";
 import type { AgentFollowupMode } from "./agents/types";
 import { agentUiPreferences, type AgentUiPreferences } from "./agents/uiPreferences";
 
@@ -11,6 +11,8 @@ const MAX_RECENTS = 12;
 export const DEFAULT_TOOLS_WIDTH = 260;
 
 export interface PersistedTab {
+  activeLeaf?: string;
+  zoomedLeaf?: string | null;
   /**
    * The tab's id, kept across restarts so per-tab data — checklists today —
    * finds its tab again. Absent in saves written before this existed; boot
@@ -31,6 +33,7 @@ export interface PersistedTab {
 
 export interface Persisted {
   version: 1;
+  savedAt?: number;
   /** Last folder opened anywhere, used only to seed the folder picker. */
   project: string | null;
   recents: string[];
@@ -70,7 +73,7 @@ export interface Persisted {
   /** Left tool dock: whether it is showing, and how wide it was left. */
   toolsOpen: boolean;
   toolsWidth: number;
-  /** Layout only — processes are never restored, just the arrangement. */
+  /** Workspace arrangement; recoverable agent state is stored by terminal id. */
   tabs: PersistedTab[];
   activeTabIndex: number;
 }
@@ -90,14 +93,14 @@ function isLayout(node: unknown): node is LayoutNode {
   return false;
 }
 
-/** Rebuild a saved tree with fresh pane and terminal ids. */
+/** Keep pane identities so drafts, agent sessions and schedules find their owner. */
 export function rehydrate(node: LayoutNode): LayoutNode {
   if (node.kind === "leaf") {
     // Shells do not survive a restart, but where the user filed them does.
     return {
       kind: "leaf",
-      id: uid("p"),
-      term: newTermId(),
+      id: typeof node.id === "string" && node.id ? node.id : uid("p"),
+      term: typeof node.term === "string" && node.term ? node.term : newTermId(),
       pinned: node.pinned === true ? true : undefined,
     };
   }
@@ -111,7 +114,7 @@ export function rehydrate(node: LayoutNode): LayoutNode {
 
 export function load(): Persisted | null {
   try {
-    const raw = localStorage.getItem(KEY);
+    const raw = readStoredValue(KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as Persisted;
     if (parsed.version !== 1) return null;
@@ -186,6 +189,7 @@ export function save(state: {
   try {
     const payload: Persisted = {
       version: 1,
+      savedAt: Date.now(),
       project: state.project,
       recents: state.recents.slice(0, MAX_RECENTS),
       fontSize: state.fontSize,
@@ -205,6 +209,8 @@ export function save(state: {
         id: t.id,
         title: t.title,
         root: t.root,
+        activeLeaf: t.activeLeaf,
+        zoomedLeaf: t.zoomedLeaf,
         project: t.project?.path ?? null,
         pinned: t.pinned === true ? true : undefined,
         color: t.color ?? null,
@@ -217,7 +223,8 @@ export function save(state: {
       ),
     };
     const raw = JSON.stringify(payload);
-    localStorage.setItem(KEY, raw);
+    try { localStorage.setItem(KEY, raw); }
+    catch (error) { console.error("failed to save local workspace", error); }
     saveDurably(KEY, raw);
   } catch {
     // Storage can be unavailable (private mode, quota); layout persistence is

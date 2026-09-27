@@ -34,9 +34,11 @@ Object.defineProperty(globalThis, "window", { value: stubWindow, configurable: t
 const sent: string[] = [];
 let spawn: AgentSpawnOptions | null = null;
 let frameSink: ((frame: AgentFrame) => void) | null = null;
+let spawnFailure: string | null = null;
 
 mock.module("../durableStorage", () => ({
   saveDurably: () => {},
+  readStoredValue: (key: string) => store.get(key) ?? null,
 }));
 
 mock.module("@tauri-apps/api/core", () => ({
@@ -54,6 +56,7 @@ mock.module("../ipc", () => ({
     options: AgentSpawnOptions,
     onFrame: { onmessage?: (frame: AgentFrame) => void },
   ) => {
+    if (spawnFailure) throw new Error(spawnFailure);
     spawn = options;
     frameSink = (frame) => onFrame.onmessage?.(frame);
     return { program: options.program, pid: 1 };
@@ -155,8 +158,128 @@ async function codexHandshake(sessionId = "01900000-0000-7000-8000-000000000001"
 }
 
 const session = await import("./session");
+const { workspaceRecovery } = await import("../workspaceRecovery");
 
 describe("Custom agent UI sessions", () => {
+  test("keeps a submitted prompt while a model change is still being negotiated", async () => {
+    const termId = "recover-configuring";
+    await session.start(termId, { ...grokLaunch, agent: "claude", program: "claudex", model: "old-model" }, "H:/project");
+    session.configure(termId, "model", "new-model");
+    session.submit(termId, "Do this after changing the model");
+    session.flushRecovery();
+    const saved = workspaceRecovery.get(termId)?.agent;
+    expect(saved?.launch.model).toBe("new-model");
+    expect(saved?.queued.map((entry) => entry.prompt.text)).toEqual(["Do this after changing the model"]);
+  });
+
+  test("recovers a blank Codex composer without trying to resume its unsaved provisional thread", async () => {
+    const termId = "recover-blank-codex";
+    await session.start(termId, codexLaunch, "H:/project");
+    await codexHandshake("not-persisted-yet");
+    session.setDraft(termId, "My first prompt");
+    const saved = JSON.parse(JSON.stringify(workspaceRecovery.get(termId)?.agent));
+    expect(saved.sessionId).toBeNull();
+    session.stop(termId);
+    sent.length = 0;
+    await session.start(termId, { ...saved.launch, resumeId: saved.sessionId }, saved.cwd, saved);
+    await codexHandshake("fresh-thread");
+    expect(sent.map(rpc).some((message) => message.method === "thread/resume")).toBe(false);
+    expect(session.getDraft(termId)).toBe("My first prompt");
+    expect(session.readyForScheduledSend(termId)).toBe(true);
+  });
+
+  test("a rejected Codex resume cannot release an overdue draft into a fresh thread", async () => {
+    const termId = "recover-missing-thread";
+    await session.start(termId, codexLaunch, "H:/project");
+    await codexHandshake("missing-thread");
+    session.submit(termId, "Earlier prompt");
+    session.setDraft(termId, "Scheduled follow-up");
+    const saved = JSON.parse(JSON.stringify(workspaceRecovery.get(termId)?.agent));
+    session.stop(termId);
+    sent.length = 0;
+    await session.start(termId, { ...saved.launch, resumeId: saved.sessionId }, saved.cwd, saved);
+    await codexHandshake("fresh-thread");
+    const resume = sent.map(rpc).find((message) => message.method === "thread/resume");
+    feed({ id: resume?.id, error: { code: -1, message: "Thread is missing" } });
+    await flush();
+    expect(session.get(termId)?.status).toBe("error");
+    expect(session.readyForScheduledSend(termId)).toBe(false);
+    expect(session.getDraft(termId)).toBe("Scheduled follow-up");
+    expect(workspaceRecovery.get(termId)?.agent?.sessionId).toBe("missing-thread");
+    expect(session.get(termId)?.items.some((item) => item.kind === "user" && item.text === "Earlier prompt")).toBe(true);
+    expect(sent.map(rpc).filter((message) => message.method === "turn/start")).toHaveLength(0);
+  });
+
+  test("recovers Claude's exact conversation, draft, images, wrapper and settings", async () => {
+    const termId = "recover-claude";
+    const launch: AgentLaunch = {
+      ...grokLaunch, agent: "claude", program: "claudex", wrapperArgs: ["--g"],
+      env: { EXAMPLE_PROVIDER: "local" }, model: "custom-model", effort: "high", accessMode: "full-access",
+    };
+    await session.start(termId, launch, "H:/specific-project");
+    feed({ type: "system", subtype: "init", session_id: "exact-claude-session", model: "custom-model" });
+    session.setDraft(termId, "Unsent prompt\nwith details");
+    session.setDraftImages(termId, [image]);
+    workspaceRecovery.update(termId, { timed: { at: 1234 } });
+    const saved = JSON.parse(JSON.stringify(workspaceRecovery.get(termId)?.agent));
+    session.stop(termId);
+    sent.length = 0;
+    await session.start(termId, { ...saved.launch, resumeId: saved.sessionId }, saved.cwd, saved);
+    expect(spawn?.program).toBe("claudex");
+    expect(spawn?.cwd).toBe("H:/specific-project");
+    expect(spawn?.args).toContain("--g");
+    expect(spawn?.args).toContain("--resume");
+    expect(spawn?.args).toContain("exact-claude-session");
+    expect(session.getDraft(termId)).toBe("Unsent prompt\nwith details");
+    expect(session.getDraftImages(termId)).toEqual([image]);
+    expect(session.get(termId)).toMatchObject({ model: "custom-model", effort: "high", accessMode: "full-access" });
+    expect(workspaceRecovery.get(termId)?.timed).toEqual({ at: 1234 });
+    expect(session.readyForScheduledSend(termId)).toBe(true);
+    expect(sent.map(rpc).filter((message) => message.type === "user")).toHaveLength(0);
+  });
+
+  test("a failed recovery retains its draft and blocks scheduled delivery", async () => {
+    const termId = "recover-failure";
+    await session.start(termId, { ...grokLaunch, agent: "claude", program: "claude" }, "H:/project");
+    session.setDraft(termId, "Keep this prompt");
+    const saved = JSON.parse(JSON.stringify(workspaceRecovery.get(termId)?.agent));
+    session.stop(termId);
+    spawnFailure = "executable unavailable";
+    await session.start(termId, saved.launch, saved.cwd, saved);
+    expect(session.get(termId)?.status).toBe("error");
+    expect(session.getDraft(termId)).toBe("Keep this prompt");
+    expect(session.readyForScheduledSend(termId)).toBe(false);
+    session.submit(termId, "Keep this prompt");
+    expect(session.getDraft(termId)).toBe("Keep this prompt");
+  });
+
+  test("Codex recovery waits for the exact saved thread before releasing follow-ups", async () => {
+    const termId = "recover-codex";
+    await session.start(termId, codexLaunch, "H:/project");
+    await codexHandshake("saved-thread");
+    session.submit(termId, "Original turn");
+    session.submit(termId, "Queued follow-up");
+    session.setDraft(termId, "Scheduled draft");
+    session.flushRecovery();
+    const saved = JSON.parse(JSON.stringify(workspaceRecovery.get(termId)?.agent));
+    expect(saved.queued).toHaveLength(1);
+    session.stop(termId);
+    sent.length = 0;
+    await session.start(termId, { ...saved.launch, resumeId: saved.sessionId }, saved.cwd, saved);
+    expect(session.readyForScheduledSend(termId)).toBe(false);
+    await codexHandshake("temporary-thread");
+    const resume = sent.map(rpc).find((message) => message.method === "thread/resume");
+    expect(resume).toMatchObject({ params: { threadId: "saved-thread" } });
+    expect(sent.map(rpc).filter((message) => message.method === "turn/start")).toHaveLength(0);
+    session.flushRecovery();
+    expect(workspaceRecovery.get(termId)?.agent?.sessionId).toBe("saved-thread");
+    expect(session.getDraft(termId)).toBe("Scheduled draft");
+    feed({ id: resume?.id, result: { thread: { id: "saved-thread", turns: [] } } });
+    await flush();
+    expect(sent.map(rpc).filter((message) => message.method === "turn/start")).toHaveLength(1);
+    expect(session.getDraft(termId)).toBe("Scheduled draft");
+  });
+
   test("restores prompt navigation from resumed Codex turns and replaces the previous conversation", async () => {
     const termId = "resumed-prompt-history";
     await session.start(termId, codexLaunch, "H:/project");
@@ -186,6 +309,7 @@ describe("Custom agent UI sessions", () => {
     sent.length = 0;
     spawn = null;
     frameSink = null;
+    spawnFailure = null;
     session.setFollowupMode("queue");
   });
 
