@@ -1,6 +1,7 @@
+import { readTabGroup } from "./tabGroups";
 import { uid } from "./layout";
 import { newTermId, type InputMode } from "./terminals";
-import type { LayoutNode, Tab } from "./types";
+import type { LayoutNode, Tab, TabGroup } from "./types";
 import { saveDurably } from "./durableStorage";
 import type { AgentFollowupMode } from "./agents/types";
 import { agentUiPreferences, type AgentUiPreferences } from "./agents/uiPreferences";
@@ -21,6 +22,7 @@ export interface PersistedTab {
   /** Folder this tab works in — projects belong to tabs, not to the window. */
   project: string | null;
   pinned?: boolean;
+  group?: TabGroup | null;
   /** Tab accent color id, or null/absent for default. */
   color?: string | null;
   /** Tab icon id, or null/absent for the default folder. */
@@ -124,6 +126,7 @@ export function load(): Persisted | null {
         project: typeof t.project === "string" ? t.project : project,
         pinned: t.pinned === true,
         color: typeof t.color === "string" ? t.color : null,
+        group: t.pinned ? null : readTabGroup(t.group),
         icon: typeof t.icon === "string" ? t.icon : null,
       }));
     return {
@@ -206,6 +209,7 @@ export function save(state: {
         pinned: t.pinned === true ? true : undefined,
         color: t.color ?? null,
         icon: t.icon ?? null,
+        group: t.group ?? null,
       })),
       activeTabIndex: Math.max(
         0,

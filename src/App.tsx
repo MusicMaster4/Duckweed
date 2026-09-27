@@ -1,3 +1,4 @@
+import { arrangeTabGroups, assignTabGroup, updateTabGroup } from "./lib/tabGroups";
 import {
   useCallback,
   useEffect,
@@ -258,6 +259,7 @@ function boot() {
         pinned: entry.pinned === true,
         color: entry.color ?? null,
         icon: entry.icon ?? null,
+        group: entry.group ?? null,
       };
     });
     const index = Math.min(Math.max(0, saved.activeTabIndex), tabs.length - 1);
@@ -1958,7 +1960,7 @@ export default function App() {
     const nextTabs = result.tabIds
       .map((id) => byId.get(id))
       .filter((t): t is Tab => t !== undefined);
-    setTabs(nextTabs);
+    setTabs(arrangeTabGroups(nextTabs));
     if (settingsOpen) setSettingsTabIndex(result.settingsIndex);
   }, []);
 
@@ -1975,7 +1977,7 @@ export default function App() {
       const pinned = rest.filter((t) => t.pinned);
       const unpinned = rest.filter((t) => !t.pinned);
       // New pin lands just after existing pins — the left-most free pin slot.
-      return [...pinned, { ...tab, pinned: true }, ...unpinned];
+      return [...pinned, { ...tab, pinned: true, group: null }, ...unpinned];
     });
   }, []);
 
@@ -3985,6 +3987,8 @@ export default function App() {
           onPin={pinTab}
           onColor={colorTab}
           onIcon={iconTab}
+          onGroup={(ids, group) => setTabs((prev) => assignTabGroup(prev, ids, group))}
+          onUpdateGroup={(id, patch) => setTabs((prev) => updateTabGroup(prev, id, patch))}
           settingsOpen={settingsTabOpen}
           settingsActive={settingsActive}
           settingsIndex={settingsTabIndex}
