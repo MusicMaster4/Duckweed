@@ -25,6 +25,8 @@ export interface TabGroup {
   id: string;
   name: string;
   collapsed: boolean;
+  /** Default color for the group and members without an individual color. */
+  color?: string | null;
 }
 
 export interface Tab {

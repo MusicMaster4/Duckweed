@@ -80,6 +80,14 @@ describe("TabStrip agent activity", () => {
 describe("TabStrip groups", () => {
   const grouped = (collapsed: boolean) => tabs.map((tab) => ({ ...tab, group: { id: "work", name: "Work", collapsed } }));
 
+  test("members inherit group color while explicit tab colors take priority", () => {
+    const colored = grouped(false).map((tab, index) => ({ ...tab, color: index === 0 ? "rose" : null, group: { ...tab.group, color: "teal" } }));
+    const html = render(new Set(), colored);
+    expect(html).toContain('--group-color:#45cec4');
+    expect(html).toContain('--tab-color:#45cec4');
+    expect(html).toContain('--tab-color:#f2686f');
+  });
+
   test("collapsed group hides its tabs and aggregates work on the focused tab", () => {
     const html = render(new Set(["tab-working"]), grouped(true));
     expect(html).toContain('aria-expanded="false"');

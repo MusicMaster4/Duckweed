@@ -1104,7 +1104,7 @@ export default function App() {
           name: tab.project?.name ?? tab.title,
           path: tab.project?.path ?? "",
           branch: tab.project?.branch ?? null,
-          color: tab.color ? tabColorHex(tab.color) : null,
+          color: tabColorHex(tab.color) ?? tabColorHex(tab.group?.color),
           terminals: leaves(tab.root).flatMap((node) => {
             const meta = terminals.getMeta(node.term);
             if (!meta) return [];
@@ -3137,7 +3137,7 @@ export default function App() {
 
   const railEntries = useMemo(
     () =>
-      zoomRailMounted ? zoomRailEntries(tabs, activeTabId, (tab) => tabColorHex(tab.color)) : [],
+      zoomRailMounted ? zoomRailEntries(tabs, activeTabId, (tab) => tabColorHex(tab.color) ?? tabColorHex(tab.group?.color)) : [],
     [activeTabId, tabs, zoomRailMounted],
   );
 
@@ -3972,7 +3972,7 @@ export default function App() {
   const activeTerm = activeTab ? (findLeaf(activeTab.root, activeTab.activeLeaf)?.term ?? null) : null;
   const activeWindowColor =
     tintWorkspaceWithTabColor && !settingsActive && !dailyLocked
-      ? tabColorHex(activeTab?.color)
+      ? tabColorHex(activeTab?.color) ?? tabColorHex(activeTab?.group?.color)
       : null;
 
   useEffect(() => {

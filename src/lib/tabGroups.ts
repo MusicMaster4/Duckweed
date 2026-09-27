@@ -1,10 +1,14 @@
 import type { Tab, TabGroup } from "./types";
+import { tabColorHex } from "./tabColors";
 
 export function readTabGroup(value: unknown): TabGroup | null {
   if (!value || typeof value !== "object") return null;
   const group = value as Partial<TabGroup>;
   if (typeof group.id !== "string" || !group.id || typeof group.name !== "string") return null;
-  return { id: group.id, name: group.name.trim() || "New group", collapsed: group.collapsed === true };
+  return {
+    id: group.id, name: group.name.trim() || "New group", collapsed: group.collapsed === true,
+    ...(group.color !== undefined ? { color: typeof group.color === "string" && tabColorHex(group.color) ? group.color : null } : {}),
+  };
 }
 
 /** Keep each group contiguous and pinned tabs outside groups. */
@@ -30,7 +34,7 @@ export function assignTabGroup(tabs: Tab[], tabIds: string[], group: TabGroup | 
     ? { ...tab, group, pinned: group ? false : tab.pinned } : tab));
 }
 
-export function updateTabGroup(tabs: Tab[], groupId: string, patch: Partial<Pick<TabGroup, "name" | "collapsed">> | null): Tab[] {
+export function updateTabGroup(tabs: Tab[], groupId: string, patch: Partial<Pick<TabGroup, "name" | "collapsed" | "color">> | null): Tab[] {
   return tabs.map((tab) => tab.group?.id === groupId
     ? { ...tab, group: patch ? { ...tab.group, ...patch, name: patch.name?.trim() || tab.group.name } : null }
     : tab);

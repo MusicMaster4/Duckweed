@@ -57,7 +57,7 @@ interface Props {
   onColor: (tabId: string, colorId: string | null) => void;
   onIcon: (tabId: string, iconId: string | null) => void;
   onGroup?: (ids: string[], group: TabGroup | null) => void;
-  onUpdateGroup?: (id: string, patch: Partial<Pick<TabGroup, "name" | "collapsed">> | null) => void;
+  onUpdateGroup?: (id: string, patch: Partial<Pick<TabGroup, "name" | "collapsed" | "color">> | null) => void;
   settingsOpen: boolean;
   settingsActive: boolean;
   /** Index of Settings among strip items (0..tabs.length). */
@@ -390,7 +390,7 @@ export function TabStrip({
   return (
     <div className="tabstrip">
       <div className="tabs" ref={stripRef} role="tablist" aria-label="Open tabs">
-        {stripItems.map((item) => {
+        {stripItems.map((item, index) => {
           if (item.kind === "settings") {
             return (
               <div
@@ -444,6 +444,8 @@ export function TabStrip({
 
           const tab = item.tab;
           const group = tab.group;
+          const nextItem = stripItems[index + 1];
+          const lastInGroup = group && (nextItem?.kind !== "tab" || nextItem.tab.group?.id !== group.id);
           const firstInGroup = group && !seenGroups.has(group.id);
           if (group) seenGroups.add(group.id);
           const members = group ? groupMembers.get(group.id)! : [];
@@ -454,6 +456,12 @@ export function TabStrip({
             active={!settingsActive && members.some((member) => member.id === activeTabId)}
             unread={completionHighlights && members.some((member) => (unreadCounts[member.id] ?? 0) > 0)}
             onUpdate={(patch) => onUpdateGroup?.(group.id, patch)}
+            onCollapseOthers={groups.some((other) => other.id !== group.id && !other.collapsed) ? () => {
+              for (const other of groups) if (other.id !== group.id && !other.collapsed) onUpdateGroup?.(other.id, { collapsed: true });
+            } : undefined}
+            onExpandAll={groups.some((other) => other.collapsed) ? () => {
+              for (const other of groups) if (other.collapsed) onUpdateGroup?.(other.id, { collapsed: false });
+            } : undefined}
           /> : null;
           if (group?.collapsed) return <Fragment key={tab.id}>{groupLabel}</Fragment>;
           const count = paneCounts[tab.id] ?? 0;
@@ -463,13 +471,14 @@ export function TabStrip({
           const isActive = tab.id === activeTabId && !settingsActive;
           const isWorking = workingTabIds.has(tab.id);
           const showWorkShimmer = isWorking && !isActive;
-          const accent = tabColorHex(tab.color);
+          const accent = tabColorHex(tab.color) ?? tabColorHex(group?.color);
           return (
             <Fragment key={tab.id}>
               {groupLabel}
               <div
                 title={tab.title}
                 data-tab-group={group?.id}
+                data-group-end={lastInGroup ? "true" : undefined}
                 data-strip-id={tab.id}
                 data-tab-id={tab.id}
                 data-pinned={tab.pinned ? "true" : undefined}

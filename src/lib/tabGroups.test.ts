@@ -49,4 +49,19 @@ describe("tab groups", () => {
     for (const invalid of [undefined, null, {}, "g", { id: 3, name: "Bad" }]) expect(readTabGroup(invalid)).toBeNull();
     expect(readTabGroup({ id: "g", name: " ", collapsed: "yes" })).toEqual({ ...group, name: "New group" });
   });
+  test("group color survives persistence and rejects unknown colors", () => {
+    expect(readTabGroup(JSON.parse(JSON.stringify({ ...group, color: "teal" })))?.color).toBe("teal");
+    expect(readTabGroup({ ...group, color: "invalid" })?.color).toBeNull();
+    expect(readTabGroup({ ...group, color: 42 })?.color).toBeNull();
+  });
+  test("changing and resetting group color preserves individual tab colors", () => {
+    const tabs = [tab("a", { group, color: "rose" }), tab("b", { group }), tab("c")];
+    const colored = updateTabGroup(tabs, "g", { color: "teal" });
+    expect(colored.slice(0, 2).map((t) => t.group?.color)).toEqual(["teal", "teal"]);
+    expect(colored[0].color).toBe("rose");
+    expect(colored[2]).toBe(tabs[2]);
+    const reset = updateTabGroup(colored, "g", { color: null });
+    expect(reset.slice(0, 2).map((t) => t.group?.color)).toEqual([null, null]);
+    expect(reset[0].color).toBe("rose");
+  });
 });
