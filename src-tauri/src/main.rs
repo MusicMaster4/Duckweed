@@ -227,46 +227,52 @@ fn read_settings(path: &Path) -> HashMap<String, String> {
 }
 
 #[tauri::command]
-fn settings_load(
-    app: AppHandle,
-    state: State<'_, DurableSettings>,
-) -> Result<HashMap<String, String>, String> {
-    let _guard = state.0.lock().map_err(|error| error.to_string())?;
-    Ok(read_settings(&settings_path(&app)?))
+async fn settings_load(app: AppHandle) -> Result<HashMap<String, String>, String> {
+    blocking(move || {
+        let state = app.state::<DurableSettings>();
+        let _guard = state.0.lock().map_err(|error| error.to_string())?;
+        Ok(read_settings(&settings_path(&app)?))
+    })
+    .await
 }
 
 #[tauri::command]
-fn settings_save(
+async fn settings_save(
     app: AppHandle,
-    state: State<'_, DurableSettings>,
     key: String,
     value: String,
     replace: Option<bool>,
 ) -> Result<(), String> {
-    if !DURABLE_SETTING_KEYS.contains(&key.as_str()) {
-        return Err("unsupported settings key".into());
-    }
-    // Reject corrupt payloads before they can replace the last good copy.
-    serde_json::from_str::<serde_json::Value>(&value).map_err(|error| error.to_string())?;
+    // Recovery snapshots can contain many transcripts and images. Parsing,
+    // locking, and atomic disk writes must not block the native UI thread.
+    blocking(move || {
+        if !DURABLE_SETTING_KEYS.contains(&key.as_str()) {
+            return Err("unsupported settings key".into());
+        }
+        // Reject corrupt payloads before they can replace the last good copy.
+        serde_json::from_str::<serde_json::Value>(&value).map_err(|error| error.to_string())?;
 
-    let _guard = state.0.lock().map_err(|error| error.to_string())?;
-    let path = settings_path(&app)?;
-    let mut settings = read_settings(&path);
+        let state = app.state::<DurableSettings>();
+        let _guard = state.0.lock().map_err(|error| error.to_string())?;
+        let path = settings_path(&app)?;
+        let mut settings = read_settings(&path);
 
-    // History accumulates across windows, builds and updates; everything else
-    // is a single-writer snapshot that simply replaces the stored copy.
-    let value = if key == COMMAND_HISTORY_KEY && !replace.unwrap_or(false) {
-        merge_history(
-            settings.get(&key).map(String::as_str).unwrap_or("[]"),
-            &value,
-        )
-    } else {
-        value
-    };
+        // History accumulates across windows, builds and updates; everything else
+        // is a single-writer snapshot that simply replaces the stored copy.
+        let value = if key == COMMAND_HISTORY_KEY && !replace.unwrap_or(false) {
+            merge_history(
+                settings.get(&key).map(String::as_str).unwrap_or("[]"),
+                &value,
+            )
+        } else {
+            value
+        };
 
-    settings.insert(key, value);
-    let raw = serde_json::to_vec_pretty(&settings).map_err(|error| error.to_string())?;
-    write_settings_file(&path, &raw)
+        settings.insert(key, value);
+        let raw = serde_json::to_vec_pretty(&settings).map_err(|error| error.to_string())?;
+        write_settings_file(&path, &raw)
+    })
+    .await
 }
 
 fn write_settings_file(path: &Path, raw: &[u8]) -> Result<(), String> {

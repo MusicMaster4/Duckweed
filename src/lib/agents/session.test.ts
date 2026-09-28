@@ -158,9 +158,28 @@ async function codexHandshake(sessionId = "01900000-0000-7000-8000-000000000001"
 }
 
 const session = await import("./session");
-const { workspaceRecovery } = await import("../workspaceRecovery");
+const { workspaceRecovery, RECOVERY_KEY, parseRecovery } = await import("../workspaceRecovery");
 
 describe("Custom agent UI sessions", () => {
+  test("shutdown flush saves a shell draft even when no agent is open", () => {
+    expect(session.activeTermIds()).toHaveLength(0);
+    workspaceRecovery.update("shell-only-recovery", { draft: "latest shell input" });
+    session.flushRecovery();
+    expect(parseRecovery(store.get(RECOVERY_KEY) ?? null).panes["shell-only-recovery"]?.draft)
+      .toBe("latest shell input");
+  });
+
+  test("batched recovery keeps the latest agent draft and its attachments", async () => {
+    const termId = "batched-agent-draft";
+    await session.start(termId, grokLaunch, "H:/project");
+    session.setDraftImages(termId, [image]);
+    for (let index = 0; index < 100; index++) session.setDraft(termId, `draft-${index}`);
+    expect(session.getDraft(termId)).toBe("draft-99");
+    session.flushRecovery();
+    expect(parseRecovery(store.get(RECOVERY_KEY) ?? null).panes[termId]?.agent)
+      .toMatchObject({ draft: "draft-99", images: [image] });
+  });
+
   test("keeps a submitted prompt while a model change is still being negotiated", async () => {
     const termId = "recover-configuring";
     await session.start(termId, { ...grokLaunch, agent: "claude", program: "claudex", model: "old-model" }, "H:/project");

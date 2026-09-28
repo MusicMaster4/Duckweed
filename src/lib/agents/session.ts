@@ -196,6 +196,8 @@ export function flushRecovery(): void {
     flushStreamEvents(session);
     checkpoint(session);
   }
+  // Also flush shell drafts and schedules when there are no agent sessions.
+  workspaceRecovery.flush();
 }
 
 function scheduleCheckpoint(session: Session): void {
@@ -368,7 +370,7 @@ export function getDraft(termId: string): string {
 
 export function setDraft(termId: string, text: string): void {
   const session = sessions.get(termId);
-  if (!session) return;
+  if (!session || session.draft === text) return;
   session.draft = text;
   checkpoint(session);
 }

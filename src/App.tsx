@@ -2934,6 +2934,11 @@ export default function App() {
   }, [focusKey, currentTab]);
 
   useEffect(() => {
+    // Flush before background timer throttling can delay an edited draft.
+    const checkpoint = () => agentSessions.flushRecovery();
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "hidden") checkpoint();
+    };
     const cleanup = () => {
       saveWorkspaceRef.current();
       agentSessions.flushRecovery();
@@ -2943,7 +2948,13 @@ export default function App() {
       terminals.disposeAll();
     };
     window.addEventListener("beforeunload", cleanup);
-    return () => window.removeEventListener("beforeunload", cleanup);
+    window.addEventListener("blur", checkpoint);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      window.removeEventListener("beforeunload", cleanup);
+      window.removeEventListener("blur", checkpoint);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
   }, []);
 
   // Warn before quitting if any terminal still has a command running.

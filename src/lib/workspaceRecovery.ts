@@ -77,43 +77,101 @@ export function parseRecovery(raw: string | null): RecoveryState {
   }
 }
 
-/** Session state is saved while editing, including panes that are not mounted. */
-export function createRecoveryStore(read: () => string | null, write: (raw: string) => void) {
+export const RECOVERY_SAVE_INTERVAL_MS = 250;
+
+type ScheduleSave = (save: () => void) => () => void;
+
+const scheduleSave: ScheduleSave = (save) => {
+  const timer = setTimeout(save, RECOVERY_SAVE_INTERVAL_MS);
+  return () => clearTimeout(timer);
+};
+
+/**
+ * Updates are immediately readable, including for unmounted panes. Batch disk
+ * checkpoints across all sessions so typing never serializes every transcript.
+ * The timer is not reset by edits, so continuous output still reaches disk.
+ */
+export function createRecoveryStore(
+  read: () => string | null,
+  write: (raw: string) => void,
+  schedule: ScheduleSave = scheduleSave,
+) {
   let state: RecoveryState | null = null;
   let frozen = false;
+  let dirty = false;
+  let cancelSave: (() => void) | null = null;
+  // Recovery patches replace pane snapshots. Reuse JSON for untouched panes
+  // instead of walking their histories and image attachments on every save.
+  const serialized = new Map<string, { pane: PaneRecovery; json: string }>();
   const load = () => state ??= parseRecovery(read());
-  const persist = () => {
+  const flush = () => {
+    cancelSave?.();
+    cancelSave = null;
+    if (!dirty) return;
     const current = load();
     current.savedAt = Math.max(Date.now(), current.savedAt + 1);
-    write(JSON.stringify(current));
+    const panes = Object.entries(current.panes).map(([id, pane]) => {
+      let cached = serialized.get(id);
+      if (cached?.pane !== pane) {
+        cached = { pane, json: `${JSON.stringify(id)}:${JSON.stringify(pane)}` };
+        serialized.set(id, cached);
+      }
+      return cached.json;
+    });
+    write(`{"version":1,"savedAt":${current.savedAt},"panes":{${panes.join(",")}}}`);
+    dirty = false;
+  };
+  const persist = () => {
+    dirty = true;
+    cancelSave ??= schedule(flush);
   };
   return {
     get(id: string): PaneRecovery | undefined { return load().panes[id]; },
     update(id: string, patch: Partial<PaneRecovery>) {
       if (frozen) return;
-      load().panes[id] = { ...load().panes[id], ...patch };
+      const previous = load().panes[id];
+      if (previous && Object.entries(patch).every(([key, value]) =>
+        previous[key as keyof PaneRecovery] === value)) return;
+      load().panes[id] = { ...previous, ...patch };
       persist();
     },
     prune(ids: string[]) {
       if (frozen) return;
       const keep = new Set(ids);
+      let changed = false;
       for (const id of Object.keys(load().panes)) {
-        if (!keep.has(id)) delete load().panes[id];
+        if (!keep.has(id)) {
+          delete load().panes[id];
+          serialized.delete(id);
+          changed = true;
+        }
       }
-      for (const pane of Object.values(load().panes)) {
-        if (pane.scheduled && !keep.has(pane.scheduled.targetTermId)) pane.scheduled = null;
+      for (const [id, pane] of Object.entries(load().panes)) {
+        if (pane.scheduled && !keep.has(pane.scheduled.targetTermId)) {
+          load().panes[id] = { ...pane, scheduled: null };
+          changed = true;
+        }
       }
-      persist();
+      if (changed) persist();
     },
     remove(id: string) {
       if (frozen) return;
+      let changed = Object.hasOwn(load().panes, id);
       delete load().panes[id];
-      for (const pane of Object.values(load().panes)) {
-        if (pane.scheduled?.targetTermId === id) pane.scheduled = null;
+      serialized.delete(id);
+      for (const [paneId, pane] of Object.entries(load().panes)) {
+        if (pane.scheduled?.targetTermId === id) {
+          load().panes[paneId] = { ...pane, scheduled: null };
+          changed = true;
+        }
       }
-      persist();
+      if (changed) persist();
     },
-    freeze() { frozen = true; },
+    flush,
+    freeze() {
+      flush();
+      frozen = true;
+    },
   };
 }
 
