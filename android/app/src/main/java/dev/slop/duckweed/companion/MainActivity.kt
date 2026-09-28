@@ -1,5 +1,10 @@
 package dev.slop.duckweed.companion
 
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
+import android.view.inputmethod.InputMethodManager
 import android.Manifest
 import android.app.DownloadManager
 import android.content.BroadcastReceiver
@@ -98,6 +103,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var conversationAttachmentImage: ImageView
     private lateinit var conversationAttachmentName: TextView
     private lateinit var conversationList: RecyclerView
+    private lateinit var conversationLatest: View
     private lateinit var conversationTerminal: TextView
     private lateinit var conversationPlan: View
     private lateinit var conversationPlanHead: View
@@ -171,10 +177,41 @@ class MainActivity : AppCompatActivity() {
     private val deliveryChecks = mutableSetOf<String>()
     private val draftPersistRunnable = Runnable { writeCurrentDraft() }
     private var refreshRequestedAt = 0L
-    private var refreshSnapshotVersion = 0L
+    private var refreshBaselines: Map<String, Long> = emptyMap()
+    private var refreshPending: Set<String> = emptySet()
+    private var refreshHadFailure = false
+    private var refreshShowsFeedback = false
+    private var refreshGeneration = 0L
+    private var networkCallbackRegistered = false
+    private var foreground = false
+    private var projectQuery = ""
+    private var conversationQuery = ""
+    private var conversationFilter = ConversationFilter.ALL
+    private var renderedSuggestions: List<SlashSuggestion>? = null
+    private var renderedCommandEmpty: String? = null
+    private val refreshTimeout = Runnable {
+        if (refreshRequestedAt > 0) finishRemoteRefresh(timedOut = true)
+    }
+    private val networkCallback = object : ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: Network) { runOnUiThread {
+            if (foreground && !isDestroyed) {
+                recoverPendingRelayMessages()
+                requestRemoteRefresh(showSpinner = false)
+            }
+        } }
+        override fun onLost(network: Network) { runOnUiThread {
+            if (foreground && !isDestroyed) {
+                refreshConnectionHealth()
+                refreshWorkspaces()
+                refreshConversationAvailability()
+            }
+        } }
+    }
     private var cachedSnapshots: List<WorkspaceSnapshot> = emptyList()
     private var unreadConversationKeys: Set<Pair<String, String>> = emptySet()
     private var remoteStateLoading = false
+    private var remoteStateReady = false
+    private var refreshOnLoad = false
     private var remoteStateReloadPending = false
     private val relayRecoveryRunning = AtomicBoolean(false)
     private val connectionTicker = object : Runnable {
@@ -293,6 +330,7 @@ class MainActivity : AppCompatActivity() {
         conversationDetail = findViewById(R.id.conversation_detail)
         conversationCommandsScroll = findViewById(R.id.conversation_commands_scroll)
         conversationCommands = findViewById(R.id.conversation_commands)
+        (conversationCommandsScroll as MaxHeightScrollView).maxHeightPx = dp(220)
         conversationComposer = findViewById(R.id.conversation_composer)
         conversationUnavailable = findViewById(R.id.conversation_unavailable)
         conversationInput = findViewById(R.id.conversation_input)
@@ -302,6 +340,7 @@ class MainActivity : AppCompatActivity() {
         conversationAttachmentImage = findViewById(R.id.conversation_attachment_image)
         conversationAttachmentName = findViewById(R.id.conversation_attachment_name)
         conversationList = findViewById(R.id.conversation_list)
+        conversationLatest = findViewById(R.id.conversation_latest)
         conversationTerminal = findViewById(R.id.conversation_terminal)
         conversationPlan = findViewById(R.id.conversation_plan)
         conversationPlanHead = findViewById(R.id.conversation_plan_head)
@@ -347,6 +386,8 @@ class MainActivity : AppCompatActivity() {
             addOnScrollListener(object : RecyclerView.OnScrollListener() {
                 override fun onScrolled(recyclerView: RecyclerView, dx: Int, dy: Int) {
                     conversationShouldStickToBottom = !recyclerView.canScrollVertically(1)
+                    conversationLatest.visibility =
+                        if (conversationShouldStickToBottom) View.GONE else View.VISIBLE
                 }
             })
         }
@@ -379,6 +420,23 @@ class MainActivity : AppCompatActivity() {
             renderPlanDetails()
         }
         conversationSend.setOnClickListener { sendConversationMessage() }
+        findViewById<View>(R.id.conversation_latest).setOnClickListener {
+            conversationShouldStickToBottom = true
+            if (conversationAdapter.itemCount > 0) conversationList.scrollToPosition(conversationAdapter.itemCount - 1)
+            it.visibility = View.GONE
+        }
+        findViewById<View>(R.id.conversation_command_button).setOnClickListener {
+            if (draftLoading) return@setOnClickListener
+            if (conversationInput.text.isNotBlank() && !conversationInput.text.startsWith("/")) {
+                showCommandBrowser()
+            } else {
+                conversationInput.setText("/")
+                conversationInput.setSelection(1)
+                conversationInput.requestFocus()
+                getSystemService(InputMethodManager::class.java).showSoftInput(conversationInput, InputMethodManager.SHOW_IMPLICIT)
+            }
+        }
+        configureWorkspaceTools()
         conversationAttach.setOnClickListener {
             it.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
             imagePicker.launch("image/*")
@@ -431,7 +489,7 @@ class MainActivity : AppCompatActivity() {
         updateButton.setOnClickListener {
             updateAvailable?.let(::downloadUpdate) ?: checkForUpdates()
         }
-        retryConnectionButton.setOnClickListener { requestRemoteRefresh(showSpinner = false) }
+        retryConnectionButton.setOnClickListener { requestRemoteRefresh() }
         requestNotificationPermissionIfEnabled()
         refreshPairingStatus()
         refreshPushRegistration()
@@ -440,6 +498,14 @@ class MainActivity : AppCompatActivity() {
 
     override fun onStart() {
         super.onStart()
+        foreground = true
+        if (!networkCallbackRegistered) {
+            runCatching {
+                getSystemService(ConnectivityManager::class.java).registerNetworkCallback(
+                    NetworkRequest.Builder().addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET).build(), networkCallback)
+                networkCallbackRegistered = true
+            }
+        }
         syncNotificationVisibility()
         connectionDot.removeCallbacks(connectionTicker)
         connectionDot.post(connectionTicker)
@@ -461,6 +527,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onStop() {
+        foreground = false
+        if (networkCallbackRegistered) {
+            runCatching { getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(networkCallback) }
+            networkCallbackRegistered = false
+        }
+        refreshShowsFeedback = false
+        finishRemoteRefresh()
         persistCurrentDraft()
         connectionDot.removeCallbacks(connectionTicker)
         MobileNotificationVisibility.activityStopped()
@@ -503,6 +576,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        if (::conversationList.isInitialized) conversationList.clearOnScrollListeners()
         if (::connectionDot.isInitialized) connectionDot.removeCallbacks(connectionTicker)
         executor.shutdownNow()
         // Let already accepted submissions finish when the Activity is recreated.
@@ -612,6 +686,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun showPage(page: Page) {
         persistCurrentDraft()
+        currentFocus?.let { getSystemService(InputMethodManager::class.java).hideSoftInputFromWindow(it.windowToken, 0); it.clearFocus() }
         if (page == Page.SETTINGS) refreshNotificationHealth()
         val previousPage = selectedPage
         selectedProject = null
@@ -668,6 +743,88 @@ class MainActivity : AppCompatActivity() {
         selectedPage = page
         navigation.forEach { (candidate, id) -> findViewById<View>(id).isSelected = candidate == page }
         findViewById<View>(R.id.settings_button).isSelected = page == Page.SETTINGS
+    }
+
+    private fun configureWorkspaceTools() {
+        fun bindSearch(id: Int, update: (String) -> Unit) {
+            findViewById<EditText>(id).apply {
+                addTextChangedListener(object : TextWatcher {
+                    override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+                    override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
+                    override fun afterTextChanged(s: Editable?) { update(s.toString()); refreshWorkspaces() }
+                })
+                setOnEditorActionListener { _, _, _ ->
+                    getSystemService(InputMethodManager::class.java).hideSoftInputFromWindow(windowToken, 0)
+                    clearFocus(); true
+                }
+            }
+        }
+        bindSearch(R.id.project_search) { projectQuery = it }
+        bindSearch(R.id.conversation_search) { conversationQuery = it }
+        val filters = findViewById<LinearLayout>(R.id.conversation_filters)
+        for ((filter, label) in listOf(ConversationFilter.ALL to "All", ConversationFilter.NEEDS_YOU to "Needs you", ConversationFilter.UNREAD to "Unread")) {
+            filters.addView(Button(this).apply {
+                text = label; textSize = 12f; isAllCaps = false
+                minWidth = 0; minimumWidth = 0
+                background = ContextCompat.getDrawable(this@MainActivity, R.drawable.nav_item)
+                setTextColor(ContextCompat.getColor(this@MainActivity, R.color.duckweed_text_dim))
+                isSelected = conversationFilter == filter
+                setPadding(dp(16), 0, dp(16), 0)
+                setOnClickListener {
+                    conversationFilter = filter
+                    for (i in 0 until filters.childCount) filters.getChildAt(i).isSelected = filters.getChildAt(i) === this
+                    performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
+                    refreshWorkspaces()
+                }
+            }, LinearLayout.LayoutParams(-2, dp(48)).apply { marginEnd = dp(4) })
+        }
+        headerConnectionStatus.apply {
+            minHeight = dp(48); gravity = Gravity.CENTER_VERTICAL
+            isFocusable = true
+            contentDescription = "Connection status. Tap to sync with desktop."
+            setOnClickListener { requestRemoteRefresh() }
+        }
+        for (refresh in listOf(responsesRefresh, projectsRefresh)) {
+            refresh.setColorSchemeColors(ContextCompat.getColor(this, R.color.duckweed_accent))
+            refresh.setProgressBackgroundColorSchemeColor(ContextCompat.getColor(this, R.color.duckweed_surface_high))
+        }
+    }
+
+    private fun updateEmptyStates(noTabs: Boolean, noConversations: Boolean) {
+        val paired = SecretStore.loadAll(this).isNotEmpty()
+        fun update(container: View, actionId: Int, title: String, detail: String, action: String, run: () -> Unit) {
+            val texts = (container as? ViewGroup)?.let { group ->
+                (0 until group.childCount).map { group.getChildAt(it) }.filterIsInstance<TextView>().filterNot { it is Button }
+            }.orEmpty()
+            texts.getOrNull(0)?.text = title
+            texts.getOrNull(1)?.text = detail
+            findViewById<Button>(actionId).apply { text = action; setOnClickListener { run() } }
+        }
+        val projectsFiltered = !noTabs && projectQuery.isNotBlank()
+        update(projectsEmpty, R.id.projects_empty_action,
+            if (projectsFiltered) "No matching tabs" else "Your desktop tabs belong here",
+            if (projectsFiltered) "Try a tab name, folder, or agent." else "Connect your desktop to continue working from your phone.",
+            if (projectsFiltered) "Clear search" else if (paired) "Sync tabs" else "Connect desktop") {
+            if (projectsFiltered) findViewById<EditText>(R.id.project_search).text.clear()
+            else if (paired) requestRemoteRefresh() else navigateToPage(Page.SETTINGS)
+        }
+        val conversationsFiltered = !noConversations && (conversationQuery.isNotBlank() || conversationFilter != ConversationFilter.ALL)
+        update(conversationsEmpty, R.id.conversations_empty_action,
+            if (conversationsFiltered) "Nothing matches this view" else "Continue a conversation",
+            if (conversationsFiltered) "Try another search or show all conversations." else "Open an agent or terminal on desktop, then sync it here.",
+            if (conversationsFiltered) "Show all conversations" else if (paired) "Sync conversations" else "Connect desktop") {
+            if (conversationsFiltered) {
+                conversationFilter = ConversationFilter.ALL
+                findViewById<EditText>(R.id.conversation_search).text.clear()
+                val filters = findViewById<LinearLayout>(R.id.conversation_filters)
+                for (i in 0 until filters.childCount) filters.getChildAt(i).isSelected = i == 0
+                refreshWorkspaces()
+            } else if (paired) requestRemoteRefresh() else navigateToPage(Page.SETTINGS)
+        }
+        findViewById<Button>(R.id.activity_empty_action).apply {
+            text = if (paired) "Open conversations" else "Connect desktop"
+            setOnClickListener { navigateToPage(if (paired) Page.CONVERSATIONS else Page.SETTINGS) }
+        }
     }
 
     private fun configureUpdater() {
@@ -1086,6 +1243,18 @@ class MainActivity : AppCompatActivity() {
                 connectionLastSync.text = "Pair a desktop to start encrypted sync."
                 color = R.color.duckweed_text_faint
             }
+            !hasNetwork() -> {
+                headerConnectionStatus.text = "No network"
+                connectionHealth.text = "Phone is offline"
+                connectionLastSync.text = "Reconnect to Wi-Fi or mobile data. Your drafts are saved."
+                color = R.color.duckweed_attention
+            }
+            refreshRequestedAt > 0 -> {
+                headerConnectionStatus.text = "Syncing"
+                connectionHealth.text = "Syncing with desktop..."
+                connectionLastSync.text = "Your saved conversations remain available."
+                color = R.color.duckweed_text_dim
+            }
             freshPairings.isNotEmpty() -> {
                 headerConnectionStatus.text = "Online"
                 connectionHealth.text = if (credentials.size == 1) {
@@ -1210,11 +1379,13 @@ class MainActivity : AppCompatActivity() {
         messages: List<CompletionRecord>,
         unreadKeys: Set<Pair<String, String>>,
     ) {
+        remoteStateReady = true
         reconcilePendingActions(snapshots)
         cachedSnapshots = snapshots
         unreadConversationKeys = unreadKeys
-        if (refreshRequestedAt > 0 && snapshots.any { it.updatedAt > refreshSnapshotVersion }) {
-            finishRemoteRefresh()
+        if (refreshRequestedAt > 0) {
+            refreshPending = refreshPending - MobileSyncPolicy.refreshedPairIds(refreshBaselines, snapshots)
+            if (refreshPending.isEmpty()) finishRemoteRefresh()
         }
         legacyResponse?.let { current ->
             legacyResponse = messages.firstOrNull { it.id == current.id } ?: current
@@ -1227,6 +1398,10 @@ class MainActivity : AppCompatActivity() {
         if (selectedPage == Page.SETTINGS) refreshNotificationHealth()
         if (conversationDetail.visibility == View.VISIBLE) refreshConversation()
         openIntentResponse()
+        if (refreshOnLoad) {
+            refreshOnLoad = false
+            requestRemoteRefresh(showSpinner = refreshShowsFeedback)
+        }
     }
 
     private fun reconcilePendingActions(
@@ -1250,7 +1425,7 @@ class MainActivity : AppCompatActivity() {
     ) {
         val now = System.currentTimeMillis()
         val onlinePairIds = snapshots
-            .filter { MobileSyncPolicy.isDesktopOnline(it.lastSeenAt, now, CONNECTION_FRESH_MS) }
+            .filter { hasNetwork() && MobileSyncPolicy.isDesktopOnline(it.lastSeenAt, now, CONNECTION_FRESH_MS) }
             .mapTo(mutableSetOf()) { it.pairId }
         val rows = snapshots.flatMap { snapshot ->
             snapshot.projects.map { project ->
@@ -1261,8 +1436,9 @@ class MainActivity : AppCompatActivity() {
                 )
             }
         }
-        projectAdapter.submit(rows)
-        projectsEmpty.visibility = if (rows.isEmpty()) View.VISIBLE else View.GONE
+        val visibleRows = rows.filter { WorkspaceFilter.project(it, projectQuery) }
+        projectAdapter.submit(visibleRows)
+        projectsEmpty.visibility = if (visibleRows.isEmpty()) View.VISIBLE else View.GONE
         val targets = rows.flatMap { row ->
             row.project.terminals.map { terminal ->
                 ConversationTarget(
@@ -1285,13 +1461,20 @@ class MainActivity : AppCompatActivity() {
                 }
             }.thenBy { it.projectName.lowercase() },
         )
-        conversationsAdapter.submitTargets(targets)
-        conversationsEmpty.visibility = if (targets.isEmpty()) View.VISIBLE else View.GONE
+        val visibleTargets = targets.filter { WorkspaceFilter.conversation(it, conversationQuery, conversationFilter) }
+        conversationsAdapter.submitTargets(visibleTargets)
+        conversationsEmpty.visibility = if (visibleTargets.isEmpty()) View.VISIBLE else View.GONE
+        updateEmptyStates(rows.isEmpty(), targets.isEmpty())
 
         selectedProject?.let { current ->
             selectedProject = rows.firstOrNull {
                 it.pairId == current.pairId && it.project.id == current.project.id
-            } ?: current
+            } ?: current.copy(project = current.project.copy(terminals = emptyList()))
+            selectedProject?.let { row ->
+                findViewById<TextView>(R.id.project_detail_title).text = row.project.name
+                findViewById<TextView>(R.id.project_detail_meta).text =
+                    "${row.project.terminals.size} open terminals" + (row.project.branch?.let { " \u00b7 $it" } ?: "")
+            }
             terminalAdapter.submit(selectedProject, unreadKeys)
         }
         selectedTarget?.let { current ->
@@ -1308,8 +1491,8 @@ class MainActivity : AppCompatActivity() {
                         Pair(row.pairId, terminal.id) in unreadKeys,
                         row.desktopOnline,
                     )
-                }
-            }
+                } ?: run { selectedTarget = current.copy(terminal = current.terminal.copy(status = "exited", permission = null)) }
+            } ?: run { selectedTarget = current.copy(terminal = current.terminal.copy(status = "exited", permission = null)) }
         }
     }
 
@@ -1413,6 +1596,8 @@ class MainActivity : AppCompatActivity() {
         MobileNotificationVisibility.showConversation(target.pairId, target.terminal.id)
         conversationReturnsToProject = returnToProject
         conversationShouldStickToBottom = true
+        findViewById<View>(R.id.conversation_latest).visibility = View.GONE
+        renderedSuggestions = null
         terminalShouldStickToBottom = true
         conversationTerminal.scrollTo(0, 0)
         val generation = ++draftGeneration
@@ -1562,10 +1747,9 @@ class MainActivity : AppCompatActivity() {
         val isAgent = target.terminal.agent != null
         val thinking = isAgent && target.terminal.status == "working"
         val desktopOnline = isDesktopOnline(target.pairId)
-        findViewById<TextView>(R.id.conversation_title).text =
-            target.terminal.agent ?: target.terminal.title
+        findViewById<TextView>(R.id.conversation_title).text = target.projectName
         findViewById<TextView>(R.id.conversation_status).text = buildList {
-            add(target.projectName)
+            add(target.terminal.agent ?: target.terminal.title)
             target.terminal.model?.let { add(it) }
             if (terminalMode && target.terminal.terminalColumns != null && target.terminal.terminalRows != null) {
                 add("${target.terminal.terminalColumns}×${target.terminal.terminalRows}")
@@ -1598,6 +1782,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
         conversationList.visibility = if (terminalMode) View.GONE else View.VISIBLE
+        if (terminalMode) findViewById<View>(R.id.conversation_latest).visibility = View.GONE
         conversationTerminal.visibility = if (terminalMode) View.VISIBLE else View.GONE
         if (terminalMode) renderTerminalOutput(target.terminal.terminalOutput)
         renderPlan(target, terminalMode)
@@ -2254,7 +2439,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun isDesktopOnline(pairId: String, now: Long = System.currentTimeMillis()): Boolean =
-        MobileSyncPolicy.isDesktopOnline(
+        hasNetwork() && MobileSyncPolicy.isDesktopOnline(
             cachedSnapshots.firstOrNull { it.pairId == pairId }?.lastSeenAt,
             now,
             CONNECTION_FRESH_MS,
@@ -2272,6 +2457,7 @@ class MainActivity : AppCompatActivity() {
         conversationComposer.visibility = if (canCompose) View.VISIBLE else View.GONE
         conversationAttach.visibility =
             if (canCompose && target.terminal.mode == "conversation") View.VISIBLE else View.GONE
+        findViewById<View>(R.id.conversation_command_button).visibility = conversationAttach.visibility
         conversationInput.hint = if (draftLoading) {
             "Loading draft..."
         } else if (target.terminal.mode == "terminal") {
@@ -2283,8 +2469,11 @@ class MainActivity : AppCompatActivity() {
             waitingForDecision -> ""
             !paired -> "Pair this desktop again before sending messages."
             !open -> "This terminal is closed and cannot receive messages."
-            !online -> "This desktop instance is offline and cannot receive messages."
+            !online -> "Offline. Your draft is saved. Tap here to retry sync."
             else -> ""
+        }
+        conversationUnavailable.setOnClickListener {
+            if (!paired) navigateToPage(Page.SETTINGS) else requestRemoteRefresh()
         }
         conversationUnavailable.visibility = if (waitingForDecision || canCompose && online) {
             View.GONE
@@ -2506,57 +2695,81 @@ class MainActivity : AppCompatActivity() {
             }.show()
     }
 
+    private fun showCommandBrowser() {
+        val commands = selectedTarget?.terminal?.commands.orEmpty()
+        if (commands.isEmpty()) { requestRemoteRefresh(); return }
+        AlertDialog.Builder(this).setTitle("Agent commands")
+            .setItems(commands.map { "${it.name}  ${it.description}" }.toTypedArray()) { _, index ->
+                AlertDialog.Builder(this).setTitle("Replace this draft?")
+                    .setMessage("The command will replace the text in the composer.")
+                    .setNegativeButton("Keep draft", null)
+                    .setPositiveButton("Use command") { _, _ ->
+                        conversationInput.setText(SlashCommandPolicy.completion(commands[index]))
+                        conversationInput.setSelection(conversationInput.length())
+                        conversationInput.requestFocus()
+                    }.show()
+            }.setNegativeButton("Cancel", null).show()
+    }
+
     private fun updateSlashCommandSuggestions() {
         if (!::conversationCommands.isInitialized || !::conversationInput.isInitialized) return
         val target = selectedTarget
         val value = conversationInput.text.toString()
-        val visible = target != null &&
-            target.terminal.mode == "conversation" &&
-            value.startsWith("/")
-        val commands = if (visible) {
-            SlashCommandPolicy.matches(value, target.terminal.commands)
-        } else {
-            emptyList()
+        val catalog = target?.terminal?.commands.orEmpty()
+        val visible = target != null && target.terminal.mode == "conversation" &&
+            target.terminal.status != "exited" && target.terminal.permission == null &&
+            SlashCommandPolicy.isQuery(value, catalog)
+        if (!visible) {
+            conversationCommandsScroll.visibility = View.GONE
+            renderedSuggestions = null
+            return
         }
+        val suggestions = SlashCommandPolicy.suggestions(value, catalog)
+        val empty = if (catalog.isEmpty()) "Commands are not available yet. Tap to sync with desktop."
+            else "No matching commands. Try a name or description."
+        // Streaming responses must not recreate focused rows or reset the picker scroll.
+        if (renderedSuggestions == suggestions && renderedCommandEmpty == empty && conversationCommandsScroll.visibility == View.VISIBLE) return
+        renderedSuggestions = suggestions
+        renderedCommandEmpty = empty
         conversationCommands.removeAllViews()
-        commands.forEach { command ->
+        (conversationCommandsScroll as MaxHeightScrollView).scrollTo(0, 0)
+        if (suggestions.isEmpty()) {
+            conversationCommands.addView(TextView(this).apply {
+                text = empty; textSize = 13f; minHeight = dp(56)
+                gravity = Gravity.CENTER_VERTICAL; setPadding(dp(12), dp(12), dp(12), dp(12))
+                setTextColor(ContextCompat.getColor(this@MainActivity, R.color.duckweed_text_dim))
+                if (catalog.isEmpty()) { isFocusable = true; setOnClickListener { requestRemoteRefresh() } }
+            })
+        }
+        suggestions.forEach { suggestion ->
             val row = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                isClickable = true
-                isFocusable = true
+                orientation = LinearLayout.VERTICAL; isClickable = true; isFocusable = true
+                minimumHeight = dp(56)
                 background = ContextCompat.getDrawable(this@MainActivity, R.drawable.nav_item)
-                setPadding(dp(12), dp(9), dp(12), dp(9))
-                contentDescription = "${command.name}. ${command.description}"
+                setPadding(dp(12), dp(10), dp(12), dp(10))
+                contentDescription = "${suggestion.title}. ${suggestion.description}" + if (suggestion.current) ". Current selection" else ""
                 setOnClickListener {
-                    val next = SlashCommandPolicy.completion(command)
-                    conversationInput.setText(next)
-                    conversationInput.setSelection(next.length)
+                    performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                    conversationInput.setText(suggestion.value)
+                    conversationInput.setSelection(suggestion.value.length)
                     conversationInput.requestFocus()
                 }
             }
             row.addView(TextView(this).apply {
-                text = command.name
-                textSize = 13f
-                setTextColor(ContextCompat.getColor(this@MainActivity, R.color.duckweed_accent))
+                text = suggestion.title + if (suggestion.current) "  \u2713" else ""
+                textSize = 14f
+                typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL)
+                setTextColor(ContextCompat.getColor(this@MainActivity, R.color.duckweed_text))
             })
-            if (command.description.isNotBlank()) {
-                row.addView(TextView(this).apply {
-                    text = command.description
-                    textSize = 11f
-                    maxLines = 2
-                    ellipsize = android.text.TextUtils.TruncateAt.END
-                    setTextColor(ContextCompat.getColor(this@MainActivity, R.color.duckweed_text_faint))
-                })
-            }
-            conversationCommands.addView(
-                row,
-                LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT,
-                ).apply { bottomMargin = dp(3) },
-            )
+            if (suggestion.description.isNotBlank()) row.addView(TextView(this).apply {
+                text = suggestion.description; textSize = 12f; maxLines = 2
+                ellipsize = android.text.TextUtils.TruncateAt.END
+                setPadding(0, dp(3), 0, 0)
+                setTextColor(ContextCompat.getColor(this@MainActivity, R.color.duckweed_text_dim))
+            })
+            conversationCommands.addView(row, LinearLayout.LayoutParams(-1, -2))
         }
-        conversationCommandsScroll.visibility = if (commands.isEmpty()) View.GONE else View.VISIBLE
+        conversationCommandsScroll.visibility = View.VISIBLE
     }
 
     private fun usageSwatch(color: Int, sizeDp: Int, cornerDp: Int): View {
@@ -2620,41 +2833,78 @@ class MainActivity : AppCompatActivity() {
             }.show()
     }
 
+    private fun hasNetwork(): Boolean {
+        val manager = getSystemService(ConnectivityManager::class.java)
+        val capabilities = manager.getNetworkCapabilities(manager.activeNetwork)
+        return capabilities?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
+    }
+
     private fun requestRemoteRefresh(showSpinner: Boolean = true) {
-        if (isFinishing || isDestroyed) return
-        val credentials = SecretStore.loadAll(this)
-        if (credentials.isEmpty()) {
-            finishRemoteRefresh()
-            refreshConnectionHealth()
+        if (isFinishing || isDestroyed || !foreground) return
+        if (!remoteStateReady) {
+            refreshOnLoad = true
+            refreshShowsFeedback = refreshShowsFeedback || showSpinner
+            refreshRemoteState()
             return
         }
+        val credentials = SecretStore.loadAll(this)
+        if (credentials.isEmpty()) { finishRemoteRefresh(); return }
+        if (!hasNetwork()) {
+            finishRemoteRefresh()
+            if (showSpinner) Toast.makeText(this, "Connect to Wi-Fi or mobile data, then retry. Your drafts are saved.", Toast.LENGTH_LONG).show()
+            return
+        }
+        refreshShowsFeedback = refreshShowsFeedback || showSpinner
         if (showSpinner) {
             if (selectedPage == Page.PROJECTS) projectsRefresh.isRefreshing = true
             if (selectedPage == Page.ACTIVITY) responsesRefresh.isRefreshing = true
         }
-        retryConnectionButton.isEnabled = false
-        connectionHealth.text = "Checking desktop connection..."
+        // Resume, pull-to-refresh and network callbacks share one in-flight request.
+        if (refreshRequestedAt > 0) return
+        val generation = ++refreshGeneration
         refreshRequestedAt = System.currentTimeMillis()
-        refreshSnapshotVersion = cachedSnapshots.maxOfOrNull { it.updatedAt } ?: 0L
-        executor.execute {
-            credentials.forEach { pairing ->
-                runCatching { RelayClient.requestWorkspaceRefresh(pairing) }
-            }
-            responsesRefresh.postDelayed({
-                if (isFinishing || isDestroyed) return@postDelayed
-                refreshRemoteState()
-                finishRemoteRefresh()
-            }, 10_000)
+        refreshHadFailure = false
+        refreshBaselines = credentials.associate { pair ->
+            pair.pairId to (cachedSnapshots.firstOrNull { it.pairId == pair.pairId }?.updatedAt ?: 0L)
         }
+        refreshPending = refreshBaselines.keys
+        retryConnectionButton.isEnabled = false
+        refreshConnectionHealth()
+        connectionDot.removeCallbacks(refreshTimeout)
+        connectionDot.postDelayed(refreshTimeout, 15_000)
+        credentials.forEach { pairing -> syncExecutor.execute {
+            val result = runCatching { RelayClient.requestWorkspaceRefresh(pairing) }
+            runOnUiThread {
+                if (isDestroyed || generation != refreshGeneration) return@runOnUiThread
+                if (result.isFailure) {
+                    refreshHadFailure = true
+                    refreshPending = refreshPending - pairing.pairId
+                    if (refreshPending.isEmpty()) finishRemoteRefresh()
+                } else recoverPendingRelayMessages()
+            }
+        } }
+        // Fetch promptly even if a push wake-up is delayed. Never resubmit user input.
+        for (delay in listOf(1_000L, 3_000L, 6_000L)) connectionDot.postDelayed({
+            if (foreground && !isDestroyed && generation == refreshGeneration) recoverPendingRelayMessages()
+        }, delay)
     }
 
-    private fun finishRemoteRefresh() {
+    private fun finishRemoteRefresh(timedOut: Boolean = false) {
+        val report = refreshRequestedAt > 0 && refreshShowsFeedback && foreground
+        val failed = refreshHadFailure || timedOut
+        refreshGeneration++
         refreshRequestedAt = 0
-        refreshSnapshotVersion = 0
+        refreshBaselines = emptyMap()
+        refreshPending = emptySet()
+        refreshShowsFeedback = false
+        if (::connectionDot.isInitialized) connectionDot.removeCallbacks(refreshTimeout)
         if (::responsesRefresh.isInitialized) responsesRefresh.isRefreshing = false
         if (::projectsRefresh.isInitialized) projectsRefresh.isRefreshing = false
         if (::retryConnectionButton.isInitialized) retryConnectionButton.isEnabled = true
         refreshConnectionHealth()
+        if (report && failed) {
+            Toast.makeText(this, "Could not finish syncing. Keep Duckweed open on desktop and tap Retry. Saved conversations are still available.", Toast.LENGTH_LONG).show()
+        }
     }
 
     private fun sendConversationMessage() {
@@ -2900,6 +3150,7 @@ class MainActivity : AppCompatActivity() {
             !draftLoading &&
             target != null &&
             target.terminal.status != "exited" &&
+            target.terminal.permission == null &&
             isDesktopOnline(target.pairId) &&
             (conversationInput.text.isNotBlank() || selectedDraftAttachment != null)
         conversationSend.alpha = if (conversationSend.isEnabled) 1f else 0.38f

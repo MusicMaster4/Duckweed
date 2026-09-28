@@ -1,3 +1,4 @@
+import { mobileSlashCommands } from "./lib/mobileWorkspace";
 import { arrangeTabGroups, assignTabGroup, updateTabGroup } from "./lib/tabGroups";
 import {
   useCallback,
@@ -1101,7 +1102,7 @@ export default function App() {
         usageLimits,
         projects: tabsRef.current.map((tab) => ({
           id: tab.id,
-          name: tab.project?.name ?? tab.title,
+          name: tab.title,
           path: tab.project?.path ?? "",
           branch: tab.project?.branch ?? null,
           color: tabColorHex(tab.color) ?? tabColorHex(tab.group?.color),
@@ -1180,17 +1181,7 @@ export default function App() {
                 mobileAlertTermIdsRef.current.has(node.term),
               completionSeq: meta.completionSeq,
               readCompletionSeq: readCompletionSeqsRef.current.get(node.term) ?? null,
-              commands: [...(session?.commands ?? [])]
-                .sort((left, right) => {
-                  const priority = (name: string) =>
-                    name === "/new" ? 0 : name === "/model" ? 1 : name === "/effort" ? 2 : 3;
-                  return priority(left.name) - priority(right.name);
-                })
-                .slice(0, 32)
-                .map((command) => ({
-                  name: command.name.slice(0, 80),
-                  description: command.description.slice(0, 180),
-                })),
+              commands: mobileSlashCommands(session),
               activity: mobileAgentActivity(session?.items ?? []),
               conversation,
               permission: session?.permission

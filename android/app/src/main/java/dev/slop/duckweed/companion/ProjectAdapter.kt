@@ -6,6 +6,7 @@ import android.view.ViewGroup
 import android.widget.TextView
 import androidx.recyclerview.widget.RecyclerView
 import androidx.recyclerview.widget.DiffUtil
+import androidx.recyclerview.widget.AsyncListDiffer
 import androidx.core.content.ContextCompat
 
 data class ProjectRow(
@@ -17,26 +18,21 @@ data class ProjectRow(
 class ProjectAdapter(
     private val onOpen: (ProjectRow) -> Unit,
 ) : RecyclerView.Adapter<ProjectAdapter.Holder>() {
-    private var projects: List<ProjectRow> = emptyList()
+    private val differ = AsyncListDiffer(this, object : DiffUtil.ItemCallback<ProjectRow>() {
+        override fun areItemsTheSame(old: ProjectRow, new: ProjectRow) = old.pairId == new.pairId && old.project.id == new.project.id
+        override fun areContentsTheSame(old: ProjectRow, new: ProjectRow) = old == new
+    })
+    private val projects: List<ProjectRow> get() = differ.currentList
+    private var submitted: List<ProjectRow> = emptyList()
     private var marks: Map<String, String> = emptyMap()
 
     private fun key(row: ProjectRow): String = "${row.pairId}\u0000${row.project.id}"
 
     fun submit(next: List<ProjectRow>) {
-        if (next == projects) return
-        val previous = projects
-        val diff = DiffUtil.calculateDiff(object : DiffUtil.Callback() {
-            override fun getOldListSize(): Int = previous.size
-            override fun getNewListSize(): Int = next.size
-            override fun areItemsTheSame(oldItemPosition: Int, newItemPosition: Int): Boolean =
-                previous[oldItemPosition].pairId == next[newItemPosition].pairId &&
-                    previous[oldItemPosition].project.id == next[newItemPosition].project.id
-            override fun areContentsTheSame(oldItemPosition: Int, newItemPosition: Int): Boolean =
-                previous[oldItemPosition] == next[newItemPosition]
-        })
-        projects = next
+        if (next == submitted) return
+        submitted = next
         marks = ProjectMarks.assign(next.map { ProjectMarkIdentity(key(it), it.project.name) })
-        diff.dispatchUpdatesTo(this)
+        differ.submitList(next)
     }
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): Holder = Holder(
@@ -50,8 +46,13 @@ class ProjectAdapter(
         val project = row.project
         val accent = MobileTabColorStyle.parse(project.color)
         MobileTabColorStyle.apply(holder.itemView, accent)
+        holder.mark.background = android.graphics.drawable.GradientDrawable().apply {
+            cornerRadius = 10f * holder.itemView.resources.displayMetrics.density
+            setColor(0x24000000)
+        }
         holder.mark.setTextColor(accent ?: ContextCompat.getColor(holder.itemView.context, R.color.duckweed_accent))
         val working = if (row.desktopOnline) project.terminals.count(RemoteTerminal::isWorking) else 0
+        val waiting = project.terminals.count { it.permission != null || it.status == "waiting" }
         holder.mark.text = marks[key(row)] ?: "P0"
         holder.name.text = project.name
         holder.meta.text = buildList {
@@ -60,9 +61,14 @@ class ProjectAdapter(
         }.joinToString("  •  ")
         holder.status.text = when {
             !row.desktopOnline -> "Offline"
+            waiting > 0 -> "Needs you"
             working > 0 -> "$working working"
             else -> "Open  ›"
         }
+        holder.status.setTextColor(ContextCompat.getColor(holder.itemView.context,
+            if (!row.desktopOnline) R.color.duckweed_text_faint
+            else if (waiting > 0) R.color.duckweed_attention
+            else if (working > 0) R.color.duckweed_accent else R.color.duckweed_text_dim))
         holder.shimmer.visibility = if (working > 0) View.VISIBLE else View.GONE
         holder.itemView.setOnClickListener { onOpen(row) }
     }

@@ -97,6 +97,7 @@ export interface MobileTerminalSnapshot {
 export interface MobileSlashCommandSnapshot {
   name: string;
   description: string;
+  options?: Array<{ value: string; label: string; description: string; current: boolean }>;
 }
 
 export interface MobileAgentActivitySnapshot {
