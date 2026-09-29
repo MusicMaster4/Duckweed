@@ -92,9 +92,9 @@ const FALLBACKS: Record<AgentId, { name: string; description: string }[]> = {
 };
 
 /**
- * Claude's stream-json init never lists switchable models, only the one in
- * use. These aliases are what bare `/model` advertises: short names and 1M
- * variants. Refresh their labels from the model id reported by system/init.
+ * Fallback while Claude's initialize control request discovers the live
+ * model catalog, or for older CLIs that do not support discovery. The
+ * system/init event only names the active model and can refresh its label.
  *
  * Effort levels match `/effort` usage plus `ultracode` (needs dynamic
  * workflows / plan — still listed so the picker mirrors the CLI; rejected

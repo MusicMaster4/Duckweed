@@ -335,6 +335,7 @@ export interface PortForward {
   target_pid: number;
   target_port: number;
   url: string;
+  warning?: string | null;
 }
 
 export interface AppPort {

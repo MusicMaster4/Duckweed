@@ -28,6 +28,9 @@ sha2 = "0.10"
 uuid = { version = "1", features = ["v4"] }
 ignore = "0.4"
 regex = "1"
+lol_html = "2"
+flate2 = "1"
+brotli = "8"
 portable-pty = "0.9"
 notify = "6.1"
 # Completion cues play from this process. WebView audio works, but on Windows

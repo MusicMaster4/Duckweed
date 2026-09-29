@@ -83,6 +83,57 @@ function streamBlock(index: number, block: unknown, deltas: unknown[]) {
 }
 
 describe("claude adapter", () => {
+  test("discovers new models before the first prompt and can select them", async () => {
+    const h = harness();
+    h.adapter.start(h.ctx);
+    const initialize = h.sent[0] as { request_id: string };
+    expect(initialize).toMatchObject({ request: { subtype: "initialize" } });
+    h.feed({
+      type: "control_response",
+      response: {
+        subtype: "success", request_id: initialize.request_id,
+        response: { models: [
+          { value: "sonnet", displayName: "Sonnet 5.5", supportedEffortLevels: ["low", "high"] },
+          { value: "future-model", displayName: "Future model", supportsEffort: false },
+          { value: "sonnet", displayName: "Duplicate" },
+          null, { displayName: "Missing ID" },
+        ] },
+      },
+    });
+    expect(h.state().models).toEqual([
+      { id: "sonnet", label: "Sonnet 5.5", efforts: ["low", "high"] },
+      { id: "future-model", label: "Future model", efforts: [] },
+    ]);
+    const change = h.adapter.configure?.("model", "future-model", h.ctx);
+    const request = h.sent.at(-1) as { request_id: string };
+    expect(request).toMatchObject({ request: { subtype: "set_model", model: "future-model" } });
+    h.feed({ type: "control_response", response: { subtype: "success", request_id: request.request_id } });
+    await change;
+    expect(h.state().model).toBe("future-model");
+  });
+
+  test("keeps fallback models when discovery fails or returns no valid models", () => {
+    for (const reply of [
+      { subtype: "error", error: "Unsupported request" },
+      { subtype: "success", response: {} },
+      { subtype: "success", response: { models: [null, {}, { value: " " }] } },
+    ]) {
+      const h = harness();
+      h.ctx.emit({ type: "session", models: [{ id: "sonnet", label: "Sonnet", efforts: [] }] });
+      h.adapter.start(h.ctx);
+      const request = h.sent[0] as { request_id: string };
+      h.feed({ type: "control_response", response: { ...reply, request_id: request.request_id } });
+      expect(h.state().models.map((model) => model.id)).toEqual(["sonnet"]);
+      expect(h.state().status).toBe("idle");
+    }
+  });
+
+  test("does not discover Anthropic models for the Claudex proxy", () => {
+    const h = harness({ program: "claudex" });
+    h.adapter.start(h.ctx);
+    expect(h.sent).toEqual([]);
+  });
+
   test("reads identity out of the init frame", () => {
     const h = harness();
     h.feed({

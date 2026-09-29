@@ -15,12 +15,14 @@ import {
 } from "../goal";
 import type { AgentLaunch } from "../launch";
 import { promptTextWithLocalSkills } from "../localSkills";
+import { fallbackModels } from "../slashCatalog";
 import {
   makeChange,
   toolKind,
   type AgentAccessMode,
   type AgentFileChange,
   type AgentGoal,
+  type AgentModelChoice,
   type AgentExtension,
   type AgentPrompt,
   type AgentQuestionItem,
@@ -541,6 +543,7 @@ export function createClaudeAdapter(): AgentAdapter {
   let messageSeq = 0;
   let settledMessageSeq = 0;
   let controlSeq = 0;
+  let initializeRequestId: string | null = null;
   /** Control request ids Claude is waiting on, keyed by our permission id. */
   const pendingPermissions = new Map<
     string,
@@ -1470,6 +1473,31 @@ export function createClaudeAdapter(): AgentAdapter {
     const response = asRecord(frame.response);
     const requestId = asString(response?.request_id);
     if (!requestId) return;
+    if (requestId === initializeRequestId) {
+      initializeRequestId = null;
+      if (response?.subtype !== "success" || ctx.launch.program === "claudex") return;
+      const payload = asRecord(response.response);
+      const fallbackEfforts = fallbackModels("claude")[0]?.efforts ?? [];
+      const models: AgentModelChoice[] = [];
+      for (const raw of asArray(payload?.models)) {
+        const row = asRecord(raw);
+        const id = asString(row?.value)?.trim();
+        if (!id || models.some((model) => model.id === id)) continue;
+        const efforts = row?.supportsEffort === false ? []
+          : Array.isArray(row?.supportedEffortLevels)
+            ? asArray(row.supportedEffortLevels)
+              .map(asString).filter((value): value is string => !!value)
+            : [...fallbackEfforts];
+        models.push({
+          id,
+          label: asString(row?.displayName)?.trim() || id,
+          efforts,
+        });
+      }
+      // Empty/error responses from older CLIs leave the fallback usable.
+      if (models.length) ctx.emit({ type: "session", models });
+      return;
+    }
     const side = pendingSideQuestions.get(requestId);
     if (side !== undefined) {
       pendingSideQuestions.delete(requestId);
@@ -1719,12 +1747,18 @@ export function createClaudeAdapter(): AgentAdapter {
     },
 
     start: (ctx) => {
-      // Nothing to hand shake: the CLI is ready as soon as it is up, and the
-      // `system/init` frame that names the model only arrives with the first
-      // turn. Opening prompts are sent by the session, not here. The session
-      // already seeded Claude's model aliases so the picker works immediately.
+      // Discover the CLI's account-specific catalog before the first turn.
+      // system/init only reports the active model, not the available choices.
       const accessMode = ctx.launch.accessMode ?? "default";
       if (accessMode !== "default") setAccessMode(accessMode, ctx, false);
+      if (ctx.launch.program !== "claudex") {
+        initializeRequestId = `dw-initialize-${++controlSeq}`;
+        ctx.send({
+          type: "control_request",
+          request_id: initializeRequestId,
+          request: { subtype: "initialize" },
+        });
+      }
       ctx.emit({
         type: "session",
         capabilities: {
