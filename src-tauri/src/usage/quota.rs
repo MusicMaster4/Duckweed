@@ -432,7 +432,7 @@ fn window_average_per_hour(limit: &QuotaLimit, now: i64) -> Option<f64> {
         return None;
     }
     let elapsed = limit.window_ms? - (limit.resets_at? - now);
-    if elapsed < MIN_EARLY_WINDOW_MS
+    if elapsed <= MIN_EARLY_WINDOW_MS
         || (elapsed < MIN_SPAN_MS && limit.percent <= QUANTUM_PERCENT)
     {
         // A single rounded reporting step is too little to extrapolate, but
@@ -594,7 +594,68 @@ struct ClaudeAccess {
     subscription_type: Option<String>,
 }
 
-static CLAUDE_LAST_SUCCESS: OnceLock<Mutex<HashMap<PathBuf, Quota>>> = OnceLock::new();
+const CLAUDE_POLL_MS: i64 = 60_000;
+const CLAUDE_MAX_BACKOFF_MS: i64 = 15 * 60_000;
+
+#[derive(Default)]
+struct ClaudePoll {
+    quota: Option<Quota>,
+    retry_at: i64,
+    failures: u32,
+}
+
+impl ClaudePoll {
+    fn read(
+        &mut self,
+        now: i64,
+        fetch: impl FnOnce() -> Result<Quota, ClaudeFetchError>,
+    ) -> Option<Quota> {
+        if now < self.retry_at {
+            return self.quota.clone();
+        }
+        let delay = match fetch() {
+            Ok(quota) => {
+                self.failures = 0;
+                self.quota = Some(quota);
+                CLAUDE_POLL_MS
+            }
+            Err(error) => {
+                self.failures = self.failures.saturating_add(1);
+                // Never present the last successful reading as current after a failure.
+                self.quota = Some(Quota {
+                    agent: "claude".into(),
+                    label: "Claude Code".into(),
+                    observed_at: None,
+                    source: "unavailable".into(),
+                    plan: None,
+                    message: Some(error.message),
+                    limits: Vec::new(),
+                });
+                let backoff =
+                    (CLAUDE_POLL_MS * (1_i64 << self.failures.min(4))).min(CLAUDE_MAX_BACKOFF_MS);
+                backoff.max(error.retry_after_ms)
+            }
+        };
+        self.retry_at = now.saturating_add(delay);
+        self.quota.clone()
+    }
+}
+
+struct ClaudeFetchError {
+    message: String,
+    retry_after_ms: i64,
+}
+
+impl ClaudeFetchError {
+    fn new(message: &str) -> Self {
+        Self {
+            message: message.into(),
+            retry_after_ms: 0,
+        }
+    }
+}
+
+static CLAUDE_POLLS: OnceLock<Mutex<HashMap<PathBuf, ClaudePoll>>> = OnceLock::new();
 static TLS_PROVIDER: OnceLock<()> = OnceLock::new();
 /// Serialise credential refresh: Claude rotates refresh tokens, so two scans
 /// racing with the same token would leave only one of them valid.
@@ -609,40 +670,76 @@ static CLAUDE_CREDENTIALS_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 /// That is what makes quota meters work after a Duckweed reinstall without
 /// opening Claude Code first — the user already signed in there.
 fn claude_quota(home: &Path) -> Option<Quota> {
-    let key = home.to_path_buf();
-    let fetched = fetch_claude_quota(home);
-    let cache = CLAUDE_LAST_SUCCESS.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Ok(mut guard) = cache.lock() {
-        if let Some(quota) = fetched.as_ref() {
-            guard.insert(key, quota.clone());
-            return Some(quota.clone());
-        }
-        return guard.get(&key).cloned();
-    }
-    fetched
+    // Share the provider cooldown across all dashboard ranges and callers.
+    // Hold the lock through the request to coalesce concurrent scans as well.
+    let mut polls = CLAUDE_POLLS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .ok()?;
+    polls
+        .entry(home.to_path_buf())
+        .or_default()
+        .read(Utc::now().timestamp_millis(), || fetch_claude_quota(home))
 }
 
-fn fetch_claude_quota(home: &Path) -> Option<Quota> {
-    let access = claude_access(home)?;
-    if access.access_token.trim().is_empty() {
-        return None;
-    }
-
-    let client = claude_http_client()?;
+fn fetch_claude_quota(home: &Path) -> Result<Quota, ClaudeFetchError> {
+    let access = claude_access(home)
+        .filter(|access| !access.access_token.trim().is_empty())
+        .ok_or_else(|| ClaudeFetchError::new(unavailable_message("claude")))?;
+    let network_error = || {
+        ClaudeFetchError::new(
+        "Claude usage could not be updated. Check your connection; Duckweed will retry automatically.")
+    };
+    let client = claude_http_client().ok_or_else(network_error)?;
     let response = client
         .get(CLAUDE_USAGE_URL)
         .bearer_auth(&access.access_token)
         .header("anthropic-beta", CLAUDE_BETA)
         .header("accept", "application/json")
         .send()
-        .ok()?
-        .error_for_status()
-        .ok()?;
-    let payload: Value = response.json().ok()?;
-    // Stamp the provider response at fetch time. If a later scan falls back to
-    // this successful result, `observed_at` still shows when it was fetched.
-    let fetched_at = Utc::now().timestamp_millis();
-    claude_quota_from_payload(&payload, access.subscription_type, fetched_at)
+        .map_err(|_| network_error())?;
+    if !response.status().is_success() {
+        let message = match response.status().as_u16() {
+            429 => "Claude usage updates are temporarily rate limited by Anthropic. Duckweed will retry automatically.",
+            401 | 403 => "Claude usage authorization failed. Sign in again with Claude Code, then refresh Usage.",
+            _ => "Anthropic could not return current Claude usage. Duckweed will retry automatically.",
+        };
+        let retry_after_ms = response
+            .headers()
+            .get("retry-after")
+            .and_then(|value| value.to_str().ok())
+            .map(|value| claude_retry_after_ms(value, Utc::now().timestamp_millis()))
+            .unwrap_or(0);
+        return Err(ClaudeFetchError {
+            message: message.into(),
+            retry_after_ms,
+        });
+    }
+    let payload: Value = response.json().map_err(|_| network_error())?;
+    claude_quota_from_payload(
+        &payload,
+        access.subscription_type,
+        Utc::now().timestamp_millis(),
+    )
+    .ok_or_else(|| {
+        ClaudeFetchError::new(
+            "Anthropic returned no usable Claude usage limits. Duckweed will retry automatically.",
+        )
+    })
+}
+
+fn claude_retry_after_ms(value: &str, now: i64) -> i64 {
+    value
+        .parse::<i64>()
+        .ok()
+        .map(|seconds| seconds.saturating_mul(1000))
+        .or_else(|| {
+            DateTime::parse_from_rfc2822(value)
+                .ok()
+                .map(|date| date.timestamp_millis().saturating_sub(now))
+        })
+        .unwrap_or(0)
+        .max(0)
 }
 
 fn claude_http_client() -> Option<reqwest::blocking::Client> {
@@ -2294,6 +2391,62 @@ mod tests {
         quota.limits[0].resets_at = Some(now + 5 * 60 * 60 * 1000 - 60 * 1000);
         apply_estimate(&mut quota, &mut history, now, None);
         assert!(quota.limits[0].forecast.is_none());
+    }
+
+    #[test]
+    fn claude_poll_shares_cooldown_and_recovers_after_rate_limit() {
+        let mut poll = ClaudePoll::default();
+        let now = 1_700_000_000_000;
+        let fresh = || {
+            claude_quota_from_payload(&json!({"five_hour": {"utilization": 20.0}}), None, now)
+                .unwrap()
+        };
+        assert_eq!(poll.read(now, || Ok(fresh())).unwrap().source, "reported");
+        let cached = poll
+            .read(now + 30_000, || panic!("duplicate request"))
+            .unwrap();
+        assert_eq!(cached.observed_at, Some(now));
+        let failed = poll
+            .read(now + CLAUDE_POLL_MS, || {
+                Err(ClaudeFetchError {
+                    message: "Rate limited".into(),
+                    retry_after_ms: 300_000,
+                })
+            })
+            .unwrap();
+        assert_eq!(failed.source, "unavailable");
+        assert!(failed.limits.is_empty());
+        assert_eq!(failed.observed_at, None);
+        assert_eq!(poll.retry_at, now + CLAUDE_POLL_MS + 300_000);
+        poll.read(poll.retry_at - 1, || panic!("must honor Retry-After"));
+        let recovered = poll
+            .read(poll.retry_at, || {
+                let mut quota = fresh();
+                quota.limits[0].percent = 35.0;
+                Ok(quota)
+            })
+            .unwrap();
+        assert_eq!(recovered.limits[0].percent, 35.0);
+        assert_eq!(poll.failures, 0);
+    }
+
+    #[test]
+    fn claude_failures_back_off_even_when_retry_after_is_zero() {
+        let mut poll = ClaudePoll::default();
+        for expected in [120_000, 240_000, 480_000, 900_000, 900_000] {
+            let now = poll.retry_at;
+            poll.read(now, || Err(ClaudeFetchError::new("Rate limited")));
+            assert_eq!(poll.retry_at - now, expected);
+        }
+        assert_eq!(claude_retry_after_ms("0", 0), 0);
+        assert_eq!(claude_retry_after_ms("120", 0), 120_000);
+        assert_eq!(claude_retry_after_ms("invalid", 0), 0);
+        assert_eq!(claude_retry_after_ms("-1", 0), 0);
+        let date = "Wed, 21 Oct 2015 07:28:00 GMT";
+        let now = DateTime::parse_from_rfc2822(date)
+            .unwrap()
+            .timestamp_millis();
+        assert_eq!(claude_retry_after_ms(date, now - 60_000), 60_000);
     }
 
     #[test]
