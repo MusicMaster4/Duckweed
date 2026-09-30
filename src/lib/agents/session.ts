@@ -38,6 +38,12 @@ import { latest as latestSession, transcript as sessionTranscript } from "./hist
 import { AGENT_PROGRAMS, type AgentLaunch } from "./launch";
 import { loadClaudeSettingsDefaults } from "./claudeSettings";
 import {
+  CODEX_CAPACITY_REPLY_DELAY_MS,
+  codexCapacityReplySettings,
+  isCodexCapacityError,
+  type CodexCapacityReplySettings,
+} from "./capacityReply";
+import {
   rememberConfigurationChoice,
   rememberPreferences,
   withRememberedPreferences,
@@ -144,6 +150,7 @@ interface Session {
   } | null;
   /** Increments whenever real user work starts, invalidating late picker notices. */
   interactionEpoch: number;
+  capacityReplyTimer: number | null;
   /** Claude/Grok mirror their TUI's two-press exit gesture. */
   exitArmedUntil: number;
   /** Prevent late protocol frames from requesting the same native handoff. */
@@ -216,7 +223,43 @@ export function readyForScheduledSend(termId: string): boolean {
     !session.state.loadingHistory && !session.state.authenticationRequired && session.state.status === "idle";
 }
 let followupMode: AgentFollowupMode = "queue";
+let capacityReply = codexCapacityReplySettings();
 let queuedPromptSequence = 0;
+
+function cancelCapacityReply(session: Session): void {
+  if (session.capacityReplyTimer === null) return;
+  runtimeWindow.clearTimeout(session.capacityReplyTimer);
+  session.capacityReplyTimer = null;
+}
+
+export function setCodexCapacityReply(settings: CodexCapacityReplySettings): void {
+  const next = codexCapacityReplySettings(settings);
+  if (!next.enabled || next.message !== capacityReply.message) {
+    for (const session of sessions.values()) cancelCapacityReply(session);
+  }
+  capacityReply = next;
+}
+
+function scheduleCapacityReply(session: Session, event: AgentEvent): void {
+  if (session.state.agent !== "codex" || !capacityReply.enabled ||
+      !capacityReply.message.trim() || session.capacityReplyTimer !== null ||
+      session.restoring || session.pendingResume || session.state.loadingHistory ||
+      session.configuring || session.interrupted || session.queued.length > 0 ||
+      event.type !== "notice" || event.tone !== "error" || event.transient ||
+      !isCodexCapacityError(event.text)) return;
+
+  const epoch = session.interactionEpoch;
+  const sessionId = session.state.sessionId;
+  session.capacityReplyTimer = runtimeWindow.setTimeout(() => {
+    session.capacityReplyTimer = null;
+    if (sessions.get(session.termId) !== session || session.disposed ||
+        !capacityReply.enabled || !capacityReply.message.trim() ||
+        session.interactionEpoch !== epoch || session.state.sessionId !== sessionId ||
+        !readyForScheduledSend(session.termId) || session.configuring ||
+        session.interrupted || session.queued.length > 0) return;
+    submit(session.termId, capacityReply.message, [], "default", { preserveDraft: true });
+  }, CODEX_CAPACITY_REPLY_DELAY_MS);
+}
 
 function nextQueuedPromptId(): string {
   queuedPromptSequence += 1;
@@ -622,6 +665,7 @@ function claimHandledTurn(session: Session): void {
 }
 
 function dispatchNow(session: Session, prompt: AgentPrompt, echoUser = true): void {
+  cancelCapacityReply(session);
   // Whatever the last turn's ending was, this one is the user's own request.
   session.interrupted = false;
   const context = echoUser ? session.context : contextWithoutUserEcho(session);
@@ -849,6 +893,13 @@ function emitNow(session: Session, event: AgentEvent): void {
   const before = session.state.status;
   const next = applyEvent(session.state, event);
   if (next === session.state) return;
+  if (event.type === "user" || event.type === "transcript" ||
+      (event.type === "history-loading" && event.loading) ||
+      (event.type === "session" && next.sessionId !== session.state.sessionId) ||
+      (event.type === "status" && event.status !== "idle") ||
+      (event.type === "authentication" && event.required)) {
+    cancelCapacityReply(session);
+  }
   if (
     event.type === "session" &&
     (next.model !== session.state.model ||
@@ -864,6 +915,7 @@ function emitNow(session: Session, event: AgentEvent): void {
     });
   }
   session.state = next;
+  scheduleCapacityReply(session, event);
 
   // A provider replay replaces the conversation, including its composer history.
   // Record incoming user turns too, so resumed sessions and remote prompts are
@@ -1106,6 +1158,7 @@ export async function start(
     preparing: null,
     configurationTurn: null,
     interactionEpoch: 0,
+    capacityReplyTimer: null,
     exitArmedUntil: 0,
     authHandoff: false,
     dismissedSideQuestions: new Set(),
@@ -1318,12 +1371,14 @@ export function submit(
   text: string,
   images: AgentImageAttachment[] = [],
   delivery: FollowupDelivery = "default",
+  options: { preserveDraft?: boolean } = {},
 ): boolean {
   const session = sessions.get(termId);
   if (!session || session.disposed) return false;
   if (session.state.status === "exited" || session.state.status === "error") return false;
   const trimmed = text.trim();
   if (!trimmed && images.length === 0) return false;
+  cancelCapacityReply(session);
   const authCommand = images.length === 0 ? /^\/(login|logout)(?:\s+(--device-auth))?$/i.exec(trimmed) : null;
   if (authCommand && session.adapter.authenticate) {
     if (session.state.status !== "idle" || session.configuring || session.state.loadingHistory) {
@@ -1332,7 +1387,7 @@ export function submit(
     }
     const action = authCommand[1].toLowerCase() as AgentAuthAction;
     recordPromptHistory(session, trimmed);
-    session.draft = "";
+    if (!options.preserveDraft) session.draft = "";
     void session.adapter.authenticate(action, session.context, Boolean(authCommand[2]))
       .then((supported) => { if (!supported && !session.disposed) handoffToNativeAuth(session, action); });
     return true;
@@ -1368,8 +1423,10 @@ export function submit(
     session.exitArmedUntil = 0;
     emit(session, { type: "exit-armed", armed: false });
   }
-  session.draft = "";
-  session.draftImages = [];
+  if (!options.preserveDraft) {
+    session.draft = "";
+    session.draftImages = [];
+  }
   // Record before usage/queue/steer paths so ↑ can recall it like a shell command.
   recordPromptHistory(session, trimmed);
   if (images.length === 0 && /^\/logout$/i.test(trimmed)) {
@@ -1631,6 +1688,7 @@ export function configure(
 ): void {
   const session = sessions.get(termId);
   if (!session || session.disposed || !value.trim()) return;
+  cancelCapacityReply(session);
 
   if (kind === "access") {
     if (session.state.status !== "idle" || session.configuring) {
@@ -1691,6 +1749,7 @@ export function configure(
  * one. Emits the transcript marker only once the agent has taken it.
  */
 async function applyResume(session: Session, sessionId: string, title: string): Promise<void> {
+  cancelCapacityReply(session);
   // Rejoining is an explicit request. Idle history stays silent because its
   // working -> idle transition occurs under `loadingHistory`; a live turn
   // keeps ownership until its real completion arrives.
@@ -1790,6 +1849,7 @@ export async function resume(
   // announced in between either — a pane that blinked back to its shell and
   // then to the agent would read as a crash.
   session.disposed = true;
+  cancelCapacityReply(session);
   sessions.delete(termId);
   if (TAURI_RUNTIME) {
     await session.adapter.dispose?.(session.context);
@@ -1848,6 +1908,7 @@ export async function newChat(termId: string): Promise<string | null> {
   const { launch } = session;
   const cwd = session.state.cwd;
   session.disposed = true;
+  cancelCapacityReply(session);
   sessions.delete(termId);
   if (TAURI_RUNTIME) {
     await session.adapter.dispose?.(session.context);
@@ -1869,6 +1930,7 @@ export async function newChat(termId: string): Promise<string | null> {
 export function interrupt(termId: string): void {
   const session = sessions.get(termId);
   if (!session || session.disposed) return;
+  cancelCapacityReply(session);
   session.interrupted = true;
   session.adapter.interrupt(session.context);
 }
@@ -1932,6 +1994,7 @@ export function answer(
 export function stop(termId: string): void {
   const session = sessions.get(termId);
   if (!session) return;
+  cancelCapacityReply(session);
   session.disposed = true;
   const recoveryTimer = recoveryTimers.get(termId);
   if (recoveryTimer) clearTimeout(recoveryTimer);

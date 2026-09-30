@@ -336,6 +336,7 @@ export interface PortForward {
   target_port: number;
   url: string;
   warning?: string | null;
+  status?: "ready" | "reconnecting";
 }
 
 export interface AppPort {

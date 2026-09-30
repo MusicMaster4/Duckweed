@@ -51,6 +51,7 @@ import { AGENTS, AGENT_IDS } from "./lib/agents/catalog";
 import * as agentSessions from "./lib/agents/session";
 import type { AgentId, AgentImageAttachment } from "./lib/agents/types";
 import { agentUiPreferences } from "./lib/agents/uiPreferences";
+import { codexCapacityReplySettings } from "./lib/agents/capacityReply";
 import { handleUnattendedPermission } from "./lib/agents/autoApproval";
 import {
   confirmCloseRunning,
@@ -296,6 +297,7 @@ function boot() {
       tintWorkspaceWithTabColor: saved.tintWorkspaceWithTabColor,
       customAgentUi: saved.customAgentUi,
       agentFollowupMode: saved.agentFollowupMode,
+      codexCapacityReply: saved.codexCapacityReply,
       autoApproveLockedRequests: saved.autoApproveLockedRequests,
       inputMode: saved.inputMode,
       confirmCloseRunning: saved.confirmCloseRunning,
@@ -327,6 +329,7 @@ function boot() {
     tintWorkspaceWithTabColor: false,
     customAgentUi: agentUiPreferences(),
     agentFollowupMode: "queue" as const,
+    codexCapacityReply: codexCapacityReplySettings(),
     autoApproveLockedRequests: false,
     inputMode: "editor" as terminals.InputMode,
     confirmCloseRunning: true,
@@ -380,6 +383,7 @@ export default function App() {
   );
   const [customAgentUi, setCustomAgentUi] = useState(initial.customAgentUi);
   const [agentFollowupMode, setAgentFollowupMode] = useState(initial.agentFollowupMode);
+  const [codexCapacityReply, setCodexCapacityReply] = useState(initial.codexCapacityReply);
   const [autoApproveLockedRequests, setAutoApproveLockedRequests] = useState(
     initial.autoApproveLockedRequests,
   );
@@ -2702,6 +2706,7 @@ export default function App() {
       terminals.setHighlight(initial.highlight);
       terminals.setAgentUi(initial.customAgentUi);
       agentSessions.setFollowupMode(initial.agentFollowupMode);
+      agentSessions.setCodexCapacityReply(initial.codexCapacityReply);
       // Keep OpenCode's OpenRouter picker current after app updates, Vite HMR,
       // and manual WebView reloads. OpenCode launches share and await this task.
       void agentSessions.refreshOpenCodeModels();
@@ -2864,6 +2869,7 @@ export default function App() {
       tintWorkspaceWithTabColor,
       customAgentUi,
       agentFollowupMode,
+      codexCapacityReply,
       autoApproveLockedRequests,
       inputMode,
       confirmCloseRunning: confirmCloseRunningPref,
@@ -2889,6 +2895,7 @@ export default function App() {
     tintWorkspaceWithTabColor,
     customAgentUi,
     agentFollowupMode,
+    codexCapacityReply,
     autoApproveLockedRequests,
     inputMode,
     confirmCloseRunningPref,
@@ -4119,6 +4126,7 @@ export default function App() {
                 openAgentCount={openAgentCount}
                 customAgentUi={customAgentUi}
                 agentFollowupMode={agentFollowupMode}
+                codexCapacityReply={codexCapacityReply}
                 autoApproveLockedRequests={autoApproveLockedRequests}
                 confirmCloseRunning={confirmCloseRunningPref}
                 explorerIntegration={explorerIntegration}
@@ -4144,6 +4152,10 @@ export default function App() {
                   setAgentFollowupMode(mode);
                 }}
                 onAutoApproveLockedRequests={setAutoApproveLockedRequests}
+                onCodexCapacityReply={(settings) => {
+                  agentSessions.setCodexCapacityReply(settings);
+                  setCodexCapacityReply(settings);
+                }}
                 onToggleConfirmCloseRunning={() =>
                   setConfirmCloseRunningPref((prev) => !prev)
                 }

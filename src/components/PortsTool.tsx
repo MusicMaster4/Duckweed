@@ -224,7 +224,11 @@ export function PortsTool({ ownerNames, onSnapshot }: Props) {
                     <strong>{owner ?? (isAgent ? "Agent" : "Terminal")}</strong>
                     <span>{port.process}</span>
                   </span>
-                  {port.forward && <em className="port-badge">Shared</em>}
+                  {port.forward && (
+                    <em className="port-badge">
+                      {port.forward.status === "reconnecting" ? "Reconnecting" : "Shared"}
+                    </em>
+                  )}
                 </header>
 
                 <div className="port-meta">
@@ -238,7 +242,7 @@ export function PortsTool({ ownerNames, onSnapshot }: Props) {
                   copied={copied === key}
                   onCopy={() => void copy(key, localUrl(port))}
                 />
-                {port.forward && (
+                {port.forward && port.forward.status !== "reconnecting" && (
                   <AddressRow
                     url={port.forward.url}
                     label="Public"

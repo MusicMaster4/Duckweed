@@ -5,6 +5,7 @@ import type { LayoutNode, Tab, TabGroup } from "./types";
 import { readStoredValue, saveDurably } from "./durableStorage";
 import type { AgentFollowupMode } from "./agents/types";
 import { agentUiPreferences, type AgentUiPreferences } from "./agents/uiPreferences";
+import { codexCapacityReplySettings, type CodexCapacityReplySettings } from "./agents/capacityReply";
 
 const KEY = "duckweed:state:v1";
 const MAX_RECENTS = 12;
@@ -57,6 +58,7 @@ export interface Persisted {
   customAgentUi: AgentUiPreferences;
   /** Default delivery for messages submitted while an agent turn is active. */
   agentFollowupMode: AgentFollowupMode;
+  codexCapacityReply: CodexCapacityReplySettings;
   /**
    * Approve agent permission requests while the daily usage lockout is active.
    * This is opt-in because unattended approvals can cause destructive changes.
@@ -151,6 +153,7 @@ export function load(): Persisted | null {
       // Older saves used one boolean for all harnesses.
       customAgentUi: agentUiPreferences(parsed.customAgentUi),
       agentFollowupMode: parsed.agentFollowupMode === "steer" ? "steer" : "queue",
+      codexCapacityReply: codexCapacityReplySettings(parsed.codexCapacityReply),
       // Never infer consent from an older save.
       autoApproveLockedRequests: parsed.autoApproveLockedRequests === true,
       inputMode: parsed.inputMode === "raw" ? "raw" : "editor",
@@ -178,6 +181,7 @@ export function save(state: {
   tintWorkspaceWithTabColor: boolean;
   customAgentUi: AgentUiPreferences;
   agentFollowupMode: AgentFollowupMode;
+  codexCapacityReply: CodexCapacityReplySettings;
   autoApproveLockedRequests: boolean;
   inputMode: InputMode;
   confirmCloseRunning: boolean;
@@ -200,6 +204,7 @@ export function save(state: {
       tintWorkspaceWithTabColor: state.tintWorkspaceWithTabColor,
       customAgentUi: state.customAgentUi,
       agentFollowupMode: state.agentFollowupMode,
+      codexCapacityReply: state.codexCapacityReply,
       autoApproveLockedRequests: state.autoApproveLockedRequests,
       inputMode: state.inputMode,
       confirmCloseRunning: state.confirmCloseRunning,

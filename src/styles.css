@@ -1108,6 +1108,30 @@ svg.tab-glyph-fill path {
   border-color: var(--accent-line);
 }
 
+.settings-message-field {
+  align-items: stretch;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.settings-message-field textarea {
+  width: 100%;
+  min-height: 72px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  outline: none;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  line-height: 1.5;
+  resize: vertical;
+}
+
+.settings-message-field textarea:focus {
+  border-color: var(--accent);
+}
+
 .settings-value {
   color: var(--text-faint);
   font-size: 10px;

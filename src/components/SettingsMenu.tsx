@@ -13,6 +13,7 @@ import type { ShellInfo } from "../lib/types";
 import type { AgentFollowupMode, AgentId } from "../lib/agents/types";
 import { AGENTS, AGENT_IDS } from "../lib/agents/catalog";
 import type { AgentUiPreferences } from "../lib/agents/uiPreferences";
+import type { CodexCapacityReplySettings } from "../lib/agents/capacityReply";
 import type { Channel } from "../lib/version";
 
 interface Props {
@@ -32,6 +33,7 @@ interface Props {
   /** Draw Duckweed's own interface for enabled coding-agent CLIs. */
   customAgentUi: AgentUiPreferences;
   agentFollowupMode: AgentFollowupMode;
+  codexCapacityReply: CodexCapacityReplySettings;
   autoApproveLockedRequests: boolean;
   confirmCloseRunning: boolean;
   /** Windows Explorer folder verbs; null when unavailable. */
@@ -50,6 +52,7 @@ interface Props {
   onDailyLimitMinutes: (minutes: number) => void;
   onToggleCustomAgentUi: (agent: AgentId) => void;
   onAgentFollowupMode: (mode: AgentFollowupMode) => void;
+  onCodexCapacityReply: (settings: CodexCapacityReplySettings) => void;
   onAutoApproveLockedRequests: (enabled: boolean) => void;
   onToggleConfirmCloseRunning: () => void;
   onToggleExplorerTab: () => void;
@@ -169,6 +172,7 @@ export function SettingsMenu({
   openAgentCount,
   customAgentUi,
   agentFollowupMode,
+  codexCapacityReply,
   autoApproveLockedRequests,
   confirmCloseRunning,
   explorerIntegration,
@@ -186,6 +190,7 @@ export function SettingsMenu({
   onDailyLimitMinutes,
   onToggleCustomAgentUi,
   onAgentFollowupMode,
+  onCodexCapacityReply,
   onAutoApproveLockedRequests,
   onToggleConfirmCloseRunning,
   onToggleExplorerTab,
@@ -239,6 +244,7 @@ export function SettingsMenu({
   const agentUiHit = matches("custom agent ui coding agent interface overlay cli harness");
   const agentUiAgentHit = (agent: AgentId) =>
     matches(`${AGENTS[agent].label} ${AGENTS[agent].binaries.join(" ")}`);
+  const capacityReplyHit = matches("codex automatic capacity reply retry message selected model is at capacity continue two seconds");
   const showAppearance =
     (section === "General" || section === "Appearance" || searching) &&
     (matches("appearance font size terminal text command editor") ||
@@ -262,7 +268,7 @@ export function SettingsMenu({
       matches("reset suggestions ghost autocomplete history learning clear forget"));
   const showAgents =
     (section === "General" || section === "Agents" || searching) &&
-    (agentUiHit || AGENT_IDS.some(agentUiAgentHit) ||
+    (agentUiHit || AGENT_IDS.some(agentUiAgentHit) || capacityReplyHit ||
       matches(
         "active turn messages follow-up queue steer send now alt shift enter agent delivery",
       ) ||
@@ -657,6 +663,47 @@ export function SettingsMenu({
                     <option value="steer">Steer immediately</option>
                   </select>
                 </label>
+              )}
+              {capacityReplyHit && (
+                <>
+                  <button
+                    type="button"
+                    className="settings-row settings-action"
+                    aria-pressed={codexCapacityReply.enabled}
+                    onClick={() => onCodexCapacityReply({
+                      ...codexCapacityReply,
+                      enabled: !codexCapacityReply.enabled,
+                    })}
+                  >
+                    <span className="settings-copy">
+                      <strong>Automatic Codex capacity reply</strong>
+                      <span>
+                        Send your message after 2 seconds when Codex shows
+                        “Selected model is at capacity” in the Custom Agent UI
+                      </span>
+                    </span>
+                    <Toggle enabled={codexCapacityReply.enabled} />
+                  </button>
+                  <label className="settings-field settings-message-field">
+                    <span>
+                      <strong>Reply message</strong>
+                      <small>
+                        {codexCapacityReply.enabled && !codexCapacityReply.message.trim()
+                          ? "Enter a message to send automatic replies"
+                          : "Each new capacity error triggers one reply. Saved automatically"}
+                      </small>
+                    </span>
+                    <textarea
+                      rows={3}
+                      value={codexCapacityReply.message}
+                      placeholder="continue"
+                      onChange={(event) => onCodexCapacityReply({
+                        ...codexCapacityReply,
+                        message: event.target.value,
+                      })}
+                    />
+                  </label>
+                </>
               )}
             </section>
             {matches(

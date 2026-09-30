@@ -332,11 +332,205 @@ describe("Custom agent UI sessions", () => {
     frameSink = null;
     spawnFailure = null;
     session.setFollowupMode("queue");
+    session.setCodexCapacityReply({ enabled: false, message: "continue" });
   });
 
   afterEach(() => {
     session.stopAll();
     session.setFollowupMode("queue");
+    session.setCodexCapacityReply({ enabled: false, message: "continue" });
+  });
+
+  describe("automatic Codex capacity replies", () => {
+    const capacityError = "Selected model is at capacity. Please try a different model.";
+    const originalSetTimeout = stubWindow.setTimeout;
+    const originalClearTimeout = stubWindow.clearTimeout;
+    let now = 0;
+    let timerId = -1;
+    const timers = new Map<number, { at: number; callback: () => void }>();
+
+    beforeEach(() => {
+      now = 0;
+      timerId = -1;
+      timers.clear();
+      stubWindow.setTimeout = ((callback: () => void, delay: number) => {
+        if (delay !== 2000) return originalSetTimeout(callback, delay);
+        const id = timerId--;
+        timers.set(id, { at: now + delay, callback });
+        return id;
+      }) as typeof originalSetTimeout;
+      stubWindow.clearTimeout = ((id: number) => {
+        if (timers.delete(id)) return;
+        originalClearTimeout(id);
+      }) as typeof originalClearTimeout;
+    });
+
+    afterEach(() => {
+      session.stopAll();
+      stubWindow.setTimeout = originalSetTimeout;
+      stubWindow.clearTimeout = originalClearTimeout;
+      timers.clear();
+    });
+
+    function advance(ms: number): void {
+      now += ms;
+      for (const [id, timer] of [...timers]) {
+        if (timer.at > now) continue;
+        timers.delete(id);
+        timer.callback();
+      }
+    }
+
+    function starts(): Record<string, unknown>[] {
+      return sent.map(rpc).filter((message) => message.method === "turn/start");
+    }
+
+    async function failPrompt(termId: string, message = capacityError): Promise<void> {
+      session.submit(termId, "Do the work");
+      feed({ id: starts().at(-1)?.id, error: { code: -32000, message } });
+      await flush();
+      expect(session.get(termId)?.status).toBe("idle");
+    }
+
+    test("is disabled by default", async () => {
+      await session.start("capacity-default", codexLaunch, "H:/project");
+      await codexHandshake();
+      await failPrompt("capacity-default");
+      advance(2000);
+      expect(starts()).toHaveLength(1);
+      expect(timers.size).toBe(0);
+    });
+
+    test("sends the custom message at two seconds and preserves the composer", async () => {
+      const termId = "capacity-custom";
+      session.setCodexCapacityReply({ enabled: true, message: "Please continue the task." });
+      await session.start(termId, codexLaunch, "H:/project");
+      await codexHandshake();
+      await failPrompt(termId);
+      session.setDraft(termId, "My unfinished draft");
+      session.setDraftImages(termId, [image]);
+      advance(1999);
+      expect(starts()).toHaveLength(1);
+      advance(1);
+      expect(starts()).toHaveLength(2);
+      expect(starts().at(-1)?.params).toMatchObject({
+        input: [{ type: "text", text: "Please continue the task." }],
+      });
+      expect(session.get(termId)?.items.at(-1)).toMatchObject({
+        kind: "user", text: "Please continue the task.",
+      });
+      expect(session.getDraft(termId)).toBe("My unfinished draft");
+      expect(session.getDraftImages(termId)).toEqual([image]);
+      advance(2000);
+      expect(starts()).toHaveLength(2);
+    });
+
+    test("replies once to duplicate failed-turn notifications", async () => {
+      const termId = "capacity-completed";
+      session.setCodexCapacityReply({ enabled: true, message: "continue" });
+      await session.start(termId, codexLaunch, "H:/project");
+      await codexHandshake();
+      session.submit(termId, "Do the work");
+      feed({ id: starts().at(-1)?.id, result: { turn: { id: "failed-turn" } } });
+      await flush();
+      const completion = {
+        method: "turn/completed",
+        params: {
+          threadId: session.get(termId)?.sessionId,
+          turn: { id: "failed-turn", status: "failed", error: { message: capacityError } },
+        },
+      };
+      feed(completion);
+      feed(completion);
+      expect(timers.size).toBe(1);
+      await new Promise((resolve) => originalSetTimeout(resolve, 850));
+      expect(session.get(termId)?.status).toBe("idle");
+      advance(2000);
+      expect(starts()).toHaveLength(2);
+      feed(completion);
+      advance(2000);
+      expect(starts()).toHaveLength(2);
+    });
+
+    test("does not reply to other errors or blank configured messages", async () => {
+      const termId = "capacity-filter";
+      session.setCodexCapacityReply({ enabled: true, message: "continue" });
+      await session.start(termId, codexLaunch, "H:/project");
+      await codexHandshake();
+      await failPrompt(termId, "Rate limit exceeded");
+      advance(2000);
+      expect(starts()).toHaveLength(1);
+      session.setCodexCapacityReply({ enabled: true, message: "  \n " });
+      await failPrompt(termId);
+      advance(2000);
+      expect(starts()).toHaveLength(2);
+    });
+
+    test("cancels pending replies when disabled or edited without replaying the old error", async () => {
+      const termId = "capacity-toggle";
+      session.setCodexCapacityReply({ enabled: true, message: "continue" });
+      await session.start(termId, codexLaunch, "H:/project");
+      await codexHandshake();
+      await failPrompt(termId);
+      advance(1000);
+      session.setCodexCapacityReply({ enabled: false, message: "continue" });
+      advance(1000);
+      expect(starts()).toHaveLength(1);
+      session.setCodexCapacityReply({ enabled: true, message: "continue" });
+      advance(2000);
+      expect(starts()).toHaveLength(1);
+      await failPrompt(termId);
+      session.setCodexCapacityReply({ enabled: true, message: "Another reply" });
+      advance(2000);
+      expect(starts()).toHaveLength(2);
+    });
+
+    test("cancels after a manual message even if that turn finishes before the timer", async () => {
+      const termId = "capacity-manual";
+      session.setCodexCapacityReply({ enabled: true, message: "continue" });
+      await session.start(termId, codexLaunch, "H:/project");
+      await codexHandshake();
+      await failPrompt(termId);
+      await failPrompt(termId, "A different failure");
+      advance(2000);
+      expect(starts()).toHaveLength(2);
+    });
+
+    test("cancels when interrupted, closed, or replaced by a new chat", async () => {
+      const termId = "capacity-lifecycle";
+      session.setCodexCapacityReply({ enabled: true, message: "continue" });
+      await session.start(termId, codexLaunch, "H:/project");
+      await codexHandshake();
+      await failPrompt(termId);
+      session.interrupt(termId);
+      advance(2000);
+      expect(starts()).toHaveLength(1);
+      await failPrompt(termId);
+      sent.length = 0;
+      await session.newChat(termId);
+      advance(2000);
+      expect(starts()).toHaveLength(0);
+      await codexHandshake();
+      await failPrompt(termId);
+      session.stop(termId);
+      advance(2000);
+      expect(starts()).toHaveLength(1);
+    });
+
+    test("replies again when the automatic follow-up receives a new capacity error", async () => {
+      const termId = "capacity-repeat";
+      session.setCodexCapacityReply({ enabled: true, message: "continue" });
+      await session.start(termId, codexLaunch, "H:/project");
+      await codexHandshake();
+      await failPrompt(termId);
+      advance(2000);
+      feed({ id: starts().at(-1)?.id, error: { code: -32000, message: capacityError } });
+      await flush();
+      advance(1999);
+      expect(starts()).toHaveLength(2);
+      advance(1);
+      expect(starts()).toHaveLength(3);
+    });
   });
 
   async function signedOutCodex(termId: string, launch = codexLaunch): Promise<void> {
