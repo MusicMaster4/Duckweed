@@ -11,12 +11,12 @@
 //! framing (one JSON value per line, in both directions); the frontend owns
 //! what those lines mean.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -40,7 +40,7 @@ pub enum AgentFrame {
     /// One diagnostic line from the agent's stderr.
     Stderr { line: String },
     /// The process is gone; no further frames follow.
-    Exit { code: Option<i32> },
+    Exit { code: Option<i32>, reconnect: bool },
 }
 
 #[derive(Serialize, Clone)]
@@ -58,7 +58,7 @@ pub struct AgentAvailability {
     pub path: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 pub struct AgentSpawnOptions {
     pub program: String,
     pub args: Vec<String>,
@@ -67,9 +67,140 @@ pub struct AgentSpawnOptions {
 }
 
 struct Process {
-    stdin: Option<ChildStdin>,
+    stdin: Option<ProcessInput>,
     child: Child,
     pid: Option<u32>,
+    runtime_roots: Vec<u32>,
+    ownership: CodexOwnership,
+    service: Option<crate::codex_transport::Service>,
+    reconnect_on_exit: bool,
+}
+
+/// Track only conversations addressed by this connection. A shared service
+/// can broadcast unrelated thread notifications belonging to other clients.
+#[derive(Default)]
+struct CodexOwnership {
+    threads: HashMap<String, Option<String>>,
+    starts: HashMap<String, Option<String>>,
+    unsubscribes: HashMap<String, String>,
+    closing: HashSet<String>,
+}
+
+impl CodexOwnership {
+    fn sent(&mut self, line: &str) {
+        let Ok(frame) = serde_json::from_str::<serde_json::Value>(line) else {
+            return;
+        };
+        let method = frame["method"].as_str().unwrap_or_default();
+        let thread = frame["params"]["threadId"].as_str().map(str::to_owned);
+        if matches!(
+            method,
+            "thread/start" | "thread/resume" | "thread/fork" | "turn/start"
+        ) {
+            self.starts.insert(
+                frame["id"].to_string(),
+                if method == "turn/start" {
+                    thread.clone()
+                } else {
+                    None
+                },
+            );
+        }
+        if let Some(thread) = thread {
+            if method == "thread/unsubscribe" {
+                let id = frame["id"].to_string();
+                self.closing.insert(id.clone());
+                self.unsubscribes.insert(id, thread);
+            } else if matches!(method, "turn/start" | "thread/shellCommand") {
+                self.threads.entry(thread).or_default();
+            }
+        }
+    }
+
+    fn received(&mut self, line: &str) {
+        let Ok(frame) = serde_json::from_str::<serde_json::Value>(line) else {
+            return;
+        };
+        if let Some(id) = frame.get("id") {
+            let key = id.to_string();
+            self.closing.remove(&key);
+            if let Some(thread) = self.unsubscribes.remove(&key) {
+                if frame.get("error").is_none() {
+                    self.threads.remove(&thread);
+                }
+            }
+            if let Some(start) = self.starts.remove(&key) {
+                if let Some(thread) = frame["result"]["thread"]["id"].as_str() {
+                    self.threads.entry(thread.to_owned()).or_default();
+                } else if let (Some(thread), Some(turn)) =
+                    (start, frame["result"]["turn"]["id"].as_str())
+                {
+                    if let Some(active) = self.threads.get_mut(&thread) {
+                        *active = Some(turn.to_owned());
+                    }
+                }
+            }
+            return;
+        }
+        let method = frame["method"].as_str().unwrap_or_default();
+        let params = &frame["params"];
+        if method == "thread/started" {
+            if let (Some(parent), Some(child)) = (
+                params["thread"]["parentThreadId"].as_str(),
+                params["thread"]["id"].as_str(),
+            ) {
+                if self.threads.contains_key(parent) {
+                    self.threads.entry(child.to_owned()).or_default();
+                }
+            }
+        }
+        if let Some(thread) = params["threadId"].as_str() {
+            if self.threads.contains_key(thread)
+                && matches!(
+                    params["item"]["type"].as_str(),
+                    Some("collabAgentToolCall" | "collabToolCall")
+                )
+            {
+                if let Some(children) = params["item"]["receiverThreadIds"].as_array() {
+                    for child in children.iter().filter_map(|child| child.as_str()) {
+                        self.threads.entry(child.to_owned()).or_default();
+                    }
+                }
+            }
+            if method == "thread/closed" {
+                self.threads.remove(thread);
+            } else if let Some(turn) = self.threads.get_mut(thread) {
+                if method == "turn/started" {
+                    *turn = params["turn"]["id"].as_str().map(str::to_owned);
+                }
+                if method == "turn/completed" {
+                    *turn = None;
+                }
+            }
+        }
+    }
+
+    fn shutdown_requests(&self) -> Vec<serde_json::Value> {
+        let mut requests = Vec::new();
+        for (thread, turn) in &self.threads {
+            if let Some(turn) = turn {
+                requests.push(serde_json::json!({"method":"turn/interrupt","params":{"threadId":thread,"turnId":turn}}));
+            }
+            requests.push(serde_json::json!({"method":"thread/backgroundTerminals/clean","params":{"threadId":thread}}));
+            requests.push(
+                serde_json::json!({"method":"thread/unsubscribe","params":{"threadId":thread}}),
+            );
+        }
+        for (index, request) in requests.iter_mut().enumerate() {
+            request["id"] = serde_json::json!(format!("duckweed-shutdown-{index}"));
+        }
+        requests
+    }
+}
+
+enum ProcessInput {
+    JsonLines(ChildStdin),
+    Codex(tungstenite::WebSocket<crate::codex_transport::ProxyWriter>),
 }
 
 #[derive(Default)]
@@ -89,6 +220,36 @@ fn err(e: impl std::fmt::Display) -> String {
 }
 
 impl AgentProcManager {
+    pub fn synchronize_codex_auth(&self, id: &str, signed_in: bool) -> Result<String, String> {
+        let service = self
+            .get(id)
+            .and_then(|process| process.lock().unwrap().service.clone());
+        let Some(service) = service else {
+            return Ok("unchanged".into());
+        };
+        crate::codex_transport::synchronize(&service, signed_in, || {
+            for process in self.inner.processes.lock().unwrap().values() {
+                let mut process = process.lock().unwrap();
+                if process
+                    .service
+                    .as_ref()
+                    .is_some_and(|other| other.home == service.home)
+                {
+                    process.reconnect_on_exit = true;
+                    if let Some(service) = &process.service {
+                        service.reconnecting.store(true, Ordering::Relaxed);
+                    }
+                }
+            }
+        })
+        .map(str::to_owned)
+    }
+    pub fn set_runtime_roots(&self, id: &str, pids: Vec<u32>) {
+        if let Some(process) = self.get(id) {
+            process.lock().unwrap().runtime_roots =
+                pids.into_iter().filter(|pid| *pid > 0).take(256).collect();
+        }
+    }
     fn get(&self, id: &str) -> Option<Arc<Mutex<Process>>> {
         self.inner.processes.lock().unwrap().get(id).cloned()
     }
@@ -121,9 +282,19 @@ impl AgentProcManager {
             .stdin
             .as_mut()
             .ok_or_else(|| format!("agent process `{id}` has no stdin"))?;
-        stdin.write_all(line.as_bytes()).map_err(err)?;
-        stdin.write_all(b"\n").map_err(err)?;
-        stdin.flush().map_err(err)
+        let shared = matches!(stdin, ProcessInput::Codex(_));
+        let result = match stdin {
+            ProcessInput::JsonLines(stdin) => {
+                stdin.write_all(line.as_bytes()).map_err(err)?;
+                stdin.write_all(b"\n").map_err(err)?;
+                stdin.flush().map_err(err)
+            }
+            ProcessInput::Codex(writer) => crate::codex_transport::send(writer, line),
+        };
+        if shared && result.is_ok() {
+            process.ownership.sent(line);
+        }
+        result
     }
 
     /// Close the agent's stdin without killing it.
@@ -146,6 +317,21 @@ impl AgentProcManager {
             None => return Ok(()),
         };
         let mut process = handle.lock().unwrap();
+        // This backstop also runs during native app shutdown, when the
+        // WebView may disappear before its async cleanup has reached Rust.
+        for frame in process.ownership.shutdown_requests() {
+            if let Some(ProcessInput::Codex(writer)) = &mut process.stdin {
+                if crate::codex_transport::send(writer, &frame.to_string()).is_ok() {
+                    process.ownership.closing.insert(frame["id"].to_string());
+                }
+            }
+        }
+        drop(process);
+        let deadline = Instant::now() + Duration::from_millis(250);
+        while !handle.lock().unwrap().ownership.closing.is_empty() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let mut process = handle.lock().unwrap();
         process.stdin.take();
         if let Some(pid) = process.pid {
             kill_tree(pid);
@@ -155,7 +341,14 @@ impl AgentProcManager {
     }
 
     pub fn stop_all(&self) {
-        let ids: Vec<String> = self.inner.processes.lock().unwrap().keys().cloned().collect();
+        let ids: Vec<String> = self
+            .inner
+            .processes
+            .lock()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
         for id in ids {
             let _ = self.stop(&id);
         }
@@ -169,12 +362,14 @@ impl AgentProcManager {
             .lock()
             .unwrap()
             .iter()
-            .filter_map(|(id, process)| {
+            .flat_map(|(id, process)| {
+                let process = process.lock().unwrap();
                 process
-                    .lock()
-                    .unwrap()
                     .pid
+                    .into_iter()
+                    .chain(process.runtime_roots.iter().copied())
                     .map(|pid| (id.clone(), pid))
+                    .collect::<Vec<_>>()
             })
             .collect()
     }
@@ -362,6 +557,8 @@ pub fn start(
     let resolved = resolve_program(&options.program)
         .ok_or_else(|| format!("`{}` was not found on PATH", options.program))?;
 
+    let shared = crate::codex_transport::connect(&resolved, &options, MAX_LINE_BYTES)?;
+
     let mut command = build_command(&resolved);
     for arg in &options.args {
         command.arg(arg);
@@ -396,20 +593,108 @@ pub fn start(
         command.process_group(0);
     }
 
-    let mut child = command
-        .spawn()
-        .map_err(|error| format!("failed to start `{}`: {error}", resolved.display()))?;
+    let (mut child, shared_reader, shared_writer, service) = match shared {
+        Some(connection) => (
+            connection.child,
+            Some(connection.reader),
+            Some(connection.writer),
+            Some(connection.service),
+        ),
+        None => (
+            command
+                .spawn()
+                .map_err(|error| format!("failed to start `{}`: {error}", resolved.display()))?,
+            None,
+            None,
+            None,
+        ),
+    };
     let pid = Some(child.id());
-    let stdin = child.stdin.take();
+    let stdin = shared_writer
+        .map(ProcessInput::Codex)
+        .or_else(|| child.stdin.take().map(ProcessInput::JsonLines));
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
 
     manager.inner.processes.lock().unwrap().insert(
         id.clone(),
-        Arc::new(Mutex::new(Process { stdin, child, pid })),
+        Arc::new(Mutex::new(Process {
+            stdin,
+            child,
+            pid,
+            runtime_roots: Vec::new(),
+            ownership: CodexOwnership::default(),
+            service,
+            reconnect_on_exit: false,
+        })),
     );
 
-    if let Some(stdout) = stdout {
+    if let Some(mut reader) = shared_reader {
+        let channel = on_frame.clone();
+        let metrics = Arc::clone(&manager.inner);
+        let process = manager.get(&id).ok_or("Codex proxy disappeared")?;
+        std::thread::Builder::new()
+            .name(format!("agent-codex-{id}"))
+            .spawn(move || {
+                loop {
+                    let message = match reader.read() {
+                        Ok(message) => message,
+                        Err(error) => {
+                            if !matches!(
+                                error,
+                                tungstenite::Error::ConnectionClosed
+                                    | tungstenite::Error::AlreadyClosed
+                            ) {
+                                let _ = channel.send(AgentFrame::Stderr {
+                                    line: format!("Codex service connection ended: {error}"),
+                                });
+                            }
+                            break;
+                        }
+                    };
+                    match message {
+                        tungstenite::Message::Text(line) => {
+                            {
+                                let mut process = process.lock().unwrap();
+                                process.ownership.received(&line);
+                                if let Ok(frame) = serde_json::from_str::<serde_json::Value>(&line)
+                                {
+                                    if frame["method"] == "account/updated" {
+                                        if let Some(service) = &process.service {
+                                            service.acknowledge();
+                                        }
+                                    }
+                                }
+                            }
+                            let bytes = line.len() as u64;
+                            if channel
+                                .send(AgentFrame::Stdout {
+                                    line: line.to_string(),
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
+                            metrics.protocol_frames.fetch_add(1, Ordering::Relaxed);
+                            metrics.protocol_bytes.fetch_add(bytes, Ordering::Relaxed);
+                        }
+                        tungstenite::Message::Close(_) => break,
+                        // Reading schedules protocol replies. Flush even when an
+                        // idle service sends only a ping and no subsequent data.
+                        tungstenite::Message::Ping(_) => {
+                            if reader.flush().is_err() {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if let Some(pid) = pid {
+                    kill_tree(pid);
+                }
+            })
+            .map_err(err)?;
+    } else if let Some(stdout) = stdout {
         let channel = on_frame.clone();
         let metrics = Arc::clone(&manager.inner);
         let thread_id = id.clone();
@@ -484,7 +769,8 @@ pub fn start(
                     Err(_) => break None,
                 }
             };
-            let _ = channel.send(AgentFrame::Exit { code });
+            let reconnect = processes.lock().unwrap().reconnect_on_exit;
+            let _ = channel.send(AgentFrame::Exit { code, reconnect });
         })
         .map_err(err)?;
 
@@ -541,6 +827,43 @@ mod tests {
     use super::*;
 
     #[test]
+    fn shared_shutdown_owns_only_subscribed_threads_and_their_children() {
+        let mut owner = CodexOwnership::default();
+        owner.sent(r#"{"id":1,"method":"thread/start","params":{}}"#);
+        owner.received(r#"{"id":1,"result":{"thread":{"id":"ours"}}}"#);
+        owner.sent(r#"{"id":2,"method":"thread/read","params":{"threadId":"foreign"}}"#);
+        owner.received(r#"{"method":"turn/started","params":{"threadId":"foreign","turn":{"id":"foreign-turn"}}}"#);
+        owner.received(
+            r#"{"method":"turn/started","params":{"threadId":"ours","turn":{"id":"our-turn"}}}"#,
+        );
+        owner.received(r#"{"method":"item/started","params":{"threadId":"ours","item":{"type":"collabAgentToolCall","receiverThreadIds":["our-child"]}}}"#);
+        let requests = owner.shutdown_requests();
+        assert_eq!(requests.len(), 5);
+        assert!(requests
+            .iter()
+            .all(|request| request["params"]["threadId"] != "foreign"));
+        assert!(requests
+            .iter()
+            .any(|request| request["method"] == "turn/interrupt"
+                && request["params"]["turnId"] == "our-turn"));
+    }
+
+    #[test]
+    fn shutdown_keeps_threads_until_unsubscribe_is_acknowledged() {
+        let mut owner = CodexOwnership::default();
+        owner.sent(r#"{"id":1,"method":"turn/start","params":{"threadId":"ours"}}"#);
+        owner.sent(r#"{"id":2,"method":"thread/unsubscribe","params":{"threadId":"ours"}}"#);
+        assert!(!owner.shutdown_requests().is_empty());
+        assert!(!owner.closing.is_empty());
+        owner.received(r#"{"id":2,"error":{"code":-1}}"#);
+        assert!(owner.closing.is_empty());
+        assert!(!owner.shutdown_requests().is_empty());
+        owner.sent(r#"{"id":3,"method":"thread/unsubscribe","params":{"threadId":"ours"}}"#);
+        owner.received(r#"{"id":3,"result":{}}"#);
+        assert!(owner.shutdown_requests().is_empty());
+    }
+
+    #[test]
     fn strips_the_line_terminator() {
         assert_eq!(trimmed_line(b"{\"a\":1}\r\n", MAX_LINE_BYTES), "{\"a\":1}");
         assert_eq!(trimmed_line(b"{\"a\":1}\n", MAX_LINE_BYTES), "{\"a\":1}");
@@ -562,7 +885,10 @@ mod tests {
         let mut reader = BufReader::with_capacity(8, Cursor::new(input));
         let mut buffer = Vec::new();
 
-        assert_eq!(read_bounded_line(&mut reader, &mut buffer, 16).unwrap(), 129);
+        assert_eq!(
+            read_bounded_line(&mut reader, &mut buffer, 16).unwrap(),
+            129
+        );
         assert_eq!(buffer, vec![b'x'; 16]);
         assert_eq!(read_bounded_line(&mut reader, &mut buffer, 16).unwrap(), 5);
         assert_eq!(buffer, b"next\n");
@@ -619,7 +945,8 @@ mod tests {
         BufReader::new(child.stdout.take().unwrap())
             .read_line(&mut line)
             .expect("agent should answer initialize");
-        let _ = child.kill();
+        kill_tree(child.id());
+        let _ = child.wait();
 
         assert!(line.contains("\"id\":1"), "unexpected reply: {line}");
     }

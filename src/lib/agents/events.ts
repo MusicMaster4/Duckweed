@@ -53,6 +53,7 @@ export type AgentEvent =
       capabilities?: AgentCapabilities;
     }
   | { type: "status"; status: AgentStatus; error?: string }
+  | { type: "authentication"; required: boolean }
   /** A provider is loading a stored conversation, not running an agent turn. */
   | { type: "history-loading"; loading: boolean }
   /** Set, update, finish, or clear the provider's long-running objective. */
@@ -401,15 +402,17 @@ function reduceEvent(state: AgentSessionState, event: AgentEvent): AgentSessionS
         accessMode: event.accessMode ?? state.accessMode,
         cwd: event.cwd ?? state.cwd,
         commands: event.commands ? mergeCommands(state.commands, event.commands) : state.commands,
-        // A non-empty list wins; adapters re-emit the full set whenever it
-        // changes rather than patching individual rows.
-        models: event.models && event.models.length
+        // Adapters publish the full catalog, including an empty one on logout.
+        models: event.models !== undefined
           ? event.models
           : state.agent === "claude" && state.program !== "claudex" && event.model
             ? refreshClaudeModelLabels(state.models, event.model)
             : state.models,
         capabilities: event.capabilities ?? state.capabilities,
       };
+
+    case "authentication":
+      return { ...state, authenticationRequired: event.required };
 
     case "status": {
       if (state.status === event.status && !event.error) return state;

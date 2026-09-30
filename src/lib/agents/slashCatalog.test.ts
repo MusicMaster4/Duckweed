@@ -25,7 +25,8 @@ describe("slashCatalog", () => {
     for (const agent of AGENT_IDS) {
       const names = fallbackCommands(agent).map((command) => command.name);
       expect(names).toContain("/logout");
-      expect(names).not.toContain("/login");
+      if (agent === "codex") expect(names).toContain("/login");
+      else expect(names).not.toContain("/login");
     }
   });
 

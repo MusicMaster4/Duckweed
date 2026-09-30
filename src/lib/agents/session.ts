@@ -7,7 +7,9 @@ import {
   agentProcSend,
   agentProcStart,
   agentProcStop,
+  agentCodexAuthSync,
   openCodeModelsRefresh,
+  openUrl,
   type AgentFrame,
 } from "../ipc";
 import type { AdapterContext, AgentAdapter } from "./adapter";
@@ -152,6 +154,7 @@ interface Session {
 }
 
 const sessions = new Map<string, Session>();
+const teardowns = new Map<string, Promise<void>>();
 const recoveryTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
 function checkpoint(session: Session): void {
@@ -210,7 +213,7 @@ function scheduleCheckpoint(session: Session): void {
 export function readyForScheduledSend(termId: string): boolean {
   const session = sessions.get(termId);
   return !!session && !session.disposed && !session.pendingResume && !session.restoring &&
-    !session.state.loadingHistory && session.state.status === "idle";
+    !session.state.loadingHistory && !session.state.authenticationRequired && session.state.status === "idle";
 }
 let followupMode: AgentFollowupMode = "queue";
 let queuedPromptSequence = 0;
@@ -803,15 +806,14 @@ function emitNow(session: Session, event: AgentEvent): void {
     return;
   }
 
-  // Browser and device authentication cannot finish over these headless
-  // streams. Reveal the PTY and launch the provider's own flow instead.
+  // Providers without protocol authentication need their native login flow.
   const authError =
     event.type === "status" && event.status === "error"
       ? event.error
       : event.type === "notice" && event.tone === "error"
         ? event.text
         : null;
-  if (isAuthenticationFailure(authError) && handoffToNativeAuth(session, "login")) return;
+  if (!session.adapter.authenticate && isAuthenticationFailure(authError) && handoffToNativeAuth(session, "login")) return;
 
   // Claude applies /effort as a tiny protocol turn. Keep that implementation
   // detail out of the UI: no red Stop flicker, no working badge, and no
@@ -877,7 +879,7 @@ function emitNow(session: Session, event: AgentEvent): void {
 
   // A resume waiting on the handshake goes first: a prompt released into the
   // new session must land in the conversation the user asked to continue.
-  if (next.status === "idle" && session.pendingResume) {
+  if (next.status === "idle" && !next.authenticationRequired && session.pendingResume) {
     const wanted = session.pendingResume;
     session.pendingResume = null;
     notify(session);
@@ -900,7 +902,7 @@ function emitNow(session: Session, event: AgentEvent): void {
   // protocol we speak runs one turn at a time, so pushing the whole backlog
   // would just make the agent reject the rest.
   const releasingQueued = next.status === "idle" && !session.restoring &&
-    !next.loadingHistory && session.queued.length > 0;
+    !next.loadingHistory && !next.authenticationRequired && session.queued.length > 0;
   const turnEndState = {
     before,
     after: next.status,
@@ -993,6 +995,19 @@ function handleFrame(session: Session, frame: AgentFrame): void {
       if (session.stderr.length > 50) session.stderr.shift();
       return;
     case "exit": {
+      if (frame.reconnect && session.state.agent === "codex") {
+        flushStreamEvents(session);
+        checkpoint(session);
+        const recovery = workspaceRecovery.get(session.termId)?.agent;
+        if (recovery) {
+          const { termId, launch } = session;
+          const cwd = session.state.cwd;
+          stop(termId);
+          void start(termId, { ...launch, prompt: null, resume: false, resumeId: recovery.sessionId }, cwd, recovery);
+          return;
+        }
+      }
+      void Promise.resolve(session.adapter.dispose?.(session.context)).catch(() => {});
       const detail = session.stderr.slice(-6).join("\n").trim();
       if (isAuthenticationFailure(detail) && handoffToNativeAuth(session, "login")) return;
       const ready = session.state.status !== "starting" && session.state.status !== "error";
@@ -1030,6 +1045,8 @@ export async function start(
 ): Promise<string | null> {
   if (sessions.has(termId)) return null;
   if (!TAURI_RUNTIME) return "the custom agent UI needs the desktop app";
+  await teardowns.get(termId);
+  if (sessions.has(termId)) return null;
 
   // OpenCode snapshots its model registry during the ACP handshake. Waiting
   // here ensures a launch made during WebView startup sees the refreshed list.
@@ -1136,12 +1153,15 @@ export async function start(
       cwd,
       launch,
       send: (message) => {
-        void agentProcSend(termId, JSON.stringify(message)).catch(() => {
+        return agentProcSend(termId, JSON.stringify(message)).catch(() => {
           // The agent is gone; the exit frame is already on its way and will
           // put the pane into its ended state.
         });
       },
       emit: (event) => emit(session, event),
+      openUrl,
+      runtimeProcesses: (pids) => invoke<void>("agent_proc_set_runtime_roots", { id: termId, pids }),
+      syncAccount: (signedIn) => agentCodexAuthSync(termId, signedIn),
       files: {
         readText: async (path) => {
           const file = await invoke<{
@@ -1298,12 +1318,29 @@ export function submit(
   text: string,
   images: AgentImageAttachment[] = [],
   delivery: FollowupDelivery = "default",
-): void {
+): boolean {
   const session = sessions.get(termId);
-  if (!session || session.disposed) return;
-  if (session.state.status === "exited" || session.state.status === "error") return;
+  if (!session || session.disposed) return false;
+  if (session.state.status === "exited" || session.state.status === "error") return false;
   const trimmed = text.trim();
-  if (!trimmed && images.length === 0) return;
+  if (!trimmed && images.length === 0) return false;
+  const authCommand = images.length === 0 ? /^\/(login|logout)(?:\s+(--device-auth))?$/i.exec(trimmed) : null;
+  if (authCommand && session.adapter.authenticate) {
+    if (session.state.status !== "idle" || session.configuring || session.state.loadingHistory) {
+      emit(session, { type: "notice", tone: "error", text: "Stop the current turn before changing the Codex account." });
+      return false;
+    }
+    const action = authCommand[1].toLowerCase() as AgentAuthAction;
+    recordPromptHistory(session, trimmed);
+    session.draft = "";
+    void session.adapter.authenticate(action, session.context, Boolean(authCommand[2]))
+      .then((supported) => { if (!supported && !session.disposed) handoffToNativeAuth(session, action); });
+    return true;
+  }
+  if (session.state.authenticationRequired) {
+    emit(session, { type: "notice", tone: "info", text: "Codex is signed out. Use /login or sign in from the Codex CLI to continue." });
+    return false;
+  }
   const extensions = session.state.extensions ?? [];
   const parts: NonNullable<AgentPrompt["parts"]> = [];
   const selectedExtensions = new Set<string>();
@@ -1337,7 +1374,7 @@ export function submit(
   recordPromptHistory(session, trimmed);
   if (images.length === 0 && /^\/logout$/i.test(trimmed)) {
     handoffToNativeAuth(session, "logout");
-    return;
+    return true;
   }
   if (images.length === 0 && /^\/usage$/i.test(trimmed)) {
     emit(session, {
@@ -1345,11 +1382,11 @@ export function submit(
       tone: "info",
       text: formatSessionUsage(session.state.usage),
     });
-    return;
+    return true;
   }
   if (session.configuring) {
     queuePrompt(session, prompt);
-    return;
+    return true;
   }
   if (
     (images.length === 0 || session.adapter.commandSupportsImages?.(trimmed) === true) &&
@@ -1363,7 +1400,7 @@ export function submit(
       // Control-plane commands such as `/goal pause` must take effect while the
       // provider is working. Sending them through the normal follow-up queue can
       // strand them behind the automatic continuation they are meant to stop.
-      return;
+      return true;
     }
   }
   if (session.state.status === "starting") {
@@ -1372,7 +1409,7 @@ export function submit(
     // optimistic bubble becomes the real turn instead of being duplicated.
     queuePrompt(session, prompt, true);
     emit(session, { type: "user", text: trimmed, images });
-    return;
+    return true;
   }
   if (session.state.status !== "idle") {
     const requestedMode =
@@ -1383,14 +1420,15 @@ export function submit(
         : followupMode;
     if (requestedMode === "steer" && !hasNextConfiguration(session)) {
       steerPrompt(session, prompt);
-      return;
+      return true;
     }
     // A turn is already running. Hold the follow-up and show it holding, so
     // the pane never looks like it swallowed a prompt.
     queuePrompt(session, prompt);
-    return;
+    return true;
   }
   dispatch(session, prompt);
+  return true;
 }
 
 /** Control a persisted goal without consuming the composer's unsent draft. */
@@ -1728,7 +1766,7 @@ export async function resume(
   }
 
   if (session.adapter.resume) {
-    if (session.state.status === "starting") {
+    if (session.state.status === "starting" || session.state.authenticationRequired) {
       // Not ready to be told anything yet; the handshake picks this up.
       session.pendingResume = { id: sessionId, title };
       return null;
@@ -1754,6 +1792,7 @@ export async function resume(
   session.disposed = true;
   sessions.delete(termId);
   if (TAURI_RUNTIME) {
+    await session.adapter.dispose?.(session.context);
     if (session.adapter.endsOnStdinClose) {
       await agentProcCloseStdin(termId).catch(() => {});
     }
@@ -1811,6 +1850,7 @@ export async function newChat(termId: string): Promise<string | null> {
   session.disposed = true;
   sessions.delete(termId);
   if (TAURI_RUNTIME) {
+    await session.adapter.dispose?.(session.context);
     if (session.adapter.endsOnStdinClose) {
       await agentProcCloseStdin(termId).catch(() => {});
     }
@@ -1901,8 +1941,12 @@ export function stop(termId: string): void {
   if (TAURI_RUNTIME) {
     // Agents that end on EOF get the chance to shut down cleanly; the kill
     // that follows is the backstop for the ones that do not.
-    if (session.adapter.endsOnStdinClose) void agentProcCloseStdin(termId).catch(() => {});
-    void agentProcStop(termId).catch(() => {});
+    const teardown = Promise.resolve(session.adapter.dispose?.(session.context)).catch(() => {}).then(async () => {
+      if (session.adapter.endsOnStdinClose) await agentProcCloseStdin(termId).catch(() => {});
+      await agentProcStop(termId).catch(() => {});
+    });
+    teardowns.set(termId, teardown);
+    void teardown.finally(() => { if (teardowns.get(termId) === teardown) teardowns.delete(termId); });
   }
   notifyNow(session);
 }

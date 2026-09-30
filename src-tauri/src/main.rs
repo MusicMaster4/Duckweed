@@ -4,6 +4,7 @@
 mod agent_activity;
 mod agent_proc;
 mod agent_sessions;
+mod codex_transport;
 mod discord_presence;
 mod fs;
 mod git;
@@ -581,6 +582,17 @@ fn agent_proc_send(
 #[tauri::command]
 fn agent_proc_close_stdin(manager: State<'_, AgentProcManager>, id: String) -> Result<(), String> {
     manager.close_stdin(&id)
+}
+
+#[tauri::command]
+fn agent_proc_set_runtime_roots(manager: State<'_, AgentProcManager>, id: String, pids: Vec<u32>) {
+    manager.set_runtime_roots(&id, pids);
+}
+
+#[tauri::command]
+async fn agent_codex_auth_sync(manager: State<'_, AgentProcManager>, id: String, signed_in: bool) -> Result<String, String> {
+    let manager = manager.inner().clone();
+    blocking(move || manager.synchronize_codex_auth(&id, signed_in)).await
 }
 
 #[tauri::command]
@@ -1255,6 +1267,8 @@ fn main() {
             opencode_models_refresh,
             agent_proc_start,
             agent_proc_send,
+            agent_proc_set_runtime_roots,
+            agent_codex_auth_sync,
             agent_proc_close_stdin,
             agent_proc_stop,
             frontend_ready,

@@ -33,6 +33,7 @@ flate2 = "1"
 brotli = "8"
 portable-pty = "0.9"
 notify = "6.1"
+tungstenite = "0.30"
 # Completion cues play from this process. WebView audio works, but on Windows
 # the session belongs to the shared msedgewebview2.exe runtime, so the volume
 # mixer would file Duckweed's sounds under "Microsoft Edge WebView2".

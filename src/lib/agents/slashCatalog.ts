@@ -11,7 +11,7 @@ const LOCAL_COMMANDS = [
   },
   {
     name: "/logout",
-    description: "Sign out with this agent's native CLI",
+    description: "Sign out of this agent",
   },
 ] as const;
 
@@ -65,6 +65,7 @@ const FALLBACKS: Record<AgentId, { name: string; description: string }[]> = {
     { name: "/help", description: "Show help" },
   ],
   codex: [
+    { name: "/login", description: "Sign in to the account shared with the Codex CLI" },
     { name: "/resume", description: "Continue a past Codex thread in this folder" },
     { name: "/goal", description: "Set or view the goal for a long-running task" },
     { name: "/fast", description: "Toggle Fast Mode for later turns" },

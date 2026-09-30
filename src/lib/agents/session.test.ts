@@ -65,9 +65,11 @@ mock.module("../ipc", () => ({
     sent.push(line);
   },
   agentProcStop: async () => {},
+  agentCodexAuthSync: async () => "unchanged",
   agentProcCloseStdin: async () => {},
   agentProcProbe: async () => [],
   openCodeModelsRefresh: async () => {},
+  openUrl: async () => {},
   agentSessionTranscript: async () => [],
   agentSessionsList: async () => [],
   homeDir: async () => "H:/",
@@ -335,6 +337,101 @@ describe("Custom agent UI sessions", () => {
   afterEach(() => {
     session.stopAll();
     session.setFollowupMode("queue");
+  });
+
+  async function signedOutCodex(termId: string, launch = codexLaunch): Promise<void> {
+    await session.start(termId, launch, "H:/project");
+    await flush();
+    feed({ id: sent.map(rpc).find((message) => message.method === "initialize")?.id, result: {} });
+    await flush();
+    feed({ id: "duckweed-account-read", result: { account: null, requiresOpenaiAuth: true } });
+    await flush();
+  }
+
+  async function externalCodexLogin(): Promise<void> {
+    feed({ method: "account/updated", params: { authMode: "chatgpt" } });
+    feed({ id: "duckweed-account-sync", result: { account: { type: "chatgpt" }, requiresOpenaiAuth: true } });
+    await flush();
+    const opened = sent.map(rpc).findLast((message) => message.method === "thread/start");
+    feed({ id: opened?.id, result: { thread: { id: "signed-in-thread" }, model: "gpt-5" } });
+    await flush();
+  }
+
+  test("holds an opening prompt while signed out and releases it after CLI login", async () => {
+    const termId = "codex-login-queue";
+    await signedOutCodex(termId, { ...codexLaunch, prompt: "Inspect the project" });
+    expect(session.get(termId)).toMatchObject({ status: "idle", authenticationRequired: true });
+    session.flushRecovery();
+    expect(workspaceRecovery.get(termId)?.agent?.queued).toHaveLength(1);
+    expect(session.readyForScheduledSend(termId)).toBe(false);
+    expect(sent.map(rpc).some((message) => message.method === "turn/start")).toBe(false);
+    await externalCodexLogin();
+    expect(sent.map(rpc).filter((message) => message.method === "turn/start")).toHaveLength(1);
+    expect(session.get(termId)?.pending).toHaveLength(0);
+  });
+
+  test("keeps a rejected signed-out submission and its image in the composer", async () => {
+    const termId = "codex-login-draft";
+    await signedOutCodex(termId);
+    session.setDraft(termId, "Keep this draft");
+    session.setDraftImages(termId, [image]);
+    expect(session.submit(termId, "Keep this draft", [image])).toBe(false);
+    expect(session.getDraft(termId)).toBe("Keep this draft");
+    expect(session.getDraftImages(termId)).toEqual([image]);
+  });
+
+  test("uses protocol logout without replacing the Codex pane with a terminal", async () => {
+    const termId = "codex-protocol-logout";
+    const handoffs: session.AgentAuthRequest[] = [];
+    const unsubscribe = session.subscribeAuthRequest((request) => handoffs.push(request));
+    try {
+      await session.start(termId, codexLaunch, "H:/project");
+      await codexHandshake();
+      expect(session.submit(termId, "/logout")).toBe(true);
+      const logout = sent.map(rpc).find((message) => message.method === "account/logout");
+      expect(logout).toBeDefined();
+      feed({ id: logout?.id, result: {} });
+      await flush();
+      feed({ id: "duckweed-account-sync", result: { account: null, requiresOpenaiAuth: true } });
+      await flush();
+      expect(session.get(termId)).toMatchObject({ status: "idle", authenticationRequired: true });
+      expect(handoffs).toHaveLength(0);
+    } finally { unsubscribe(); }
+  });
+
+  test("waits for sign-in before resuming the user's chosen thread", async () => {
+    const termId = "codex-resume-after-login";
+    await signedOutCodex(termId);
+    await session.resume(termId, "stored-thread");
+    expect(sent.map(rpc).some((message) => message.method === "thread/resume")).toBe(false);
+    await externalCodexLogin();
+    expect(sent.map(rpc).find((message) => message.method === "thread/resume")?.params)
+      .toMatchObject({ threadId: "stored-thread" });
+    expect(sent.map(rpc).some((message) => message.method === "turn/start")).toBe(false);
+  });
+
+  test("restores the draft and attachments after a credential service reload", async () => {
+    const termId = "codex-auth-reconnect";
+    await session.start(termId, codexLaunch, "H:/project");
+    await codexHandshake();
+    session.submit(termId, "An earlier prompt");
+    const turn = sent.map(rpc).find((message) => message.method === "turn/start");
+    feed({ id: turn?.id, result: { turn: { id: "saved-turn" } } });
+    feed({ method: "turn/completed", params: { threadId: "01900000-0000-7000-8000-000000000001", turn: { id: "saved-turn", status: "completed", items: [] } } });
+    await new Promise((resolve) => setTimeout(resolve, 850));
+    session.setDraft(termId, "Continue after login");
+    session.setDraftImages(termId, [image]);
+    const before = sent.map(rpc).filter((message) => message.method === "initialize").length;
+    frameSink?.({ kind: "exit", code: 0, reconnect: true });
+    for (let count = 0; count < 10; count++) await flush();
+    expect(sent.map(rpc).filter((message) => message.method === "initialize")).toHaveLength(before + 1);
+    expect(session.getDraft(termId)).toBe("Continue after login");
+    expect(session.getDraftImages(termId)).toEqual([image]);
+    expect(session.get(termId)?.status).toBe("starting");
+    await codexHandshake("temporary-thread");
+    const resume = sent.map(rpc).findLast((message) => message.method === "thread/resume");
+    expect(resume?.params).toMatchObject({ threadId: "01900000-0000-7000-8000-000000000001" });
+    expect(session.getDraft(termId)).toBe("Continue after login");
   });
 
   test.each(["steer", "queue"] as const)("preserves Codex background activity after an async question in %s mode", async (mode) => {

@@ -579,7 +579,7 @@ export function AgentSurface({
     pinnedRef.current = true;
     userPausedRef.current = false;
     setShowJumpToBottom(false);
-    agents.submit(termId, text, images, delivery);
+    return agents.submit(termId, text, images, delivery) === false;
   };
 
   const jumpToBottom = () => {

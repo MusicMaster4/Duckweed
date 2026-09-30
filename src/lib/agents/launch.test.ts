@@ -18,6 +18,9 @@ describe("tokenize", () => {
 });
 
 describe("parseAgentLaunch", () => {
+  test.each(["codex --no-daemon", "codex --remote ws://localhost:8080", "codex --remote-auth-token-env CODEX_REMOTE_TOKEN"])("keeps native transports in the terminal: %s", (command) => {
+    expect(parseAgentLaunch(command)).toBeNull();
+  });
   test("claims a bare launch of every supported agent", () => {
     expect(parseAgentLaunch("claude")?.agent).toBe("claude");
     expect(parseAgentLaunch("codex")?.agent).toBe("codex");

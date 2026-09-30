@@ -478,6 +478,8 @@ export interface AgentSessionState {
   /** Accent colour for the session chrome. */
   accent: string;
   status: AgentStatus;
+  /** A signed-out provider must not receive queued prompts or resume requests. */
+  authenticationRequired?: boolean;
   /** True while a stored transcript is replacing the current conversation. */
   loadingHistory?: boolean;
   /** Wall-clock time when the current turn first entered `working`. */

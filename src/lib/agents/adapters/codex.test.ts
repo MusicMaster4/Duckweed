@@ -35,7 +35,7 @@ function harness(
 ) {
   const events: AgentEvent[] = [];
   const sent: Record<string, unknown>[] = [];
-  const adapter = createCodexAdapter({ childStreamPublishMs: 0, ...adapterOptions });
+  const adapter = createCodexAdapter({ childStreamPublishMs: 0, authPollIntervalMs: 0, ...adapterOptions });
   const ctx: AdapterContext = {
     cwd: "H:/project",
     launch: { ...launch, ...overrides },
@@ -200,11 +200,11 @@ describe("codex adapter", () => {
     await Promise.resolve();
     await Promise.resolve();
 
-    expect(h.state()).toMatchObject({ status: "error", error: "Codex is not signed in." });
+    expect(h.state()).toMatchObject({ status: "idle", authenticationRequired: true });
     expect(h.sent.some((message) => message.method === "thread/start")).toBe(false);
   });
 
-  test("turns a retrying 401 notification into a terminal auth error", async () => {
+  test("stops a retrying 401 and keeps sign-in available in the same pane", async () => {
     const h = harness();
     await h.handshake();
     h.adapter.prompt({ text: "hello", images: [] }, h.ctx);
@@ -217,9 +217,94 @@ describe("codex adapter", () => {
     });
 
     expect(h.state()).toMatchObject({
-      status: "error",
-      error: expect.stringContaining("401 Unauthorized"),
+      status: "idle",
+      authenticationRequired: true,
     });
+    expect(h.state().items.at(-1)).toMatchObject({ kind: "notice", text: expect.stringContaining("401 Unauthorized") });
+  });
+
+  test("adopts a CLI login after starting signed out without reinitializing", async () => {
+    const h = harness();
+    h.adapter.start(h.ctx);
+    h.feed({ id: 1, result: {} });
+    await Promise.resolve(); await Promise.resolve();
+    h.feed({ id: "duckweed-account-read", result: { account: null, requiresOpenaiAuth: true } });
+    await Promise.resolve(); await Promise.resolve();
+    h.notify("account/updated", { authMode: "chatgpt", planType: "plus" });
+    expect(h.sent.at(-1)).toMatchObject({ method: "account/read", params: { refreshToken: false } });
+    h.feed({ id: "duckweed-account-sync", result: { account: { type: "chatgpt", email: "user@example.com", planType: "plus" }, requiresOpenaiAuth: true } });
+    await Promise.resolve(); await Promise.resolve();
+    const opened = h.sent.find((frame) => frame.method === "thread/start");
+    expect(opened).toBeDefined();
+    h.feed({ id: opened?.id, result: { thread: { id: "thread_1" }, model: "test-model" } });
+    await Promise.resolve(); await Promise.resolve();
+    expect(h.state()).toMatchObject({ status: "idle", authenticationRequired: false });
+    expect(h.sent.filter((frame) => frame.method === "initialize")).toHaveLength(1);
+  });
+
+  test("logs out through the shared server and retains the conversation", async () => {
+    const h = harness();
+    await h.handshake();
+    await h.loadModels();
+    const logout = h.adapter.authenticate?.("logout", h.ctx);
+    const request = h.sent.at(-1);
+    expect(request).toMatchObject({ method: "account/logout" });
+    h.feed({ id: request?.id, result: {} });
+    await logout;
+    h.feed({ id: "duckweed-account-sync", result: { account: null, requiresOpenaiAuth: true } });
+    await Promise.resolve(); await Promise.resolve();
+    expect(h.state()).toMatchObject({ status: "idle", authenticationRequired: true, sessionId: "sess_1", models: [] });
+    const before = h.sent.length;
+    h.adapter.prompt({ text: "must wait", images: [] }, h.ctx);
+    expect(h.sent).toHaveLength(before);
+    await h.adapter.dispose?.(h.ctx);
+    expect(h.sent.at(-1)).toMatchObject({ method: "thread/unsubscribe", params: { threadId: "thread_1" } });
+  });
+
+  test("opens managed browser login and waits for the provider callback", async () => {
+    const h = harness();
+    await h.handshake();
+    const opened: string[] = [];
+    h.ctx.openUrl = async (url) => { opened.push(url); };
+    const login = h.adapter.authenticate?.("login", h.ctx);
+    const request = h.sent.at(-1);
+    expect(request).toMatchObject({ method: "account/login/start", params: { type: "chatgpt" } });
+    h.feed({ id: request?.id, result: { type: "chatgpt", loginId: "login-1", authUrl: "https://auth.openai.com/test" } });
+    await login;
+    expect(opened).toEqual(["https://auth.openai.com/test"]);
+    h.notify("account/login/completed", { loginId: "login-1", success: true });
+    expect(h.state().items.at(-1)).toMatchObject({ text: "Codex sign-in completed." });
+    await h.adapter.dispose?.(h.ctx);
+  });
+
+  test("paginates the provider model catalog using inference model ids", async () => {
+    const h = harness();
+    await h.handshake();
+    h.feed({ id: 3, result: { data: [{ id: "catalog-a", model: "model-a", displayName: "A" }], nextCursor: "page-2" } });
+    await Promise.resolve(); await Promise.resolve();
+    const next = h.sent.at(-1);
+    expect(next).toMatchObject({ method: "model/list", params: { cursor: "page-2" } });
+    h.feed({ id: next?.id, result: { data: [{ id: "catalog-b", model: "model-b", displayName: "B" }], nextCursor: null } });
+    await Promise.resolve(); await Promise.resolve();
+    expect(h.state().models.map((model) => model.id)).toEqual(["model-a", "model-b"]);
+  });
+
+  test("discards a model catalog from the previous account", async () => {
+    const h = harness();
+    await h.handshake();
+    h.notify("account/updated", { authMode: null });
+    await h.loadModels();
+    expect(h.state().models).toEqual([]);
+    h.feed({ id: "duckweed-account-sync", result: { account: null, requiresOpenaiAuth: true } });
+    await Promise.resolve(); await Promise.resolve();
+    expect(h.state().authenticationRequired).toBe(true);
+  });
+
+  test("answers the currentTime request introduced by newer servers", async () => {
+    const h = harness();
+    await h.handshake();
+    h.feed({ id: "time-1", method: "currentTime/read", params: { threadId: "thread_1" } });
+    expect(h.sent.at(-1)).toMatchObject({ id: "time-1", result: { currentTimeAt: expect.any(Number) } });
   });
 
   test("reads the model and effort the thread actually started with", async () => {
@@ -2702,6 +2787,67 @@ describe("codex adapter", () => {
     await new Promise((resolve) => setTimeout(resolve, 25));
     expect(h.state().status).toBe("idle");
     expect(h.events.filter((event) => event.type === "turn-end")).toHaveLength(1);
+  });
+
+  test.each(["accept", "acceptForSession", "decline"])("answers permissions requests with the selected grant: %s", async (choice) => {
+    const h = harness();
+    await h.handshake();
+    const permissions = { network: { enabled: true }, fileSystem: { read: ["H:/shared"], entries: [{ access: "deny", path: { type: "glob_pattern", pattern: "**/.aws/**" } }] } };
+    h.feed({ id: "access-1", method: "item/permissions/requestApproval", params: { threadId: "thread_1", reason: "Run the preview", permissions } });
+    expect(h.state().permission?.detail).toContain("**/.aws/**");
+    h.adapter.respond(h.state().permission!.id, choice, h.ctx);
+    expect(h.sent.at(-1)).toMatchObject({ id: "access-1", result: {
+      permissions: choice === "decline" ? {} : permissions,
+      scope: choice === "acceptForSession" ? "session" : "turn",
+    } });
+  });
+
+  test("ignores authentication errors from another client's thread", async () => {
+    const h = harness();
+    await h.handshake();
+    h.notify("error", { threadId: "foreign-thread", error: { message: "401 Unauthorized" } });
+    expect(h.state().authenticationRequired).toBe(false);
+    expect(h.state().status).toBe("idle");
+  });
+
+  test("holds prompts while a CLI account reload is deferred", async () => {
+    const h = harness({}, { completionQuietMs: 0, authPollIntervalMs: 10 });
+    h.ctx.syncAccount = async () => "deferred";
+    await h.handshake();
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(h.state().authenticationRequired).toBe(true);
+    const before = h.sent.length;
+    h.adapter.prompt({ text: "Hold this", images: [] }, h.ctx);
+    expect(h.sent).toHaveLength(before);
+    expect(h.state().items.filter((item) => item.kind === "notice" && item.text.includes("shared service will reload"))).toHaveLength(1);
+    await h.adapter.dispose?.(h.ctx);
+  });
+
+  test("does not treat a rejected credential as an external logout", async () => {
+    const h = harness({}, { completionQuietMs: 0, authPollIntervalMs: 10 });
+    const signedIn: boolean[] = [];
+    h.ctx.syncAccount = async (value) => { signedIn.push(value); return "unchanged"; };
+    await h.handshake();
+    h.notify("error", { threadId: "thread_1", error: { message: "401 Unauthorized" } });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    h.feed({ id: "duckweed-account-sync", result: { account: { type: "chatgpt" }, requiresOpenaiAuth: true } });
+    await Promise.resolve(); await Promise.resolve();
+    expect(signedIn).toEqual([true]);
+    expect(h.state().authenticationRequired).toBe(true);
+    await h.adapter.dispose?.(h.ctx);
+  });
+
+  test("reports daemon-owned terminal PIDs for local preview discovery", async () => {
+    const h = harness({}, { completionQuietMs: 0, authPollIntervalMs: 10 });
+    const roots: number[][] = [];
+    h.ctx.runtimeProcesses = async (pids) => { roots.push(pids); };
+    await h.handshake();
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    const request = h.sent.findLast((frame) => frame.method === "thread/backgroundTerminals/list")!;
+    h.feed({ id: request.id, result: { data: [{ osPid: 123 }, { osPid: 123 }, { osPid: null }, { osPid: -1 }], nextCursor: null } });
+    await Promise.resolve(); await Promise.resolve();
+    expect(roots).toEqual([[123]]);
+    await h.adapter.dispose?.(h.ctx);
   });
 
   test("does not call a child complete when its metadata omits status", async () => {
