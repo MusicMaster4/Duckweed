@@ -28,6 +28,13 @@ use tauri::ipc::Channel;
 /// be able to grow the webview message queue without bound.
 const MAX_LINE_BYTES: usize = 8 * 1024 * 1024;
 
+/// Cap on one WebSocket message from the shared Codex service. A message over
+/// it is a protocol error that ends the whole connection, so it must sit well
+/// above any legitimate response: `plugin/list` alone returns the full remote
+/// catalog, already over 11 MB. Messages over `MAX_LINE_BYTES` are still kept
+/// out of the webview; this only decides whether the session survives them.
+const MAX_CODEX_MESSAGE_BYTES: usize = 256 * 1024 * 1024;
+
 /// Stderr is diagnostics, never protocol. Keep only enough to explain a failed
 /// start; a chatty agent must not pin megabytes of logs in memory forever.
 const MAX_STDERR_LINE_BYTES: usize = 64 * 1024;
@@ -557,7 +564,7 @@ pub fn start(
     let resolved = resolve_program(&options.program)
         .ok_or_else(|| format!("`{}` was not found on PATH", options.program))?;
 
-    let shared = crate::codex_transport::connect(&resolved, &options, MAX_LINE_BYTES)?;
+    let shared = crate::codex_transport::connect(&resolved, &options, MAX_CODEX_MESSAGE_BYTES)?;
 
     let mut command = build_command(&resolved);
     for arg in &options.args {
@@ -653,6 +660,22 @@ pub fn start(
                         }
                     };
                     match message {
+                        tungstenite::Message::Text(line) if line.len() > MAX_LINE_BYTES => {
+                            let _ = channel.send(AgentFrame::Stderr {
+                                line: format!(
+                                    "Dropped a {} byte Codex message over the {MAX_LINE_BYTES} byte limit.",
+                                    line.len()
+                                ),
+                            });
+                            if let Some(reply) =
+                                crate::codex_transport::oversized_reply(&line, MAX_LINE_BYTES)
+                            {
+                                process.lock().unwrap().ownership.received(&reply);
+                                if channel.send(AgentFrame::Stdout { line: reply }).is_err() {
+                                    break;
+                                }
+                            }
+                        }
                         tungstenite::Message::Text(line) => {
                             {
                                 let mut process = process.lock().unwrap();

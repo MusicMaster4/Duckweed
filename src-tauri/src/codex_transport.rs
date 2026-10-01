@@ -485,6 +485,37 @@ pub fn send(writer: &mut WebSocket<ProxyWriter>, line: &str) -> Result<(), Strin
         .map_err(|error| error.to_string())
 }
 
+/// A response too large for the webview must still settle its request, or the
+/// caller waits forever. Server requests and notifications have no waiting
+/// caller on our side, so they are only dropped.
+pub fn oversized_reply(line: &str, limit: usize) -> Option<String> {
+    #[derive(serde::Deserialize)]
+    struct Envelope {
+        id: Option<serde_json::Value>,
+        method: Option<serde::de::IgnoredAny>,
+    }
+    let envelope: Envelope = serde_json::from_str(line).ok()?;
+    if envelope.method.is_some() {
+        return None;
+    }
+    let id = envelope.id?;
+    Some(
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": {
+                "code": -32603,
+                "message": format!(
+                    "Codex sent a {} byte response, over Duckweed's {} byte limit.",
+                    line.len(),
+                    limit
+                ),
+            },
+        })
+        .to_string(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -505,6 +536,25 @@ mod tests {
         );
         auth["tokens"]["account_id"] = json!("workspace-2");
         assert_ne!(first, owner_digest(&auth, None));
+    }
+
+    #[test]
+    fn oversized_responses_settle_their_request_and_other_frames_are_dropped() {
+        let reply = oversized_reply(r#"{"id":6,"result":{"marketplaces":[]}}"#, 8).unwrap();
+        let reply: serde_json::Value = serde_json::from_str(&reply).unwrap();
+        assert_eq!(reply["id"], 6);
+        assert_eq!(reply["error"]["code"], -32603);
+        assert!(reply.get("result").is_none());
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(
+                &oversized_reply(r#"{"id":"duckweed-x","result":{}}"#, 8).unwrap()
+            )
+            .unwrap()["id"],
+            "duckweed-x"
+        );
+        assert!(oversized_reply(r#"{"id":3,"method":"item/permissions/requestApproval","params":{}}"#, 8).is_none());
+        assert!(oversized_reply(r#"{"method":"item/agentMessage/delta","params":{}}"#, 8).is_none());
+        assert!(oversized_reply("not json", 8).is_none());
     }
 
     #[test]
