@@ -7,7 +7,7 @@ const http = require('node:http');
 const { spawn, spawnSync } = require('node:child_process');
 const { once } = require('node:events');
 const vm = require('node:vm');
-const { failureState, retryAfterMs, shouldProbe } = require('./quota.cjs');
+const { failureState, retryAfterMs, shouldProbe, claudeWindows } = require('./quota.cjs');
 const { claudeCacheResult } = require('./claude-cache.cjs');
 const { patchHtml } = require('./patch-management.cjs');
 
@@ -62,6 +62,8 @@ test('legacy cached windows keep their measured values and are labeled cached', 
   assert.equal(body._duckweed_cache.cached, true);
   assert.equal(body._duckweed_cache.checkedAt, '2026-10-02T09:00:00Z');
   assert.equal(claudeCacheResult({ errorStatus: 429, error: 'HTTP 429', windows: [] }).status_code, 429);
+  const oauth = claudeCacheResult({ checkedAt: '2026-10-02T09:00:00Z', windows: [{ id: 'seven_day_oauth_apps', remainingPercent: 75, resetAt: null }] });
+  assert.equal(JSON.parse(oauth.body).seven_day_oauth_apps.utilization, 25);
 });
 
 test('both panels share one quota cache and cannot override its cooldown', async () => {
@@ -73,7 +75,7 @@ test('both panels share one quota cache and cannot override its cooldown', async
     error: 'Quota update returned HTTP 429.', errorStatus: 429, rateLimitFailures: 1, retryAt: new Date(Date.now() + 600000).toISOString(),
     windows: [{ id: 'five_hour', remainingPercent: 97, resetAt: null }], quotaSupported: true };
   fs.writeFileSync(statePath, JSON.stringify({ accounts: [oldAccount] }));
-  let calls = 0, rateLimited = true;
+  let calls = 0, rateLimited = true, emptyUsage = false;
   const upstream = http.createServer(async (req, res) => {
     for await (const chunk of req) { /* Drain fixture request bodies. */ }
     let data;
@@ -81,7 +83,7 @@ test('both panels share one quota cache and cannot override its cooldown', async
     else if (req.url === '/v0/management/api-call') {
       calls++;
       data = rateLimited ? { status_code: 429, header: { 'Retry-After': ['0'] }, body: '{"error":{"message":"Rate limited"}}' }
-        : { status_code: 200, header: {}, body: JSON.stringify({ five_hour: { utilization: 4, resets_at: null }, extra_usage: { is_enabled: false } }) };
+        : { status_code: 200, header: {}, body: JSON.stringify(emptyUsage ? {} : { five_hour: { utilization: 4, resets_at: null }, extra_usage: { is_enabled: false } }) };
     } else if (req.url === '/v0/management/auth-files/fields') data = {};
     else { res.writeHead(404); return res.end('{}'); }
     res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(data));
@@ -130,6 +132,17 @@ test('both panels share one quota cache and cannot override its cooldown', async
     assert.deepEqual(recovered.extra_usage, { is_enabled: false });
     assert.equal(JSON.parse(fs.readFileSync(statePath)).accounts[0].rateLimitFailures, 0);
     await request(); assert.equal(calls, 2, 'successful readings are cached for ten minutes');
+    emptyUsage = true;
+    const due = JSON.parse(fs.readFileSync(statePath));
+    due.accounts[0].checkedAt = new Date(Date.now() - 3600000).toISOString();
+    fs.writeFileSync(statePath, JSON.stringify(due));
+    const invalid = JSON.parse((await (await request()).json()).body);
+    assert.equal(calls, 3);
+    assert.equal(invalid.five_hour.utilization, 4, 'empty upstream responses preserve the last reported quota');
+    assert.match(invalid._duckweed_cache.error, /no usable quota windows/);
+    assert.equal(invalid._duckweed_cache.checkedAt, due.accounts[0].checkedAt);
+    await request(); assert.equal(calls, 3, 'invalid payloads also respect the persisted cooldown');
+
   } finally {
     const exited = once(child, 'exit'); child.kill(); await exited;
     await new Promise(resolve => upstream.close(resolve));
@@ -154,4 +167,22 @@ test('native management patch is idempotent, fails safely and has valid JavaScri
   assert.ok(!patched.includes("location.replace('http://'"));
   const legacyRedirect = '<!-- duckweed-account-panel:v1 -->\n<script>location.replace("http://127.0.0.1:8318/")</script>\n';
   assert.equal(patchHtml(patched.replace('</head>', legacyRedirect + '</head>')), patched);
+});
+
+
+test('Claude quota exposes all reported windows and rejects invalid utilization', () => {
+  const parsed = claudeWindows({ five_hour: { utilization: 20 }, seven_day_oauth_apps: { utilization: 30 },
+    seven_day_cowork: { utilization: 40 }, seven_day_opus: { utilization: NaN }, seven_day_sonnet: { utilization: -1 } });
+  assert.deepEqual(parsed.windows.map(w => w.id), ['five_hour', 'seven_day_oauth_apps', 'seven_day_cowork']);
+  assert.equal(parsed.quotaSupported, true);
+  assert.equal(claudeWindows({ five_hour: { utilization: null } }).quotaSupported, false);
+});
+
+test('unavailable cached quotas carry the remaining Retry-After without probing', () => {
+  const now = Date.parse('2026-10-02T10:00:00Z');
+  const limited = claudeCacheResult({ errorStatus: 429, error: 'HTTP 429', retryAt: '2026-10-02T10:10:00Z' }, now);
+  assert.equal(limited.status_code, 429);
+  assert.deepEqual(limited.header, { 'Retry-After': ['600'] });
+  assert.equal(claudeCacheResult({ checkedAt: 'invalid', usage: { five_hour: { utilization: 20 } } }, now).status_code, 503);
+  assert.equal(claudeCacheResult({ checkedAt: '2026-10-02T09:00:00Z', usage: { five_hour: null } }, now).status_code, 503);
 });

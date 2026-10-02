@@ -126,6 +126,7 @@ export function AgentSurface({
   const userPausedRef = useRef(false);
   const lastScrollTopRef = useRef(0);
   const [showJumpToBottom, setShowJumpToBottom] = useState(false);
+  const hasSession = session !== null;
   const items = session?.items ?? EMPTY_ITEMS;
   const workflow = useMemo(() => latestWorkflow(items), [items]);
   const workflowComplete = workflowIsComplete(workflow, session?.status);
@@ -442,6 +443,8 @@ export function AgentSurface({
     return () => window.clearTimeout(timer);
   }, [workflow?.id, workflowComplete]);
 
+  // Session startup can finish after the surface mounts. Attach scrolling
+  // when its transcript becomes available, including after a reconnect.
   // A mounted or remounted conversation opens at its newest turn. Later
   // streamed height changes are handled by ResizeObserver without forcing a
   // synchronous full-transcript layout for every text delta.
@@ -450,7 +453,7 @@ export function AgentSurface({
     if (!node || !pinnedRef.current) return;
     node.scrollTop = node.scrollHeight;
     lastScrollTopRef.current = node.scrollTop;
-  }, [termId]);
+  }, [termId, hasSession]);
 
   useEffect(() => {
     const node = scrollRef.current;
@@ -471,7 +474,10 @@ export function AgentSurface({
       lastScrollTopRef.current = node.scrollTop;
     };
     const followResize = () => {
-      if (pinnedRef.current) node.scrollTop = node.scrollHeight;
+      if (pinnedRef.current) {
+        node.scrollTop = node.scrollHeight;
+        lastScrollTopRef.current = node.scrollTop;
+      }
       syncScrollState();
     };
     const resizeObserver = new ResizeObserver(followResize);
@@ -496,7 +502,7 @@ export function AgentSurface({
       resizeObserver.disconnect();
       mutationObserver.disconnect();
     };
-  }, []);
+  }, [termId, hasSession]);
 
   if (!session) return null;
 

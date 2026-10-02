@@ -20,6 +20,10 @@ Claude, two Codex accounts, Antigravity and Grok are signed in on this PC. OpenR
 
 ## Duckweed and command line
 
+Duckweed's Usage and statistics panels read `priority-status.json` when Claude is configured to use the local CLIProxy endpoint. Each enabled Claude account gets its own limits and cache timestamp. Deleted or paused credentials are excluded. Duckweed does not make an additional Anthropic request in this mode, including when the monitor is offline or cooling down. Custom endpoints without a local quota source show an unavailable explanation instead of the unrelated local OAuth account.
+
+Without a proxy, Duckweed checks Claude's OAuth usage at most once every ten minutes. It persists the last successful observation and retry deadline under `~/.cache/duckweed`, with a credential fingerprint and a filesystem lock to coordinate app instances. HTTP errors retain the last reading, show its timestamp and retry deadline, and back off up to one hour while honoring longer `Retry-After` values. Restarting Duckweed or switching dashboard ranges does not bypass the deadline. Cached or failed observations do not generate a fresh burn-rate estimate, and a known reset does not invent a replenished balance.
+
 Use `claude` or `codex` in Duckweed. Both now read their local proxy configuration automatically. `claudex --g` selects the existing Grok route. Available model IDs are listed in the panel's **Models** disclosure. A Responses or OpenAI-compatible client can use `http://127.0.0.1:8317/v1` with the local key in `~/.cli-proxy-api/.api-key`.
 
 ```

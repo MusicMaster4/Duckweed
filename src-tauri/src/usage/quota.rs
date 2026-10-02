@@ -114,7 +114,7 @@ fn lookback_ms(window_ms: Option<i64>) -> i64 {
 }
 
 /// How one limit is trending, and where that number came from.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct QuotaForecast {
     /// Utilization points consumed per hour of continued use.
     pub per_hour: f64,
@@ -141,7 +141,7 @@ pub struct QuotaForecast {
     pub duty: Option<f64>,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct QuotaLimit {
     pub id: String,
     pub label: String,
@@ -161,7 +161,7 @@ pub struct QuotaLimit {
     pub forecast: Option<QuotaForecast>,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Quota {
     pub agent: String,
     pub label: String,
@@ -169,7 +169,7 @@ pub struct Quota {
     /// HTTP fetch, or the timestamp on the log line they were read from. A
     /// cached or re-read snapshot carries the original time, so repeating it
     /// cannot be mistaken for a fresh observation that the limit stood still.
-    #[serde(skip_serializing)]
+    #[serde(default)]
     pub observed_at: Option<i64>,
     /// `reported` when the CLI persisted provider state, otherwise
     /// `unavailable`.
@@ -201,18 +201,24 @@ pub fn build(
     let mut quotas: Vec<Quota> = crate::usage::sources::AGENTS
         .iter()
         .filter(|agent| used_agents.contains(agent.id) && supports_quota_reporting(agent.id))
-        .map(|agent| {
-            reported_for_with_codex_session(agent.id, home, latest_codex_session).unwrap_or_else(
-                || Quota {
-                    agent: agent.id.to_string(),
-                    label: agent.label.to_string(),
-                    observed_at: None,
-                    source: "unavailable".into(),
-                    plan: None,
-                    message: Some(unavailable_message(agent.id).into()),
-                    limits: Vec::new(),
-                },
-            )
+        .flat_map(|agent| {
+            if agent.id == "claude" {
+                if let Some(quotas) = claude_proxy_quotas(home) {
+                    return quotas;
+                }
+            }
+            vec![
+                reported_for_with_codex_session(agent.id, home, latest_codex_session)
+                    .unwrap_or_else(|| Quota {
+                        agent: agent.id.to_string(),
+                        label: agent.label.to_string(),
+                        observed_at: None,
+                        source: "unavailable".into(),
+                        plan: None,
+                        message: Some(unavailable_message(agent.id).into()),
+                        limits: Vec::new(),
+                    }),
+            ]
         })
         .collect();
 
@@ -285,6 +291,10 @@ fn apply_estimate(quota: &mut Quota, history: &mut QuotaHistory, now: i64, duty:
     let agent = quota.agent.clone();
     let observed_at = quota.observed_at.unwrap_or(now);
     for limit in &mut quota.limits {
+        if quota.agent == "claude" && quota.message.is_some() {
+            limit.forecast = None;
+            continue;
+        }
         limit.forecast = forecast_for(&agent, observed_at, limit, history, now, duty);
     }
 }
@@ -432,8 +442,7 @@ fn window_average_per_hour(limit: &QuotaLimit, now: i64) -> Option<f64> {
         return None;
     }
     let elapsed = limit.window_ms? - (limit.resets_at? - now);
-    if elapsed <= MIN_EARLY_WINDOW_MS
-        || (elapsed < MIN_SPAN_MS && limit.percent <= QUANTUM_PERCENT)
+    if elapsed <= MIN_EARLY_WINDOW_MS || (elapsed < MIN_SPAN_MS && limit.percent <= QUANTUM_PERCENT)
     {
         // A single rounded reporting step is too little to extrapolate, but
         // substantial usage after a reset need not wait five minutes before
@@ -594,14 +603,16 @@ struct ClaudeAccess {
     subscription_type: Option<String>,
 }
 
-const CLAUDE_POLL_MS: i64 = 60_000;
-const CLAUDE_MAX_BACKOFF_MS: i64 = 15 * 60_000;
+const CLAUDE_POLL_MS: i64 = 10 * 60_000;
+const CLAUDE_MAX_BACKOFF_MS: i64 = 60 * 60_000;
 
-#[derive(Default)]
+#[derive(Default, Serialize, Deserialize)]
 struct ClaudePoll {
     quota: Option<Quota>,
     retry_at: i64,
     failures: u32,
+    #[serde(default)]
+    error: Option<String>,
 }
 
 impl ClaudePoll {
@@ -611,33 +622,71 @@ impl ClaudePoll {
         fetch: impl FnOnce() -> Result<Quota, ClaudeFetchError>,
     ) -> Option<Quota> {
         if now < self.retry_at {
-            return self.quota.clone();
+            return self.display(now);
         }
         let delay = match fetch() {
             Ok(quota) => {
                 self.failures = 0;
+                self.error = None;
                 self.quota = Some(quota);
                 CLAUDE_POLL_MS
             }
             Err(error) => {
                 self.failures = self.failures.saturating_add(1);
-                // Never present the last successful reading as current after a failure.
-                self.quota = Some(Quota {
-                    agent: "claude".into(),
-                    label: "Claude Code".into(),
-                    observed_at: None,
-                    source: "unavailable".into(),
-                    plan: None,
-                    message: Some(error.message),
-                    limits: Vec::new(),
-                });
-                let backoff =
-                    (CLAUDE_POLL_MS * (1_i64 << self.failures.min(4))).min(CLAUDE_MAX_BACKOFF_MS);
+                self.error = Some(error.message);
+                // Preserve the observation timestamp and last provider values.
+                // A failed refresh says nothing about current consumption.
+                if self.quota.is_none() {
+                    self.quota = Some(claude_unavailable(
+                        self.error
+                            .as_deref()
+                            .unwrap_or("Claude usage is unavailable."),
+                    ));
+                }
+                let backoff = (CLAUDE_POLL_MS * (1_i64 << (self.failures - 1).min(3)))
+                    .min(CLAUDE_MAX_BACKOFF_MS);
                 backoff.max(error.retry_after_ms)
             }
         };
         self.retry_at = now.saturating_add(delay);
-        self.quota.clone()
+        self.display(now)
+    }
+
+    fn display(&self, now: i64) -> Option<Quota> {
+        let mut quota = self.quota.clone().or_else(|| {
+            (self.retry_at > now).then(|| {
+                claude_unavailable(&format!(
+                    "Claude usage has not been loaded yet. Next retry: {}.",
+                    claude_time(self.retry_at)
+                ))
+            })
+        })?;
+        if quota.source == "reported" {
+            if self.error.is_some() || quota.observed_at.is_some_and(|at| now - at > 60_000) {
+                quota.message = Some(claude_cache_note(
+                    quota.observed_at,
+                    self.error.as_deref(),
+                    Some(self.retry_at),
+                ));
+            }
+        } else if let Some(error) = &self.error {
+            quota.message = Some(format!(
+                "{error} Next retry: {}.",
+                claude_time(self.retry_at)
+            ));
+        }
+        if quota.source == "reported"
+            && quota
+                .limits
+                .iter()
+                .any(|limit| limit.resets_at.is_some_and(|at| at <= now))
+        {
+            let note = quota
+                .message
+                .get_or_insert_with(|| claude_cache_note(quota.observed_at, None, None));
+            note.push_str(" A reported window has reset; its current balance is awaiting refresh.");
+        }
+        Some(quota)
     }
 }
 
@@ -676,10 +725,319 @@ fn claude_quota(home: &Path) -> Option<Quota> {
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
         .ok()?;
-    polls
-        .entry(home.to_path_buf())
-        .or_default()
-        .read(Utc::now().timestamp_millis(), || fetch_claude_quota(home))
+    let cache = claude_cache_path(home);
+    let poll = polls.entry(cache.clone()).or_default();
+    let result = claude_cached_read(&cache, poll, Utc::now().timestamp_millis(), || {
+        fetch_claude_quota(home)
+    });
+    // A successful OAuth refresh rotates the credential fingerprint. Carry
+    // the same cooldown across that rotation rather than immediately polling.
+    let refreshed_cache = claude_cache_path(home);
+    if refreshed_cache != cache {
+        if let Ok(bytes) = serde_json::to_vec(poll) {
+            let _ = write_atomically(&refreshed_cache, &bytes);
+        }
+    }
+    result
+}
+
+fn claude_unavailable(message: &str) -> Quota {
+    Quota {
+        agent: "claude".into(),
+        label: "Claude Code".into(),
+        observed_at: None,
+        source: "unavailable".into(),
+        plan: None,
+        message: Some(message.into()),
+        limits: Vec::new(),
+    }
+}
+
+fn claude_time(at: i64) -> String {
+    DateTime::from_timestamp_millis(at)
+        .map(|date| {
+            date.with_timezone(&chrono::Local)
+                .format("%b %d, %H:%M")
+                .to_string()
+        })
+        .unwrap_or_else(|| "unknown".into())
+}
+
+fn claude_cache_note(at: Option<i64>, error: Option<&str>, retry: Option<i64>) -> String {
+    let mut note = format!(
+        "Cached usage from {}.",
+        at.map(claude_time).unwrap_or_else(|| "unknown".into())
+    );
+    if let Some(error) = error {
+        note.push_str(&format!(" {error}"));
+        if let Some(retry) = retry {
+            note.push_str(&format!(" Next retry: {}.", claude_time(retry)));
+        }
+    }
+    note
+}
+
+fn claude_json(path: &Path) -> Option<Value> {
+    serde_json::from_slice(&std::fs::read(path).ok()?).ok()
+}
+
+fn claude_hash(value: &str) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(value.as_bytes()))
+}
+
+fn claude_cache_path(home: &Path) -> PathBuf {
+    // Include the credential fingerprint so switching OAuth accounts cannot
+    // reuse another account's balance or cooldown. No token is persisted.
+    let credentials = claude_json(&home.join(".claude/.credentials.json"));
+    let token = credentials
+        .as_ref()
+        .and_then(|value| {
+            value
+                .pointer("/claudeAiOauth/refreshToken")
+                .or_else(|| value.pointer("/claudeAiOauth/accessToken"))
+        })
+        .and_then(Value::as_str)
+        .unwrap_or("signed-out");
+    home.join(".cache/duckweed")
+        .join(format!("claude-quota-{}.json", claude_hash(token)))
+}
+
+struct ClaudeCacheLock {
+    path: PathBuf,
+    _file: std::fs::File,
+}
+impl Drop for ClaudeCacheLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+fn claude_cached_read(
+    path: &Path,
+    poll: &mut ClaudePoll,
+    now: i64,
+    fetch: impl FnOnce() -> Result<Quota, ClaudeFetchError>,
+) -> Option<Quota> {
+    if let Some(saved) = std::fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<ClaudePoll>(&bytes).ok())
+    {
+        *poll = saved;
+    }
+    if now < poll.retry_at {
+        return poll.display(now);
+    }
+    let Some(parent) = path.parent() else {
+        return poll.display(now);
+    };
+    if std::fs::create_dir_all(parent).is_err() {
+        return Some(claude_unavailable(
+            "Claude usage cache cannot be written. Check folder permissions before retrying.",
+        ));
+    }
+    let lock_path = path.with_extension("lock");
+    let open_lock = || {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&lock_path)
+    };
+    let file =
+        match open_lock() {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let expired = std::fs::metadata(&lock_path)
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .and_then(|at| at.elapsed().ok())
+                    .is_some_and(|age| age > Duration::from_secs(120));
+                if !expired {
+                    return poll.display(now).or_else(|| {
+                        Some(claude_unavailable(
+                            "Claude usage is being updated by another Duckweed instance.",
+                        ))
+                    });
+                }
+                let _ = std::fs::remove_file(&lock_path);
+                match open_lock() {
+                    Ok(file) => file,
+                    Err(_) => return poll.display(now),
+                }
+            }
+            Err(_) => return Some(claude_unavailable(
+                "Claude usage cache cannot be locked. Check folder permissions before retrying.",
+            )),
+        };
+    let _lock = ClaudeCacheLock {
+        path: lock_path,
+        _file: file,
+    };
+    // A second process may have finished between the first read and our lock.
+    if let Some(saved) = std::fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<ClaudePoll>(&bytes).ok())
+    {
+        *poll = saved;
+    }
+    if now < poll.retry_at {
+        return poll.display(now);
+    }
+    // Persist a lease before networking so a crash cannot bypass the cooldown.
+    poll.retry_at = now.saturating_add(CLAUDE_POLL_MS);
+    if serde_json::to_vec(poll)
+        .ok()
+        .and_then(|bytes| write_atomically(path, &bytes).ok())
+        .is_none()
+    {
+        return Some(claude_unavailable(
+            "Claude usage cache cannot be saved. Check folder permissions before retrying.",
+        ));
+    }
+    poll.retry_at = now;
+    let result = poll.read(now, fetch);
+    if let Ok(bytes) = serde_json::to_vec(poll) {
+        let _ = write_atomically(path, &bytes);
+    }
+    result
+}
+
+/// Read the same snapshots that the local CLIProxy monitor serves. The monitor
+/// alone owns upstream polling, including Retry-After and exponential backoff.
+/// A proxy account is not necessarily Claude Code's own local OAuth account.
+fn claude_proxy_quotas(home: &Path) -> Option<Vec<Quota>> {
+    let settings = claude_json(&home.join(".claude/settings.json"));
+    let base = std::env::var("ANTHROPIC_BASE_URL")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| {
+            settings
+                .as_ref()?
+                .pointer("/env/ANTHROPIC_BASE_URL")?
+                .as_str()
+                .map(str::to_string)
+        })?;
+    claude_proxy_quotas_at(home, &base, Utc::now().timestamp_millis())
+}
+
+fn claude_proxy_quotas_at(home: &Path, base: &str, now: i64) -> Option<Vec<Quota>> {
+    let url = reqwest::Url::parse(base).ok();
+    if url
+        .as_ref()
+        .is_some_and(|url| url.host_str() == Some("api.anthropic.com"))
+    {
+        return None;
+    }
+    let local = url.as_ref().is_some_and(|url| {
+        matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "[::1]"))
+            && url.port_or_known_default() == Some(8317)
+    });
+    if !local {
+        return Some(vec![claude_unavailable("Claude uses a custom API endpoint. This endpoint does not expose a local account quota cache.")]);
+    }
+    let root = std::env::var_os("CLIPROXY_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".cli-proxy-api"));
+    let state = claude_json(&root.join("priority-status.json"));
+    let accounts = state
+        .as_ref()
+        .and_then(|s| s.get("accounts"))
+        .and_then(Value::as_array);
+    let mut quotas = Vec::new();
+    for account in accounts.into_iter().flatten().filter(|a| {
+        a.get("provider").and_then(Value::as_str) == Some("claude")
+            && a.get("disabled").and_then(Value::as_bool) != Some(true)
+    }) {
+        let Some(name) = account.get("name").and_then(Value::as_str) else {
+            continue;
+        };
+        // Confirm the account still exists and is enabled; old snapshot files
+        // must not resurrect a removed or paused credential.
+        if Path::new(name).file_name().and_then(|v| v.to_str()) != Some(name) {
+            continue;
+        }
+        let Some(auth) = claude_json(&root.join("auth").join(name)) else {
+            continue;
+        };
+        if auth.get("disabled").and_then(Value::as_bool) == Some(true) {
+            continue;
+        }
+        let identity = account.get("id").and_then(Value::as_str).unwrap_or(name);
+        let title = account
+            .get("label")
+            .or_else(|| account.get("email"))
+            .and_then(Value::as_str)
+            .unwrap_or(name);
+        let observed = account
+            .get("checkedAt")
+            .and_then(Value::as_str)
+            .and_then(parse_rfc3339_ms);
+        let mut payload = account.get("usage").cloned().unwrap_or_else(|| json!({}));
+        if let Some(windows) = account.get("windows").and_then(Value::as_array) {
+            for window in windows {
+                let Some(id) = window.get("id").and_then(Value::as_str) else {
+                    continue;
+                };
+                if payload.get(id).is_some() {
+                    continue;
+                }
+                if let Some(remaining) = window.get("remainingPercent").and_then(Value::as_f64) {
+                    payload[id] = json!({"utilization": 100.0 - remaining, "resets_at": window.get("resetAt")});
+                }
+            }
+        }
+        let plan = account
+            .get("plan")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let mut quota = observed.and_then(|at| claude_quota_from_payload(&payload, plan, at))
+            .unwrap_or_else(|| claude_unavailable("CLIProxy has not reported this account's usage yet. Run cliproxy start to update the cache."));
+        quota.label = format!("Claude Code (CLIProxy: {title})");
+        for limit in &mut quota.limits {
+            limit.id = format!("proxy-{}-{}", claude_hash(identity), limit.id);
+        }
+        if quota.source == "reported" {
+            let error = account.get("error").and_then(Value::as_str);
+            let retry = account
+                .get("retryAt")
+                .and_then(Value::as_str)
+                .and_then(parse_rfc3339_ms);
+            quota.message = Some(claude_cache_note(observed, error, retry));
+            if observed.is_some_and(|at| now.saturating_sub(at) >= CLAUDE_POLL_MS) {
+                quota
+                    .message
+                    .as_mut()
+                    .unwrap()
+                    .push_str(" The local monitor will refresh when its cooldown allows.");
+            }
+        } else if let Some(error) = account.get("error").and_then(Value::as_str) {
+            quota.message = Some(claude_cache_note(
+                observed,
+                Some(error),
+                account
+                    .get("retryAt")
+                    .and_then(Value::as_str)
+                    .and_then(parse_rfc3339_ms),
+            ));
+        }
+        if quota.source == "reported"
+            && quota
+                .limits
+                .iter()
+                .any(|limit| limit.resets_at.is_some_and(|at| at <= now))
+        {
+            quota
+                .message
+                .as_mut()
+                .unwrap()
+                .push_str(" A reported window has reset; its current balance is awaiting refresh.");
+        }
+        quotas.push(quota);
+    }
+    if quotas.is_empty() {
+        quotas.push(claude_unavailable("Claude uses CLIProxy, but no enabled Claude account quota is cached. Run cliproxy start and sign in to Claude in the proxy manager."));
+    }
+    Some(quotas)
 }
 
 fn fetch_claude_quota(home: &Path) -> Result<Quota, ClaudeFetchError> {
@@ -877,6 +1235,9 @@ fn replace_file(temporary: &Path, target: &Path) -> std::io::Result<()> {
 
     let target_wide: Vec<u16> = target.as_os_str().encode_wide().chain(Some(0)).collect();
     let temporary_wide: Vec<u16> = temporary.as_os_str().encode_wide().chain(Some(0)).collect();
+    if !target.exists() {
+        return std::fs::rename(temporary, target);
+    }
     let replaced = unsafe {
         ReplaceFileW(
             target_wide.as_ptr(),
@@ -949,6 +1310,12 @@ fn claude_quota_from_payload(
         ("five_hour", "five-hour", "5-hour limit", Some(FIVE_HOUR)),
         ("seven_day", "seven-day", "7-day limit", Some(SEVEN_DAY)),
         (
+            "seven_day_fable",
+            "seven-day-fable",
+            "7-day Opus",
+            Some(SEVEN_DAY),
+        ),
+        (
             "seven_day_oauth_apps",
             "seven-day-oauth-apps",
             "7-day OAuth apps",
@@ -980,6 +1347,9 @@ fn claude_quota_from_payload(
         let Some(percent) = reported.get("utilization").and_then(Value::as_f64) else {
             continue;
         };
+        if !percent.is_finite() || !(0.0..=100.0).contains(&percent) {
+            continue;
+        }
         limits.push(QuotaLimit {
             id: id.into(),
             label: label.into(),
@@ -2414,10 +2784,11 @@ mod tests {
                 })
             })
             .unwrap();
-        assert_eq!(failed.source, "unavailable");
-        assert!(failed.limits.is_empty());
-        assert_eq!(failed.observed_at, None);
-        assert_eq!(poll.retry_at, now + CLAUDE_POLL_MS + 300_000);
+        assert_eq!(failed.source, "reported");
+        assert_eq!(failed.limits[0].percent, 20.0);
+        assert_eq!(failed.observed_at, Some(now));
+        assert!(failed.message.as_deref().unwrap().contains("Rate limited"));
+        assert_eq!(poll.retry_at, now + CLAUDE_POLL_MS * 2);
         poll.read(poll.retry_at - 1, || panic!("must honor Retry-After"));
         let recovered = poll
             .read(poll.retry_at, || {
@@ -2433,7 +2804,7 @@ mod tests {
     #[test]
     fn claude_failures_back_off_even_when_retry_after_is_zero() {
         let mut poll = ClaudePoll::default();
-        for expected in [120_000, 240_000, 480_000, 900_000, 900_000] {
+        for expected in [600_000, 1_200_000, 2_400_000, 3_600_000, 3_600_000] {
             let now = poll.retry_at;
             poll.read(now, || Err(ClaudeFetchError::new("Rate limited")));
             assert_eq!(poll.retry_at - now, expected);
@@ -2447,6 +2818,220 @@ mod tests {
             .unwrap()
             .timestamp_millis();
         assert_eq!(claude_retry_after_ms(date, now - 60_000), 60_000);
+    }
+
+    fn claude_fixture_root() -> PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("duckweed-claude-quota-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[test]
+    fn claude_cache_survives_restart_and_preserves_retry_after_and_observation() {
+        let root = claude_fixture_root();
+        let path = root.join("quota.json");
+        let now = 1_700_000_000_000;
+        let mut poll = ClaudePoll::default();
+        claude_cached_read(&path, &mut poll, now, || {
+            Ok(
+                claude_quota_from_payload(&json!({"five_hour": {"utilization": 20.0}}), None, now)
+                    .unwrap(),
+            )
+        })
+        .unwrap();
+        let mut restarted = ClaudePoll::default();
+        let cached = claude_cached_read(&path, &mut restarted, now + 60_000, || {
+            panic!("restart bypassed cooldown")
+        })
+        .unwrap();
+        assert_eq!(cached.observed_at, Some(now));
+        let failed = claude_cached_read(&path, &mut restarted, now + CLAUDE_POLL_MS, || {
+            Err(ClaudeFetchError {
+                message: "Rate limited".into(),
+                retry_after_ms: 2 * HOUR,
+            })
+        })
+        .unwrap();
+        assert_eq!(failed.limits[0].percent, 20.0);
+        assert_eq!(failed.observed_at, Some(now));
+        let mut another = ClaudePoll::default();
+        claude_cached_read(
+            &path,
+            &mut another,
+            now + CLAUDE_POLL_MS + 2 * HOUR - 1,
+            || panic!("restarted process ignored Retry-After"),
+        );
+        assert_eq!(another.retry_at, now + CLAUDE_POLL_MS + 2 * HOUR);
+        let mut history = QuotaHistory::default();
+        record_samples(&cached, &mut history, now);
+        let mut stale = failed;
+        apply_estimate(&mut stale, &mut history, now + CLAUDE_POLL_MS, None);
+        assert_eq!(
+            history.samples.len(),
+            1,
+            "cached readings cannot invent idle observations"
+        );
+        assert!(stale.limits[0].forecast.is_none());
+        assert!(!path.with_extension("lock").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn claude_concurrent_processes_share_the_persisted_polling_lease() {
+        let root = claude_fixture_root();
+        let path = root.join("quota.json");
+        let other_path = path.clone();
+        let now = 1_700_000_000_000;
+        let (entered, wait) = mpsc::channel();
+        let (release, resume) = mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            claude_cached_read(&other_path, &mut ClaudePoll::default(), now, || {
+                entered.send(()).unwrap();
+                resume.recv().unwrap();
+                Ok(claude_quota_from_payload(
+                    &json!({"five_hour": {"utilization": 23.0}}),
+                    None,
+                    now,
+                )
+                .unwrap())
+            })
+        });
+        wait.recv_timeout(Duration::from_secs(5)).unwrap();
+        claude_cached_read(&path, &mut ClaudePoll::default(), now, || {
+            panic!("overlapping request")
+        });
+        release.send(()).unwrap();
+        assert_eq!(thread.join().unwrap().unwrap().limits[0].percent, 23.0);
+        let read = claude_cached_read(&path, &mut ClaudePoll::default(), now + 1000, || {
+            panic!("duplicate request")
+        })
+        .unwrap();
+        assert_eq!(read.limits[0].percent, 23.0);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn claude_expired_cached_window_keeps_its_last_value_and_marks_the_reset() {
+        let now = 1_700_000_000_000;
+        let quota = claude_quota_from_payload(
+            &json!({"five_hour":{"utilization":100.0,
+            "resets_at": DateTime::from_timestamp_millis(now - 1000).unwrap().to_rfc3339()}}),
+            None,
+            now - 60_000,
+        )
+        .unwrap();
+        let poll = ClaudePoll {
+            quota: Some(quota),
+            retry_at: now + CLAUDE_POLL_MS,
+            ..Default::default()
+        };
+        let mut cached = poll.display(now).unwrap();
+        assert_eq!(
+            cached.limits[0].percent, 100.0,
+            "a reset does not report a new balance"
+        );
+        assert!(cached
+            .message
+            .as_deref()
+            .unwrap()
+            .contains("awaiting refresh"));
+        apply_estimate(&mut cached, &mut QuotaHistory::default(), now, None);
+        assert!(cached.limits[0].forecast.is_none());
+    }
+
+    #[test]
+    fn claude_cache_fingerprint_separates_signed_out_and_different_credentials() {
+        let root = claude_fixture_root();
+        let signed_out = claude_cache_path(&root);
+        std::fs::create_dir(root.join(".claude")).unwrap();
+        let credentials = root.join(".claude/.credentials.json");
+        std::fs::write(
+            &credentials,
+            r#"{"claudeAiOauth":{"refreshToken":"fixture-account-a"}}"#,
+        )
+        .unwrap();
+        let first = claude_cache_path(&root);
+        std::fs::write(
+            &credentials,
+            r#"{"claudeAiOauth":{"refreshToken":"fixture-account-b"}}"#,
+        )
+        .unwrap();
+        assert_ne!(first, claude_cache_path(&root));
+        assert_ne!(first, signed_out);
+        assert!(!first.to_string_lossy().contains("fixture-account"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn claude_proxy_reads_each_enabled_account_without_a_local_oauth_session() {
+        let root = claude_fixture_root();
+        let proxy = root.join(".cli-proxy-api");
+        std::fs::create_dir_all(proxy.join("auth")).unwrap();
+        for name in ["a.json", "b.json"] {
+            std::fs::write(
+                proxy.join("auth").join(name),
+                r#"{"type":"claude","disabled":false}"#,
+            )
+            .unwrap();
+        }
+        std::fs::write(proxy.join("priority-status.json"), json!({"accounts": [
+            {"id":"a", "name":"a.json", "label":"Account A", "provider":"claude", "checkedAt":"2026-10-02T10:00:00Z",
+             "error":"Quota update returned HTTP 429.", "retryAt":"2026-10-02T11:00:00Z",
+             "usage":{"five_hour":{"utilization":39.0,"resets_at":"2026-10-02T15:00:00Z"}}},
+            {"id":"b", "name":"b.json", "label":"Account B", "provider":"claude", "checkedAt":"2026-10-02T10:05:00Z",
+             "windows":[{"id":"seven_day_oauth_apps","remainingPercent":80.0,"resetAt":"2026-10-09T10:00:00Z"}]},
+            {"id":"removed", "name":"removed.json", "provider":"claude"}
+        ]}).to_string()).unwrap();
+        let now = parse_rfc3339_ms("2026-10-02T10:10:00Z").unwrap();
+        let quotas = claude_proxy_quotas_at(&root, "http://localhost:8317", now).unwrap();
+        assert_eq!(quotas.len(), 2);
+        assert!(quotas.iter().all(|q| q.source == "reported"));
+        assert_eq!(quotas[0].limits[0].percent, 39.0);
+        assert_eq!(quotas[1].limits[0].percent, 20.0);
+        assert_ne!(quotas[0].limits[0].id, quotas[1].limits[0].id);
+        assert!(quotas[0].message.as_deref().unwrap().contains("429"));
+        assert_eq!(
+            quotas[0].observed_at,
+            parse_rfc3339_ms("2026-10-02T10:00:00Z")
+        );
+        std::fs::write(proxy.join("auth/a.json"), r#"{"disabled":true}"#).unwrap();
+        let remaining = claude_proxy_quotas_at(&root, "http://127.0.0.1:8317", now).unwrap();
+        assert_eq!(remaining.len(), 1);
+        std::fs::remove_file(proxy.join("auth/b.json")).unwrap();
+        let empty = claude_proxy_quotas_at(&root, "http://127.0.0.1:8317", now).unwrap();
+        assert_eq!(empty[0].source, "unavailable");
+        assert!(claude_proxy_quotas_at(&root, "https://api.anthropic.com", now).is_none());
+        assert_eq!(
+            claude_proxy_quotas_at(&root, "https://proxy.example.test", now).unwrap()[0].source,
+            "unavailable"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[ignore = "read-only smoke check of the installed CLIProxy cache"]
+    fn claude_live_proxy_cache_is_readable_without_upstream_requests() {
+        let home = PathBuf::from(
+            std::env::var_os("USERPROFILE")
+                .or_else(|| std::env::var_os("HOME"))
+                .unwrap(),
+        );
+        let quotas = claude_proxy_quotas_at(
+            &home,
+            "http://127.0.0.1:8317",
+            Utc::now().timestamp_millis(),
+        )
+        .unwrap();
+        assert!(!quotas.is_empty());
+        assert!(quotas
+            .iter()
+            .all(|quota| quota.source == "reported" && !quota.limits.is_empty()));
+        println!(
+            "Read {} enabled Claude account(s) and {} provider windows from the installed cache.",
+            quotas.len(),
+            quotas.iter().map(|q| q.limits.len()).sum::<usize>()
+        );
     }
 
     #[test]
@@ -2707,7 +3292,10 @@ mod tests {
             .all(|sample| sample.limit_id != "primary"));
         assert_eq!(quota.limits[0].id, "codex:primary:10080");
         assert_ne!(
-            quota.limits[0].forecast.as_ref().map(|forecast| forecast.basis.as_str()),
+            quota.limits[0]
+                .forecast
+                .as_ref()
+                .map(|forecast| forecast.basis.as_str()),
             Some("recent")
         );
         assert_eq!(quota.limits[1].id, "codex_bengalfox:primary:300");
@@ -2718,9 +3306,9 @@ mod tests {
     #[ignore = "queries the locally installed Codex CLI account"]
     fn codex_live_account_read_returns_current_provider_pools() {
         let (_, buckets) = live_codex_rate_limits().expect("live Codex rate limits");
-        assert!(buckets.iter().any(|bucket| {
-            bucket.get("limit_id").and_then(Value::as_str) == Some("codex")
-        }));
+        assert!(buckets
+            .iter()
+            .any(|bucket| { bucket.get("limit_id").and_then(Value::as_str) == Some("codex") }));
 
         let quota = codex_quota_from_buckets(None, &buckets).expect("live Codex quota");
         assert!(!quota.limits.is_empty());
@@ -2734,10 +3322,8 @@ mod tests {
         // After the account hits its ceiling, Codex still appends rate_limits
         // events but with primary/secondary null. The card must keep the last
         // usable reading (often 100%) instead of saying limits are unavailable.
-        let root = std::env::temp_dir().join(format!(
-            "duckweed-quota-exhausted-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("duckweed-quota-exhausted-{}", std::process::id()));
         let dir = root.join(".codex/sessions/2026/07/26");
         std::fs::create_dir_all(&dir).unwrap();
 

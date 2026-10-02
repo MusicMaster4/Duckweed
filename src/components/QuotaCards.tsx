@@ -14,7 +14,7 @@ export function QuotaCards({ quotas, now }: { quotas: Quota[]; now: number }) {
     <div className="usage-quota-grid">
       {quotas.map((quota) => (
         <article
-          key={quota.agent}
+          key={`${quota.agent}:${quota.label}`}
           className={`usage-quota ${quota.source === "unavailable" ? "is-unavailable" : ""}`}
         >
           <header>

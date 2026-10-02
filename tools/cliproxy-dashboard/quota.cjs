@@ -83,13 +83,13 @@ function codexWindows(usage) {
     weeklyResetAt: core.find(w => w.label === 'Weekly')?.resetAt || null, plan: usage.plan_type || null, quotaSupported: true };
 }
 function claudeWindows(usage) {
-  const definitions = [['five_hour', '5 hours'], ['seven_day', 'Weekly'], ['seven_day_opus', 'Opus weekly'], ['seven_day_sonnet', 'Sonnet weekly'], ['seven_day_fable', 'Opus weekly']];
-  const windows = definitions.filter(([id]) => usage[id] && typeof usage[id].utilization === 'number')
+  const definitions = [['five_hour', '5 hours'], ['seven_day', 'Weekly'], ['seven_day_opus', 'Opus weekly'], ['seven_day_sonnet', 'Sonnet weekly'], ['seven_day_fable', 'Opus weekly'], ['seven_day_oauth_apps', 'OAuth apps weekly'], ['seven_day_cowork', 'Cowork weekly'], ['iguana_necktie', 'Iguana Necktie']];
+  const windows = definitions.filter(([id]) => usage[id] && typeof usage[id].utilization === 'number' && Number.isFinite(usage[id].utilization) && usage[id].utilization >= 0 && usage[id].utilization <= 100)
     .map(([id, label]) => window(id, label, usage[id].utilization, usage[id].resets_at));
   const core = windows.filter(w => ['five_hour', 'seven_day'].includes(w.id));
   return { windows, available: core.length ? core.every(w => w.remainingPercent > 0) : null,
     weeklyResetAt: windows.find(w => w.id === 'seven_day')?.resetAt || windows.find(w => w.label.includes('weekly'))?.resetAt || null,
-    quotaSupported: true };
+    quotaSupported: windows.length > 0 };
 }
 function normalizedWindows(usage) {
   const windows = (usage.groups || []).flatMap((group, i) => (group.buckets || []).map((bucket, j) => {
@@ -184,7 +184,11 @@ async function probe(account) {
     const result = await management('/api-call', 'POST', { auth_index: account.auth_index, method, url, header, ...(data ? { data } : {}) });
     if (result.status_code !== 200) throw quotaError(result.status_code, result.header);
     const usage = typeof result.body === 'string' ? JSON.parse(result.body) : result.body;
-    if (account.provider === 'claude') return { ...claudeWindows(usage), usage };
+    if (account.provider === 'claude') {
+      const parsed = claudeWindows(usage);
+      if (!parsed.windows.length) throw new Error('Claude returned no usable quota windows.');
+      return { ...parsed, usage };
+    }
     if (account.provider === 'codex') return codexWindows(usage);
     const windows = Object.entries(usage.models || {}).filter(([, m]) => typeof m.quotaInfo?.remainingFraction === 'number')
       .map(([id, m]) => window(id, m.displayName || id, 100 - m.quotaInfo.remainingFraction * 100, m.quotaInfo.resetTime));
