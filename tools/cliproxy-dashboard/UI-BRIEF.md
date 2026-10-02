@@ -1,0 +1,19 @@
+# CLIProxy account panel
+
+Build `index.html`, a self-contained, polished account dashboard with vanilla HTML/CSS/JavaScript. You own only this file. You are not alone in the codebase. Do not change backend files, local credentials, or other people's edits. Read C:/Users/jubar/.agents/skills/frontend-design/SKILL.md before building. Plan and critique briefly, then implement.
+
+The user wants fewer words, no glow, no eyebrow/HUD labels, all English, no em dashes. A calm dark desktop utility, precise spacing, understated blue/teal accents, no hero or promotional content. Account rows/cards show provider, account identity, modest plan chip, remaining quota bars and a live reset countdown. Real data only. Never invent a quota. No external fonts/dependencies. Responsive, keyboard accessible, visible focus, reduced motion.
+
+API, same origin, JSON, authenticate using Authorization: Bearer <management password>. Initial simple password form. Keep password in sessionStorage only. Never hardcode secrets. Fetch failure HTTP401 returns to login.
+
+- GET /local/status -> {checkedAt,refreshing,refreshIntervalSeconds:60,accounts:[{id,name,email,provider,label,plan,status,disabled,priority,windows:[{id,label,remainingPercent,resetAt}],checkedAt,error,quotaSupported}],connections:[{id,name,provider,baseUrl,keyCount}],providers:[{id,name,modes:["oauth" or "key"],baseUrl?}],models:[{id,provider?}]}.
+- POST /local/refresh -> refreshes live quotas and returns the same status shape. Poll GET status every 10 seconds, refresh happens automatically on backend every 60 seconds. Countdown ticks locally every second. Show last update only as short timestamp or tooltip. If refresh failed, preserve last data and visibly mark it stale. Unknown quota says "Quota unavailable".
+- POST /local/login body {provider} -> {url,state,provider}; open url using a synchronously opened popup to avoid blockers. Then poll GET /local/login-status?state=... every 2 seconds -> {status:"wait"|"ok"|"error",error?}. On ok refresh. Do not imply account selection is automatic. Login dialog concise note "Choose a different account in the sign-in window." Supports repeated login for each provider; existing accounts remain.
+- POST /local/account body {id,disabled:boolean} enables/pauses a credential. Same returned status.
+- POST /local/connect body {provider,name,baseUrl,apiKey,models:["model-id",...]} adds another API key connection without replacing existing keys. Returns same status. Provider catalog supplies suggested base URL. For custom compatible provider name, URL, key and comma-separated model IDs required. Password inputs, clear after save. No secrets displayed after saving.
+
+Main view minimal header "CLIProxy", small connected state, icon refresh and "Add account". Provider filter including All. Group or sort accounts naturally; show all accounts per provider. Simple empty state for providers with no account. Add account dialog lets choosing provider, OAuth sign-in or API key connection depending modes. Include muted link "Advanced settings" to http://127.0.0.1:8317/management.html in a new tab. API key connections can be compact rows below subscription accounts, rather than pretending they have subscription quota.
+
+Small optional Models disclosure listing actual model IDs and copy actions. Compact connection disclosure can show http://127.0.0.1:8317/v1 and agent launch examples: claude; codex -c model_provider=cliproxy; claudex --g. Do not overwhelm primary view with setup text.
+
+Do not run a server. Write index.html completely, then report what you built. Use safe textContent/DOM construction or proper escaping for all remote fields. No innerHTML interpolation of untrusted strings. CSS must contain no glow, gradients, filter blur, text shadow or box shadow, including plan chips.
