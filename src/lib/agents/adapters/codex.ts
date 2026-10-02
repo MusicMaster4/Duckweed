@@ -328,6 +328,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
   let accountRead: Promise<void> | null = null;
   let accountSignedIn = false;
   let usesOpenaiAuth = true;
+  let modelProvider: string | null = null;
   let accountReloadDeferred = false;
   let openingThread: Promise<void> | null = null;
   let nextId = 1;
@@ -1535,6 +1536,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       // An explicit launch flag still wins: the server has not seen it yet
       // (thread/start carries no effort), so its answer here is the default,
       // and the first turn/start is what applies the request.
+      modelProvider = asString(thread.modelProvider);
       currentModel = ctx.launch.model ?? asString(thread.model) ?? currentModel;
       currentEffort = ctx.launch.effort ?? asString(thread.reasoningEffort) ?? currentEffort;
       currentServiceTier = asString(thread.serviceTier);
@@ -1622,7 +1624,11 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
             isDefault: model.isDefault === true,
           }))
           .filter((model) => model.id);
-        models = advertisedModels.filter((model) => !model.hidden);
+        // CLIProxy aggregates every provider into /models. Keep this harness on
+        // its OpenAI model family while retaining the CLI's effort metadata.
+        // Other custom endpoints may intentionally serve their own model names.
+        models = advertisedModels.filter((model) => !model.hidden &&
+          (modelProvider?.toLowerCase() !== "cliproxy" || /^(?:openai\/)?(?:gpt-|o\d(?:-|$)|codex(?:-|$))/i.test(model.id)));
         const hiddenCurrent = advertisedModels.some(
           (model) =>
             model.hidden &&

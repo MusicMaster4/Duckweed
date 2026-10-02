@@ -26,6 +26,7 @@ import { subagentComposerCopy } from "../../lib/agents/subagents";
 import {
   effortsFor,
   shortModelLabel,
+  findModelChoice,
   type AgentImageAttachment,
   type AgentSessionState,
 } from "../../lib/agents/types";
@@ -165,11 +166,8 @@ function buildMenu(value: string, session: AgentSessionState): Menu | null {
         .map((model) => ({
           value: model.id,
           label: model.label || shortModelLabel(model.id),
-          description: model.id !== model.label ? model.id : model.efforts.join(", "),
-          current:
-            session.model === model.id ||
-            session.model === model.label ||
-            (!!session.model && model.id.endsWith(`/${session.model}`)),
+          description: model.resolvedModel ?? (model.id !== model.label ? model.id : model.efforts.join(", ")),
+          current: findModelChoice(session.model, session.models)?.id === model.id,
         }));
       if (rows.length) return { kind: "args", command, rows };
       return null;

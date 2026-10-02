@@ -329,6 +329,25 @@ describe("codex adapter", () => {
     expect(models[0].label).toBe("GPT-5.6-Sol");
   });
 
+  test("scopes the mixed CLIProxy catalog to Codex models without changing other providers", async () => {
+    for (const modelProvider of ["cliproxy", "custom-server"]) {
+      const h = harness();
+      await h.handshake({ modelProvider });
+      const request = h.sent.find(message => message.method === "model/list")!;
+      h.feed({ id: request.id, result: { data: [
+        { id: "gpt-9-future", displayName: "Future Codex", supportedReasoningEfforts: [{ reasoningEffort: "ultra" }] },
+        { id: "claude-opus-7-2", displayName: "Opus 7.2" },
+        { id: "gemini-future" }, { id: "grok-future" }, { id: "or/selected" },
+        { id: "o3" }, { id: "codex-mini-latest" }, { id: "openai/gpt-9" },
+      ] } });
+      await Promise.resolve(); await Promise.resolve();
+      expect(h.state().models.map(model => model.id)).toEqual(modelProvider === "cliproxy"
+        ? ["gpt-9-future", "o3", "codex-mini-latest", "openai/gpt-9"]
+        : ["gpt-9-future", "claude-opus-7-2", "gemini-future", "grok-future", "or/selected", "o3", "codex-mini-latest", "openai/gpt-9"]);
+      expect(h.state().models[0].efforts).toEqual(["ultra"]);
+    }
+  });
+
   test("lists callable skills with their invocation names and excludes Computer Use", async () => {
     const h = harness();
     await h.handshake();

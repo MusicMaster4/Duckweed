@@ -460,6 +460,8 @@ export interface AgentModelChoice {
   /** Short label for the UI; falls back to {@link id}. */
   label: string;
   efforts: string[];
+  /** Exact model behind a CLI alias, reported by the running CLI. */
+  resolvedModel?: string;
 }
 
 export interface AgentSessionState {
@@ -555,19 +557,28 @@ export interface AgentSessionState {
   exitArmed?: boolean;
 }
 
-/** Effort levels the current model (or any known model) accepts. */
+/** Resolve aliases without confusing different versions of the same family. */
+export function findModelChoice(current: string | null, models: AgentModelChoice[]): AgentModelChoice | undefined {
+  if (!current) return undefined;
+  const normalized = current.toLowerCase();
+  const exact = models.find(model => model.id.toLowerCase() === normalized || model.label.toLowerCase() === normalized);
+  if (exact) return exact;
+  const resolved = models.filter(model => model.resolvedModel?.toLowerCase() === normalized);
+  if (resolved.length) return resolved.find(model => model.id !== "default") ?? resolved[0];
+  return models.find(model => {
+    if (model.id.endsWith(`/${current}`) || current.endsWith(`/${model.id}`)) return true;
+    if (model.resolvedModel) return false;
+    // Older CLI catalogs expose only aliases. Do not compare two versioned IDs.
+    const alias = /^(opus|sonnet|haiku|fable)(\[1m\])?$/i.exec(model.id);
+    return !!alias && normalized.startsWith(`claude-${alias[1].toLowerCase()}-`) && normalized.includes("[1m]") === !!alias[2];
+  });
+}
+
+/** Effort levels advertised for the selected model. */
 export function effortsFor(state: Pick<AgentSessionState, "model" | "models">): string[] {
   if (!state.models.length) return [];
-  const active =
-    (state.model &&
-      state.models.find(
-        (model) =>
-          model.id === state.model ||
-          model.label === state.model ||
-          model.id.endsWith(`/${state.model}`),
-      )) ||
-    null;
-  if (active?.efforts.length) return active.efforts;
+  const active = findModelChoice(state.model, state.models);
+  if (active) return active.efforts;
   // Fall back to the union so a session that only knows efforts on a sibling
   // model still offers something useful in the picker.
   const seen = new Set<string>();

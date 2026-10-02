@@ -112,6 +112,36 @@ describe("claude adapter", () => {
     expect(h.state().model).toBe("future-model");
   });
 
+  test("uses resolved CLI versions, preserves selection aliases and discovers native commands", async () => {
+    const h = harness();
+    h.adapter.start(h.ctx);
+    const initialize = h.sent[0] as { request_id: string };
+    h.feed({ type: "control_response", response: { subtype: "success", request_id: initialize.request_id, response: {
+      models: [
+        { value: "default", displayName: "Default (recommended)", resolvedModel: "claude-opus-7-2", supportedEffortLevels: ["medium", "max"] },
+        { value: "opus", displayName: "Opus", resolvedModel: "claude-opus-7-2", supportedEffortLevels: ["medium", "max"] },
+        { value: "claude-fable-6-1[1m]", displayName: "Fable", resolvedModel: "claude-fable-6-1", supportedEffortLevels: ["high"] },
+        { value: "haiku", displayName: "Haiku", resolvedModel: "claude-haiku-5-1" },
+      ], commands: [{ name: "new-command", description: "Native capability" }, { name: "__internal" }],
+    } } });
+    expect(h.state().models).toEqual([
+      { id: "default", label: "Default (Opus 7.2)", resolvedModel: "claude-opus-7-2", efforts: ["medium", "max"] },
+      { id: "opus", label: "Opus 7.2", resolvedModel: "claude-opus-7-2", efforts: ["medium", "max"] },
+      { id: "claude-fable-6-1[1m]", label: "Fable 6.1 (1M)", resolvedModel: "claude-fable-6-1[1m]", efforts: ["high"] },
+      { id: "haiku", label: "Haiku 5.1", resolvedModel: "claude-haiku-5-1", efforts: [] },
+    ]);
+    expect(h.state().commands).toEqual([{ name: "/new-command", description: "Native capability" }]);
+    const change = h.adapter.configure?.("model", "opus", h.ctx);
+    const request = h.sent.at(-1) as { request_id: string };
+    expect(request).toMatchObject({ request: { subtype: "set_model", model: "opus" } });
+    h.feed({ type: "control_response", response: { subtype: "success", request_id: request.request_id } });
+    await change;
+    h.feed({ type: "system", subtype: "init", model: "claude-opus-6-1", slash_commands: ["new-command"] });
+    expect(h.state().models[1].label).toBe("Opus 7.2");
+    expect(h.state().model).toBe("claude-opus-6-1");
+    expect(h.state().commands[0].description).toBe("Native capability");
+  });
+
   test("keeps fallback models when discovery fails or returns no valid models", () => {
     for (const reply of [
       { subtype: "error", error: "Unsupported request" },

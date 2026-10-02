@@ -119,7 +119,7 @@ export function refreshClaudeModelLabels(models: AgentModelChoice[], id: string)
   const version = match[2].replace("-", ".");
   const name = `${family[0].toUpperCase()}${family.slice(1)} ${version}`;
   return models.map((model) => {
-    if (model.id !== family && model.id !== `${family}[1m]`) return model;
+    if (model.resolvedModel || (model.id !== family && model.id !== `${family}[1m]`)) return model;
     return { ...model, label: `${name}${model.id.endsWith("[1m]") ? " (1M context)" : ""}` };
   });
 }

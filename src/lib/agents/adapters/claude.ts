@@ -16,6 +16,7 @@ import {
 import type { AgentLaunch } from "../launch";
 import { promptTextWithLocalSkills } from "../localSkills";
 import { fallbackModels } from "../slashCatalog";
+import { shortModelLabel } from "../types";
 import {
   makeChange,
   toolKind,
@@ -1487,15 +1488,24 @@ export function createClaudeAdapter(): AgentAdapter {
           : Array.isArray(row?.supportedEffortLevels)
             ? asArray(row.supportedEffortLevels)
               .map(asString).filter((value): value is string => !!value)
-            : [...fallbackEfforts];
+            : row?.supportsEffort === true ? [...fallbackEfforts] : [];
+        const resolved = asString(row?.resolvedModel)?.trim();
+        const resolvedModel = resolved && id.toLowerCase().includes("[1m]") && !resolved.toLowerCase().includes("[1m]") ? `${resolved}[1m]` : resolved;
+        const label = asString(row?.displayName)?.trim() || id;
         models.push({
           id,
-          label: asString(row?.displayName)?.trim() || id,
+          label: resolvedModel ? (id === "default" ? `Default (${shortModelLabel(resolvedModel)})` : shortModelLabel(resolvedModel)) : label,
+          ...(resolvedModel ? { resolvedModel } : {}),
           efforts,
         });
       }
       // Empty/error responses from older CLIs leave the fallback usable.
-      if (models.length) ctx.emit({ type: "session", models });
+      const commands = asArray(payload?.commands).flatMap(raw => {
+        const command = asRecord(raw);
+        const name = asString(command?.name)?.trim();
+        return name && !name.startsWith("__") ? [{ name: name.startsWith("/") ? name : `/${name}`, description: asString(command?.description) ?? "" }] : [];
+      });
+      if (models.length || commands.length) ctx.emit({ type: "session", ...(models.length ? { models } : {}), ...(commands.length ? { commands } : {}) });
       return;
     }
     const side = pendingSideQuestions.get(requestId);
