@@ -177,7 +177,8 @@ export function AgentControls({ session, onSelect, placement = "composer" }: Pro
     : canPickModel
       ? "Model"
       : null;
-  const effortLabel = selectedEffort
+  const modelWithoutEffort = findModelChoice(selectedModel, models)?.efforts.length === 0;
+  const effortLabel = modelWithoutEffort ? null : selectedEffort
     ? formatEffortLabel(selectedEffort)
     : canPickEffort
       ? "Effort"
