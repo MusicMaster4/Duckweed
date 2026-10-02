@@ -388,7 +388,7 @@
     <p class="note" id="noModes" hidden>This provider has no supported setup method here.</p>
   </div>
   <div class="dlg-foot">
-    <a class="adv" href="http://127.0.0.1:8317/management.html" target="_blank" rel="noopener noreferrer">Advanced settings</a>
+    <a class="adv" href="http://127.0.0.1:8317/management.html?advanced=1" target="_blank" rel="noopener noreferrer">Advanced settings</a>
   </div>
 </dialog>
 
@@ -603,7 +603,7 @@
   }
 
   async function poll() {
-    if (S.inflight) return;
+    if (document.hidden || S.inflight) return;
     S.inflight = true;
     try {
       applyStatus(await api('/local/status'));

@@ -570,6 +570,8 @@ describe("Custom agent UI sessions", () => {
     session.setDraft(termId, "Keep this draft");
     session.setDraftImages(termId, [image]);
     expect(session.submit(termId, "Keep this draft", [image])).toBe(false);
+    expect(session.submit(termId, "Keep this draft", [image])).toBe(false);
+    expect(session.get(termId)?.items.filter((item) => item.kind === "notice" && item.text.includes("Codex is signed out"))).toHaveLength(1);
     expect(session.getDraft(termId)).toBe("Keep this draft");
     expect(session.getDraftImages(termId)).toEqual([image]);
   });
@@ -616,8 +618,13 @@ describe("Custom agent UI sessions", () => {
     session.setDraft(termId, "Continue after login");
     session.setDraftImages(termId, [image]);
     const before = sent.map(rpc).filter((message) => message.method === "initialize").length;
+    const surfaceStates: Array<boolean> = [];
+    const unsubscribe = session.subscribe(termId, () => surfaceStates.push(session.isActive(termId)));
     frameSink?.({ kind: "exit", code: 0, reconnect: true });
     for (let count = 0; count < 10; count++) await flush();
+    unsubscribe();
+    expect(surfaceStates.length).toBeGreaterThan(0);
+    expect(surfaceStates.every(Boolean)).toBe(true);
     expect(sent.map(rpc).filter((message) => message.method === "initialize")).toHaveLength(before + 1);
     expect(session.getDraft(termId)).toBe("Continue after login");
     expect(session.getDraftImages(termId)).toEqual([image]);

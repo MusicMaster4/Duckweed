@@ -126,4 +126,14 @@ test('native management patch is idempotent, fails safely and has valid JavaScri
   const checked = spawnSync(process.execPath, ['--input-type=module', '--check'], { input: script, encoding: 'utf8' });
   assert.equal(checked.status, 0, checked.stderr);
   assert.ok(patched.includes('children:globalThis.duckweedQuotaNote(e.localCache)'));
+  assert.ok(patched.includes('duckweed-account-panel:v1'));
+  const entry = [...patched.matchAll(/<script([^>]*)>([\s\S]*?)<\/script>/g)].find(match => match[2].includes("location.replace('http://'"))?.[2];
+  assert.ok(entry, 'existing bookmarks must reach the redesigned panel');
+  const vm = require('node:vm');
+  let destination;
+  vm.runInNewContext(entry, { URLSearchParams, location: { search: '', hostname: '127.0.0.1', replace: value => { destination = value; } } });
+  assert.equal(destination, 'http://127.0.0.1:8318/');
+  destination = undefined;
+  vm.runInNewContext(entry, { URLSearchParams, location: { search: '?advanced=1', hostname: '127.0.0.1', replace: value => { destination = value; } } });
+  assert.equal(destination, undefined, 'advanced settings must remain accessible');
 });

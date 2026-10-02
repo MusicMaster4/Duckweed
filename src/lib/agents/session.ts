@@ -1054,7 +1054,7 @@ function handleFrame(session: Session, frame: AgentFrame): void {
         if (recovery) {
           const { termId, launch } = session;
           const cwd = session.state.cwd;
-          stop(termId);
+          disposeSession(termId, true);
           void start(termId, { ...launch, prompt: null, resume: false, resumeId: recovery.sessionId }, cwd, recovery);
           return;
         }
@@ -1095,10 +1095,13 @@ export async function start(
   cwd: string,
   recovery?: AgentRecovery,
 ): Promise<string | null> {
-  if (sessions.has(termId)) return null;
+  const replacing = sessions.get(termId);
+  if (replacing && !replacing.disposed) return null;
   if (!TAURI_RUNTIME) return "the custom agent UI needs the desktop app";
   await teardowns.get(termId);
-  if (sessions.has(termId)) return null;
+  // A service reconnect reserves its existing surface during teardown. A
+  // user's Stop while we await teardown cancels that replacement entirely.
+  if (replacing ? sessions.get(termId) !== replacing : sessions.has(termId)) return null;
 
   // OpenCode snapshots its model registry during the ACP handshake. Waiting
   // here ensures a launch made during WebView startup sees the refreshed list.
@@ -1393,7 +1396,10 @@ export function submit(
     return true;
   }
   if (session.state.authenticationRequired) {
-    emit(session, { type: "notice", tone: "info", text: "Codex is signed out. Use /login or sign in from the Codex CLI to continue." });
+    const text = "Codex is signed out. Use /login or sign in from the Codex CLI to continue.";
+    if (!session.state.items.some((item) => item.kind === "notice" && item.text === text)) {
+      emit(session, { type: "notice", tone: "info", text });
+    }
     return false;
   }
   const extensions = session.state.extensions ?? [];
@@ -1992,15 +1998,31 @@ export function answer(
 
 /** End the session and hand the pane back to its terminal. */
 export function stop(termId: string): void {
+  disposeSession(termId);
+}
+
+function disposeSession(termId: string, keepSurface = false): void {
   const session = sessions.get(termId);
   if (!session) return;
+  if (session.disposed) {
+    if (!keepSurface) {
+      sessions.delete(termId);
+      workspaceRecovery.update(termId, { agent: null });
+      notifyNow(session);
+    }
+    return;
+  }
   cancelCapacityReply(session);
   session.disposed = true;
   const recoveryTimer = recoveryTimers.get(termId);
   if (recoveryTimer) clearTimeout(recoveryTimer);
   recoveryTimers.delete(termId);
-  workspaceRecovery.update(termId, { agent: null });
-  sessions.delete(termId);
+  if (keepSurface) {
+    session.state = { ...session.state, status: "starting", error: null };
+  } else {
+    workspaceRecovery.update(termId, { agent: null });
+    sessions.delete(termId);
+  }
   if (TAURI_RUNTIME) {
     // Agents that end on EOF get the chance to shut down cleanly; the kill
     // that follows is the backstop for the ones that do not.

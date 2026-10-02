@@ -1,9 +1,16 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const marker = '<!-- duckweed-claude-quota-cache:v1 -->';
+const entryMarker = '<!-- duckweed-account-panel:v1 -->';
+function panelEntry(html) {
+  if (html.includes(entryMarker)) return html;
+  if (!html.includes('</head>')) throw new Error('Management UI is missing its head element.');
+  const entry = `${entryMarker}\n<script>if (!new URLSearchParams(location.search).has('advanced')) location.replace('http://' + location.hostname + ':8318/');</script>\n`;
+  return html.replace('</head>', entry + '</head>');
+}
 
 function patchHtml(html) {
-  if (html.includes(marker)) return html;
+  if (html.includes(marker)) return panelEntry(html);
   const replacements = [
     ['qp={request:async(e,t)=>{let n=await W.post(`/requests/api-call`,e,t)',
       'qp={request:async(e,t)=>{let n=e.url===`https://api.anthropic.com/api/oauth/usage`?await globalThis.duckweedClaudeQuota(e,Fm.getState(),()=>W.post(`/requests/api-call`,e,t)):await W.post(`/requests/api-call`,e,t)'],
@@ -24,7 +31,7 @@ function patchHtml(html) {
   for (const [before, after] of replacements) html = html.replace(before, after);
   const bridge = fs.readFileSync(path.join(__dirname, 'management-quota-bridge.js'), 'utf8');
   if (!html.includes('</head>')) throw new Error('Management UI is missing its head element.');
-  return html.replace('</head>', `${marker}\n<script>\n${bridge}\n</script>\n</head>`);
+  return panelEntry(html.replace('</head>', `${marker}\n<script>\n${bridge}\n</script>\n</head>`));
 }
 function patchManagementPanel(root) {
   const filename = path.join(root, 'static', 'management.html');

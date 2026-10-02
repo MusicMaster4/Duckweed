@@ -163,6 +163,14 @@ pub fn synchronize(
         return Ok("restarted");
     }
     let owner = stored_owner(&service.home);
+    // File-backed credentials give us a stable ownership revision. Token
+    // refreshes do not change it; login/logout do. Do not launch an npm shim
+    // and a new CLI process for every session's five-second poll.
+    if signed_in && owner == *service.owner.lock().unwrap()
+        && service.home.join("auth.json").is_file()
+    {
+        return Ok("unchanged");
+    }
     let mut status = build_command(&service.resolved);
     status.args(["login", "status"]);
     if let Some(cwd) = &service.options.cwd {
@@ -536,6 +544,25 @@ mod tests {
         );
         auth["tokens"]["account_id"] = json!("workspace-2");
         assert_ne!(first, owner_digest(&auth, None));
+    }
+
+    #[test]
+    fn unchanged_file_account_does_not_launch_another_cli() {
+        let home = std::env::temp_dir().join(format!("dw-owner-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&home).unwrap();
+        std::fs::write(home.join("auth.json"), r#"{"auth_mode":"apikey","OPENAI_API_KEY":"test-only-key"}"#).unwrap();
+        let options = AgentSpawnOptions {
+            program: "missing-codex-binary".into(),
+            args: vec!["app-server".into()],
+            cwd: None,
+            env: Some(std::collections::HashMap::from([("CODEX_HOME".into(), home.to_string_lossy().into_owned())])),
+        };
+        let connection = service(Path::new("missing-codex-binary"), &options);
+        for _ in 0..3 {
+            assert_eq!(synchronize(&connection, true, || panic!("unchanged account restarted")).unwrap(), "unchanged");
+        }
+        std::fs::remove_file(home.join("auth.json")).unwrap();
+        std::fs::remove_dir(home).unwrap();
     }
 
     #[test]

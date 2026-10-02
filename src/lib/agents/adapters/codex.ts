@@ -327,6 +327,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
   let authPollTimer: ReturnType<typeof setInterval> | null = null;
   let accountRead: Promise<void> | null = null;
   let accountSignedIn = false;
+  let usesOpenaiAuth = true;
   let accountReloadDeferred = false;
   let openingThread: Promise<void> | null = null;
   let nextId = 1;
@@ -1485,6 +1486,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
           5_000,
         );
         if (disposed) return;
+        usesOpenaiAuth = account.requiresOpenaiAuth !== false;
         applyAccount(account, ctx);
       } catch {
         // Older app-server builds do not expose account/read. Continue and
@@ -1676,15 +1678,15 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     if (accountRead) return accountRead;
     const version = accountUpdateVersion;
     const read = () => requestWithTimeout(ctx, "duckweed-account-sync", "account/read", { refreshToken: false }, 5_000);
-    accountRead = (synchronize && ctx.syncAccount ? ctx.syncAccount(accountSignedIn)
+    accountRead = (synchronize && usesOpenaiAuth && ctx.syncAccount ? ctx.syncAccount(accountSignedIn)
       .then((result) => {
         if (disposed || result === "restarted") return null;
         if (result === "deferred") {
           if (!accountReloadDeferred) ctx.emit({ type: "notice", tone: "info", text: "The Codex account changed in the CLI. The shared service will reload after active turns and background terminals finish." });
           accountReloadDeferred = true;
-          authenticationRequired = true;
-          ctx.emit({ type: "authentication", required: true });
-          return null;
+          // The running daemon still owns valid credentials. Keep its active
+          // turn and steer usable until the shared service can safely reload.
+          return read();
         }
         accountReloadDeferred = false;
         return read();
@@ -1692,6 +1694,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       .then(async (account) => {
         if (!account || disposed || version !== accountUpdateVersion) return;
         if (rejectedAuthVersion === version) return;
+        usesOpenaiAuth = account.requiresOpenaiAuth !== false;
         const changed = applyAccount(account, ctx) || accountCachesDirty;
         accountCachesDirty = false;
         if (authenticationRequired) return;

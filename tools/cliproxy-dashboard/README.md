@@ -31,7 +31,7 @@ cliproxy login gemini-cli
 cliproxy stop
 ```
 
-The Windows startup entry launches the proxy and panel in the background. A scheduled task refreshes account quotas every minute, including when the panel is closed. `cliproxy stop` stops both local processes. The task does not start the proxy when it is stopped.
+The Windows startup entry launches the proxy and panel in the background. The panel server refreshes account quotas every minute, including when the browser panel is closed. `cliproxy stop` stops both local processes. The duplicate scheduled quota task is disabled. The credential command only reads the local key and does not launch services; run `cliproxy start` if the proxy was intentionally stopped.
 
 Codex can use the original direct provider for one launch with `codex -c model_provider=openai`. Its optional `--profile cliproxy` works for normal CLI sessions. Codex `app-server`, which Duckweed uses, reads the default proxy provider without a profile flag.
 
@@ -41,7 +41,7 @@ Live Duckweed protocol checks passed for Claude, Codex and Grok, including tool 
 
 ## Source and validation
 
-`server.cjs` serves the UI and authenticated account operations. `quota.cjs` collects quota data and adjusts account priorities. `claude-cache.cjs` returns cached Claude quota data with an explicit timestamp and stale/error metadata. `index.html` is self-contained and has no external dependencies, shadows or glow. The original proxy management UI remains available through **Advanced settings**.
+`server.cjs` serves the UI and authenticated account operations. `quota.cjs` collects quota data and adjusts account priorities. `claude-cache.cjs` returns cached Claude quota data with an explicit timestamp and stale/error metadata. `index.html` is self-contained and has no external dependencies, shadows or glow. Existing management bookmarks open the redesigned account panel. The original proxy management UI remains available through **Advanced settings**, using `management.html?advanced=1`. Hidden browser tabs pause polling.
 
 ```
 node --test tools/cliproxy-dashboard/dashboard.test.cjs
@@ -49,4 +49,4 @@ node --test tools/cliproxy-dashboard/dashboard.test.cjs
 
 The integration test uses an isolated proxy fixture. It covers multiple accounts, preserving existing API keys, OAuth account addition, pausing accounts, quota normalization, secret exclusion and local access checks.
 
-The deployed copy is in `C:\Users\jubar\.cli-proxy-api\dashboard`. After source changes, run `powershell -NoProfile -File tools/cliproxy-dashboard/deploy.ps1`. Machine configuration backups are in `C:\Users\jubar\.cli-proxy-api\backups\20261002-065123`.
+The deployed copy is in `C:\Users\jubar\.cli-proxy-api\dashboard`. After source changes, run `powershell -NoProfile -File tools/cliproxy-dashboard/deploy.ps1`. Deployment restarts only the panel server and keeps the proxy running. Pass `-RestartProxy` only when changing the proxy itself. Machine configuration backups are in `C:\Users\jubar\.cli-proxy-api\backups\20261002-065123`.

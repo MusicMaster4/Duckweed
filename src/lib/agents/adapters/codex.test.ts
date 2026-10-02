@@ -69,7 +69,7 @@ function harness(
     });
 
   /** `initialize` → `initialized` → `thread/start` (+ a fire-and-forget `model/list`). */
-  const handshake = async (threadResult: Record<string, unknown> = {}) => {
+  const handshake = async (threadResult: Record<string, unknown> = {}, accountResult: Record<string, unknown> = { account: { type: "chatgpt", email: null }, requiresOpenaiAuth: true }) => {
     adapter.start(ctx);
     await Promise.resolve();
     feed({ jsonrpc: "2.0", id: 1, result: {} });
@@ -78,7 +78,7 @@ function harness(
     feed({
       jsonrpc: "2.0",
       id: "duckweed-account-read",
-      result: { account: { type: "chatgpt", email: null }, requiresOpenaiAuth: true },
+      result: accountResult,
     });
     await Promise.resolve();
     await Promise.resolve();
@@ -2810,16 +2810,38 @@ describe("codex adapter", () => {
     expect(h.state().status).toBe("idle");
   });
 
-  test("holds prompts while a CLI account reload is deferred", async () => {
+  test("keeps steering available while a native account reload is deferred", async () => {
     const h = harness({}, { completionQuietMs: 0, authPollIntervalMs: 10 });
     h.ctx.syncAccount = async () => "deferred";
     await h.handshake();
+    h.adapter.prompt({ text: "Work on this", images: [] }, h.ctx);
+    h.notify("turn/started", { threadId: "thread_1", turn: { id: "active_turn", status: "inProgress" } });
     await new Promise((resolve) => setTimeout(resolve, 25));
-    expect(h.state().authenticationRequired).toBe(true);
-    const before = h.sent.length;
-    h.adapter.prompt({ text: "Hold this", images: [] }, h.ctx);
-    expect(h.sent).toHaveLength(before);
+    expect(h.state().authenticationRequired).toBe(false);
+    expect(h.state().status).toBe("working");
+    const steer = h.adapter.steer!({ text: "Change direction", images: [] }, h.ctx);
+    const request = h.sent.findLast((frame) => frame.method === "turn/steer")!;
+    expect(request).toMatchObject({ params: { expectedTurnId: "active_turn" } });
+    h.feed({ id: request.id, result: { turnId: "active_turn" } });
+    expect(await steer).toBe(true);
     expect(h.state().items.filter((item) => item.kind === "notice" && item.text.includes("shared service will reload"))).toHaveLength(1);
+    expect(h.state().items.some((item) => item.kind === "notice" && item.text.includes("signed out"))).toBe(false);
+    await h.adapter.dispose?.(h.ctx);
+  });
+
+  test("does not synchronize native OpenAI credentials for a proxy provider", async () => {
+    const h = harness({}, { completionQuietMs: 0, authPollIntervalMs: 10 });
+    let syncCalls = 0;
+    h.ctx.syncAccount = async () => { syncCalls += 1; return "deferred"; };
+    await h.handshake({}, { account: null, requiresOpenaiAuth: false });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    h.feed({ id: "duckweed-account-sync", result: { account: null, requiresOpenaiAuth: false } });
+    await Promise.resolve(); await Promise.resolve();
+    expect(syncCalls).toBe(0);
+    expect(h.state().authenticationRequired).toBe(false);
+    h.adapter.prompt({ text: "Use the proxy", images: [] }, h.ctx);
+    expect(h.sent.at(-1)).toMatchObject({ method: "turn/start" });
+    expect(h.state().items.some((item) => item.kind === "notice" && /signed out|account changed/.test(item.text))).toBe(false);
     await h.adapter.dispose?.(h.ctx);
   });
 

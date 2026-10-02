@@ -1,3 +1,5 @@
+﻿param([switch]$RestartProxy)
+
 $ErrorActionPreference = 'Stop'
 $destination = Join-Path $env:USERPROFILE '.cli-proxy-api\dashboard'
 New-Item -ItemType Directory -Path $destination -Force | Out-Null
@@ -5,4 +7,12 @@ $files = @(Get-Item -LiteralPath (Join-Path $PSScriptRoot 'index.html')) + @(Get
 foreach ($file in $files) {
     Copy-Item -LiteralPath $file.FullName -Destination $destination
 }
-& (Join-Path $env:USERPROFILE '.cli-proxy-api\cliproxy.ps1') restart
+$helper = Join-Path $env:USERPROFILE '.cli-proxy-api\cliproxy.ps1'
+if ($RestartProxy) {
+    & $helper restart
+} else {
+    $serverScript = Join-Path $destination 'server.cjs'
+    $running = @(Get-CimInstance Win32_Process -Filter "name = 'node.exe'" | Where-Object { $_.CommandLine -like ('*' + $serverScript + '*') })
+    foreach ($process in $running) { Stop-Process -Id $process.ProcessId }
+    & $helper start
+}
