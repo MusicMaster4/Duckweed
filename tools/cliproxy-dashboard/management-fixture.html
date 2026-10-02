@@ -1,0 +1,11 @@
+<!doctype html><html><head>
+<script type="module">
+// Minimal standalone excerpts of the supported management bundle contract.
+var qp={request:async(e,t)=>{let n=await W.post(`/requests/api-call`,e,t);return n}};
+var claude={fetchQuota:async()=>{let s=[],o={},c=null;return{windows:s,extraUsage:o.extra_usage,planType:c}},storeSelector:e=>e.claudeQuota,
+storeSetter:`setClaudeQuota`,buildLoadingState:()=>({status:`loading`,windows:[]}),buildSuccessState:e=>({status:`success`,windows:e.windows,extraUsage:e.extraUsage,planType:e.planType})};
+function body(e,t){let o=e.windows??[],s=e.extraUsage??null,c=e.planType??null;return(0,V.jsxs)(V.Fragment,{children:[c&&c]})}
+function notifyOne(n,a,i,t){a(i(`auth_files.quota_refresh_success`,{name:t.name}),`success`)}
+function notifyTwo(e,n,t,r){n(t(`auth_files.quota_refresh_success`,{name:r.name}),`success`)}
+var wA=e=>jm.getState()[e.storeSetter];
+</script></head><body></body></html>

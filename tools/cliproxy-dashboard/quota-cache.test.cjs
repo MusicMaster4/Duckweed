@@ -6,9 +6,33 @@ const path = require('node:path');
 const http = require('node:http');
 const { spawn, spawnSync } = require('node:child_process');
 const { once } = require('node:events');
+const vm = require('node:vm');
 const { failureState, retryAfterMs, shouldProbe } = require('./quota.cjs');
 const { claudeCacheResult } = require('./claude-cache.cjs');
 const { patchHtml } = require('./patch-management.cjs');
+
+test('native automatic quotas preserve readings, reject old sessions and skip hidden or overlapping updates', async () => {
+  let hidden = false, calls = 0, writes = 0, resolve, fail = false;
+  const file = { name: 'fixture.json', disabled: false };
+  const state = { cacheGeneration: 0, fileGenerations: {}, codexQuota: {}, setCodexQuota(updater) { writes++; this.codexQuota = updater(this.codexQuota); } };
+  const adapter = { filterFn: () => true, storeSelector: s => s.codexQuota, storeSetter: 'setCodexQuota',
+    fetchQuota: async () => { calls++; await new Promise(r => { resolve = r; }); if (fail) throw Error('HTTP 429'); return { remaining: 90 }; },
+    buildSuccessState: data => ({ status: 'success', ...data }) };
+  const context = { URL, AbortSignal, setInterval: () => 1, clearInterval() {}, setTimeout() {},
+    document: { get hidden() { return hidden; }, addEventListener() {}, removeEventListener() {} } };
+  vm.createContext(context);
+  vm.runInContext(fs.readFileSync(path.join(__dirname, 'management-quota-bridge.js'), 'utf8'), context);
+  const monitor = context.duckweedStartQuotaMonitor({ codex: adapter, claude: { ...adapter, filterFn: () => false }, antigravity: adapter, xai: adapter },
+    { getState: () => state }, { getState: () => ({ connectionStatus: 'connected', apiBase: 'http://127.0.0.1:8317' }) },
+    { list: async () => ({ files: [file] }) }, f => f.name, { t: key => key });
+  const begin = async () => { const work = monitor.tick(); await new Promise(r => setImmediate(r)); return { work }; };
+  let pending = await begin(); await monitor.tick(); assert.equal(calls, 1); resolve(); await pending.work;
+  assert.equal(writes, 1); assert.equal(state.codexQuota[file.name].remaining, 90);
+  hidden = true; await monitor.tick(); assert.equal(calls, 1); hidden = false;
+  pending = await begin(); state.cacheGeneration++; resolve(); await pending.work; assert.equal(writes, 1);
+  fail = true; pending = await begin(); resolve(); await pending.work; assert.equal(writes, 1);
+  await monitor.tick(); assert.equal(calls, 3, 'rate limited automatic updates must back off');
+});
 
 test('Claude retry deadlines survive repeated refreshes and a zero Retry-After', () => {
   const now = Date.parse('2026-10-02T10:00:00Z');
@@ -117,7 +141,7 @@ test('both panels share one quota cache and cannot override its cooldown', async
 });
 
 test('native management patch is idempotent, fails safely and has valid JavaScript', () => {
-  const html = fs.readFileSync(path.join(os.homedir(), '.cli-proxy-api', 'static', 'management.html'), 'utf8');
+  const html = fs.readFileSync(path.join(__dirname, 'management-fixture.html'), 'utf8');
   const patched = patchHtml(html);
   assert.equal(patchHtml(patched), patched);
   assert.throws(() => patchHtml('<html><head></head><body></body></html>'), /left unchanged/);
@@ -126,14 +150,8 @@ test('native management patch is idempotent, fails safely and has valid JavaScri
   const checked = spawnSync(process.execPath, ['--input-type=module', '--check'], { input: script, encoding: 'utf8' });
   assert.equal(checked.status, 0, checked.stderr);
   assert.ok(patched.includes('children:globalThis.duckweedQuotaNote(e.localCache)'));
-  assert.ok(patched.includes('duckweed-account-panel:v1'));
-  const entry = [...patched.matchAll(/<script([^>]*)>([\s\S]*?)<\/script>/g)].find(match => match[2].includes("location.replace('http://'"))?.[2];
-  assert.ok(entry, 'existing bookmarks must reach the redesigned panel');
-  const vm = require('node:vm');
-  let destination;
-  vm.runInNewContext(entry, { URLSearchParams, location: { search: '', hostname: '127.0.0.1', replace: value => { destination = value; } } });
-  assert.equal(destination, 'http://127.0.0.1:8318/');
-  destination = undefined;
-  vm.runInNewContext(entry, { URLSearchParams, location: { search: '?advanced=1', hostname: '127.0.0.1', replace: value => { destination = value; } } });
-  assert.equal(destination, undefined, 'advanced settings must remain accessible');
+  assert.ok(!patched.includes('duckweed-account-panel:v1'));
+  assert.ok(!patched.includes("location.replace('http://'"));
+  const legacyRedirect = '<!-- duckweed-account-panel:v1 -->\n<script>location.replace("http://127.0.0.1:8318/")</script>\n';
+  assert.equal(patchHtml(patched.replace('</head>', legacyRedirect + '</head>')), patched);
 });

@@ -6,7 +6,24 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
 const { once } = require('node:events');
-const { codexWindows, claudeWindows, normalizedWindows, xaiWindows, timestamp, retryAfterMs, failureState, shouldProbe } = require('./quota.cjs');
+const { codexWindows, claudeWindows, normalizedWindows, xaiWindows, timestamp, retryAfterMs, failureState, shouldProbe, rankAccounts } = require('./quota.cjs');
+
+test('routing spends five-hour balances first, then the closest weekly reset', () => {
+  const weekly = { name: 'weekly', available: true, weeklyResetAt: '2026-10-03T00:00:00Z', windows: [] };
+  const fiveLater = { name: 'five-later', available: true, weeklyResetAt: '2026-10-06T00:00:00Z', windows: [{ id: 'main-primary', label: '5 hours', remainingPercent: 60 }] };
+  const fiveEarlier = { ...fiveLater, name: 'five-earlier', weeklyResetAt: '2026-10-05T00:00:00Z' };
+  const extra = { ...weekly, name: 'extra-model-only', weeklyResetAt: '2026-10-04T00:00:00Z', windows: [{ id: 'review-primary', label: '5 hours', remainingPercent: 100 }] };
+  const exhausted = { ...fiveEarlier, name: 'exhausted', available: false, windows: [{ id: 'main-primary', label: '5 hours', remainingPercent: 0 }] };
+  const paused = { ...fiveEarlier, name: 'paused', disabled: true };
+  const unknown = { ...weekly, name: 'unknown', available: null };
+  assert.deepEqual(rankAccounts([weekly, fiveLater, exhausted, paused, extra, unknown, fiveEarlier]).map(a => a.name),
+    ['five-earlier', 'five-later', 'weekly', 'extra-model-only', 'exhausted']);
+  fiveEarlier.available = false;
+  fiveLater.available = false;
+  assert.equal(rankAccounts([fiveEarlier, fiveLater, weekly])[0].name, 'weekly');
+  const claude = { ...fiveLater, name: 'claude', available: true, windows: [{ id: 'five_hour', label: '5 hours', remainingPercent: 1 }] };
+  assert.equal(rankAccounts([weekly, claude])[0].name, 'claude');
+});
 
 test('quota parsing preserves exhausted, unknown and provider-specific windows', () => {
   assert.equal(timestamp(null), null);
@@ -108,7 +125,10 @@ test('account panel keeps multiple accounts and keys, protects secrets and enfor
     assert.equal((await call('/local/login', { provider: 'claude' })).state, 'fixture-state');
     assert.equal((await call('/local/login-status?state=fixture-state')).status, 'ok');
     assert.equal((await call('/local/status')).accounts.length, 3);
-    assert.equal((await fetch(base + '/')).status, 200);
+    const landing = await fetch(base + '/', { redirect: 'manual' });
+    assert.equal(landing.status, 302);
+    assert.equal(landing.headers.get('location'), `http://127.0.0.1:${upstream.address().port}/management.html`);
+    assert.equal((await fetch(base + '/accounts')).status, 200);
   } finally {
     const exited = once(child, 'exit'); child.kill(); await exited;
     await new Promise(resolve => upstream.close(resolve));

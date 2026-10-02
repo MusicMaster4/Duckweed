@@ -133,6 +133,10 @@ const server = http.createServer(async (req, res) => {
   }
   if (req.method === 'GET' && url.pathname === '/health') return json(res, 200, { service: 'duckweed-cliproxy-dashboard' });
   if (req.method === 'GET' && url.pathname === '/') {
+    res.writeHead(302, { Location: upstream + '/management.html', 'Cache-Control': 'no-store' });
+    return res.end();
+  }
+  if (req.method === 'GET' && url.pathname === '/accounts') {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store',
       'Content-Security-Policy': "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'" });
     return res.end(fs.readFileSync(path.join(__dirname, 'index.html')));

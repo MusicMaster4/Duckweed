@@ -198,6 +198,39 @@ function safeAccount(account) {
     label: account.label || account.email || account.account || account.provider, plan: null,
     status: account.status, disabled: !!account.disabled, priority: account.priority ?? 0 };
 }
+function fiveHourBalance(account) {
+  return (account.windows || []).some(w =>
+    (w.id === 'five_hour' || (w.id.startsWith('main-') && w.label === '5 hours')) && w.remainingPercent > 0);
+}
+function accountReset(account) {
+  const weekly = Date.parse(account.weeklyResetAt);
+  if (Number.isFinite(weekly)) return weekly;
+  const resets = (account.windows || []).map(w => Date.parse(w.resetAt)).filter(Number.isFinite);
+  return resets.length ? Math.min(...resets) : Infinity;
+}
+function rankAccounts(accounts) {
+  return accounts.filter(a => !a.disabled && a.available !== null).sort((a, b) =>
+    Number(b.available) - Number(a.available) ||
+    Number(fiveHourBalance(b)) - Number(fiveHourBalance(a)) ||
+    accountReset(a) - accountReset(b) || a.name.localeCompare(b.name));
+}
+async function applyNativeCodexHeaders(files) {
+  const settings = path.join(root, 'codex-client-headers.json');
+  if (!fs.existsSync(settings)) return;
+  const desired = JSON.parse(fs.readFileSync(settings, 'utf8'));
+  if (!/^codex_cli_rs\/[\d.]+$/.test(desired['User-Agent']) || desired.Originator !== 'codex_cli_rs') {
+    throw new Error('Invalid native Codex client headers.');
+  }
+  for (const account of files.filter(a => a.provider === 'codex' && !a.disabled)) {
+    if (path.basename(account.name) !== account.name) continue;
+    const metadata = JSON.parse(fs.readFileSync(path.join(root, 'auth', account.name), 'utf8'));
+    if (metadata.headers?.['User-Agent'] === desired['User-Agent'] && metadata.headers?.Originator === desired.Originator) continue;
+    await management('/auth-files/fields', 'PATCH', { name: account.name, headers: desired });
+    if (account.status_message === 'status 403') {
+      await management('/v8/management/routing/cooldown/reset', 'POST', { auth_index: account.auth_index });
+    }
+  }
+}
 let inFlight;
 function refresh(authIndex) {
   if (inFlight) return authIndex ? inFlight.then(() => refresh(authIndex)) : inFlight;
@@ -217,6 +250,7 @@ async function update(authIndex) {
   }
   try {
     const { files = [] } = await management('/auth-files');
+    await applyNativeCodexHeaders(files);
     const previous = readState();
     const observations = [];
     for (let offset = 0; offset < files.length; offset += 3) {
@@ -237,8 +271,7 @@ async function update(authIndex) {
     for (const provider of ['claude', 'codex']) {
       const group = observations.filter(a => a.provider === provider && !a.disabled);
       if (group.some(a => a.error)) continue;
-      const ranked = group.filter(a => a.weeklyResetAt && a.available !== null)
-        .sort((a, b) => Number(b.available) - Number(a.available) || Date.parse(a.weeklyResetAt) - Date.parse(b.weeklyResetAt) || a.name.localeCompare(b.name));
+      const ranked = rankAccounts(group);
       for (let i = 0; i < ranked.length; i++) {
         const item = ranked[i], priority = item.available ? ranked.length - i : -100;
         const source = files.find(a => a.auth_index === item.id);
@@ -254,7 +287,7 @@ async function update(authIndex) {
     return state;
   } finally { fs.closeSync(lock); fs.unlinkSync(lockPath); }
 }
-module.exports = { root, management, readState, refresh, safeAccount, codexWindows, claudeWindows, normalizedWindows, xaiWindows, timestamp,
+module.exports = { root, management, readState, refresh, safeAccount, rankAccounts, fiveHourBalance, codexWindows, claudeWindows, normalizedWindows, xaiWindows, timestamp,
   retryAfterMs, failureState, shouldProbe, isRefreshing: () => !!inFlight };
 if (require.main === module) refresh().then(state => {
   if (!process.argv.includes('--quiet')) console.log(JSON.stringify({ checkedAt: state.checkedAt, accounts: state.accounts.map(a => ({ provider: a.provider, status: a.status, quotaSupported: a.quotaSupported, error: a.error })) }, null, 2));
