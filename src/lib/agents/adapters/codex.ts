@@ -346,10 +346,19 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
   let rootTurnStatusConfirmed = false;
   /** Invalidates late `turn/start` responses after the represented turn ended. */
   let rootTurnGeneration = 0;
+  /** `rootTurnGeneration` whose turn/start was stopped before its id arrived. */
+  let stopRequestedForGeneration: number | null = null;
   /** Advances when a live root completion beats an in-flight resume snapshot. */
   let rootCompletionVersion = 0;
   /** Bounded memory of completions used to reject stale RPC/resume snapshots. */
   const completedRootTurnIds = new Set<string>();
+  /**
+   * The subset Codex itself reported finished (`turn/completed`) or that an
+   * acknowledged interrupt stopped. Other retirements are local inferences,
+   * such as a thread-idle fallback, and live output for them proves the turn
+   * is still running.
+   */
+  const finishedRootTurnIds = new Set<string>();
   let rootCompletionTimer: ReturnType<typeof setTimeout> | null = null;
   /**
    * A completion is not settled until its quiet window expires. Keeping the
@@ -470,6 +479,36 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       const oldest = completedRootTurnIds.values().next().value;
       if (oldest) completedRootTurnIds.delete(oldest);
     }
+  }
+
+  /** Record proof only; the turn is still retired by settling it. */
+  function rememberRootTurnFinished(turnId: string | null): void {
+    if (!turnId) return;
+    finishedRootTurnIds.add(turnId);
+    if (finishedRootTurnIds.size > 64) {
+      const oldest = finishedRootTurnIds.values().next().value;
+      if (oldest) finishedRootTurnIds.delete(oldest);
+    }
+  }
+
+  /**
+   * Make `turnId` the live root turn again. Codex keeps one active turn per
+   * thread and folds a `turn/start` sent while it runs into that same turn,
+   * without a new `turn/started`. If Duckweed had closed the turn early, every
+   * later frame looked stale and the pane froze on the Thinking placeholder
+   * while Codex kept working.
+   */
+  function adoptRootTurn(turnId: string, ctx: AdapterContext): void {
+    if (currentTurnId && currentTurnId !== turnId) rememberRootTurnCompleted(currentTurnId);
+    completedRootTurnIds.delete(turnId);
+    cancelPendingRootCompletion();
+    currentTurnId = turnId;
+    rootTurnCompletionObserved = false;
+    rootTurnMayBeActive = true;
+    rootTurnStatusConfirmed = true;
+    rootTurnWasSteered = false;
+    rootCompletionSeenDuringSteer = undefined;
+    ctx.emit({ type: "status", status: "working" });
   }
 
   /**
@@ -1671,6 +1710,8 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     if (authenticationRequired && (!wasRequired || changed)) {
       if (threadId && currentTurnId) void request(ctx, "turn/interrupt", { threadId, turnId: currentTurnId }).catch(() => {});
       cancelPendingRootCompletion();
+      // Deliberately stopped: its trailing frames must not reopen the pane.
+      rememberRootTurnFinished(currentTurnId);
       settleRootTurn(currentTurnId);
       ctx.emit({ type: "permission", permission: null });
       ctx.emit({ type: "notice", tone: "info", text: "Codex is signed out. Use /login or sign in from the Codex CLI to continue." });
@@ -2275,6 +2316,18 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         const turn = asRecord(params.turn);
         const startedTurnId = asString(turn?.id);
         if (startedTurnId && completedRootTurnIds.has(startedTurnId)) return;
+        if (
+          startedTurnId && threadId && !rootTurnMayBeActive &&
+          stopRequestedForGeneration === rootTurnGeneration
+        ) {
+          // The turn Stop could not address yet. Interrupt it now instead of
+          // reopening the pane for work the user already cancelled.
+          stopRequestedForGeneration = null;
+          rememberRootTurnCompleted(startedTurnId);
+          rememberRootTurnFinished(startedTurnId);
+          void request(ctx, "turn/interrupt", { threadId, turnId: startedTurnId }).catch(() => {});
+          return;
+        }
         if (startedTurnId !== currentTurnId) {
           rememberRootTurnCompleted(currentTurnId);
           rootTurnWasSteered = false;
@@ -2292,6 +2345,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         const turn = asRecord(params.turn);
         const completedTurnId = asString(turn?.id);
         if (rootTurnSignalIsStale(completedTurnId)) return;
+        rememberRootTurnFinished(completedTurnId);
         rootTurnCompletionObserved = true;
         const error = asRecord(turn?.error);
         if (error) {
@@ -3364,20 +3418,41 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       const incomingTurnId = asString(params.turnId) ?? asString(asRecord(params.turn)?.id);
       const awaitingUnconfirmedRootTurn =
         rootTurnMayBeActive && !rootTurnStatusConfirmed;
+      const liveOutput = method.startsWith("item/") || method === "turn/plan/updated";
       if (
         incomingTurnId && incomingTurnId !== currentTurnId &&
-        !completedRootTurnIds.has(incomingTurnId) &&
-        (rootPendingCompletion || rootTurnCompletionObserved || awaitingUnconfirmedRootTurn) &&
-        (method.startsWith("item/") || method === "turn/plan/updated" || method === "turn/started")
+        !finishedRootTurnIds.has(incomingTurnId)
       ) {
-        rememberRootTurnCompleted(currentTurnId);
-        cancelPendingRootCompletion();
-        currentTurnId = incomingTurnId;
-        rootTurnCompletionObserved = false;
-        rootTurnMayBeActive = true;
-        rootTurnStatusConfirmed = true;
-        rootTurnWasSteered = false;
-        ctx.emit({ type: "status", status: "working" });
+        const rootTurnUnsettled = Boolean(
+          rootPendingCompletion || rootTurnCompletionObserved || awaitingUnconfirmedRootTurn,
+        );
+        const continuesNewTurn =
+          !completedRootTurnIds.has(incomingTurnId) &&
+          rootTurnUnsettled &&
+          (liveOutput || method === "turn/started");
+        // Only a local fallback retired this turn, so new output means it was
+        // still running. A finishing turn can still record leftover steered
+        // input after the next one started, so user echoes prove nothing.
+        const revivesClosedTurn =
+          completedRootTurnIds.has(incomingTurnId) &&
+          (currentTurnId === null || rootTurnUnsettled) &&
+          liveOutput &&
+          asString(asRecord(params.item)?.type) !== "userMessage";
+        if (continuesNewTurn || revivesClosedTurn) adoptRootTurn(incomingTurnId, ctx);
+      }
+      if (
+        method === "turn/completed" && incomingTurnId && currentTurnId &&
+        incomingTurnId !== currentTurnId
+      ) {
+        // Codex publishes thread idle just before turn/completed. When both
+        // belong to a turn that was already replaced, the idle fallback armed
+        // a completion for the newer turn, which is still running.
+        if (!finishedRootTurnIds.has(incomingTurnId) && !rootTurnCompletionObserved) {
+          if (rootPendingCompletion) cancelPendingRootCompletion();
+          rootCompletionSeenDuringSteer = undefined;
+        }
+        rememberRootTurnCompleted(incomingTurnId);
+        rememberRootTurnFinished(incomingTurnId);
       }
       if (!notificationBelongsToRoot(method, params)) return;
       handleNotification(method, params, ctx);
@@ -3440,15 +3515,34 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
             // A completion/status fallback won the race. Remember the late
             // response's id so it cannot be mistaken for a later fast turn.
             rememberRootTurnCompleted(responseTurnId);
+            if (
+              stopRequestedForGeneration === generation &&
+              generation === rootTurnGeneration &&
+              !finishedRootTurnIds.has(responseTurnId) &&
+              threadId
+            ) {
+              // Stop arrived before the id did. Without this the turn kept
+              // running unseen and swallowed the next prompt.
+              stopRequestedForGeneration = null;
+              rememberRootTurnFinished(responseTurnId);
+              void request(ctx, "turn/interrupt", { threadId, turnId: responseTurnId })
+                .catch(() => {});
+            }
             return;
           }
-          if (!completedRootTurnIds.has(responseTurnId)) {
-            // The response is a second authoritative source for the ID. This
-            // keeps interrupt and completion matching correct if the matching
-            // `turn/started` notification was missed.
-            currentTurnId ??= responseTurnId;
-            rootTurnStatusConfirmed = true;
+          if (finishedRootTurnIds.has(responseTurnId)) return;
+          if (completedRootTurnIds.has(responseTurnId)) {
+            // On a busy thread Codex steers this input into the running turn
+            // and answers with that turn's id, without a new turn/started.
+            // Duckweed had closed it early, so it must become live again.
+            adoptRootTurn(responseTurnId, ctx);
+            return;
           }
+          // The response is a second authoritative source for the ID. This
+          // keeps interrupt and completion matching correct if the matching
+          // `turn/started` notification was missed.
+          currentTurnId ??= responseTurnId;
+          rootTurnStatusConfirmed = true;
         })
         .catch((error: unknown) => {
           if (generation !== rootTurnGeneration) return;
@@ -3842,6 +3936,8 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       if (!threadId || !currentTurnId) {
         // Working without an interruptible turn is stale adapter state. Let the
         // session recover instead of leaving a Stop button that cannot work.
+        // A pending turn/start still interrupts its turn once the id arrives.
+        if (rootTurnMayBeActive) stopRequestedForGeneration = rootTurnGeneration;
         settleRootTurn(null);
         ctx.emit({ type: "turn-end" });
         return;
@@ -3849,6 +3945,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       const turnId = currentTurnId;
       void request(ctx, "turn/interrupt", { threadId, turnId })
         .then(() => {
+          rememberRootTurnFinished(turnId);
           if (currentTurnId !== turnId) return;
           cancelPendingRootCompletion();
           settleRootTurn(turnId);

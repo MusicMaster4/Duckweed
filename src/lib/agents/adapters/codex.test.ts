@@ -3444,6 +3444,127 @@ describe("codex adapter", () => {
     expect(h.state().status).toBe("idle");
   });
 
+  test("shows a queued follow-up that Codex folds into a turn closed early by thread idle", async () => {
+    const h = harness();
+    await h.handshake();
+    h.adapter.prompt({ text: "first task", images: [] }, h.ctx);
+    h.notify("turn/started", { threadId: "thread_1", turn: { id: "running" } });
+    // An idle frame that does not belong to this turn closes it locally while
+    // Codex is still working, which releases the queued follow-up.
+    h.notify("thread/status/changed", { threadId: "thread_1", status: { type: "idle" } });
+    expect(h.state().status).toBe("idle");
+
+    h.adapter.prompt({ text: "queued follow-up", images: [] }, h.ctx);
+    const start = h.sent.at(-1) as { id: number };
+    // `turn/start` on a busy thread steers the running turn: Codex answers
+    // with that turn's id and never sends a new turn/started.
+    h.feed({ jsonrpc: "2.0", id: start.id, result: { turn: { id: "running", status: "inProgress" } } });
+    await Promise.resolve();
+    await Promise.resolve();
+    h.notify("item/reasoning/textDelta", {
+      threadId: "thread_1", turnId: "running", itemId: "after-queue", delta: "Reading the follow-up.",
+    });
+    h.notify("item/started", {
+      threadId: "thread_1", turnId: "running",
+      item: { id: "after-queue-cmd", type: "commandExecution", command: "bun test", status: "inProgress" },
+    });
+
+    expect(h.state().status).toBe("working");
+    expect(h.state().items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "thinking", text: "Reading the follow-up." }),
+      expect.objectContaining({ kind: "tool", command: "bun test" }),
+    ]));
+    h.adapter.interrupt(h.ctx);
+    expect(h.sent.at(-1)).toMatchObject({ method: "turn/interrupt", params: { turnId: "running" } });
+  });
+
+  test("revives a turn closed early by thread idle when its live output continues", async () => {
+    const h = harness();
+    await h.handshake();
+    h.adapter.prompt({ text: "long task", images: [] }, h.ctx);
+    h.notify("turn/started", { threadId: "thread_1", turn: { id: "running" } });
+    h.notify("thread/status/changed", { threadId: "thread_1", status: { type: "idle" } });
+    expect(h.state().status).toBe("idle");
+
+    h.notify("item/started", {
+      threadId: "thread_1", turnId: "running",
+      item: { id: "still-running", type: "commandExecution", command: "bun run build", status: "inProgress" },
+    });
+    expect(h.state().status).toBe("working");
+    expect(h.state().items.at(-1)).toMatchObject({ kind: "tool", command: "bun run build" });
+
+    h.notify("turn/completed", { threadId: "thread_1", turn: { id: "running", status: "completed" } });
+    expect(h.state().status).toBe("idle");
+    expect(h.events.filter((event) => event.type === "turn-end")).toHaveLength(2);
+  });
+
+  test("does not let the previous turn's idle and late completion end the next turn", async () => {
+    const h = harness({}, { completionQuietMs: 20 });
+    await h.handshake();
+    h.notify("turn/started", { threadId: "thread_1", turn: { id: "previous" } });
+    h.notify("turn/started", { threadId: "thread_1", turn: { id: "next" } });
+    // Codex can publish the previous turn's idle status and turn/completed
+    // after the next turn already started.
+    h.notify("thread/status/changed", { threadId: "thread_1", status: { type: "idle" } });
+    h.notify("turn/completed", { threadId: "thread_1", turn: { id: "previous", status: "completed" } });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(h.state().status).toBe("working");
+    expect(h.events.filter((event) => event.type === "turn-end")).toHaveLength(0);
+
+    h.notify("item/reasoning/textDelta", {
+      threadId: "thread_1", turnId: "next", itemId: "next-thought", delta: "Still on it.",
+    });
+    expect(h.state().items.at(-1)).toMatchObject({ kind: "thinking", text: "Still on it." });
+    h.notify("turn/completed", { threadId: "thread_1", turn: { id: "next", status: "completed" } });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(h.state().status).toBe("idle");
+    expect(h.events.filter((event) => event.type === "turn-end")).toHaveLength(1);
+  });
+
+  test.each(["response", "notification"])(
+    "interrupts a turn stopped before its id arrived by %s",
+    async (firstSource) => {
+      const h = harness();
+      await h.handshake();
+      h.adapter.prompt({ text: "never mind", images: [] }, h.ctx);
+      const start = h.sent.at(-1) as { id: number };
+      h.adapter.interrupt(h.ctx);
+      expect(h.state().status).toBe("idle");
+
+      const response = () => h.feed({ jsonrpc: "2.0", id: start.id, result: { turn: { id: "unwanted" } } });
+      const started = () => h.notify("turn/started", { threadId: "thread_1", turn: { id: "unwanted" } });
+      if (firstSource === "response") response(); else started();
+      await Promise.resolve();
+      await Promise.resolve();
+      if (firstSource === "response") started(); else response();
+      await Promise.resolve();
+      await Promise.resolve();
+      h.notify("item/started", {
+        threadId: "thread_1", turnId: "unwanted",
+        item: { id: "unwanted-cmd", type: "commandExecution", command: "rm -rf build", status: "inProgress" },
+      });
+
+      const interrupts = h.sent.filter((message) => message.method === "turn/interrupt");
+      expect(interrupts).toHaveLength(1);
+      expect(interrupts[0]).toMatchObject({ params: { threadId: "thread_1", turnId: "unwanted" } });
+      expect(h.state().status).toBe("idle");
+      expect(h.state().items.some((item) => item.kind === "tool")).toBe(false);
+    },
+  );
+
+  test("keeps late frames from a turn Codex reported finished out of the transcript", async () => {
+    const h = harness();
+    await h.handshake();
+    h.notify("turn/started", { threadId: "thread_1", turn: { id: "done" } });
+    h.notify("turn/completed", { threadId: "thread_1", turn: { id: "done", status: "completed" } });
+    h.notify("item/completed", {
+      threadId: "thread_1", turnId: "done",
+      item: { id: "late", type: "agentMessage", text: "Late duplicate." },
+    });
+    expect(h.state().status).toBe("idle");
+    expect(h.state().items.some((item) => item.kind === "assistant")).toBe(false);
+  });
+
   test("does not let late interrupted-turn frames consume queued follow-ups", async () => {
     const h = harness();
     await h.handshake();
