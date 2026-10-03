@@ -21,6 +21,14 @@ export interface SplitNode {
 
 export type LayoutNode = LeafNode | SplitNode;
 
+export interface TabGroup {
+  id: string;
+  name: string;
+  collapsed: boolean;
+  /** Default color for the group and members without an individual color. */
+  color?: string | null;
+}
+
 export interface Tab {
   id: string;
   title: string;
@@ -37,6 +45,8 @@ export interface Tab {
   color?: string | null;
   /** Optional tab icon id; null/absent keeps the default folder. */
   icon?: string | null;
+  /** Shared metadata is kept in sync for every member by tabGroups helpers. */
+  group?: TabGroup | null;
 }
 
 export interface ShellInfo {

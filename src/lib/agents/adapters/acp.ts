@@ -314,6 +314,8 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
   const toolTitles = new Map<string, string>();
   /** ACP updates omit raw input, so remember which calls were delegated work. */
   const taskCalls = new Set<string>();
+  /** A launch acknowledgement is not the background agent's result. */
+  const backgroundTaskCalls = new Set<string>();
   /** OpenCode updates omit raw input too, so keep TodoWrite calls absorbed. */
   const todoCalls = new Set<string>();
   /**
@@ -1026,7 +1028,17 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
         const taskMeta = readSubagentMeta(title, rawInput);
         if (taskMeta) taskCalls.add(callId);
         const isTask = taskCalls.has(callId);
-        const activity = isTask && text ? lastLine(text) : null;
+        const launched = isTask && /Async agent launched successfully/i.test(text);
+        if (launched) backgroundTaskCalls.add(callId);
+        const waitingForResult =
+          backgroundTaskCalls.has(callId) && status !== "failed" && (!text || launched);
+        if (backgroundTaskCalls.has(callId) && !waitingForResult &&
+          (status === "completed" || status === "failed")) {
+          backgroundTaskCalls.delete(callId);
+        }
+        const activity = isTask
+          ? waitingForResult ? "Working" : text ? lastLine(text) : null
+          : null;
         ctx.emit({
           type: "tool",
           callId,
@@ -1040,7 +1052,9 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
               ? { tool: toolKind(name, acpKind) }
               : {}),
           ...(title ? { title: oneLine(title) } : {}),
-          ...(status && ACP_STATUS[status] ? { status: ACP_STATUS[status] } : {}),
+          ...(status && ACP_STATUS[status]
+            ? { status: waitingForResult ? "running" as const : ACP_STATUS[status] }
+            : {}),
           ...(command ? { command } : {}),
           ...(text ? { output: text } : {}),
           ...(changes.length ? { changes } : {}),

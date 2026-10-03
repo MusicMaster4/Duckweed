@@ -77,6 +77,20 @@ describe("Grok effort picker", () => {
 });
 
 describe("next-message agent controls", () => {
+  test("shows the resolved CLI version and hides effort on a model that does not support it", () => {
+    const claude = session("claude");
+    claude.model = "claude-haiku-5-1";
+    claude.effort = "high";
+    claude.models = [
+      { id: "opus", label: "Opus 7.2", resolvedModel: "claude-opus-7-2", efforts: ["high"] },
+      { id: "haiku", label: "Haiku 5.1", resolvedModel: "claude-haiku-5-1", efforts: [] },
+    ];
+    const html = renderToStaticMarkup(<AgentControls session={claude} onSelect={() => {}} />);
+    expect(html).toContain("Haiku 5.1");
+    expect(html).not.toContain('is-effort');
+    expect(html).not.toContain('>High</span>');
+  });
+
   test("shows the 1M Claude model rather than matching the ordinary Opus alias first", () => {
     const claude = session("claude");
     claude.model = "claude-opus-5-5-20260923[1m]";

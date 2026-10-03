@@ -113,6 +113,14 @@ data class PendingReadSync(
 data class RemoteSlashCommand(
     val name: String,
     val description: String,
+    val options: List<RemoteCommandOption> = emptyList(),
+)
+
+data class RemoteCommandOption(
+    val value: String,
+    val label: String,
+    val description: String,
+    val current: Boolean = false,
 )
 
 data class RemoteAgentActivity(

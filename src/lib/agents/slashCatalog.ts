@@ -11,7 +11,7 @@ const LOCAL_COMMANDS = [
   },
   {
     name: "/logout",
-    description: "Sign out with this agent's native CLI",
+    description: "Sign out of this agent",
   },
 ] as const;
 
@@ -65,6 +65,7 @@ const FALLBACKS: Record<AgentId, { name: string; description: string }[]> = {
     { name: "/help", description: "Show help" },
   ],
   codex: [
+    { name: "/login", description: "Sign in to the account shared with the Codex CLI" },
     { name: "/resume", description: "Continue a past Codex thread in this folder" },
     { name: "/goal", description: "Set or view the goal for a long-running task" },
     { name: "/fast", description: "Toggle Fast Mode for later turns" },
@@ -92,9 +93,9 @@ const FALLBACKS: Record<AgentId, { name: string; description: string }[]> = {
 };
 
 /**
- * Claude's stream-json init never lists switchable models, only the one in
- * use. These aliases are what bare `/model` advertises: short names and 1M
- * variants. Refresh their labels from the model id reported by system/init.
+ * Fallback while Claude's initialize control request discovers the live
+ * model catalog, or for older CLIs that do not support discovery. The
+ * system/init event only names the active model and can refresh its label.
  *
  * Effort levels match `/effort` usage plus `ultracode` (needs dynamic
  * workflows / plan — still listed so the picker mirrors the CLI; rejected
@@ -118,7 +119,7 @@ export function refreshClaudeModelLabels(models: AgentModelChoice[], id: string)
   const version = match[2].replace("-", ".");
   const name = `${family[0].toUpperCase()}${family.slice(1)} ${version}`;
   return models.map((model) => {
-    if (model.id !== family && model.id !== `${family}[1m]`) return model;
+    if (model.resolvedModel || (model.id !== family && model.id !== `${family}[1m]`)) return model;
     return { ...model, label: `${name}${model.id.endsWith("[1m]") ? " (1M context)" : ""}` };
   });
 }

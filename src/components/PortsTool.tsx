@@ -212,7 +212,6 @@ export function PortsTool({ ownerNames, onSnapshot }: Props) {
             const key = `${port.pid}:${port.port}`;
             const owner = ownerNames.get(port.owner_id);
             const isAgent = port.owner_kind === "agent";
-            const isBusy = busy === key || busy === port.forward?.id;
             const isConfirming = confirming === key;
             return (
               <article className={`port-card ${port.forward ? "is-shared" : ""}`} key={key}>
@@ -225,7 +224,11 @@ export function PortsTool({ ownerNames, onSnapshot }: Props) {
                     <strong>{owner ?? (isAgent ? "Agent" : "Terminal")}</strong>
                     <span>{port.process}</span>
                   </span>
-                  {port.forward && <em className="port-badge">Shared</em>}
+                  {port.forward && (
+                    <em className="port-badge">
+                      {port.forward.status === "reconnecting" ? "Reconnecting" : "Shared"}
+                    </em>
+                  )}
                 </header>
 
                 <div className="port-meta">
@@ -239,7 +242,7 @@ export function PortsTool({ ownerNames, onSnapshot }: Props) {
                   copied={copied === key}
                   onCopy={() => void copy(key, localUrl(port))}
                 />
-                {port.forward && (
+                {port.forward && port.forward.status !== "reconnecting" && (
                   <AddressRow
                     url={port.forward.url}
                     label="Public"
@@ -247,12 +250,15 @@ export function PortsTool({ ownerNames, onSnapshot }: Props) {
                     onCopy={() => void copy(port.forward!.id, port.forward!.url)}
                   />
                 )}
+                {port.forward?.warning && (
+                  <p className="ports-network-note" role="status">{port.forward.warning}</p>
+                )}
 
                 <div className="port-actions">
                   {port.forward ? (
                     <button
                       type="button"
-                      disabled={isBusy}
+                      disabled={busy !== null}
                       onClick={() =>
                         void run(port.forward!.id, () => portForwardStop(port.forward!.id))
                       }
@@ -264,7 +270,7 @@ export function PortsTool({ ownerNames, onSnapshot }: Props) {
                       type="button"
                       className="port-primary"
                       title="Share this app and its backend ports in this tab through one public link"
-                      disabled={isBusy}
+                      disabled={busy !== null}
                       onClick={() =>
                         void run(key, () => portForward(port.pid, port.port, [...ownerNames.keys()]))
                       }
@@ -273,7 +279,7 @@ export function PortsTool({ ownerNames, onSnapshot }: Props) {
                     </button>
                   )}
                   {!isConfirming ? (
-                    <button type="button" className="port-quiet" onClick={() => setConfirming(key)}>
+                    <button type="button" className="port-quiet" disabled={busy !== null} onClick={() => setConfirming(key)}>
                       Close
                     </button>
                   ) : (
@@ -284,7 +290,7 @@ export function PortsTool({ ownerNames, onSnapshot }: Props) {
                       <button
                         type="button"
                         className="port-danger"
-                        disabled={isBusy}
+                        disabled={busy !== null}
                         onClick={() => {
                           setConfirming(null);
                           void run(key, () => portClose(port.pid, port.port));
@@ -304,8 +310,8 @@ export function PortsTool({ ownerNames, onSnapshot }: Props) {
           <svg viewBox="0 0 16 16" aria-hidden="true">
             <path d="M8 2.5v3M3.5 13.5h9M4 9h8v4.5H4zM8 5.5L4 9M8 5.5L12 9" />
           </svg>
-          Anyone with a public link can access that server over the internet. Stop sharing when
-          access is no longer needed.
+          Anyone with a public link can access this app and its backend ports in this tab over the internet.
+          Keep Duckweed and the servers running, with this computer awake and online.
         </p>
       </div>
     </section>

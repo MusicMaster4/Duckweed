@@ -1,4 +1,5 @@
 import {
+  Fragment,
   useEffect,
   useRef,
   useState,
@@ -6,11 +7,12 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 
-import type { Tab } from "../lib/types";
+import type { Tab, TabGroup } from "../lib/types";
 import { tabColorHex } from "../lib/tabColors";
 import { tabIconDef } from "../lib/tabIcons";
 import {
   SETTINGS_TAB_ID,
+  buildStripOrder,
   clampLeft,
   dropIndex,
   restingLeft,
@@ -19,6 +21,7 @@ import {
 import type { DragState } from "../hooks/useDragPane";
 import { ProjectMenu } from "./ProjectMenu";
 import { TabContextMenu } from "./TabContextMenu";
+import { TabGroupLabel } from "./TabGroupLabel";
 
 /** Everything the tab strip needs to say which folder a tab is working in. */
 export interface ProjectActions {
@@ -53,6 +56,8 @@ interface Props {
   onPin: (tabId: string) => void;
   onColor: (tabId: string, colorId: string | null) => void;
   onIcon: (tabId: string, iconId: string | null) => void;
+  onGroup?: (ids: string[], group: TabGroup | null) => void;
+  onUpdateGroup?: (id: string, patch: Partial<Pick<TabGroup, "name" | "collapsed" | "color">> | null) => void;
   settingsOpen: boolean;
   settingsActive: boolean;
   /** Index of Settings among strip items (0..tabs.length). */
@@ -143,6 +148,8 @@ export function TabStrip({
   onPin,
   onColor,
   onIcon,
+  onGroup,
+  onUpdateGroup,
   settingsOpen,
   settingsActive,
   settingsIndex,
@@ -171,7 +178,9 @@ export function TabStrip({
     const snapshot = (tabId: string) => {
       const strip = stripRef.current;
       if (!strip) return null;
-      const els = [...strip.querySelectorAll<HTMLElement>("[data-strip-id]")];
+      const sourceGroup = tabs.find((tab) => tab.id === tabId)?.group?.id;
+      const els = [...strip.querySelectorAll<HTMLElement>("[data-strip-id]")]
+        .filter((el) => !sourceGroup || el.dataset.tabGroup === sourceGroup);
       const from = els.findIndex((el) => el.dataset.stripId === tabId);
       if (from < 0) return null;
       // Pinned tabs are fixed — never start a drag for them.
@@ -214,7 +223,13 @@ export function TabStrip({
         }
         document.body.classList.remove("is-dragging-tab");
         setDragTabId(null);
-        if (to !== from) onReorder(from, to);
+        if (to !== from) {
+          // Collapsed members and group labels are not drag slots.
+          const ids = buildStripOrder(tabs.map((tab) => tab.id), settingsOpen, settingsIndex);
+          const source = ids.indexOf(slots[from].el.dataset.stripId!);
+          const target = ids.indexOf(slots[to].el.dataset.stripId!);
+          if (source >= 0 && target >= 0) onReorder(source, target);
+        }
       };
       settling.current = commit;
       window.setTimeout(() => {
@@ -288,7 +303,7 @@ export function TabStrip({
       window.removeEventListener("pointercancel", finish);
       window.removeEventListener("keydown", key);
     };
-  }, [onReorder]);
+  }, [onReorder, tabs, settingsOpen, settingsIndex]);
 
   const paneDropTab = drag?.target?.kind === "tab" ? drag.target.tabId : null;
   const paneDropNew = drag?.target?.kind === "newTab";
@@ -341,10 +356,41 @@ export function TabStrip({
     for (const tab of tabs) stripItems.push({ kind: "tab", tab });
   }
 
+  const groupMembers = new Map<string, Tab[]>();
+  for (const tab of tabs) {
+    if (!tab.group) continue;
+    const members = groupMembers.get(tab.group.id) ?? [];
+    members.push(tab);
+    groupMembers.set(tab.group.id, members);
+  }
+  const groups = [...groupMembers.values()].map((members) => members[0].group!);
+  const seenGroups = new Set<string>();
+  const newGroup = (ids: string[]) => {
+    onGroup?.(ids, { id: crypto.randomUUID(), name: "New group", collapsed: false });
+    setContext(null);
+  };
+
+  // Selecting a hidden tab with a shortcut reveals its group.
+  const previousSelection = useRef({ activeTabId, settingsActive });
+  useEffect(() => {
+    const previous = previousSelection.current;
+    previousSelection.current = { activeTabId, settingsActive };
+    if (previous.activeTabId === activeTabId && previous.settingsActive === settingsActive) return;
+    const group = tabs.find((tab) => tab.id === activeTabId)?.group;
+    if (!settingsActive && group?.collapsed) onUpdateGroup?.(group.id, { collapsed: false });
+  }, [activeTabId, settingsActive, tabs, onUpdateGroup]);
+
+  useEffect(() => {
+    const strip = stripRef.current;
+    const selected = strip?.querySelector<HTMLElement>('[aria-selected="true"]')
+      ?? strip?.querySelector<HTMLElement>(".tab-group-label.is-active");
+    selected?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+  }, [activeTabId, settingsActive, tabs]);
+
   return (
     <div className="tabstrip">
       <div className="tabs" ref={stripRef} role="tablist" aria-label="Open tabs">
-        {stripItems.map((item) => {
+        {stripItems.map((item, index) => {
           if (item.kind === "settings") {
             return (
               <div
@@ -397,6 +443,27 @@ export function TabStrip({
           }
 
           const tab = item.tab;
+          const group = tab.group;
+          const nextItem = stripItems[index + 1];
+          const lastInGroup = group && (nextItem?.kind !== "tab" || nextItem.tab.group?.id !== group.id);
+          const firstInGroup = group && !seenGroups.has(group.id);
+          if (group) seenGroups.add(group.id);
+          const members = group ? groupMembers.get(group.id)! : [];
+          const groupLabel = firstInGroup && group ? <TabGroupLabel
+            group={group}
+            count={members.length}
+            working={members.some((member) => workingTabIds.has(member.id))}
+            active={!settingsActive && members.some((member) => member.id === activeTabId)}
+            unread={completionHighlights && members.some((member) => (unreadCounts[member.id] ?? 0) > 0)}
+            onUpdate={(patch) => onUpdateGroup?.(group.id, patch)}
+            onCollapseOthers={groups.some((other) => other.id !== group.id && !other.collapsed) ? () => {
+              for (const other of groups) if (other.id !== group.id && !other.collapsed) onUpdateGroup?.(other.id, { collapsed: true });
+            } : undefined}
+            onExpandAll={groups.some((other) => other.collapsed) ? () => {
+              for (const other of groups) if (other.collapsed) onUpdateGroup?.(other.id, { collapsed: false });
+            } : undefined}
+          /> : null;
+          if (group?.collapsed) return <Fragment key={tab.id}>{groupLabel}</Fragment>;
           const count = paneCounts[tab.id] ?? 0;
           const unread = unreadCounts[tab.id] ?? 0;
           const showUnread = completionHighlights && unread > 0;
@@ -404,118 +471,123 @@ export function TabStrip({
           const isActive = tab.id === activeTabId && !settingsActive;
           const isWorking = workingTabIds.has(tab.id);
           const showWorkShimmer = isWorking && !isActive;
-          const accent = tabColorHex(tab.color);
+          const accent = tabColorHex(tab.color) ?? tabColorHex(group?.color);
           return (
-            <div
-              key={tab.id}
-              data-strip-id={tab.id}
-              data-tab-id={tab.id}
-              data-pinned={tab.pinned ? "true" : undefined}
-              role="tab"
-              aria-selected={isActive}
-              aria-label={
-                showUnread
-                  ? `${tab.title}${isWorking ? ", agent working" : ""}, ${unread} finished terminal${unread === 1 ? "" : "s"} not reviewed`
-                  : `${tab.title}${isWorking ? ", agent working" : ""}`
-              }
-              tabIndex={isActive ? 0 : -1}
-              className={[
-                "tab",
-                isActive ? "is-active" : "",
-                paneDropTab === tab.id ? "is-drop" : "",
-                tab.project ? "" : "is-unclaimed",
-                tab.pinned ? "is-pinned" : "",
-                accent ? "is-colored" : "",
-                isWorking ? "is-agent-working" : "",
-                showUnread ? "is-unread" : "",
-                dragTabId === tab.id ? "is-reordering" : "",
-              ]
-                .filter(Boolean)
-                .join(" ")}
-              style={accent ? ({ "--tab-color": accent } as CSSProperties) : undefined}
-              onPointerDown={(e) => {
-                if (e.button !== 0) return;
-                onSelect(tab.id);
-                // Pinned tabs stay put — select only, no reorder gesture.
-                if (tab.pinned) {
-                  settling.current?.();
-                  reorder.current = null;
-                  return;
+            <Fragment key={tab.id}>
+              {groupLabel}
+              <div
+                title={tab.title}
+                data-tab-group={group?.id}
+                data-group-end={lastInGroup ? "true" : undefined}
+                data-strip-id={tab.id}
+                data-tab-id={tab.id}
+                data-pinned={tab.pinned ? "true" : undefined}
+                role="tab"
+                aria-selected={isActive}
+                aria-label={
+                  showUnread
+                    ? `${tab.title}${isWorking ? ", agent working" : ""}, ${unread} finished terminal${unread === 1 ? "" : "s"} not reviewed`
+                    : `${tab.title}${isWorking ? ", agent working" : ""}`
                 }
-                beginReorder(e, tab.id);
-              }}
-              onDoubleClick={() => setEditing(tab.id)}
-              onKeyDown={(e) => {
-                if (e.target !== e.currentTarget) return;
-                if (e.key !== "Enter" && e.key !== " ") return;
-                e.preventDefault();
-                onSelect(tab.id);
-              }}
-              onAuxClick={(e) => {
-                if (e.button === 1) onClose(tab.id);
-              }}
-              onContextMenu={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                onSelect(tab.id);
-                openContextAt(tab.id, e.clientX, e.clientY);
-              }}
-            >
-              {showWorkShimmer && <span className="tab-work-shimmer" aria-hidden="true" />}
-              {reviewFlashKey !== undefined && (
-                <span
-                  key={reviewFlashKey}
-                  className="tab-completion-review"
-                  aria-hidden="true"
-                />
-              )}
-              {editing === tab.id ? (
-                <input
-                  className="tab-rename"
-                  autoFocus
-                  defaultValue={tab.title}
-                  onPointerDown={(e) => e.stopPropagation()}
-                  onBlur={(e) => {
-                    onRename(tab.id, e.target.value.trim() || tab.title);
-                    setEditing(null);
-                  }}
-                  onKeyDown={(e) => {
-                    e.stopPropagation();
-                    if (e.key === "Enter") (e.target as HTMLInputElement).blur();
-                    if (e.key === "Escape") setEditing(null);
-                  }}
-                />
-              ) : (
-                <>
-                  {tab.pinned && <PinIcon />}
+                tabIndex={isActive ? 0 : -1}
+                className={[
+                  "tab",
+                  isActive ? "is-active" : "",
+                  paneDropTab === tab.id ? "is-drop" : "",
+                  tab.project ? "" : "is-unclaimed",
+                  tab.pinned ? "is-pinned" : "",
+                  accent ? "is-colored" : "",
+                  isWorking ? "is-agent-working" : "",
+                  showUnread ? "is-unread" : "",
+                  dragTabId === tab.id ? "is-reordering" : "",
+                ]
+                  .filter(Boolean)
+                  .join(" ")}
+                style={accent ? ({ "--tab-color": accent } as CSSProperties) : undefined}
+                onPointerDown={(e) => {
+                  if (e.button !== 0) return;
+                  onSelect(tab.id);
+                  // Pinned tabs stay put — select only, no reorder gesture.
+                  if (tab.pinned) {
+                    settling.current?.();
+                    reorder.current = null;
+                    return;
+                  }
+                  beginReorder(e, tab.id);
+                }}
+                onDoubleClick={() => setEditing(tab.id)}
+                onKeyDown={(e) => {
+                  if (e.target !== e.currentTarget) return;
+                  if (e.key !== "Enter" && e.key !== " ") return;
+                  e.preventDefault();
+                  onSelect(tab.id);
+                }}
+                onAuxClick={(e) => {
+                  if (e.button === 1) onClose(tab.id);
+                }}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  onSelect(tab.id);
+                  openContextAt(tab.id, e.clientX, e.clientY);
+                }}
+              >
+                {showWorkShimmer && <span className="tab-work-shimmer" aria-hidden="true" />}
+                {reviewFlashKey !== undefined && (
                   <span
-                    className="tab-folder"
-                    title={
-                      tab.project
-                        ? tab.project.path
-                        : "This tab has no folder"
-                    }
+                    key={reviewFlashKey}
+                    className="tab-completion-review"
                     aria-hidden="true"
-                  >
-                    <TabGlyph iconId={tab.icon} />
-                  </span>
-                  <span className="tab-title">{tab.title}</span>
-                  {count > 1 && <span className="tab-count">{count}</span>}
-                  <button
-                    type="button"
-                    className="tab-close"
-                    title="Close tab (Ctrl+Shift+Q)"
+                  />
+                )}
+                {editing === tab.id ? (
+                  <input
+                    className="tab-rename"
+                    autoFocus
+                    defaultValue={tab.title}
                     onPointerDown={(e) => e.stopPropagation()}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onClose(tab.id);
+                    onBlur={(e) => {
+                      onRename(tab.id, e.target.value.trim() || tab.title);
+                      setEditing(null);
                     }}
-                  >
-                    ✕
-                  </button>
-                </>
-              )}
-            </div>
+                    onKeyDown={(e) => {
+                      e.stopPropagation();
+                      if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+                      if (e.key === "Escape") setEditing(null);
+                    }}
+                  />
+                ) : (
+                  <>
+                    {tab.pinned && <PinIcon />}
+                    <span
+                      className="tab-folder"
+                      title={
+                        tab.project
+                          ? tab.project.path
+                          : "This tab has no folder"
+                      }
+                      aria-hidden="true"
+                    >
+                      <TabGlyph iconId={tab.icon} />
+                    </span>
+                    <span className="tab-title">{tab.title}</span>
+                    {count > 1 && <span className="tab-count">{count}</span>}
+                    <button
+                      type="button"
+                      className="tab-close"
+                      title="Close tab (Ctrl+Shift+Q)"
+                      onPointerDown={(e) => e.stopPropagation()}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onClose(tab.id);
+                      }}
+                    >
+                      ✕
+                    </button>
+                  </>
+                )}
+              </div>
+            </Fragment>
           );
         })}
 
@@ -558,6 +630,21 @@ export function TabStrip({
           color={contextTab.color ?? null}
           icon={contextTab.icon ?? null}
           canCloseOthers={tabs.length > 1}
+          groupActions={onGroup && <>
+            <div className="menu-separator" />
+            <button type="button" role="menuitem" className="menu-item" onClick={() => newGroup([contextTab.id])}>Add to new group</button>
+            <button type="button" role="menuitem" className="menu-item" onClick={() => newGroup(tabs.map((tab) => tab.id))}>Group all tabs</button>
+            {groups.filter((group) => group.id !== contextTab.group?.id).map((group) =>
+              <button key={group.id} type="button" role="menuitem" className="menu-item" onClick={() => {
+                onGroup([contextTab.id], { ...group, collapsed: false });
+                onUpdateGroup?.(group.id, { collapsed: false });
+                setContext(null);
+              }}>Add to {group.name}</button>
+            )}
+            {contextTab.group && <button type="button" role="menuitem" className="menu-item" onClick={() => {
+              onGroup([contextTab.id], null); setContext(null);
+            }}>Remove from group</button>}
+          </>}
           onPin={() => onPin(contextTab.id)}
           onRename={() => setEditing(contextTab.id)}
           onChangeFolder={() => openPickerAt(contextTab.id, context.x, context.y)}

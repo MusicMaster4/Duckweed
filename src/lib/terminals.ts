@@ -1,4 +1,5 @@
 import { Terminal } from "@xterm/xterm";
+import { workspaceRecovery } from "./workspaceRecovery";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
@@ -375,6 +376,15 @@ function limbo(): HTMLElement {
 }
 
 function notifySession(id: string) {
+  const session = sessions.get(id);
+  if (session) {
+    const saved = workspaceRecovery.get(id);
+    const title = session.titleLocked ? session.title : undefined;
+    if (saved?.cwd !== session.cwd || saved?.title !== title || saved?.draft !== session.draft ||
+        saved?.history !== session.history) {
+      workspaceRecovery.update(id, { cwd: session.cwd, title, draft: session.draft, history: session.history });
+    }
+  }
   for (const cb of sessionListeners.get(id) ?? []) cb();
 }
 
@@ -1031,6 +1041,8 @@ interface TerminalStartOptions {
 }
 
 function create(id: string, opts: TerminalStartOptions): Session {
+  const recovery = workspaceRecovery.get(id);
+  opts = { ...opts, cwd: recovery?.cwd || opts.cwd, shell: recovery?.shell ?? opts.shell };
   const metrics = metricsFor(fontSize);
   metricsDpr = window.devicePixelRatio || 1;
   const term = new Terminal({
@@ -1110,8 +1122,8 @@ function create(id: string, opts: TerminalStartOptions): Session {
     editorMode: true,
     trimmingSelection: false,
     blocks: null as unknown as BlockTracker,
-    title: "shell",
-    titleLocked: false,
+    title: recovery?.title ?? "shell",
+    titleLocked: !!recovery?.title,
     cwd: opts.cwd ?? "",
     // Prefer the spawn shell id until the backend returns a display label, so
     // early `cd`s (open project / explorer) still pick the right quote rules.
@@ -1126,8 +1138,8 @@ function create(id: string, opts: TerminalStartOptions): Session {
     completionStartedAt: null,
     ran: false,
     lastSubmitAt: 0,
-    history: [],
-    draft: "",
+    history: recovery?.history ?? [],
+    draft: recovery?.draft ?? "",
     agent: null,
     lastAgentCompletionAt: 0,
     agentUnbindTimer: null,
@@ -1486,8 +1498,29 @@ function create(id: string, opts: TerminalStartOptions): Session {
     return false;
   });
 
+  workspaceRecovery.update(id, { shell: opts.shell ?? null });
+  if (recovery?.agent) {
+    const saved = recovery.agent;
+    session.agentUi = saved.launch.agent;
+    session.agentUiRestore = { ran: false, processStartedAt: null, rawLaunchText: null };
+    // Never fall back to sending an agent draft into a shell after a failed restore.
+    void agentSessions.start(id, {
+      ...saved.launch, prompt: null, resume: false, resumeId: saved.sessionId,
+    }, saved.cwd, saved);
+  }
   void start(session, opts);
   return session;
+}
+
+/** Restore background panes too, so their schedules do not depend on selection. */
+export function restore(id: string, opts: TerminalStartOptions): void {
+  if (!sessions.has(id)) create(id, opts);
+}
+
+export function readyForScheduledSend(id: string): boolean {
+  const session = sessions.get(id);
+  return !!session && session.spawned && !session.exited &&
+    (!session.agentUi || agentSessions.readyForScheduledSend(id));
 }
 
 async function start(session: Session, opts: TerminalStartOptions) {
@@ -1662,7 +1695,7 @@ export function registerInputPaste(id: string, pasteFn: (text: string) => void):
 
 /** Unsent composer buffer for this terminal (survives pane remounts). */
 export function getDraft(id: string): string {
-  return sessions.get(id)?.draft ?? "";
+  return sessions.get(id)?.draft ?? workspaceRecovery.get(id)?.draft ?? "";
 }
 
 /** Keep the composer draft in session state so layout changes cannot discard it. */
@@ -1670,6 +1703,7 @@ export function setDraft(id: string, text: string): void {
   const session = sessions.get(id);
   if (!session) return;
   session.draft = text;
+  workspaceRecovery.update(id, { draft: text });
 }
 
 /**
@@ -1768,6 +1802,7 @@ export function submitCommand(id: string, command: string): void {
   // Opening a custom agent unmounts that editor immediately, so its queued
   // state update is not guaranteed to run before the shell is revealed again.
   session.draft = "";
+  workspaceRecovery.update(id, { draft: "" });
   // A harness launch is UI navigation, not shell history. Intercept it before
   // marking the pane used or recording the command so closing can reveal the
   // exact terminal that was underneath — including the welcome duck.
@@ -1778,6 +1813,7 @@ export function submitCommand(id: string, command: string): void {
 /** Submit directly to the pane's shell, bypassing custom-agent interception. */
 function submitShellCommand(session: Session, text: string): void {
   session.draft = "";
+  workspaceRecovery.update(session.id, { draft: "" });
   markRan(session);
   if (!text.trim()) {
     // Empty Enter — just send a newline so the shell re-draws the prompt.

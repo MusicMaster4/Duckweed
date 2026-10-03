@@ -6,11 +6,31 @@ import {
   mobileAgentActivity,
   mobileTerminalStatus,
   mobileUsageLimits,
+  mobileSlashCommands,
   truncateUtf8,
   truncateUtf8Tail,
   utf8ByteLength,
 } from "./mobileWorkspace";
 import type { MobileWorkspaceSnapshot } from "./ipc";
+
+describe("mobile command catalog", () => {
+  test("shares provider model and effort choices with the current selection", () => {
+    const commands = mobileSlashCommands({
+      commands: [
+        { name: "/effort", description: "Reasoning effort" },
+        { name: "/model", description: "Choose model" },
+        { name: "/new", description: "New conversation" },
+      ],
+      models: [{ id: "provider/fast", label: "Fast", efforts: ["low", "high"] }],
+      model: "fast", effort: "high",
+    });
+    expect(commands.map((c) => c.name)).toEqual(["/new", "/model", "/effort"]);
+    expect(commands[1].options?.[0]).toMatchObject({ value: "provider/fast", label: "Fast", current: true });
+    expect(commands[2].options?.map((o) => [o.value, o.current])).toEqual([["low", false], ["high", true]]);
+    expect(commands[0].options).toBeUndefined();
+    expect(mobileSlashCommands(null)).toEqual([]);
+  });
+});
 
 describe("mobile workspace payload bounds", () => {
   test("counts UTF-8 bytes without splitting a multibyte character", () => {

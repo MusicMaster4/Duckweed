@@ -5,7 +5,7 @@ import { runInNewContext } from "node:vm";
 const script = readFileSync(new URL("../../src-tauri/src/port_sharing.js", import.meta.url), "utf8")
   .replace("__DUCKWEED_PRIMARY_PORT__", "3000");
 
-function browser() {
+function browser(address = "https://shared.example/dashboard") {
   const calls: unknown[][] = [];
   class Connection {
     static OPEN = 1;
@@ -16,7 +16,7 @@ function browser() {
   }
   const context = {
     URL, Request,
-    location: new URL("https://shared.example/dashboard"),
+    location: new URL(address),
     fetch: (...args: unknown[]) => { calls.push(args); return Promise.resolve("response"); },
     XMLHttpRequest: Xhr, WebSocket: Connection, EventSource: Connection,
     navigator: { sendBeacon: (...args: unknown[]) => { calls.push(args); return true; } },
@@ -63,5 +63,43 @@ describe("shared app browser routing", () => {
       ["https://shared.example/.duckweed/port/8000/metrics", "data"],
     ]);
     expect(context.WebSocket.OPEN).toBe(1);
+  });
+
+  test("dependency pages retain their backend for root-relative requests", async () => {
+    const { context, calls } = browser("https://shared.example/.duckweed/port/8000/dashboard");
+    await context.fetch("/api");
+    await context.fetch("https://shared.example/api");
+    await context.fetch("/.duckweed/port/9000/api");
+    await context.fetch("https://external.example/api");
+    expect(calls.map(call => call[0])).toEqual([
+      "https://shared.example/.duckweed/port/8000/api",
+      "https://shared.example/.duckweed/port/8000/api",
+      "/.duckweed/port/9000/api", "https://external.example/api",
+    ]);
+  });
+
+  test("preserves cancellation, credentials and streaming Request uploads", async () => {
+    const { context, calls } = browser();
+    const controller = new AbortController();
+    const request = new Request("http://localhost:8000/upload", {
+      method: "POST", body: "payload", signal: controller.signal,
+      credentials: "include", redirect: "manual",
+    });
+    await context.fetch(request);
+    const forwarded = calls[0][0] as Request;
+    expect(forwarded.credentials).toBe("include");
+    expect(forwarded.redirect).toBe("manual");
+    controller.abort();
+    expect(forwarded.signal.aborted).toBe(true);
+    expect(await forwarded.text()).toBe("payload");
+  });
+
+  test("keeps WebSocket subclasses and native URL errors intact", async () => {
+    const { context, calls } = browser();
+    class Socket extends context.WebSocket {}
+    const socket = new Socket("ws://localhost:8000/ws");
+    expect(socket instanceof Socket).toBe(true);
+    await context.fetch("http://[");
+    expect(calls[1][0]).toBe("http://[");
   });
 });

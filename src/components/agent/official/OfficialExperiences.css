@@ -122,6 +122,21 @@
   border-bottom: 1px solid rgba(255, 255, 255, 0.075);
 }
 
+.claude-experience .official-answer.is-compact-update {
+  align-self: flex-start;
+  max-width: 100%;
+  margin: 0 0 2px 3px;
+  padding: 3px 9px;
+  border-left: 1px solid color-mix(in srgb, #d97757 42%, var(--border));
+  color: var(--text-dim);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.claude-experience .official-answer.is-compact-update .official-markdown p {
+  margin: 0;
+}
+
 .official-markdown {
   min-width: 0;
 }

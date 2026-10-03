@@ -34,9 +34,11 @@ Object.defineProperty(globalThis, "window", { value: stubWindow, configurable: t
 const sent: string[] = [];
 let spawn: AgentSpawnOptions | null = null;
 let frameSink: ((frame: AgentFrame) => void) | null = null;
+let spawnFailure: string | null = null;
 
 mock.module("../durableStorage", () => ({
   saveDurably: () => {},
+  readStoredValue: (key: string) => store.get(key) ?? null,
 }));
 
 mock.module("@tauri-apps/api/core", () => ({
@@ -54,6 +56,7 @@ mock.module("../ipc", () => ({
     options: AgentSpawnOptions,
     onFrame: { onmessage?: (frame: AgentFrame) => void },
   ) => {
+    if (spawnFailure) throw new Error(spawnFailure);
     spawn = options;
     frameSink = (frame) => onFrame.onmessage?.(frame);
     return { program: options.program, pid: 1 };
@@ -62,9 +65,11 @@ mock.module("../ipc", () => ({
     sent.push(line);
   },
   agentProcStop: async () => {},
+  agentCodexAuthSync: async () => "unchanged",
   agentProcCloseStdin: async () => {},
   agentProcProbe: async () => [],
   openCodeModelsRefresh: async () => {},
+  openUrl: async () => {},
   agentSessionTranscript: async () => [],
   agentSessionsList: async () => [],
   homeDir: async () => "H:/",
@@ -155,8 +160,147 @@ async function codexHandshake(sessionId = "01900000-0000-7000-8000-000000000001"
 }
 
 const session = await import("./session");
+const { workspaceRecovery, RECOVERY_KEY, parseRecovery } = await import("../workspaceRecovery");
 
 describe("Custom agent UI sessions", () => {
+  test("shutdown flush saves a shell draft even when no agent is open", () => {
+    expect(session.activeTermIds()).toHaveLength(0);
+    workspaceRecovery.update("shell-only-recovery", { draft: "latest shell input" });
+    session.flushRecovery();
+    expect(parseRecovery(store.get(RECOVERY_KEY) ?? null).panes["shell-only-recovery"]?.draft)
+      .toBe("latest shell input");
+  });
+
+  test("batched recovery keeps the latest agent draft and its attachments", async () => {
+    const termId = "batched-agent-draft";
+    await session.start(termId, grokLaunch, "H:/project");
+    session.setDraftImages(termId, [image]);
+    for (let index = 0; index < 100; index++) session.setDraft(termId, `draft-${index}`);
+    expect(session.getDraft(termId)).toBe("draft-99");
+    session.flushRecovery();
+    expect(parseRecovery(store.get(RECOVERY_KEY) ?? null).panes[termId]?.agent)
+      .toMatchObject({ draft: "draft-99", images: [image] });
+  });
+
+  test("keeps a submitted prompt while a model change is still being negotiated", async () => {
+    const termId = "recover-configuring";
+    await session.start(termId, { ...grokLaunch, agent: "claude", program: "claudex", model: "old-model" }, "H:/project");
+    session.configure(termId, "model", "new-model");
+    session.submit(termId, "Do this after changing the model");
+    session.flushRecovery();
+    const saved = workspaceRecovery.get(termId)?.agent;
+    expect(saved?.launch.model).toBe("new-model");
+    expect(saved?.queued.map((entry) => entry.prompt.text)).toEqual(["Do this after changing the model"]);
+  });
+
+  test("recovers a blank Codex composer without trying to resume its unsaved provisional thread", async () => {
+    const termId = "recover-blank-codex";
+    await session.start(termId, codexLaunch, "H:/project");
+    await codexHandshake("not-persisted-yet");
+    session.setDraft(termId, "My first prompt");
+    const saved = JSON.parse(JSON.stringify(workspaceRecovery.get(termId)?.agent));
+    expect(saved.sessionId).toBeNull();
+    session.stop(termId);
+    sent.length = 0;
+    await session.start(termId, { ...saved.launch, resumeId: saved.sessionId }, saved.cwd, saved);
+    await codexHandshake("fresh-thread");
+    expect(sent.map(rpc).some((message) => message.method === "thread/resume")).toBe(false);
+    expect(session.getDraft(termId)).toBe("My first prompt");
+    expect(session.readyForScheduledSend(termId)).toBe(true);
+  });
+
+  test("a rejected Codex resume cannot release an overdue draft into a fresh thread", async () => {
+    const termId = "recover-missing-thread";
+    await session.start(termId, codexLaunch, "H:/project");
+    await codexHandshake("missing-thread");
+    session.submit(termId, "Earlier prompt");
+    session.setDraft(termId, "Scheduled follow-up");
+    const saved = JSON.parse(JSON.stringify(workspaceRecovery.get(termId)?.agent));
+    session.stop(termId);
+    sent.length = 0;
+    await session.start(termId, { ...saved.launch, resumeId: saved.sessionId }, saved.cwd, saved);
+    await codexHandshake("fresh-thread");
+    const resume = sent.map(rpc).find((message) => message.method === "thread/resume");
+    feed({ id: resume?.id, error: { code: -1, message: "Thread is missing" } });
+    await flush();
+    expect(session.get(termId)?.status).toBe("error");
+    expect(session.readyForScheduledSend(termId)).toBe(false);
+    expect(session.getDraft(termId)).toBe("Scheduled follow-up");
+    expect(workspaceRecovery.get(termId)?.agent?.sessionId).toBe("missing-thread");
+    expect(session.get(termId)?.items.some((item) => item.kind === "user" && item.text === "Earlier prompt")).toBe(true);
+    expect(sent.map(rpc).filter((message) => message.method === "turn/start")).toHaveLength(0);
+  });
+
+  test("recovers Claude's exact conversation, draft, images, wrapper and settings", async () => {
+    const termId = "recover-claude";
+    const launch: AgentLaunch = {
+      ...grokLaunch, agent: "claude", program: "claudex", wrapperArgs: ["--g"],
+      env: { EXAMPLE_PROVIDER: "local" }, model: "custom-model", effort: "high", accessMode: "full-access",
+    };
+    await session.start(termId, launch, "H:/specific-project");
+    feed({ type: "system", subtype: "init", session_id: "exact-claude-session", model: "custom-model" });
+    session.setDraft(termId, "Unsent prompt\nwith details");
+    session.setDraftImages(termId, [image]);
+    workspaceRecovery.update(termId, { timed: { at: 1234 } });
+    const saved = JSON.parse(JSON.stringify(workspaceRecovery.get(termId)?.agent));
+    session.stop(termId);
+    sent.length = 0;
+    await session.start(termId, { ...saved.launch, resumeId: saved.sessionId }, saved.cwd, saved);
+    expect(spawn?.program).toBe("claudex");
+    expect(spawn?.cwd).toBe("H:/specific-project");
+    expect(spawn?.args).toContain("--g");
+    expect(spawn?.args).toContain("--resume");
+    expect(spawn?.args).toContain("exact-claude-session");
+    expect(session.getDraft(termId)).toBe("Unsent prompt\nwith details");
+    expect(session.getDraftImages(termId)).toEqual([image]);
+    expect(session.get(termId)).toMatchObject({ model: "custom-model", effort: "high", accessMode: "full-access" });
+    expect(workspaceRecovery.get(termId)?.timed).toEqual({ at: 1234 });
+    expect(session.readyForScheduledSend(termId)).toBe(true);
+    expect(sent.map(rpc).filter((message) => message.type === "user")).toHaveLength(0);
+  });
+
+  test("a failed recovery retains its draft and blocks scheduled delivery", async () => {
+    const termId = "recover-failure";
+    await session.start(termId, { ...grokLaunch, agent: "claude", program: "claude" }, "H:/project");
+    session.setDraft(termId, "Keep this prompt");
+    const saved = JSON.parse(JSON.stringify(workspaceRecovery.get(termId)?.agent));
+    session.stop(termId);
+    spawnFailure = "executable unavailable";
+    await session.start(termId, saved.launch, saved.cwd, saved);
+    expect(session.get(termId)?.status).toBe("error");
+    expect(session.getDraft(termId)).toBe("Keep this prompt");
+    expect(session.readyForScheduledSend(termId)).toBe(false);
+    session.submit(termId, "Keep this prompt");
+    expect(session.getDraft(termId)).toBe("Keep this prompt");
+  });
+
+  test("Codex recovery waits for the exact saved thread before releasing follow-ups", async () => {
+    const termId = "recover-codex";
+    await session.start(termId, codexLaunch, "H:/project");
+    await codexHandshake("saved-thread");
+    session.submit(termId, "Original turn");
+    session.submit(termId, "Queued follow-up");
+    session.setDraft(termId, "Scheduled draft");
+    session.flushRecovery();
+    const saved = JSON.parse(JSON.stringify(workspaceRecovery.get(termId)?.agent));
+    expect(saved.queued).toHaveLength(1);
+    session.stop(termId);
+    sent.length = 0;
+    await session.start(termId, { ...saved.launch, resumeId: saved.sessionId }, saved.cwd, saved);
+    expect(session.readyForScheduledSend(termId)).toBe(false);
+    await codexHandshake("temporary-thread");
+    const resume = sent.map(rpc).find((message) => message.method === "thread/resume");
+    expect(resume).toMatchObject({ params: { threadId: "saved-thread" } });
+    expect(sent.map(rpc).filter((message) => message.method === "turn/start")).toHaveLength(0);
+    session.flushRecovery();
+    expect(workspaceRecovery.get(termId)?.agent?.sessionId).toBe("saved-thread");
+    expect(session.getDraft(termId)).toBe("Scheduled draft");
+    feed({ id: resume?.id, result: { thread: { id: "saved-thread", turns: [] } } });
+    await flush();
+    expect(sent.map(rpc).filter((message) => message.method === "turn/start")).toHaveLength(1);
+    expect(session.getDraft(termId)).toBe("Scheduled draft");
+  });
+
   test("restores prompt navigation from resumed Codex turns and replaces the previous conversation", async () => {
     const termId = "resumed-prompt-history";
     await session.start(termId, codexLaunch, "H:/project");
@@ -186,12 +330,309 @@ describe("Custom agent UI sessions", () => {
     sent.length = 0;
     spawn = null;
     frameSink = null;
+    spawnFailure = null;
     session.setFollowupMode("queue");
+    session.setCodexCapacityReply({ enabled: false, message: "continue" });
   });
 
   afterEach(() => {
     session.stopAll();
     session.setFollowupMode("queue");
+    session.setCodexCapacityReply({ enabled: false, message: "continue" });
+  });
+
+  describe("automatic Codex capacity replies", () => {
+    const capacityError = "Selected model is at capacity. Please try a different model.";
+    const originalSetTimeout = stubWindow.setTimeout;
+    const originalClearTimeout = stubWindow.clearTimeout;
+    let now = 0;
+    let timerId = -1;
+    const timers = new Map<number, { at: number; callback: () => void }>();
+
+    beforeEach(() => {
+      now = 0;
+      timerId = -1;
+      timers.clear();
+      stubWindow.setTimeout = ((callback: () => void, delay: number) => {
+        if (delay !== 2000) return originalSetTimeout(callback, delay);
+        const id = timerId--;
+        timers.set(id, { at: now + delay, callback });
+        return id;
+      }) as typeof originalSetTimeout;
+      stubWindow.clearTimeout = ((id: number) => {
+        if (timers.delete(id)) return;
+        originalClearTimeout(id);
+      }) as typeof originalClearTimeout;
+    });
+
+    afterEach(() => {
+      session.stopAll();
+      stubWindow.setTimeout = originalSetTimeout;
+      stubWindow.clearTimeout = originalClearTimeout;
+      timers.clear();
+    });
+
+    function advance(ms: number): void {
+      now += ms;
+      for (const [id, timer] of [...timers]) {
+        if (timer.at > now) continue;
+        timers.delete(id);
+        timer.callback();
+      }
+    }
+
+    function starts(): Record<string, unknown>[] {
+      return sent.map(rpc).filter((message) => message.method === "turn/start");
+    }
+
+    async function failPrompt(termId: string, message = capacityError): Promise<void> {
+      session.submit(termId, "Do the work");
+      feed({ id: starts().at(-1)?.id, error: { code: -32000, message } });
+      await flush();
+      expect(session.get(termId)?.status).toBe("idle");
+    }
+
+    test("is disabled by default", async () => {
+      await session.start("capacity-default", codexLaunch, "H:/project");
+      await codexHandshake();
+      await failPrompt("capacity-default");
+      advance(2000);
+      expect(starts()).toHaveLength(1);
+      expect(timers.size).toBe(0);
+    });
+
+    test("sends the custom message at two seconds and preserves the composer", async () => {
+      const termId = "capacity-custom";
+      session.setCodexCapacityReply({ enabled: true, message: "Please continue the task." });
+      await session.start(termId, codexLaunch, "H:/project");
+      await codexHandshake();
+      await failPrompt(termId);
+      session.setDraft(termId, "My unfinished draft");
+      session.setDraftImages(termId, [image]);
+      advance(1999);
+      expect(starts()).toHaveLength(1);
+      advance(1);
+      expect(starts()).toHaveLength(2);
+      expect(starts().at(-1)?.params).toMatchObject({
+        input: [{ type: "text", text: "Please continue the task." }],
+      });
+      expect(session.get(termId)?.items.at(-1)).toMatchObject({
+        kind: "user", text: "Please continue the task.",
+      });
+      expect(session.getDraft(termId)).toBe("My unfinished draft");
+      expect(session.getDraftImages(termId)).toEqual([image]);
+      advance(2000);
+      expect(starts()).toHaveLength(2);
+    });
+
+    test("replies once to duplicate failed-turn notifications", async () => {
+      const termId = "capacity-completed";
+      session.setCodexCapacityReply({ enabled: true, message: "continue" });
+      await session.start(termId, codexLaunch, "H:/project");
+      await codexHandshake();
+      session.submit(termId, "Do the work");
+      feed({ id: starts().at(-1)?.id, result: { turn: { id: "failed-turn" } } });
+      await flush();
+      const completion = {
+        method: "turn/completed",
+        params: {
+          threadId: session.get(termId)?.sessionId,
+          turn: { id: "failed-turn", status: "failed", error: { message: capacityError } },
+        },
+      };
+      feed(completion);
+      feed(completion);
+      expect(timers.size).toBe(1);
+      await new Promise((resolve) => originalSetTimeout(resolve, 850));
+      expect(session.get(termId)?.status).toBe("idle");
+      advance(2000);
+      expect(starts()).toHaveLength(2);
+      feed(completion);
+      advance(2000);
+      expect(starts()).toHaveLength(2);
+    });
+
+    test("does not reply to other errors or blank configured messages", async () => {
+      const termId = "capacity-filter";
+      session.setCodexCapacityReply({ enabled: true, message: "continue" });
+      await session.start(termId, codexLaunch, "H:/project");
+      await codexHandshake();
+      await failPrompt(termId, "Rate limit exceeded");
+      advance(2000);
+      expect(starts()).toHaveLength(1);
+      session.setCodexCapacityReply({ enabled: true, message: "  \n " });
+      await failPrompt(termId);
+      advance(2000);
+      expect(starts()).toHaveLength(2);
+    });
+
+    test("cancels pending replies when disabled or edited without replaying the old error", async () => {
+      const termId = "capacity-toggle";
+      session.setCodexCapacityReply({ enabled: true, message: "continue" });
+      await session.start(termId, codexLaunch, "H:/project");
+      await codexHandshake();
+      await failPrompt(termId);
+      advance(1000);
+      session.setCodexCapacityReply({ enabled: false, message: "continue" });
+      advance(1000);
+      expect(starts()).toHaveLength(1);
+      session.setCodexCapacityReply({ enabled: true, message: "continue" });
+      advance(2000);
+      expect(starts()).toHaveLength(1);
+      await failPrompt(termId);
+      session.setCodexCapacityReply({ enabled: true, message: "Another reply" });
+      advance(2000);
+      expect(starts()).toHaveLength(2);
+    });
+
+    test("cancels after a manual message even if that turn finishes before the timer", async () => {
+      const termId = "capacity-manual";
+      session.setCodexCapacityReply({ enabled: true, message: "continue" });
+      await session.start(termId, codexLaunch, "H:/project");
+      await codexHandshake();
+      await failPrompt(termId);
+      await failPrompt(termId, "A different failure");
+      advance(2000);
+      expect(starts()).toHaveLength(2);
+    });
+
+    test("cancels when interrupted, closed, or replaced by a new chat", async () => {
+      const termId = "capacity-lifecycle";
+      session.setCodexCapacityReply({ enabled: true, message: "continue" });
+      await session.start(termId, codexLaunch, "H:/project");
+      await codexHandshake();
+      await failPrompt(termId);
+      session.interrupt(termId);
+      advance(2000);
+      expect(starts()).toHaveLength(1);
+      await failPrompt(termId);
+      sent.length = 0;
+      await session.newChat(termId);
+      advance(2000);
+      expect(starts()).toHaveLength(0);
+      await codexHandshake();
+      await failPrompt(termId);
+      session.stop(termId);
+      advance(2000);
+      expect(starts()).toHaveLength(1);
+    });
+
+    test("replies again when the automatic follow-up receives a new capacity error", async () => {
+      const termId = "capacity-repeat";
+      session.setCodexCapacityReply({ enabled: true, message: "continue" });
+      await session.start(termId, codexLaunch, "H:/project");
+      await codexHandshake();
+      await failPrompt(termId);
+      advance(2000);
+      feed({ id: starts().at(-1)?.id, error: { code: -32000, message: capacityError } });
+      await flush();
+      advance(1999);
+      expect(starts()).toHaveLength(2);
+      advance(1);
+      expect(starts()).toHaveLength(3);
+    });
+  });
+
+  async function signedOutCodex(termId: string, launch = codexLaunch): Promise<void> {
+    await session.start(termId, launch, "H:/project");
+    await flush();
+    feed({ id: sent.map(rpc).find((message) => message.method === "initialize")?.id, result: {} });
+    await flush();
+    feed({ id: "duckweed-account-read", result: { account: null, requiresOpenaiAuth: true } });
+    await flush();
+  }
+
+  async function externalCodexLogin(): Promise<void> {
+    feed({ method: "account/updated", params: { authMode: "chatgpt" } });
+    feed({ id: "duckweed-account-sync", result: { account: { type: "chatgpt" }, requiresOpenaiAuth: true } });
+    await flush();
+    const opened = sent.map(rpc).findLast((message) => message.method === "thread/start");
+    feed({ id: opened?.id, result: { thread: { id: "signed-in-thread" }, model: "gpt-5" } });
+    await flush();
+  }
+
+  test("holds an opening prompt while signed out and releases it after CLI login", async () => {
+    const termId = "codex-login-queue";
+    await signedOutCodex(termId, { ...codexLaunch, prompt: "Inspect the project" });
+    expect(session.get(termId)).toMatchObject({ status: "idle", authenticationRequired: true });
+    session.flushRecovery();
+    expect(workspaceRecovery.get(termId)?.agent?.queued).toHaveLength(1);
+    expect(session.readyForScheduledSend(termId)).toBe(false);
+    expect(sent.map(rpc).some((message) => message.method === "turn/start")).toBe(false);
+    await externalCodexLogin();
+    expect(sent.map(rpc).filter((message) => message.method === "turn/start")).toHaveLength(1);
+    expect(session.get(termId)?.pending).toHaveLength(0);
+  });
+
+  test("keeps a rejected signed-out submission and its image in the composer", async () => {
+    const termId = "codex-login-draft";
+    await signedOutCodex(termId);
+    session.setDraft(termId, "Keep this draft");
+    session.setDraftImages(termId, [image]);
+    expect(session.submit(termId, "Keep this draft", [image])).toBe(false);
+    expect(session.submit(termId, "Keep this draft", [image])).toBe(false);
+    expect(session.get(termId)?.items.filter((item) => item.kind === "notice" && item.text.includes("Codex is signed out"))).toHaveLength(1);
+    expect(session.getDraft(termId)).toBe("Keep this draft");
+    expect(session.getDraftImages(termId)).toEqual([image]);
+  });
+
+  test("uses protocol logout without replacing the Codex pane with a terminal", async () => {
+    const termId = "codex-protocol-logout";
+    const handoffs: session.AgentAuthRequest[] = [];
+    const unsubscribe = session.subscribeAuthRequest((request) => handoffs.push(request));
+    try {
+      await session.start(termId, codexLaunch, "H:/project");
+      await codexHandshake();
+      expect(session.submit(termId, "/logout")).toBe(true);
+      const logout = sent.map(rpc).find((message) => message.method === "account/logout");
+      expect(logout).toBeDefined();
+      feed({ id: logout?.id, result: {} });
+      await flush();
+      feed({ id: "duckweed-account-sync", result: { account: null, requiresOpenaiAuth: true } });
+      await flush();
+      expect(session.get(termId)).toMatchObject({ status: "idle", authenticationRequired: true });
+      expect(handoffs).toHaveLength(0);
+    } finally { unsubscribe(); }
+  });
+
+  test("waits for sign-in before resuming the user's chosen thread", async () => {
+    const termId = "codex-resume-after-login";
+    await signedOutCodex(termId);
+    await session.resume(termId, "stored-thread");
+    expect(sent.map(rpc).some((message) => message.method === "thread/resume")).toBe(false);
+    await externalCodexLogin();
+    expect(sent.map(rpc).find((message) => message.method === "thread/resume")?.params)
+      .toMatchObject({ threadId: "stored-thread" });
+    expect(sent.map(rpc).some((message) => message.method === "turn/start")).toBe(false);
+  });
+
+  test("restores the draft and attachments after a credential service reload", async () => {
+    const termId = "codex-auth-reconnect";
+    await session.start(termId, codexLaunch, "H:/project");
+    await codexHandshake();
+    session.submit(termId, "An earlier prompt");
+    const turn = sent.map(rpc).find((message) => message.method === "turn/start");
+    feed({ id: turn?.id, result: { turn: { id: "saved-turn" } } });
+    feed({ method: "turn/completed", params: { threadId: "01900000-0000-7000-8000-000000000001", turn: { id: "saved-turn", status: "completed", items: [] } } });
+    await new Promise((resolve) => setTimeout(resolve, 850));
+    session.setDraft(termId, "Continue after login");
+    session.setDraftImages(termId, [image]);
+    const before = sent.map(rpc).filter((message) => message.method === "initialize").length;
+    const surfaceStates: Array<boolean> = [];
+    const unsubscribe = session.subscribe(termId, () => surfaceStates.push(session.isActive(termId)));
+    frameSink?.({ kind: "exit", code: 0, reconnect: true });
+    for (let count = 0; count < 10; count++) await flush();
+    unsubscribe();
+    expect(surfaceStates.length).toBeGreaterThan(0);
+    expect(surfaceStates.every(Boolean)).toBe(true);
+    expect(sent.map(rpc).filter((message) => message.method === "initialize")).toHaveLength(before + 1);
+    expect(session.getDraft(termId)).toBe("Continue after login");
+    expect(session.getDraftImages(termId)).toEqual([image]);
+    expect(session.get(termId)?.status).toBe("starting");
+    await codexHandshake("temporary-thread");
+    const resume = sent.map(rpc).findLast((message) => message.method === "thread/resume");
+    expect(resume?.params).toMatchObject({ threadId: "01900000-0000-7000-8000-000000000001" });
+    expect(session.getDraft(termId)).toBe("Continue after login");
   });
 
   test.each(["steer", "queue"] as const)("preserves Codex background activity after an async question in %s mode", async (mode) => {

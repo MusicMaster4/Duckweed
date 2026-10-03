@@ -97,11 +97,17 @@ URLs in markup, custom hostnames and HTTPS-only local backends need the app's
 own same-origin reverse proxy configuration. OAuth providers may also require
 the temporary public callback URL in their settings.
 
-If the link itself fails, create a fresh share and keep Duckweed and the local
-servers running. Duckweed checks an HTTP response through the public tunnel
-before displaying a link. A network change or provider outage can still break
-an existing tunnel. A 403 on `/.duckweed/port/` means that port is outside the
-shared tab; a 502 means the local server is unavailable.
+Keep Duckweed and the local servers running, with the computer awake and online.
+Duckweed checks the public HTTP route before displaying a link and every 15
+seconds while sharing. If the route fails, Ports shows **Reconnecting** and hides
+the unavailable link. Duckweed retries automatically, including when the tunnel
+helper is still running but its public route has disappeared.
+
+Temporary providers can change the public address. Duckweed verifies new
+addresses announced by the provider and updates Ports. After a reconnection,
+copy the current public link again; a previously copied link can expire.
+A 403 on `/.duckweed/port/` means that port is outside the shared tab; a 502 means
+the local server is unavailable.
 
 ## Still stuck?
 

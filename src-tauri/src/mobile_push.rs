@@ -190,6 +190,17 @@ pub struct WorkspaceTerminal {
 pub struct WorkspaceSlashCommand {
     pub name: String,
     pub description: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<WorkspaceSlashCommandOption>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct WorkspaceSlashCommandOption {
+    pub value: String,
+    pub label: String,
+    pub description: String,
+    #[serde(default)]
+    pub current: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

@@ -28,8 +28,12 @@ sha2 = "0.10"
 uuid = { version = "1", features = ["v4"] }
 ignore = "0.4"
 regex = "1"
+lol_html = "2"
+flate2 = "1"
+brotli = "8"
 portable-pty = "0.9"
 notify = "6.1"
+tungstenite = "0.30"
 # Completion cues play from this process. WebView audio works, but on Windows
 # the session belongs to the shared msedgewebview2.exe runtime, so the volume
 # mixer would file Duckweed's sounds under "Microsoft Edge WebView2".

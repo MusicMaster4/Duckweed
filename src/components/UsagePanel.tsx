@@ -99,7 +99,7 @@ export function UsagePanel({ openAgentCount }: Props) {
         .catch((cause: unknown) => {
           if (!cancelled) setError(String(cause));
         });
-    }, 60_000);
+    }, 30_000);
     return () => {
       cancelled = true;
       clearInterval(timer);

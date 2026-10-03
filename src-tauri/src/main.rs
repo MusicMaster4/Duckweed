@@ -4,6 +4,7 @@
 mod agent_activity;
 mod agent_proc;
 mod agent_sessions;
+mod codex_transport;
 mod discord_presence;
 mod fs;
 mod git;
@@ -139,8 +140,9 @@ fn webview_failed_reason_name(code: i32) -> &'static str {
     }
 }
 
-const DURABLE_SETTING_KEYS: [&str; 10] = [
+const DURABLE_SETTING_KEYS: [&str; 11] = [
     "duckweed:state:v1",
+    "duckweed:workspace-recovery:v1",
     "duckweed:usage:v1",
     // Ghost-text unlearning table — must match frontend DURABLE_KEYS or restore
     // aborts when seeding WebView feedback into app-data and never reaches history.
@@ -226,56 +228,72 @@ fn read_settings(path: &Path) -> HashMap<String, String> {
 }
 
 #[tauri::command]
-fn settings_load(
-    app: AppHandle,
-    state: State<'_, DurableSettings>,
-) -> Result<HashMap<String, String>, String> {
-    let _guard = state.0.lock().map_err(|error| error.to_string())?;
-    Ok(read_settings(&settings_path(&app)?))
+async fn settings_load(app: AppHandle) -> Result<HashMap<String, String>, String> {
+    blocking(move || {
+        let state = app.state::<DurableSettings>();
+        let _guard = state.0.lock().map_err(|error| error.to_string())?;
+        Ok(read_settings(&settings_path(&app)?))
+    })
+    .await
 }
 
 #[tauri::command]
-fn settings_save(
+async fn settings_save(
     app: AppHandle,
-    state: State<'_, DurableSettings>,
     key: String,
     value: String,
     replace: Option<bool>,
 ) -> Result<(), String> {
-    if !DURABLE_SETTING_KEYS.contains(&key.as_str()) {
-        return Err("unsupported settings key".into());
-    }
-    // Reject corrupt payloads before they can replace the last good copy.
-    serde_json::from_str::<serde_json::Value>(&value).map_err(|error| error.to_string())?;
+    // Recovery snapshots can contain many transcripts and images. Parsing,
+    // locking, and atomic disk writes must not block the native UI thread.
+    blocking(move || {
+        if !DURABLE_SETTING_KEYS.contains(&key.as_str()) {
+            return Err("unsupported settings key".into());
+        }
+        // Reject corrupt payloads before they can replace the last good copy.
+        serde_json::from_str::<serde_json::Value>(&value).map_err(|error| error.to_string())?;
 
-    let _guard = state.0.lock().map_err(|error| error.to_string())?;
-    let path = settings_path(&app)?;
-    let mut settings = read_settings(&path);
+        let state = app.state::<DurableSettings>();
+        let _guard = state.0.lock().map_err(|error| error.to_string())?;
+        let path = settings_path(&app)?;
+        let mut settings = read_settings(&path);
 
-    // History accumulates across windows, builds and updates; everything else
-    // is a single-writer snapshot that simply replaces the stored copy.
-    let value = if key == COMMAND_HISTORY_KEY && !replace.unwrap_or(false) {
-        merge_history(
-            settings.get(&key).map(String::as_str).unwrap_or("[]"),
-            &value,
-        )
-    } else {
-        value
-    };
+        // History accumulates across windows, builds and updates; everything else
+        // is a single-writer snapshot that simply replaces the stored copy.
+        let value = if key == COMMAND_HISTORY_KEY && !replace.unwrap_or(false) {
+            merge_history(
+                settings.get(&key).map(String::as_str).unwrap_or("[]"),
+                &value,
+            )
+        } else {
+            value
+        };
 
-    settings.insert(key, value);
-    let raw = serde_json::to_vec_pretty(&settings).map_err(|error| error.to_string())?;
+        settings.insert(key, value);
+        let raw = serde_json::to_vec_pretty(&settings).map_err(|error| error.to_string())?;
+        write_settings_file(&path, &raw)
+    })
+    .await
+}
+
+fn write_settings_file(path: &Path, raw: &[u8]) -> Result<(), String> {
     let parent = path.parent().ok_or("settings path has no parent")?;
     std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
 
     let temporary = path.with_extension("json.tmp");
     let backup = path.with_extension("json.bak");
-    std::fs::write(&temporary, raw).map_err(|error| error.to_string())?;
+    {
+        use std::io::Write;
+        let mut file = std::fs::File::create(&temporary).map_err(|error| error.to_string())?;
+        file.write_all(raw).map_err(|error| error.to_string())?;
+        file.sync_all().map_err(|error| error.to_string())?;
+    }
     if path.exists() {
         std::fs::copy(&path, &backup).map_err(|error| error.to_string())?;
-        std::fs::remove_file(&path).map_err(|error| error.to_string())?;
     }
-    std::fs::rename(&temporary, &path).map_err(|error| error.to_string())
+    // Rename replaces the previous file atomically, including on Windows.
+    // Never unlink the live snapshot before its replacement is ready.
+    std::fs::rename(&temporary, path).map_err(|error| error.to_string())
 }
 
 async fn blocking<T, F>(job: F) -> Result<T, String>
@@ -564,6 +582,17 @@ fn agent_proc_send(
 #[tauri::command]
 fn agent_proc_close_stdin(manager: State<'_, AgentProcManager>, id: String) -> Result<(), String> {
     manager.close_stdin(&id)
+}
+
+#[tauri::command]
+fn agent_proc_set_runtime_roots(manager: State<'_, AgentProcManager>, id: String, pids: Vec<u32>) {
+    manager.set_runtime_roots(&id, pids);
+}
+
+#[tauri::command]
+async fn agent_codex_auth_sync(manager: State<'_, AgentProcManager>, id: String, signed_in: bool) -> Result<String, String> {
+    let manager = manager.inner().clone();
+    blocking(move || manager.synchronize_codex_auth(&id, signed_in)).await
 }
 
 #[tauri::command]
@@ -1238,6 +1267,8 @@ fn main() {
             opencode_models_refresh,
             agent_proc_start,
             agent_proc_send,
+            agent_proc_set_runtime_roots,
+            agent_codex_auth_sync,
             agent_proc_close_stdin,
             agent_proc_stop,
             frontend_ready,
@@ -1294,6 +1325,23 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn settings_checkpoint_replaces_existing_file_and_keeps_a_readable_backup() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let directory = std::env::temp_dir().join(format!("duckweed-settings-{}-{unique}", std::process::id()));
+        let path = directory.join("durable-settings.json");
+        write_settings_file(&path, br#"{"draft":"first"}"#).unwrap();
+        write_settings_file(&path, br#"{"draft":"latest"}"#).unwrap();
+        assert_eq!(read_settings(&path).get("draft").unwrap(), "latest");
+        assert!(!path.with_extension("json.tmp").exists());
+        std::fs::write(&path, "damaged").unwrap();
+        assert_eq!(read_settings(&path).get("draft").unwrap(), "first");
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_file(path.with_extension("json.bak")).unwrap();
+        std::fs::remove_dir(directory).unwrap();
+    }
 
     fn commands(raw: &str) -> Vec<String> {
         parse_history(raw).into_iter().map(|e| e.command).collect()

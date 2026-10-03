@@ -120,7 +120,6 @@ export const TerminalPane = memo(function TerminalPane({
   const [titleMenu, setTitleMenu] = useState<TitleMenu | null>(null);
   const [toolsMenu, setToolsMenu] = useState<ToolsMenu | null>(null);
   const [toolsView, setToolsView] = useState<ToolsView>("home");
-  const [timedMessage, setTimedMessage] = useState("");
   const [timedAt, setTimedAt] = useState("");
   const [timedError, setTimedError] = useState("");
 
@@ -545,7 +544,7 @@ export const TerminalPane = memo(function TerminalPane({
                   {timedSend && (
                     <div className="pane-tools-scheduled" role="status">
                       <span className="pane-tools-scheduled-mark" aria-hidden="true" />
-                      <span>Message at <strong>{new Date(timedSend.at).toLocaleString("en-US", { dateStyle: "medium", timeStyle: "short" })}</strong></span>
+                      <span>Send draft at <strong>{new Date(timedSend.at).toLocaleString("en-US", { dateStyle: "medium", timeStyle: "short" })}</strong></span>
                       <button type="button" className="pane-tools-cancel" onClick={() => onCancelTimedSend(node.term)}>Cancel</button>
                     </div>
                   )}
@@ -554,13 +553,12 @@ export const TerminalPane = memo(function TerminalPane({
                     <span className="menu-hint">Send the current draft when another agent finishes.</span>
                   </button>
                   <button type="button" role="menuitem" className="menu-item pane-tools-option" onClick={() => {
-                    setTimedMessage(timedSend?.text ?? "");
                     setTimedAt(timedSend ? localDateTime(timedSend.at) : localDateTime(Math.ceil((Date.now() + 5 * 60_000) / 60_000) * 60_000));
                     setTimedError("");
                     setToolsView("timed");
                   }}>
                     <span>Schedule message</span>
-                    <span className="menu-hint">Write a message to send at a chosen time.</span>
+                    <span className="menu-hint">Send this terminal's draft at a chosen time.</span>
                   </button>
                 </>
               ) : toolsView === "completion" ? (
@@ -602,36 +600,24 @@ export const TerminalPane = memo(function TerminalPane({
                   <form noValidate className="pane-tools-form" onSubmit={(event) => {
                     event.preventDefault();
                     const at = new Date(timedAt).getTime();
-                    if (!timedMessage.trim()) {
-                      setTimedError("Enter a message to schedule.");
-                      return;
-                    }
                     if (!Number.isFinite(at) || at <= Date.now()) {
                       setTimedError("Choose a future date and time.");
                       return;
                     }
-                    onScheduleTimedSend(node.term, { text: timedMessage, at });
+                    onScheduleTimedSend(node.term, { at });
                     setToolsMenu(null);
                   }}>
-                    <label htmlFor={`timed-message-${node.id}`}>Message</label>
-                    <textarea
-                      id={`timed-message-${node.id}`}
-                      autoFocus
-                      rows={4}
-                      value={timedMessage}
-                      onChange={(event) => { setTimedMessage(event.target.value); setTimedError(""); }}
-                      placeholder="Type a message..."
-                    />
                     <label htmlFor={`timed-at-${node.id}`}>Send at</label>
                     <input
                       id={`timed-at-${node.id}`}
                       type="datetime-local"
+                      autoFocus
                       value={timedAt}
                       min={localDateTime(Date.now())}
                       onChange={(event) => { setTimedAt(event.target.value); setTimedError(""); }}
                     />
                     {timedError && <div className="pane-tools-form-error" role="alert">{timedError}</div>}
-                    <div className="pane-tools-form-hint">Uses your local time. Duckweed must stay open.</div>
+                    <div className="pane-tools-form-hint">Sends this terminal's draft at the selected local time. Duckweed must stay open.</div>
                     <button
                       type="submit"
                       className="pane-tools-submit"

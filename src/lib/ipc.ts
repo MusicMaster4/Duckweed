@@ -97,6 +97,7 @@ export interface MobileTerminalSnapshot {
 export interface MobileSlashCommandSnapshot {
   name: string;
   description: string;
+  options?: Array<{ value: string; label: string; description: string; current: boolean }>;
 }
 
 export interface MobileAgentActivitySnapshot {
@@ -334,6 +335,8 @@ export interface PortForward {
   target_pid: number;
   target_port: number;
   url: string;
+  warning?: string | null;
+  status?: "ready" | "reconnecting";
 }
 
 export interface AppPort {
@@ -478,7 +481,7 @@ export const agentUnwatch = (id: string) => invoke<void>("agent_unwatch", { id }
 export type AgentFrame =
   | { kind: "stdout"; line: string }
   | { kind: "stderr"; line: string }
-  | { kind: "exit"; code: number | null };
+  | { kind: "exit"; code: number | null; reconnect?: boolean };
 
 export interface AgentAvailability {
   name: string;
@@ -549,6 +552,9 @@ export const agentProcCloseStdin = (id: string) =>
   invoke<void>("agent_proc_close_stdin", { id });
 
 export const agentProcStop = (id: string) => invoke<void>("agent_proc_stop", { id });
+
+export const agentCodexAuthSync = (id: string, signedIn: boolean) =>
+  invoke<"unchanged" | "deferred" | "restarted">("agent_codex_auth_sync", { id, signedIn });
 
 /** True when the shell for `id` has a child process (a command still running). */
 export const ptyIsBusy = (id: string) => invoke<boolean>("pty_is_busy", { id });

@@ -24,7 +24,9 @@ pub struct Context {
 impl Context {
     pub fn for_request(model: &str, tier: &str, tokens: &crate::usage::Tokens) -> Self {
         let model = normalize(model);
-        let long_capable = model.starts_with("gpt-6-astra")
+        let long_capable = ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"]
+            .iter()
+            .any(|name| model.starts_with(name))
             || model.starts_with("gpt-5.6-")
             || model == "gpt-5.5"
             || model == "gpt-5.5-pro"
@@ -146,8 +148,10 @@ static TABLE: &[Entry] = &[
     e("claude-3-haiku", 0.25, 1.25),
     e("claude-haiku", 1.0, 5.0),
     // ---- OpenAI / Codex ----
-    // https://developers.openai.com/api/docs/pricing (2026-09-07).
+    // https://developers.openai.com/api/docs/pricing (2026-09-24).
     e("gpt-6-astra", 10.0, 50.0),
+    e("gpt-6-sol", 2.0, 10.0),
+    e("gpt-6-luna", 0.1, 0.5),
     e("gpt-5.6-sol", 4.0, 20.0),
     e("gpt-5.6-terra", 2.0, 12.0),
     e("gpt-5.6-luna", 0.2, 1.2),
@@ -334,6 +338,8 @@ mod tests {
         for (model, input, output) in [
             ("gpt-5.1-codex-mini", 0.25, 2.0),
             ("gpt-6-astra", 10.0, 50.0),
+            ("gpt-6-sol", 2.0, 10.0),
+            ("gpt-6-luna", 0.1, 0.5),
             ("gpt-5.6-sol", 4.0, 20.0),
             ("gpt-5.6-terra", 2.0, 12.0),
             ("gpt-5.6-luna", 0.2, 1.2),
@@ -346,6 +352,7 @@ mod tests {
         }
         assert!(!lookup("gpt-5.7", &none).1);
         assert!(!lookup("gpt-5.6", &none).1);
+        assert!(!lookup("gpt-6", &none).1);
         let tokens = crate::usage::Tokens {
             input: 100_000,
             cache_read: 180_000,
@@ -364,6 +371,39 @@ mod tests {
             ..Default::default()
         };
         assert!(!Context::for_request("gpt-6-astra", "", &boundary).long);
+    }
+
+    #[test]
+    fn gpt_6_sol_and_luna_apply_cache_tier_and_long_context_rates() {
+        let tokens = crate::usage::Tokens {
+            input: 100_000,
+            cache_read: 180_000,
+            cache_write: 20_000,
+            output: 8_000,
+            reasoning: 2_000,
+            ..Default::default()
+        };
+        for (model, expected_standard, expected_fast, expected_batch) in [
+            ("gpt-6-sol", 0.722, 1.444, 0.361),
+            ("gpt-6-luna", 0.0361, 0.0722, 0.01805),
+        ] {
+            let (rates, known) = lookup(model, &Overrides::new());
+            assert!(known);
+            assert!(Context::for_request(model, "", &tokens).long);
+            for (tier, expected) in [
+                ("", expected_standard),
+                ("fast", expected_fast),
+                ("batch", expected_batch),
+            ] {
+                let context = Context::for_request(model, tier, &tokens);
+                assert!((context.cost(model, rates, &tokens) - expected).abs() < 1e-9);
+            }
+            let boundary = crate::usage::Tokens {
+                input: 272_000,
+                ..Default::default()
+            };
+            assert!(!Context::for_request(model, "", &boundary).long);
+        }
     }
 
     #[test]

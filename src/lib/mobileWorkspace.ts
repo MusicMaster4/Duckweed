@@ -5,6 +5,8 @@ import type {
   MobileWorkspaceSnapshot,
 } from "./ipc";
 import type { AgentStatus } from "./agents/types";
+import { effortsFor, type AgentSessionState } from "./agents/types";
+import type { MobileSlashCommandSnapshot } from "./ipc";
 import type { AgentItem } from "./agents/types";
 import type { MobileAgentActivitySnapshot } from "./ipc";
 import type { Quota } from "./usage";
@@ -16,6 +18,27 @@ export const MOBILE_WORKSPACE_SNAPSHOT_BUDGET_BYTES = 220_000;
 export const MOBILE_WORKSPACE_CONVERSATION_BUDGET_BYTES = 180_000;
 
 const encoder = new TextEncoder();
+
+/** Share the actual provider choices with mobile, including guided arguments. */
+export function mobileSlashCommands(session: Pick<AgentSessionState, "commands" | "models" | "model" | "effort"> | null | undefined): MobileSlashCommandSnapshot[] {
+  if (!session) return [];
+  const priority = (name: string) => name === "/new" ? 0 : name === "/model" ? 1 : name === "/effort" ? 2 : 3;
+  return [...session.commands]
+    .sort((a, b) => priority(a.name) - priority(b.name))
+    .slice(0, 64)
+    .map((command) => ({
+      name: command.name.slice(0, 80),
+      description: command.description.slice(0, 180),
+      ...(command.name === "/model" ? { options: session.models.slice(0, 80).map((model) => ({
+        value: model.id,
+        label: model.label || model.id,
+        description: model.id !== model.label ? model.id : model.efforts.join(", "),
+        current: session.model === model.id || session.model === model.label || !!session.model && model.id.endsWith(`/${session.model}`),
+      })) } : command.name === "/effort" ? { options: effortsFor(session).map((effort) => ({
+        value: effort, label: effort, description: "Reasoning effort", current: session.effort === effort,
+      })) } : {}),
+    }));
+}
 
 export function utf8ByteLength(value: string): number {
   return encoder.encode(value).byteLength;

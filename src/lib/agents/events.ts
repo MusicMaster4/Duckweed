@@ -53,6 +53,7 @@ export type AgentEvent =
       capabilities?: AgentCapabilities;
     }
   | { type: "status"; status: AgentStatus; error?: string }
+  | { type: "authentication"; required: boolean }
   /** A provider is loading a stored conversation, not running an agent turn. */
   | { type: "history-loading"; loading: boolean }
   /** Set, update, finish, or clear the provider's long-running objective. */
@@ -74,6 +75,7 @@ export type AgentEvent =
    * of waiting for every already-generated delta to be painted.
    */
   | { type: "assistant-snapshot"; id: string; text: string }
+  | { type: "thinking-snapshot"; id: string; text: string }
   | { type: "assistant-end"; id: string }
   | { type: "thinking-delta"; id: string; text: string }
   | { type: "thinking-end"; id: string }
@@ -400,15 +402,17 @@ function reduceEvent(state: AgentSessionState, event: AgentEvent): AgentSessionS
         accessMode: event.accessMode ?? state.accessMode,
         cwd: event.cwd ?? state.cwd,
         commands: event.commands ? mergeCommands(state.commands, event.commands) : state.commands,
-        // A non-empty list wins; adapters re-emit the full set whenever it
-        // changes rather than patching individual rows.
-        models: event.models && event.models.length
+        // Adapters publish the full catalog, including an empty one on logout.
+        models: event.models !== undefined
           ? event.models
           : state.agent === "claude" && state.program !== "claudex" && event.model
             ? refreshClaudeModelLabels(state.models, event.model)
             : state.models,
         capabilities: event.capabilities ?? state.capabilities,
       };
+
+    case "authentication":
+      return { ...state, authenticationRequired: event.required };
 
     case "status": {
       if (state.status === event.status && !event.error) return state;
@@ -502,8 +506,10 @@ function reduceEvent(state: AgentSessionState, event: AgentEvent): AgentSessionS
       return { ...state, items };
     }
 
-    case "assistant-snapshot": {
-      const index = findStreaming(state, "assistant", event.id);
+    case "assistant-snapshot":
+    case "thinking-snapshot": {
+      const kind = event.type === "assistant-snapshot" ? "assistant" : "thinking";
+      const index = findStreaming(state, kind, event.id);
       if (index < 0) {
         return {
           ...state,
@@ -511,7 +517,7 @@ function reduceEvent(state: AgentSessionState, event: AgentEvent): AgentSessionS
           items: [
             ...state.items,
             {
-              kind: "assistant",
+              kind,
               id: event.id,
               at: Date.now(),
               text: clampEnd(event.text, MAX_TEXT),

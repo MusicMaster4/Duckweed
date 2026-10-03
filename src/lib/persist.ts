@@ -1,15 +1,19 @@
+import { readTabGroup } from "./tabGroups";
 import { uid } from "./layout";
 import { newTermId, type InputMode } from "./terminals";
-import type { LayoutNode, Tab } from "./types";
-import { saveDurably } from "./durableStorage";
+import type { LayoutNode, Tab, TabGroup } from "./types";
+import { readStoredValue, saveDurably } from "./durableStorage";
 import type { AgentFollowupMode } from "./agents/types";
 import { agentUiPreferences, type AgentUiPreferences } from "./agents/uiPreferences";
+import { codexCapacityReplySettings, type CodexCapacityReplySettings } from "./agents/capacityReply";
 
 const KEY = "duckweed:state:v1";
 const MAX_RECENTS = 12;
 export const DEFAULT_TOOLS_WIDTH = 260;
 
 export interface PersistedTab {
+  activeLeaf?: string;
+  zoomedLeaf?: string | null;
   /**
    * The tab's id, kept across restarts so per-tab data — checklists today —
    * finds its tab again. Absent in saves written before this existed; boot
@@ -21,6 +25,7 @@ export interface PersistedTab {
   /** Folder this tab works in — projects belong to tabs, not to the window. */
   project: string | null;
   pinned?: boolean;
+  group?: TabGroup | null;
   /** Tab accent color id, or null/absent for default. */
   color?: string | null;
   /** Tab icon id, or null/absent for the default folder. */
@@ -29,6 +34,7 @@ export interface PersistedTab {
 
 export interface Persisted {
   version: 1;
+  savedAt?: number;
   /** Last folder opened anywhere, used only to seed the folder picker. */
   project: string | null;
   recents: string[];
@@ -52,6 +58,7 @@ export interface Persisted {
   customAgentUi: AgentUiPreferences;
   /** Default delivery for messages submitted while an agent turn is active. */
   agentFollowupMode: AgentFollowupMode;
+  codexCapacityReply: CodexCapacityReplySettings;
   /**
    * Approve agent permission requests while the daily usage lockout is active.
    * This is opt-in because unattended approvals can cause destructive changes.
@@ -68,7 +75,7 @@ export interface Persisted {
   /** Left tool dock: whether it is showing, and how wide it was left. */
   toolsOpen: boolean;
   toolsWidth: number;
-  /** Layout only — processes are never restored, just the arrangement. */
+  /** Workspace arrangement; recoverable agent state is stored by terminal id. */
   tabs: PersistedTab[];
   activeTabIndex: number;
 }
@@ -88,14 +95,14 @@ function isLayout(node: unknown): node is LayoutNode {
   return false;
 }
 
-/** Rebuild a saved tree with fresh pane and terminal ids. */
+/** Keep pane identities so drafts, agent sessions and schedules find their owner. */
 export function rehydrate(node: LayoutNode): LayoutNode {
   if (node.kind === "leaf") {
     // Shells do not survive a restart, but where the user filed them does.
     return {
       kind: "leaf",
-      id: uid("p"),
-      term: newTermId(),
+      id: typeof node.id === "string" && node.id ? node.id : uid("p"),
+      term: typeof node.term === "string" && node.term ? node.term : newTermId(),
       pinned: node.pinned === true ? true : undefined,
     };
   }
@@ -109,7 +116,7 @@ export function rehydrate(node: LayoutNode): LayoutNode {
 
 export function load(): Persisted | null {
   try {
-    const raw = localStorage.getItem(KEY);
+    const raw = readStoredValue(KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as Persisted;
     if (parsed.version !== 1) return null;
@@ -124,6 +131,7 @@ export function load(): Persisted | null {
         project: typeof t.project === "string" ? t.project : project,
         pinned: t.pinned === true,
         color: typeof t.color === "string" ? t.color : null,
+        group: t.pinned ? null : readTabGroup(t.group),
         icon: typeof t.icon === "string" ? t.icon : null,
       }));
     return {
@@ -145,6 +153,7 @@ export function load(): Persisted | null {
       // Older saves used one boolean for all harnesses.
       customAgentUi: agentUiPreferences(parsed.customAgentUi),
       agentFollowupMode: parsed.agentFollowupMode === "steer" ? "steer" : "queue",
+      codexCapacityReply: codexCapacityReplySettings(parsed.codexCapacityReply),
       // Never infer consent from an older save.
       autoApproveLockedRequests: parsed.autoApproveLockedRequests === true,
       inputMode: parsed.inputMode === "raw" ? "raw" : "editor",
@@ -172,6 +181,7 @@ export function save(state: {
   tintWorkspaceWithTabColor: boolean;
   customAgentUi: AgentUiPreferences;
   agentFollowupMode: AgentFollowupMode;
+  codexCapacityReply: CodexCapacityReplySettings;
   autoApproveLockedRequests: boolean;
   inputMode: InputMode;
   confirmCloseRunning: boolean;
@@ -183,6 +193,7 @@ export function save(state: {
   try {
     const payload: Persisted = {
       version: 1,
+      savedAt: Date.now(),
       project: state.project,
       recents: state.recents.slice(0, MAX_RECENTS),
       fontSize: state.fontSize,
@@ -193,6 +204,7 @@ export function save(state: {
       tintWorkspaceWithTabColor: state.tintWorkspaceWithTabColor,
       customAgentUi: state.customAgentUi,
       agentFollowupMode: state.agentFollowupMode,
+      codexCapacityReply: state.codexCapacityReply,
       autoApproveLockedRequests: state.autoApproveLockedRequests,
       inputMode: state.inputMode,
       confirmCloseRunning: state.confirmCloseRunning,
@@ -202,10 +214,13 @@ export function save(state: {
         id: t.id,
         title: t.title,
         root: t.root,
+        activeLeaf: t.activeLeaf,
+        zoomedLeaf: t.zoomedLeaf,
         project: t.project?.path ?? null,
         pinned: t.pinned === true ? true : undefined,
         color: t.color ?? null,
         icon: t.icon ?? null,
+        group: t.group ?? null,
       })),
       activeTabIndex: Math.max(
         0,
@@ -213,7 +228,8 @@ export function save(state: {
       ),
     };
     const raw = JSON.stringify(payload);
-    localStorage.setItem(KEY, raw);
+    try { localStorage.setItem(KEY, raw); }
+    catch (error) { console.error("failed to save local workspace", error); }
     saveDurably(KEY, raw);
   } catch {
     // Storage can be unavailable (private mode, quota); layout persistence is

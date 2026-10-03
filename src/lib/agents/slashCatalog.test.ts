@@ -12,7 +12,7 @@ import {
   mergeCommands,
   refreshClaudeModelLabels,
 } from "./slashCatalog";
-import { effortsFor, shortModelLabel } from "./types";
+import { effortsFor, shortModelLabel, findModelChoice } from "./types";
 
 describe("slashCatalog", () => {
   test("every agent has at least /model in its fallback commands", () => {
@@ -25,7 +25,8 @@ describe("slashCatalog", () => {
     for (const agent of AGENT_IDS) {
       const names = fallbackCommands(agent).map((command) => command.name);
       expect(names).toContain("/logout");
-      expect(names).not.toContain("/login");
+      if (agent === "codex") expect(names).toContain("/login");
+      else expect(names).not.toContain("/login");
     }
   });
 
@@ -189,6 +190,19 @@ describe("effortsFor / shortModelLabel", () => {
     expect(effortsFor({ model: "a", models })).toEqual(["low", "high"]);
     expect(effortsFor({ model: null, models })).toEqual(["low", "high", "medium"]);
     expect(effortsFor({ model: "missing", models: [] })).toEqual([]);
+  });
+
+  test("resolved aliases retain their own effort support and never match a different version", () => {
+    const models = [
+      { id: "default", label: "Default (Opus 7.2)", resolvedModel: "claude-opus-7-2", efforts: ["high"] },
+      { id: "opus", label: "Opus 7.2", resolvedModel: "claude-opus-7-2", efforts: ["high"] },
+      { id: "haiku", label: "Haiku 5.1", resolvedModel: "claude-haiku-5-1", efforts: [] },
+    ];
+    expect(findModelChoice("claude-opus-7-2", models)?.id).toBe("opus");
+    expect(findModelChoice("default", models)?.id).toBe("default");
+    expect(findModelChoice("claude-opus-6-1", models)).toBeUndefined();
+    expect(effortsFor({ model: "claude-haiku-5-1", models })).toEqual([]);
+    expect(effortsFor({ model: "haiku", models })).toEqual([]);
   });
 
   test("shortens provider-prefixed and Claude model ids", () => {

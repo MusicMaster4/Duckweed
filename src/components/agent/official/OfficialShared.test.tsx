@@ -62,8 +62,13 @@ function activitySession(agent: AgentId, items: AgentItem[]): AgentSessionState 
   };
 }
 
-function renderAgentActivity(agent: AgentId, items: AgentItem[]): string {
+function renderAgentActivity(
+  agent: AgentId,
+  items: AgentItem[],
+  status: AgentSessionState["status"] = "working",
+): string {
   const session = activitySession(agent, items);
+  session.status = status;
   const props = {
     items,
     termId: session.termId,
@@ -525,14 +530,14 @@ describe("official agent presentation", () => {
 
       expect(html).not.toContain("Reviewing the entry point");
       expect(html.match(/agent-activity-cluster/g)).toHaveLength(1);
-      if (agent === "codex" || agent === "claude") {
+      if (agent === "codex") {
         expect(html).not.toContain("I found the entry point. I am checking the callers now.");
         expect(html).not.toContain("is-interim-update");
         expect(html).toContain("Checking every caller in full");
         expect(html).toContain("agent-thinking-latest");
       } else {
         expect(html).toContain("I found the entry point. I am checking the callers now.");
-        expect(html).toContain("is-interim-update");
+        expect(html).toContain(agent === "claude" ? "is-compact-update" : "is-interim-update");
         expect(html.indexOf("I found the entry point. I am checking the callers now.")).toBeLessThan(
           html.indexOf("Checking every caller in full"),
         );
@@ -569,13 +574,13 @@ describe("official agent presentation", () => {
 
       expect(html).toContain("I found the boundary. I am continuing below this update.");
       expect(html).not.toContain("THIS_OLD_ACTIVITY_MUST_MOVE_OUT");
-      if (agent === "codex" || agent === "claude") {
+      if (agent === "codex") {
         expect(html).not.toContain("is-interim-update");
         expect(html).toContain("agent-activity-cluster");
         expect(html).toContain("agent-thinking-latest");
       } else {
-        expect(html).toContain("is-interim-update");
-        expect(html).not.toContain("agent-activity-cluster");
+        expect(html).toContain(agent === "claude" ? "is-compact-update" : "is-interim-update");
+        if (agent !== "claude") expect(html).not.toContain("agent-activity-cluster");
       }
     });
   }
@@ -1128,6 +1133,33 @@ describe("official agent presentation", () => {
     expect(codexHtml).not.toContain("official-answer official-answer--chatgpt");
     expect(claudeHtml).toContain("official-answer official-answer--claude");
     expect(claudeHtml).not.toContain("agent-thinking-latest");
+  });
+
+  test("keeps every Claude progress message in order and promotes the final reply", () => {
+    const items: AgentItem[] = [
+      { kind: "user", id: "user", at: 1, text: "Inspect the project" },
+      { kind: "assistant", id: "first", at: 2, text: "Checking files.", streaming: false },
+      {
+        kind: "tool", id: "read", at: 3, callId: "read", name: "Read", tool: "read",
+        title: "Read files", status: "done", command: null, output: "", changes: [],
+      },
+      { kind: "assistant", id: "second", at: 4, text: "I found the entry point.", streaming: false },
+      {
+        kind: "assistant", id: "long", at: 5,
+        text: "I am checking the remaining callers and verifying which ones need the same change. ".repeat(2),
+        streaming: false,
+      },
+      { kind: "assistant", id: "final", at: 6, text: "Done.", streaming: false },
+    ];
+    const html = renderAgentActivity("claude", items, "idle");
+
+    for (const text of ["Checking files.", "I found the entry point.", "Done."]) {
+      expect(html).toContain(text);
+    }
+    expect(html.match(/is-compact-update/g)).toHaveLength(2);
+    expect(html).toContain("is-interim-update");
+    expect(html.indexOf("Checking files.")).toBeLessThan(html.indexOf("I found the entry point."));
+    expect(html.indexOf("I found the entry point.")).toBeLessThan(html.indexOf("Done."));
   });
 
   test("uses a single provider mark plus an ASCII startup animation", () => {

@@ -1,28 +1,10 @@
 /**
- * Syntax highlighting for terminal output that arrives with no colour of its own.
- *
- * Plenty of tools print plain text — `dir`, `where`, most `--help` screens,
- * stack traces, config dumps — and a wall of one-colour text is exactly what
- * this is here to fix. Tools that *do* emit colour (Claude Code, Codex, git,
- * npm) are left completely alone; they already know what they want to look
- * like, and repainting over them is how you break a TUI.
- *
- * The safety rules are deliberately strict. A chunk is only ever touched when:
- *
- *   1. nothing is drawing its own screen — the alternate screen is the obvious
- *      case, and mouse reporting catches the TUIs that run inline instead;
- *   2. the chunk contains no ESC byte at all, so there is no escape sequence to
- *      land inside and corrupt;
- *   3. no carriage return appears without a following newline, which is the
- *      signature of a progress bar or spinner redrawing a line in place;
- *   4. the SGR state left behind by earlier chunks is clean, so the colours we
- *      emit cannot leak into or out of somebody else's styling.
- *
- * When all four hold, injecting SGR is safe: the sequences occupy no cells, so
- * wrapping, cursor position and selection are unaffected.
+ * Add syntax colours to unstyled terminal text. Control sequences are kept
+ * byte-for-byte: ConPTY cursor updates and shell prompt markers often share a
+ * PTY read with ordinary output. Styled text and interactive redraws own their
+ * rendering and must pass through unchanged.
  */
 
-import { incompleteTailStart } from "./frames";
 import { highlightColors } from "./theme";
 
 const ESC = "\x1b";
@@ -159,75 +141,141 @@ function highlightLine(line: string): string {
   return head + painted;
 }
 
-/**
- * Mouse reporting — the tracking modes, not the encodings, which say nothing on
- * their own. Only a program painting its own screen turns these on, and unlike
- * the alternate screen they also catch the ones that draw inline: Codex and
- * Claude Code both render into the normal buffer, where the alt-screen test
- * would happily wave their frames through to be repainted.
- */
-const MOUSE_ON = /\x1b\[\?(?:1000|1002|1003)h/;
-const MOUSE_OFF = /\x1b\[\?(?:1000|1002|1003)l/;
-
-/**
- * A per-session colouriser. It has to be stateful because the decision to
- * highlight depends on escape sequences seen in *earlier* chunks: alt-screen
- * mode, leftover SGR and split sequences all persist across writes.
- */
-export function createHighlighter() {
-  let altScreen = false;
-  /** A program is tracking the mouse, so it is drawing and we are not. */
-  let mouse = false;
-  /** True when the last SGR seen was something other than a full reset. */
-  let styled = false;
-  /** The previous chunk ended mid-sequence, so this one starts inside it. */
-  let continuing = false;
-
-  /** Track the modes that decide whether a later plain chunk is safe to paint. */
-  function observe(chunk: string): void {
-    if (chunk.includes("?1049h") || chunk.includes("?47h")) altScreen = true;
-    if (chunk.includes("?1049l") || chunk.includes("?47l")) altScreen = false;
-    if (MOUSE_ON.test(chunk)) mouse = true;
-    if (MOUSE_OFF.test(chunk)) mouse = false;
-
-    // Only the final SGR in the chunk matters — it is the state the next chunk
-    // inherits. `\x1b[m`, `\x1b[0m` and `\x1b[00m` all mean "back to default".
-    let last: string | null = null;
-    for (const m of chunk.matchAll(/\x1b\[([0-9;]*)m/g)) last = m[1];
-    if (last !== null) styled = !/^0*(;0*)*$/.test(last);
+/** Locate a complete escape sequence without inspecting its payload as text. */
+function escapeEnd(text: string, start: number): number {
+  const kind = text[start + 1];
+  if (kind === undefined) return -1;
+  if (kind === "[") {
+    const match = /^\x1b\[[0-?]*[ -/]*[@-~]/.exec(text.slice(start));
+    return match ? start + match[0].length : -1;
   }
+  if ("]P_^X".includes(kind)) {
+    for (let i = start + 2; i < text.length; i++) {
+      if (text[i] === "\x07") return i + 1;
+      if (text[i] === ESC && text[i + 1] === "\\") return i + 2;
+    }
+    return -1;
+  }
+  const match = /^\x1b[ -/]*[0-~]/.exec(text.slice(start));
+  return match ? start + match[0].length : -1;
+}
 
-  /** Returns the chunk to hand to xterm — untouched unless every rule allows it. */
+/** String payloads have no style/mode state, so retain only their terminator context. */
+function sequenceCarry(sequence: string): string {
+  if (sequence.length > 2 && "]P_^X".includes(sequence[1])) {
+    return sequence.slice(0, 2) + (sequence.endsWith(ESC) ? ESC : "");
+  }
+  return sequence;
+}
+
+/** Track independent SGR attributes, including selective and extended resets. */
+function observeStyle(sequence: string, styles: Set<number>): void {
+  if (sequence === `${ESC}c`) { styles.clear(); return; }
+  const match = /^\x1b\[([0-9;:]*)m$/.exec(sequence);
+  if (!match) return;
+  const params = match[1].split(";");
+  for (let i = 0; i < params.length; i++) {
+    const value = Number(params[i].split(":")[0]);
+    if (value === 0) styles.clear();
+    else if (value === 38 || value === 48 || value === 58) {
+      styles.add(value);
+      // RGB/palette values belong to this parameter, not separate attributes.
+      if (!params[i].includes(":")) {
+        const format = Number(params[++i]);
+        i += format === 2 ? 3 : format === 5 ? 1 : 0;
+      }
+    } else if ((value >= 30 && value <= 37) || (value >= 90 && value <= 97)) {
+      styles.add(38);
+    } else if ((value >= 40 && value <= 47) || (value >= 100 && value <= 107)) {
+      styles.add(48);
+    } else if (value === 39) styles.delete(38);
+    else if (value === 49) styles.delete(48);
+    else if (value === 59) styles.delete(58);
+    else if (value === 22) { styles.delete(1); styles.delete(2); }
+    else if (value === 23) { styles.delete(3); styles.delete(20); }
+    else if (value === 24) { styles.delete(4); styles.delete(21); }
+    else if (value === 25) { styles.delete(5); styles.delete(6); }
+    else if (value === 27) styles.delete(7);
+    else if (value === 28) styles.delete(8);
+    else if (value === 29) styles.delete(9);
+    else if (value === 10) {
+      for (let font = 11; font <= 19; font++) styles.delete(font);
+    } else if (value === 54) { styles.delete(51); styles.delete(52); }
+    else if (value === 55) styles.delete(53);
+    else if (value === 65) {
+      for (let ideogram = 60; ideogram <= 64; ideogram++) styles.delete(ideogram);
+    } else if (value === 75) { styles.delete(73); styles.delete(74); }
+    else styles.add(value);
+  }
+}
+
+function highlightText(text: string): string {
+  return text.split("\n").map((line) =>
+    line.endsWith("\r") ? highlightLine(line.slice(0, -1)) + "\r" : highlightLine(line),
+  ).join("\n");
+}
+
+/** Each session keeps the program's style and screen modes across PTY reads. */
+export function createHighlighter() {
+  const modes = new Set<number>();
+  const styles = new Set<number>();
+  let pending = "";
+  const ownsScreen = () => modes.size > 0;
+
   return function process(chunk: string, enabled = true): string {
     if (!chunk) return chunk;
-
-    if (continuing || chunk.includes(ESC)) {
-      observe(chunk);
-      // A sequence split across chunks is rare enough that the tail is assumed
-      // to complete inside the very next chunk; the cost of being wrong is one
-      // uncoloured chunk, never a corrupted one.
-      // Frame reassembly holds a split sequence back until the rest of it lands,
-      // so this only trips on a payload too long to be worth waiting for.
-      continuing = incompleteTailStart(chunk) >= 0;
-      return chunk;
+    const spans: { text: string; sequence?: string }[] = [];
+    let at = 0;
+    if (pending) {
+      const combined = pending + chunk;
+      const end = escapeEnd(combined, 0);
+      if (end < 0) {
+        pending = sequenceCarry(combined);
+        return chunk;
+      }
+      at = end - pending.length;
+      spans.push({ text: chunk.slice(0, at), sequence: combined.slice(0, end) });
+      pending = "";
     }
-    // Highlighting can be disabled while mode/SGR tracking must stay current.
-    // Plain chunks need no vocabulary/token pass in that state.
-    if (!enabled) return chunk;
-    if (altScreen || mouse || styled) return chunk;
-    // Bare CR means an in-place redraw (spinners, progress bars); colouring a
-    // line that is about to be overwritten just makes it flicker.
-    if (/\r(?!\n)/.test(chunk)) return chunk;
+    while (at < chunk.length) {
+      const start = chunk.indexOf(ESC, at);
+      if (start < 0) { spans.push({ text: chunk.slice(at) }); break; }
+      if (start > at) spans.push({ text: chunk.slice(at, start) });
+      const end = escapeEnd(chunk, start);
+      if (end < 0) {
+        const tail = chunk.slice(start);
+        pending = sequenceCarry(tail);
+        spans.push({ text: tail, sequence: pending });
+        break;
+      }
+      const sequence = chunk.slice(start, end);
+      spans.push({ text: sequence, sequence });
+      at = end;
+    }
 
-    // Split on newlines so line-level rules see whole lines. A chunk can end
-    // mid-line, but the tail is still a valid prefix to tokenise and every SGR
-    // we emit is closed before the chunk ends, so nothing leaks.
-    return chunk
-      .split("\n")
-      .map((line) =>
-        line.endsWith("\r") ? highlightLine(line.slice(0, -1)) + "\r" : highlightLine(line),
-      )
-      .join("\n");
+    // A redraw can enter and leave a mode in one coalesced read. Suppress the
+    // whole read, including text before its markers, while still tracking state.
+    let redraw = ownsScreen() || /\r(?!\n)|\x08/.test(chunk);
+    for (const span of spans) {
+      if (!span.sequence) continue;
+      if (span.sequence === `${ESC}c`) { modes.clear(); continue; }
+      const match = /^\x1b\[\?([0-9;]*)([hl])$/.exec(span.sequence);
+      if (!match) continue;
+      for (const raw of match[1].split(";")) {
+        const mode = Number(raw);
+        if (![47, 1047, 1049, 1000, 1002, 1003, 2026].includes(mode)) continue;
+        if (match[2] === "h") { modes.add(mode); redraw = true; }
+        else modes.delete(mode);
+      }
+    }
+
+    return spans.map((span) => {
+      if (span.sequence) {
+        observeStyle(span.sequence, styles);
+        return span.text;
+      }
+      return enabled && !redraw && styles.size === 0 ? highlightText(span.text) : span.text;
+    }).join("");
   };
 }
 

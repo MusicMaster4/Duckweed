@@ -137,9 +137,7 @@ object Crypto {
                         readCompletionSeq = if (terminal.isNull("readCompletionSeq")) null else terminal.optLong("readCompletionSeq"),
                         commands = (0 until commandsJson.length()).mapNotNull { commandIndex ->
                             val command = commandsJson.optJSONObject(commandIndex) ?: return@mapNotNull null
-                            val name = command.optString("name").trim()
-                            if (!name.startsWith("/")) return@mapNotNull null
-                            RemoteSlashCommand(name, command.optString("description").trim())
+                            SlashCommandJson.read(command)
                         },
                         activity = parseAgentActivities(activityJson, json.optLong("sentAt")),
                         conversation = (0 until conversationJson.length()).mapNotNull { messageIndex ->
