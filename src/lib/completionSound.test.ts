@@ -1,6 +1,8 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 
 const originalAudio = globalThis.Audio;
+const originalWindow = globalThis.window;
+const gestureListeners = new Map<string, Set<() => void>>();
 const players: FakeAudio[] = [];
 
 class FakeAudio {
@@ -12,6 +14,7 @@ class FakeAudio {
   loads = 0;
   plays = 0;
   pauses = 0;
+  playError: Error | null = null;
 
   constructor(src: string) {
     this.src = src;
@@ -28,7 +31,7 @@ class FakeAudio {
 
   play() {
     this.plays += 1;
-    return Promise.resolve();
+    return this.playError ? Promise.reject(this.playError) : Promise.resolve();
   }
 }
 
@@ -39,6 +42,8 @@ beforeAll(() => {
 afterAll(() => {
   if (originalAudio === undefined) delete (globalThis as { Audio?: unknown }).Audio;
   else (globalThis as { Audio?: unknown }).Audio = originalAudio;
+  if (originalWindow === undefined) delete (globalThis as { window?: unknown }).window;
+  else (globalThis as { window?: unknown }).window = originalWindow;
 });
 
 /** A stand-in for the Tauri IPC bridge `invoke()` talks to. */
@@ -52,8 +57,14 @@ function fakeTauriRuntime(invoke: (command: string) => Promise<unknown>) {
       },
     },
     // The WebView fallback binds gesture listeners before it plays.
-    addEventListener() {},
-    removeEventListener() {},
+    addEventListener(name: string, listener: () => void) {
+      const listeners = gestureListeners.get(name) ?? new Set();
+      listeners.add(listener);
+      gestureListeners.set(name, listeners);
+    },
+    removeEventListener(name: string, listener: () => void) {
+      gestureListeners.get(name)?.delete(listener);
+    },
     setTimeout: globalThis.setTimeout.bind(globalThis),
   };
   return calls;
@@ -126,26 +137,115 @@ describe("completion sound", () => {
     }
   });
 
-  // Runs last: the fallback is sticky for the rest of the session.
-  test("falls back to the WebView when the app process cannot play", async () => {
+  test("falls back for a temporary failure and recovers native playback on the next cue", async () => {
     const sound = await import("./completionSound");
-    const calls = fakeTauriRuntime(() => Promise.reject(new Error("no output")));
+    let deviceAvailable = false;
+    const calls = fakeTauriRuntime(() => deviceAvailable
+      ? Promise.resolve(null)
+      : Promise.reject(new Error("no output")));
 
     try {
       const playsBefore = totalPlays();
-      sound.playCompletionSound();
+      sound.playCompletionSound(0);
       await flush();
 
       expect(calls).toEqual(["play_completion_sound"]);
       expect(totalPlays()).toBe(playsBefore + 1);
+      expect(gestureListeners.get("keydown")?.size).toBe(1);
 
-      // Later completions go straight to the WebView instead of retrying.
-      sound.playCompletionSound();
+      deviceAvailable = true;
+      const pausesBefore = players[0].pauses;
+      sound.playCompletionSound(1);
       await flush();
-      expect(calls).toHaveLength(1);
+      expect(calls).toHaveLength(2);
+      expect(totalPlays()).toBe(playsBefore + 1);
+      expect(players[0].pauses).toBe(pausesBefore + 1);
+    } finally {
+      clearTauriRuntime();
+    }
+  });
+
+  test("continues falling back while native audio is unavailable", async () => {
+    const sound = await import("./completionSound");
+    const calls = fakeTauriRuntime(() => Promise.reject(new Error("no output")));
+    try {
+      const playsBefore = totalPlays();
+      sound.playCompletionSound(2);
+      await flush();
+      sound.playCompletionSound(3);
+      await flush();
+      expect(calls).toHaveLength(2);
       expect(totalPlays()).toBe(playsBefore + 2);
     } finally {
       clearTauriRuntime();
     }
   });
+
+  test("ignores an old native rejection after a newer cue succeeded", async () => {
+    const sound = await import("./completionSound");
+    let rejectOld!: (error: Error) => void;
+    const oldRequest = new Promise((_, reject) => { rejectOld = reject; });
+    let request = 0;
+    const calls = fakeTauriRuntime(() => ++request === 1 ? oldRequest : Promise.resolve(null));
+    try {
+      const playsBefore = totalPlays();
+      sound.playCompletionSound(0);
+      sound.playCompletionSound(1);
+      await flush();
+      rejectOld(new Error("output was temporarily unavailable"));
+      await flush();
+      expect(calls).toHaveLength(2);
+      expect(totalPlays()).toBe(playsBefore);
+    } finally {
+      clearTauriRuntime();
+    }
+  });
+
+  test("ignores an old native rejection after a newer cue fell back", async () => {
+    const sound = await import("./completionSound");
+    let rejectOld!: (error: Error) => void;
+    const oldRequest = new Promise((_, reject) => { rejectOld = reject; });
+    let request = 0;
+    fakeTauriRuntime(() => ++request === 1 ? oldRequest : Promise.reject(new Error("no output")));
+    try {
+      const playsBefore = totalPlays();
+      sound.playCompletionSound(0);
+      sound.playCompletionSound(1);
+      await flush();
+      expect(totalPlays()).toBe(playsBefore + 1);
+      const pausesBefore = players[1].pauses;
+      rejectOld(new Error("old output failure"));
+      await flush();
+      expect(totalPlays()).toBe(playsBefore + 1);
+      expect(players[1].pauses).toBe(pausesBefore);
+    } finally {
+      clearTauriRuntime();
+    }
+  });
+
+  test("rebinds gesture unlock if fallback autoplay becomes blocked again", async () => {
+    const sound = await import("./completionSound");
+    fakeTauriRuntime(() => Promise.reject(new Error("no output")));
+    try {
+      sound.playCompletionSound(0);
+      await flush();
+      // A successful play previously unlocked the WebView. The next gesture
+      // removes those listeners, as it would in a real running app.
+      for (const listener of gestureListeners.get("keydown") ?? []) listener();
+      expect(gestureListeners.get("keydown")?.size).toBe(0);
+
+      players[1].playError = new Error("autoplay blocked after interruption");
+      sound.playCompletionSound(1);
+      await flush();
+      expect(gestureListeners.get("keydown")?.size).toBe(1);
+      players[1].playError = null;
+      for (const listener of gestureListeners.get("keydown") ?? []) listener();
+      await flush();
+      expect(gestureListeners.get("keydown")?.size).toBe(0);
+    } finally {
+      players[1].playError = null;
+      clearTauriRuntime();
+    }
+  });
+
 });
