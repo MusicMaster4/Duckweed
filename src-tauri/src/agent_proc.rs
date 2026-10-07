@@ -16,7 +16,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -74,7 +74,7 @@ pub struct AgentSpawnOptions {
 }
 
 struct Process {
-    stdin: Option<ProcessInput>,
+    stdin: Option<Arc<Mutex<ProcessInput>>>,
     child: Child,
     pid: Option<u32>,
     runtime_roots: Vec<u32>,
@@ -118,7 +118,7 @@ impl CodexOwnership {
                 let id = frame["id"].to_string();
                 self.closing.insert(id.clone());
                 self.unsubscribes.insert(id, thread);
-            } else if matches!(method, "turn/start" | "thread/shellCommand") {
+            } else if matches!(method, "turn/start" | "thread/shellCommand" | "thread/resume") {
                 self.threads.entry(thread).or_default();
             }
         }
@@ -138,7 +138,17 @@ impl CodexOwnership {
             }
             if let Some(start) = self.starts.remove(&key) {
                 if let Some(thread) = frame["result"]["thread"]["id"].as_str() {
-                    self.threads.entry(thread.to_owned()).or_default();
+                    let active = frame["result"]["thread"]["activeTurnId"].as_str().map(str::to_owned)
+                        .or_else(|| frame["result"]["thread"]["turns"].as_array().and_then(|turns| {
+                            turns.iter().rev().find(|turn| turn["status"] == "inProgress")
+                                .and_then(|turn| turn["id"].as_str()).map(str::to_owned)
+                        }))
+                        .or_else(|| frame["result"]["initialTurnsPage"]["data"].as_array().and_then(|turns| {
+                            turns.iter().find(|turn| turn["status"] == "inProgress")
+                                .and_then(|turn| turn["id"].as_str()).map(str::to_owned)
+                        }));
+                    let turn = self.threads.entry(thread.to_owned()).or_default();
+                    if active.is_some() { *turn = active; }
                 } else if let (Some(thread), Some(turn)) =
                     (start, frame["result"]["turn"]["id"].as_str())
                 {
@@ -190,6 +200,7 @@ impl CodexOwnership {
     fn shutdown_requests(&self) -> Vec<serde_json::Value> {
         let mut requests = Vec::new();
         for (thread, turn) in &self.threads {
+            requests.push(serde_json::json!({"method":"thread/goal/set","params":{"threadId":thread,"status":"paused"}}));
             if let Some(turn) = turn {
                 requests.push(serde_json::json!({"method":"turn/interrupt","params":{"threadId":thread,"turnId":turn}}));
             }
@@ -208,6 +219,19 @@ impl CodexOwnership {
 enum ProcessInput {
     JsonLines(ChildStdin),
     Codex(tungstenite::WebSocket<crate::codex_transport::ProxyWriter>),
+}
+
+impl ProcessInput {
+    fn send(&mut self, line: &str) -> Result<(), String> {
+        match self {
+            Self::JsonLines(stdin) => {
+                stdin.write_all(line.as_bytes()).map_err(err)?;
+                stdin.write_all(b"\n").map_err(err)?;
+                stdin.flush().map_err(err)
+            }
+            Self::Codex(writer) => crate::codex_transport::send(writer, line),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -251,6 +275,21 @@ impl AgentProcManager {
         })
         .map(str::to_owned)
     }
+    pub fn interrupt_codex(&self, id: &str) -> Result<(), String> {
+        let handle = self.get(id).ok_or_else(|| format!("no agent process `{id}`"))?;
+        let (service, threads) = {
+            let process = handle.lock().unwrap();
+            (process.service.clone(), process.ownership.threads.iter()
+                .map(|(thread, turn)| (thread.clone(), turn.clone())).collect::<Vec<_>>())
+        };
+        match service {
+            Some(service) => crate::codex_transport::interrupt_threads(&service, &threads),
+            // A private app-server has no shared work to preserve. Killing its
+            // process tree is the backstop when the protocol stops answering.
+            None => self.stop(id),
+        }
+    }
+
     pub fn set_runtime_roots(&self, id: &str, pids: Vec<u32>) {
         if let Some(process) = self.get(id) {
             process.lock().unwrap().runtime_roots =
@@ -284,24 +323,19 @@ impl AgentProcManager {
         let handle = self
             .get(id)
             .ok_or_else(|| format!("no agent process `{id}`"))?;
-        let mut process = handle.lock().unwrap();
-        let stdin = process
-            .stdin
-            .as_mut()
-            .ok_or_else(|| format!("agent process `{id}` has no stdin"))?;
-        let shared = matches!(stdin, ProcessInput::Codex(_));
-        let result = match stdin {
-            ProcessInput::JsonLines(stdin) => {
-                stdin.write_all(line.as_bytes()).map_err(err)?;
-                stdin.write_all(b"\n").map_err(err)?;
-                stdin.flush().map_err(err)
-            }
-            ProcessInput::Codex(writer) => crate::codex_transport::send(writer, line),
+        let stdin = {
+            let mut process = handle.lock().unwrap();
+            let stdin = process.stdin.clone()
+                .ok_or_else(|| format!("agent process `{id}` has no stdin"))?;
+            // Register before writing: a fast reply can beat the write's return.
+            if process.service.is_some() { process.ownership.sent(line); }
+            stdin
         };
-        if shared && result.is_ok() {
-            process.ownership.sent(line);
-        }
-        result
+        // A full stdin pipe must never hold the process lock. The stdout reader
+        // needs that lock to deliver replies, and Stop needs it to kill a wedged
+        // proxy. Holding it across write_all creates a duplex pipe deadlock.
+        let mut input = stdin.lock().unwrap();
+        input.send(line)
     }
 
     /// Close the agent's stdin without killing it.
@@ -323,27 +357,45 @@ impl AgentProcManager {
             // ends; it is not an error.
             None => return Ok(()),
         };
-        let mut process = handle.lock().unwrap();
-        // This backstop also runs during native app shutdown, when the
-        // WebView may disappear before its async cleanup has reached Rust.
-        for frame in process.ownership.shutdown_requests() {
-            if let Some(ProcessInput::Codex(writer)) = &mut process.stdin {
-                if crate::codex_transport::send(writer, &frame.to_string()).is_ok() {
-                    process.ownership.closing.insert(frame["id"].to_string());
-                }
+        let (stdin, requests, service, threads) = {
+            let mut process = handle.lock().unwrap();
+            let requests = process.ownership.shutdown_requests();
+            for frame in &requests {
+                process.ownership.closing.insert(frame["id"].to_string());
             }
+            let threads = process.ownership.threads.iter()
+                .map(|(thread, turn)| (thread.clone(), turn.clone())).collect::<Vec<_>>();
+            (process.stdin.take(), requests, process.service.clone(), threads)
+        };
+        // Cleanup also runs after the WebView disappears. Bound even the write
+        // itself, not just the response wait, so backpressure cannot trap Stop.
+        let (done, wait) = mpsc::channel();
+        if let Some(stdin) = stdin {
+            thread::spawn(move || {
+                let mut input = stdin.lock().unwrap();
+                for frame in requests {
+                    if input.send(&frame.to_string()).is_err() { break; }
+                }
+                let _ = done.send(());
+            });
         }
-        drop(process);
         let deadline = Instant::now() + Duration::from_millis(250);
+        let _ = wait.recv_timeout(deadline.saturating_duration_since(Instant::now()));
         while !handle.lock().unwrap().ownership.closing.is_empty() && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(5));
+            thread::sleep(Duration::from_millis(5));
         }
         let mut process = handle.lock().unwrap();
-        process.stdin.take();
+        let cleanup_unconfirmed = !process.ownership.closing.is_empty();
         if let Some(pid) = process.pid {
             kill_tree(pid);
         }
         let _ = process.child.kill();
+        drop(process);
+        if cleanup_unconfirmed {
+            if let Some(service) = service {
+                return crate::codex_transport::interrupt_threads(&service, &threads);
+            }
+        }
         Ok(())
     }
 
@@ -619,7 +671,8 @@ pub fn start(
     let pid = Some(child.id());
     let stdin = shared_writer
         .map(ProcessInput::Codex)
-        .or_else(|| child.stdin.take().map(ProcessInput::JsonLines));
+        .or_else(|| child.stdin.take().map(ProcessInput::JsonLines))
+        .map(|input| Arc::new(Mutex::new(input)));
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
 
@@ -861,7 +914,7 @@ mod tests {
         );
         owner.received(r#"{"method":"item/started","params":{"threadId":"ours","item":{"type":"collabAgentToolCall","receiverThreadIds":["our-child"]}}}"#);
         let requests = owner.shutdown_requests();
-        assert_eq!(requests.len(), 5);
+        assert_eq!(requests.len(), 7);
         assert!(requests
             .iter()
             .all(|request| request["params"]["threadId"] != "foreign"));
@@ -884,6 +937,97 @@ mod tests {
         owner.sent(r#"{"id":3,"method":"thread/unsubscribe","params":{"threadId":"ours"}}"#);
         owner.received(r#"{"id":3,"result":{}}"#);
         assert!(owner.shutdown_requests().is_empty());
+    }
+
+    // Run only as the child of the backpressure test. No Codex or inference.
+    #[test]
+    #[ignore]
+    fn backpressure_helper() {
+        if std::env::var_os("DUCKWEED_BACKPRESSURE_HELPER").is_none() { return; }
+        println!("ready");
+        std::io::stdout().flush().unwrap();
+        thread::sleep(Duration::from_millis(150));
+        println!("alive");
+        std::io::stdout().flush().unwrap();
+        // Deliberately never read stdin, simulating a blocked agent/proxy.
+        thread::sleep(Duration::from_secs(30));
+    }
+
+    #[test]
+    fn full_stdin_does_not_block_output_or_stop() {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command.args(["--exact", "agent_proc::tests::backpressure_helper", "--ignored", "--nocapture"])
+            .env("DUCKWEED_BACKPRESSURE_HELPER", "1")
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+        hide_console(&mut command);
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
+        let mut child = command.spawn().unwrap();
+        let pid = child.id();
+        let mut output = BufReader::new(child.stdout.take().unwrap());
+        let mut line = String::new();
+        while !line.contains("ready") {
+            line.clear();
+            assert!(output.read_line(&mut line).unwrap() > 0);
+        }
+        let input = child.stdin.take().unwrap();
+        let handle = Arc::new(Mutex::new(Process {
+            stdin: Some(Arc::new(Mutex::new(ProcessInput::JsonLines(input)))),
+            child, pid: Some(pid), runtime_roots: Vec::new(),
+            ownership: CodexOwnership::default(), service: None, reconnect_on_exit: false,
+        }));
+        let manager = AgentProcManager::default();
+        manager.inner.processes.lock().unwrap().insert("backpressure".into(), handle.clone());
+        let sender = manager.clone();
+        let (written, write_result) = mpsc::channel();
+        let writer = thread::spawn(move || {
+            let result = sender.send("backpressure", &"x".repeat(4 * 1024 * 1024));
+            let _ = written.send(result);
+        });
+        let reader_handle = handle.clone();
+        let (received, read_result) = mpsc::channel();
+        let reader = thread::spawn(move || {
+            let mut line = String::new();
+            while output.read_line(&mut line).unwrap_or(0) > 0 {
+                if line.contains("alive") {
+                    // The production stdout reader takes this lock to update
+                    // ownership before forwarding the frame to the WebView.
+                    let _process = reader_handle.lock().unwrap();
+                    let _ = received.send(());
+                    break;
+                }
+                line.clear();
+            }
+        });
+        let output_arrived = read_result.recv_timeout(Duration::from_secs(2)).is_ok();
+        let write_is_blocked = write_result.try_recv().is_err();
+        // Clean up even when checking the old implementation, whose process
+        // lock is held by the blocked write and prevents manager.stop().
+        if !output_arrived { kill_tree(pid); }
+        let started = Instant::now();
+        manager.stop("backpressure").unwrap();
+        let stop_elapsed = started.elapsed();
+        writer.join().unwrap();
+        reader.join().unwrap();
+        let _ = handle.lock().unwrap().child.wait();
+        assert!(output_arrived, "a full stdin pipe blocked live stdout delivery");
+        assert!(write_is_blocked, "the fixture did not reproduce stdin backpressure");
+        assert!(stop_elapsed < Duration::from_secs(2), "Stop waited on the blocked stdin writer");
+        assert_eq!(manager.open_count(), 0);
+    }
+
+    #[test]
+    fn resumed_live_turn_is_owned_even_without_a_start_notification() {
+        let mut owner = CodexOwnership::default();
+        owner.sent(r#"{"id":1,"method":"thread/resume","params":{"threadId":"resumed"}}"#);
+        assert!(owner.threads.contains_key("resumed"));
+        owner.received(r#"{"id":1,"result":{"thread":{"id":"resumed"},"initialTurnsPage":{"data":[{"id":"live-turn","status":"inProgress"}]}}}"#);
+        let requests = owner.shutdown_requests();
+        assert!(requests.iter().any(|request| request["method"] == "turn/interrupt" && request["params"]["turnId"] == "live-turn"));
+        assert!(requests.iter().any(|request| request["method"] == "thread/goal/set" && request["params"]["status"] == "paused"));
     }
 
     #[test]

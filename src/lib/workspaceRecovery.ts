@@ -14,6 +14,7 @@ export interface AgentRecovery {
   images: AgentImageAttachment[];
   history: string[];
   queued: Array<{ id: string; prompt: AgentPrompt; echoed: boolean }>;
+  queuePaused?: boolean;
   items: AgentItem[];
   usage: AgentSessionState["usage"];
   goal?: AgentSessionState["goal"];

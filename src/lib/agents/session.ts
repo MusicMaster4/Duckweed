@@ -25,6 +25,7 @@ import {
 import { createAcpAdapter } from "./adapters/acp";
 import { createClaudeAdapter } from "./adapters/claude";
 import { createCodexAdapter } from "./adapters/codex";
+import { ProtocolWriter } from "./protocolWriter";
 import { AGENTS, agentPresentation, agentSpawnEnv } from "./catalog";
 import {
   applyEvent,
@@ -93,6 +94,9 @@ interface Session {
   stderr: string[];
   /** Prompts submitted before the handshake finished or while a turn runs. */
   queued: Array<{ id: string; prompt: AgentPrompt; echoed: boolean }>;
+  /** Stop suspends queued work until another explicit send, including after recovery. */
+  queuePaused: boolean;
+  protocolWriter: ProtocolWriter;
   /** Unsent composer content, so a pane remount never loses a draft. */
   draft: string;
   draftImages: AgentImageAttachment[];
@@ -194,6 +198,7 @@ function checkpoint(session: Session): void {
       }] : []),
       ...session.queued,
     ],
+    queuePaused: session.queuePaused,
     items: session.restoring && session.recovery ? session.recovery.items : session.state.items,
     usage: session.state.usage,
     goal: session.state.goal,
@@ -660,6 +665,7 @@ function contextWithoutUserEcho(session: Session): AdapterContext {
 
 /** Preserve completion ownership when a provider-side slash RPC starts work. */
 function claimHandledTurn(session: Session): void {
+  session.queuePaused = false;
   session.userInitiatedTurn = true;
   session.interactionEpoch += 1;
 }
@@ -701,6 +707,7 @@ function dispatchNow(session: Session, prompt: AgentPrompt, echoUser = true): vo
   // commands). Announceability still filters pure meta slashes later.
   session.userInitiatedTurn = true;
   session.interactionEpoch += 1;
+  session.queuePaused = false;
   session.adapter.prompt(prompt, context);
 }
 
@@ -842,6 +849,27 @@ function emit(session: Session, event: AgentEvent): void {
 
 function emitNow(session: Session, event: AgentEvent): void {
   if (session.disposed) return;
+  if (event.type === "prompt-failed") {
+    session.queuePaused = true;
+    session.userInitiatedTurn = false;
+    cancelCapacityReply(session);
+    if (!session.draft && session.draftImages.length === 0) {
+      session.draft = event.prompt.text;
+      session.draftImages = [...event.prompt.images];
+      session.state = { ...session.state, draftRevision: (session.state.draftRevision ?? 0) + 1 };
+    } else {
+      // Never overwrite a newer draft or automatically retry uncertain delivery.
+      const id = nextQueuedPromptId();
+      session.queued.unshift({ id, prompt: event.prompt, echoed: false });
+      session.state = applyEvent(session.state, { type: "queue", prompt: { ...event.prompt, id } });
+    }
+    checkpoint(session);
+    notifyNow(session);
+    return;
+  }
+  if (session.protocolWriter.failure && event.type === "status" && event.status !== "error") {
+    event = { type: "status", status: "error", error: session.protocolWriter.failure.message };
+  }
   if (
     event.type === "side-question" &&
     event.sideQuestion &&
@@ -953,7 +981,7 @@ function emitNow(session: Session, event: AgentEvent): void {
   // running, waits here. Exactly one is released per idle moment: every
   // protocol we speak runs one turn at a time, so pushing the whole backlog
   // would just make the agent reject the rest.
-  const releasingQueued = next.status === "idle" && !session.restoring &&
+  const releasingQueued = next.status === "idle" && !session.interrupted && !session.queuePaused && !session.restoring &&
     !next.loadingHistory && !next.authenticationRequired && session.queued.length > 0;
   const turnEndState = {
     before,
@@ -1037,7 +1065,7 @@ function emitNow(session: Session, event: AgentEvent): void {
 }
 
 function handleFrame(session: Session, frame: AgentFrame): void {
-  if (session.disposed) return;
+  if (session.disposed || session.protocolWriter.failure) return;
   switch (frame.kind) {
     case "stdout":
       session.adapter.receive(frame.line, session.context);
@@ -1059,6 +1087,7 @@ function handleFrame(session: Session, frame: AgentFrame): void {
           return;
         }
       }
+      session.protocolWriter.close();
       void Promise.resolve(session.adapter.dispose?.(session.context)).catch(() => {});
       const detail = session.stderr.slice(-6).join("\n").trim();
       if (isAuthenticationFailure(detail) && handoffToNativeAuth(session, "login")) return;
@@ -1139,12 +1168,30 @@ export async function start(
     launch.model ??
     (isClaudexProgram(launch.program) ? claudexDefaultModel(launch.wrapperArgs) : null);
 
+  const protocolWriter = new ProtocolWriter(
+    (message) => agentProcSend(termId, JSON.stringify(message)),
+    (error) => {
+      if (session.disposed) return;
+      session.queuePaused = true;
+      emit(session, { type: "status", status: "error", error: error.message });
+      // Let rejected prompt RPCs preserve their input before adapter disposal.
+      // Native teardown also aborts an in-flight write and cleans owned work.
+      const teardown = new Promise<void>((resolve) => setTimeout(resolve, 0)).then(async () => {
+        try { await session.adapter.dispose?.(session.context); } catch {}
+        await agentProcStop(termId).catch(() => {});
+      });
+      teardowns.set(termId, teardown);
+      void teardown.finally(() => { if (teardowns.get(termId) === teardown) teardowns.delete(termId); });
+    },
+  );
   const session: Session = {
     termId,
     adapter,
     launch,
     stderr: [],
     queued: recovery?.queued.map((entry) => ({ ...entry, echoed: false })) ?? [],
+    queuePaused: recovery?.queuePaused === true,
+    protocolWriter,
     draft: recovery?.draft ?? "",
     draftImages: recovery?.images ?? [],
     promptHistory: recovery?.history ?? [],
@@ -1208,16 +1255,14 @@ export async function start(
     context: {
       cwd,
       launch,
-      send: (message) => {
-        return agentProcSend(termId, JSON.stringify(message)).catch(() => {
-          // The agent is gone; the exit frame is already on its way and will
-          // put the pane into its ended state.
-        });
-      },
+      send: (message) => protocolWriter.send(message),
+      cancelPendingSend: (id) => protocolWriter.cancel(id),
+      acknowledgeSend: (id) => protocolWriter.acknowledge(id),
       emit: (event) => emit(session, event),
       openUrl,
       runtimeProcesses: (pids) => invoke<void>("agent_proc_set_runtime_roots", { id: termId, pids }),
       syncAccount: (signedIn) => agentCodexAuthSync(termId, signedIn),
+      interruptFallback: () => invoke<void>("agent_codex_interrupt", { id: termId }),
       files: {
         readText: async (path) => {
           const file = await invoke<{
@@ -1353,6 +1398,7 @@ function restoreAfterFailedSteer(session: Session, prompt: AgentPrompt): void {
 }
 
 function steerPrompt(session: Session, prompt: AgentPrompt): void {
+  session.queuePaused = false;
   if (!session.adapter.steer) {
     restoreAfterFailedSteer(session, prompt);
     return;
@@ -1793,6 +1839,12 @@ async function applyResume(session: Session, sessionId: string, title: string): 
     return;
   }
   if (await Promise.resolve(attempt).catch(() => false)) {
+    // Provider transcript replay clears composer state. Restore a suspended
+    // queue visibly without dispatching work that Stop already put on hold.
+    if (session.queuePaused) {
+      session.state = { ...session.state, pending: session.queued.filter((entry) => !entry.echoed)
+        .map((entry) => ({ ...entry.prompt, id: entry.id })) };
+    }
     session.restoring = false;
     session.recovery = null;
     emit(session, { type: "resumed", sessionId, title });
@@ -1855,8 +1907,10 @@ export async function resume(
   // announced in between either — a pane that blinked back to its shell and
   // then to the agent would read as a crash.
   session.disposed = true;
+  session.protocolWriter.close();
   cancelCapacityReply(session);
   sessions.delete(termId);
+  await teardowns.get(termId);
   if (TAURI_RUNTIME) {
     await session.adapter.dispose?.(session.context);
     if (session.adapter.endsOnStdinClose) {
@@ -1914,8 +1968,10 @@ export async function newChat(termId: string): Promise<string | null> {
   const { launch } = session;
   const cwd = session.state.cwd;
   session.disposed = true;
+  session.protocolWriter.close();
   cancelCapacityReply(session);
   sessions.delete(termId);
+  await teardowns.get(termId);
   if (TAURI_RUNTIME) {
     await session.adapter.dispose?.(session.context);
     if (session.adapter.endsOnStdinClose) {
@@ -1938,6 +1994,8 @@ export function interrupt(termId: string): void {
   if (!session || session.disposed) return;
   cancelCapacityReply(session);
   session.interrupted = true;
+  session.queuePaused = true;
+  checkpoint(session);
   session.adapter.interrupt(session.context);
 }
 
@@ -2014,6 +2072,7 @@ function disposeSession(termId: string, keepSurface = false): void {
   }
   cancelCapacityReply(session);
   session.disposed = true;
+  session.protocolWriter.close();
   const recoveryTimer = recoveryTimers.get(termId);
   if (recoveryTimer) clearTimeout(recoveryTimer);
   recoveryTimers.delete(termId);
@@ -2026,7 +2085,8 @@ function disposeSession(termId: string, keepSurface = false): void {
   if (TAURI_RUNTIME) {
     // Agents that end on EOF get the chance to shut down cleanly; the kill
     // that follows is the backstop for the ones that do not.
-    const teardown = Promise.resolve(session.adapter.dispose?.(session.context)).catch(() => {}).then(async () => {
+    const teardown = Promise.resolve(teardowns.get(termId)).then(async () => {
+      try { await session.adapter.dispose?.(session.context); } catch {}
       if (session.adapter.endsOnStdinClose) await agentProcCloseStdin(termId).catch(() => {});
       await agentProcStop(termId).catch(() => {});
     });

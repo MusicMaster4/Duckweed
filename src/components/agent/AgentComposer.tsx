@@ -311,6 +311,20 @@ export function AgentComposer({
     historyDraftRef.current = null;
   };
 
+  useEffect(() => {
+    if (!session.draftRevision || target) return;
+    // Delivery fails after submit cleared local input. Restore the saved text
+    // and attachments when the session publishes that asynchronous recovery.
+    const restored = agents.getDraft(session.termId);
+    const restoredImages = agents.getDraftImages(session.termId);
+    setValue(restored);
+    setCursor(restored.length);
+    setImages(restoredImages);
+    imagesRef.current = restoredImages;
+    setAttachmentError(null);
+    leaveHistoryBrowse();
+  }, [session.termId, session.draftRevision, target]);
+
   const change = (text: string, nextCursor?: number) => {
     setValue(text);
     setCursor(nextCursor ?? Math.min(cursor, text.length));

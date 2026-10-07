@@ -570,18 +570,20 @@ async fn agent_proc_start(
 
 /// One protocol message to the agent's stdin.
 #[tauri::command]
-fn agent_proc_send(
+async fn agent_proc_send(
     manager: State<'_, AgentProcManager>,
     id: String,
     line: String,
 ) -> Result<(), String> {
-    manager.send(&id, &line)
+    let manager = manager.inner().clone();
+    blocking(move || manager.send(&id, &line)).await
 }
 
 /// Signal end-of-input without killing the agent.
 #[tauri::command]
-fn agent_proc_close_stdin(manager: State<'_, AgentProcManager>, id: String) -> Result<(), String> {
-    manager.close_stdin(&id)
+async fn agent_proc_close_stdin(manager: State<'_, AgentProcManager>, id: String) -> Result<(), String> {
+    let manager = manager.inner().clone();
+    blocking(move || manager.close_stdin(&id)).await
 }
 
 #[tauri::command]
@@ -596,8 +598,15 @@ async fn agent_codex_auth_sync(manager: State<'_, AgentProcManager>, id: String,
 }
 
 #[tauri::command]
-fn agent_proc_stop(manager: State<'_, AgentProcManager>, id: String) -> Result<(), String> {
-    manager.stop(&id)
+async fn agent_codex_interrupt(manager: State<'_, AgentProcManager>, id: String) -> Result<(), String> {
+    let manager = manager.inner().clone();
+    blocking(move || manager.interrupt_codex(&id)).await
+}
+
+#[tauri::command]
+async fn agent_proc_stop(manager: State<'_, AgentProcManager>, id: String) -> Result<(), String> {
+    let manager = manager.inner().clone();
+    blocking(move || manager.stop(&id)).await
 }
 
 fn home_path() -> PathBuf {
@@ -1271,6 +1280,7 @@ fn main() {
             agent_codex_auth_sync,
             agent_proc_close_stdin,
             agent_proc_stop,
+            agent_codex_interrupt,
             frontend_ready,
             toggle_window_fullscreen,
             sync_webview_bounds,

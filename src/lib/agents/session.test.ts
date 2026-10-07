@@ -35,6 +35,8 @@ const sent: string[] = [];
 let spawn: AgentSpawnOptions | null = null;
 let frameSink: ((frame: AgentFrame) => void) | null = null;
 let spawnFailure: string | null = null;
+let sendOverride: ((line: string) => Promise<void>) | null = null;
+let nativeStops = 0;
 
 mock.module("../durableStorage", () => ({
   saveDurably: () => {},
@@ -45,7 +47,8 @@ mock.module("@tauri-apps/api/core", () => ({
   Channel: class Channel {
     onmessage: ((frame: AgentFrame) => void) | null = null;
   },
-  invoke: async () => {
+  invoke: async (command: string) => {
+    if (command === "agent_codex_interrupt") return;
     throw new Error("unexpected invoke");
   },
 }));
@@ -63,8 +66,9 @@ mock.module("../ipc", () => ({
   },
   agentProcSend: async (_id: string, line: string) => {
     sent.push(line);
+    await sendOverride?.(line);
   },
-  agentProcStop: async () => {},
+  agentProcStop: async () => { nativeStops += 1; },
   agentCodexAuthSync: async () => "unchanged",
   agentProcCloseStdin: async () => {},
   agentProcProbe: async () => [],
@@ -126,10 +130,8 @@ function feed(frame: unknown): void {
 }
 
 async function flush(): Promise<void> {
-  await Promise.resolve();
-  await Promise.resolve();
-  await Promise.resolve();
-  await Promise.resolve();
+  // Native protocol writes are ordered, with each delivery crossing async IPC.
+  for (let step = 0; step < 32; step += 1) await Promise.resolve();
 }
 
 async function handshake(): Promise<void> {
@@ -163,6 +165,78 @@ const session = await import("./session");
 const { workspaceRecovery, RECOVERY_KEY, parseRecovery } = await import("../workspaceRecovery");
 
 describe("Custom agent UI sessions", () => {
+
+  test("a rejected native send restores the message and images and stops the broken connection", async () => {
+    const termId = "send-rejected";
+    await session.start(termId, codexLaunch, "H:/project");
+    await codexHandshake();
+    sendOverride = async () => { throw new Error("The pipe is closed."); };
+    session.submit(termId, "Keep my message", [image]);
+    await flush();
+    expect(session.get(termId)?.status).toBe("error");
+    expect(session.getDraft(termId)).toBe("Keep my message");
+    expect(session.get(termId)?.draftRevision).toBe(1);
+    expect(session.getDraftImages(termId)).toEqual([image]);
+    session.flushRecovery();
+    expect(workspaceRecovery.get(termId)?.agent).toMatchObject({ draft: "Keep my message", images: [image], queuePaused: true });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(nativeStops).toBeGreaterThan(0);
+    feed({ method: "thread/status/changed", params: { threadId: session.get(termId)?.sessionId, status: { type: "active" } } });
+    expect(session.get(termId)?.status).toBe("error");
+  });
+
+  test("failed delivery preserves a newer draft and keeps the failed prompt suspended", async () => {
+    const termId = "send-rejected-new-draft";
+    await session.start(termId, codexLaunch, "H:/project");
+    await codexHandshake();
+    sendOverride = async () => { throw new Error("Disconnected"); };
+    session.submit(termId, "Failed message", [image]);
+    session.setDraft(termId, "A newer draft");
+    await flush();
+    expect(session.getDraft(termId)).toBe("A newer draft");
+    expect(session.get(termId)?.pending).toEqual([expect.objectContaining({ text: "Failed message", images: [image] })]);
+    expect(workspaceRecovery.get(termId)?.agent?.queuePaused).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  });
+
+  test("a pending failure teardown cannot stop a replacement conversation", async () => {
+    const termId = "send-failure-reopen";
+    await session.start(termId, codexLaunch, "H:/project");
+    await codexHandshake();
+    sendOverride = async () => { throw new Error("Disconnected"); };
+    session.submit(termId, "A failed send");
+    await flush();
+    session.stop(termId);
+    sendOverride = null;
+    await session.start(termId, codexLaunch, "H:/project");
+    await codexHandshake();
+    const stopsAtRestart = nativeStops;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(nativeStops).toBe(stopsAtRestart);
+    expect(session.get(termId)?.status).toBe("idle");
+  });
+
+  test("Stop removes an unsent prompt from behind a pending native write", async () => {
+    const termId = "stop-before-delivery";
+    await session.start(termId, codexLaunch, "H:/project");
+    await codexHandshake();
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    sendOverride = async (line) => { if (rpc(line).method === "thread/backgroundTerminals/list") await blocked; };
+    const listing = session.refreshTasks(termId);
+    session.submit(termId, "This must never be sent after Stop");
+    expect(sent.map(rpc).filter((message) => message.method === "turn/start")).toHaveLength(0);
+    session.interrupt(termId);
+    await flush();
+    release();
+    await flush();
+    const list = sent.map(rpc).findLast((message) => message.method === "thread/backgroundTerminals/list")!;
+    feed({ id: list.id, result: { data: [] } });
+    await listing;
+    expect(sent.map(rpc).filter((message) => message.method === "turn/start")).toHaveLength(0);
+    expect(session.get(termId)?.status).toBe("idle");
+  });
+
   test("shutdown flush saves a shell draft even when no agent is open", () => {
     expect(session.activeTermIds()).toHaveLength(0);
     workspaceRecovery.update("shell-only-recovery", { draft: "latest shell input" });
@@ -301,6 +375,46 @@ describe("Custom agent UI sessions", () => {
     expect(session.getDraft(termId)).toBe("Scheduled draft");
   });
 
+  test("Stop keeps queued work visible instead of immediately restarting the conversation", async () => {
+    const termId = "stopped-codex-queue";
+    const threadId = "stopped-thread";
+    await session.start(termId, codexLaunch, "H:/project");
+    await codexHandshake(threadId);
+    session.submit(termId, "Original task");
+    await flush();
+    const start = sent.map(rpc).findLast((frame) => frame.method === "turn/start")!;
+    feed({ id: start.id, result: { turn: { id: "original" } } });
+    await flush();
+    session.submit(termId, "Queued follow-up");
+    expect(session.get(termId)?.pending).toHaveLength(1);
+    session.interrupt(termId);
+    await flush();
+    for (const frame of sent.map(rpc).filter((frame) => ["turn/interrupt", "thread/backgroundTerminals/clean"].includes(String(frame.method)))) {
+      feed({ id: frame.id, result: {} });
+    }
+    await flush();
+    expect(session.get(termId)?.status).toBe("idle");
+    expect(session.get(termId)?.pending).toHaveLength(1);
+    expect(sent.map(rpc).filter((frame) => frame.method === "turn/start")).toHaveLength(1);
+    feed({ method: "turn/completed", params: { threadId, turn: { id: "original", status: "interrupted" } } });
+    await flush();
+    expect(sent.map(rpc).filter((frame) => frame.method === "turn/start")).toHaveLength(1);
+    session.flushRecovery();
+    const saved = JSON.parse(JSON.stringify(workspaceRecovery.get(termId)?.agent));
+    session.stop(termId);
+    sent.length = 0;
+    await session.start(termId, { ...saved.launch, resumeId: threadId }, saved.cwd, saved);
+    await codexHandshake("provisional-thread");
+    const resume = sent.map(rpc).findLast((frame) => frame.method === "thread/resume")!;
+    feed({ id: resume.id, result: { thread: { id: threadId, turns: [
+      { id: "original", status: "interrupted", items: [] },
+    ] } } });
+    await flush();
+    expect(session.get(termId)?.status).toBe("idle");
+    expect(session.get(termId)?.pending).toHaveLength(1);
+    expect(sent.map(rpc).filter((frame) => frame.method === "turn/start")).toHaveLength(0);
+  });
+
   test("restores prompt navigation from resumed Codex turns and replaces the previous conversation", async () => {
     const termId = "resumed-prompt-history";
     await session.start(termId, codexLaunch, "H:/project");
@@ -331,6 +445,8 @@ describe("Custom agent UI sessions", () => {
     spawn = null;
     frameSink = null;
     spawnFailure = null;
+    sendOverride = null;
+    nativeStops = 0;
     session.setFollowupMode("queue");
     session.setCodexCapacityReply({ enabled: false, message: "continue" });
   });

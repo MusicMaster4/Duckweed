@@ -26,12 +26,18 @@ export interface AdapterContext {
   launch: AgentLaunch;
   /** Write one protocol message to the agent's stdin. */
   send: (message: unknown) => void | Promise<void>;
+  /** Remove an RPC that has not reached the native transport yet. */
+  cancelPendingSend?: (id: string | number) => boolean;
+  /** Provider replies can confirm delivery independently of the native IPC callback. */
+  acknowledgeSend?: (id: string | number) => void;
   /** Report something the UI should show. */
   emit: (event: AgentEvent) => void;
   /** Open a provider-managed sign-in URL in the system browser. */
   openUrl?: (url: string) => Promise<void>;
   /** Provider-owned processes may live under a shared daemon instead of our transport. */
   runtimeProcesses?: (pids: number[]) => Promise<void>;
+  /** Interrupt owned Codex work through native control if the UI transport is unresponsive. */
+  interruptFallback?: () => Promise<void>;
   /** Reload an idle local service after credentials changed through a CLI command. */
   syncAccount?: (signedIn: boolean) => Promise<"unchanged" | "deferred" | "restarted">;
   /**

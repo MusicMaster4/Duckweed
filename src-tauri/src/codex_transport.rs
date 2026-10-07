@@ -252,6 +252,58 @@ pub fn synchronize(
     Ok("restarted")
 }
 
+/// Use a separate proxy when the UI connection cannot deliver an interrupt.
+/// Only the root and children recorded by that connection are addressed.
+pub fn interrupt_threads(service: &Service, threads: &[(String, Option<String>)]) -> Result<(), String> {
+    let mut client = ControlClient::new(service)?;
+    let mut errors = Vec::new();
+    for (thread, known_turn) in threads {
+        // Goals persist in the daemon and can immediately restart a cancelled
+        // turn, including after the UI reconnects. Pause only an active goal.
+        if let Ok(goal) = client.rpc("thread/goal/get", serde_json::json!({"threadId":thread})) {
+            if goal["goal"]["status"] == "active" {
+                if let Err(error) = client.rpc("thread/goal/set", serde_json::json!({"threadId":thread,"status":"paused"})) {
+                    errors.push(error);
+                }
+            }
+        }
+        // Empty provisional and ephemeral threads do not have persisted turn
+        // pages. Their live thread status is enough to prove there is no turn
+        // to interrupt. For active threads, resolve the current id separately.
+        let metadata = client.rpc("thread/read", serde_json::json!({"threadId":thread,"includeTurns":false}));
+        let turn = match metadata {
+            Ok(metadata) if metadata["thread"]["status"]["type"] == "idle" => None,
+            Ok(metadata) => {
+                let active = metadata["thread"]["activeTurnId"].as_str().map(str::to_owned);
+                if active.is_some() { active } else {
+                    match client.rpc("thread/turns/list", serde_json::json!({"threadId":thread,"limit":1,"sortDirection":"desc","itemsView":"summary"})) {
+                        Ok(page) => page["data"].as_array().and_then(|turns| turns.first())
+                            .filter(|turn| turn["status"] == "inProgress")
+                            .and_then(|turn| turn["id"].as_str()).map(str::to_owned),
+                        Err(error) => {
+                            if known_turn.is_none() { errors.push(error); }
+                            known_turn.clone()
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                if known_turn.is_none() { errors.push(error); }
+                known_turn.clone()
+            }
+        };
+        if let Some(turn) = turn {
+            if let Err(error) = client.rpc("turn/interrupt", serde_json::json!({"threadId":thread,"turnId":turn})) {
+                errors.push(error);
+            }
+        }
+        if let Err(error) = client.rpc("thread/backgroundTerminals/clean", serde_json::json!({"threadId":thread})) {
+            errors.push(error);
+        }
+    }
+    if errors.is_empty() { Ok(()) } else { Err(errors.join("\n")) }
+}
+
 struct ControlClient {
     connection: Connection,
     done: mpsc::Sender<()>,
@@ -305,7 +357,7 @@ impl ControlClient {
                     }
                     if frame.get("error").is_some() {
                         return Err(format!(
-                            "Codex could not check {method} before reloading its account."
+                            "Codex request {method} failed: {}", frame["error"]["message"].as_str().unwrap_or("unknown error")
                         ));
                     }
                     return Ok(frame["result"].clone());
@@ -795,9 +847,17 @@ mod tests {
         );
         // Duckweed opens a provisional blank thread before its first prompt.
         // It must not prevent synchronization of a later native logout.
-        fresh
+        let provisional = fresh
             .rpc("thread/start", json!({"cwd":root,"ephemeral":true}))
             .unwrap();
+        let ours = provisional["thread"]["id"].as_str().unwrap().to_owned();
+        let foreign = fresh.rpc("thread/start", json!({"cwd":root,"ephemeral":true})).unwrap();
+        let foreign = foreign["thread"]["id"].as_str().unwrap();
+        // Exercise the emergency control connection against the installed CLI,
+        // without any inference or touching the developer's real CODEX_HOME.
+        interrupt_threads(&fresh.connection.service, &[(ours.clone(), None)]).unwrap();
+        assert_eq!(fresh.rpc("thread/read", json!({"threadId":ours,"includeTurns":false})).unwrap()["thread"]["status"]["type"], "idle");
+        assert_eq!(fresh.rpc("thread/read", json!({"threadId":foreign,"includeTurns":false})).unwrap()["thread"]["status"]["type"], "idle");
         let mut logout = build_command(&resolved);
         logout
             .arg("logout")

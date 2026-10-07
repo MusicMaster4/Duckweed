@@ -480,6 +480,8 @@ export interface AgentSessionState {
   /** Accent colour for the session chrome. */
   accent: string;
   status: AgentStatus;
+  /** Changes when a failed send restores composer content asynchronously. */
+  draftRevision?: number;
   /** A signed-out provider must not receive queued prompts or resume requests. */
   authenticationRequired?: boolean;
   /** True while a stored transcript is replacing the current conversation. */

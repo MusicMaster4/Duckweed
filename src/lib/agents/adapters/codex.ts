@@ -10,6 +10,7 @@ import {
   type AgentCommandResult,
 } from "../adapter";
 import { isAuthenticationFailure } from "../auth";
+import { isCodexCapacityError } from "../capacityReply";
 import { applyEvent, type AgentEvent } from "../events";
 import type { AgentLaunch } from "../launch";
 import {
@@ -89,6 +90,8 @@ const DEFAULT_CHILD_STREAM_PUBLISH_MS = 125;
  * recover before the composer looks wedged.
  */
 const RESUME_RPC_TIMEOUT_MS = 10_000;
+const RPC_TIMEOUT_MS = 30_000;
+const STOP_RPC_TIMEOUT_MS = 5_000;
 const SIDE_DEVELOPER_INSTRUCTIONS = `You are in an ephemeral side conversation, not the main thread.
 Use the inherited conversation only as reference context. Answer only the question submitted after the fork. Do not continue tasks, plans, or tool calls inherited from the parent thread. Keep the response focused and do not modify files or workspace state.`;
 
@@ -124,6 +127,9 @@ interface CodexAdapterOptions {
    * production recovers by forking. `0` disables the timer (interrupt-only).
    */
   resumeTimeoutMs?: number;
+  /** Control RPCs must not hold Stop or the Tasks panel indefinitely. */
+  stopTimeoutMs?: number;
+  rpcTimeoutMs?: number;
 }
 
 const EXEC_STATUS: Record<string, ToolStatus> = {
@@ -314,6 +320,11 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     options.childStreamPublishMs ?? DEFAULT_CHILD_STREAM_PUBLISH_MS;
   const reduceChildEvent = options.childEventReducer ?? applyEvent;
   const resumeTimeoutMs = options.resumeTimeoutMs ?? RESUME_RPC_TIMEOUT_MS;
+  const stopTimeoutMs = options.stopTimeoutMs ?? STOP_RPC_TIMEOUT_MS;
+  const rpcTimeoutMs = options.rpcTimeoutMs ?? RPC_TIMEOUT_MS;
+  let stoppedByUser = false;
+  let currentGoal: CodexGoal | null = null;
+  let stopRecovery: { generation: number; promise: Promise<boolean> } | null = null;
   let disposed = false;
   let initialized = false;
   let authenticationRequired = false;
@@ -335,6 +346,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
   const pending = new Map<RequestKey, Pending>();
   let threadId: string | null = null;
   let currentTurnId: string | null = null;
+  let rootStartRequestId: RequestKey | null = null;
   /**
    * True from the moment Duckweed asks Codex to start/rejoin root work until
    * either completion channel settles it. `turn/started` is normally first,
@@ -1090,7 +1102,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     method: string,
     params: unknown,
   ): Promise<Record<string, unknown>> {
-    return requestWithId(ctx, nextId++, method, params);
+    return requestWithTimeout(ctx, nextId++, method, params, rpcTimeoutMs);
   }
 
   function requestWithId(
@@ -1101,8 +1113,22 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
   ): Promise<Record<string, unknown>> {
     return new Promise((resolve, reject) => {
       pending.set(id, { resolve, reject });
-      ctx.send({ jsonrpc: "2.0", id, method, params });
+      sendRequest(ctx, id, method, params);
     });
+  }
+
+  function sendRequest(ctx: AdapterContext, id: RequestKey, method: string, params: unknown): void {
+    const failed = (error: unknown) => {
+      const waiting = pending.get(id);
+      pending.delete(id);
+      waiting?.reject(asRecord(error) ?? { message: String(error) });
+    };
+    try {
+      const sending = ctx.send({ jsonrpc: "2.0", id, method, params });
+      if (sending) void Promise.resolve(sending).catch(failed);
+    } catch (error: unknown) {
+      failed(error);
+    }
   }
 
   function resumeErrorCode(error: unknown): string | null {
@@ -1139,10 +1165,12 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       };
       timer = setTimeout(() => {
         finish(() => {
+          const cancelledBeforeDelivery = ctx.cancelPendingSend?.(id) === true;
           notify(ctx, "$/cancelRequest", { id });
           reject({
-            code: RESUME_TIMEOUT,
-            message: method.startsWith("account/") ? "Codex did not answer the account request." : "Codex did not resume that conversation.",
+            cancelledBeforeDelivery,
+            code: method === "thread/resume" || method === "thread/fork" || method === "thread/turns/list" ? RESUME_TIMEOUT : "duckweed_rpc_timeout",
+            message: `Codex did not answer ${method}.`,
           });
         });
       }, timeoutMs);
@@ -1150,7 +1178,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         resolve: (result) => finish(() => resolve(result)),
         reject: (error) => finish(() => reject(error)),
       });
-      ctx.send({ jsonrpc: "2.0", id, method, params });
+      sendRequest(ctx, id, method, params);
     });
   }
 
@@ -1169,7 +1197,12 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
   }
 
   function notify(ctx: AdapterContext, method: string, params: unknown) {
-    ctx.send({ jsonrpc: "2.0", method, params });
+    try {
+      const sending = ctx.send({ jsonrpc: "2.0", method, params });
+      if (sending) void Promise.resolve(sending).catch(() => {});
+    } catch {
+      // The waiting RPC's watchdog still settles when the transport is gone.
+    }
   }
 
   function extensionRows(result: Record<string, unknown>, kind: AgentExtension["kind"]): AgentExtension[] {
@@ -1254,7 +1287,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
 
   async function listRuntimeTasks(ctx: AdapterContext): Promise<AgentRuntimeTask[]> {
     if (!threadId) return [];
-    const result = await request(ctx, "thread/backgroundTerminals/list", { threadId, limit: 100 });
+    const result = await requestWithTimeout(ctx, nextId++, "thread/backgroundTerminals/list", { threadId, limit: 100 }, stopTimeoutMs);
     return asArray(result.data)
       .map((raw) => asRecord(raw))
       .filter((row): row is Record<string, unknown> => row !== null)
@@ -2290,6 +2323,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     switch (method) {
       case "thread/goal/updated": {
         const goal = readGoal(params.goal);
+        currentGoal = goal;
         if (goal) {
           ctx.emit({
             type: "goal",
@@ -2299,6 +2333,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         return;
       }
       case "thread/goal/cleared":
+        currentGoal = null;
         ctx.emit({ type: "goal", goal: null });
         return;
       case "thread/started": {
@@ -2317,15 +2352,15 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         const startedTurnId = asString(turn?.id);
         if (startedTurnId && completedRootTurnIds.has(startedTurnId)) return;
         if (
-          startedTurnId && threadId && !rootTurnMayBeActive &&
-          stopRequestedForGeneration === rootTurnGeneration
+          startedTurnId && threadId && (stoppedByUser || (!rootTurnMayBeActive &&
+          stopRequestedForGeneration === rootTurnGeneration))
         ) {
           // The turn Stop could not address yet. Interrupt it now instead of
           // reopening the pane for work the user already cancelled.
           stopRequestedForGeneration = null;
           rememberRootTurnCompleted(startedTurnId);
-          rememberRootTurnFinished(startedTurnId);
-          void request(ctx, "turn/interrupt", { threadId, turnId: startedTurnId }).catch(() => {});
+          void stopTurn(threadId, startedTurnId, ctx, rootTurnGeneration)
+            .then((stopped) => { if (stopped) rememberRootTurnFinished(startedTurnId); });
           return;
         }
         if (startedTurnId !== currentTurnId) {
@@ -2346,6 +2381,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         const completedTurnId = asString(turn?.id);
         if (rootTurnSignalIsStale(completedTurnId)) return;
         rememberRootTurnFinished(completedTurnId);
+        if (stoppedByUser) return;
         rootTurnCompletionObserved = true;
         const error = asRecord(turn?.error);
         if (error) {
@@ -2366,14 +2402,17 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       case "thread/status/changed": {
         const status = threadStatus(params.status);
         if (status === "working") {
+          if (stoppedByUser) return;
           cancelPendingRootCompletion();
           rootTurnMayBeActive = true;
           rootTurnStatusConfirmed = true;
           ctx.emit({ type: "status", status: "working" });
         } else if (status === "idle") {
+          if (stoppedByUser) return;
           // This is Codex's thread-level reconciliation channel. It closes the
           // turn when a start/completed notification was lost or reordered.
-          const wasActive = rootTurnStatusConfirmed || currentTurnId !== null;
+          const wasActive = currentTurnId !== null ||
+            (rootStartRequestId === null && rootTurnStatusConfirmed);
           // Sending turn/start only proves that Duckweed asked for work. Until
           // Codex acknowledges that turn, a thread-idle frame can still belong
           // to the turn that just released a queued follow-up.
@@ -2918,6 +2957,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
 
   function showGoalResult(result: Record<string, unknown>, ctx: AdapterContext): void {
     const goal = readGoal(result.goal);
+    currentGoal = goal;
     ctx.emit({
       type: "goal",
       goal: goal ? { objective: goal.objective, status: goal.status } : null,
@@ -2942,6 +2982,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     if (!threadId) return;
     void request(ctx, "thread/goal/clear", { threadId })
       .then((result) => {
+        currentGoal = null;
         ctx.emit({ type: "goal", goal: null });
         ctx.emit({
           type: "notice",
@@ -2954,6 +2995,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
 
   function setGoalStatus(status: "active" | "paused", ctx: AdapterContext): void {
     if (!threadId) return;
+    if (status === "active") { stoppedByUser = false; rootTurnGeneration += 1; }
     void request(ctx, "thread/goal/set", { threadId, status })
       .then((result) => showGoalResult(result, ctx))
       .catch((error: unknown) =>
@@ -2993,6 +3035,8 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
 
   function replaceGoal(objective: string, ctx: AdapterContext): void {
     if (!threadId) return;
+    stoppedByUser = false;
+    rootTurnGeneration += 1;
     // A new `/goal <objective>` starts fresh accounting, matching Codex's TUI.
     void request(ctx, "thread/goal/clear", { threadId })
       .then(() =>
@@ -3252,6 +3296,66 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     return "handled";
   }
 
+  function recoverStop(ctx: AdapterContext, generation: number): Promise<boolean> {
+    if (disposed || generation !== rootTurnGeneration || !stoppedByUser) return Promise.resolve(false);
+    if (stopRecovery?.generation === generation) return stopRecovery.promise;
+    const promise = Promise.resolve().then(() => {
+      if (!ctx.interruptFallback) throw new Error("Codex did not confirm that the work stopped.");
+      return ctx.interruptFallback();
+    }).then(() => {
+      if (disposed || generation !== rootTurnGeneration || !stoppedByUser) return false;
+      rememberRootTurnFinished(currentTurnId);
+      cancelPendingRootCompletion();
+      settleRootTurn(null);
+      ctx.emit({ type: "runtime-tasks", tasks: [] });
+      ctx.emit({ type: "turn-end" });
+      return true;
+    }).catch((error: unknown) => {
+      if (disposed || generation !== rootTurnGeneration || !stoppedByUser) return false;
+      cancelPendingRootCompletion();
+      ctx.emit({ type: "notice", tone: "error", text:
+        asString(asRecord(error)?.message) ?? (typeof error === "string" ? error : "Codex did not confirm that the work stopped.") });
+      ctx.emit({ type: "status", status: "error", error: "Codex did not confirm that the work stopped." });
+      ctx.emit({ type: "turn-end" });
+      return false;
+    });
+    stopRecovery = { generation, promise };
+    return promise;
+  }
+
+  function stopTurn(targetThread: string, turn: string, ctx: AdapterContext, generation: number): Promise<boolean> {
+    return requestWithTimeout(ctx, nextId++, "turn/interrupt", { threadId: targetThread, turnId: turn }, stopTimeoutMs)
+      .then(() => true).catch(() => recoverStop(ctx, generation));
+  }
+
+  function stopBackgroundWork(ctx: AdapterContext, generation: number): Promise<boolean>[] {
+    const work: Promise<boolean>[] = [];
+    const targets = new Set([threadId, ...children.keys(), ...sideThreads.keys()]);
+    if (threadId && currentGoal?.status === "active") {
+      const goal = currentGoal;
+      work.push(requestWithTimeout(ctx, nextId++, "thread/goal/set", { threadId, status: "paused" }, stopTimeoutMs)
+        .then(() => {
+          if (disposed || generation !== rootTurnGeneration) return false;
+          currentGoal = { ...goal, status: "paused" };
+          ctx.emit({ type: "goal", goal: { objective: goal.objective, status: "paused" } });
+          return true;
+        }).catch(() => recoverStop(ctx, generation)));
+    }
+    for (const target of targets) {
+      if (!target) continue;
+      const childTurn = children.get(target)?.currentTurnId ?? sideThreads.get(target)?.currentTurnId;
+      if (childTurn) work.push(stopTurn(target, childTurn, ctx, generation));
+      work.push(requestWithTimeout(ctx, nextId++, "thread/backgroundTerminals/clean", { threadId: target }, stopTimeoutMs)
+        .then(() => {
+          if (!disposed && generation === rootTurnGeneration && target === threadId) {
+            ctx.emit({ type: "runtime-tasks", tasks: [] });
+          }
+          return true;
+        }).catch(() => recoverStop(ctx, generation)));
+    }
+    return work;
+  }
+
   return {
     args: (_launch: AgentLaunch) => [],
 
@@ -3272,15 +3376,35 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         ...[...children].map(([threadId, child]) => ({ threadId, turnId: child.currentTurnId })),
         ...[...sideThreads].map(([threadId, side]) => ({ threadId, turnId: side.currentTurnId })),
       ];
-      if (loginId) await ctx.send({ jsonrpc: "2.0", id: nextId++, method: "account/login/cancel", params: { loginId } });
+      const sends: Promise<void>[] = [];
+      const sendCleanup = (method: string, params: unknown) => {
+        try {
+          sends.push(Promise.resolve(ctx.send({ jsonrpc: "2.0", id: nextId++, method, params })));
+        } catch {
+          // Native teardown owns the backstop when the transport is gone.
+        }
+      };
+      if (loginId) sendCleanup("account/login/cancel", { loginId });
       for (const entry of active) {
         if (!entry.threadId) continue;
-        if (entry.turnId) await ctx.send({ jsonrpc: "2.0", id: nextId++, method: "turn/interrupt", params: entry });
-        await ctx.send({ jsonrpc: "2.0", id: nextId++, method: "thread/backgroundTerminals/clean", params: { threadId: entry.threadId } });
-        await ctx.send({ jsonrpc: "2.0", id: nextId++, method: "thread/unsubscribe", params: { threadId: entry.threadId } });
+        sendCleanup("thread/goal/set", { threadId: entry.threadId, status: "paused" });
+        if (entry.turnId) sendCleanup("turn/interrupt", entry);
+        sendCleanup("thread/backgroundTerminals/clean", { threadId: entry.threadId });
+        sendCleanup("thread/unsubscribe", { threadId: entry.threadId });
       }
-      for (const waiting of [...pending.values()]) waiting.reject({ code: "duckweed_closed", message: "Codex connection closed." });
+      for (const [id, waiting] of [...pending]) {
+        ctx.cancelPendingSend?.(id);
+        waiting.reject({ code: "duckweed_closed", message: "Codex connection closed." });
+      }
       pending.clear();
+      // Never wait indefinitely on a full pipe before the session invokes the
+      // native teardown. Its separate control connection can finish cleanup.
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([
+        Promise.allSettled(sends),
+        new Promise<void>((resolve) => { timer = setTimeout(resolve, stopTimeoutMs); }),
+      ]);
+      if (timer !== undefined) clearTimeout(timer);
     },
 
     receive: (line, ctx) => {
@@ -3294,6 +3418,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
             ? frame.id
             : null;
         if (id === null) return;
+        ctx.acknowledgeSend?.(id);
         const waiting = pending.get(id);
         if (!waiting) return;
         pending.delete(id);
@@ -3417,7 +3542,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       // dropped and the pane freezes on the empty Thinking placeholder.
       const incomingTurnId = asString(params.turnId) ?? asString(asRecord(params.turn)?.id);
       const awaitingUnconfirmedRootTurn =
-        rootTurnMayBeActive && !rootTurnStatusConfirmed;
+        rootTurnMayBeActive && currentTurnId === null;
       const liveOutput = method.startsWith("item/") || method === "turn/plan/updated";
       if (
         incomingTurnId && incomingTurnId !== currentTurnId &&
@@ -3438,7 +3563,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
           (currentTurnId === null || rootTurnUnsettled) &&
           liveOutput &&
           asString(asRecord(params.item)?.type) !== "userMessage";
-        if (continuesNewTurn || revivesClosedTurn) adoptRootTurn(incomingTurnId, ctx);
+        if (!stoppedByUser && (continuesNewTurn || revivesClosedTurn)) adoptRootTurn(incomingTurnId, ctx);
       }
       if (
         method === "turn/completed" && incomingTurnId && currentTurnId &&
@@ -3456,10 +3581,15 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       }
       if (!notificationBelongsToRoot(method, params)) return;
       handleNotification(method, params, ctx);
+      if (rootStartRequestId !== null && currentTurnId && rootTurnStatusConfirmed &&
+          (method === "turn/started" || liveOutput)) {
+        ctx.acknowledgeSend?.(rootStartRequestId);
+      }
     },
 
     prompt: (prompt, ctx) => {
       if (!threadId || authenticationRequired || disposed) return;
+      stoppedByUser = false;
       cancelPendingRootCompletion();
       rootTurnCompletionObserved = false;
       rootTurnWasSteered = false;
@@ -3477,7 +3607,9 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       // to close this turn.
       rootTurnStatusConfirmed = false;
       const generation = ++rootTurnGeneration;
-      void request(ctx, "turn/start", {
+      const requestId = nextId++;
+      rootStartRequestId = requestId;
+      void requestWithTimeout(ctx, requestId, "turn/start", {
         threadId,
         input: [
           ...(prompt.text ? [{ type: "text", text: prompt.text }] : []),
@@ -3507,10 +3639,15 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         // discipline: `effort` is the exact field name in TurnStartParams.
         ...(currentEffort ? { effort: currentEffort } : {}),
         ...serviceTierParamsFor(currentModel),
-      })
+      }, rpcTimeoutMs)
         .then((result) => {
-          const responseTurnId = asString(asRecord(result.turn)?.id);
-          if (!responseTurnId) return;
+          const responseTurn = asRecord(result.turn);
+          const responseTurnId = asString(responseTurn?.id);
+          if (!responseTurnId?.trim()) {
+            if (generation !== rootTurnGeneration || !rootTurnMayBeActive ||
+                (currentTurnId && rootTurnStatusConfirmed)) return;
+            throw { code: "duckweed_invalid_turn", message: "Codex did not confirm the start of this message. Your message has been kept for retry." };
+          }
           if (generation !== rootTurnGeneration || !rootTurnMayBeActive) {
             // A completion/status fallback won the race. Remember the late
             // response's id so it cannot be mistaken for a later fast turn.
@@ -3524,13 +3661,18 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
               // Stop arrived before the id did. Without this the turn kept
               // running unseen and swallowed the next prompt.
               stopRequestedForGeneration = null;
-              rememberRootTurnFinished(responseTurnId);
-              void request(ctx, "turn/interrupt", { threadId, turnId: responseTurnId })
-                .catch(() => {});
+              void stopTurn(threadId, responseTurnId, ctx, generation)
+                .then((stopped) => { if (stopped) rememberRootTurnFinished(responseTurnId); });
             }
             return;
           }
           if (finishedRootTurnIds.has(responseTurnId)) return;
+          if (["completed", "interrupted", "failed"].includes(asString(responseTurn?.status) ?? "")) {
+            currentTurnId = responseTurnId;
+            rootTurnStatusConfirmed = true;
+            handleNotification("turn/completed", { threadId, turn: responseTurn }, ctx);
+            return;
+          }
           if (completedRootTurnIds.has(responseTurnId)) {
             // On a busy thread Codex steers this input into the running turn
             // and answers with that turn's id, without a new turn/started.
@@ -3545,17 +3687,31 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
           rootTurnStatusConfirmed = true;
         })
         .catch((error: unknown) => {
-          if (generation !== rootTurnGeneration) return;
+          if (disposed || generation !== rootTurnGeneration || stoppedByUser || !rootTurnMayBeActive) return;
+          // Coarse thread status does not prove this message was accepted. A
+          // turn identity with live notifications does, even if its reply was lost.
+          if (resumeErrorCode(error) === "duckweed_rpc_timeout" &&
+              asRecord(error)?.cancelledBeforeDelivery !== true && currentTurnId && rootTurnStatusConfirmed) return;
+          stoppedByUser = true;
+          stopRequestedForGeneration = generation;
           cancelPendingRootCompletion();
           settleRootTurn(null);
           const record = asRecord(error);
+          // Capacity errors confirm delivery and have their own optional follow-up flow.
+          if (!isCodexCapacityError(asString(record?.message) ?? "")) {
+            ctx.emit({ type: "prompt-failed", prompt });
+          }
           ctx.emit({
             type: "notice",
             tone: "error",
             text: asString(record?.message) ?? "Codex could not start the turn.",
           });
           ctx.emit({ type: "turn-end" });
-        });
+          if (["duckweed_rpc_timeout", "duckweed_invalid_turn"].includes(resumeErrorCode(error) ?? "") && ctx.interruptFallback) {
+            void recoverStop(ctx, generation);
+          }
+        })
+        .finally(() => { if (rootStartRequestId === requestId) rootStartRequestId = null; });
     },
 
     steer: async (prompt, ctx) => {
@@ -3712,6 +3868,8 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
      * arrived so the composer does not sit on "Loading conversation" forever.
      */
     resume: (sessionId, ctx) => {
+      stoppedByUser = false;
+      currentGoal = null;
       cancelPendingRootCompletion();
       rootTurnCompletionObserved = false;
       hydratingResume = true;
@@ -3860,6 +4018,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         void request(ctx, "thread/goal/get", { threadId })
           .then((goalResult) => {
             const goal = readGoal(goalResult.goal);
+            currentGoal = goal;
             ctx.emit({
               type: "goal",
               goal: goal ? { objective: goal.objective, status: goal.status } : null,
@@ -3916,6 +4075,11 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
 
     interrupt: (ctx) => {
       cancelPendingRootCompletion();
+      if (rootStartRequestId !== null && ctx.cancelPendingSend?.(rootStartRequestId)) {
+        const id = rootStartRequestId;
+        rootStartRequestId = null;
+        pending.get(id)?.reject({ code: "duckweed_prompt_cancelled" });
+      }
       if (resumeRequestId !== null || hydratingResume) {
         resumeAborted = true;
       }
@@ -3925,6 +4089,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         const inFlight = pending.get(requestId);
         pending.delete(requestId);
         inFlight?.reject({ code: RESUME_CANCELLED });
+        ctx.cancelPendingSend?.(requestId);
         notify(ctx, "$/cancelRequest", { id: requestId });
         return;
       }
@@ -3937,28 +4102,31 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         // Working without an interruptible turn is stale adapter state. Let the
         // session recover instead of leaving a Stop button that cannot work.
         // A pending turn/start still interrupts its turn once the id arrives.
-        if (rootTurnMayBeActive) stopRequestedForGeneration = rootTurnGeneration;
+        if (rootTurnMayBeActive) {
+          stoppedByUser = true;
+          stopRequestedForGeneration = rootTurnGeneration;
+          stopBackgroundWork(ctx, rootTurnGeneration);
+          if (ctx.interruptFallback) {
+            void recoverStop(ctx, rootTurnGeneration);
+            return;
+          }
+        }
         settleRootTurn(null);
         ctx.emit({ type: "turn-end" });
         return;
       }
       const turnId = currentTurnId;
-      void request(ctx, "turn/interrupt", { threadId, turnId })
-        .then(() => {
-          rememberRootTurnFinished(turnId);
-          if (currentTurnId !== turnId) return;
-          cancelPendingRootCompletion();
-          settleRootTurn(turnId);
-          ctx.emit({ type: "turn-end" });
-        })
-        .catch(() => {
-          // The turn may have finished between the click and the call. Either
-          // way, keeping the local session marked as working would be stale.
-          if (currentTurnId !== turnId) return;
-          cancelPendingRootCompletion();
-          settleRootTurn(turnId);
-          ctx.emit({ type: "turn-end" });
-        });
+      const generation = rootTurnGeneration;
+      stoppedByUser = true;
+      const work = stopBackgroundWork(ctx, generation);
+      work.push(stopTurn(threadId, turnId, ctx, generation));
+      void Promise.all(work).then((stopped) => {
+        if (stopped.some((result) => !result) || disposed || generation !== rootTurnGeneration || currentTurnId !== turnId) return;
+        rememberRootTurnFinished(turnId);
+        cancelPendingRootCompletion();
+        settleRootTurn(turnId);
+        ctx.emit({ type: "turn-end" });
+      });
     },
 
     respond: (permissionId, optionId, ctx) => {
@@ -4057,7 +4225,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     refreshTasks: listRuntimeTasks,
     stopTask: async (processId, ctx) => {
       if (!threadId) return false;
-      await request(ctx, "thread/backgroundTerminals/terminate", { threadId, processId });
+      await requestWithTimeout(ctx, nextId++, "thread/backgroundTerminals/terminate", { threadId, processId }, stopTimeoutMs);
       return true;
     },
   };

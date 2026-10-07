@@ -12,6 +12,7 @@ import type {
   AgentPermission,
   AgentPlanStep,
   AgentPlanType,
+  AgentPrompt,
   AgentSessionState,
   AgentRuntimeTask,
   AgentSideQuestion,
@@ -128,6 +129,8 @@ export type AgentEvent =
     }
   | { type: "runtime-tasks"; tasks: AgentRuntimeTask[] }
   | { type: "usage"; usage: Partial<AgentUsage> }
+  /** Preserve a rejected or unconfirmed prompt for an explicit retry. */
+  | { type: "prompt-failed"; prompt: AgentPrompt }
   /** A follow-up the user sent while a turn was still running. */
   | { type: "queue"; prompt: AgentPendingPrompt }
   /** A queued follow-up has been sent, cancelled, or restored for editing. */
@@ -741,6 +744,9 @@ function reduceEvent(state: AgentSessionState, event: AgentEvent): AgentSessionS
 
     case "usage":
       return { ...state, usage: { ...state.usage, ...event.usage } };
+
+    case "prompt-failed":
+      return state;
 
     case "queue":
       return { ...state, started: true, pending: [...state.pending, event.prompt] };

@@ -3147,8 +3147,11 @@ describe("codex adapter", () => {
       method: "turn/interrupt",
       params: { threadId: "thread_1", turnId: "turn_interrupt_final" },
     });
+    for (const cleanup of h.sent.filter((frame) => frame.method === "thread/backgroundTerminals/clean")) {
+      h.feed({ id: cleanup.id, result: {} });
+    }
     h.feed({ jsonrpc: "2.0", id: interrupt.id, result: {} });
-    await Promise.resolve();
+    for (let step = 0; step < 8; step += 1) await Promise.resolve();
     await new Promise((resolve) => setTimeout(resolve, 30));
 
     expect(h.state().status).toBe("idle");
@@ -3285,6 +3288,118 @@ describe("codex adapter", () => {
     expect(h.state().items[0]).toMatchObject({ kind: "user", images: [image] });
   });
 
+
+  test("an unanswered start exits Thinking and preserves the prompt", async () => {
+    const h = harness({}, { completionQuietMs: 0, rpcTimeoutMs: 20 });
+    await h.handshake();
+    const cancelled: Array<string | number> = [];
+    h.ctx.cancelPendingSend = (id) => { cancelled.push(id); return true; };
+    const prompt = { text: "Inspect this image", images: [image] };
+    h.adapter.prompt(prompt, h.ctx);
+    const start = h.sent.findLast((message) => message.method === "turn/start")!;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(h.state().status).toBe("idle");
+    expect(cancelled).toContain(start.id as number);
+    expect(h.events).toContainEqual({ type: "prompt-failed", prompt });
+    expect(h.state().items).toContainEqual(expect.objectContaining({ kind: "notice", text: "Codex did not answer turn/start." }));
+    await h.adapter.dispose?.(h.ctx);
+  });
+
+  test("coarse active thread status cannot hide an unanswered start", async () => {
+    const h = harness({}, { completionQuietMs: 0, rpcTimeoutMs: 20 });
+    await h.handshake();
+    h.adapter.prompt({ text: "A message without delivery confirmation", images: [] }, h.ctx);
+    h.notify("thread/status/changed", { threadId: "thread_1", status: { type: "active" } });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(h.state().status).toBe("idle");
+    expect(h.events.filter((event) => event.type === "prompt-failed")).toHaveLength(1);
+    await h.adapter.dispose?.(h.ctx);
+  });
+
+  test("active then idle thread status cannot silently accept an unconfirmed message", async () => {
+    const h = harness({}, { completionQuietMs: 0, rpcTimeoutMs: 20 });
+    await h.handshake();
+    h.adapter.prompt({ text: "An unconfirmed message", images: [] }, h.ctx);
+    h.notify("thread/status/changed", { threadId: "thread_1", status: { type: "active" } });
+    h.notify("thread/status/changed", { threadId: "thread_1", status: { type: "idle" } });
+    expect(h.state().status).toBe("working");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(h.state().status).toBe("idle");
+    expect(h.events.filter((event) => event.type === "prompt-failed")).toHaveLength(1);
+    await h.adapter.dispose?.(h.ctx);
+  });
+
+  test("existing turn output cannot hide a message cancelled before delivery", async () => {
+    const h = harness({}, { completionQuietMs: 0, rpcTimeoutMs: 20 });
+    await h.handshake();
+    h.ctx.cancelPendingSend = () => true;
+    h.adapter.prompt({ text: "This request is still queued", images: [] }, h.ctx);
+    h.notify("item/agentMessage/delta", { threadId: "thread_1", turnId: "existing-turn", itemId: "answer", delta: "Old work continues." });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(h.state().status).toBe("idle");
+    expect(h.events.filter((event) => event.type === "prompt-failed")).toHaveLength(1);
+    await h.adapter.dispose?.(h.ctx);
+  });
+
+  test.each(["turn/started", "item/agentMessage/delta"])("live %s preserves work when the start reply is lost", async (method) => {
+    const h = harness({}, { completionQuietMs: 0, rpcTimeoutMs: 20 });
+    await h.handshake();
+    const acknowledgements: Array<string | number> = [];
+    h.ctx.acknowledgeSend = (id) => acknowledgements.push(id);
+    h.adapter.prompt({ text: "Keep this healthy turn running", images: [] }, h.ctx);
+    const start = h.sent.findLast((message) => message.method === "turn/start")!;
+    // Status may arrive before turn identity, on the independent notification path.
+    h.notify("thread/status/changed", { threadId: "thread_1", status: { type: "active" } });
+    h.notify(method, { threadId: "thread_1", turnId: "live-turn", turn: { id: "live-turn" }, itemId: "answer", delta: "Working normally." });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(h.state().status).toBe("working");
+    expect(acknowledgements).toContain(start.id as number);
+    expect(h.events.filter((event) => event.type === "prompt-failed")).toHaveLength(0);
+    h.notify("turn/completed", { threadId: "thread_1", turn: { id: "live-turn", status: "completed" } });
+    expect(h.state().status).toBe("idle");
+    await h.adapter.dispose?.(h.ctx);
+  });
+
+  test.each([{}, { turn: { id: "" } }])("invalid start responses do not leave the composer busy: %j", async (result) => {
+    const h = harness();
+    await h.handshake();
+    h.adapter.prompt({ text: "Start a turn", images: [] }, h.ctx);
+    const start = h.sent.findLast((message) => message.method === "turn/start")!;
+    h.feed({ id: start.id, result });
+    for (let step = 0; step < 8; step += 1) await Promise.resolve();
+    expect(h.state().status).toBe("idle");
+    expect(h.events.filter((event) => event.type === "prompt-failed")).toHaveLength(1);
+    await h.adapter.dispose?.(h.ctx);
+  });
+
+  test.each(["completed", "interrupted", "failed"])("settles a start response that already reports %s", async (status) => {
+    const h = harness();
+    await h.handshake();
+    h.adapter.prompt({ text: "A very fast turn", images: [] }, h.ctx);
+    const start = h.sent.findLast((message) => message.method === "turn/start")!;
+    h.feed({ id: start.id, result: { turn: { id: "fast-turn", status, ...(status === "failed" ? { error: { message: "Execution failed." } } : {}) } } });
+    for (let step = 0; step < 8; step += 1) await Promise.resolve();
+    expect(h.state().status).toBe("idle");
+    expect(h.events.filter((event) => event.type === "turn-end")).toHaveLength(1);
+    if (status === "failed") expect(h.state().items).toContainEqual(expect.objectContaining({ kind: "notice", text: "Execution failed." }));
+    await h.adapter.dispose?.(h.ctx);
+  });
+
+  test.each([false, true])("preserves the prompt after a send failure, synchronous: %s", async (synchronous) => {
+    const h = harness();
+    await h.handshake();
+    h.ctx.send = () => {
+      if (synchronous) throw new Error("Disconnected");
+      return Promise.reject(new Error("Disconnected"));
+    };
+    const prompt = { text: "Do not lose this message", images: [image] };
+    h.adapter.prompt(prompt, h.ctx);
+    for (let step = 0; step < 8; step += 1) await Promise.resolve();
+    expect(h.state().status).toBe("idle");
+    expect(h.events).toContainEqual({ type: "prompt-failed", prompt });
+    await h.adapter.dispose?.(h.ctx);
+  });
+
   test("interrupts only the turn that is actually running", async () => {
     const h = harness();
     await h.handshake();
@@ -3300,9 +3415,128 @@ describe("codex adapter", () => {
       params: { threadId: "thread_1", turnId: "turn_7" },
     });
     const interrupt = h.sent.at(-1) as { id: number };
+    for (const cleanup of h.sent.filter((frame) => frame.method === "thread/backgroundTerminals/clean")) {
+      h.feed({ id: cleanup.id, result: {} });
+    }
     h.feed({ jsonrpc: "2.0", id: interrupt.id, result: {} });
-    await Promise.resolve();
+    for (let step = 0; step < 8; step += 1) await Promise.resolve();
     expect(h.state().status).toBe("idle");
+  });
+
+  test("keeps Stop pending until both the turn and background terminals are stopped", async () => {
+    const h = harness();
+    await h.handshake();
+    h.notify("turn/started", { threadId: "thread_1", turn: { id: "busy" } });
+    h.adapter.interrupt(h.ctx);
+    const interrupt = h.sent.findLast((frame) => frame.method === "turn/interrupt")!;
+    const cleanup = h.sent.findLast((frame) => frame.method === "thread/backgroundTerminals/clean")!;
+    h.feed({ id: interrupt.id, result: {} });
+    h.notify("turn/completed", { threadId: "thread_1", turn: { id: "busy", status: "interrupted" } });
+    h.notify("thread/status/changed", { threadId: "thread_1", status: { type: "idle" } });
+    for (let step = 0; step < 8; step += 1) await Promise.resolve();
+    expect(h.state().status).toBe("working");
+    h.feed({ id: cleanup.id, result: {} });
+    for (let step = 0; step < 8; step += 1) await Promise.resolve();
+    expect(h.state().status).toBe("idle");
+    expect(h.events.filter((event) => event.type === "turn-end")).toHaveLength(1);
+  });
+
+  test("recovers an unanswered Stop through native control and accepts another prompt", async () => {
+    const h = harness({}, { completionQuietMs: 0, stopTimeoutMs: 20 });
+    let nativeStops = 0;
+    h.ctx.interruptFallback = async () => { nativeStops += 1; };
+    await h.handshake();
+    h.notify("turn/started", { threadId: "thread_1", turn: { id: "wedged" } });
+    h.adapter.interrupt(h.ctx);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(nativeStops).toBe(1);
+    expect(h.state().status).toBe("idle");
+    expect(h.state().runtimeTasks).toEqual([]);
+    h.notify("thread/status/changed", { threadId: "thread_1", status: { type: "active" } });
+    h.notify("item/agentMessage/delta", { threadId: "thread_1", turnId: "wedged", itemId: "late", delta: "Old work" });
+    expect(h.state().status).toBe("idle");
+    expect(h.state().items.some((item) => item.kind === "assistant")).toBe(false);
+    h.adapter.prompt({ text: "A new request", images: [] }, h.ctx);
+    h.notify("turn/started", { threadId: "thread_1", turn: { id: "next" } });
+    h.notify("item/agentMessage/delta", { threadId: "thread_1", turnId: "next", itemId: "answer", delta: "The new request works." });
+    expect(h.state().items.at(-1)).toMatchObject({ kind: "assistant", text: "The new request works." });
+    await h.adapter.dispose?.(h.ctx);
+  });
+
+  test("uses native control when Stop has no turn id to address", async () => {
+    const h = harness();
+    let nativeStops = 0;
+    h.ctx.interruptFallback = async () => { nativeStops += 1; };
+    await h.handshake();
+    h.adapter.prompt({ text: "Start with a lost acknowledgement", images: [] }, h.ctx);
+    h.adapter.interrupt(h.ctx);
+    for (let step = 0; step < 12; step += 1) await Promise.resolve();
+    expect(nativeStops).toBe(1);
+    expect(h.state().status).toBe("idle");
+    await h.adapter.dispose?.(h.ctx);
+  });
+
+  test("does not claim a successful Stop when native recovery fails", async () => {
+    const h = harness({}, { completionQuietMs: 0, stopTimeoutMs: 20 });
+    h.ctx.interruptFallback = async () => { throw new Error("The service is unavailable."); };
+    await h.handshake();
+    h.notify("turn/started", { threadId: "thread_1", turn: { id: "wedged" } });
+    h.adapter.interrupt(h.ctx);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(h.state().status).toBe("error");
+    expect(h.state().items).toContainEqual(expect.objectContaining({ kind: "notice", text: "The service is unavailable." }));
+    await h.adapter.dispose?.(h.ctx);
+  });
+
+  test("handles failed protocol writes instead of leaving their RPC promises pending", async () => {
+    const h = harness();
+    await h.handshake();
+    h.ctx.send = () => Promise.reject(new Error("The pipe is closed."));
+    await expect(h.adapter.refreshTasks!(h.ctx)).rejects.toThrow("The pipe is closed.");
+    await expect(h.adapter.stopTask!("process-1", h.ctx)).rejects.toThrow("The pipe is closed.");
+    await h.adapter.dispose?.(h.ctx);
+  });
+
+  test("bounds unresponsive task listing and task termination", async () => {
+    const h = harness({}, { completionQuietMs: 0, stopTimeoutMs: 20 });
+    await h.handshake();
+    await expect(h.adapter.refreshTasks!(h.ctx)).rejects.toMatchObject({ code: "duckweed_rpc_timeout" });
+    await expect(h.adapter.stopTask!("process-1", h.ctx)).rejects.toMatchObject({ code: "duckweed_rpc_timeout" });
+    await h.adapter.dispose?.(h.ctx);
+  });
+
+  test("pauses active goals and refuses automatic restarts after Stop", async () => {
+    const h = harness();
+    await h.handshake();
+    h.notify("thread/goal/updated", { threadId: "thread_1", goal: { objective: "Finish the work", status: "active" } });
+    h.notify("turn/started", { threadId: "thread_1", turn: { id: "goal-turn" } });
+    h.adapter.interrupt(h.ctx);
+    const pause = h.sent.findLast((frame) => frame.method === "thread/goal/set")!;
+    expect(pause).toMatchObject({ params: { threadId: "thread_1", status: "paused" } });
+    for (const frame of h.sent.filter((frame) => ["thread/goal/set", "turn/interrupt", "thread/backgroundTerminals/clean"].includes(String(frame.method)))) {
+      h.feed({ id: frame.id, result: {} });
+    }
+    for (let step = 0; step < 8; step += 1) await Promise.resolve();
+    expect(h.state().goal).toEqual({ objective: "Finish the work", status: "paused" });
+    expect(h.state().status).toBe("idle");
+    h.notify("turn/started", { threadId: "thread_1", turn: { id: "auto-restart" } });
+    expect(h.sent.at(-1)).toMatchObject({ method: "turn/interrupt", params: { turnId: "auto-restart" } });
+    expect(h.state().status).toBe("idle");
+    const cancelled = h.sent.at(-1)!;
+    h.feed({ id: cancelled.id, result: {} });
+    h.adapter.command?.("/goal resume", h.ctx);
+    h.notify("turn/started", { threadId: "thread_1", turn: { id: "explicit-resume" } });
+    expect(h.state().status).toBe("working");
+    await h.adapter.dispose?.(h.ctx);
+  });
+
+  test("teardown reaches its native backstop even if protocol writes never resolve", async () => {
+    const h = harness({}, { completionQuietMs: 0, stopTimeoutMs: 20 });
+    await h.handshake();
+    h.ctx.send = () => new Promise<void>(() => {});
+    const started = Date.now();
+    await h.adapter.dispose?.(h.ctx);
+    expect(Date.now() - started).toBeLessThan(200);
   });
 
   test("shows follow-up work when a new prompt races the previous turn's quiet window", async () => {
@@ -3571,8 +3805,11 @@ describe("codex adapter", () => {
     h.notify("turn/started", { threadId: "thread_1", turn: { id: "stopped" } });
     h.adapter.interrupt(h.ctx);
     const interrupt = h.sent.at(-1) as { id: number };
+    for (const cleanup of h.sent.filter((frame) => frame.method === "thread/backgroundTerminals/clean")) {
+      h.feed({ id: cleanup.id, result: {} });
+    }
     h.feed({ jsonrpc: "2.0", id: interrupt.id, result: {} });
-    await Promise.resolve();
+    for (let step = 0; step < 8; step += 1) await Promise.resolve();
     h.adapter.prompt({ text: "queued fix", images: [] }, h.ctx);
     h.notify("turn/completed", {
       threadId: "thread_1", turn: { id: "stopped", status: "interrupted" },
@@ -3594,8 +3831,11 @@ describe("codex adapter", () => {
     h.notify("turn/started", { threadId: "thread_1", turn: { id: "stopped" } });
     h.adapter.interrupt(h.ctx);
     const interrupt = h.sent.at(-1) as { id: number };
+    for (const cleanup of h.sent.filter((frame) => frame.method === "thread/backgroundTerminals/clean")) {
+      h.feed({ id: cleanup.id, result: {} });
+    }
     h.feed({ jsonrpc: "2.0", id: interrupt.id, result: {} });
-    await Promise.resolve();
+    for (let step = 0; step < 8; step += 1) await Promise.resolve();
     h.feed({ jsonrpc: "2.0", id: start.id, result: { turn: { id: "stopped" } } });
     await Promise.resolve();
     h.adapter.prompt({ text: "continue", images: [] }, h.ctx);
