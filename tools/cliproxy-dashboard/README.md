@@ -39,7 +39,9 @@ cliproxy stop
 
 The Windows startup entry launches the proxy and panel in the background. The panel server refreshes account quotas every minute, including when the browser panel is closed. `cliproxy stop` stops both local processes. The duplicate scheduled quota task is disabled. The credential command only reads the local key and does not launch services; run `cliproxy start` if the proxy was intentionally stopped.
 
-Codex can use the original direct provider for one launch with `codex -c model_provider=openai`. Its optional `--profile cliproxy` works for normal CLI sessions. Codex `app-server`, which Duckweed uses, reads the default proxy provider without a profile flag.
+Codex can use the original direct provider for one launch with `codex -c model_provider=openai`. The `cliproxy` provider uses HTTP with SSE streaming (`supports_websockets = false`). The installed proxy rejects the `response.interrupt` WebSocket frame sent by newer Codex versions, returning HTTP 400. HTTP streaming supports normal responses and stopping without that unsupported frame. Steered input is applied after the in-flight response settles. `configure-codex-transport.cjs` backs up the user configuration before changing only this provider's transport; deployment runs it automatically. Reopen existing Codex conversations after applying the change so they reload the provider configuration.
+
+Its optional `--profile cliproxy` works for normal CLI sessions. Codex `app-server`, which Duckweed uses, reads the default proxy provider without a profile flag.
 
 The proxy also accepts Anthropic Messages and Gemini-format API requests. The Gemini plugin does not implement the native Gemini CLI's Cloud Code inbound routes. Connecting models through this proxy does not automatically redirect the Antigravity IDE or every provider's native application.
 
@@ -51,8 +53,10 @@ Live Duckweed protocol checks passed for Claude, Codex and Grok, including tool 
 
 ```
 node --test tools/cliproxy-dashboard/dashboard.test.cjs
+node --test tools/cliproxy-dashboard/codex-transport.test.cjs
 node --test tools/cliproxy-dashboard/quota-cache.test.cjs
 python tools/cliproxy-dashboard/routing-integration.py
+python tools/cliproxy-dashboard/codex-transport-integration.py
 ```
 
 The integration test uses an isolated proxy fixture. It covers multiple accounts, preserving existing API keys, OAuth account addition, pausing accounts, quota normalization, secret exclusion and local access checks.
@@ -60,3 +64,5 @@ The integration test uses an isolated proxy fixture. It covers multiple accounts
 `routing-integration.py` runs the installed proxy against a local upstream using dummy keys. It verifies account affinity, quota failover and priority recovery without touching real accounts. Live Codex checks on this PC also passed: two simultaneous Responses streams, two app-server threads with the second finishing during the first thread's shell command, and steering the active first thread.
 
 The deployed copy is in `C:\Users\jubar\.cli-proxy-api\dashboard`. After source changes, run `powershell -NoProfile -File tools/cliproxy-dashboard/deploy.ps1`. Deployment restarts only the panel server and keeps the proxy running. Pass `-RestartProxy` only when changing the proxy itself. Machine configuration backups are in `C:\Users\jubar\.cli-proxy-api\backups\20261002-065123`.
+
+`codex-transport-integration.py` runs the installed Codex app-server and proxy with an isolated HTTP upstream and dummy keys. It verifies configuration reload for an existing conversation, streamed text, steering, interruption and continuation after stopping without using real provider accounts. Set `CODEX_BIN` or `CLIPROXY_BIN` to test a specific binary.
