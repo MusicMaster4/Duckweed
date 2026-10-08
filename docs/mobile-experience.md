@@ -38,6 +38,8 @@ Opening a conversation requests its focused snapshot immediately, including whil
 
 Desktop publication coalesces streaming changes, uses native sync ticks while minimized, and sends to paired phones concurrently. Desktop command polling also runs per device so one pairing's error does not discard commands recovered for another.
 
+Expired relay deliveries are removed every 15 minutes and before deployment migrations, preserving active pairings and unexpired deliveries.
+
 Refresh requests keep per-desktop timestamp baselines. Returning connectivity triggers relay recovery without resending user input. Offline state retains conversations and drafts and provides an explicit retry action.
 
 The protocol additions are optional. Older snapshots still load with the native timeline; shared rendering and the new controls require an updated desktop and Android app.
