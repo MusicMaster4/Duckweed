@@ -454,7 +454,7 @@ export async function handleRequest(request: Request, env: Env, push: PushSender
           sent_at = excluded.sent_at, created_at = excluded.created_at, expires_at = excluded.expires_at,
           collapse_key = excluded.collapse_key
         WHERE excluded.sent_at >= messages.sent_at
-        ON CONFLICT(pair_id, collapse_key) DO UPDATE SET
+        ON CONFLICT(pair_id, collapse_key) WHERE collapse_key IS NOT NULL DO UPDATE SET
           message_id = excluded.message_id, payload_nonce = excluded.payload_nonce,
           payload_ciphertext = excluded.payload_ciphertext, sent_at = excluded.sent_at,
           created_at = excluded.created_at, expires_at = excluded.expires_at
