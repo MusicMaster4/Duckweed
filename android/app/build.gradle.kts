@@ -61,6 +61,16 @@ android {
         buildConfig = true
     }
 
+    val mobileAssets = layout.buildDirectory.dir("generated/agentAssets")
+    sourceSets["main"].assets.srcDir(mobileAssets)
+    val buildMobileExperience by tasks.registering(Exec::class) {
+        workingDir(rootProject.projectDir.resolve(".."))
+        commandLine(if (System.getProperty("os.name").startsWith("Windows")) "bun.exe" else "bun", "run", "build:mobile")
+        inputs.files(fileTree(rootProject.projectDir.resolve("../src")), rootProject.projectDir.resolve("../vite.mobile.config.ts"), rootProject.projectDir.resolve("../mobile.html"), rootProject.projectDir.resolve("../bun.lock"), rootProject.projectDir.resolve("../package.json"))
+        outputs.dir(mobileAssets)
+    }
+    tasks.named("preBuild").configure { dependsOn(buildMobileExperience) }
+
     val generatedSounds = layout.buildDirectory.dir("generated/res/completionSounds")
     sourceSets["main"].res.srcDir(generatedSounds)
     val syncCompletionSounds by tasks.registering(Sync::class) {
@@ -80,6 +90,7 @@ dependencies {
     implementation("com.google.firebase:firebase-messaging")
     implementation("com.google.android.gms:play-services-code-scanner:16.1.0")
     implementation("androidx.appcompat:appcompat:1.7.1")
+    implementation("androidx.webkit:webkit:1.14.0")
     implementation("androidx.biometric:biometric:1.1.0")
     implementation("androidx.core:core-ktx:1.17.0")
     implementation("androidx.recyclerview:recyclerview:1.4.0")

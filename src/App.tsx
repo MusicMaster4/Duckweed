@@ -1,3 +1,5 @@
+import { mobileAgentExperience } from "./lib/mobileExperience";
+import * as mobileAgentHistory from "./lib/agents/history";
 import { mobileSlashCommands } from "./lib/mobileWorkspace";
 import { arrangeTabGroups, assignTabGroup, updateTabGroup } from "./lib/tabGroups";
 import {
@@ -502,6 +504,8 @@ export default function App() {
   const editorDirtyRef = useRef(false);
   const processState = useRef(new Map<string, ProcessState>());
   const mobileWorkspaceSnapshotRef = useRef("");
+  const mobileFocusedTerminalsRef = useRef(new Map<string, string>());
+  const mobileHistoryRef = useRef(new Map<string, { rows: import("./lib/ipc").AgentSessionSummary[]; error: string | null; requestId: string }>());
   /** Last folder opened in any tab — only ever used to seed the folder picker. */
   const lastProject = useRef<string | null>(initial.lastProject);
 
@@ -989,10 +993,12 @@ export default function App() {
     checkDue();
     window.addEventListener("focus", checkDue);
     document.addEventListener("visibilitychange", checkDue);
+    const offSyncTick = TAURI_RUNTIME ? listen("mobile:sync-tick", checkDue) : null;
     return () => {
       window.clearTimeout(timer);
       window.removeEventListener("focus", checkDue);
       document.removeEventListener("visibilitychange", checkDue);
+      void offSyncTick?.then(off => off());
     };
   }, [timedSends, sendDraftNow]);
 
@@ -1185,7 +1191,14 @@ export default function App() {
                 mobileAlertTermIdsRef.current.has(node.term),
               completionSeq: meta.completionSeq,
               readCompletionSeq: readCompletionSeqsRef.current.get(node.term) ?? null,
-              commands: mobileSlashCommands(session),
+              experience: session ? mobileAgentExperience(session,
+                [...mobileFocusedTerminalsRef.current.values()].includes(node.term)) : undefined,
+              history: mobileHistoryRef.current.get(node.term)?.rows,
+              historyError: mobileHistoryRef.current.get(node.term)?.error,
+              historyRequestId: mobileHistoryRef.current.get(node.term)?.requestId,
+              scheduled: timedSendsRef.current.has(node.term) ? { at: timedSendsRef.current.get(node.term)!.at }
+                : scheduledSendsRef.current.has(node.term) ? { targetLabel: scheduledSendsRef.current.get(node.term)!.targetLabel } : null,
+              commands: mobileSlashCommands(session ? { ...session, model: session.nextModel ?? session.model, effort: session.nextEffort ?? session.effort } : null),
               activity: mobileAgentActivity(session?.items ?? []),
               conversation,
               permission: session?.permission
@@ -1275,8 +1288,8 @@ export default function App() {
         if (!stopped) console.error("mobile usage limits sync", error);
       });
     };
-    const offAgents = agentSessions.subscribeAll(schedule);
-    const offTerminals = termIds.map((termId) => terminals.subscribeSession(termId, schedule));
+    const offAgents = agentSessions.subscribeAll(() => schedule());
+    const offTerminals = termIds.map((termId) => terminals.subscribeSession(termId, () => schedule()));
     const offTerminalOutput = termIds.map((termId) =>
       terminals.subscribeOutput(termId, () => {
         // PTYs can repaint dozens of times per second. A short coalescing
@@ -1336,7 +1349,11 @@ export default function App() {
       offTerminals.forEach((off) => off());
       offTerminalOutput.forEach((off) => off());
     };
-  }, [tabs, termIds, termIdsKey, unreadTermIds, mobileAlertTermIds]);
+  }, [termIdsKey]);
+
+  useEffect(() => {
+    window.dispatchEvent(new Event("duckweed:mobile-read"));
+  }, [tabs, unreadTermIds, mobileAlertTermIds, scheduledSends, timedSends]);
 
   // The relay cannot open an inbound connection through a user's router, so
   // the desktop checks the small encrypted command queue while Duckweed runs.
@@ -1359,6 +1376,49 @@ export default function App() {
           try {
             if (!applied.has(key)) {
               if (command.kind === "refresh") {
+                if (command.terminalId) mobileFocusedTerminalsRef.current.set(command.deviceId, command.terminalId);
+                else mobileFocusedTerminalsRef.current.delete(command.deviceId);
+                window.dispatchEvent(new Event("duckweed:mobile-refresh"));
+              } else if (command.kind === "agent_control" && command.terminalId) {
+                const session = agentSessions.get(command.terminalId);
+                if (session) {
+                  const action = command.action;
+                  if (action === "interrupt") agentSessions.interrupt(command.terminalId);
+                  else if (action === "new_chat" && session.status === "idle") await agentSessions.newChat(command.terminalId);
+                  else if (action === "model" || action === "effort") {
+                    const choices = mobileSlashCommands({ ...session, model: session.nextModel ?? session.model }).find(row => row.name === `/${action}`)?.options ?? [];
+                    if (choices.some(choice => choice.value === command.value)) agentSessions.configure(command.terminalId, action, command.value!);
+                  } else if (action === "history") {
+                    try {
+                      const rows = await mobileAgentHistory.list(session.agent, session.cwd);
+                      mobileHistoryRef.current.set(command.terminalId, { rows: rows.slice(0, 60).map(row => ({ ...row, title: truncateUtf8(row.title, 240), path: "" })), error: null, requestId: command.commandId });
+                    } catch (error) {
+                      mobileHistoryRef.current.set(command.terminalId, { rows: [], error: String(error), requestId: command.commandId });
+                    }
+                  } else if (action === "resume" && command.value && session.status === "idle") {
+                    const rows = await mobileAgentHistory.list(session.agent, session.cwd);
+                    const selected = rows.find(row => row.id === command.value);
+                    if (selected) await agentSessions.resume(command.terminalId, selected.id, selected.title);
+                  } else if (action === "cancel_schedule") {
+                    cancelSchedule(command.terminalId);
+                    cancelTimedSend(command.terminalId);
+                  } else if (action === "schedule" && (command.text?.trim() || command.images.length > 0)) {
+                    const timed = command.scheduledAt && command.scheduledAt > Date.now() && command.scheduledAt < Date.now() + 31 * 86_400_000;
+                    const triggered = command.targetTerminalId && command.targetTerminalId !== command.terminalId && terminals.getMeta(command.targetTerminalId);
+                    if (timed || triggered) {
+                      agentSessions.setDraft(command.terminalId, command.text ?? "");
+                      agentSessions.setDraftImages(command.terminalId, command.images);
+                      cancelSchedule(command.terminalId);
+                      cancelTimedSend(command.terminalId);
+                      if (timed) scheduleTimedSend(command.terminalId, { at: command.scheduledAt! });
+                      else if (command.targetTerminalId) {
+                        const target = agentSessions.get(command.targetTerminalId);
+                        scheduleSend(command.terminalId, { termId: command.targetTerminalId, label: target?.label ?? "Terminal", detail: target?.cwd ?? "" });
+                      }
+                      agentSessions.flushRecovery();
+                    }
+                  }
+                }
                 window.dispatchEvent(new Event("duckweed:mobile-refresh"));
               } else if (command.kind === "create_terminal" && command.projectId) {
                 window.dispatchEvent(new CustomEvent("duckweed:mobile-create-terminal", {

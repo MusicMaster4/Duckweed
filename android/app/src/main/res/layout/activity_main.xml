@@ -283,15 +283,15 @@
             </LinearLayout>
         </androidx.swiperefreshlayout.widget.SwipeRefreshLayout>
 
+        <androidx.swiperefreshlayout.widget.SwipeRefreshLayout android:id="@+id/conversations_page"
+            android:layout_width="match_parent" android:layout_height="match_parent" android:visibility="gone">
         <LinearLayout
-            android:id="@+id/conversations_page"
             android:layout_width="match_parent"
             android:layout_height="match_parent"
             android:orientation="vertical"
             android:paddingStart="@dimen/screen_gutter"
             android:paddingTop="10dp"
-            android:paddingEnd="@dimen/screen_gutter"
-            android:visibility="gone">
+            android:paddingEnd="@dimen/screen_gutter">
 
             <TextView
                 android:layout_width="wrap_content"
@@ -305,7 +305,7 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="4dp"
-                android:text="All open terminals across paired desktops."
+                android:text="Continue where you left off."
                 android:textColor="@color/duckweed_text_faint"
                 android:textSize="13sp" />
 
@@ -366,6 +366,7 @@
                 </LinearLayout>
             </FrameLayout>
         </LinearLayout>
+        </androidx.swiperefreshlayout.widget.SwipeRefreshLayout>
 
         <ScrollView
             android:id="@+id/connections_page"
@@ -903,6 +904,35 @@
                 </LinearLayout>
             </LinearLayout>
 
+            <LinearLayout android:id="@+id/conversation_controls"
+                android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:gravity="center_vertical" android:orientation="horizontal"
+                android:layout_marginBottom="6dp" android:visibility="gone">
+                <Button android:id="@+id/conversation_model"
+                    android:layout_width="0dp" android:layout_height="44dp" android:layout_weight="1"
+                    android:background="@drawable/button_secondary" android:text="Model" android:textAllCaps="false"
+                    android:ellipsize="end" android:maxLines="1" android:textColor="@color/duckweed_text"
+                    android:textSize="12sp" android:paddingStart="12dp" android:paddingEnd="12dp" />
+                <Button android:id="@+id/conversation_effort"
+                    android:layout_width="wrap_content" android:layout_height="44dp" android:layout_marginStart="6dp"
+                    android:background="@drawable/button_secondary" android:text="Effort" android:textAllCaps="false"
+                    android:textColor="@color/duckweed_text" android:textSize="12sp"
+                    android:paddingStart="12dp" android:paddingEnd="12dp" />
+                <ImageButton android:id="@+id/conversation_stop"
+                    android:layout_width="44dp" android:layout_height="44dp" android:layout_marginStart="4dp"
+                    android:background="@drawable/nav_item" android:contentDescription="Stop agent turn"
+                    android:padding="14dp" android:src="@drawable/ic_stop" app:tint="@color/duckweed_error" />
+                <ImageButton android:id="@+id/conversation_more"
+                    android:layout_width="44dp" android:layout_height="44dp" android:layout_marginStart="4dp"
+                    android:background="@drawable/nav_item" android:contentDescription="Conversation actions"
+                    android:padding="12dp" android:src="@drawable/ic_more" app:tint="@color/duckweed_text" />
+            </LinearLayout>
+
+            <TextView android:id="@+id/conversation_schedule_notice"
+                android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:padding="8dp" android:textSize="12sp" android:textColor="@color/duckweed_text_dim"
+                android:visibility="gone" />
+
             <!-- Keep the composer outside this flexible region. When the IME
                  reduces the window, conversation content gives up height first
                  instead of pushing the text field below the keyboard. -->
@@ -913,6 +943,11 @@
                 android:layout_weight="1"
                 android:clipChildren="true"
                 android:orientation="vertical">
+
+            <dev.slop.duckweed.companion.AgentExperienceView
+                android:id="@+id/conversation_experience"
+                android:layout_width="match_parent" android:layout_height="0dp"
+                android:layout_weight="1" android:visibility="gone" />
 
             <androidx.recyclerview.widget.RecyclerView
                 android:id="@+id/conversation_list"
@@ -1289,13 +1324,14 @@
             android:padding="6dp">
 
         <TextView
-            android:id="@+id/nav_responses"
+            android:id="@+id/nav_conversations"
             android:layout_width="0dp"
             android:layout_height="match_parent"
+            android:layout_marginStart="4dp"
             android:layout_weight="1"
             android:background="@drawable/nav_item"
             android:clickable="true"
-            android:drawableTop="@drawable/ic_activity"
+            android:drawableTop="@drawable/ic_responses"
             android:drawablePadding="3dp"
             android:drawableTint="@color/nav_item_color"
             android:focusable="true"
@@ -1303,9 +1339,10 @@
             android:gravity="center"
             android:includeFontPadding="false"
             android:maxLines="1"
-            android:text="Activity"
+            android:text="Conversations"
             android:textColor="@color/nav_item_color"
             android:textSize="12sp" />
+
 
         <TextView
             android:id="@+id/nav_projects"
@@ -1328,14 +1365,13 @@
             android:textSize="12sp" />
 
         <TextView
-            android:id="@+id/nav_conversations"
+            android:id="@+id/nav_responses"
             android:layout_width="0dp"
             android:layout_height="match_parent"
-            android:layout_marginStart="4dp"
             android:layout_weight="1"
             android:background="@drawable/nav_item"
             android:clickable="true"
-            android:drawableTop="@drawable/ic_responses"
+            android:drawableTop="@drawable/ic_activity"
             android:drawablePadding="3dp"
             android:drawableTint="@color/nav_item_color"
             android:focusable="true"
@@ -1343,10 +1379,9 @@
             android:gravity="center"
             android:includeFontPadding="false"
             android:maxLines="1"
-            android:text="Conversations"
+            android:text="Activity"
             android:textColor="@color/nav_item_color"
             android:textSize="12sp" />
-
         </LinearLayout>
     </FrameLayout>
 </LinearLayout>

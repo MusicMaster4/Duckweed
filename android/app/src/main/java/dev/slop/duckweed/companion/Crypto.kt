@@ -157,6 +157,11 @@ object Crypto {
                         },
                         permission = parseRemotePermission(permissionJson),
                         terminalOutput = terminalOutput,
+                        experience = terminal.optJSONObject("experience")?.toString(),
+                        history = terminal.optJSONArray("history")?.toString(),
+                        historyError = terminal.optString("historyError").takeIf { it.isNotBlank() && it != "null" },
+                        historyRequestId = terminal.optString("historyRequestId").takeIf { it.isNotBlank() && it != "null" },
+                        scheduled = terminal.optJSONObject("scheduled")?.toString(),
                     )
                 }.filter { it.id.isNotBlank() },
             )

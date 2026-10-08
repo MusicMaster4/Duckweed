@@ -30,9 +30,12 @@ class MessageFetchWorker(context: Context, parameters: WorkerParameters) : Worke
         const val PAIR_ID = "pair_id"
         const val MESSAGE_ID = "message_id"
 
-        fun fetchAndStore(applicationContext: Context, credentials: PairCredentials, messageId: String) {
+        fun fetchAndStore(
+            applicationContext: Context, credentials: PairCredentials, messageId: String,
+            inlineEnvelope: EncryptedEnvelope? = null, sentAt: Long? = null,
+        ) {
             val pairId = credentials.pairId
-            val envelope = RelayClient.fetch(credentials, messageId)
+            val envelope = inlineEnvelope ?: RelayClient.fetch(credentials, messageId)
             val message = Crypto.decrypt(credentials, messageId, "payload", envelope)
             val receivedAt = System.currentTimeMillis()
             val workspaceStore = WorkspaceStore(applicationContext)
@@ -40,8 +43,9 @@ class MessageFetchWorker(context: Context, parameters: WorkerParameters) : Worke
                 workspaceStore.markPresence(pairId, receivedAt)
             } else if (message.workspace != null) {
                 if (workspaceStore.put(message.workspace, receivedAt)) {
-                    val cleared = MessageStore(applicationContext)
-                        .putSyncedConversation(message.workspace)
+                    val cleared = MessageStore(applicationContext).use {
+                        it.putSyncedConversation(message.workspace)
+                    }
                     NotificationTools.cancelIds(applicationContext, cleared)
                     NotificationTools.refreshApprovalActions(applicationContext)
                 }
@@ -63,8 +67,8 @@ class MessageFetchWorker(context: Context, parameters: WorkerParameters) : Worke
                     }
                 }
             }
-            RelayClient.acknowledge(credentials, messageId)
             NotificationTools.announceChanged(applicationContext)
+            RelayClient.acknowledge(credentials, messageId, sentAt ?: message.sentAt)
         }
     }
 }

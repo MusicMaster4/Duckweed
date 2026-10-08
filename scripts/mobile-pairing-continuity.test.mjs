@@ -187,7 +187,7 @@ describe("mobile pairing continuity", () => {
     expect(desktop).toContain('item.kind === "assistant"');
     expect(desktop).toContain("streaming: item.streaming");
     expect(desktop).toContain("activity: mobileAgentActivity");
-    expect(desktop).toContain("commands: mobileSlashCommands(session)");
+    expect(desktop).toContain("commands: mobileSlashCommands(session ?");
     expect(worker).toContain("putSyncedConversation(message.workspace)");
     expect(store).toContain("fun putSyncedConversation(snapshot: WorkspaceSnapshot)");
   });

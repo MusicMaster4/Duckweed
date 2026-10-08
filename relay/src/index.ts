@@ -268,7 +268,7 @@ async function sendFcm(
   if (!result.ok) throw new Error(`FCM rejected the encrypted notification (${result.status})`);
 }
 
-export async function handleRequest(request: Request, env: Env, push: PushSender = sendFcm): Promise<Response> {
+export async function handleRequest(request: Request, env: Env, push: PushSender = sendFcm, context?: Pick<ExecutionContext, "waitUntil">): Promise<Response> {
   const parts = pathParts(new URL(request.url).pathname);
   try {
     if (request.method === "GET" && parts.length === 1 && parts[0] === "health") {
@@ -399,20 +399,29 @@ export async function handleRequest(request: Request, env: Env, push: PushSender
       const found = await requireReceive(env, pairId, request);
       if (!found) return fail(401, "invalid receiver credential");
       const pending = await env.DB.prepare(`
-        SELECT message_id, sent_at
+        SELECT message_id, sent_at, payload_nonce, payload_ciphertext, collapse_key
           FROM messages
          WHERE pair_id = ? AND expires_at > ?
-         ORDER BY created_at DESC
+         ORDER BY CASE WHEN collapse_key LIKE 'workspace:%' THEN 0 ELSE 1 END, created_at DESC
          LIMIT 100
       `).bind(pairId, Date.now()).all<{
         message_id: string;
         sent_at: number;
+        payload_nonce: string;
+        payload_ciphertext: string;
+        collapse_key: string | null;
       }>();
+      // Foreground clients download the newest workspace in the same request.
+      // Bound the batch so an offline week's completions cannot monopolize sync.
+      const inline = new URL(request.url).searchParams.get("inline") === "1";
+      const messages = inline ? pending.results.slice(0, 8) : pending.results;
       return response({
-        messages: pending.results.map((message) => ({
+        messages: messages.map((message) => ({
           messageId: message.message_id,
           sentAt: message.sent_at,
+          ...(inline ? { payload: { nonce: message.payload_nonce, ciphertext: message.payload_ciphertext } } : {}),
         })),
+        ...(inline ? { hasMore: pending.results.length > messages.length } : {}),
       }, 200);
     }
 
@@ -433,11 +442,23 @@ export async function handleRequest(request: Request, env: Env, push: PushSender
       }
 
       const now = Date.now();
+      // Only silent state is replaceable. Completions remain independently recoverable.
+      const stateKey = collapseKey === `workspace:${pairId}` || collapseKey === pairId ? collapseKey : null;
       await env.DB.prepare(`
-        INSERT OR REPLACE INTO messages (
+        INSERT INTO messages (
           pair_id, message_id, payload_nonce, payload_ciphertext,
-          sent_at, created_at, expires_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+          sent_at, created_at, expires_at, collapse_key
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(pair_id, message_id) DO UPDATE SET
+          payload_nonce = excluded.payload_nonce, payload_ciphertext = excluded.payload_ciphertext,
+          sent_at = excluded.sent_at, created_at = excluded.created_at, expires_at = excluded.expires_at,
+          collapse_key = excluded.collapse_key
+        WHERE excluded.sent_at >= messages.sent_at
+        ON CONFLICT(pair_id, collapse_key) DO UPDATE SET
+          message_id = excluded.message_id, payload_nonce = excluded.payload_nonce,
+          payload_ciphertext = excluded.payload_ciphertext, sent_at = excluded.sent_at,
+          created_at = excluded.created_at, expires_at = excluded.expires_at
+        WHERE excluded.sent_at >= messages.sent_at
       `).bind(
         pairId,
         messageId,
@@ -446,21 +467,23 @@ export async function handleRequest(request: Request, env: Env, push: PushSender
         sentAt,
         now,
         now + MESSAGE_TTL_MS,
+        stateKey,
       ).run();
-      try {
-        await push(env, found.fcm_token, {
-          version: "1",
-          pair_id: pairId,
-          message_id: messageId,
-          preview_nonce: preview.nonce,
-          preview_ciphertext: preview.ciphertext,
-        }, collapseKey);
-      } catch (error) {
-        await env.DB.prepare("DELETE FROM messages WHERE pair_id = ? AND message_id = ?")
-          .bind(pairId, messageId).run();
-        console.error("FCM delivery rejected", { pairId, messageId, error: String(error) });
-        return fail(502, "push provider rejected the message");
-      }
+      const notify = async () => {
+        try {
+          await push(env, found.fcm_token!, {
+            version: "1", pair_id: pairId, message_id: messageId,
+            preview_nonce: preview.nonce, preview_ciphertext: preview.ciphertext,
+          }, collapseKey);
+        } catch (error) {
+          // Push is a wake-up hint. Never discard authenticated data on FCM failure.
+          console.error("FCM delivery rejected; payload retained", { pairId, messageId, error: String(error) });
+        }
+      };
+      // Workspace publication is complete once stored. FCM latency must not
+      // serialize the desktop's live stream behind a notification provider.
+      if (context) context.waitUntil(notify());
+      else await notify();
       return response({ accepted: true, messageId }, 202);
     }
 
@@ -563,8 +586,12 @@ export async function handleRequest(request: Request, env: Env, push: PushSender
         }, 200);
       }
       if (request.method === "DELETE") {
-        await env.DB.prepare("DELETE FROM messages WHERE pair_id = ? AND message_id = ?")
-          .bind(pairId, messageId).run();
+        const at = new URL(request.url).searchParams.get("sentAt");
+        if (at !== null && !/^\d+$/.test(at)) return fail(400, "invalid acknowledgement timestamp");
+        await env.DB.prepare(at === null
+          ? "DELETE FROM messages WHERE pair_id = ? AND message_id = ?"
+          : "DELETE FROM messages WHERE pair_id = ? AND message_id = ? AND sent_at = ?")
+          .bind(...(at === null ? [pairId, messageId] : [pairId, messageId, Number(at)])).run();
         return empty();
       }
     }
@@ -587,8 +614,8 @@ async function cleanup(env: Env): Promise<void> {
 }
 
 export default {
-  fetch(request: Request, env: Env): Promise<Response> {
-    return handleRequest(request, env);
+  fetch(request: Request, env: Env, context?: ExecutionContext): Promise<Response> {
+    return handleRequest(request, env, sendFcm, context);
   },
   scheduled(_controller: ScheduledController, env: Env, context: ExecutionContext): void {
     context.waitUntil(cleanup(env));

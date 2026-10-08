@@ -155,7 +155,12 @@ class WorkspaceStore(private val context: Context) {
                         .put("activity", activity)
                         .put("conversation", conversation)
                         .put("permission", permission)
-                        .put("terminalOutput", terminal.terminalOutput),
+                        .put("terminalOutput", terminal.terminalOutput)
+                        .put("experience", terminal.experience?.let { JSONObject(it) })
+                        .put("history", terminal.history?.let { JSONArray(it) })
+                        .put("historyError", terminal.historyError)
+                        .put("historyRequestId", terminal.historyRequestId)
+                        .put("scheduled", terminal.scheduled?.let { JSONObject(it) }),
                 )
             }
             projects.put(
@@ -255,6 +260,11 @@ class WorkspaceStore(private val context: Context) {
                                 },
                                 permission = parseRemotePermission(permissionJson),
                                 terminalOutput = terminalOutput,
+                                experience = terminal.optJSONObject("experience")?.toString(),
+                                history = terminal.optJSONArray("history")?.toString(),
+                                historyError = terminal.optString("historyError").takeIf { it.isNotBlank() && it != "null" },
+                                historyRequestId = terminal.optString("historyRequestId").takeIf { it.isNotBlank() && it != "null" },
+                                scheduled = terminal.optJSONObject("scheduled")?.toString(),
                             )
                         },
                     )

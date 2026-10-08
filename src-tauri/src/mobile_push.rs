@@ -183,6 +183,16 @@ pub struct WorkspaceTerminal {
     pub permission: Option<WorkspacePermission>,
     #[serde(default)]
     pub terminal_output: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub experience: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history_request_id: Option<String>,
+    #[serde(default)]
+    pub scheduled: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -390,6 +400,14 @@ struct PlainRemoteCommand {
     agent: Option<String>,
     #[serde(default)]
     images: Vec<RemoteImageAttachment>,
+    #[serde(default)]
+    action: Option<String>,
+    #[serde(default)]
+    value: Option<String>,
+    #[serde(default)]
+    scheduled_at: Option<i64>,
+    #[serde(default)]
+    target_terminal_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -450,6 +468,29 @@ impl PlainRemoteCommand {
     fn is_valid(&self) -> bool {
         match self.kind.as_str() {
             "refresh" => true,
+            "agent_control" => {
+                self.terminal_id
+                    .as_deref()
+                    .is_some_and(|id| !id.trim().is_empty())
+                    && match self.action.as_deref() {
+                        Some("interrupt" | "new_chat" | "history" | "cancel_schedule") => true,
+                        Some("model" | "effort" | "resume") => self
+                            .value
+                            .as_deref()
+                            .is_some_and(|value| !value.trim().is_empty() && value.len() <= 1_024),
+                        Some("schedule") => {
+                            (self.scheduled_at.is_some() || self.target_terminal_id.is_some())
+                                && (self
+                                    .text
+                                    .as_deref()
+                                    .is_some_and(|text| !text.trim().is_empty())
+                                    || !self.images.is_empty())
+                                && self.images.len() <= 1
+                                && self.images.iter().all(RemoteImageAttachment::is_valid)
+                        }
+                        _ => false,
+                    }
+            }
             "create_terminal" => self
                 .project_id
                 .as_deref()
@@ -519,6 +560,10 @@ pub struct RemoteCommand {
     pub answers: Vec<RemoteQuestionAnswer>,
     pub agent: Option<String>,
     pub images: Vec<RemoteImageAttachment>,
+    pub action: Option<String>,
+    pub value: Option<String>,
+    pub scheduled_at: Option<i64>,
+    pub target_terminal_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -1290,15 +1335,35 @@ fn workspace_blocking(app: &AppHandle, snapshot: WorkspaceSnapshot) -> Result<Se
         failed: 0,
         errors: Vec::new(),
     };
-    for device in &state.devices {
-        match send_workspace_to_device(device, &snapshot, sent_at, &message_id) {
-            Ok(()) => result.sent += 1,
-            Err(error) => {
-                result.failed += 1;
-                result.errors.push(format!("{}: {error}", device.name));
+    std::thread::scope(|scope| {
+        let jobs: Vec<_> = state
+            .devices
+            .iter()
+            .map(|device| {
+                let snapshot = &snapshot;
+                let message_id = &message_id;
+                scope.spawn(move || {
+                    (
+                        device.name.clone(),
+                        send_workspace_to_device(device, snapshot, sent_at, message_id),
+                    )
+                })
+            })
+            .collect();
+        for job in jobs {
+            match job.join() {
+                Ok((_, Ok(()))) => result.sent += 1,
+                Ok((name, Err(error))) => {
+                    result.failed += 1;
+                    result.errors.push(format!("{name}: {error}"));
+                }
+                Err(_) => {
+                    result.failed += 1;
+                    result.errors.push("Mobile workspace worker stopped".into());
+                }
             }
         }
-    }
+    });
     Ok(result)
 }
 
@@ -1438,62 +1503,81 @@ fn poll_commands_blocking(app: &AppHandle) -> Result<Vec<RemoteCommand>, String>
         read_state(&state_path(app)?)
     };
     let mut commands = Vec::new();
-    for device in &state.devices {
-        // A temporary keyring failure must not turn into an implicit unpair.
-        // Sending and polling can recover as soon as the credential store does.
-        let Ok(secret) = load_secret(&device.id) else {
-            continue;
-        };
-        let response = send_request(
-            client()?
-                .get(format!(
-                    "{}/v1/pairings/{}/commands",
-                    relay_url(),
-                    device.id
-                ))
-                .bearer_auth(&secret.send_token),
-        )
-        .map_err(|error| request_error("could not poll mobile commands", &error))?;
-        if pairing_is_gone(response.status()) {
-            // The phone may have removed the relay row, or the relay may be
-            // between deployments. Keep the local credential until the user
-            // explicitly removes the device from Settings.
+    std::thread::scope(|scope| {
+        let jobs: Vec<_> = state
+            .devices
+            .iter()
+            .map(|device| scope.spawn(move || (device.name.clone(), poll_device_commands(device))))
+            .collect();
+        for job in jobs {
+            match job.join() {
+                Ok((_, Ok(found))) => commands.extend(found),
+                Ok((name, Err(error))) => eprintln!("mobile commands for {name}: {error}"),
+                Err(_) => eprintln!("mobile command worker stopped"),
+            }
+        }
+    });
+    Ok(commands)
+}
+
+fn poll_device_commands(device: &MobileDevice) -> Result<Vec<RemoteCommand>, String> {
+    let mut commands = Vec::new();
+    // A temporary keyring failure must not turn into an implicit unpair.
+    // Sending and polling can recover as soon as the credential store does.
+    let secret = load_secret(&device.id)?;
+    let response = send_request(
+        client()?
+            .get(format!(
+                "{}/v1/pairings/{}/commands",
+                relay_url(),
+                device.id
+            ))
+            .bearer_auth(&secret.send_token),
+    )
+    .map_err(|error| request_error("could not poll mobile commands", &error))?;
+    if pairing_is_gone(response.status()) {
+        // The phone may have removed the relay row, or the relay may be
+        // between deployments. Keep the local credential until the user
+        // explicitly removes the device from Settings.
+        return Ok(Vec::new());
+    }
+    let list: RemoteCommandList = checked(response)?
+        .json()
+        .map_err(|error| error.to_string())?;
+    for remote in list.commands {
+        let plain = decrypt(
+            &secret.master_key,
+            &device.id,
+            &remote.command_id,
+            "command",
+            &remote.payload,
+        )?;
+        let command: PlainRemoteCommand =
+            serde_json::from_slice(&plain).map_err(|error| error.to_string())?;
+        if command.version != 1 || command.id != remote.command_id {
             continue;
         }
-        let list: RemoteCommandList = checked(response)?
-            .json()
-            .map_err(|error| error.to_string())?;
-        for remote in list.commands {
-            let plain = decrypt(
-                &secret.master_key,
-                &device.id,
-                &remote.command_id,
-                "command",
-                &remote.payload,
-            )?;
-            let command: PlainRemoteCommand =
-                serde_json::from_slice(&plain).map_err(|error| error.to_string())?;
-            if command.version != 1 || command.id != remote.command_id {
-                continue;
-            }
-            if !command.is_valid() {
-                continue;
-            }
-            commands.push(RemoteCommand {
-                device_id: device.id.clone(),
-                command_id: remote.command_id,
-                kind: command.kind,
-                terminal_id: command.terminal_id,
-                project_id: command.project_id,
-                text: command.text,
-                permission_id: command.permission_id,
-                option_id: command.option_id,
-                completion_seq: command.completion_seq,
-                answers: command.answers,
-                agent: command.agent,
-                images: command.images,
-            });
+        if !command.is_valid() {
+            continue;
         }
+        commands.push(RemoteCommand {
+            device_id: device.id.clone(),
+            command_id: remote.command_id,
+            kind: command.kind,
+            terminal_id: command.terminal_id,
+            project_id: command.project_id,
+            text: command.text,
+            permission_id: command.permission_id,
+            option_id: command.option_id,
+            completion_seq: command.completion_seq,
+            answers: command.answers,
+            agent: command.agent,
+            images: command.images,
+            action: command.action,
+            value: command.value,
+            scheduled_at: command.scheduled_at,
+            target_terminal_id: command.target_terminal_id,
+        });
     }
     Ok(commands)
 }
@@ -1557,11 +1641,11 @@ fn schedule_completion(
         .clone()
         .filter(|id| !id.trim().is_empty())
         .ok_or("scheduled mobile completion requires a terminal")?;
-    let cancelled = scheduled_completions().lock().unwrap().insert(
-        key.clone(),
-        terminal_id.clone(),
-        selected,
-    );
+    let cancelled =
+        scheduled_completions()
+            .lock()
+            .unwrap()
+            .insert(key.clone(), terminal_id.clone(), selected);
     let thread_key = key.clone();
     std::thread::Builder::new()
         .name("mobile-completion-delay".into())
@@ -1813,6 +1897,38 @@ mod tests {
             decrypt(secret, pair, id, "command", &envelope).unwrap(),
             plain
         );
+    }
+
+    #[test]
+    fn agent_controls_require_a_target_and_valid_action_arguments() {
+        let valid = |fields: serde_json::Value| {
+            let command: PlainRemoteCommand = serde_json::from_value(fields).unwrap();
+            command.is_valid()
+        };
+        let base = serde_json::json!({ "version": 1, "id": "control", "kind": "agent_control", "terminalId": "term" });
+        for action in ["interrupt", "history", "new_chat", "cancel_schedule"] {
+            let mut fields = base.clone();
+            fields["action"] = action.into();
+            assert!(valid(fields));
+        }
+        for action in ["model", "effort", "resume"] {
+            let mut fields = base.clone();
+            fields["action"] = action.into();
+            assert!(!valid(fields.clone()));
+            fields["value"] = "real-choice".into();
+            assert!(valid(fields));
+        }
+        let mut fields = base.clone();
+        fields["action"] = "schedule".into();
+        fields["scheduledAt"] = 1234.into();
+        assert!(!valid(fields.clone()));
+        fields["text"] = "Follow up".into();
+        assert!(valid(fields.clone()));
+        fields["terminalId"] = "".into();
+        assert!(!valid(fields));
+        let mut fields = base;
+        fields["action"] = "arbitrary-action".into();
+        assert!(!valid(fields));
     }
 
     #[test]

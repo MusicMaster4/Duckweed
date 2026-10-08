@@ -92,6 +92,12 @@ export interface MobileTerminalSnapshot {
   conversation: MobileConversationSnapshot[];
   permission: MobilePermissionSnapshot | null;
   terminalOutput?: string;
+  /** The same normalized state the desktop transcript renders. */
+  experience?: import("./mobileExperience").MobileAgentExperience;
+  history?: AgentSessionSummary[];
+  historyError?: string | null;
+  historyRequestId?: string;
+  scheduled?: { at?: number; targetLabel?: string } | null;
 }
 
 export interface MobileSlashCommandSnapshot {
@@ -218,7 +224,7 @@ export interface MobileWorkspaceSnapshot {
 export interface MobileRemoteCommand {
   deviceId: string;
   commandId: string;
-  kind: "input" | "refresh" | "approval" | "question" | "read" | "create_terminal" | "close_terminal";
+  kind: "input" | "refresh" | "approval" | "question" | "read" | "create_terminal" | "close_terminal" | "agent_control";
   terminalId: string | null;
   projectId: string | null;
   text: string | null;
@@ -234,6 +240,10 @@ export interface MobileRemoteCommand {
     dataUrl: string;
     size: number;
   }>;
+  action?: "interrupt" | "new_chat" | "model" | "effort" | "history" | "resume" | "schedule" | "cancel_schedule";
+  value?: string | null;
+  scheduledAt?: number | null;
+  targetTerminalId?: string | null;
 }
 
 export interface MobileSendResult {

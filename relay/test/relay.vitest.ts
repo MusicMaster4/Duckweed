@@ -143,7 +143,7 @@ describe("encrypted notification relay", () => {
     expect(gone.status).toBe(404);
   });
 
-  it("removes a stored payload if FCM rejects the push", async () => {
+  it("retains a stored payload if FCM rejects the push", async () => {
     const pairId = "30000000-0000-4000-8000-000000000003";
     const messageId = "40000000-0000-4000-8000-000000000004";
     const registrationToken = "a".repeat(43);
@@ -172,14 +172,65 @@ describe("encrypted notification relay", () => {
       preview: { nonce: "E".repeat(16), ciphertext: "F".repeat(64) },
       payload: { nonce: "G".repeat(16), ciphertext: "H".repeat(64) },
     }), env, async () => { throw new Error("rejected"); });
-    expect(rejected.status).toBe(502);
+    expect(rejected.status).toBe(202);
 
     const fetched = await handleRequest(
       request(`/v1/pairings/${pairId}/messages/${messageId}`, "GET", receiveToken),
       env,
       accept,
     );
-    expect(fetched.status).toBe(404);
+    expect(fetched.status).toBe(200);
+
+    // Storage completes before a delayed notification provider responds.
+    let finishPush!: () => void;
+    const pushPending = new Promise<void>(resolve => { finishPush = resolve; });
+    const background: Promise<unknown>[] = [];
+    const stored = await handleRequest(request(`/v1/pairings/${pairId}/messages`, "POST", sendToken, {
+      messageId: "40000000-0000-4000-8000-000000000005",
+      sentAt: Date.now(),
+      preview: { nonce: "E".repeat(16), ciphertext: "F".repeat(64) },
+      payload: { nonce: "G".repeat(16), ciphertext: "H".repeat(64) },
+      collapseKey: `workspace:${pairId}`,
+    }), env, () => pushPending, { waitUntil: promise => { background.push(promise); } });
+    expect(stored.status).toBe(202);
+    expect(background).toHaveLength(1);
+    finishPush();
+    await Promise.all(background);
+  });
+
+  it("collapses workspace snapshots, serves inline ciphertext, and ignores stale replacement and ACKs", async () => {
+    const pairId = "70000000-0000-4000-8000-000000000007";
+    const sendToken = "m".repeat(43), receiveToken = "n".repeat(43), registrationToken = "o".repeat(43);
+    const accept = async () => {};
+    await handleRequest(request("/v1/pairings", "POST", undefined, {
+      pairId, registrationTokenHash: await hash(registrationToken), sendTokenHash: await hash(sendToken), expiresAt: Date.now() + 60_000,
+    }, "203.0.113.8"), env, accept);
+    await handleRequest(request(`/v1/pairings/${pairId}/register`, "POST", undefined, {
+      registrationToken, receiveToken, fcmToken: "token", deviceId: "phone", name: "Phone", proof: "p".repeat(43),
+    }), env, accept);
+    const at = Date.now();
+    const preview = { nonce: "Q".repeat(16), ciphertext: "R".repeat(64) };
+    const payload = { nonce: "S".repeat(16), ciphertext: "T".repeat(64) };
+    const send = (id: string, sentAt: number, collapseKey?: string) => handleRequest(request(`/v1/pairings/${pairId}/messages`, "POST", sendToken,
+      { messageId: id, sentAt, collapseKey, preview, payload }), env, accept);
+    const first = "71000000-0000-4000-8000-000000000001";
+    const latest = "71000000-0000-4000-8000-000000000002";
+    const completion = "71000000-0000-4000-8000-000000000003";
+    await send(first, at, `workspace:${pairId}`);
+    await send(latest, at + 1, `workspace:${pairId}`);
+    await send(first, at, `workspace:${pairId}`);
+    await send(completion, at + 2);
+    const pending = await handleRequest(request(`/v1/pairings/${pairId}/messages?inline=1`, "GET", receiveToken), env, accept);
+    expect(await pending.json()).toMatchObject({ messages: [{ messageId: latest, payload }, { messageId: completion, payload }], hasMore: false });
+    expect((await handleRequest(request(`/v1/pairings/${pairId}/messages/${first}`, "GET", receiveToken), env, accept)).status).toBe(404);
+    // Heartbeats reuse their id; an ACK for the older revision must not erase the newer one.
+    await send(pairId, at, pairId);
+    await send(pairId, at + 3, pairId);
+    await handleRequest(request(`/v1/pairings/${pairId}/messages/${pairId}?sentAt=${at}`, "DELETE", receiveToken), env, accept);
+    expect((await handleRequest(request(`/v1/pairings/${pairId}/messages/${pairId}`, "GET", receiveToken), env, accept)).status).toBe(200);
+    await handleRequest(request(`/v1/pairings/${pairId}/messages/${pairId}?sentAt=${at + 3}`, "DELETE", receiveToken), env, accept);
+    expect((await handleRequest(request(`/v1/pairings/${pairId}/messages/${pairId}`, "GET", receiveToken), env, accept)).status).toBe(404);
+    expect((await handleRequest(request(`/v1/pairings/${pairId}/messages?inline=1`, "GET", sendToken), env, accept)).status).toBe(401);
   });
 
   it("relays encrypted phone commands back to the paired desktop", async () => {

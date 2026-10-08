@@ -317,6 +317,18 @@ export function fitMobileWorkspaceSnapshot(
     serialized = JSON.stringify(snapshot);
   }
 
+  // Rich transcripts on unopened panes yield first. The focused conversation
+  // keeps its provider state while the rest of the workspace remains responsive.
+  const experiences = terminalMetadataRefs(snapshot).map(terminal => terminal.experience)
+    .filter((value): value is NonNullable<typeof value> => !!value)
+    .sort((a, b) => Number(a.focused) - Number(b.focused));
+  for (const experience of experiences) {
+    while (experience.items.length > 2 && utf8ByteLength(serialized) > MOBILE_WORKSPACE_SNAPSHOT_BUDGET_BYTES) {
+      experience.items.shift();
+      serialized = JSON.stringify(snapshot);
+    }
+  }
+
   for (const ref of conversationRefs(snapshot)) {
     if (utf8ByteLength(serialized) <= MOBILE_WORKSPACE_SNAPSHOT_BUDGET_BYTES) break;
     const currentBytes = utf8ByteLength(ref.message.text);
