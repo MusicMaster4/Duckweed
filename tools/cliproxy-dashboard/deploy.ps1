@@ -1,8 +1,6 @@
 ﻿param([switch]$RestartProxy)
 
 $ErrorActionPreference = 'Stop'
-& node.exe (Join-Path $PSScriptRoot 'configure-codex-transport.cjs')
-if ($LASTEXITCODE -ne 0) { throw 'The Codex CLIProxy transport could not be configured.' }
 $destination = Join-Path $env:USERPROFILE '.cli-proxy-api\dashboard'
 New-Item -ItemType Directory -Path $destination -Force | Out-Null
 $files = @(Get-Item -LiteralPath (Join-Path $PSScriptRoot 'index.html')) + @(Get-Item -LiteralPath (Join-Path $PSScriptRoot 'management-quota-bridge.js')) + @(Get-ChildItem -LiteralPath $PSScriptRoot -File -Filter '*.cjs' | Where-Object { $_.Name -notlike '*.test.cjs' })

@@ -39,7 +39,11 @@ cliproxy stop
 
 The Windows startup entry launches the proxy and panel in the background. The panel server refreshes account quotas every minute, including when the browser panel is closed. `cliproxy stop` stops both local processes. The duplicate scheduled quota task is disabled. The credential command only reads the local key and does not launch services; run `cliproxy start` if the proxy was intentionally stopped.
 
-Codex can use the original direct provider for one launch with `codex -c model_provider=openai`. The `cliproxy` provider uses HTTP with SSE streaming (`supports_websockets = false`). The installed proxy rejects the `response.interrupt` WebSocket frame sent by newer Codex versions, returning HTTP 400. HTTP streaming supports normal responses and stopping without that unsupported frame. Steered input is applied after the in-flight response settles. `configure-codex-transport.cjs` backs up the user configuration before changing only this provider's transport; deployment runs it automatically. Reopen existing Codex conversations after applying the change so they reload the provider configuration.
+Codex can use the original direct provider for one launch with `codex -c model_provider=openai`. This PC uses the compatibility-patched CLIProxyAPI build with `oauth.providers.codex.response-steering = true` and `supports_websockets = true`. Stock CLIProxyAPI 8.0.10 rejects newer Codex `response.interrupt` frames. The patch forwards those control frames unchanged through its full-duplex Codex WebSocket transport, including interrupts received after response completion. It preserves the response ID, discard mode and unknown fields, and does not enqueue a new response or change accounts. Cancellation remains provider-owned: the upstream can report `response.interrupt.failed` for hosted tools. The proxy preserves that non-terminal protocol event, allowing the response and subsequent messages to continue instead of generating a local HTTP 400.
+
+Changing only `supports_websockets` in the user configuration does not update a model client retained by an already-loaded conversation. Rejoining a loaded thread can therefore keep using its earlier WebSocket capability. The proxy compatibility patch fixes this path for existing sessions as well as new ones. Installing it reconnects the proxy; the shared Codex service stays running. Historical error messages remain in the transcript.
+
+`configure-codex-transport.cjs` remains a manual HTTP/SSE fallback and backs up the user configuration before changing only this provider. Pass `--websocket` only after installing the compatibility build. Normal dashboard deployment preserves the selected transport.
 
 Its optional `--profile cliproxy` works for normal CLI sessions. Codex `app-server`, which Duckweed uses, reads the default proxy provider without a profile flag.
 
@@ -66,3 +70,12 @@ The integration test uses an isolated proxy fixture. It covers multiple accounts
 The deployed copy is in `C:\Users\jubar\.cli-proxy-api\dashboard`. After source changes, run `powershell -NoProfile -File tools/cliproxy-dashboard/deploy.ps1`. Deployment restarts only the panel server and keeps the proxy running. Pass `-RestartProxy` only when changing the proxy itself. Machine configuration backups are in `C:\Users\jubar\.cli-proxy-api\backups\20261002-065123`.
 
 `codex-transport-integration.py` runs the installed Codex app-server and proxy with an isolated HTTP upstream and dummy keys. It verifies configuration reload for an existing conversation, streamed text, steering, interruption and continuation after stopping without using real provider accounts. Set `CODEX_BIN` or `CLIPROXY_BIN` to test a specific binary.
+
+The compatibility build is reproducible from CLIProxyAPI commit `6fecc6e5567912661654a4eaf9b8f5436facd1c2`. With Go 1.26+ and that source checkout, run:
+
+```powershell
+./tools/cliproxy-dashboard/build-codex-interrupt-proxy.ps1 -SourcePath C:/path/to/CLIProxyAPI -OutputPath C:/path/to/patched/cli-proxy-api.exe
+./tools/cliproxy-dashboard/install-codex-interrupt-proxy.ps1 -PatchedBinary C:/path/to/patched/cli-proxy-api.exe
+```
+
+The build applies `codex-response-interrupt.patch`, runs WebSocket interruption and steering regression tests, compiles the server, and records SHA-256 hashes. Installation verifies those hashes, backs up the existing binary and configuration, enables Codex full-duplex transport, restarts only the local proxy, and restores the previous files if startup fails. Python with PyYAML is required to preserve the configuration values while enabling the provider setting. Tests use dummy credentials and a local WebSocket upstream; they cover active and late interrupts, byte-for-byte frame preservation, continuation and connection cleanup without reconnecting or replaying the request.

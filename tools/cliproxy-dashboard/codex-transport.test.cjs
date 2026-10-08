@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { httpTransportConfig, configure } = require('./configure-codex-transport.cjs');
+const { httpTransportConfig, transportConfig, configure } = require('./configure-codex-transport.cjs');
 
 test('changes only the CLIProxy transport while preserving other providers and comments', () => {
   const source = 'model_provider = "cliproxy"\r\n[model_providers.direct]\r\nsupports_websockets = true\r\n\r\n[model_providers.cliproxy] # local proxy\r\nname = "CLIProxyAPI"\r\nsupports_websockets = true # transport\r\nrequires_openai_auth = true\r\n\r\n[tui]\r\ntheme = "dark"\r\n';
@@ -35,4 +35,12 @@ test('backs up the original configuration once and leaves subsequent runs unchan
     assert.ok(path.basename(root).startsWith('cliproxy-transport-test-'));
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('restores WebSocket capability only when explicitly requested for the patched proxy', () => {
+  const source = '[model_providers.cliproxy]\nsupports_websockets = false # fallback\n';
+  const updated = source.replace('false', 'true');
+  assert.equal(transportConfig(source, true), updated);
+  assert.equal(transportConfig(updated, true), updated);
+  assert.equal(httpTransportConfig(updated), source);
 });

@@ -1,0 +1,181 @@
+diff --git a/internal/runtime/executor/codex_websockets_duplex.go b/internal/runtime/executor/codex_websockets_duplex.go
+index 132e416..87d2ebc 100644
+--- a/internal/runtime/executor/codex_websockets_duplex.go
++++ b/internal/runtime/executor/codex_websockets_duplex.go
+@@ -311,6 +311,24 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
+ 					log.Infof("codex websockets: request forwarded session=%s auth=%s url=%s event=response.steer", sess.sessionID, auth.ID, initial.wsURL)
+ 					continue
+ 
++				case "response.interrupt":
++					// Interrupts refer to an existing response. Forward the native
++					// control frame unchanged without creating steering metadata
++					// or delaying it behind queued response.create requests.
++					if !cliproxyexecutor.WebsocketAuthEnabled(streamCtx, auth.ID) {
++						fail(fmt.Errorf("websocket credential is no longer enabled"))
++						return
++					}
++					helps.RecordAPIWebsocketRequest(streamCtx, e.cfg, helps.UpstreamRequestLog{
++						URL: initial.wsURL, Method: "WEBSOCKET", Body: payload, Provider: e.Identifier(), AuthID: auth.ID,
++					})
++					if errWrite := writeCodexWebsocketMessage(sess, conn, payload); errWrite != nil {
++						fail(mapCodexWebsocketWriteError(sess, conn, errWrite))
++						return
++					}
++					log.Infof("codex websockets: request forwarded session=%s auth=%s url=%s event=response.interrupt", sess.sessionID, auth.ID, initial.wsURL)
++					continue
++
+ 				case "response.create", "response.append":
+ 					if len(pendingCreates) == 0 && readyForCreate() {
+ 						if !processCreatePayload(payload) {
+diff --git a/sdk/api/handlers/openai/openai_responses_interrupt_integration_test.go b/sdk/api/handlers/openai/openai_responses_interrupt_integration_test.go
+new file mode 100644
+index 0000000..3bb7d6a
+--- /dev/null
++++ b/sdk/api/handlers/openai/openai_responses_interrupt_integration_test.go
+@@ -0,0 +1,146 @@
++package openai
++
++import (
++	"bytes"
++	"context"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/gin-gonic/gin"
++	"github.com/gorilla/websocket"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
++	runtimeexecutor "github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
++	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
++	"github.com/tidwall/gjson"
++)
++
++// Use the real downstream handler, account routing and Codex executor. Control
++// frames must reach the upstream unchanged, including after response completion.
++func TestResponsesInterruptFullDuplexIntegration(t *testing.T) {
++	for _, phase := range []string{"active", "completed"} {
++		t.Run(phase, func(t *testing.T) {
++			var connections atomic.Int32
++			done := make(chan struct{})
++			interrupt := []byte(`{"type":"response.interrupt","response_id":"r1","mode":"discard_partial_items","unknown":{"preserve":true}}`)
++			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++				defer close(done)
++				connections.Add(1)
++				c, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
++				if err != nil {
++					t.Error(err)
++					return
++				}
++				defer func() { _ = c.Close() }()
++				_ = c.SetReadDeadline(time.Now().Add(8 * time.Second))
++				read := func() []byte {
++					_, payload, err := c.ReadMessage()
++					if err != nil {
++						t.Errorf("upstream read: %v", err)
++					}
++					return payload
++				}
++				write := func(payload string) {
++					if err := c.WriteMessage(websocket.TextMessage, []byte(payload)); err != nil {
++						t.Errorf("upstream write: %v", err)
++					}
++				}
++				if gjson.GetBytes(read(), "type").String() != "response.create" {
++					t.Error("missing initial create")
++					return
++				}
++				write(`{"type":"response.created","response":{"id":"r1"}}`)
++				if phase == "completed" {
++					write(`{"type":"response.completed","response":{"id":"r1","output":[]}}`)
++				}
++				if payload := read(); !bytes.Equal(payload, interrupt) {
++					t.Errorf("interrupt altered or dropped: %s", payload)
++					return
++				}
++				if phase == "active" {
++					write(`{"type":"response.completed","response":{"id":"r1","output":[]}}`)
++				} else {
++					write(`{"type":"fixture.interrupt.received","response_id":"r1"}`)
++				}
++				if payload := read(); gjson.GetBytes(payload, "type").String() != "response.create" {
++					t.Errorf("continuation lost: %s", payload)
++					return
++				}
++				write(`{"type":"response.created","response":{"id":"r2"}}`)
++				write(`{"type":"response.output_item.done","output_index":0,"item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"INTERRUPT_OK"}]}}`)
++				write(`{"type":"response.completed","response":{"id":"r2","output":[]}}`)
++				_, _, _ = c.ReadMessage()
++			}))
++			defer upstream.Close()
++			cfg := &config.Config{}
++			cfg.Codex.ResponseSteering = true
++			cfg.CodexResponseSteering = true
++			manager := coreauth.NewManager(nil, nil, nil)
++			manager.SetConfig(cfg)
++			manager.RegisterExecutor(runtimeexecutor.NewCodexAutoExecutor(cfg))
++			authID := "interrupt-integration-" + phase
++			_, err := manager.Register(context.Background(), &coreauth.Auth{ID: authID, Provider: "codex", Status: coreauth.StatusActive, Attributes: map[string]string{"api_key": "fixture-key", "base_url": upstream.URL, "websockets": "true"}})
++			if err != nil {
++				t.Fatal(err)
++			}
++			registry.GetGlobalRegistry().RegisterClient(authID, "codex", []*registry.ModelInfo{{ID: "interrupt-test-model"}})
++			defer registry.GetGlobalRegistry().UnregisterClient(authID)
++			handler := NewOpenAIResponsesAPIHandler(handlers.NewBaseAPIHandlers(&cfg.SDKConfig, manager))
++			router := gin.New()
++			router.GET("/v1/responses", handler.ResponsesWebsocket)
++			downstream := httptest.NewServer(router)
++			defer downstream.Close()
++			c, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(downstream.URL, "http")+"/v1/responses", nil)
++			if err != nil {
++				t.Fatal(err)
++			}
++			defer func() { _ = c.Close() }()
++			_ = c.SetReadDeadline(time.Now().Add(10 * time.Second))
++			send := func(payload []byte) {
++				if err := c.WriteMessage(websocket.TextMessage, payload); err != nil {
++					t.Fatal(err)
++				}
++			}
++			send([]byte(`{"type":"response.create","model":"interrupt-test-model","input":[]}`))
++			completed := false
++			for {
++				_, payload, err := c.ReadMessage()
++				if err != nil {
++					t.Fatalf("early close: %v", err)
++				}
++				kind := gjson.GetBytes(payload, "type").String()
++				if kind == "error" {
++					t.Fatalf("interrupt rejected: %s", payload)
++				}
++				id := gjson.GetBytes(payload, "response.id").String()
++				if (phase == "active" && kind == "response.created" && id == "r1") || (phase == "completed" && kind == "response.completed" && id == "r1") {
++					send(interrupt)
++				}
++				if (phase == "active" && kind == "response.completed" && id == "r1") || kind == "fixture.interrupt.received" {
++					send([]byte(`{"type":"response.create","model":"interrupt-test-model","previous_response_id":"r1","input":[]}`))
++				}
++				if kind == "response.completed" && id == "r2" {
++					completed = gjson.GetBytes(payload, "response.output.0.content.0.text").String() == "INTERRUPT_OK"
++					_ = c.Close()
++					break
++				}
++			}
++			if !completed {
++				t.Fatal("continuation did not complete")
++			}
++			select {
++			case <-done:
++			case <-time.After(3 * time.Second):
++				t.Fatal("connection cleanup stalled")
++			}
++			if connections.Load() != 1 {
++				t.Fatalf("unexpected reconnect or replay: %d", connections.Load())
++			}
++		})
++	}
++}

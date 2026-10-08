@@ -218,6 +218,14 @@ finally:
     def remove_readonly(function, target, error):
         assert Path(target).resolve().is_relative_to(root.resolve())
         os.chmod(target, stat.S_IWRITE)
-        function(target)
+        for attempt in range(50):
+            try:
+                function(target)
+                return
+            except PermissionError as locked:
+                if getattr(locked, 'winerror', None) != 32 or attempt == 49:
+                    raise
+                # A Git helper may still be releasing the temporary plugin clone.
+                time.sleep(0.1)
 
     shutil.rmtree(root, onexc=remove_readonly)
