@@ -1,0 +1,389 @@
+diff --git a/sdk/api/handlers/openai/openai_responses_websocket.go b/sdk/api/handlers/openai/openai_responses_websocket.go
+index 35bfc33..6309371 100644
+--- a/sdk/api/handlers/openai/openai_responses_websocket.go
++++ b/sdk/api/handlers/openai/openai_responses_websocket.go
+@@ -262,10 +262,51 @@ func truncateWebsocketCloseReason(reason string, maxBytes int) string {
+ 	return truncated.String()
+ }
+ 
++func (h *OpenAIResponsesAPIHandler) responsesWebsocketNeedsHTTP(headers http.Header) bool {
++	if h == nil || h.AuthManager == nil {
++		return false
++	}
++	userAgent := strings.ToLower(strings.TrimSpace(headers.Get("User-Agent")))
++	if !util.IsCodexResponsesLiteRequest(nil, headers) && headers.Get("X-Codex-Turn-Metadata") == "" &&
++		!strings.HasPrefix(userAgent, "codex_") && !strings.HasPrefix(userAgent, "codex-") &&
++		!strings.HasPrefix(strings.ToLower(headers.Get("Originator")), "codex_") &&
++		!strings.HasPrefix(strings.ToLower(headers.Get("Originator")), "codex-") {
++		return false
++	}
++	foundCodex := false
++	for _, auth := range h.AuthManager.List() {
++		if auth == nil || !strings.EqualFold(auth.Provider, "codex") {
++			continue
++		}
++		foundCodex = true
++		if auth.Disabled || auth.Status == coreauth.StatusDisabled {
++			continue
++		}
++		if websocketUpstreamSupportsIncrementalInput(auth.Attributes, auth.Metadata) {
++			return false
++		}
++		// Absence of a setting is not an HTTP preference for OAuth accounts.
++		// API-key accounts explicitly default to HTTP in their provider config.
++		_, attributeSet := auth.Attributes["websockets"]
++		_, metadataSet := auth.Metadata["websockets"]
++		if !attributeSet && !metadataSet && auth.AuthKind() != coreauth.AuthKindAPIKey {
++			return false
++		}
++	}
++	return foundCodex
++}
++
+ // ResponsesWebsocket handles websocket requests for /v1/responses.
+ // It accepts `response.create` and `response.append` requests and streams
+ // response events back as JSON websocket text messages.
+ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
++	// Native Codex caches provider capabilities in loaded conversations. If all
++	// Codex accounts use HTTP, decline the upgrade with its supported fallback
++	// signal instead of accepting a socket that cannot forward native controls.
++	if h.responsesWebsocketNeedsHTTP(c.Request.Header) {
++		c.JSON(http.StatusUpgradeRequired, gin.H{"error": gin.H{"type": "invalid_request_error", "message": "Codex accounts use HTTP streaming"}})
++		return
++	}
+ 	conn, err := responsesWebsocketUpgrader.Upgrade(c.Writer, c.Request, websocketUpgradeHeaders(c.Request))
+ 	if err != nil {
+ 		return
+diff --git a/sdk/api/handlers/openai/openai_responses_websocket_forward.go b/sdk/api/handlers/openai/openai_responses_websocket_forward.go
+index 4bcdfd6..9a6d4d1 100644
+--- a/sdk/api/handlers/openai/openai_responses_websocket_forward.go
++++ b/sdk/api/handlers/openai/openai_responses_websocket_forward.go
+@@ -72,6 +72,34 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
+ 	}
+ 
+ 	for {
++		if data == nil && errs == nil {
++			if opts.duplexStream != nil && opts.duplexStream() {
++				// A duplex stream ends with its socket, not an individual response.
++				// The data channel may close before select observes its final error.
++				_, errClose := writer.closeWithoutError()
++				cancel(nil)
++				if errClose != nil {
++					return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), nil, errClose
++				}
++				return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), nil, websocket.ErrCloseSent
++			}
++			if !completed {
++				errMsg := &interfaces.ErrorMessage{
++					StatusCode: http.StatusRequestTimeout,
++					Error:      fmt.Errorf("stream closed before response.completed"),
++				}
++				h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)
++				markAPIResponseTimestamp(c)
++				_, errClose := writer.closeWithoutError()
++				cancel(errMsg.Error)
++				if errClose != nil {
++					return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), errMsg, errClose
++				}
++				return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), errMsg, websocket.ErrCloseSent
++			}
++			cancel(nil)
++			return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), nil, nil
++		}
+ 		select {
+ 		case <-c.Request.Context().Done():
+ 			cancel(c.Request.Context().Err())
+@@ -119,32 +147,10 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
+ 			return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), errMsg, errTerminate
+ 		case chunk, ok := <-data:
+ 			if !ok {
+-				if opts.duplexStream != nil && opts.duplexStream() {
+-					// A duplex stream ends with its socket, not an individual response.
+-					// The data channel may close before select observes its final error.
+-					_, errClose := writer.closeWithoutError()
+-					cancel(nil)
+-					if errClose != nil {
+-						return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), nil, errClose
+-					}
+-					return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), nil, websocket.ErrCloseSent
+-				}
+-				if !completed {
+-					errMsg := &interfaces.ErrorMessage{
+-						StatusCode: http.StatusRequestTimeout,
+-						Error:      fmt.Errorf("stream closed before response.completed"),
+-					}
+-					h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)
+-					markAPIResponseTimestamp(c)
+-					_, errClose := writer.closeWithoutError()
+-					cancel(errMsg.Error)
+-					if errClose != nil {
+-						return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), errMsg, errClose
+-					}
+-					return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), errMsg, websocket.ErrCloseSent
+-				}
+-				cancel(nil)
+-				return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), nil, nil
++				// Data EOF and the terminal error are published on separate channels.
++				// Drain errors before closing: code 1009 enables Codex's HTTP fallback.
++				data = nil
++				continue
+ 			}
+ 			if keepAliveTicker != nil && keepAliveInterval > 0 {
+ 				keepAliveTicker.Reset(keepAliveInterval)
+diff --git a/sdk/api/handlers/openai/openai_responses_fallback_test.go b/sdk/api/handlers/openai/openai_responses_fallback_test.go
+new file mode 100644
+--- /dev/null
++++ b/sdk/api/handlers/openai/openai_responses_fallback_test.go
+@@ -0,0 +1,252 @@
++package openai
++
++import (
++	"context"
++	"errors"
++	"fmt"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/gin-gonic/gin"
++	"github.com/gorilla/websocket"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
++	runtimeexecutor "github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
++	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
++	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
++	"github.com/tidwall/gjson"
++)
++
++// A closed data channel must not beat the final error. Missing close code 1009
++// makes Codex retry the same oversized history instead of falling back to SSE.
++func TestResponsesWebsocketPreservesErrorAfterDataClose(t *testing.T) {
++	for _, duplex := range []bool{false, true} {
++		for _, delayed := range []bool{false, true} {
++			for _, failure := range []struct {
++				name string
++				err  error
++				code int
++			}{
++				{"raw-too-big", &websocket.CloseError{Code: websocket.CloseMessageTooBig, Text: "history too big"}, websocket.CloseMessageTooBig},
++				{"mapped-too-big", websocketPinnedFailoverStatusError{status: http.StatusRequestEntityTooLarge, msg: `{"error":{"message":"history too big","code":"message_too_big"}}`}, websocket.CloseMessageTooBig},
++				{"http-replay", responsesWebsocketHTTPReplayRequiredError(), websocket.CloseServiceRestart},
++			} {
++				t.Run(fmt.Sprintf("%s/duplex=%t/delayed=%t", failure.name, duplex, delayed), func(t *testing.T) {
++					serverErr := make(chan error, 1)
++					server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++						conn, err := responsesWebsocketUpgrader.Upgrade(w, r, nil)
++						if err != nil {
++							serverErr <- err
++							return
++						}
++						defer conn.Close()
++						ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
++						requestCtx, cancelRequest := context.WithTimeout(r.Context(), time.Second)
++						defer cancelRequest()
++						ctx.Request = r.WithContext(requestCtx)
++						data := make(chan []byte)
++						finalErrors := make(chan *interfaces.ErrorMessage, 1)
++						close(data)
++						publish := func() {
++							if delayed {
++								time.Sleep(10 * time.Millisecond)
++							}
++							finalErrors <- &interfaces.ErrorMessage{Error: failure.err}
++							close(finalErrors)
++						}
++						if delayed {
++							go publish()
++						} else {
++							publish()
++						}
++						h := NewOpenAIResponsesAPIHandler(handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil))
++						_, _, _, errMsg, errForward := h.forwardResponsesWebsocket(ctx, newResponsesWebsocketWriter(conn), func(...interface{}) {}, data, finalErrors, nil, "fallback", responsesWebsocketForwardOptions{duplexStream: func() bool { return duplex }})
++						if errMsg == nil || !errors.Is(errMsg.Error, failure.err) || !errors.Is(errForward, websocket.ErrCloseSent) {
++							serverErr <- fmt.Errorf("final error lost: message=%v forward=%v", errMsg, errForward)
++							return
++						}
++						serverErr <- nil
++					}))
++					defer server.Close()
++					conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
++					if err != nil {
++						t.Fatal(err)
++					}
++					defer conn.Close()
++					conn.SetReadDeadline(time.Now().Add(2 * time.Second))
++					_, _, err = conn.ReadMessage()
++					var closeErr *websocket.CloseError
++					if !errors.As(err, &closeErr) || closeErr.Code != failure.code {
++						t.Errorf("close=%v, want code %d", err, failure.code)
++					}
++					if err := <-serverErr; err != nil {
++						t.Error(err)
++					}
++				})
++			}
++		}
++	}
++}
++
++func TestResponsesWebsocketTooBigFullDuplexIntegration(t *testing.T) {
++	for _, phase := range []string{"initial", "continuation"} {
++		t.Run(phase, func(t *testing.T) {
++			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++				c, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
++				if err != nil {
++					t.Error(err)
++					return
++				}
++				defer c.Close()
++				c.SetReadDeadline(time.Now().Add(3 * time.Second))
++				if _, _, err = c.ReadMessage(); err != nil {
++					t.Error(err)
++					return
++				}
++				if phase == "continuation" {
++					if err = c.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.created","response":{"id":"r1"}}`)); err != nil {
++						t.Error(err)
++						return
++					}
++					if err = c.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.completed","response":{"id":"r1","output":[]}}`)); err != nil {
++						t.Error(err)
++						return
++					}
++					if _, _, err = c.ReadMessage(); err != nil {
++						t.Error(err)
++						return
++					}
++				}
++				if err = c.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseMessageTooBig, "history too big"), time.Now().Add(time.Second)); err != nil {
++					t.Error(err)
++				}
++			}))
++			defer upstream.Close()
++			cfg := &config.Config{}
++			cfg.Codex.ResponseSteering = true
++			cfg.CodexResponseSteering = true
++			manager := coreauth.NewManager(nil, nil, nil)
++			manager.SetConfig(cfg)
++			manager.RegisterExecutor(runtimeexecutor.NewCodexAutoExecutor(cfg))
++			authID := "fallback-" + phase
++			_, err := manager.Register(context.Background(), &coreauth.Auth{ID: authID, Provider: "codex", Status: coreauth.StatusActive, Attributes: map[string]string{"api_key": "fixture", "base_url": upstream.URL, "websockets": "true"}})
++			if err != nil {
++				t.Fatal(err)
++			}
++			registry.GetGlobalRegistry().RegisterClient(authID, "codex", []*registry.ModelInfo{{ID: "fallback-model"}})
++			defer registry.GetGlobalRegistry().UnregisterClient(authID)
++			handler := NewOpenAIResponsesAPIHandler(handlers.NewBaseAPIHandlers(&cfg.SDKConfig, manager))
++			router := gin.New()
++			router.GET("/v1/responses", handler.ResponsesWebsocket)
++			server := httptest.NewServer(router)
++			defer server.Close()
++			c, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http")+"/v1/responses", nil)
++			if err != nil {
++				t.Fatal(err)
++			}
++			defer c.Close()
++			c.SetReadDeadline(time.Now().Add(5 * time.Second))
++			if err = c.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"fallback-model","input":[]}`)); err != nil {
++				t.Fatal(err)
++			}
++			for {
++				_, payload, err := c.ReadMessage()
++				if err != nil {
++					var closeErr *websocket.CloseError
++					if !errors.As(err, &closeErr) || closeErr.Code != websocket.CloseMessageTooBig {
++						t.Fatalf("close=%v, want code 1009", err)
++					}
++					break
++				}
++				if phase == "continuation" && gjson.GetBytes(payload, "type").String() == "response.completed" {
++					if err = c.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"fallback-model","previous_response_id":"r1","input":[]}`)); err != nil {
++						t.Fatal(err)
++					}
++				}
++			}
++			account, ok := manager.GetByID(authID)
++			if !ok || account.Disabled || account.Unavailable {
++				t.Fatal("message-size failure disabled the credential")
++			}
++		})
++	}
++}
++
++func TestResponsesWebsocketNativeHTTPPolicyHandshake(t *testing.T) {
++	for _, native := range []bool{false, true} {
++		for _, enabled := range []bool{false, true} {
++			t.Run(fmt.Sprintf("native=%t/websockets=%t", native, enabled), func(t *testing.T) {
++				cfg := &config.Config{}
++				manager := coreauth.NewManager(nil, nil, nil)
++				_, err := manager.Register(context.Background(), &coreauth.Auth{ID: "http-policy", Provider: "codex", Status: coreauth.StatusActive, Attributes: map[string]string{"websockets": fmt.Sprint(enabled)}})
++				if err != nil {
++					t.Fatal(err)
++				}
++				h := NewOpenAIResponsesAPIHandler(handlers.NewBaseAPIHandlers(&cfg.SDKConfig, manager))
++				headers := http.Header{}
++				if native {
++					headers.Set("User-Agent", "codex_cli_rs/0.162.0")
++				} else {
++					headers.Set("User-Agent", "fixture-generic-client")
++				}
++				if actual := h.responsesWebsocketNeedsHTTP(headers); actual != (native && !enabled) {
++					t.Fatalf("forceHTTP=%t", actual)
++				}
++				if native && !enabled {
++					router := gin.New()
++					router.GET("/v1/responses", h.ResponsesWebsocket)
++					server := httptest.NewServer(router)
++					defer server.Close()
++					conn, response, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http")+"/v1/responses", headers)
++					if conn != nil {
++						conn.Close()
++					}
++					if response == nil || response.StatusCode != http.StatusUpgradeRequired || !errors.Is(err, websocket.ErrBadHandshake) {
++						t.Fatalf("HTTP fallback handshake=%v error=%v", response, err)
++					}
++					response.Body.Close()
++				}
++			})
++		}
++	}
++}
++
++func TestResponsesWebsocketHTTPPolicyRecognizesAppServerMetadata(t *testing.T) {
++	cfg := &config.Config{}
++	manager := coreauth.NewManager(nil, nil, nil)
++	_, err := manager.Register(context.Background(), &coreauth.Auth{ID: "http-metadata", Provider: "codex", Status: coreauth.StatusActive, Attributes: map[string]string{"websockets": "false"}})
++	if err != nil {
++		t.Fatal(err)
++	}
++	h := NewOpenAIResponsesAPIHandler(handlers.NewBaseAPIHandlers(&cfg.SDKConfig, manager))
++	headers := http.Header{"User-Agent": []string{"duckweed/0.1.0"}, "X-Codex-Turn-Metadata": []string{`{"request_kind":"prewarm"}`}}
++	if !h.responsesWebsocketNeedsHTTP(headers) {
++		t.Fatal("loaded Duckweed clients must receive the native HTTP fallback signal")
++	}
++	// Unspecified OAuth capabilities retain the existing downstream bridge.
++	unspecifiedManager := coreauth.NewManager(nil, nil, nil)
++	_, err = unspecifiedManager.Register(context.Background(), &coreauth.Auth{ID: "unspecified", Provider: "codex", Status: coreauth.StatusActive})
++	if err != nil {
++		t.Fatal(err)
++	}
++	unspecified := NewOpenAIResponsesAPIHandler(handlers.NewBaseAPIHandlers(&cfg.SDKConfig, unspecifiedManager))
++	if unspecified.responsesWebsocketNeedsHTTP(headers) {
++		t.Fatal("missing setting treated as an HTTP preference")
++	}
++
++	// Another provider must not activate Codex's transport preference by itself.
++	otherManager := coreauth.NewManager(nil, nil, nil)
++	_, err = otherManager.Register(context.Background(), &coreauth.Auth{ID: "other", Provider: "claude", Status: coreauth.StatusActive})
++	if err != nil {
++		t.Fatal(err)
++	}
++	other := NewOpenAIResponsesAPIHandler(handlers.NewBaseAPIHandlers(&cfg.SDKConfig, otherManager))
++	if other.responsesWebsocketNeedsHTTP(headers) {
++		t.Fatal("Codex policy applied without a Codex account")
++	}
++}

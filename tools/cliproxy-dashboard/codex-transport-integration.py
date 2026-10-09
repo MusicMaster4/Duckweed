@@ -1,4 +1,5 @@
 """Verify Codex streaming, steering and stopping through an isolated CLIProxy."""
+import base64
 import json
 import os
 from pathlib import Path
@@ -6,7 +7,10 @@ import queue
 import shutil
 import socket
 import stat
+import struct
+import zlib
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -14,6 +18,8 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import yaml
+
+large_history = "--large-history" in sys.argv
 
 root = Path(tempfile.mkdtemp(prefix="cliproxy-codex-http-test-"))
 pending_requests = queue.Queue()
@@ -26,13 +32,14 @@ class Upstream(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
-        # An upgrade here would mean Codex used the incompatible transport.
+        # HTTP policy must apply even when an existing client still uses a
+        # downstream WebSocket. No upgrade may reach the upstream provider.
         requests.append({"websocket": self.headers.get("Upgrade")})
         self.send_error(400, "WebSocket transport is not supported by this fixture")
 
     def do_POST(self):
         body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
-        requests.append({"path": self.path, "body": json.loads(body)})
+        requests.append({"path": self.path, "bytes": len(body)})
         text = body.decode()
         response_id = "fixture-response-" + str(len(requests))
         item = {"id": "fixture-message-" + str(len(requests)), "type": "message", "role": "assistant", "status": "completed",
@@ -83,7 +90,7 @@ base = f"http://127.0.0.1:{port}"
 config = {"host": "127.0.0.1", "port": port, "auth-dir": str(root / "auth"), "api-keys": ["fixture-client"],
           "remote-management": {"allow-remote": False, "secret-key": "fixture-management", "disable-control-panel": True},
           "request-retry": 0,
-          "codex-api-key": [{"api-key": "fixture-upstream", "base-url": f"http://127.0.0.1:{upstream.server_port}",
+          "codex-api-key": [{"api-key": "fixture-upstream", "websockets": False, "base-url": f"http://127.0.0.1:{upstream.server_port}",
                              "models": [{"name": "gpt-6.1-sol"}]}]}
 (root / "config.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
 proxy_binary = Path(os.environ.get("CLIPROXY_BIN", str(Path(os.environ["LOCALAPPDATA"]) / "Programs/CLIProxyAPI/cli-proxy-api.exe")))
@@ -130,7 +137,7 @@ def start_turn(thread, text):
 
 def completed(turn):
     event = wait_for(lambda f: f.get("method") == "turn/completed" and f.get("params", {}).get("turn", {}).get("id") == turn)
-    assert event["params"]["turn"]["status"] == "completed", event
+    assert event["params"]["turn"]["status"] == "completed", {"event": event, "requests": requests}
     assert any(f.get("method") == "item/completed" and f.get("params", {}).get("turnId") == turn
                and f["params"].get("item", {}).get("text") == "HTTP_STREAM_OK" for f in frames)
 
@@ -178,11 +185,23 @@ multi_agent = false
     codex.stdin.flush()
     thread = rpc("thread/start", {"cwd": str(root), "approvalPolicy": "never", "sandbox": "read-only"})["thread"]["id"]
     completed(start_turn(thread, "Reply HTTP_STREAM_OK."))
+    if large_history:
+        # Valid random PNGs simulate the image-heavy conversation from the bug.
+        # Invalid image bytes would be omitted by Codex before reaching the API.
+        def png_chunk(kind, data):
+            return struct.pack("!I", len(data)) + kind + data + struct.pack("!I", zlib.crc32(kind + data))
+        pixels = b"".join(b"\0" + os.urandom(1024 * 3) for _ in range(1024))
+        png = b"\x89PNG\r\n\x1a\n" + png_chunk(b"IHDR", struct.pack("!2I5B", 1024, 1024, 8, 2, 0, 0, 0)) + png_chunk(b"IDAT", zlib.compress(pixels)) + png_chunk(b"IEND", b"")
+        image_url = "data:image/png;base64," + base64.b64encode(png).decode()
+        turn = rpc("turn/start", {"threadId": thread, "input": [{"type": "text", "text": "Reply HTTP_STREAM_OK."}] +
+            [{"type": "image", "url": image_url} for _ in range(10)]})["turn"]["id"]
+        completed(turn)
     # Existing Duckweed tabs reload their provider settings after unsubscribe/resume.
-    subprocess.run(["node", str(Path(__file__).with_name("configure-codex-transport.cjs")), str(codex_home / "config.toml")],
-                   check=True, stdout=subprocess.DEVNULL, creationflags=creationflags)
-    rpc("thread/unsubscribe", {"threadId": thread})
-    rpc("thread/resume", {"threadId": thread})
+    if not large_history:
+        subprocess.run(["node", str(Path(__file__).with_name("configure-codex-transport.cjs")), str(codex_home / "config.toml")],
+                       check=True, stdout=subprocess.DEVNULL, creationflags=creationflags)
+        rpc("thread/unsubscribe", {"threadId": thread})
+        rpc("thread/resume", {"threadId": thread})
     completed(start_turn(thread, "Reply HTTP_STREAM_OK."))
     steer_thread = rpc("thread/start", {"cwd": str(root), "approvalPolicy": "never", "sandbox": "read-only"})["thread"]["id"]
     turn = start_turn(steer_thread, "WAIT_FOR_CONTROL")
@@ -199,9 +218,14 @@ multi_agent = false
     assert stopped["params"]["turn"]["status"] == "interrupted", stopped
     completed(start_turn(thread, "FINISH_HTTP. Reply HTTP_STREAM_OK."))
     assert requests and all("websocket" not in request for request in requests), requests
+    if large_history:
+        assert max(request["bytes"] for request in requests) > 28 * 1024 * 1024, "Large history was not sent to the provider: " + json.dumps(requests)
     assert all(frame.get("method") != "error" for frame in frames), frames
-    print(json.dumps({"codexHttpStreaming": "passed", "reloadExistingThread": "passed", "steering": "passed", "interrupt": "passed", "continueAfterInterrupt": "passed",
-                      "providerRequests": len(requests), "codexBinary": str(codex_binary)}))
+    print(json.dumps({"codexHttpStreaming": "passed", "reloadExistingThread": "not-run" if large_history else "passed",
+                      "largeHistory": "passed" if large_history else "not-run", "steering": "passed",
+                      "interrupt": "passed", "continueAfterInterrupt": "passed", "providerRequests": len(requests),
+                      "largestRequestBytes": max(request.get("bytes", 0) for request in requests), "codexBinary": str(codex_binary)}))
+
 finally:
     shutdown.set()
     for process in [codex, proxy]:

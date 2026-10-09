@@ -1,9 +1,10 @@
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { writeTransport, applyTransport } = require('./codex-transport-policy.cjs');
 
-// Stock CLIProxy rejects Codex response.interrupt frames. HTTP remains the
-// fallback; --websocket is used only after installing the compatibility patch.
+// HTTP handles image-heavy histories that exceed upstream WebSocket limits.
+// WebSocket mode remains an explicit option for the compatibility build.
 function transportConfig(source, supportsWebsockets = false) {
   return source.replace(/^(\[model_providers\.(?:cliproxy|"cliproxy")\][^\r\n]*\r?\n)([\s\S]*?)(?=^\s*\[|(?![\s\S]))/m,
     (section, header, body) => {
@@ -28,12 +29,18 @@ function configure(configPath = path.join(process.env.CODEX_HOME || path.join(os
 
 module.exports = { transportConfig, httpTransportConfig: source => transportConfig(source, false), configure };
 if (require.main === module) {
-  try {
+  (async () => {
     const useWebsocket = process.argv.includes('--websocket');
     const result = configure(process.argv.slice(2).find(arg => !arg.startsWith('--')), useWebsocket);
+    if (process.argv.includes('--sync-proxy')) {
+      const { root, management } = require('./quota.cjs');
+      writeTransport(root, useWebsocket);
+      const { files = [] } = await management('/auth-files');
+      await applyTransport(files, root, management);
+    }
     console.log(result.changed ? 'Codex CLIProxy streaming now uses ' + (useWebsocket ? 'WebSocket' : 'HTTP') + '. Configuration backup: ' + result.backupPath : 'Codex CLIProxy transport needs no change.');
-  } catch (error) {
+  })().catch(error => {
     console.error('Could not configure the Codex CLIProxy transport: ' + error.message);
     process.exitCode = 1;
-  }
+  });
 }

@@ -1,6 +1,7 @@
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { applyTransport } = require('./codex-transport-policy.cjs');
 const root = process.env.CLIPROXY_HOME || path.join(os.homedir(), '.cli-proxy-api');
 const proxyBase = process.env.CLIPROXY_API_URL || 'http://127.0.0.1:8317';
 const base = proxyBase + '/v0/management';
@@ -72,7 +73,7 @@ function codexWindows(usage) {
       const seconds = item.limit_window_seconds ?? (item.window_minutes == null ? null : item.window_minutes * 60);
       const duration = seconds >= 600000 ? 'Weekly' : seconds === 18000 ? '5 hours' : seconds ? `${Math.round(seconds / 3600)} hours` : id === 'secondary' ? 'Weekly' : 'Session';
       const reset = item.reset_at ?? (typeof item.reset_after_seconds === 'number' ? Date.now() / 1000 + item.reset_after_seconds : null);
-      windows.push(window(`${prefix}-${id}`, label ? `${label} · ${duration}` : duration, item.used_percent, reset));
+      windows.push(window(`${prefix}-${id}`, label ? `${label} Â· ${duration}` : duration, item.used_percent, reset));
     }
   };
   append(main, 'main', '');
@@ -94,7 +95,7 @@ function claudeWindows(usage) {
 function normalizedWindows(usage) {
   const windows = (usage.groups || []).flatMap((group, i) => (group.buckets || []).map((bucket, j) => {
     const remaining = bucket.remainingFraction ?? bucket.remaining_fraction;
-    return window(`${i}-${j}`, [group.displayName || group.display_name, bucket.window || bucket.description].filter(Boolean).join(' · ') || 'Quota',
+    return window(`${i}-${j}`, [group.displayName || group.display_name, bucket.window || bucket.description].filter(Boolean).join(' Â· ') || 'Quota',
       typeof remaining === 'number' ? 100 - remaining * 100 : null, bucket.resetTime || bucket.reset_time);
   }));
   return { windows, available: null, weeklyResetAt: null, plan: usage.subscription?.plan || usage.subscription?.tierName || null, quotaSupported: true };
@@ -254,6 +255,7 @@ async function update(authIndex) {
   }
   try {
     const { files = [] } = await management('/auth-files');
+    await applyTransport(files, root, management);
     await applyNativeCodexHeaders(files);
     const previous = readState();
     const observations = [];
@@ -279,8 +281,8 @@ async function update(authIndex) {
       for (let i = 0; i < ranked.length; i++) {
         const item = ranked[i], priority = item.available ? ranked.length - i : -100;
         const source = files.find(a => a.auth_index === item.id);
-        if (source.priority !== priority || (provider === 'codex' && source.websockets !== true)) {
-          await management('/auth-files/fields', 'PATCH', { name: item.name, auth_index: item.id, priority, ...(provider === 'codex' ? { websockets: true } : {}) });
+        if (source.priority !== priority) {
+          await management('/auth-files/fields', 'PATCH', { name: item.name, auth_index: item.id, priority });
         }
         item.priority = priority;
       }

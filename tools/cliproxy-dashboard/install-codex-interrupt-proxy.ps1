@@ -2,7 +2,7 @@
 $ErrorActionPreference = 'Stop'
 $binary = (Resolve-Path -LiteralPath $PatchedBinary).Path
 $manifest = Get-Content -LiteralPath ($binary + '.compatibility.json') -Raw | ConvertFrom-Json
-if (-not $manifest.supportsResponseInterrupt -or (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash -ne $manifest.binarySha256 -or (Get-FileHash -LiteralPath (Join-Path $PSScriptRoot 'codex-response-interrupt.patch') -Algorithm SHA256).Hash -ne $manifest.patchSha256) {
+if (-not $manifest.supportsNativeHttpFallback -or -not $manifest.preservesWebsocketFallback -or (Get-FileHash -LiteralPath (Join-Path $PSScriptRoot 'codex-websocket-fallback.patch') -Algorithm SHA256).Hash -ne $manifest.fallbackPatchSha256 -or -not $manifest.supportsResponseInterrupt -or (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash -ne $manifest.binarySha256 -or (Get-FileHash -LiteralPath (Join-Path $PSScriptRoot 'codex-response-interrupt.patch') -Algorithm SHA256).Hash -ne $manifest.patchSha256) {
     throw 'The supplied proxy does not match the verified compatibility build.'
 }
 $proxyRoot = Join-Path $env:USERPROFILE '.cli-proxy-api'
@@ -66,6 +66,6 @@ try {
     if ($running.Count -gt 0) { Start-ConfiguredProxy }
     throw
 }
-& node.exe (Join-Path $PSScriptRoot 'configure-codex-transport.cjs') --websocket
+& node.exe (Join-Path $PSScriptRoot 'configure-codex-transport.cjs') --sync-proxy
 if ($LASTEXITCODE -ne 0) { throw 'The proxy is installed, but the Codex transport configuration could not be updated.' }
-Write-Output ('Codex WebSocket interruption compatibility installed. Backup: ' + $backup)
+Write-Output ('Codex WebSocket interruption and large-history fallback compatibility installed. Backup: ' + $backup)
