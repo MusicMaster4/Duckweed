@@ -1,3 +1,4 @@
+import { AgentMarkdownWorkspace } from "./AgentMarkdownAssets";
 import type { AgentSessionState } from "../../lib/agents/types";
 import { ChatGPTExperience } from "./official/ChatGPTExperience";
 import { ClaudeExperience } from "./official/ClaudeExperience";
@@ -19,6 +20,12 @@ interface AgentTimelineProps extends ExperienceProps {
  * Cursor and OpenCode use their separate, purpose-built work surfaces.
  */
 export function AgentTimeline(props: AgentTimelineProps) {
+  return <AgentMarkdownWorkspace.Provider value={props.cwd}>
+    <ProviderTimeline {...props} />
+  </AgentMarkdownWorkspace.Provider>;
+}
+
+function ProviderTimeline(props: AgentTimelineProps) {
   switch (props.agent) {
     case "codex":
       return <ChatGPTExperience {...props} />;

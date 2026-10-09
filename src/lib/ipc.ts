@@ -25,6 +25,9 @@ export const syncWebviewBounds = () => invoke<void>("sync_webview_bounds");
 /** Open an http(s) URL in the system default browser (Ctrl/Cmd-click on links). */
 export const openUrl = (url: string) => invoke<void>("open_url", { url });
 
+/** Open an agent-linked local document with its default desktop application. */
+export const openAgentDocument = (path: string) => invoke<void>("open_agent_document", { path });
+
 /**
  * Play one completion cue from the app process instead of the WebView, so the
  * Windows volume mixer lists it as Duckweed. Resolves when the cue starts.

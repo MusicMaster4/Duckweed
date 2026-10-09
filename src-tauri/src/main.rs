@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod agent_activity;
+mod agent_documents;
 mod agent_proc;
 mod agent_sessions;
 mod codex_transport;
@@ -808,6 +809,18 @@ fn open_url(url: String) -> Result<(), String> {
     open_external_url(&url)
 }
 
+/// Open an explicitly clicked local document from an agent response.
+#[tauri::command]
+async fn open_agent_document(path: String) -> Result<(), String> {
+    blocking(move || {
+        let resolved = agent_documents::resolve_document(&path)?;
+        let path = resolved.to_string_lossy();
+        // Windows canonical paths carry a device prefix the shell need not see.
+        let path = path.strip_prefix(r"\\?\").unwrap_or(&path);
+        open_with_default_handler(path)
+    }).await
+}
+
 /// Suspend or shut the machine down for the power watch.
 ///
 /// Runs on a blocking task: a Windows sleep does not return until the machine
@@ -840,7 +853,7 @@ fn open_external_url(url: &str) -> Result<(), String> {
     if !is_safe_http_url(url) {
         return Err("only http(s) URLs can be opened".into());
     }
-    open_in_browser(url)
+    open_with_default_handler(url)
 }
 
 /// True for plain `http://` / `https://` URLs with no control characters.
@@ -853,7 +866,7 @@ fn is_safe_http_url(url: &str) -> bool {
 }
 
 #[cfg(windows)]
-fn open_in_browser(url: &str) -> Result<(), String> {
+fn open_with_default_handler(url: &str) -> Result<(), String> {
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::UI::Shell::ShellExecuteW;
@@ -882,7 +895,7 @@ fn open_in_browser(url: &str) -> Result<(), String> {
 }
 
 #[cfg(target_os = "macos")]
-fn open_in_browser(url: &str) -> Result<(), String> {
+fn open_with_default_handler(url: &str) -> Result<(), String> {
     std::process::Command::new("open")
         .arg(url)
         .spawn()
@@ -891,7 +904,7 @@ fn open_in_browser(url: &str) -> Result<(), String> {
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
-fn open_in_browser(url: &str) -> Result<(), String> {
+fn open_with_default_handler(url: &str) -> Result<(), String> {
     std::process::Command::new("xdg-open")
         .arg(url)
         .spawn()
@@ -1285,6 +1298,7 @@ fn main() {
             toggle_window_fullscreen,
             sync_webview_bounds,
             open_url,
+            open_agent_document,
             play_completion_sound,
             power_action,
             take_launch_intent,
