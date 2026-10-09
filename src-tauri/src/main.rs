@@ -605,9 +605,19 @@ async fn agent_codex_interrupt(manager: State<'_, AgentProcManager>, id: String)
 }
 
 #[tauri::command]
-async fn agent_proc_stop(manager: State<'_, AgentProcManager>, id: String) -> Result<(), String> {
+async fn agent_proc_stop(
+    manager: State<'_, AgentProcManager>,
+    id: String,
+    preserve_codex_work: Option<bool>,
+) -> Result<(), String> {
     let manager = manager.inner().clone();
-    blocking(move || manager.stop(&id)).await
+    blocking(move || {
+        if preserve_codex_work.unwrap_or(false) {
+            manager.disconnect(&id)
+        } else {
+            manager.stop(&id)
+        }
+    }).await
 }
 
 fn home_path() -> PathBuf {

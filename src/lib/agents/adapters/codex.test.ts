@@ -152,6 +152,30 @@ function harness(
 }
 
 describe("codex adapter", () => {
+
+  test("reconnecting disposes local state without interrupting provider-owned work", async () => {
+    const h = harness();
+    await h.handshake();
+    h.adapter.prompt({ text: "Active task", images: [] }, h.ctx);
+    const turn = h.sent.findLast((message) => message.method === "turn/start");
+    h.feed({ id: turn?.id, result: { turn: { id: "active-turn" } } });
+    await Promise.resolve();
+    const before = h.sent.length;
+    await h.adapter.dispose?.(h.ctx, { preserveWork: true });
+    expect(h.sent.slice(before)).toEqual([]);
+  });
+
+  test("connection loss preserves an unconfirmed prompt before adapter disposal", async () => {
+    const h = harness();
+    await h.handshake();
+    const prompt = { text: "Unconfirmed input", images: [image] };
+    h.adapter.prompt(prompt, h.ctx);
+    h.adapter.connectionLost?.(h.ctx);
+    for (let step = 0; step < 8; step += 1) await Promise.resolve();
+    expect(h.events).toEqual(expect.arrayContaining([{ type: "prompt-failed", prompt }]));
+    await h.adapter.dispose?.(h.ctx, { preserveWork: true });
+  });
+
   test("initializes, then opens a thread in the launch directory", async () => {
     const h = harness();
     await h.handshake();

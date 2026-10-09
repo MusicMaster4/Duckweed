@@ -97,6 +97,10 @@ interface Session {
   /** Stop suspends queued work until another explicit send, including after recovery. */
   queuePaused: boolean;
   protocolWriter: ProtocolWriter;
+  /** Reserves the surface while outstanding requests settle before reconnection. */
+  reconnecting: boolean;
+  /** Keep late RPC completion from reviving a terminal transport failure. */
+  connectionError: string | null;
   /** Unsent composer content, so a pane remount never loses a draft. */
   draft: string;
   draftImages: AgentImageAttachment[];
@@ -166,6 +170,10 @@ interface Session {
 
 const sessions = new Map<string, Session>();
 const teardowns = new Map<string, Promise<void>>();
+/** Bound recurring failures across replacement Session objects. */
+const reconnectAttempts = new Map<string, { count: number; startedAt: number }>();
+const MAX_RECONNECT_ATTEMPTS = 3;
+const RECONNECT_WINDOW_MS = 60_000;
 const recoveryTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
 function checkpoint(session: Session): void {
@@ -867,6 +875,11 @@ function emitNow(session: Session, event: AgentEvent): void {
     notifyNow(session);
     return;
   }
+  // Old RPCs can settle after a disconnect. Preserve failed input above, but
+  // their synthetic statuses must not release work or replace the reconnect UI.
+  if (session.reconnecting && (event.type === "status" || event.type === "turn-end")) return;
+  if (session.connectionError && (event.type === "turn-end" ||
+      (event.type === "status" && (event.status !== "error" || event.error !== session.connectionError)))) return;
   if (session.protocolWriter.failure && event.type === "status" && event.status !== "error") {
     event = { type: "status", status: "error", error: session.protocolWriter.failure.message };
   }
@@ -1064,10 +1077,66 @@ function emitNow(session: Session, event: AgentEvent): void {
   }
 }
 
+/** Settle uncertain input before releasing a connection that cannot recover. */
+function failConnection(session: Session, message: string, preserveCodexWork = false): void {
+  session.queuePaused = true;
+  session.connectionError = message;
+  session.adapter.connectionLost?.(session.context);
+  emit(session, { type: "status", status: "error", error: message });
+  // Let rejected prompt RPCs preserve their input before adapter disposal.
+  const teardown = new Promise<void>((resolve) => setTimeout(resolve, 0)).then(async () => {
+    try { await session.adapter.dispose?.(session.context, { preserveWork: preserveCodexWork }); } catch {}
+    await agentProcStop(session.termId, preserveCodexWork).catch(() => {});
+  });
+  teardowns.set(session.termId, teardown);
+  void teardown.finally(() => {
+    if (teardowns.get(session.termId) === teardown) teardowns.delete(session.termId);
+  });
+}
+
+/** Restore the same thread without replaying requests whose delivery is uncertain. */
+function reconnect(session: Session): boolean {
+  if (session.state.agent !== "codex" || session.disposed) return false;
+  if (session.reconnecting) return true;
+  const now = Date.now();
+  const previous = reconnectAttempts.get(session.termId);
+  const established = !session.restoring && !session.pendingResume && !session.state.loadingHistory &&
+    ["idle", "working", "waiting"].includes(session.state.status);
+  // A slow failed handshake must not reset the budget merely by taking time.
+  const attempts = previous && (!established || now - previous.startedAt < RECONNECT_WINDOW_MS)
+    ? previous : { count: 0, startedAt: now };
+  if (attempts.count >= MAX_RECONNECT_ATTEMPTS) return false;
+  attempts.count += 1;
+  reconnectAttempts.set(session.termId, attempts);
+  session.reconnecting = true;
+  cancelCapacityReply(session);
+  // Reject pending start/steer requests while the adapter can still preserve
+  // their input. Requests already acknowledged by Codex are never replayed.
+  session.adapter.connectionLost?.(session.context);
+  session.protocolWriter.close();
+  session.state = { ...session.state, status: "starting", error: null, permission: null };
+  notifyNow(session);
+  // Promise rejection handlers and an in-flight configuration get one task to
+  // restore input before the checkpoint and old adapter disposal.
+  void new Promise<void>((resolve) => setTimeout(resolve, 0)).then(async () => {
+    if (session.disposed || sessions.get(session.termId) !== session) return;
+    flushStreamEvents(session);
+    checkpoint(session);
+    const recovery = workspaceRecovery.get(session.termId)?.agent;
+    if (!recovery) return;
+    const { termId, launch } = session;
+    disposeSession(termId, true, true);
+    await start(termId, { ...launch, prompt: null, resume: false, resumeId: recovery.sessionId },
+      session.state.cwd, recovery, { preserveCodexWork: true });
+  });
+  return true;
+}
+
 function handleFrame(session: Session, frame: AgentFrame): void {
-  if (session.disposed || session.protocolWriter.failure) return;
+  if (session.disposed || session.connectionError) return;
   switch (frame.kind) {
     case "stdout":
+      if (session.protocolWriter.failure || session.reconnecting) return;
       session.adapter.receive(frame.line, session.context);
       return;
     case "stderr":
@@ -1075,21 +1144,16 @@ function handleFrame(session: Session, frame: AgentFrame): void {
       if (session.stderr.length > 50) session.stderr.shift();
       return;
     case "exit": {
-      if (frame.reconnect && session.state.agent === "codex") {
-        flushStreamEvents(session);
-        checkpoint(session);
-        const recovery = workspaceRecovery.get(session.termId)?.agent;
-        if (recovery) {
-          const { termId, launch } = session;
-          const cwd = session.state.cwd;
-          disposeSession(termId, true);
-          void start(termId, { ...launch, prompt: null, resume: false, resumeId: recovery.sessionId }, cwd, recovery);
-          return;
-        }
-      }
+      if (frame.reconnect && reconnect(session)) return;
+      if (session.protocolWriter.failure || session.reconnecting) return;
       session.protocolWriter.close();
-      void Promise.resolve(session.adapter.dispose?.(session.context)).catch(() => {});
       const detail = session.stderr.slice(-6).join("\n").trim();
+      if (frame.reconnect && session.state.agent === "codex") {
+        failConnection(session,
+          `Codex disconnected repeatedly and could not reconnect. Your conversation and unsent messages have been kept.${detail ? `\n${detail}` : ""}`, true);
+        return;
+      }
+      void Promise.resolve(session.adapter.dispose?.(session.context)).catch(() => {});
       if (isAuthenticationFailure(detail) && handoffToNativeAuth(session, "login")) return;
       const ready = session.state.status !== "starting" && session.state.status !== "error";
       if (!ready) {
@@ -1123,6 +1187,7 @@ export async function start(
   launch: AgentLaunch,
   cwd: string,
   recovery?: AgentRecovery,
+  options: { preserveCodexWork?: boolean } = {},
 ): Promise<string | null> {
   const replacing = sessions.get(termId);
   if (replacing && !replacing.disposed) return null;
@@ -1131,6 +1196,8 @@ export async function start(
   // A service reconnect reserves its existing surface during teardown. A
   // user's Stop while we await teardown cancels that replacement entirely.
   if (replacing ? sessions.get(termId) !== replacing : sessions.has(termId)) return null;
+
+  if (!options.preserveCodexWork) reconnectAttempts.delete(termId);
 
   // OpenCode snapshots its model registry during the ACP handshake. Waiting
   // here ensures a launch made during WebView startup sees the refreshed list.
@@ -1173,15 +1240,9 @@ export async function start(
     (error) => {
       if (session.disposed) return;
       session.queuePaused = true;
-      emit(session, { type: "status", status: "error", error: error.message });
-      // Let rejected prompt RPCs preserve their input before adapter disposal.
-      // Native teardown also aborts an in-flight write and cleans owned work.
-      const teardown = new Promise<void>((resolve) => setTimeout(resolve, 0)).then(async () => {
-        try { await session.adapter.dispose?.(session.context); } catch {}
-        await agentProcStop(termId).catch(() => {});
-      });
-      teardowns.set(termId, teardown);
-      void teardown.finally(() => { if (teardowns.get(termId) === teardown) teardowns.delete(termId); });
+      if (error.code === "duckweed_connection_closed" && reconnect(session)) return;
+      failConnection(session, error.message,
+        session.state.agent === "codex" && error.code === "duckweed_connection_closed");
     },
   );
   const session: Session = {
@@ -1192,6 +1253,8 @@ export async function start(
     queued: recovery?.queued.map((entry) => ({ ...entry, echoed: false })) ?? [],
     queuePaused: recovery?.queuePaused === true,
     protocolWriter,
+    reconnecting: false,
+    connectionError: null,
     draft: recovery?.draft ?? "",
     draftImages: recovery?.images ?? [],
     promptHistory: recovery?.history ?? [],
@@ -1287,7 +1350,7 @@ export async function start(
 
   try {
     // A WebView crash can leave the old native process alive under this id.
-    if (recovery) await agentProcStop(termId).catch(() => {});
+    if (recovery) await agentProcStop(termId, options.preserveCodexWork).catch(() => {});
     if (session.disposed) return null;
     await agentProcStart(
       termId,
@@ -1311,6 +1374,10 @@ export async function start(
     );
   } catch (error) {
     if (sessions.get(termId) !== session) return null;
+    // Daemon maintenance can also close the replacement proxy during its
+    // HTTP upgrade. It shares the same retry budget as an established pipe.
+    if (options.preserveCodexWork &&
+        /Could not connect to the shared Codex service|Codex .* timed out/.test(String(error)) && reconnect(session)) return null;
     if (recovery) {
       emit(session, { type: "status", status: "error", error: `Could not restore agent: ${String(error)}` });
       return null;
@@ -1839,12 +1906,10 @@ async function applyResume(session: Session, sessionId: string, title: string): 
     return;
   }
   if (await Promise.resolve(attempt).catch(() => false)) {
-    // Provider transcript replay clears composer state. Restore a suspended
-    // queue visibly without dispatching work that Stop already put on hold.
-    if (session.queuePaused) {
-      session.state = { ...session.state, pending: session.queued.filter((entry) => !entry.echoed)
-        .map((entry) => ({ ...entry.prompt, id: entry.id })) };
-    }
+    // Provider replay clears the visible queue. Retain every remaining prompt,
+    // including follow-ups waiting for a live resumed turn to finish.
+    session.state = { ...session.state, pending: session.queued.filter((entry) => !entry.echoed)
+      .map((entry) => ({ ...entry.prompt, id: entry.id })) };
     session.restoring = false;
     session.recovery = null;
     emit(session, { type: "resumed", sessionId, title });
@@ -2056,10 +2121,11 @@ export function answer(
 
 /** End the session and hand the pane back to its terminal. */
 export function stop(termId: string): void {
+  reconnectAttempts.delete(termId);
   disposeSession(termId);
 }
 
-function disposeSession(termId: string, keepSurface = false): void {
+function disposeSession(termId: string, keepSurface = false, preserveCodexWork = false): void {
   const session = sessions.get(termId);
   if (!session) return;
   if (session.disposed) {
@@ -2086,9 +2152,9 @@ function disposeSession(termId: string, keepSurface = false): void {
     // Agents that end on EOF get the chance to shut down cleanly; the kill
     // that follows is the backstop for the ones that do not.
     const teardown = Promise.resolve(teardowns.get(termId)).then(async () => {
-      try { await session.adapter.dispose?.(session.context); } catch {}
+      try { await session.adapter.dispose?.(session.context, { preserveWork: preserveCodexWork }); } catch {}
       if (session.adapter.endsOnStdinClose) await agentProcCloseStdin(termId).catch(() => {});
-      await agentProcStop(termId).catch(() => {});
+      await agentProcStop(termId, preserveCodexWork).catch(() => {});
     });
     teardowns.set(termId, teardown);
     void teardown.finally(() => { if (teardowns.get(termId) === teardown) teardowns.delete(termId); });

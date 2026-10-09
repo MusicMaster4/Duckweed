@@ -83,6 +83,19 @@ describe("ordered protocol writer", () => {
     expect(failures).toHaveLength(1);
   });
 
+
+  test.each([
+    "IO error: O pipe est? sendo fechado. (os error 232)",
+    "IO error: The pipe has been ended. (os error 109)",
+    "duckweed_connection_closed: WebSocket protocol error: Connection reset without closing handshake",
+  ])("classifies a closed connection without depending on the OS language: %s", async (detail) => {
+    const failures: unknown[] = [];
+    const writer = new ProtocolWriter(async () => { throw new Error(detail); }, (error) => failures.push(error));
+    await expect(writer.send(rpc(1))).rejects.toMatchObject({ code: "duckweed_connection_closed" });
+    expect(failures).toHaveLength(1);
+    expect(writer.failure?.message).not.toContain("duckweed_connection_closed:");
+  });
+
   test("provider replies can release a write whose IPC callback was lost", async () => {
     const blocked = deferred();
     const writes: unknown[] = [];

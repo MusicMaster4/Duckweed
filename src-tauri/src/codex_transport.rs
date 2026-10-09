@@ -149,6 +149,14 @@ fn service(resolved: &Path, options: &AgentSpawnOptions) -> Service {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn test_service(home: &Path) -> Service {
+    service(Path::new("codex"), &AgentSpawnOptions {
+        program: "codex".into(), args: vec!["app-server".into()], cwd: None,
+        env: Some([("CODEX_HOME".into(), home.to_string_lossy().into())].into()),
+    })
+}
+
 /// A native `codex login/logout` writes the store without reloading the daemon.
 /// Restart only after checking every loaded thread and its background terminals.
 /// Never restart another client's active work to make our account read succeed.

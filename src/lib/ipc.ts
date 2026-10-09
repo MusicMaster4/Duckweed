@@ -564,7 +564,9 @@ export const agentProcSend = (id: string, line: string) =>
 export const agentProcCloseStdin = (id: string) =>
   invoke<void>("agent_proc_close_stdin", { id });
 
-export const agentProcStop = (id: string) => invoke<void>("agent_proc_stop", { id });
+/** Reconnecting a shared Codex proxy must leave its provider-owned work running. */
+export const agentProcStop = (id: string, preserveCodexWork = false) =>
+  invoke<void>("agent_proc_stop", { id, preserveCodexWork });
 
 export const agentCodexAuthSync = (id: string, signedIn: boolean) =>
   invoke<"unchanged" | "deferred" | "restarted">("agent_codex_auth_sync", { id, signedIn });

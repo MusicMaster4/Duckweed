@@ -35,8 +35,10 @@ const sent: string[] = [];
 let spawn: AgentSpawnOptions | null = null;
 let frameSink: ((frame: AgentFrame) => void) | null = null;
 let spawnFailure: string | null = null;
+let spawnFailureOnce = false;
 let sendOverride: ((line: string) => Promise<void>) | null = null;
 let nativeStops = 0;
+const nativeStopModes: boolean[] = [];
 
 mock.module("../durableStorage", () => ({
   saveDurably: () => {},
@@ -59,7 +61,11 @@ mock.module("../ipc", () => ({
     options: AgentSpawnOptions,
     onFrame: { onmessage?: (frame: AgentFrame) => void },
   ) => {
-    if (spawnFailure) throw new Error(spawnFailure);
+    if (spawnFailure) {
+      const reason = spawnFailure;
+      if (spawnFailureOnce) { spawnFailure = null; spawnFailureOnce = false; }
+      throw new Error(reason);
+    }
     spawn = options;
     frameSink = (frame) => onFrame.onmessage?.(frame);
     return { program: options.program, pid: 1 };
@@ -68,7 +74,7 @@ mock.module("../ipc", () => ({
     sent.push(line);
     await sendOverride?.(line);
   },
-  agentProcStop: async () => { nativeStops += 1; },
+  agentProcStop: async (_id: string, preserveCodexWork = false) => { nativeStops += 1; nativeStopModes.push(preserveCodexWork); },
   agentCodexAuthSync: async () => "unchanged",
   agentProcCloseStdin: async () => {},
   agentProcProbe: async () => [],
@@ -146,13 +152,13 @@ async function handshake(): Promise<void> {
 
 async function codexHandshake(sessionId = "01900000-0000-7000-8000-000000000001"): Promise<void> {
   await flush();
-  const initialize = sent.map(rpc).find((message) => message.method === "initialize");
+  const initialize = sent.map(rpc).findLast((message) => message.method === "initialize");
   feed({ jsonrpc: "2.0", id: initialize?.id, result: {} });
   await flush();
-  const accountRead = sent.map(rpc).find((message) => message.method === "account/read");
+  const accountRead = sent.map(rpc).findLast((message) => message.method === "account/read");
   feed({ jsonrpc: "2.0", id: accountRead?.id, result: { account: { type: "chatgpt" } } });
   await flush();
-  const threadStart = sent.map(rpc).find((message) => message.method === "thread/start");
+  const threadStart = sent.map(rpc).findLast((message) => message.method === "thread/start");
   feed({
     jsonrpc: "2.0",
     id: threadStart?.id,
@@ -214,6 +220,190 @@ describe("Custom agent UI sessions", () => {
     await new Promise((resolve) => setTimeout(resolve, 10));
     expect(nativeStops).toBe(stopsAtRestart);
     expect(session.get(termId)?.status).toBe("idle");
+  });
+
+
+  test.each([
+    "IO error: O pipe est? sendo fechado. (os error 232)",
+    "duckweed_connection_closed: IO error: The pipe is being closed. (os error 232)",
+  ])("reconnects a closed Codex pipe and keeps uncertain input without replay: %s", async (error) => {
+    const termId = `closed-pipe-${error}`;
+    const threadId = "saved-pipe-thread";
+    await session.start(termId, codexLaunch, "H:/project");
+    await codexHandshake(threadId);
+    const oldSink = frameSink;
+    sendOverride = async (line) => {
+      if (rpc(line).method === "turn/start") throw new Error(error);
+    };
+    session.submit(termId, "Keep this prompt", [image]);
+    await flush();
+    expect(session.get(termId)?.status).toBe("starting");
+    expect(session.getDraft(termId)).toBe("Keep this prompt");
+    expect(session.getDraftImages(termId)).toEqual([image]);
+    // The waiter races the failed write. Both must share one reconnect.
+    oldSink?.({ kind: "exit", code: 1, reconnect: true });
+    sendOverride = null;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await flush();
+    expect(sent.map(rpc).filter((message) => message.method === "initialize")).toHaveLength(2);
+    expect(nativeStopModes.length).toBeGreaterThan(0);
+    expect(nativeStopModes.every(Boolean)).toBe(true);
+    await codexHandshake("provisional-thread");
+    const resume = sent.map(rpc).findLast((message) => message.method === "thread/resume");
+    expect(resume?.params).toMatchObject({ threadId });
+    feed({ id: resume?.id, result: { thread: { id: threadId, turns: [] } } });
+    await flush();
+    expect(session.get(termId)?.status).toBe("idle");
+    expect(session.get(termId)?.error).toBeNull();
+    expect(session.getDraft(termId)).toBe("Keep this prompt");
+    expect(session.getDraftImages(termId)).toEqual([image]);
+    expect(sent.map(rpc).filter((message) => message.method === "turn/start")).toHaveLength(1);
+    oldSink?.({ kind: "exit", code: 1, reconnect: true });
+    expect(session.get(termId)?.status).toBe("idle");
+  });
+
+  test("a pipe closing during initialization cannot leave a stale fatal state", async () => {
+    const termId = "initialization-pipe-loss";
+    let failed = false;
+    sendOverride = async (line) => {
+      if (!failed && rpc(line).method === "initialize") {
+        failed = true;
+        throw new Error("duckweed_connection_closed: pipe closed");
+      }
+    };
+    await session.start(termId, codexLaunch, "H:/project");
+    await flush();
+    expect(session.get(termId)?.status).toBe("starting");
+    expect(session.get(termId)?.error).toBeNull();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await codexHandshake();
+    expect(session.get(termId)?.status).toBe("idle");
+    expect(session.get(termId)?.error).toBeNull();
+    expect(sent.map(rpc).filter((message) => message.method === "initialize")).toHaveLength(2);
+  });
+
+  test("retries a replacement proxy that closes during its HTTP upgrade", async () => {
+    const termId = "upgrade-pipe-loss";
+    await session.start(termId, codexLaunch, "H:/project");
+    await codexHandshake();
+    session.setDraft(termId, "Retain this draft");
+    spawnFailure = "Could not connect to the shared Codex service: pipe closed";
+    spawnFailureOnce = true;
+    frameSink?.({ kind: "exit", code: 1, reconnect: true });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    await codexHandshake();
+    expect(session.get(termId)?.status).toBe("idle");
+    expect(session.get(termId)?.error).toBeNull();
+    expect(session.getDraft(termId)).toBe("Retain this draft");
+    expect(sent.map(rpc).filter((message) => message.method === "initialize")).toHaveLength(2);
+    expect(nativeStopModes.every(Boolean)).toBe(true);
+  });
+
+  test("proxy loss reattaches to accepted live work and keeps queued messages and a newer draft", async () => {
+    const termId = "live-proxy-loss";
+    const threadId = "live-proxy-thread";
+    await session.start(termId, codexLaunch, "H:/project");
+    await codexHandshake(threadId);
+    session.submit(termId, "Keep working");
+    await flush();
+    const turn = sent.map(rpc).findLast((message) => message.method === "turn/start");
+    feed({ id: turn?.id, result: { turn: { id: "live-turn" } } });
+    await flush();
+    session.submit(termId, "Queued follow-up", [image]);
+    session.setDraft(termId, "Newer draft");
+    session.setDraftImages(termId, [image]);
+    const before = sent.length;
+    frameSink?.({ kind: "exit", code: 1, reconnect: true });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await flush();
+    await codexHandshake("provisional-thread");
+    const resume = sent.map(rpc).findLast((message) => message.method === "thread/resume");
+    expect(resume?.params).toMatchObject({ threadId });
+    feed({ id: resume?.id, result: { thread: { id: threadId, activeTurnId: "live-turn", turns: [{
+      id: "live-turn", status: "inProgress", items: [{ id: "accepted-user", type: "userMessage", content: [{ type: "text", text: "Keep working" }] }],
+    }] } } });
+    await flush();
+    expect(session.get(termId)?.status).toBe("working");
+    expect(session.getDraft(termId)).toBe("Newer draft");
+    expect(session.getDraftImages(termId)).toEqual([image]);
+    expect(session.get(termId)?.pending).toEqual([expect.objectContaining({ text: "Queued follow-up", images: [image] })]);
+    const recoveryWrites = sent.slice(before).map(rpc);
+    expect(recoveryWrites.some((message) => ["turn/interrupt", "thread/goal/set", "thread/backgroundTerminals/clean", "turn/start"].includes(String(message.method)))).toBe(false);
+    expect(nativeStopModes.every(Boolean)).toBe(true);
+  });
+
+  test("an exit before a turn reply keeps its unconfirmed prompt alongside a newer draft", async () => {
+    const termId = "unconfirmed-proxy-loss";
+    await session.start(termId, codexLaunch, "H:/project");
+    await codexHandshake();
+    session.submit(termId, "Unconfirmed input", [image]);
+    await flush();
+    session.setDraft(termId, "Newer draft");
+    frameSink?.({ kind: "exit", code: 1, reconnect: true });
+    await flush();
+    expect(session.getDraft(termId)).toBe("Newer draft");
+    expect(session.get(termId)?.pending).toEqual([expect.objectContaining({ text: "Unconfirmed input", images: [image] })]);
+    expect(workspaceRecovery.get(termId)?.agent?.queuePaused).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await flush();
+    expect(session.getDraft(termId)).toBe("Newer draft");
+    expect(session.get(termId)?.pending).toEqual([expect.objectContaining({ text: "Unconfirmed input", images: [image] })]);
+  });
+
+  test("Stop cancels a scheduled reconnect before it launches another process", async () => {
+    const termId = "cancel-proxy-reconnect";
+    await session.start(termId, codexLaunch, "H:/project");
+    await codexHandshake();
+    frameSink?.({ kind: "exit", code: 1, reconnect: true });
+    session.stop(termId);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await flush();
+    expect(session.get(termId)).toBeNull();
+    expect(sent.map(rpc).filter((message) => message.method === "initialize")).toHaveLength(1);
+    expect(nativeStopModes).toEqual([false]);
+  });
+
+  test("repeated proxy failures stop retrying while keeping the draft", async () => {
+    const termId = "repeated-proxy-loss";
+    await session.start(termId, codexLaunch, "H:/project");
+    await codexHandshake();
+    session.setDraft(termId, "Do not lose this draft");
+    for (let count = 0; count < 4; count += 1) {
+      if (count === 3) {
+        await codexHandshake("last-attempt-thread");
+        session.submit(termId, "Last unconfirmed message", [image]);
+        session.setDraft(termId, "Do not lose this draft");
+        await flush();
+      }
+      frameSink?.({ kind: "exit", code: 1, reconnect: true });
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      await flush();
+    }
+    expect(sent.map(rpc).filter((message) => message.method === "initialize")).toHaveLength(4);
+    expect(session.get(termId)?.status).toBe("error");
+    expect(session.get(termId)?.error).toContain("disconnected repeatedly");
+    expect(session.getDraft(termId)).toBe("Do not lose this draft");
+    expect(session.get(termId)?.pending).toEqual([expect.objectContaining({ text: "Last unconfirmed message", images: [image] })]);
+    expect(nativeStopModes.every(Boolean)).toBe(true);
+  });
+
+  test("slow failures before the handshake finishes cannot renew the retry budget", async () => {
+    const termId = "slow-proxy-loss";
+    const originalNow = Date.now;
+    let now = originalNow();
+    Date.now = () => now;
+    try {
+      await session.start(termId, codexLaunch, "H:/project");
+      for (let count = 0; count < 4; count += 1) {
+        now += 120_000;
+        frameSink?.({ kind: "exit", code: 1, reconnect: true });
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        await flush();
+      }
+      expect(sent.map(rpc).filter((message) => message.method === "initialize")).toHaveLength(4);
+      expect(session.get(termId)?.status).toBe("error");
+      expect(session.get(termId)?.error).toContain("disconnected repeatedly");
+    } finally { Date.now = originalNow; }
   });
 
   test("Stop removes an unsent prompt from behind a pending native write", async () => {
@@ -445,8 +635,10 @@ describe("Custom agent UI sessions", () => {
     spawn = null;
     frameSink = null;
     spawnFailure = null;
+    spawnFailureOnce = false;
     sendOverride = null;
     nativeStops = 0;
+    nativeStopModes.length = 0;
     session.setFollowupMode("queue");
     session.setCodexCapacityReply({ enabled: false, message: "continue" });
   });
@@ -737,6 +929,7 @@ describe("Custom agent UI sessions", () => {
     const surfaceStates: Array<boolean> = [];
     const unsubscribe = session.subscribe(termId, () => surfaceStates.push(session.isActive(termId)));
     frameSink?.({ kind: "exit", code: 0, reconnect: true });
+    await new Promise((resolve) => setTimeout(resolve, 10));
     for (let count = 0; count < 10; count++) await flush();
     unsubscribe();
     expect(surfaceStates.length).toBeGreaterThan(0);

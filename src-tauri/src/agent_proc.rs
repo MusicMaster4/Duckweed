@@ -335,7 +335,13 @@ impl AgentProcManager {
         // needs that lock to deliver replies, and Stop needs it to kill a wedged
         // proxy. Holding it across write_all creates a duplex pipe deadlock.
         let mut input = stdin.lock().unwrap();
-        input.send(line)
+        input.send(line).map_err(|error| {
+            if matches!(*input, ProcessInput::Codex(_)) {
+                format!("duckweed_connection_closed: {error}")
+            } else {
+                error
+            }
+        })
     }
 
     /// Close the agent's stdin without killing it.
@@ -351,6 +357,16 @@ impl AgentProcManager {
     }
 
     pub fn stop(&self, id: &str) -> Result<(), String> {
+        self.stop_inner(id, false)
+    }
+
+    /// Drop only our shared-service proxy during recovery. Its turns, goals and
+    /// background terminals belong to the daemon and must survive reconnection.
+    pub fn disconnect(&self, id: &str) -> Result<(), String> {
+        self.stop_inner(id, true)
+    }
+
+    fn stop_inner(&self, id: &str, preserve_codex_work: bool) -> Result<(), String> {
         let handle = match self.inner.processes.lock().unwrap().remove(id) {
             Some(process) => process,
             // Stopping an agent that already exited is how every teardown path
@@ -359,6 +375,12 @@ impl AgentProcManager {
         };
         let (stdin, requests, service, threads) = {
             let mut process = handle.lock().unwrap();
+            if preserve_codex_work && process.service.is_some() {
+                process.stdin.take();
+                if let Some(pid) = process.pid { kill_tree(pid); }
+                let _ = process.child.kill();
+                return Ok(());
+            }
             let requests = process.ownership.shutdown_requests();
             for frame in &requests {
                 process.ownership.closing.insert(frame["id"].to_string());
@@ -845,7 +867,11 @@ pub fn start(
                     Err(_) => break None,
                 }
             };
-            let reconnect = processes.lock().unwrap().reconnect_on_exit;
+            let process = processes.lock().unwrap();
+            // A proxy can exit during daemon maintenance or lose its local
+            // connection while provider-owned work is still running.
+            let reconnect = process.reconnect_on_exit || process.service.is_some();
+            drop(process);
             let _ = channel.send(AgentFrame::Exit { code, reconnect });
         })
         .map_err(err)?;
@@ -951,6 +977,80 @@ mod tests {
         std::io::stdout().flush().unwrap();
         // Deliberately never read stdin, simulating a blocked agent/proxy.
         thread::sleep(Duration::from_secs(30));
+    }
+
+    // An isolated pipe reader records shutdown requests without launching Codex.
+    #[test]
+    #[ignore]
+    fn shutdown_helper() {
+        let Some(path) = std::env::var_os("DUCKWEED_SHUTDOWN_HELPER_PATH") else { return; };
+        let mut log = std::fs::File::create(path).unwrap();
+        println!("ready");
+        std::io::stdout().flush().unwrap();
+        for line in std::io::stdin().lock().lines() {
+            writeln!(log, "{}", line.unwrap()).unwrap();
+            log.flush().unwrap();
+        }
+    }
+
+    #[test]
+    fn disconnect_preserves_shared_work_but_stop_still_cleans_it() {
+        let root = std::env::temp_dir().join(format!("duckweed-disconnect-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        for preserve in [true, false] {
+            let path = root.join(format!("shutdown-{preserve}.jsonl"));
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command.args(["--exact", "agent_proc::tests::shutdown_helper", "--ignored", "--nocapture"])
+                .env("DUCKWEED_SHUTDOWN_HELPER_PATH", &path)
+                .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+            hide_console(&mut command);
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::CommandExt;
+                command.process_group(0);
+            }
+            let mut child = command.spawn().unwrap();
+            let pid = child.id();
+            let mut output = BufReader::new(child.stdout.take().unwrap());
+            let mut line = String::new();
+            while !line.contains("ready") {
+                line.clear();
+                assert!(output.read_line(&mut line).unwrap() > 0);
+            }
+            let input = child.stdin.take().unwrap();
+            let mut ownership = CodexOwnership::default();
+            ownership.sent(r#"{"id":1,"method":"turn/start","params":{"threadId":"ours"}}"#);
+            ownership.received(r#"{"id":1,"result":{"turn":{"id":"live-turn"}}}"#);
+            let handle = Arc::new(Mutex::new(Process {
+                stdin: Some(Arc::new(Mutex::new(ProcessInput::JsonLines(input)))),
+                child, pid: Some(pid), runtime_roots: Vec::new(), ownership,
+                service: Some(crate::codex_transport::test_service(&root)), reconnect_on_exit: false,
+            }));
+            // All cleanup requests are confirmed locally. This fixture tests
+            // pipe writes and must never invoke the real control-plane fallback.
+            let reader_handle = handle.clone();
+            let reader = thread::spawn(move || {
+                while output.read_line(&mut String::new()).unwrap_or(0) > 0 {}
+                reader_handle.lock().unwrap().ownership.closing.clear();
+            });
+            let manager = AgentProcManager::default();
+            manager.inner.processes.lock().unwrap().insert("fixture".into(), handle.clone());
+            // The helper exits on EOF once the cleanup writer releases stdin.
+            if preserve { manager.disconnect("fixture").unwrap(); }
+            else { manager.stop("fixture").unwrap(); }
+            let _ = handle.lock().unwrap().child.wait();
+            reader.join().unwrap();
+            let recorded = std::fs::read_to_string(&path).unwrap();
+            if preserve { assert!(recorded.is_empty(), "reconnection sent shutdown requests: {recorded}"); }
+            else {
+                for method in ["turn/interrupt", "thread/goal/set", "thread/backgroundTerminals/clean", "thread/unsubscribe"] {
+                    assert!(recorded.contains(method), "Stop omitted {method}: {recorded}");
+                }
+            }
+            assert_eq!(manager.open_count(), 0);
+            std::fs::remove_file(path).unwrap();
+        }
+        std::fs::remove_dir(root).unwrap();
     }
 
     #[test]

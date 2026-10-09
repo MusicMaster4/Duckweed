@@ -5,6 +5,16 @@ export interface ProtocolWriteError {
   message: string;
 }
 
+/** Native transport failures have a stable marker, independent of Windows language. */
+function deliveryError(error: unknown): ProtocolWriteError {
+  const detail = error instanceof Error ? error.message : String(error);
+  const closed = detail.startsWith("duckweed_connection_closed:") || /\(os error (?:109|232)\)/.test(detail);
+  return {
+    code: closed ? "duckweed_connection_closed" : "duckweed_send_failed",
+    message: `Could not deliver the message to the agent: ${detail.replace(/^duckweed_connection_closed:\s*/, "")}`,
+  };
+}
+
 interface Write {
   message: unknown;
   requestId: RequestId | null;
@@ -74,16 +84,10 @@ export class ProtocolWriter {
     try {
       void Promise.resolve(this.write(entry.message)).then(
         () => this.delivered(entry),
-        (error: unknown) => this.fail(entry, {
-          code: "duckweed_send_failed",
-          message: `Could not deliver the message to the agent: ${error instanceof Error ? error.message : String(error)}`,
-        }),
+        (error: unknown) => this.fail(entry, deliveryError(error)),
       );
     } catch (error: unknown) {
-      this.fail(entry, {
-        code: "duckweed_send_failed",
-        message: `Could not deliver the message to the agent: ${error instanceof Error ? error.message : String(error)}`,
-      });
+      this.fail(entry, deliveryError(error));
     }
   }
 

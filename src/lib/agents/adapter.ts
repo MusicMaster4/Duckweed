@@ -161,8 +161,10 @@ export interface AgentAdapter {
   stopTask?: (taskId: string, ctx: AdapterContext) => Promise<boolean> | boolean;
   /** Authenticate without replacing the custom UI with a shell. */
   authenticate?: (action: "login" | "logout", ctx: AdapterContext, device?: boolean) => Promise<boolean>;
+  /** Reject unconfirmed requests so their input can be preserved before reconnection. */
+  connectionLost?: (ctx: AdapterContext) => void;
   /** Release subscriptions and cancel timers before the transport is stopped. */
-  dispose?: (ctx: AdapterContext) => void | Promise<void>;
+  dispose?: (ctx: AdapterContext, options?: { preserveWork?: boolean }) => void | Promise<void>;
   /**
    * The session is closing. Adapters that end on stdin EOF rather than a kill
    * say so, and the session closes their stdin first.

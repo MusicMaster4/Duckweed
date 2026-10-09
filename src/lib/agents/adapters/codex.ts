@@ -3365,7 +3365,14 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
 
     authenticate,
 
-    dispose: async (ctx) => {
+    connectionLost: () => {
+      for (const waiting of [...pending.values()]) {
+        waiting.reject({ code: "duckweed_connection_closed", message: "Codex disconnected. Your message has been kept for retry." });
+      }
+      pending.clear();
+    },
+
+    dispose: async (ctx, options) => {
       if (disposed) return;
       disposed = true;
       if (authPollTimer !== null) clearInterval(authPollTimer);
@@ -3384,8 +3391,8 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
           // Native teardown owns the backstop when the transport is gone.
         }
       };
-      if (loginId) sendCleanup("account/login/cancel", { loginId });
-      for (const entry of active) {
+      if (!options?.preserveWork && loginId) sendCleanup("account/login/cancel", { loginId });
+      for (const entry of options?.preserveWork ? [] : active) {
         if (!entry.threadId) continue;
         sendCleanup("thread/goal/set", { threadId: entry.threadId, status: "paused" });
         if (entry.turnId) sendCleanup("turn/interrupt", entry);

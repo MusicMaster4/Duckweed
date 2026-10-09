@@ -964,7 +964,7 @@ export function AgentSurface({
 
         {session.error && (
           <div className="agent-fatal">
-            <strong>{session.label} could not start</strong>
+            <strong>{session.label} {session.started ? "connection lost" : "could not start"}</strong>
             <pre>{session.error}</pre>
             <button type="button" className="agent-fatal-btn" onClick={onClose}>
               Back to the shell
