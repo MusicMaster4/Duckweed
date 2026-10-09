@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   accessChoicesFor,
   effortsFor,
+  findModelChoice,
   shortModelLabel,
   type AgentModelChoice,
   type AgentSessionState,
@@ -61,8 +62,8 @@ export function AgentControls({ session, onSelect, placement = "composer" }: Pro
       return models.map((model) => ({
         id: model.id,
         label: model.label || shortModelLabel(model.id),
-        detail: model.id !== model.label ? model.id : null,
-        current: isCurrentModel(selectedModel, model),
+        detail: model.resolvedModel ?? (model.id !== model.label ? model.id : null),
+        current: findModelChoice(selectedModel, models)?.id === model.id,
       }));
     }
     if (menu === "effort") {
@@ -176,7 +177,8 @@ export function AgentControls({ session, onSelect, placement = "composer" }: Pro
     : canPickModel
       ? "Model"
       : null;
-  const effortLabel = selectedEffort
+  const modelWithoutEffort = findModelChoice(selectedModel, models)?.efforts.length === 0;
+  const effortLabel = modelWithoutEffort ? null : selectedEffort
     ? formatEffortLabel(selectedEffort)
     : canPickEffort
       ? "Effort"
@@ -365,35 +367,8 @@ function ControlTrigger({
   );
 }
 
-function isCurrentModel(current: string | null, model: AgentModelChoice): boolean {
-  if (!current) return false;
-  const cur = current.toLowerCase();
-  const id = model.id.toLowerCase();
-  const label = model.label.toLowerCase();
-  if (id === cur || label === cur) return true;
-  if (id.endsWith(`/${cur}`) || cur.endsWith(`/${id}`)) return true;
-  // Claude: settings `opus[1m]` vs init `claude-opus-5-5[1m]` vs picker `opus[1m]`.
-  // Compare family + optional 1m flag only — never substring-match full ids
-  // (that would mark opus-4-8 as current for opus-5).
-  const familyOf = (value: string): string | null => {
-    for (const family of ["fable", "opus", "sonnet", "haiku"] as const) {
-      if (value.includes(family)) return family;
-    }
-    return null;
-  };
-  const family = familyOf(cur);
-  if (family && family === familyOf(id)) {
-    const curOneM = cur.includes("1m") || cur.includes("[1m]");
-    const idOneM = id.includes("1m") || id.includes("[1m]");
-    // Alias `opus` matches any non-1m opus id; `opus[1m]` only the 1m variants.
-    if (id === family || id === `${family}[1m]`) return curOneM === idOneM;
-    if (cur === family || cur === `${family}[1m]`) return curOneM === idOneM;
-  }
-  return false;
-}
-
 function displayModelLabel(current: string, models: AgentModelChoice[]): string {
-  const match = models.find((model) => isCurrentModel(current, model));
+  const match = findModelChoice(current, models);
   if (match?.label) return match.label;
   return shortModelLabel(current);
 }

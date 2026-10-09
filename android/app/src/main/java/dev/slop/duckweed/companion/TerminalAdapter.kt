@@ -7,13 +7,19 @@ import android.widget.TextView
 import androidx.core.content.ContextCompat
 import androidx.recyclerview.widget.RecyclerView
 import androidx.recyclerview.widget.DiffUtil
+import androidx.recyclerview.widget.AsyncListDiffer
 
 class TerminalAdapter(
     private val onOpen: (ConversationTarget) -> Unit,
     private val onClose: ((ConversationTarget) -> Unit)? = null,
     private val onPending: (() -> Unit)? = null,
 ) : RecyclerView.Adapter<TerminalAdapter.Holder>() {
-    private var targets: List<ConversationTarget> = emptyList()
+    private val differ = AsyncListDiffer(this, object : DiffUtil.ItemCallback<ConversationTarget>() {
+        override fun areItemsTheSame(old: ConversationTarget, new: ConversationTarget) = old.pairId == new.pairId && old.terminal.id == new.terminal.id
+        override fun areContentsTheSame(old: ConversationTarget, new: ConversationTarget) = old == new
+    })
+    private val targets: List<ConversationTarget> get() = differ.currentList
+    private var submitted: List<ConversationTarget> = emptyList()
 
     fun submit(
         next: ProjectRow?,
@@ -35,28 +41,17 @@ class TerminalAdapter(
     }
 
     fun submitTargets(next: List<ConversationTarget>) {
-        if (next == targets) return
-        val previous = targets
-        val diff = DiffUtil.calculateDiff(object : DiffUtil.Callback() {
-            override fun getOldListSize(): Int = previous.size
-            override fun getNewListSize(): Int = next.size
-            override fun areItemsTheSame(oldItemPosition: Int, newItemPosition: Int): Boolean =
-                previous[oldItemPosition].pairId == next[newItemPosition].pairId &&
-                    previous[oldItemPosition].terminal.id == next[newItemPosition].terminal.id
-            override fun areContentsTheSame(oldItemPosition: Int, newItemPosition: Int): Boolean =
-                previous[oldItemPosition] == next[newItemPosition]
-        })
-        targets = next
-        diff.dispatchUpdatesTo(this)
+        if (next == submitted) return
+        submitted = next
+        differ.submitList(next)
     }
 
     fun markRead(pairId: String, terminalId: String) {
-        val index = targets.indexOfFirst {
+        val index = submitted.indexOfFirst {
             it.pairId == pairId && it.terminal.id == terminalId && it.unread
         }
         if (index < 0) return
-        targets = targets.toMutableList().also { it[index] = it[index].copy(unread = false) }
-        notifyItemChanged(index)
+        submitTargets(submitted.toMutableList().also { it[index] = it[index].copy(unread = false) })
     }
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): Holder = Holder(
@@ -72,24 +67,27 @@ class TerminalAdapter(
         val accent = MobileTabColorStyle.parse(target.projectColor)
         MobileTabColorStyle.apply(holder.itemView, accent, unread = target.unread)
         holder.itemView.alpha = if (pending == null) 1f else PENDING_ALPHA
-        holder.context.text = "Project  ${target.projectName}"
-        holder.title.text = terminal.agent ?: terminal.title
-        holder.model.text = terminal.model ?: terminal.shell
+        holder.title.text = target.projectName
+        holder.context.text = listOfNotNull(terminal.agent ?: terminal.title, terminal.model ?: terminal.shell)
+            .distinct().joinToString(" · ")
+        holder.model.text = terminal.conversation.lastOrNull { it.role == "assistant" }?.text
+            ?.replace(Regex("\\s+"), " ")?.take(180)
+            ?: if (terminal.permission != null) "Review the request to continue" else "Open to continue on this device"
         holder.status.text = if (pending != null) {
             when (pending.kind) {
-                PendingMobileAction.CREATE_TERMINAL -> "OPENING..."
-                PendingMobileAction.CLOSE_TERMINAL -> "CLOSING..."
-                else -> "UPDATING..."
+                PendingMobileAction.CREATE_TERMINAL -> "Opening…"
+                PendingMobileAction.CLOSE_TERMINAL -> "Closing…"
+                else -> "Updating…"
             }
         } else if (!target.desktopOnline) {
-            "OFFLINE"
+            "Offline"
         } else {
             when (terminal.status) {
-                "starting" -> "OPENING"
-                "working" -> if (terminal.agent != null) "THINKING" else "RUNNING"
-                "waiting" -> "NEEDS YOU"
-                "exited" -> "CLOSED"
-                else -> "READY"
+                "starting" -> "Opening"
+                "working" -> if (terminal.agent != null) "Thinking" else "Running"
+                "waiting" -> "Needs you"
+                "exited" -> "Closed"
+                else -> if (target.unread) "Unread" else "Ready"
             }
         }
         holder.status.setTextColor(

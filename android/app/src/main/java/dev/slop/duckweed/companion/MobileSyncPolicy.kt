@@ -2,6 +2,12 @@ package dev.slop.duckweed.companion
 
 /** Pure cross-device rules shared by storage and UI code. */
 object MobileSyncPolicy {
+    /** Desktop clocks are independent. Compare each response to its own baseline. */
+    fun refreshedPairIds(baselines: Map<String, Long>, snapshots: List<WorkspaceSnapshot>): Set<String> =
+        snapshots.filter { snapshot ->
+            baselines[snapshot.pairId]?.let { snapshot.updatedAt > it } == true
+        }.mapTo(mutableSetOf()) { it.pairId }
+
     fun nextDeliveryState(current: String?, incoming: String): String {
         val progress = listOf("sending", "sent", "received", "delivered")
         if (current == "delivered" || (current == "received" && incoming == "failed")) return current

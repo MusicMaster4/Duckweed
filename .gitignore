@@ -6,6 +6,7 @@ relay/node_modules
 relay/.wrangler
 relay/wrangler.deploy.json
 android/.gradle
+android/.kotlin
 android/local.properties
 android/**/build
 android/app/google-services.json

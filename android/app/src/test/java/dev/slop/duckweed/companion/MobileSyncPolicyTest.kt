@@ -7,6 +7,13 @@ import org.junit.Test
 
 class MobileSyncPolicyTest {
     @Test
+    fun refreshComparesEachDesktopClockSeparately() {
+        val baselines = mapOf("ahead" to 9000L, "behind" to 100L)
+        val snapshots = listOf(WorkspaceSnapshot("ahead", 9000L, emptyList()), WorkspaceSnapshot("behind", 101L, emptyList()))
+        assertEquals(setOf("behind"), MobileSyncPolicy.refreshedPairIds(baselines, snapshots))
+        assertEquals(emptySet<String>(), MobileSyncPolicy.refreshedPairIds(baselines, listOf(WorkspaceSnapshot("unknown", 99999L, emptyList()))))
+    }
+    @Test
     fun delayedPreviewForReadCompletionDoesNotAlertEvenWithALaterSendTime() {
         assertTrue(MobileSyncPolicy.isCompletionAlreadyRead(7, 7, 90_000, 50_000))
         assertTrue(MobileSyncPolicy.isCompletionAlreadyRead(6, 7, 90_000, 50_000))

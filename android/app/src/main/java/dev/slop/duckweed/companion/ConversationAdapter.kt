@@ -93,9 +93,9 @@ class ConversationAdapter(
                 bubble.layoutParams = this
             }
             author.text = when {
-                outgoing -> "YOU"
-                message.streaming -> "${message.agent.uppercase()}  ·  WRITING"
-                else -> message.agent.uppercase()
+                outgoing -> "You"
+                message.streaming -> "${message.agent} · Writing"
+                else -> message.agent
             }
             author.setTextColor(
                 ContextCompat.getColor(
@@ -335,11 +335,11 @@ class ConversationAdapter(
             (value * itemView.resources.displayMetrics.density).toInt()
     }
 
-    private fun relativeTime(at: Long): CharSequence = DateUtils.getRelativeTimeSpanString(
-        at,
-        System.currentTimeMillis(),
-        DateUtils.MINUTE_IN_MILLIS,
-    )
+    private fun relativeTime(at: Long): CharSequence {
+        val now = System.currentTimeMillis()
+        return if (now - at in 0 until DateUtils.MINUTE_IN_MILLIS) "Just now"
+        else DateUtils.getRelativeTimeSpanString(at, now, DateUtils.MINUTE_IN_MILLIS)
+    }
 
     companion object {
         private const val VIEW_MESSAGE = 0

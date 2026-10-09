@@ -83,6 +83,87 @@ function streamBlock(index: number, block: unknown, deltas: unknown[]) {
 }
 
 describe("claude adapter", () => {
+  test("discovers new models before the first prompt and can select them", async () => {
+    const h = harness();
+    h.adapter.start(h.ctx);
+    const initialize = h.sent[0] as { request_id: string };
+    expect(initialize).toMatchObject({ request: { subtype: "initialize" } });
+    h.feed({
+      type: "control_response",
+      response: {
+        subtype: "success", request_id: initialize.request_id,
+        response: { models: [
+          { value: "sonnet", displayName: "Sonnet 5.5", supportedEffortLevels: ["low", "high"] },
+          { value: "future-model", displayName: "Future model", supportsEffort: false },
+          { value: "sonnet", displayName: "Duplicate" },
+          null, { displayName: "Missing ID" },
+        ] },
+      },
+    });
+    expect(h.state().models).toEqual([
+      { id: "sonnet", label: "Sonnet 5.5", efforts: ["low", "high"] },
+      { id: "future-model", label: "Future model", efforts: [] },
+    ]);
+    const change = h.adapter.configure?.("model", "future-model", h.ctx);
+    const request = h.sent.at(-1) as { request_id: string };
+    expect(request).toMatchObject({ request: { subtype: "set_model", model: "future-model" } });
+    h.feed({ type: "control_response", response: { subtype: "success", request_id: request.request_id } });
+    await change;
+    expect(h.state().model).toBe("future-model");
+  });
+
+  test("uses resolved CLI versions, preserves selection aliases and discovers native commands", async () => {
+    const h = harness();
+    h.adapter.start(h.ctx);
+    const initialize = h.sent[0] as { request_id: string };
+    h.feed({ type: "control_response", response: { subtype: "success", request_id: initialize.request_id, response: {
+      models: [
+        { value: "default", displayName: "Default (recommended)", resolvedModel: "claude-opus-7-2", supportedEffortLevels: ["medium", "max"] },
+        { value: "opus", displayName: "Opus", resolvedModel: "claude-opus-7-2", supportedEffortLevels: ["medium", "max"] },
+        { value: "claude-fable-6-1[1m]", displayName: "Fable", resolvedModel: "claude-fable-6-1", supportedEffortLevels: ["high"] },
+        { value: "haiku", displayName: "Haiku", resolvedModel: "claude-haiku-5-1" },
+      ], commands: [{ name: "new-command", description: "Native capability" }, { name: "__internal" }],
+    } } });
+    expect(h.state().models).toEqual([
+      { id: "default", label: "Default (Opus 7.2)", resolvedModel: "claude-opus-7-2", efforts: ["medium", "max"] },
+      { id: "opus", label: "Opus 7.2", resolvedModel: "claude-opus-7-2", efforts: ["medium", "max"] },
+      { id: "claude-fable-6-1[1m]", label: "Fable 6.1 (1M)", resolvedModel: "claude-fable-6-1[1m]", efforts: ["high"] },
+      { id: "haiku", label: "Haiku 5.1", resolvedModel: "claude-haiku-5-1", efforts: [] },
+    ]);
+    expect(h.state().commands).toEqual([{ name: "/new-command", description: "Native capability" }]);
+    const change = h.adapter.configure?.("model", "opus", h.ctx);
+    const request = h.sent.at(-1) as { request_id: string };
+    expect(request).toMatchObject({ request: { subtype: "set_model", model: "opus" } });
+    h.feed({ type: "control_response", response: { subtype: "success", request_id: request.request_id } });
+    await change;
+    h.feed({ type: "system", subtype: "init", model: "claude-opus-6-1", slash_commands: ["new-command"] });
+    expect(h.state().models[1].label).toBe("Opus 7.2");
+    expect(h.state().model).toBe("claude-opus-6-1");
+    expect(h.state().commands[0].description).toBe("Native capability");
+  });
+
+  test("keeps fallback models when discovery fails or returns no valid models", () => {
+    for (const reply of [
+      { subtype: "error", error: "Unsupported request" },
+      { subtype: "success", response: {} },
+      { subtype: "success", response: { models: [null, {}, { value: " " }] } },
+    ]) {
+      const h = harness();
+      h.ctx.emit({ type: "session", models: [{ id: "sonnet", label: "Sonnet", efforts: [] }] });
+      h.adapter.start(h.ctx);
+      const request = h.sent[0] as { request_id: string };
+      h.feed({ type: "control_response", response: { ...reply, request_id: request.request_id } });
+      expect(h.state().models.map((model) => model.id)).toEqual(["sonnet"]);
+      expect(h.state().status).toBe("idle");
+    }
+  });
+
+  test("does not discover Anthropic models for the Claudex proxy", () => {
+    const h = harness({ program: "claudex" });
+    h.adapter.start(h.ctx);
+    expect(h.sent).toEqual([]);
+  });
+
   test("reads identity out of the init frame", () => {
     const h = harness();
     h.feed({
@@ -198,6 +279,65 @@ describe("claude adapter", () => {
     ]);
   });
 
+  test("recovers thinking from a settled message when partial events are missing", () => {
+    const h = harness();
+    h.feed({
+      type: "assistant",
+      message: {
+        id: "settled-thinking",
+        content: [
+          { type: "thinking", thinking: "Checking the affected paths." },
+          { type: "text", text: "I found the affected paths." },
+        ],
+      },
+    });
+
+    expect(h.state().items.map((item) => [item.kind, item.text])).toEqual([
+      ["thinking", "Checking the affected paths."],
+      ["assistant", "I found the affected paths."],
+    ]);
+  });
+
+  test("settled thinking completes its streamed block without a duplicate", () => {
+    const h = harness();
+    h.feed({ type: "stream_event", event: { type: "message_start" } });
+    for (const frame of streamBlock(0, { type: "thinking" }, [
+      { type: "thinking_delta", thinking: "Checking" },
+    ])) h.feed(frame);
+    h.feed({
+      type: "assistant",
+      message: {
+        id: "thinking-message",
+        content: [{ type: "thinking", thinking: "Checking the affected paths." }],
+      },
+    });
+
+    expect(h.state().items).toEqual([
+      expect.objectContaining({
+        kind: "thinking", id: "m1-b0", text: "Checking the affected paths.", streaming: false,
+      }),
+    ]);
+  });
+
+  test("settled messages without stream events do not overwrite earlier blocks", () => {
+    const h = harness();
+    h.feed({ type: "stream_event", event: { type: "message_start" } });
+    for (const frame of streamBlock(0, { type: "text" }, [
+      { type: "text_delta", text: "First update." },
+    ])) h.feed(frame);
+    h.feed({
+      type: "assistant",
+      message: { id: "first", content: [{ type: "text", text: "First update." }] },
+    });
+    h.feed({
+      type: "assistant",
+      message: { id: "second", content: [{ type: "text", text: "Second update." }] },
+    });
+
+    expect(h.state().items.filter((item) => item.kind === "assistant").map((item) => item.text))
+      .toEqual(["First update.", "Second update."]);
+  });
+
   test("keeps interim comments single across tool rounds", () => {
     const h = harness();
     const comments = [
@@ -308,6 +448,49 @@ describe("claude adapter", () => {
         prompt: "Find the fixture that breaks the parser",
         model: "haiku",
       },
+    });
+  });
+
+  test("keeps an asynchronously launched Agent running until its task notification", () => {
+    const h = harness();
+    h.feed({
+      type: "assistant",
+      message: {
+        content: [{
+          type: "tool_use",
+          id: "agent-background",
+          name: "Agent",
+          input: { description: "Author the shots", prompt: "Build the animations" },
+        }],
+      },
+    });
+    h.feed({
+      type: "user",
+      message: {
+        content: [{
+          type: "tool_result",
+          tool_use_id: "agent-background",
+          content: "Async agent launched successfully. Agent ID: agent-42",
+        }],
+      },
+      toolUseResult: { status: "async_launched", agentId: "agent-42" },
+    });
+    h.feed({ type: "result", subtype: "success", is_error: false });
+
+    expect(h.state().items[0]).toMatchObject({
+      kind: "tool",
+      status: "running",
+      subagent: { activity: "Working" },
+    });
+
+    h.feed({
+      type: "queue-operation",
+      content: "<task-notification><task-id>agent-42</task-id><status>completed</status><summary>All shots rendered</summary></task-notification>",
+    });
+    expect(h.state().items[0]).toMatchObject({
+      kind: "tool",
+      status: "done",
+      output: "All shots rendered",
     });
   });
 

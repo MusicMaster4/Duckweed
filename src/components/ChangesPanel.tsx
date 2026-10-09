@@ -4,6 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { gitDiff, gitDiscardAll, gitFileDiff } from "../lib/ipc";
 import { confirmCloseRunning, getConfirmClose } from "../lib/confirmClose";
 import type { Diff, DiffHunk, FileDiff, ProjectInfo } from "../lib/types";
+import { highlightDiffHunk } from "../lib/diffSyntax";
 import { AsciiAmbient } from "./AsciiAmbient";
 
 interface Props {
@@ -382,6 +383,11 @@ export function ChangesPanel({ project, onClose }: Props) {
         const isExpanded = expanded.has(file.path);
         const [dir, name] = splitPath(file.path);
         const rows = isClosed ? [] : rowsFor(view);
+        const syntax = new Map(rows.flatMap((row) =>
+          row.kind === "hunk"
+            ? [[row.hunk, highlightDiffHunk(row.hunk, view.path)] as const]
+            : [],
+        ));
 
         return (
           <section key={file.path} className={`diff-file ${isClosed ? "is-closed" : ""}`}>
@@ -452,7 +458,14 @@ export function ChangesPanel({ project, onClose }: Props) {
                       {row.hunk.lines.map((line, i) => (
                         <div key={i} className={`diff-line is-${line.kind}`}>
                           <span className="diff-no">{line.new ?? ""}</span>
-                          <code className="diff-text">{line.text || " "}</code>
+                          <code className="diff-text">
+                            {syntax.get(row.hunk)?.[i].map((token, index) => (
+                              <span key={index} className={`code-token token-${token.kind}`}>
+                                {token.text}
+                              </span>
+                            ))}
+                            {!line.text && " "}
+                          </code>
                         </div>
                       ))}
                     </div>

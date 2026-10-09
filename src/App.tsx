@@ -1,3 +1,7 @@
+import { mobileAgentExperience } from "./lib/mobileExperience";
+import * as mobileAgentHistory from "./lib/agents/history";
+import { mobileSlashCommands } from "./lib/mobileWorkspace";
+import { arrangeTabGroups, assignTabGroup, updateTabGroup } from "./lib/tabGroups";
 import {
   useCallback,
   useEffect,
@@ -49,6 +53,7 @@ import { AGENTS, AGENT_IDS } from "./lib/agents/catalog";
 import * as agentSessions from "./lib/agents/session";
 import type { AgentId, AgentImageAttachment } from "./lib/agents/types";
 import { agentUiPreferences } from "./lib/agents/uiPreferences";
+import { codexCapacityReplySettings } from "./lib/agents/capacityReply";
 import { handleUnattendedPermission } from "./lib/agents/autoApproval";
 import {
   confirmCloseRunning,
@@ -127,6 +132,8 @@ import {
 import { toggleFullscreen } from "./lib/window";
 import { DEFAULT_TOOLS_WIDTH, load, pushRecent, rehydrate, save } from "./lib/persist";
 import { flushDurableStorage } from "./lib/durableStorage";
+import { workspaceRecovery } from "./lib/workspaceRecovery";
+import { deliverDueSends } from "./lib/scheduledSend";
 import {
   shouldPlayCompletionSound,
   shouldSignalCompletion,
@@ -252,18 +259,22 @@ function boot() {
         id: entry.id ?? uid("tab"),
         title: entry.title || `Terminal ${i + 1}`,
         root,
-        activeLeaf: leaves(root)[0].id,
-        zoomedLeaf: null,
+        activeLeaf: leaves(root).find((node) => node.id === entry.activeLeaf)?.id ?? leaves(root)[0].id,
+        zoomedLeaf: leaves(root).find((node) => node.id === entry.zoomedLeaf)?.id ?? null,
         project: entry.project ? provisionalProject(entry.project) : null,
         pinned: entry.pinned === true,
         color: entry.color ?? null,
         icon: entry.icon ?? null,
+        group: entry.group ?? null,
       };
     });
     const index = Math.min(Math.max(0, saved.activeTabIndex), tabs.length - 1);
     const startupLayout = getDefaultLayout();
     const startupTab = tabs[index];
-    if (startupLayout && startupTab.project) {
+    // A template can seed a legacy layout-only save, but must never replace
+    // recoverable panes, drafts or schedules.
+    if (startupLayout && startupTab.project &&
+        !leaves(startupTab.root).some((node) => workspaceRecovery.get(node.term))) {
       const root = instantiateLayout(startupLayout.root, (command) => {
         const term = terminals.newTermId();
         startupSpawns.set(term, {
@@ -273,12 +284,7 @@ function boot() {
         });
         return leaf(term);
       });
-      tabs[index] = {
-        ...startupTab,
-        root,
-        activeLeaf: leaves(root)[0].id,
-        zoomedLeaf: null,
-      };
+      tabs[index] = { ...startupTab, root, activeLeaf: leaves(root)[0].id, zoomedLeaf: null };
     }
     return {
       tabs,
@@ -293,6 +299,7 @@ function boot() {
       tintWorkspaceWithTabColor: saved.tintWorkspaceWithTabColor,
       customAgentUi: saved.customAgentUi,
       agentFollowupMode: saved.agentFollowupMode,
+      codexCapacityReply: saved.codexCapacityReply,
       autoApproveLockedRequests: saved.autoApproveLockedRequests,
       inputMode: saved.inputMode,
       confirmCloseRunning: saved.confirmCloseRunning,
@@ -324,6 +331,7 @@ function boot() {
     tintWorkspaceWithTabColor: false,
     customAgentUi: agentUiPreferences(),
     agentFollowupMode: "queue" as const,
+    codexCapacityReply: codexCapacityReplySettings(),
     autoApproveLockedRequests: false,
     inputMode: "editor" as terminals.InputMode,
     confirmCloseRunning: true,
@@ -377,6 +385,7 @@ export default function App() {
   );
   const [customAgentUi, setCustomAgentUi] = useState(initial.customAgentUi);
   const [agentFollowupMode, setAgentFollowupMode] = useState(initial.agentFollowupMode);
+  const [codexCapacityReply, setCodexCapacityReply] = useState(initial.codexCapacityReply);
   const [autoApproveLockedRequests, setAutoApproveLockedRequests] = useState(
     initial.autoApproveLockedRequests,
   );
@@ -433,9 +442,18 @@ export default function App() {
   const [highlightedAgentTermId, setHighlightedAgentTermId] = useState<string | null>(null);
   const [openAgentCount, setOpenAgentCount] = useState(0);
   const [scheduledSends, setScheduledSends] = useState<Map<string, ScheduledSend>>(
-    () => new Map(),
+    () => new Map(initial.tabs.flatMap((tab) => leaves(tab.root).flatMap((node) => {
+      const send = workspaceRecovery.get(node.term)?.scheduled;
+      const targetExists = initial.tabs.some((owner) => leaves(owner.root).some((pane) => pane.term === send?.targetTermId));
+      return send && targetExists ? [[node.term, send] as const] : [];
+    }))),
   );
-  const [timedSends, setTimedSends] = useState<Map<string, TimedSend>>(() => new Map());
+  const [timedSends, setTimedSends] = useState<Map<string, TimedSend>>(
+    () => new Map(initial.tabs.flatMap((tab) => leaves(tab.root).flatMap((node) => {
+      const send = workspaceRecovery.get(node.term)?.timed;
+      return send ? [[node.term, send] as const] : [];
+    }))),
+  );
   const unreadTermIdsRef = useRef(unreadTermIds);
   unreadTermIdsRef.current = unreadTermIds;
   const mobileAlertTermIdsRef = useRef(mobileAlertTermIds);
@@ -486,6 +504,8 @@ export default function App() {
   const editorDirtyRef = useRef(false);
   const processState = useRef(new Map<string, ProcessState>());
   const mobileWorkspaceSnapshotRef = useRef("");
+  const mobileFocusedTerminalsRef = useRef(new Map<string, string>());
+  const mobileHistoryRef = useRef(new Map<string, { rows: import("./lib/ipc").AgentSessionSummary[]; error: string | null; requestId: string }>());
   /** Last folder opened in any tab — only ever used to seed the folder picker. */
   const lastProject = useRef<string | null>(initial.lastProject);
 
@@ -836,6 +856,7 @@ export default function App() {
 
   const releaseTerm = useCallback((term: string) => {
     terminals.dispose(term);
+    workspaceRecovery.remove(term);
     if (timedSendsRef.current.has(term)) {
       const nextTimedSends = new Map(timedSendsRef.current);
       nextTimedSends.delete(term);
@@ -882,6 +903,7 @@ export default function App() {
     if (current?.targetTermId === target.termId && current.targetLabel === targetLabel) return;
     const next = new Map(scheduledSendsRef.current);
     next.set(termId, { targetTermId: target.termId, targetLabel });
+    workspaceRecovery.update(termId, { scheduled: next.get(termId) });
     scheduledSendsRef.current = next;
     setScheduledSends(next);
   }, []);
@@ -890,14 +912,16 @@ export default function App() {
     if (!scheduledSendsRef.current.has(termId)) return;
     const next = new Map(scheduledSendsRef.current);
     next.delete(termId);
+    workspaceRecovery.update(termId, { scheduled: null });
     scheduledSendsRef.current = next;
     setScheduledSends(next);
   }, []);
 
   const scheduleTimedSend = useCallback((termId: string, send: TimedSend) => {
-    if (!send.text.trim() || !Number.isFinite(send.at) || send.at <= Date.now()) return;
+    if (!Number.isFinite(send.at) || send.at <= Date.now()) return;
     const next = new Map(timedSendsRef.current);
     next.set(termId, send);
+    workspaceRecovery.update(termId, { timed: send });
     timedSendsRef.current = next;
     setTimedSends(next);
   }, []);
@@ -906,6 +930,7 @@ export default function App() {
     if (!timedSendsRef.current.has(termId)) return;
     const next = new Map(timedSendsRef.current);
     next.delete(termId);
+    workspaceRecovery.update(termId, { timed: null });
     timedSendsRef.current = next;
     setTimedSends(next);
   }, []);
@@ -921,6 +946,7 @@ export default function App() {
       if (agent) {
         if (agent.status === "exited" || agent.status === "error") return false;
         agentSessions.submit(termId, text, images, delivery);
+        agentSessions.flushRecovery();
         bus.emit("term:clear-draft", { termId });
         return true;
       }
@@ -939,55 +965,42 @@ export default function App() {
     [],
   );
 
-  // A timed message is separate from the visible composer draft. Restore that
-  // draft after using the same submit route as a manual Enter.
-  const sendTimedMessage = useCallback((termId: string, text: string) => {
-    const agent = agentSessions.get(termId);
-    if (agent) {
-      if (agent.status === "exited" || agent.status === "error") return;
-      const draft = agentSessions.getDraft(termId);
-      const images = agentSessions.getDraftImages(termId);
-      agentSessions.submit(termId, text);
-      agentSessions.setDraft(termId, draft);
-      agentSessions.setDraftImages(termId, images);
-      return;
-    }
-    const meta = terminals.getMeta(termId);
-    if (!meta || meta.exited) return;
-    const draft = terminals.getDraft(termId);
-    if (meta.agent || meta.busy) terminals.writeRaw(termId, `${text}\r`);
-    else terminals.submitCommand(termId, text);
-    terminals.setDraft(termId, draft);
-  }, []);
-
   useEffect(() => {
     if (timedSends.size === 0) return;
     let timer = 0;
     const checkDue = () => {
-      const due = [...timedSendsRef.current].filter(([, send]) => send.at <= Date.now());
-      if (due.length > 0) {
-        const next = new Map(timedSendsRef.current);
-        for (const [termId] of due) next.delete(termId);
+      const previous = timedSendsRef.current;
+      const next = deliverDueSends(previous, Date.now(), (termId) => {
+        if (dailyLockedRef.current || !terminals.readyForScheduledSend(termId)) return false;
+        const agent = agentSessions.get(termId);
+        const text = agent ? agentSessions.getDraft(termId) : terminals.getDraft(termId);
+        const images = agent ? agentSessions.getDraftImages(termId) : [];
+        return hasSendablePayload(text, images) && sendDraftNow(termId, text, images);
+      });
+      if (next.size !== previous.size) {
+        for (const termId of previous.keys()) {
+          if (!next.has(termId)) workspaceRecovery.update(termId, { timed: null });
+        }
         timedSendsRef.current = next;
         setTimedSends(next);
-        for (const [termId, send] of due) sendTimedMessage(termId, send.text);
-        return;
       }
       const nextAt = Math.min(...[...timedSendsRef.current.values()].map((send) => send.at));
       window.clearTimeout(timer);
       if (Number.isFinite(nextAt)) {
-        timer = window.setTimeout(checkDue, Math.max(0, Math.min(nextAt - Date.now(), 30_000)));
+        timer = window.setTimeout(checkDue, Math.max(250, Math.min(nextAt - Date.now(), 30_000)));
       }
     };
     checkDue();
     window.addEventListener("focus", checkDue);
     document.addEventListener("visibilitychange", checkDue);
+    const offSyncTick = TAURI_RUNTIME ? listen("mobile:sync-tick", checkDue) : null;
     return () => {
       window.clearTimeout(timer);
       window.removeEventListener("focus", checkDue);
       document.removeEventListener("visibilitychange", checkDue);
+      void offSyncTick?.then(off => off());
     };
-  }, [timedSends, sendTimedMessage]);
+  }, [timedSends, sendDraftNow]);
 
   const completeScheduledSendsForTarget = useCallback(
     (targetTermId: string) => {
@@ -1000,23 +1013,43 @@ export default function App() {
       const waiting = [...scheduledSendsRef.current].filter(
         ([, scheduled]) => scheduled.targetTermId === targetTermId,
       );
-      for (const [sourceTermId] of waiting) {
+      for (const [sourceTermId, scheduled] of waiting) {
+        if (!scheduled.triggered) {
+          const next = new Map(scheduledSendsRef.current);
+          next.set(sourceTermId, { ...scheduled, triggered: true });
+          workspaceRecovery.update(sourceTermId, { scheduled: next.get(sourceTermId) });
+          scheduledSendsRef.current = next;
+          setScheduledSends(next);
+        }
+        if (!terminals.readyForScheduledSend(sourceTermId)) continue;
         const sourceAgent = agentSessions.get(sourceTermId);
         const text = sourceAgent
           ? agentSessions.getDraft(sourceTermId)
           : terminals.getDraft(sourceTermId);
         const images = sourceAgent ? agentSessions.getDraftImages(sourceTermId) : [];
+        if (!hasSendablePayload(text, images) || !sendDraftNow(sourceTermId, text, images)) continue;
         const next = new Map(scheduledSendsRef.current);
         next.delete(sourceTermId);
+        workspaceRecovery.update(sourceTermId, { scheduled: null });
         scheduledSendsRef.current = next;
         setScheduledSends(next);
-        if (hasSendablePayload(text, images)) {
-          sendDraftNow(sourceTermId, text, images);
-        }
       }
     },
     [sendDraftNow],
   );
+
+  useEffect(() => {
+    if (![...scheduledSends.values()].some((send) => send.triggered)) return;
+    const retry = () => {
+      if (dailyLockedRef.current) return;
+      for (const send of scheduledSendsRef.current.values()) {
+        if (send.triggered) completeScheduledSendsForTarget(send.targetTermId);
+      }
+    };
+    const timer = window.setInterval(retry, 500);
+    retry();
+    return () => window.clearInterval(timer);
+  }, [scheduledSends, completeScheduledSendsForTarget]);
 
   const beforeScheduledSubmit = useCallback(
     (
@@ -1079,10 +1112,10 @@ export default function App() {
         usageLimits,
         projects: tabsRef.current.map((tab) => ({
           id: tab.id,
-          name: tab.project?.name ?? tab.title,
+          name: tab.title,
           path: tab.project?.path ?? "",
           branch: tab.project?.branch ?? null,
-          color: tab.color ? tabColorHex(tab.color) : null,
+          color: tabColorHex(tab.color) ?? tabColorHex(tab.group?.color),
           terminals: leaves(tab.root).flatMap((node) => {
             const meta = terminals.getMeta(node.term);
             if (!meta) return [];
@@ -1158,17 +1191,14 @@ export default function App() {
                 mobileAlertTermIdsRef.current.has(node.term),
               completionSeq: meta.completionSeq,
               readCompletionSeq: readCompletionSeqsRef.current.get(node.term) ?? null,
-              commands: [...(session?.commands ?? [])]
-                .sort((left, right) => {
-                  const priority = (name: string) =>
-                    name === "/new" ? 0 : name === "/model" ? 1 : name === "/effort" ? 2 : 3;
-                  return priority(left.name) - priority(right.name);
-                })
-                .slice(0, 32)
-                .map((command) => ({
-                  name: command.name.slice(0, 80),
-                  description: command.description.slice(0, 180),
-                })),
+              experience: session ? mobileAgentExperience(session,
+                [...mobileFocusedTerminalsRef.current.values()].includes(node.term)) : undefined,
+              history: mobileHistoryRef.current.get(node.term)?.rows,
+              historyError: mobileHistoryRef.current.get(node.term)?.error,
+              historyRequestId: mobileHistoryRef.current.get(node.term)?.requestId,
+              scheduled: timedSendsRef.current.has(node.term) ? { at: timedSendsRef.current.get(node.term)!.at }
+                : scheduledSendsRef.current.has(node.term) ? { targetLabel: scheduledSendsRef.current.get(node.term)!.targetLabel } : null,
+              commands: mobileSlashCommands(session ? { ...session, model: session.nextModel ?? session.model, effort: session.nextEffort ?? session.effort } : null),
               activity: mobileAgentActivity(session?.items ?? []),
               conversation,
               permission: session?.permission
@@ -1258,8 +1288,8 @@ export default function App() {
         if (!stopped) console.error("mobile usage limits sync", error);
       });
     };
-    const offAgents = agentSessions.subscribeAll(schedule);
-    const offTerminals = termIds.map((termId) => terminals.subscribeSession(termId, schedule));
+    const offAgents = agentSessions.subscribeAll(() => schedule());
+    const offTerminals = termIds.map((termId) => terminals.subscribeSession(termId, () => schedule()));
     const offTerminalOutput = termIds.map((termId) =>
       terminals.subscribeOutput(termId, () => {
         // PTYs can repaint dozens of times per second. A short coalescing
@@ -1319,7 +1349,11 @@ export default function App() {
       offTerminals.forEach((off) => off());
       offTerminalOutput.forEach((off) => off());
     };
-  }, [tabs, termIds, termIdsKey, unreadTermIds, mobileAlertTermIds]);
+  }, [termIdsKey]);
+
+  useEffect(() => {
+    window.dispatchEvent(new Event("duckweed:mobile-read"));
+  }, [tabs, unreadTermIds, mobileAlertTermIds, scheduledSends, timedSends]);
 
   // The relay cannot open an inbound connection through a user's router, so
   // the desktop checks the small encrypted command queue while Duckweed runs.
@@ -1342,6 +1376,49 @@ export default function App() {
           try {
             if (!applied.has(key)) {
               if (command.kind === "refresh") {
+                if (command.terminalId) mobileFocusedTerminalsRef.current.set(command.deviceId, command.terminalId);
+                else mobileFocusedTerminalsRef.current.delete(command.deviceId);
+                window.dispatchEvent(new Event("duckweed:mobile-refresh"));
+              } else if (command.kind === "agent_control" && command.terminalId) {
+                const session = agentSessions.get(command.terminalId);
+                if (session) {
+                  const action = command.action;
+                  if (action === "interrupt") agentSessions.interrupt(command.terminalId);
+                  else if (action === "new_chat" && session.status === "idle") await agentSessions.newChat(command.terminalId);
+                  else if (action === "model" || action === "effort") {
+                    const choices = mobileSlashCommands({ ...session, model: session.nextModel ?? session.model }).find(row => row.name === `/${action}`)?.options ?? [];
+                    if (choices.some(choice => choice.value === command.value)) agentSessions.configure(command.terminalId, action, command.value!);
+                  } else if (action === "history") {
+                    try {
+                      const rows = await mobileAgentHistory.list(session.agent, session.cwd);
+                      mobileHistoryRef.current.set(command.terminalId, { rows: rows.slice(0, 60).map(row => ({ ...row, title: truncateUtf8(row.title, 240), path: "" })), error: null, requestId: command.commandId });
+                    } catch (error) {
+                      mobileHistoryRef.current.set(command.terminalId, { rows: [], error: String(error), requestId: command.commandId });
+                    }
+                  } else if (action === "resume" && command.value && session.status === "idle") {
+                    const rows = await mobileAgentHistory.list(session.agent, session.cwd);
+                    const selected = rows.find(row => row.id === command.value);
+                    if (selected) await agentSessions.resume(command.terminalId, selected.id, selected.title);
+                  } else if (action === "cancel_schedule") {
+                    cancelSchedule(command.terminalId);
+                    cancelTimedSend(command.terminalId);
+                  } else if (action === "schedule" && (command.text?.trim() || command.images.length > 0)) {
+                    const timed = command.scheduledAt && command.scheduledAt > Date.now() && command.scheduledAt < Date.now() + 31 * 86_400_000;
+                    const triggered = command.targetTerminalId && command.targetTerminalId !== command.terminalId && terminals.getMeta(command.targetTerminalId);
+                    if (timed || triggered) {
+                      agentSessions.setDraft(command.terminalId, command.text ?? "");
+                      agentSessions.setDraftImages(command.terminalId, command.images);
+                      cancelSchedule(command.terminalId);
+                      cancelTimedSend(command.terminalId);
+                      if (timed) scheduleTimedSend(command.terminalId, { at: command.scheduledAt! });
+                      else if (command.targetTerminalId) {
+                        const target = agentSessions.get(command.targetTerminalId);
+                        scheduleSend(command.terminalId, { termId: command.targetTerminalId, label: target?.label ?? "Terminal", detail: target?.cwd ?? "" });
+                      }
+                      agentSessions.flushRecovery();
+                    }
+                  }
+                }
                 window.dispatchEvent(new Event("duckweed:mobile-refresh"));
               } else if (command.kind === "create_terminal" && command.projectId) {
                 window.dispatchEvent(new CustomEvent("duckweed:mobile-create-terminal", {
@@ -1663,6 +1740,8 @@ export default function App() {
   }, []);
 
   const firePowerAction = useCallback(async (action: powerWatch.PowerAction) => {
+    saveWorkspaceRef.current();
+    agentSessions.flushRecovery();
     await flushDurableStorage();
     await powerAction(action);
   }, [acknowledgeTermFromMobile]);
@@ -1759,7 +1838,9 @@ export default function App() {
   useEffect(() => {
     if (!TAURI_RUNTIME || lockoutBusy.length > 0) return;
     if (!backgroundExitRequestedRef.current) return;
-    void exit(0);
+    saveWorkspaceRef.current();
+    agentSessions.flushRecovery();
+    void flushDurableStorage().then(() => exit(0));
   }, [lockoutBusy.length]);
 
   const continueLockedInBackground = useCallback(() => {
@@ -1974,7 +2055,7 @@ export default function App() {
     const nextTabs = result.tabIds
       .map((id) => byId.get(id))
       .filter((t): t is Tab => t !== undefined);
-    setTabs(nextTabs);
+    setTabs(arrangeTabGroups(nextTabs));
     if (settingsOpen) setSettingsTabIndex(result.settingsIndex);
   }, []);
 
@@ -1991,7 +2072,7 @@ export default function App() {
       const pinned = rest.filter((t) => t.pinned);
       const unpinned = rest.filter((t) => !t.pinned);
       // New pin lands just after existing pins — the left-most free pin slot.
-      return [...pinned, { ...tab, pinned: true }, ...unpinned];
+      return [...pinned, { ...tab, pinned: true, group: null }, ...unpinned];
     });
   }, []);
 
@@ -2685,6 +2766,7 @@ export default function App() {
       terminals.setHighlight(initial.highlight);
       terminals.setAgentUi(initial.customAgentUi);
       agentSessions.setFollowupMode(initial.agentFollowupMode);
+      agentSessions.setCodexCapacityReply(initial.codexCapacityReply);
       // Keep OpenCode's OpenRouter picker current after app updates, Vite HMR,
       // and manual WebView reloads. OpenCode launches share and await this task.
       void agentSessions.refreshOpenCodeModels();
@@ -2833,34 +2915,34 @@ export default function App() {
     });
   }, []);
 
-  // Persist the arrangement (never the processes). Debounced because dragging a
-  // divider produces a state update per pointer move.
-  useEffect(() => {
+  const saveWorkspaceRef = useRef<() => void>(() => {});
+  saveWorkspaceRef.current = () => {
     if (!booted) return;
-    const id = window.setTimeout(
-      () =>
-        save({
-          project: lastProject.current,
-          recents,
-          fontSize,
-          shell,
-          highlight,
-          completionHighlights,
-          completionSoundEnabled,
-          tintWorkspaceWithTabColor,
-          customAgentUi,
-          agentFollowupMode,
-          autoApproveLockedRequests,
-          inputMode,
-          confirmCloseRunning: confirmCloseRunningPref,
-          toolsOpen,
-          toolsWidth,
-          tabs,
-          activeTabId,
-        }),
-      400,
-    );
-    return () => window.clearTimeout(id);
+    save({
+      project: lastProject.current,
+      recents,
+      fontSize,
+      shell,
+      highlight,
+      completionHighlights,
+      completionSoundEnabled,
+      tintWorkspaceWithTabColor,
+      customAgentUi,
+      agentFollowupMode,
+      codexCapacityReply,
+      autoApproveLockedRequests,
+      inputMode,
+      confirmCloseRunning: confirmCloseRunningPref,
+      toolsOpen,
+      toolsWidth,
+      tabs,
+      activeTabId,
+    });
+  };
+
+  // Save every committed workspace change, without depending on a clean exit.
+  useEffect(() => {
+    saveWorkspaceRef.current();
   }, [
     booted,
     project,
@@ -2873,6 +2955,7 @@ export default function App() {
     tintWorkspaceWithTabColor,
     customAgentUi,
     agentFollowupMode,
+    codexCapacityReply,
     autoApproveLockedRequests,
     inputMode,
     confirmCloseRunningPref,
@@ -2881,6 +2964,15 @@ export default function App() {
     tabs,
     activeTabId,
   ]);
+
+  useEffect(() => {
+    if (!booted) return;
+    workspaceRecovery.prune(termIds);
+    if (dailyLocked) return;
+    for (const termId of termIds) {
+      if (workspaceRecovery.get(termId)) terminals.restore(termId, spawnFor(termId));
+    }
+  }, [booted, dailyLocked, termIdsKey, spawnFor]);
 
   // A closed tab takes its checklist with it. Deferred to a settled tab list so
   // an intermediate state during a reorder or a close cannot drop a live list.
@@ -2909,9 +3001,27 @@ export default function App() {
   }, [focusKey, currentTab]);
 
   useEffect(() => {
-    const cleanup = () => terminals.disposeAll();
+    // Flush before background timer throttling can delay an edited draft.
+    const checkpoint = () => agentSessions.flushRecovery();
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "hidden") checkpoint();
+    };
+    const cleanup = () => {
+      saveWorkspaceRef.current();
+      agentSessions.flushRecovery();
+      // Killing processes is cleanup, not a request to forget the open panes.
+      workspaceRecovery.freeze();
+      void flushDurableStorage();
+      terminals.disposeAll();
+    };
     window.addEventListener("beforeunload", cleanup);
-    return () => window.removeEventListener("beforeunload", cleanup);
+    window.addEventListener("blur", checkpoint);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      window.removeEventListener("beforeunload", cleanup);
+      window.removeEventListener("blur", checkpoint);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
   }, []);
 
   // Warn before quitting if any terminal still has a command running.
@@ -2921,6 +3031,9 @@ export default function App() {
     let unlisten: (() => void) | undefined;
     void getCurrentWindow()
       .onCloseRequested(async (event) => {
+        saveWorkspaceRef.current();
+        agentSessions.flushRecovery();
+        await flushDurableStorage();
         if (dailyLockedRef.current) {
           const busy = probeActivity();
           if (busy.length > 0) {
@@ -2942,6 +3055,11 @@ export default function App() {
           allowDontShowAgain: true,
         });
         if (!ok) event.preventDefault();
+        else {
+          saveWorkspaceRef.current();
+          agentSessions.flushRecovery();
+          await flushDurableStorage();
+        }
       })
       .then((fn) => {
         if (disposed) fn();
@@ -3088,7 +3206,7 @@ export default function App() {
 
   const railEntries = useMemo(
     () =>
-      zoomRailMounted ? zoomRailEntries(tabs, activeTabId, (tab) => tabColorHex(tab.color)) : [],
+      zoomRailMounted ? zoomRailEntries(tabs, activeTabId, (tab) => tabColorHex(tab.color) ?? tabColorHex(tab.group?.color)) : [],
     [activeTabId, tabs, zoomRailMounted],
   );
 
@@ -3923,7 +4041,7 @@ export default function App() {
   const activeTerm = activeTab ? (findLeaf(activeTab.root, activeTab.activeLeaf)?.term ?? null) : null;
   const activeWindowColor =
     tintWorkspaceWithTabColor && !settingsActive && !dailyLocked
-      ? tabColorHex(activeTab?.color)
+      ? tabColorHex(activeTab?.color) ?? tabColorHex(activeTab?.group?.color)
       : null;
 
   useEffect(() => {
@@ -4001,6 +4119,8 @@ export default function App() {
           onPin={pinTab}
           onColor={colorTab}
           onIcon={iconTab}
+          onGroup={(ids, group) => setTabs((prev) => assignTabGroup(prev, ids, group))}
+          onUpdateGroup={(id, patch) => setTabs((prev) => updateTabGroup(prev, id, patch))}
           settingsOpen={settingsTabOpen}
           settingsActive={settingsActive}
           settingsIndex={settingsTabIndex}
@@ -4066,6 +4186,7 @@ export default function App() {
                 openAgentCount={openAgentCount}
                 customAgentUi={customAgentUi}
                 agentFollowupMode={agentFollowupMode}
+                codexCapacityReply={codexCapacityReply}
                 autoApproveLockedRequests={autoApproveLockedRequests}
                 confirmCloseRunning={confirmCloseRunningPref}
                 explorerIntegration={explorerIntegration}
@@ -4091,6 +4212,10 @@ export default function App() {
                   setAgentFollowupMode(mode);
                 }}
                 onAutoApproveLockedRequests={setAutoApproveLockedRequests}
+                onCodexCapacityReply={(settings) => {
+                  agentSessions.setCodexCapacityReply(settings);
+                  setCodexCapacityReply(settings);
+                }}
                 onToggleConfirmCloseRunning={() =>
                   setConfirmCloseRunningPref((prev) => !prev)
                 }

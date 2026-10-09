@@ -9,6 +9,7 @@ export const COMMAND_HISTORY_KEY = "duckweed:command-history:v1";
 
 export const DURABLE_KEYS = [
   "duckweed:state:v1",
+  "duckweed:workspace-recovery:v1",
   "duckweed:usage:v1",
   "duckweed:suggest-feedback:v1",
   // Per-tab checklists. These are the user's own notes rather than app state,
@@ -30,6 +31,15 @@ export const DURABLE_KEYS = [
 ] as const;
 
 export type DurableKey = (typeof DURABLE_KEYS)[number];
+
+// Native recovery may be larger than the WebView quota (for example images).
+const restoredFallbacks = new Map<DurableKey, string>();
+
+export function readStoredValue(key: DurableKey): string | null {
+  if (restoredFallbacks.has(key)) return restoredFallbacks.get(key)!;
+  try { return (globalThis.window?.localStorage ?? globalThis.localStorage).getItem(key); }
+  catch { return null; }
+}
 
 export interface DurableWriteQueue {
   enqueue(write: () => Promise<unknown>): void;
@@ -111,7 +121,16 @@ export async function restoreDurableStorage(): Promise<void> {
       }
 
       if (typeof nativeValue === "string") {
-        localStorage.setItem(key, nativeValue);
+        // A crash can interrupt the native mirror after the synchronous save.
+        // Keep the newer checkpoint instead of replacing it with an older one.
+        if ((key === "duckweed:state:v1" || key === "duckweed:workspace-recovery:v1") &&
+            existing && checkpointTime(existing) > checkpointTime(nativeValue)) {
+          await invoke("settings_save", { key, value: existing });
+        } else {
+          restoredFallbacks.set(key, nativeValue);
+          localStorage.setItem(key, nativeValue);
+          restoredFallbacks.delete(key);
+        }
       } else if (existing !== null) {
         await invoke("settings_save", { key, value: existing });
       }
@@ -132,10 +151,30 @@ export function saveDurably(
   value: string,
   options?: { replace?: boolean },
 ): void {
+  if (restoredFallbacks.has(key)) restoredFallbacks.set(key, value);
   if (!TAURI_RUNTIME) return;
+  // Coalesce checkpoints while an earlier IPC write is still pending.
+  // History keeps its ordered merge/replace semantics.
+  if (key !== COMMAND_HISTORY_KEY) {
+    const waiting = pendingSnapshots.has(key);
+    pendingSnapshots.set(key, value);
+    if (waiting) return;
+    durableWrites.enqueue(() => {
+      const latest = pendingSnapshots.get(key)!;
+      pendingSnapshots.delete(key);
+      return invoke("settings_save", { key, value: latest, replace: false });
+    });
+    return;
+  }
   durableWrites.enqueue(() =>
     invoke("settings_save", { key, value, replace: options?.replace ?? false }),
   );
+}
+
+const pendingSnapshots = new Map<DurableKey, string>();
+
+function checkpointTime(raw: string): number {
+  try { return Number(JSON.parse(raw).savedAt) || 0; } catch { return 0; }
 }
 
 /** Wait until every app-data settings write queued so far is on disk. */

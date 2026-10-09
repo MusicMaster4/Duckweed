@@ -11,12 +11,12 @@
 //! framing (one JSON value per line, in both directions); the frontend owns
 //! what those lines mean.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -27,6 +27,13 @@ use tauri::ipc::Channel;
 /// and diffs inline, so the ceiling is generous — but a runaway line must not
 /// be able to grow the webview message queue without bound.
 const MAX_LINE_BYTES: usize = 8 * 1024 * 1024;
+
+/// Cap on one WebSocket message from the shared Codex service. A message over
+/// it is a protocol error that ends the whole connection, so it must sit well
+/// above any legitimate response: `plugin/list` alone returns the full remote
+/// catalog, already over 11 MB. Messages over `MAX_LINE_BYTES` are still kept
+/// out of the webview; this only decides whether the session survives them.
+const MAX_CODEX_MESSAGE_BYTES: usize = 256 * 1024 * 1024;
 
 /// Stderr is diagnostics, never protocol. Keep only enough to explain a failed
 /// start; a chatty agent must not pin megabytes of logs in memory forever.
@@ -40,7 +47,7 @@ pub enum AgentFrame {
     /// One diagnostic line from the agent's stderr.
     Stderr { line: String },
     /// The process is gone; no further frames follow.
-    Exit { code: Option<i32> },
+    Exit { code: Option<i32>, reconnect: bool },
 }
 
 #[derive(Serialize, Clone)]
@@ -58,7 +65,7 @@ pub struct AgentAvailability {
     pub path: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 pub struct AgentSpawnOptions {
     pub program: String,
     pub args: Vec<String>,
@@ -67,9 +74,164 @@ pub struct AgentSpawnOptions {
 }
 
 struct Process {
-    stdin: Option<ChildStdin>,
+    stdin: Option<Arc<Mutex<ProcessInput>>>,
     child: Child,
     pid: Option<u32>,
+    runtime_roots: Vec<u32>,
+    ownership: CodexOwnership,
+    service: Option<crate::codex_transport::Service>,
+    reconnect_on_exit: bool,
+}
+
+/// Track only conversations addressed by this connection. A shared service
+/// can broadcast unrelated thread notifications belonging to other clients.
+#[derive(Default)]
+struct CodexOwnership {
+    threads: HashMap<String, Option<String>>,
+    starts: HashMap<String, Option<String>>,
+    unsubscribes: HashMap<String, String>,
+    closing: HashSet<String>,
+}
+
+impl CodexOwnership {
+    fn sent(&mut self, line: &str) {
+        let Ok(frame) = serde_json::from_str::<serde_json::Value>(line) else {
+            return;
+        };
+        let method = frame["method"].as_str().unwrap_or_default();
+        let thread = frame["params"]["threadId"].as_str().map(str::to_owned);
+        if matches!(
+            method,
+            "thread/start" | "thread/resume" | "thread/fork" | "turn/start"
+        ) {
+            self.starts.insert(
+                frame["id"].to_string(),
+                if method == "turn/start" {
+                    thread.clone()
+                } else {
+                    None
+                },
+            );
+        }
+        if let Some(thread) = thread {
+            if method == "thread/unsubscribe" {
+                let id = frame["id"].to_string();
+                self.closing.insert(id.clone());
+                self.unsubscribes.insert(id, thread);
+            } else if matches!(method, "turn/start" | "thread/shellCommand" | "thread/resume") {
+                self.threads.entry(thread).or_default();
+            }
+        }
+    }
+
+    fn received(&mut self, line: &str) {
+        let Ok(frame) = serde_json::from_str::<serde_json::Value>(line) else {
+            return;
+        };
+        if let Some(id) = frame.get("id") {
+            let key = id.to_string();
+            self.closing.remove(&key);
+            if let Some(thread) = self.unsubscribes.remove(&key) {
+                if frame.get("error").is_none() {
+                    self.threads.remove(&thread);
+                }
+            }
+            if let Some(start) = self.starts.remove(&key) {
+                if let Some(thread) = frame["result"]["thread"]["id"].as_str() {
+                    let active = frame["result"]["thread"]["activeTurnId"].as_str().map(str::to_owned)
+                        .or_else(|| frame["result"]["thread"]["turns"].as_array().and_then(|turns| {
+                            turns.iter().rev().find(|turn| turn["status"] == "inProgress")
+                                .and_then(|turn| turn["id"].as_str()).map(str::to_owned)
+                        }))
+                        .or_else(|| frame["result"]["initialTurnsPage"]["data"].as_array().and_then(|turns| {
+                            turns.iter().find(|turn| turn["status"] == "inProgress")
+                                .and_then(|turn| turn["id"].as_str()).map(str::to_owned)
+                        }));
+                    let turn = self.threads.entry(thread.to_owned()).or_default();
+                    if active.is_some() { *turn = active; }
+                } else if let (Some(thread), Some(turn)) =
+                    (start, frame["result"]["turn"]["id"].as_str())
+                {
+                    if let Some(active) = self.threads.get_mut(&thread) {
+                        *active = Some(turn.to_owned());
+                    }
+                }
+            }
+            return;
+        }
+        let method = frame["method"].as_str().unwrap_or_default();
+        let params = &frame["params"];
+        if method == "thread/started" {
+            if let (Some(parent), Some(child)) = (
+                params["thread"]["parentThreadId"].as_str(),
+                params["thread"]["id"].as_str(),
+            ) {
+                if self.threads.contains_key(parent) {
+                    self.threads.entry(child.to_owned()).or_default();
+                }
+            }
+        }
+        if let Some(thread) = params["threadId"].as_str() {
+            if self.threads.contains_key(thread)
+                && matches!(
+                    params["item"]["type"].as_str(),
+                    Some("collabAgentToolCall" | "collabToolCall")
+                )
+            {
+                if let Some(children) = params["item"]["receiverThreadIds"].as_array() {
+                    for child in children.iter().filter_map(|child| child.as_str()) {
+                        self.threads.entry(child.to_owned()).or_default();
+                    }
+                }
+            }
+            if method == "thread/closed" {
+                self.threads.remove(thread);
+            } else if let Some(turn) = self.threads.get_mut(thread) {
+                if method == "turn/started" {
+                    *turn = params["turn"]["id"].as_str().map(str::to_owned);
+                }
+                if method == "turn/completed" {
+                    *turn = None;
+                }
+            }
+        }
+    }
+
+    fn shutdown_requests(&self) -> Vec<serde_json::Value> {
+        let mut requests = Vec::new();
+        for (thread, turn) in &self.threads {
+            requests.push(serde_json::json!({"method":"thread/goal/set","params":{"threadId":thread,"status":"paused"}}));
+            if let Some(turn) = turn {
+                requests.push(serde_json::json!({"method":"turn/interrupt","params":{"threadId":thread,"turnId":turn}}));
+            }
+            requests.push(serde_json::json!({"method":"thread/backgroundTerminals/clean","params":{"threadId":thread}}));
+            requests.push(
+                serde_json::json!({"method":"thread/unsubscribe","params":{"threadId":thread}}),
+            );
+        }
+        for (index, request) in requests.iter_mut().enumerate() {
+            request["id"] = serde_json::json!(format!("duckweed-shutdown-{index}"));
+        }
+        requests
+    }
+}
+
+enum ProcessInput {
+    JsonLines(ChildStdin),
+    Codex(tungstenite::WebSocket<crate::codex_transport::ProxyWriter>),
+}
+
+impl ProcessInput {
+    fn send(&mut self, line: &str) -> Result<(), String> {
+        match self {
+            Self::JsonLines(stdin) => {
+                stdin.write_all(line.as_bytes()).map_err(err)?;
+                stdin.write_all(b"\n").map_err(err)?;
+                stdin.flush().map_err(err)
+            }
+            Self::Codex(writer) => crate::codex_transport::send(writer, line),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -89,6 +251,51 @@ fn err(e: impl std::fmt::Display) -> String {
 }
 
 impl AgentProcManager {
+    pub fn synchronize_codex_auth(&self, id: &str, signed_in: bool) -> Result<String, String> {
+        let service = self
+            .get(id)
+            .and_then(|process| process.lock().unwrap().service.clone());
+        let Some(service) = service else {
+            return Ok("unchanged".into());
+        };
+        crate::codex_transport::synchronize(&service, signed_in, || {
+            for process in self.inner.processes.lock().unwrap().values() {
+                let mut process = process.lock().unwrap();
+                if process
+                    .service
+                    .as_ref()
+                    .is_some_and(|other| other.home == service.home)
+                {
+                    process.reconnect_on_exit = true;
+                    if let Some(service) = &process.service {
+                        service.reconnecting.store(true, Ordering::Relaxed);
+                    }
+                }
+            }
+        })
+        .map(str::to_owned)
+    }
+    pub fn interrupt_codex(&self, id: &str) -> Result<(), String> {
+        let handle = self.get(id).ok_or_else(|| format!("no agent process `{id}`"))?;
+        let (service, threads) = {
+            let process = handle.lock().unwrap();
+            (process.service.clone(), process.ownership.threads.iter()
+                .map(|(thread, turn)| (thread.clone(), turn.clone())).collect::<Vec<_>>())
+        };
+        match service {
+            Some(service) => crate::codex_transport::interrupt_threads(&service, &threads),
+            // A private app-server has no shared work to preserve. Killing its
+            // process tree is the backstop when the protocol stops answering.
+            None => self.stop(id),
+        }
+    }
+
+    pub fn set_runtime_roots(&self, id: &str, pids: Vec<u32>) {
+        if let Some(process) = self.get(id) {
+            process.lock().unwrap().runtime_roots =
+                pids.into_iter().filter(|pid| *pid > 0).take(256).collect();
+        }
+    }
     fn get(&self, id: &str) -> Option<Arc<Mutex<Process>>> {
         self.inner.processes.lock().unwrap().get(id).cloned()
     }
@@ -116,14 +323,25 @@ impl AgentProcManager {
         let handle = self
             .get(id)
             .ok_or_else(|| format!("no agent process `{id}`"))?;
-        let mut process = handle.lock().unwrap();
-        let stdin = process
-            .stdin
-            .as_mut()
-            .ok_or_else(|| format!("agent process `{id}` has no stdin"))?;
-        stdin.write_all(line.as_bytes()).map_err(err)?;
-        stdin.write_all(b"\n").map_err(err)?;
-        stdin.flush().map_err(err)
+        let stdin = {
+            let mut process = handle.lock().unwrap();
+            let stdin = process.stdin.clone()
+                .ok_or_else(|| format!("agent process `{id}` has no stdin"))?;
+            // Register before writing: a fast reply can beat the write's return.
+            if process.service.is_some() { process.ownership.sent(line); }
+            stdin
+        };
+        // A full stdin pipe must never hold the process lock. The stdout reader
+        // needs that lock to deliver replies, and Stop needs it to kill a wedged
+        // proxy. Holding it across write_all creates a duplex pipe deadlock.
+        let mut input = stdin.lock().unwrap();
+        input.send(line).map_err(|error| {
+            if matches!(*input, ProcessInput::Codex(_)) {
+                format!("duckweed_connection_closed: {error}")
+            } else {
+                error
+            }
+        })
     }
 
     /// Close the agent's stdin without killing it.
@@ -139,23 +357,79 @@ impl AgentProcManager {
     }
 
     pub fn stop(&self, id: &str) -> Result<(), String> {
+        self.stop_inner(id, false)
+    }
+
+    /// Drop only our shared-service proxy during recovery. Its turns, goals and
+    /// background terminals belong to the daemon and must survive reconnection.
+    pub fn disconnect(&self, id: &str) -> Result<(), String> {
+        self.stop_inner(id, true)
+    }
+
+    fn stop_inner(&self, id: &str, preserve_codex_work: bool) -> Result<(), String> {
         let handle = match self.inner.processes.lock().unwrap().remove(id) {
             Some(process) => process,
             // Stopping an agent that already exited is how every teardown path
             // ends; it is not an error.
             None => return Ok(()),
         };
+        let (stdin, requests, service, threads) = {
+            let mut process = handle.lock().unwrap();
+            if preserve_codex_work && process.service.is_some() {
+                process.stdin.take();
+                if let Some(pid) = process.pid { kill_tree(pid); }
+                let _ = process.child.kill();
+                return Ok(());
+            }
+            let requests = process.ownership.shutdown_requests();
+            for frame in &requests {
+                process.ownership.closing.insert(frame["id"].to_string());
+            }
+            let threads = process.ownership.threads.iter()
+                .map(|(thread, turn)| (thread.clone(), turn.clone())).collect::<Vec<_>>();
+            (process.stdin.take(), requests, process.service.clone(), threads)
+        };
+        // Cleanup also runs after the WebView disappears. Bound even the write
+        // itself, not just the response wait, so backpressure cannot trap Stop.
+        let (done, wait) = mpsc::channel();
+        if let Some(stdin) = stdin {
+            thread::spawn(move || {
+                let mut input = stdin.lock().unwrap();
+                for frame in requests {
+                    if input.send(&frame.to_string()).is_err() { break; }
+                }
+                let _ = done.send(());
+            });
+        }
+        let deadline = Instant::now() + Duration::from_millis(250);
+        let _ = wait.recv_timeout(deadline.saturating_duration_since(Instant::now()));
+        while !handle.lock().unwrap().ownership.closing.is_empty() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
         let mut process = handle.lock().unwrap();
-        process.stdin.take();
+        let cleanup_unconfirmed = !process.ownership.closing.is_empty();
         if let Some(pid) = process.pid {
             kill_tree(pid);
         }
         let _ = process.child.kill();
+        drop(process);
+        if cleanup_unconfirmed {
+            if let Some(service) = service {
+                return crate::codex_transport::interrupt_threads(&service, &threads);
+            }
+        }
         Ok(())
     }
 
     pub fn stop_all(&self) {
-        let ids: Vec<String> = self.inner.processes.lock().unwrap().keys().cloned().collect();
+        let ids: Vec<String> = self
+            .inner
+            .processes
+            .lock()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
         for id in ids {
             let _ = self.stop(&id);
         }
@@ -169,12 +443,14 @@ impl AgentProcManager {
             .lock()
             .unwrap()
             .iter()
-            .filter_map(|(id, process)| {
+            .flat_map(|(id, process)| {
+                let process = process.lock().unwrap();
                 process
-                    .lock()
-                    .unwrap()
                     .pid
+                    .into_iter()
+                    .chain(process.runtime_roots.iter().copied())
                     .map(|pid| (id.clone(), pid))
+                    .collect::<Vec<_>>()
             })
             .collect()
     }
@@ -362,6 +638,8 @@ pub fn start(
     let resolved = resolve_program(&options.program)
         .ok_or_else(|| format!("`{}` was not found on PATH", options.program))?;
 
+    let shared = crate::codex_transport::connect(&resolved, &options, MAX_CODEX_MESSAGE_BYTES)?;
+
     let mut command = build_command(&resolved);
     for arg in &options.args {
         command.arg(arg);
@@ -396,20 +674,125 @@ pub fn start(
         command.process_group(0);
     }
 
-    let mut child = command
-        .spawn()
-        .map_err(|error| format!("failed to start `{}`: {error}", resolved.display()))?;
+    let (mut child, shared_reader, shared_writer, service) = match shared {
+        Some(connection) => (
+            connection.child,
+            Some(connection.reader),
+            Some(connection.writer),
+            Some(connection.service),
+        ),
+        None => (
+            command
+                .spawn()
+                .map_err(|error| format!("failed to start `{}`: {error}", resolved.display()))?,
+            None,
+            None,
+            None,
+        ),
+    };
     let pid = Some(child.id());
-    let stdin = child.stdin.take();
+    let stdin = shared_writer
+        .map(ProcessInput::Codex)
+        .or_else(|| child.stdin.take().map(ProcessInput::JsonLines))
+        .map(|input| Arc::new(Mutex::new(input)));
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
 
     manager.inner.processes.lock().unwrap().insert(
         id.clone(),
-        Arc::new(Mutex::new(Process { stdin, child, pid })),
+        Arc::new(Mutex::new(Process {
+            stdin,
+            child,
+            pid,
+            runtime_roots: Vec::new(),
+            ownership: CodexOwnership::default(),
+            service,
+            reconnect_on_exit: false,
+        })),
     );
 
-    if let Some(stdout) = stdout {
+    if let Some(mut reader) = shared_reader {
+        let channel = on_frame.clone();
+        let metrics = Arc::clone(&manager.inner);
+        let process = manager.get(&id).ok_or("Codex proxy disappeared")?;
+        std::thread::Builder::new()
+            .name(format!("agent-codex-{id}"))
+            .spawn(move || {
+                loop {
+                    let message = match reader.read() {
+                        Ok(message) => message,
+                        Err(error) => {
+                            if !matches!(
+                                error,
+                                tungstenite::Error::ConnectionClosed
+                                    | tungstenite::Error::AlreadyClosed
+                            ) {
+                                let _ = channel.send(AgentFrame::Stderr {
+                                    line: format!("Codex service connection ended: {error}"),
+                                });
+                            }
+                            break;
+                        }
+                    };
+                    match message {
+                        tungstenite::Message::Text(line) if line.len() > MAX_LINE_BYTES => {
+                            let _ = channel.send(AgentFrame::Stderr {
+                                line: format!(
+                                    "Dropped a {} byte Codex message over the {MAX_LINE_BYTES} byte limit.",
+                                    line.len()
+                                ),
+                            });
+                            if let Some(reply) =
+                                crate::codex_transport::oversized_reply(&line, MAX_LINE_BYTES)
+                            {
+                                process.lock().unwrap().ownership.received(&reply);
+                                if channel.send(AgentFrame::Stdout { line: reply }).is_err() {
+                                    break;
+                                }
+                            }
+                        }
+                        tungstenite::Message::Text(line) => {
+                            {
+                                let mut process = process.lock().unwrap();
+                                process.ownership.received(&line);
+                                if let Ok(frame) = serde_json::from_str::<serde_json::Value>(&line)
+                                {
+                                    if frame["method"] == "account/updated" {
+                                        if let Some(service) = &process.service {
+                                            service.acknowledge();
+                                        }
+                                    }
+                                }
+                            }
+                            let bytes = line.len() as u64;
+                            if channel
+                                .send(AgentFrame::Stdout {
+                                    line: line.to_string(),
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
+                            metrics.protocol_frames.fetch_add(1, Ordering::Relaxed);
+                            metrics.protocol_bytes.fetch_add(bytes, Ordering::Relaxed);
+                        }
+                        tungstenite::Message::Close(_) => break,
+                        // Reading schedules protocol replies. Flush even when an
+                        // idle service sends only a ping and no subsequent data.
+                        tungstenite::Message::Ping(_) => {
+                            if reader.flush().is_err() {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if let Some(pid) = pid {
+                    kill_tree(pid);
+                }
+            })
+            .map_err(err)?;
+    } else if let Some(stdout) = stdout {
         let channel = on_frame.clone();
         let metrics = Arc::clone(&manager.inner);
         let thread_id = id.clone();
@@ -484,7 +867,12 @@ pub fn start(
                     Err(_) => break None,
                 }
             };
-            let _ = channel.send(AgentFrame::Exit { code });
+            let process = processes.lock().unwrap();
+            // A proxy can exit during daemon maintenance or lose its local
+            // connection while provider-owned work is still running.
+            let reconnect = process.reconnect_on_exit || process.service.is_some();
+            drop(process);
+            let _ = channel.send(AgentFrame::Exit { code, reconnect });
         })
         .map_err(err)?;
 
@@ -541,6 +929,208 @@ mod tests {
     use super::*;
 
     #[test]
+    fn shared_shutdown_owns_only_subscribed_threads_and_their_children() {
+        let mut owner = CodexOwnership::default();
+        owner.sent(r#"{"id":1,"method":"thread/start","params":{}}"#);
+        owner.received(r#"{"id":1,"result":{"thread":{"id":"ours"}}}"#);
+        owner.sent(r#"{"id":2,"method":"thread/read","params":{"threadId":"foreign"}}"#);
+        owner.received(r#"{"method":"turn/started","params":{"threadId":"foreign","turn":{"id":"foreign-turn"}}}"#);
+        owner.received(
+            r#"{"method":"turn/started","params":{"threadId":"ours","turn":{"id":"our-turn"}}}"#,
+        );
+        owner.received(r#"{"method":"item/started","params":{"threadId":"ours","item":{"type":"collabAgentToolCall","receiverThreadIds":["our-child"]}}}"#);
+        let requests = owner.shutdown_requests();
+        assert_eq!(requests.len(), 7);
+        assert!(requests
+            .iter()
+            .all(|request| request["params"]["threadId"] != "foreign"));
+        assert!(requests
+            .iter()
+            .any(|request| request["method"] == "turn/interrupt"
+                && request["params"]["turnId"] == "our-turn"));
+    }
+
+    #[test]
+    fn shutdown_keeps_threads_until_unsubscribe_is_acknowledged() {
+        let mut owner = CodexOwnership::default();
+        owner.sent(r#"{"id":1,"method":"turn/start","params":{"threadId":"ours"}}"#);
+        owner.sent(r#"{"id":2,"method":"thread/unsubscribe","params":{"threadId":"ours"}}"#);
+        assert!(!owner.shutdown_requests().is_empty());
+        assert!(!owner.closing.is_empty());
+        owner.received(r#"{"id":2,"error":{"code":-1}}"#);
+        assert!(owner.closing.is_empty());
+        assert!(!owner.shutdown_requests().is_empty());
+        owner.sent(r#"{"id":3,"method":"thread/unsubscribe","params":{"threadId":"ours"}}"#);
+        owner.received(r#"{"id":3,"result":{}}"#);
+        assert!(owner.shutdown_requests().is_empty());
+    }
+
+    // Run only as the child of the backpressure test. No Codex or inference.
+    #[test]
+    #[ignore]
+    fn backpressure_helper() {
+        if std::env::var_os("DUCKWEED_BACKPRESSURE_HELPER").is_none() { return; }
+        println!("ready");
+        std::io::stdout().flush().unwrap();
+        thread::sleep(Duration::from_millis(150));
+        println!("alive");
+        std::io::stdout().flush().unwrap();
+        // Deliberately never read stdin, simulating a blocked agent/proxy.
+        thread::sleep(Duration::from_secs(30));
+    }
+
+    // An isolated pipe reader records shutdown requests without launching Codex.
+    #[test]
+    #[ignore]
+    fn shutdown_helper() {
+        let Some(path) = std::env::var_os("DUCKWEED_SHUTDOWN_HELPER_PATH") else { return; };
+        let mut log = std::fs::File::create(path).unwrap();
+        println!("ready");
+        std::io::stdout().flush().unwrap();
+        for line in std::io::stdin().lock().lines() {
+            writeln!(log, "{}", line.unwrap()).unwrap();
+            log.flush().unwrap();
+        }
+    }
+
+    #[test]
+    fn disconnect_preserves_shared_work_but_stop_still_cleans_it() {
+        let root = std::env::temp_dir().join(format!("duckweed-disconnect-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        for preserve in [true, false] {
+            let path = root.join(format!("shutdown-{preserve}.jsonl"));
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command.args(["--exact", "agent_proc::tests::shutdown_helper", "--ignored", "--nocapture"])
+                .env("DUCKWEED_SHUTDOWN_HELPER_PATH", &path)
+                .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+            hide_console(&mut command);
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::CommandExt;
+                command.process_group(0);
+            }
+            let mut child = command.spawn().unwrap();
+            let pid = child.id();
+            let mut output = BufReader::new(child.stdout.take().unwrap());
+            let mut line = String::new();
+            while !line.contains("ready") {
+                line.clear();
+                assert!(output.read_line(&mut line).unwrap() > 0);
+            }
+            let input = child.stdin.take().unwrap();
+            let mut ownership = CodexOwnership::default();
+            ownership.sent(r#"{"id":1,"method":"turn/start","params":{"threadId":"ours"}}"#);
+            ownership.received(r#"{"id":1,"result":{"turn":{"id":"live-turn"}}}"#);
+            let handle = Arc::new(Mutex::new(Process {
+                stdin: Some(Arc::new(Mutex::new(ProcessInput::JsonLines(input)))),
+                child, pid: Some(pid), runtime_roots: Vec::new(), ownership,
+                service: Some(crate::codex_transport::test_service(&root)), reconnect_on_exit: false,
+            }));
+            // All cleanup requests are confirmed locally. This fixture tests
+            // pipe writes and must never invoke the real control-plane fallback.
+            let reader_handle = handle.clone();
+            let reader = thread::spawn(move || {
+                while output.read_line(&mut String::new()).unwrap_or(0) > 0 {}
+                reader_handle.lock().unwrap().ownership.closing.clear();
+            });
+            let manager = AgentProcManager::default();
+            manager.inner.processes.lock().unwrap().insert("fixture".into(), handle.clone());
+            // The helper exits on EOF once the cleanup writer releases stdin.
+            if preserve { manager.disconnect("fixture").unwrap(); }
+            else { manager.stop("fixture").unwrap(); }
+            let _ = handle.lock().unwrap().child.wait();
+            reader.join().unwrap();
+            let recorded = std::fs::read_to_string(&path).unwrap();
+            if preserve { assert!(recorded.is_empty(), "reconnection sent shutdown requests: {recorded}"); }
+            else {
+                for method in ["turn/interrupt", "thread/goal/set", "thread/backgroundTerminals/clean", "thread/unsubscribe"] {
+                    assert!(recorded.contains(method), "Stop omitted {method}: {recorded}");
+                }
+            }
+            assert_eq!(manager.open_count(), 0);
+            std::fs::remove_file(path).unwrap();
+        }
+        std::fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    fn full_stdin_does_not_block_output_or_stop() {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command.args(["--exact", "agent_proc::tests::backpressure_helper", "--ignored", "--nocapture"])
+            .env("DUCKWEED_BACKPRESSURE_HELPER", "1")
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+        hide_console(&mut command);
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
+        let mut child = command.spawn().unwrap();
+        let pid = child.id();
+        let mut output = BufReader::new(child.stdout.take().unwrap());
+        let mut line = String::new();
+        while !line.contains("ready") {
+            line.clear();
+            assert!(output.read_line(&mut line).unwrap() > 0);
+        }
+        let input = child.stdin.take().unwrap();
+        let handle = Arc::new(Mutex::new(Process {
+            stdin: Some(Arc::new(Mutex::new(ProcessInput::JsonLines(input)))),
+            child, pid: Some(pid), runtime_roots: Vec::new(),
+            ownership: CodexOwnership::default(), service: None, reconnect_on_exit: false,
+        }));
+        let manager = AgentProcManager::default();
+        manager.inner.processes.lock().unwrap().insert("backpressure".into(), handle.clone());
+        let sender = manager.clone();
+        let (written, write_result) = mpsc::channel();
+        let writer = thread::spawn(move || {
+            let result = sender.send("backpressure", &"x".repeat(4 * 1024 * 1024));
+            let _ = written.send(result);
+        });
+        let reader_handle = handle.clone();
+        let (received, read_result) = mpsc::channel();
+        let reader = thread::spawn(move || {
+            let mut line = String::new();
+            while output.read_line(&mut line).unwrap_or(0) > 0 {
+                if line.contains("alive") {
+                    // The production stdout reader takes this lock to update
+                    // ownership before forwarding the frame to the WebView.
+                    let _process = reader_handle.lock().unwrap();
+                    let _ = received.send(());
+                    break;
+                }
+                line.clear();
+            }
+        });
+        let output_arrived = read_result.recv_timeout(Duration::from_secs(2)).is_ok();
+        let write_is_blocked = write_result.try_recv().is_err();
+        // Clean up even when checking the old implementation, whose process
+        // lock is held by the blocked write and prevents manager.stop().
+        if !output_arrived { kill_tree(pid); }
+        let started = Instant::now();
+        manager.stop("backpressure").unwrap();
+        let stop_elapsed = started.elapsed();
+        writer.join().unwrap();
+        reader.join().unwrap();
+        let _ = handle.lock().unwrap().child.wait();
+        assert!(output_arrived, "a full stdin pipe blocked live stdout delivery");
+        assert!(write_is_blocked, "the fixture did not reproduce stdin backpressure");
+        assert!(stop_elapsed < Duration::from_secs(2), "Stop waited on the blocked stdin writer");
+        assert_eq!(manager.open_count(), 0);
+    }
+
+    #[test]
+    fn resumed_live_turn_is_owned_even_without_a_start_notification() {
+        let mut owner = CodexOwnership::default();
+        owner.sent(r#"{"id":1,"method":"thread/resume","params":{"threadId":"resumed"}}"#);
+        assert!(owner.threads.contains_key("resumed"));
+        owner.received(r#"{"id":1,"result":{"thread":{"id":"resumed"},"initialTurnsPage":{"data":[{"id":"live-turn","status":"inProgress"}]}}}"#);
+        let requests = owner.shutdown_requests();
+        assert!(requests.iter().any(|request| request["method"] == "turn/interrupt" && request["params"]["turnId"] == "live-turn"));
+        assert!(requests.iter().any(|request| request["method"] == "thread/goal/set" && request["params"]["status"] == "paused"));
+    }
+
+    #[test]
     fn strips_the_line_terminator() {
         assert_eq!(trimmed_line(b"{\"a\":1}\r\n", MAX_LINE_BYTES), "{\"a\":1}");
         assert_eq!(trimmed_line(b"{\"a\":1}\n", MAX_LINE_BYTES), "{\"a\":1}");
@@ -562,7 +1152,10 @@ mod tests {
         let mut reader = BufReader::with_capacity(8, Cursor::new(input));
         let mut buffer = Vec::new();
 
-        assert_eq!(read_bounded_line(&mut reader, &mut buffer, 16).unwrap(), 129);
+        assert_eq!(
+            read_bounded_line(&mut reader, &mut buffer, 16).unwrap(),
+            129
+        );
         assert_eq!(buffer, vec![b'x'; 16]);
         assert_eq!(read_bounded_line(&mut reader, &mut buffer, 16).unwrap(), 5);
         assert_eq!(buffer, b"next\n");
@@ -619,7 +1212,8 @@ mod tests {
         BufReader::new(child.stdout.take().unwrap())
             .read_line(&mut line)
             .expect("agent should answer initialize");
-        let _ = child.kill();
+        kill_tree(child.id());
+        let _ = child.wait();
 
         assert!(line.contains("\"id\":1"), "unexpected reply: {line}");
     }

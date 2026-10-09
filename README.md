@@ -461,8 +461,24 @@ tab over the internet. Share the frontend once: browser calls to localhost APIs,
 WebSockets and event streams go through that same HTTPS link. Start the frontend
 and backend in panes of the same tab before sharing. Public links are intended for
 development and testing, not production. Duckweed shows the link only after an
-end-to-end readiness check reaches its local proxy. It stops the tunnel when you
-stop sharing, close the owning process, or exit the app.
+browser-style HTTPS check reaches its local proxy using normal DNS, without
+bypassing provider warning pages. It also checks that the selected local server
+responds over HTTP. Responses, uploads, WebSockets, and event streams are forwarded
+without buffering the whole body. HTML adaptation preserves the document structure
+and handles gzip, deflate, and Brotli responses, local asset URLs, redirects, and
+cookies. A server restart within the same pane has a 30-second grace period to
+keep the existing link. Ownership is checked again for incoming requests.
+
+Keep Duckweed and the servers running, and the computer awake and online. Stop
+sharing revokes access and closes existing connections. Closing the process from
+the Ports tool or exiting Duckweed also stops its tunnel. Links are temporary and
+depend on the tunnel provider and the visitor's network. Cloudflare Quick Tunnels
+[do not support SSE](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/do-more-with-tunnels/trycloudflare/);
+Duckweed displays a notice when using that fallback. No tunnel can make every
+development app portable automatically: OAuth redirect allowlists, local HTTPS
+servers, URLs embedded in worker scripts or stylesheets, and apps with strict
+deployment-origin settings can require configuration for the public URL. Only
+ports belonging to panes included in the shared tab are authorized.
 
 ## Keyboard shortcuts
 
@@ -557,6 +573,20 @@ cd src-tauri && cargo check
 GitHub CI runs the TypeScript check, Bun test suite, and `cargo check` on Linux,
 macOS, and Windows. Native release packaging is also performed on the matching
 operating system before a release can be published.
+
+Port-sharing regression tests run with `cargo test --manifest-path
+src-tauri/Cargo.toml ports::`. Two opt-in tests create temporary public tunnels:
+`public_tunnel_is_reachable_end_to_end` checks HTTPS and backend routing;
+`public_browser_app_works_end_to_end` uses Node and an isolated headless browser
+to check uploads, cookies, redirects, XHR, SSE, WebSockets, assets, and compressed
+HTML. Set `DUCKWEED_TEST_BROWSER` to a Chrome or Edge executable, then run:
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml public_browser_app_works_end_to_end -- --ignored --nocapture
+```
+
+These tests serve synthetic fixtures only and stop their servers and tunnels
+when finished. They require internet access and an available tunnel provider.
 
 Release builds come from two branches: `main` publishes stable releases and
 `testing` publishes beta releases. The full versioning, signing, and updater

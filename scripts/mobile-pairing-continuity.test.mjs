@@ -187,7 +187,7 @@ describe("mobile pairing continuity", () => {
     expect(desktop).toContain('item.kind === "assistant"');
     expect(desktop).toContain("streaming: item.streaming");
     expect(desktop).toContain("activity: mobileAgentActivity");
-    expect(desktop).toContain("session?.commands ?? []");
+    expect(desktop).toContain("commands: mobileSlashCommands(session ?");
     expect(worker).toContain("putSyncedConversation(message.workspace)");
     expect(store).toContain("fun putSyncedConversation(snapshot: WorkspaceSnapshot)");
   });
@@ -303,7 +303,7 @@ describe("mobile pairing continuity", () => {
     const layout = read("android/app/src/main/res/layout/activity_main.xml");
 
     expect(layout).toContain('android:text="Activity"');
-    expect(layout).toContain('android:text="Projects"');
+    expect(layout).toContain('android:text="Tabs"');
     expect(layout).toContain('android:text="Conversations"');
     expect(layout).toContain('android:id="@+id/settings_button"');
     expect(layout).not.toContain('android:id="@+id/nav_connections"');

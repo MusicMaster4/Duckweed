@@ -1,4 +1,4 @@
-import { useEffect, useRef, type CSSProperties } from "react";
+import { useEffect, useRef, type ReactNode, type CSSProperties } from "react";
 
 import { TAB_COLORS } from "../lib/tabColors";
 import { isDefaultTabIcon, TAB_ICONS, tabIconDef } from "../lib/tabIcons";
@@ -9,6 +9,7 @@ interface Props {
   color: string | null;
   icon: string | null;
   canCloseOthers: boolean;
+  groupActions?: ReactNode;
   onPin: () => void;
   onRename: () => void;
   onChangeFolder: () => void;
@@ -40,6 +41,7 @@ export function TabContextMenu({
   color,
   icon,
   canCloseOthers,
+  groupActions,
   onPin,
   onRename,
   onChangeFolder,
@@ -114,6 +116,8 @@ export function TabContextMenu({
         >
           <span>Change folder…</span>
         </button>
+
+        {groupActions}
 
         <div className="menu-separator" />
 

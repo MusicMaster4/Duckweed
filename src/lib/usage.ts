@@ -102,7 +102,7 @@ export interface Quota {
   /** Only provider-persisted limits are metered. */
   source: "reported" | "unavailable";
   plan: string | null;
-  /** Why a trustworthy provider limit cannot be shown. */
+  /** Cache freshness, a pending retry, or why provider limits are unavailable. */
   message: string | null;
   limits: QuotaLimit[];
 }

@@ -25,6 +25,9 @@ export const syncWebviewBounds = () => invoke<void>("sync_webview_bounds");
 /** Open an http(s) URL in the system default browser (Ctrl/Cmd-click on links). */
 export const openUrl = (url: string) => invoke<void>("open_url", { url });
 
+/** Open an agent-linked local document with its default desktop application. */
+export const openAgentDocument = (path: string) => invoke<void>("open_agent_document", { path });
+
 /**
  * Play one completion cue from the app process instead of the WebView, so the
  * Windows volume mixer lists it as Duckweed. Resolves when the cue starts.
@@ -92,11 +95,18 @@ export interface MobileTerminalSnapshot {
   conversation: MobileConversationSnapshot[];
   permission: MobilePermissionSnapshot | null;
   terminalOutput?: string;
+  /** The same normalized state the desktop transcript renders. */
+  experience?: import("./mobileExperience").MobileAgentExperience;
+  history?: AgentSessionSummary[];
+  historyError?: string | null;
+  historyRequestId?: string;
+  scheduled?: { at?: number; targetLabel?: string } | null;
 }
 
 export interface MobileSlashCommandSnapshot {
   name: string;
   description: string;
+  options?: Array<{ value: string; label: string; description: string; current: boolean }>;
 }
 
 export interface MobileAgentActivitySnapshot {
@@ -217,7 +227,7 @@ export interface MobileWorkspaceSnapshot {
 export interface MobileRemoteCommand {
   deviceId: string;
   commandId: string;
-  kind: "input" | "refresh" | "approval" | "question" | "read" | "create_terminal" | "close_terminal";
+  kind: "input" | "refresh" | "approval" | "question" | "read" | "create_terminal" | "close_terminal" | "agent_control";
   terminalId: string | null;
   projectId: string | null;
   text: string | null;
@@ -233,6 +243,10 @@ export interface MobileRemoteCommand {
     dataUrl: string;
     size: number;
   }>;
+  action?: "interrupt" | "new_chat" | "model" | "effort" | "history" | "resume" | "schedule" | "cancel_schedule";
+  value?: string | null;
+  scheduledAt?: number | null;
+  targetTerminalId?: string | null;
 }
 
 export interface MobileSendResult {
@@ -334,6 +348,8 @@ export interface PortForward {
   target_pid: number;
   target_port: number;
   url: string;
+  warning?: string | null;
+  status?: "ready" | "reconnecting";
 }
 
 export interface AppPort {
@@ -478,7 +494,7 @@ export const agentUnwatch = (id: string) => invoke<void>("agent_unwatch", { id }
 export type AgentFrame =
   | { kind: "stdout"; line: string }
   | { kind: "stderr"; line: string }
-  | { kind: "exit"; code: number | null };
+  | { kind: "exit"; code: number | null; reconnect?: boolean };
 
 export interface AgentAvailability {
   name: string;
@@ -548,7 +564,12 @@ export const agentProcSend = (id: string, line: string) =>
 export const agentProcCloseStdin = (id: string) =>
   invoke<void>("agent_proc_close_stdin", { id });
 
-export const agentProcStop = (id: string) => invoke<void>("agent_proc_stop", { id });
+/** Reconnecting a shared Codex proxy must leave its provider-owned work running. */
+export const agentProcStop = (id: string, preserveCodexWork = false) =>
+  invoke<void>("agent_proc_stop", { id, preserveCodexWork });
+
+export const agentCodexAuthSync = (id: string, signedIn: boolean) =>
+  invoke<"unchanged" | "deferred" | "restarted">("agent_codex_auth_sync", { id, signedIn });
 
 /** True when the shell for `id` has a child process (a command still running). */
 export const ptyIsBusy = (id: string) => invoke<boolean>("pty_is_busy", { id });

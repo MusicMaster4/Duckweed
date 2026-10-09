@@ -7,6 +7,7 @@ import type {
   AgentSessionState,
   PlanItem,
 } from "../../../lib/agents/types";
+import { AgentMarkdownWorkspace } from "../AgentMarkdownAssets";
 import { AgentProviderIcon } from "../AgentProviderIcon";
 import { CursorExperience } from "../provider/CursorExperience";
 import { OpenCodeExperience } from "../provider/OpenCodeExperience";
@@ -62,8 +63,13 @@ function activitySession(agent: AgentId, items: AgentItem[]): AgentSessionState 
   };
 }
 
-function renderAgentActivity(agent: AgentId, items: AgentItem[]): string {
+function renderAgentActivity(
+  agent: AgentId,
+  items: AgentItem[],
+  status: AgentSessionState["status"] = "working",
+): string {
   const session = activitySession(agent, items);
+  session.status = status;
   const props = {
     items,
     termId: session.termId,
@@ -329,6 +335,66 @@ describe("official agent presentation", () => {
     );
   });
 
+  test("renders local artifact links from the reported example in every custom agent", () => {
+    const native = globalThis as typeof globalThis & { isTauri?: boolean };
+    const previous = native.isTauri;
+    native.isTauri = true;
+    try {
+      const text = "Ready: [**Open HTML summary**](<D:/The stuff you'll need/YouTube Research/summary.html>).\n\n![Summary preview](<D:/The stuff you'll need/YouTube Research/summary-preview.jpg>)";
+      for (const agent of ["codex", "claude", "grok", "cursor", "opencode"] as const) {
+        const html = renderAgentActivity(agent, [{
+          kind: "assistant", id: "artifact-answer", at: 1, text, streaming: false,
+        }], "idle");
+        expect(html).toContain('<strong>Open HTML summary</strong></a>.');
+        expect(html).toContain('href="D:/The stuff you&#x27;ll need/YouTube Research/summary.html"');
+        expect(html).toContain('href="D:/The stuff you&#x27;ll need/YouTube Research/summary-preview.jpg"');
+        expect(html).toContain('class="official-markdown-image-fallback">Summary preview</span>');
+        expect(html).not.toContain("![Summary preview]");
+        expect(html).not.toContain("[**Open HTML summary**]");
+      }
+    } finally {
+      if (previous === undefined) delete native.isTauri;
+      else native.isTauri = previous;
+    }
+  });
+
+  test("renders remote images, titled links, and formatting inside link labels", () => {
+    const html = renderToStaticMarkup(<AssistantMarkdown text={
+      '[**Docs**](https://example.com/a_(b) "Documentation") ![Preview](<https://example.com/preview image.png>)'
+    } />);
+    expect(html).toContain('href="https://example.com/a_(b)" title="Documentation"');
+    expect(html).toContain('<strong>Docs</strong></a>');
+    expect(html).toContain('<img class="official-markdown-image" src="https://example.com/preview%20image.png" alt="Preview"');
+    expect(html).not.toContain("![Preview]");
+  });
+
+  test("resolves relative artifact labels and keeps local previews readable on mobile", () => {
+    const html = renderToStaticMarkup(
+      <AgentMarkdownWorkspace.Provider value="H:/project">
+        <AssistantMarkdown text="[Report](output/report.html) ![Preview](images/preview.jpg)" />
+      </AgentMarkdownWorkspace.Provider>,
+    );
+    expect(html).toContain('title="H:/project/output/report.html">Report</span>');
+    expect(html).toContain('title="H:/project/images/preview.jpg"');
+    expect(html).not.toContain("![Preview]");
+    expect(html).not.toContain('src="file:');
+  });
+
+  test("does not turn dangerous Markdown destinations or inline code into links", () => {
+    const html = renderToStaticMarkup(<AssistantMarkdown text={
+      '[Run](javascript:alert(1)) ![Bad](data:text/html,bad) `[Docs](https://example.com)`'
+    } />);
+    expect(html).not.toContain('href="javascript:');
+    expect(html).not.toContain('src="data:');
+    expect(html).toContain('<code>[Docs](https://example.com)</code>');
+  });
+
+  test("keeps incomplete artifact tokens readable during streaming", () => {
+    const html = renderToStaticMarkup(<AssistantMarkdown text="![Preview](<D:/Reports/preview.jpg>" />);
+    expect(html).toContain("![Preview](&lt;D:/Reports/preview.jpg&gt;");
+    expect(html).not.toContain("<img");
+  });
+
   test("settles the Grok matrix with every point dimmed", () => {
     const html = renderToStaticMarkup(<GrokDotMatrix active={false} />);
     expect(html).toContain("is-settled");
@@ -525,14 +591,14 @@ describe("official agent presentation", () => {
 
       expect(html).not.toContain("Reviewing the entry point");
       expect(html.match(/agent-activity-cluster/g)).toHaveLength(1);
-      if (agent === "codex" || agent === "claude") {
+      if (agent === "codex") {
         expect(html).not.toContain("I found the entry point. I am checking the callers now.");
         expect(html).not.toContain("is-interim-update");
         expect(html).toContain("Checking every caller in full");
         expect(html).toContain("agent-thinking-latest");
       } else {
         expect(html).toContain("I found the entry point. I am checking the callers now.");
-        expect(html).toContain("is-interim-update");
+        expect(html).toContain(agent === "claude" ? "is-compact-update" : "is-interim-update");
         expect(html.indexOf("I found the entry point. I am checking the callers now.")).toBeLessThan(
           html.indexOf("Checking every caller in full"),
         );
@@ -569,13 +635,13 @@ describe("official agent presentation", () => {
 
       expect(html).toContain("I found the boundary. I am continuing below this update.");
       expect(html).not.toContain("THIS_OLD_ACTIVITY_MUST_MOVE_OUT");
-      if (agent === "codex" || agent === "claude") {
+      if (agent === "codex") {
         expect(html).not.toContain("is-interim-update");
         expect(html).toContain("agent-activity-cluster");
         expect(html).toContain("agent-thinking-latest");
       } else {
-        expect(html).toContain("is-interim-update");
-        expect(html).not.toContain("agent-activity-cluster");
+        expect(html).toContain(agent === "claude" ? "is-compact-update" : "is-interim-update");
+        if (agent !== "claude") expect(html).not.toContain("agent-activity-cluster");
       }
     });
   }
@@ -1128,6 +1194,33 @@ describe("official agent presentation", () => {
     expect(codexHtml).not.toContain("official-answer official-answer--chatgpt");
     expect(claudeHtml).toContain("official-answer official-answer--claude");
     expect(claudeHtml).not.toContain("agent-thinking-latest");
+  });
+
+  test("keeps every Claude progress message in order and promotes the final reply", () => {
+    const items: AgentItem[] = [
+      { kind: "user", id: "user", at: 1, text: "Inspect the project" },
+      { kind: "assistant", id: "first", at: 2, text: "Checking files.", streaming: false },
+      {
+        kind: "tool", id: "read", at: 3, callId: "read", name: "Read", tool: "read",
+        title: "Read files", status: "done", command: null, output: "", changes: [],
+      },
+      { kind: "assistant", id: "second", at: 4, text: "I found the entry point.", streaming: false },
+      {
+        kind: "assistant", id: "long", at: 5,
+        text: "I am checking the remaining callers and verifying which ones need the same change. ".repeat(2),
+        streaming: false,
+      },
+      { kind: "assistant", id: "final", at: 6, text: "Done.", streaming: false },
+    ];
+    const html = renderAgentActivity("claude", items, "idle");
+
+    for (const text of ["Checking files.", "I found the entry point.", "Done."]) {
+      expect(html).toContain(text);
+    }
+    expect(html.match(/is-compact-update/g)).toHaveLength(2);
+    expect(html).toContain("is-interim-update");
+    expect(html.indexOf("Checking files.")).toBeLessThan(html.indexOf("I found the entry point."));
+    expect(html.indexOf("I found the entry point.")).toBeLessThan(html.indexOf("Done."));
   });
 
   test("uses a single provider mark plus an ASCII startup animation", () => {

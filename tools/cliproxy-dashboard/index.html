@@ -1,0 +1,1314 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>CLIProxy</title>
+<style>
+  :root {
+    --bg: #0F1317;
+    --panel: #151A20;
+    --panel-2: #1A2028;
+    --line: #252D37;
+    --line-2: #323C48;
+    --text: #DCE2E8;
+    --muted: #8794A2;
+    --faint: #5F6B78;
+    --blue: #6A9FD8;
+    --teal: #4DB3A6;
+    --amber: #D3A257;
+    --red: #D46F6F;
+    --track: #222A33;
+    --radius: 8px;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --mono: ui-monospace, "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.45 var(--sans);
+    -webkit-font-smoothing: antialiased;
+    min-height: 100vh;
+  }
+  [hidden] { display: none !important; }
+  a { color: var(--blue); }
+  .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  .muted { color: var(--muted); }
+  .sr-only {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+  }
+  :focus { outline: none; }
+  :focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; border-radius: 4px; }
+
+  /* Controls */
+  button, input, select { font: inherit; color: inherit; }
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+    height: 32px; padding: 0 12px;
+    border: 1px solid var(--line-2); border-radius: 6px;
+    background: var(--panel-2); color: var(--text);
+    cursor: pointer; white-space: nowrap;
+    transition: background-color .12s, border-color .12s;
+  }
+  .btn:hover { background: #212833; border-color: #3C4756; }
+  .btn:disabled { opacity: .5; cursor: default; }
+  .btn.primary { background: #23415F; border-color: #2F5478; color: #EAF2FB; }
+  .btn.primary:hover { background: #29496B; border-color: #3A6390; }
+  .btn.ghost { background: transparent; border-color: transparent; color: var(--muted); }
+  .btn.ghost:hover { background: var(--panel-2); color: var(--text); }
+  .btn.sm { height: 28px; padding: 0 10px; font-size: 13px; }
+  .btn.icon { width: 32px; padding: 0; }
+  .btn svg { width: 16px; height: 16px; flex: none; }
+  .field { display: grid; gap: 6px; }
+  .field > span { font-size: 12.5px; color: var(--muted); }
+  .field small { color: var(--faint); font-size: 12px; }
+  input[type=text], input[type=password], input[type=url], select {
+    height: 34px; padding: 0 10px; width: 100%;
+    background: var(--bg); border: 1px solid var(--line-2); border-radius: 6px;
+  }
+  input::placeholder { color: var(--faint); }
+  input:focus-visible, select:focus-visible { outline-offset: 0; border-color: var(--blue); }
+
+  /* Login */
+  .gate { min-height: 100vh; display: grid; place-items: center; padding: 24px; }
+  .gate form {
+    width: min(340px, 100%); display: grid; gap: 16px;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 24px;
+  }
+  .gate h1 { margin: 0; font-size: 17px; font-weight: 600; letter-spacing: -.01em; }
+  .err { color: var(--red); font-size: 13px; margin: 0; }
+  .ok-text { color: var(--teal); font-size: 13px; margin: 0; }
+
+  /* App shell */
+  .app { max-width: 1180px; margin: 0 auto; padding: 18px 24px 48px; }
+  header.top { display: flex; align-items: center; gap: 12px; padding-bottom: 16px; border-bottom: 1px solid var(--line); }
+  header.top h1 { margin: 0; font-size: 16px; font-weight: 600; letter-spacing: -.01em; }
+  .conn { display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--muted); }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--teal); flex: none; }
+  .conn[data-state=stale] .dot { background: var(--amber); }
+  .conn[data-state=stale] { color: var(--amber); }
+  .conn[data-state=offline] .dot { background: var(--red); }
+  .conn time { color: var(--faint); }
+  .top .spacer { flex: 1; }
+  .spin svg { animation: spin 1s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .bar-stale {
+    display: flex; align-items: center; gap: 10px; margin-top: 14px;
+    padding: 8px 12px; border: 1px solid #4A3D27; border-radius: 6px;
+    background: #1E1A13; color: var(--amber); font-size: 13px;
+  }
+  .bar-stale .btn { margin-left: auto; }
+
+  .filters { display: flex; flex-wrap: wrap; gap: 4px; margin: 16px 0 6px; }
+  .filters button {
+    height: 30px; padding: 0 11px; border-radius: 6px; cursor: pointer;
+    border: 1px solid transparent; background: transparent; color: var(--muted);
+    display: inline-flex; align-items: center; gap: 6px;
+  }
+  .filters button:hover { color: var(--text); background: var(--panel); }
+  .filters button[aria-pressed=true] { color: var(--text); background: var(--panel-2); border-color: var(--line-2); }
+  .filters .n { font-family: var(--mono); font-size: 11.5px; color: var(--faint); }
+
+  /* Groups */
+  .group { margin-top: 22px; }
+  .group-head { display: flex; align-items: baseline; gap: 8px; margin: 0 0 8px; padding: 0 2px; }
+  .group-head h2 { margin: 0; font-size: 13.5px; font-weight: 600; }
+  .group-head .n { font-size: 12.5px; color: var(--faint); }
+  .list { border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); }
+  .list > * + * { border-top: 1px solid var(--line); }
+
+  .acct {
+    display: grid; grid-template-columns: minmax(190px, .8fr) minmax(360px, 1.7fr) auto;
+    gap: 20px; align-items: center; padding: 14px 16px;
+  }
+  .acct[data-disabled=true] .ident, .acct[data-disabled=true] .quota { opacity: .5; }
+  .ident { min-width: 0; }
+  .who { display: flex; align-items: center; gap: 8px; min-width: 0; flex-wrap: wrap; }
+  .who .name { font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+  .sub { margin-top: 3px; font-size: 12.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .warn-line { margin-top: 3px; font-size: 12.5px; color: var(--amber); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .chip {
+    display: inline-flex; align-items: center; height: 19px; padding: 0 7px;
+    border: 1px solid var(--line-2); border-radius: 4px;
+    font-size: 11.5px; color: var(--muted); white-space: nowrap; line-height: 1;
+  }
+  .chip.plan { color: #A9C6E6; border-color: #2E4157; }
+  .chip.paused { color: var(--muted); }
+  .chip.stale { color: var(--amber); border-color: #4A3D27; }
+
+  .quota { display: grid; gap: 7px; min-width: 0; }
+  .win {
+    display: grid; grid-template-columns: minmax(96px, 15rem) minmax(70px, 1fr) 40px 104px;
+    gap: 10px; align-items: center; font-size: 12.5px;
+  }
+  .more {
+    justify-self: start; display: inline-flex; align-items: center; gap: 6px;
+    height: 24px; padding: 0 6px; margin-left: -6px; border: 0; border-radius: 4px;
+    background: transparent; color: var(--muted); font-size: 12.5px; cursor: pointer;
+  }
+  .more:hover { color: var(--text); background: var(--panel-2); }
+  .more::before {
+    content: ""; width: 5px; height: 5px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor;
+    transform: rotate(-45deg); transition: transform .15s;
+  }
+  .more[aria-expanded=true]::before { transform: rotate(45deg); }
+  .rest { display: grid; gap: 7px; }
+  .code {
+    display: flex; align-items: center; gap: 10px; padding: 8px 10px 8px 12px;
+    border: 1px solid var(--line-2); border-radius: 6px; background: var(--bg);
+  }
+  .code > span { font-size: 12.5px; color: var(--muted); }
+  .code code { flex: 1; font-family: var(--mono); font-size: 16px; letter-spacing: .08em; color: var(--text); }
+  .win .wl { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .meter { height: 6px; background: var(--track); border-radius: 3px; overflow: hidden; }
+  .meter i { display: block; height: 100%; width: 0; background: var(--teal); border-radius: 3px; transition: width .4s ease; }
+  .meter[data-level=mid] i { background: var(--blue); }
+  .meter[data-level=low] i { background: var(--amber); }
+  .meter[data-level=none] i { background: var(--red); }
+  .win .pct { text-align: right; }
+  .win .rst { color: var(--muted); white-space: nowrap; }
+  .win .na { grid-column: 2 / -1; color: var(--faint); }
+  .quota-na { color: var(--faint); font-size: 13px; }
+
+  .keyrow {
+    display: grid; grid-template-columns: minmax(160px, 1fr) minmax(0, 1.45fr) auto;
+    gap: 20px; align-items: center; padding: 10px 16px; font-size: 13px;
+  }
+  .keyrow .kname { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .keyrow .kname span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .keyrow .url { color: var(--muted); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .keyrow .kc { color: var(--faint); font-size: 12.5px; }
+
+  .empty {
+    border: 1px dashed var(--line-2); border-radius: var(--radius);
+    padding: 28px 16px; text-align: center; color: var(--muted);
+    display: grid; gap: 12px; justify-items: center;
+  }
+  .empty p { margin: 0; }
+
+  /* Disclosures */
+  .extras { margin-top: 32px; display: grid; gap: 8px; }
+  details.disc { border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); }
+  details.disc > summary {
+    cursor: pointer; list-style: none; padding: 10px 14px; font-size: 13px; color: var(--muted);
+    display: flex; align-items: center; gap: 8px; border-radius: var(--radius);
+  }
+  details.disc > summary::-webkit-details-marker { display: none; }
+  details.disc > summary::before {
+    content: ""; width: 6px; height: 6px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor;
+    transform: rotate(-45deg); transition: transform .15s; margin-right: 2px;
+  }
+  details.disc[open] > summary::before { transform: rotate(45deg); }
+  details.disc > summary:hover { color: var(--text); }
+  details.disc .n { font-family: var(--mono); font-size: 11.5px; color: var(--faint); }
+  .disc-body { padding: 4px 14px 12px; }
+  .kv { display: grid; grid-template-columns: 110px minmax(0, 1fr) auto; gap: 4px 12px; align-items: center; }
+  .kv > span:first-child { color: var(--muted); font-size: 12.5px; }
+  .kv code, .models code {
+    font-family: var(--mono); font-size: 12.5px; color: var(--text);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;
+  }
+  .models { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 2px 16px; }
+  .models li { display: flex; align-items: center; gap: 8px; min-height: 30px; min-width: 0; }
+  .models li code { flex: 1; }
+  .models .prov { color: var(--faint); font-size: 12px; white-space: nowrap; }
+
+  /* Dialog */
+  dialog {
+    width: min(460px, calc(100vw - 32px)); padding: 0; color: var(--text);
+    background: var(--panel); border: 1px solid var(--line-2); border-radius: 10px;
+  }
+  dialog::backdrop { background: rgba(6, 9, 12, .66); }
+  .dlg-head { display: flex; align-items: center; padding: 14px 16px 0 20px; }
+  .dlg-head h2 { margin: 0; font-size: 15px; font-weight: 600; flex: 1; }
+  .dlg-body { padding: 16px 20px 6px; display: grid; gap: 16px; }
+  .dlg-foot { padding: 10px 20px 16px; display: flex; align-items: center; gap: 8px; }
+  .dlg-foot .adv { font-size: 12.5px; color: var(--faint); text-decoration: none; }
+  .dlg-foot .adv:hover { color: var(--muted); text-decoration: underline; }
+  .seg { display: inline-flex; padding: 2px; gap: 2px; background: var(--bg); border: 1px solid var(--line-2); border-radius: 7px; }
+  .seg label { position: relative; }
+  .seg input { position: absolute; opacity: 0; inset: 0; margin: 0; cursor: pointer; }
+  .seg span { display: block; padding: 5px 12px; border-radius: 5px; color: var(--muted); font-size: 13px; }
+  .seg input:checked + span { background: var(--panel-2); color: var(--text); }
+  .seg input:focus-visible + span { outline: 2px solid var(--blue); outline-offset: 0; }
+  .note { margin: 0; font-size: 13px; color: var(--muted); }
+  .pane { display: grid; gap: 14px; }
+  .actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .wait { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
+  .wait .dot { background: var(--blue); animation: pulse 1.4s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: .3; } }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+
+  .toast {
+    position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%);
+    background: var(--panel-2); border: 1px solid var(--line-2); border-radius: 6px;
+    padding: 8px 14px; font-size: 13px; max-width: calc(100vw - 32px);
+  }
+
+  @media (max-width: 820px) {
+    .acct { grid-template-columns: 1fr auto; gap: 12px 16px; }
+    .acct .quota { grid-column: 1 / -1; grid-row: 2; }
+    .keyrow { grid-template-columns: 1fr auto; gap: 4px 16px; }
+    .keyrow .url { grid-column: 1 / -1; grid-row: 2; }
+  }
+  @media (max-width: 520px) {
+    .app { padding: 14px 14px 40px; }
+    .top .conn time, .top .add-label { display: none; }
+    .win { grid-template-columns: minmax(0, 1fr) 56px 36px 92px; gap: 8px; }
+    .grid2 { grid-template-columns: 1fr; }
+    .kv { grid-template-columns: 1fr auto; }
+    .kv > span:first-child { grid-column: 1 / -1; margin-top: 6px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation: none !important; transition: none !important; }
+  }
+</style>
+</head>
+<body>
+
+<div class="gate" id="gate" hidden>
+  <form id="loginForm" novalidate>
+    <h1>CLIProxy</h1>
+    <label class="field">
+      <span>Management password</span>
+      <input type="password" id="pw" autocomplete="current-password" required>
+    </label>
+    <p class="err" id="loginErr" role="alert" hidden></p>
+    <button class="btn primary" type="submit" id="loginBtn">Continue</button>
+  </form>
+</div>
+
+<div class="app" id="app" hidden>
+  <header class="top">
+    <h1>CLIProxy</h1>
+    <span class="conn" id="conn" data-state="ok">
+      <span class="dot" aria-hidden="true"></span>
+      <span id="connText">Connected</span>
+      <time id="connTime" class="mono"></time>
+    </span>
+    <span class="spacer"></span>
+    <button class="btn icon ghost" id="refreshBtn" type="button" aria-label="Refresh quotas" title="Refresh quotas">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/><path d="M13.5 2.5v3h-3"/></svg>
+    </button>
+    <button class="btn" id="addBtn" type="button">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M8 3v10M3 8h10"/></svg>
+      <span class="add-label">Add account</span>
+    </button>
+    <button class="btn icon ghost" id="logoutBtn" type="button" aria-label="Lock" title="Lock">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="7" width="9" height="6.5" rx="1.2"/><path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2"/></svg>
+    </button>
+  </header>
+
+  <div class="bar-stale" id="staleBar" role="status" hidden>
+    <span id="staleText"></span>
+    <button class="btn sm" type="button" id="staleRetry">Retry</button>
+  </div>
+
+  <nav class="filters" id="filters" aria-label="Provider"></nav>
+  <main id="main"></main>
+
+  <section class="extras">
+    <details class="disc" id="modelsDisc">
+      <summary>Models <span class="n" id="modelCount"></span></summary>
+      <div class="disc-body" id="modelsBody"></div>
+    </details>
+    <details class="disc">
+      <summary>Connection</summary>
+      <div class="disc-body"><div class="kv" id="connKv"></div></div>
+    </details>
+  </section>
+</div>
+
+<dialog id="addDlg" aria-labelledby="addTitle">
+  <div class="dlg-head">
+    <h2 id="addTitle">Add account</h2>
+    <button class="btn icon ghost" type="button" id="addClose" aria-label="Close">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg>
+    </button>
+  </div>
+  <div class="dlg-body">
+    <label class="field">
+      <span>Provider</span>
+      <select id="provSel"></select>
+    </label>
+    <div class="seg" id="modeSeg" role="radiogroup" aria-label="Method" hidden>
+      <label><input type="radio" name="mode" value="oauth" checked><span>Sign in</span></label>
+      <label><input type="radio" name="mode" value="key"><span>API key</span></label>
+    </div>
+
+    <div class="pane" id="oauthPane">
+      <p class="note">Choose a different account in the sign-in window.</p>
+      <div class="wait" id="oauthWait" role="status" hidden><span class="dot" aria-hidden="true"></span><span id="oauthWaitText">Waiting for sign-in</span></div>
+      <div class="code" id="oauthCode" hidden>
+        <span>Code</span>
+        <code id="oauthCodeText"></code>
+        <button class="btn ghost sm" type="button" id="oauthCodeCopy" aria-label="Copy code">Copy</button>
+      </div>
+      <p class="ok-text" id="oauthOk" role="status" hidden></p>
+      <p class="err" id="oauthErr" role="alert" hidden></p>
+      <a id="oauthFallback" href="#" target="_blank" rel="noopener noreferrer" hidden>Open sign-in window</a>
+      <div class="actions">
+        <button class="btn primary" type="button" id="oauthStart">Sign in</button>
+        <button class="btn ghost" type="button" id="oauthCancel" hidden>Cancel</button>
+      </div>
+    </div>
+
+    <form class="pane" id="keyPane" novalidate autocomplete="off" hidden>
+      <div class="grid2">
+        <label class="field">
+          <span id="kNameLabel">Name</span>
+          <input type="text" id="kName" spellcheck="false">
+        </label>
+        <label class="field">
+          <span>Base URL</span>
+          <input type="url" id="kUrl" spellcheck="false" inputmode="url">
+        </label>
+      </div>
+      <label class="field">
+        <span>API key</span>
+        <input type="password" id="kKey" autocomplete="new-password" spellcheck="false">
+      </label>
+      <label class="field">
+        <span id="kModelsLabel">Model IDs</span>
+        <input type="text" id="kModels" spellcheck="false" placeholder="model-a, model-b">
+        <small>Comma separated</small>
+      </label>
+      <p class="err" id="keyErr" role="alert" hidden></p>
+      <p class="ok-text" id="keyOk" role="status" hidden></p>
+      <div class="actions">
+        <button class="btn primary" type="submit" id="keySave">Save connection</button>
+      </div>
+    </form>
+    <p class="note" id="noModes" hidden>This provider has no supported setup method here.</p>
+  </div>
+  <div class="dlg-foot">
+    <a class="adv" href="http://127.0.0.1:8317/management.html" target="_blank" rel="noopener noreferrer">Full management panel</a>
+  </div>
+</dialog>
+
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+<script>
+(() => {
+  'use strict';
+
+  const PW_KEY = 'cliproxy.mgmt';
+  const POLL_MS = 10000;
+  const LOGIN_POLL_MS = 2000;
+  const LOGIN_TIMEOUT_MS = 10 * 60 * 1000;
+  const API_BASE = 'http://127.0.0.1:8317/v1';
+  const LAUNCH = [
+    ['Claude Code', 'claude'],
+    ['Codex', 'codex -c model_provider=cliproxy'],
+    ['Claudex', 'claudex --g'],
+  ];
+  const CUSTOM_ID = 'custom';
+
+  const $ = (id) => document.getElementById(id);
+  const S = {
+    data: null,
+    filter: 'all',
+    pollFailed: false,
+    lastOkAt: null,
+    lastError: '',
+    pollTimer: null,
+    tickTimer: null,
+    inflight: false,
+    refreshing: false,
+    login: null,
+    expanded: new Set(),
+  };
+  const QUOTA_PREVIEW = 3;
+
+  /* ---------- helpers ---------- */
+  function el(tag, props, ...kids) {
+    const n = document.createElement(tag);
+    if (props) {
+      for (const [k, v] of Object.entries(props)) {
+        if (v == null || v === false) continue;
+        if (k === 'class') n.className = v;
+        else if (k === 'text') n.textContent = v;
+        else if (k === 'dataset') Object.assign(n.dataset, v);
+        else if (k.startsWith('on')) n.addEventListener(k.slice(2), v);
+        else n.setAttribute(k, v === true ? '' : String(v));
+      }
+    }
+    for (const c of kids.flat()) {
+      if (c == null || c === false) continue;
+      n.append(c instanceof Node ? c : document.createTextNode(String(c)));
+    }
+    return n;
+  }
+  const str = (v) => (v == null ? '' : String(v)).trim();
+  const arr = (v) => (Array.isArray(v) ? v : []);
+
+  function parseTime(v) {
+    if (v == null || v === '') return null;
+    let t;
+    if (typeof v === 'number' || /^\d+(\.\d+)?$/.test(String(v))) {
+      const n = Number(v);
+      t = n < 1e12 ? n * 1000 : n;
+    } else {
+      t = Date.parse(String(v));
+    }
+    if (!Number.isFinite(t) || t < 946684800000) return null; // before 2000 means unset
+    return t;
+  }
+  const fmtClock = (t) => new Date(t).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+  const fmtFull = (t) => new Date(t).toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'medium' });
+
+  function fmtLeft(ms) {
+    if (ms <= 0) return 'now';
+    let s = Math.ceil(ms / 1000);
+    const d = Math.floor(s / 86400); s -= d * 86400;
+    const h = Math.floor(s / 3600); s -= h * 3600;
+    const m = Math.floor(s / 60); s -= m * 60;
+    if (d > 0) return `${d}d ${h}h`;
+    if (h > 0) return `${h}h ${String(m).padStart(2, '0')}m`;
+    if (m > 0) return `${m}m ${String(s).padStart(2, '0')}s`;
+    return `${s}s`;
+  }
+
+  function toast(msg) {
+    const t = $('toast');
+    t.textContent = msg;
+    t.hidden = false;
+    clearTimeout(toast._t);
+    toast._t = setTimeout(() => { t.hidden = true; }, 3200);
+  }
+
+  async function copy(text) {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      const ta = el('textarea', { class: 'sr-only', readonly: true });
+      ta.value = text;
+      document.body.append(ta);
+      ta.select();
+      try { document.execCommand('copy'); } catch { /* ignore */ }
+      ta.remove();
+    }
+    toast('Copied');
+  }
+  const copyBtn = (text, label) => el('button', {
+    class: 'btn ghost sm', type: 'button', 'aria-label': `Copy ${label}`, title: 'Copy',
+    onclick: () => copy(text),
+  }, 'Copy');
+
+  function safeUrl(u) {
+    try {
+      const x = new URL(String(u), location.href);
+      return (x.protocol === 'https:' || x.protocol === 'http:') ? x.href : null;
+    } catch { return null; }
+  }
+
+  /* ---------- API ---------- */
+  class AuthError extends Error {}
+
+  async function api(path, opts = {}) {
+    const pw = sessionStorage.getItem(PW_KEY);
+    if (!pw) { showGate(); throw new AuthError('No password'); }
+    const init = {
+      method: opts.method || 'GET',
+      headers: { 'Authorization': `Bearer ${pw}`, 'Accept': 'application/json' },
+      cache: 'no-store',
+    };
+    if (opts.body !== undefined) {
+      init.headers['Content-Type'] = 'application/json';
+      init.body = JSON.stringify(opts.body);
+    }
+    let res;
+    try {
+      res = await fetch(path, init);
+    } catch {
+      throw new Error('Cannot reach the proxy');
+    }
+    if (res.status === 401) {
+      showGate('Enter the management password again.');
+      throw new AuthError('Unauthorized');
+    }
+    let body = null;
+    const text = await res.text();
+    if (text) { try { body = JSON.parse(text); } catch { body = null; } }
+    if (!res.ok) {
+      const msg = body && (body.error || body.message);
+      throw new Error(str(msg) || `Request failed (${res.status})`);
+    }
+    return body;
+  }
+
+  /* ---------- gate ---------- */
+  function showGate(msg) {
+    sessionStorage.removeItem(PW_KEY);
+    stopTimers();
+    S.data = null;
+    $('app').hidden = true;
+    $('gate').hidden = false;
+    if ($('addDlg').open) $('addDlg').close();
+    const e = $('loginErr');
+    e.textContent = msg || '';
+    e.hidden = !msg;
+    $('pw').value = '';
+    $('pw').focus();
+  }
+
+  $('loginForm').addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    const pw = $('pw').value;
+    const e = $('loginErr');
+    if (!pw) { e.textContent = 'Enter the management password.'; e.hidden = false; return; }
+    $('loginBtn').disabled = true;
+    e.hidden = true;
+    sessionStorage.setItem(PW_KEY, pw);
+    try {
+      const data = await api('/local/status');
+      $('pw').value = '';
+      startApp(data);
+    } catch (err) {
+      if (err instanceof AuthError) {
+        e.textContent = 'Wrong password.';
+      } else {
+        sessionStorage.removeItem(PW_KEY);
+        e.textContent = err.message;
+      }
+      e.hidden = false;
+    } finally {
+      $('loginBtn').disabled = false;
+    }
+  });
+
+  $('logoutBtn').addEventListener('click', () => showGate());
+
+  /* ---------- lifecycle ---------- */
+  function startApp(data) {
+    $('gate').hidden = true;
+    $('app').hidden = false;
+    applyStatus(data);
+    stopTimers();
+    S.pollTimer = setInterval(poll, POLL_MS);
+    S.tickTimer = setInterval(tick, 1000);
+    renderConnKv();
+  }
+  function stopTimers() {
+    clearInterval(S.pollTimer);
+    clearInterval(S.tickTimer);
+    S.pollTimer = S.tickTimer = null;
+    stopLoginPoll();
+  }
+
+  async function poll() {
+    if (document.hidden || S.inflight) return;
+    S.inflight = true;
+    try {
+      applyStatus(await api('/local/status'));
+    } catch (err) {
+      if (!(err instanceof AuthError)) markFailed(err.message);
+    } finally {
+      S.inflight = false;
+    }
+  }
+
+  async function refreshNow() {
+    if (S.refreshing) return;
+    S.refreshing = true;
+    renderHeader();
+    try {
+      applyStatus(await api('/local/refresh', { method: 'POST' }));
+    } catch (err) {
+      if (!(err instanceof AuthError)) { markFailed(err.message); toast('Refresh failed'); }
+    } finally {
+      S.refreshing = false;
+      renderHeader();
+    }
+  }
+
+  function markFailed(msg) {
+    S.pollFailed = true;
+    S.lastError = msg || 'Update failed';
+    renderHeader();
+  }
+
+  function applyStatus(data) {
+    if (!data || typeof data !== 'object') { markFailed('Unexpected response'); return; }
+    S.data = data;
+    S.pollFailed = false;
+    S.lastError = '';
+    S.lastOkAt = Date.now();
+    render();
+  }
+
+  $('refreshBtn').addEventListener('click', refreshNow);
+  $('staleRetry').addEventListener('click', refreshNow);
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && S.data) poll();
+  });
+
+  /* ---------- model ---------- */
+  function providers() {
+    const d = S.data || {};
+    const map = new Map();
+    for (const p of arr(d.providers)) {
+      const id = str(p && p.id);
+      if (!id || map.has(id)) continue;
+      map.set(id, {
+        id,
+        name: str(p.name) || id,
+        modes: arr(p.modes).map(String).filter((m) => m === 'oauth' || m === 'key'),
+        baseUrl: str(p.baseUrl),
+      });
+    }
+    const add = (id) => {
+      id = str(id);
+      if (id && !map.has(id)) map.set(id, { id, name: id, modes: [], baseUrl: '' });
+    };
+    arr(d.accounts).forEach((a) => add(a && a.provider));
+    arr(d.connections).forEach((c) => add(c && c.provider));
+    return [...map.values()];
+  }
+  const provName = (id) => {
+    const p = providers().find((x) => x.id === id);
+    return p ? p.name : (str(id) || 'Unknown');
+  };
+
+  function sortAccounts(list) {
+    return list.slice().sort((a, b) =>
+      (!!a.disabled - !!b.disabled) ||
+      ((Number(b.priority) || 0) - (Number(a.priority) || 0)) ||
+      identity(a).primary.localeCompare(identity(b).primary));
+  }
+
+  const looksTechnical = (v) => /\.(json|ya?ml|toml|txt)$/i.test(v) || /[\\/]/.test(v);
+
+  function identity(a) {
+    const email = str(a.email), name = str(a.name), label = str(a.label), id = str(a.id);
+    const primary = email || name || label || id || 'Unnamed account';
+    const extra = [];
+    const tech = [];
+    for (const v of [name, label]) {
+      if (!v || v === primary || extra.includes(v)) continue;
+      if (email && (looksTechnical(v) || v.includes(email))) tech.push(v);
+      else extra.push(v);
+    }
+    if (id && id !== primary && !extra.includes(id) && !tech.includes(id)) tech.push(id);
+    return { primary, secondary: extra.join(' / '), technical: tech.join('\n') };
+  }
+
+  function isDataStale() {
+    if (S.pollFailed) return true;
+    const t = parseTime(S.data && S.data.checkedAt);
+    if (!t) return false;
+    const iv = Math.max(60, Number(S.data.refreshIntervalSeconds) || 60);
+    return Date.now() - t > iv * 3 * 1000;
+  }
+
+  /* ---------- render ---------- */
+  function render() {
+    const fk = document.activeElement && document.activeElement.dataset
+      ? document.activeElement.dataset.fk : null;
+    renderHeader();
+    renderFilters();
+    renderMain();
+    renderModels();
+    if (fk) {
+      const t = [...document.querySelectorAll('[data-fk]')].find((n) => n.dataset.fk === fk);
+      if (t) t.focus({ preventScroll: true });
+    }
+  }
+
+  function renderHeader() {
+    const d = S.data || {};
+    const conn = $('conn');
+    const stale = isDataStale();
+    const checked = parseTime(d.checkedAt) || S.lastOkAt;
+    conn.dataset.state = S.pollFailed ? 'stale' : (stale ? 'stale' : 'ok');
+    $('connText').textContent = S.pollFailed ? 'Stale' : (stale ? 'Stale' : 'Connected');
+    const ct = $('connTime');
+    if (checked) {
+      ct.textContent = fmtClock(checked);
+      ct.dateTime = new Date(checked).toISOString();
+      conn.title = `Last update ${fmtFull(checked)}`;
+    } else {
+      ct.textContent = '';
+      conn.title = '';
+    }
+    const busy = S.refreshing || !!d.refreshing;
+    const rb = $('refreshBtn');
+    rb.classList.toggle('spin', busy);
+    rb.setAttribute('aria-busy', busy ? 'true' : 'false');
+
+    const bar = $('staleBar');
+    if (stale) {
+      const when = checked ? ` from ${fmtClock(checked)}` : '';
+      $('staleText').textContent = S.pollFailed
+        ? `Update failed. Showing data${when}. ${S.lastError}`.trim()
+        : `Quotas have not refreshed recently. Showing data${when}.`;
+      bar.hidden = false;
+    } else {
+      bar.hidden = true;
+    }
+  }
+
+  function renderFilters() {
+    const d = S.data || {};
+    const accounts = arr(d.accounts).filter(Boolean), conns = arr(d.connections).filter(Boolean);
+    const counted = providers()
+      .map((p) => ({
+        p,
+        n: accounts.filter((a) => str(a.provider) === p.id).length +
+           conns.filter((c) => str(c.provider) === p.id).length,
+      }))
+      .filter((x) => x.n > 0);
+    if (S.filter !== 'all' && !counted.some((x) => x.p.id === S.filter)) S.filter = 'all';
+    const nav = $('filters');
+    nav.replaceChildren();
+    nav.hidden = counted.length === 0;
+    const mk = (id, label, n) => el('button', {
+      type: 'button', 'aria-pressed': S.filter === id ? 'true' : 'false', dataset: { fk: `f:${id}` },
+      onclick: () => { S.filter = id; render(); },
+    }, label, n != null ? el('span', { class: 'n', text: String(n) }) : null);
+    nav.append(mk('all', 'All', accounts.length + conns.length));
+    for (const { p, n } of counted) nav.append(mk(p.id, p.name, n));
+  }
+
+  function renderMain() {
+    const d = S.data || {};
+    const main = $('main');
+    main.replaceChildren();
+    const accounts = arr(d.accounts).filter(Boolean);
+    const conns = arr(d.connections).filter(Boolean);
+    const ps = providers();
+    const shown = S.filter === 'all' ? ps : ps.filter((p) => p.id === S.filter);
+    let any = false;
+
+    for (const p of shown) {
+      const pa = sortAccounts(accounts.filter((a) => str(a.provider) === p.id));
+      const pc = conns.filter((c) => str(c.provider) === p.id)
+        .sort((a, b) => str(a.name).localeCompare(str(b.name)));
+      if (!pa.length && !pc.length) {
+        if (S.filter === 'all') continue;
+        main.append(emptyState(p));
+        any = true;
+        continue;
+      }
+      any = true;
+      const total = pa.length + pc.length;
+      const sec = el('section', { class: 'group', 'aria-labelledby': `g-${cssId(p.id)}` },
+        el('div', { class: 'group-head' },
+          el('h2', { id: `g-${cssId(p.id)}`, text: p.name }),
+          el('span', { class: 'n', text: total === 1 ? '1 account' : `${total} accounts` })));
+      const list = el('div', { class: 'list' });
+      pa.forEach((a) => list.append(accountRow(a)));
+      pc.forEach((c) => list.append(keyRow(c)));
+      sec.append(list);
+      main.append(sec);
+    }
+
+    if (!any) main.append(emptyState(null));
+  }
+
+  function cssId(s) { return String(s).replace(/[^a-zA-Z0-9_-]/g, '_'); }
+
+  function emptyState(p) {
+    const text = p ? `No ${p.name} accounts yet.` : 'No accounts yet.';
+    return el('div', { class: 'group' }, el('div', { class: 'empty' },
+      el('p', { text }),
+      el('button', {
+        class: 'btn primary sm', type: 'button', dataset: { fk: `empty:${p ? p.id : ''}` },
+        onclick: () => openAdd(p ? p.id : null),
+      }, 'Add account')));
+  }
+
+  function accountRow(a) {
+    const id = identity(a);
+    const disabled = !!a.disabled;
+    const err = str(a.error);
+    const row = el('article', { class: 'acct', dataset: { disabled: String(disabled) }, 'aria-label': id.primary });
+
+    const who = el('div', { class: 'who' },
+      el('span', { class: 'name', text: id.primary, title: id.technical ? `${id.primary}\n${id.technical}` : id.primary }));
+    if (str(a.plan)) who.append(el('span', { class: 'chip plan', text: str(a.plan) }));
+    if (disabled) who.append(el('span', { class: 'chip paused', text: 'Paused' }));
+    if (err) who.append(el('span', { class: 'chip stale', text: 'Stale' }));
+
+    const ident = el('div', { class: 'ident' }, who);
+    const subParts = [];
+    if (id.secondary) subParts.push(id.secondary);
+    const st = str(a.status);
+    if (st && !/^(active|ok|ready|valid)$/i.test(st) && !(disabled && /disabled|paused/i.test(st))) subParts.push(st);
+    if (subParts.length) ident.append(el('div', { class: 'sub', text: subParts.join(' · '), title: subParts.join(' · ') }));
+    const checked = parseTime(a.checkedAt);
+    if (err) {
+      ident.append(el('div', {
+        class: 'warn-line', title: err + (checked ? `\nLast good data ${fmtFull(checked)}` : ''),
+        text: Number(a.errorStatus) === 429
+          ? `Refresh rate limited.${parseTime(a.retryAt) ? ' Retry at ' + fmtClock(parseTime(a.retryAt)) + '.' : ''}`
+          : 'Update unavailable',
+      }));
+    }
+    if (checked) ident.title = `Checked ${fmtFull(checked)}`;
+    if (id.technical) ident.append(el('span', { class: 'sr-only', text: `Credential ${id.technical}` }));
+    row.append(ident);
+
+    row.append(quotaBlock(a));
+
+    const act = el('div', { class: 'act' },
+      el('button', {
+        class: 'btn sm', type: 'button', dataset: { fk: `t:${str(a.id)}` },
+        'aria-label': `${disabled ? 'Resume' : 'Pause'} ${id.primary}`,
+        onclick: (ev) => toggleAccount(a, ev.currentTarget),
+      }, disabled ? 'Resume' : 'Pause'));
+    row.append(act);
+    return row;
+  }
+
+  // Higher score = more recognizable. Ties keep backend order.
+  function windowScore(w) {
+    const s = `${str(w.label)} ${str(w.id)}`.toLowerCase();
+    let score = 0;
+    if (/\b(5\s?h|hour|hourly|day|daily|week|weekly|month|monthly|session)\b/.test(s)) score += 4;
+    if (/claude|opus|sonnet|haiku|gemini|gpt|codex|o[134]\b|grok|deepseek|qwen|llama|mistral|kimi/.test(s)) score += 3;
+    if (/\b(pro|opus|sonnet)\b/.test(s)) score += 1;
+    if (/preview|exp(erimental)?\b|lite|image|tts|audio|embed|internal|test|_\d{4,}|\b[0-9a-f]{8,}\b/.test(s)) score -= 3;
+    if (!str(w.label)) score -= 1;
+    return score;
+  }
+
+  function quotaBlock(a) {
+    const q = el('div', { class: 'quota' });
+    const wins = arr(a.windows).filter((w) => w && typeof w === 'object');
+    if (a.quotaSupported === false || !wins.length) {
+      q.append(el('div', { class: 'quota-na', text: 'Quota unavailable' }));
+      return q;
+    }
+    if (wins.length <= QUOTA_PREVIEW) {
+      wins.forEach((w) => q.append(windowLine(w)));
+      return q;
+    }
+    const ranked = wins.map((w, i) => ({ w, i, s: windowScore(w) }))
+      .sort((x, y) => (y.s - x.s) || (x.i - y.i));
+    const top = new Set(ranked.slice(0, QUOTA_PREVIEW).map((x) => x.i));
+    wins.forEach((w, i) => { if (top.has(i)) q.append(windowLine(w)); });
+
+    const key = `${str(a.provider)}|${str(a.id) || identity(a).primary}`;
+    const open = S.expanded.has(key);
+    const restId = `rest-${cssId(key)}`;
+    const hiddenCount = wins.length - QUOTA_PREVIEW;
+    const rest = el('div', { class: 'rest', id: restId });
+    rest.hidden = !open;
+    wins.forEach((w, i) => { if (!top.has(i)) rest.append(windowLine(w)); });
+    const btn = el('button', {
+      class: 'more', type: 'button', 'aria-expanded': open ? 'true' : 'false', 'aria-controls': restId,
+      dataset: { fk: `m:${key}` },
+      onclick: () => {
+        const now = !S.expanded.has(key);
+        if (now) S.expanded.add(key); else S.expanded.delete(key);
+        rest.hidden = !now;
+        btn.setAttribute('aria-expanded', now ? 'true' : 'false');
+        btn.textContent = now ? 'Show fewer' : `${hiddenCount} more`;
+      },
+    }, open ? 'Show fewer' : `${hiddenCount} more`);
+    q.append(rest, btn);
+    return q;
+  }
+
+  function windowLine(w) {
+    const label = str(w.label) || str(w.id) || 'Quota';
+    const raw = w.remainingPercent;
+    const pct = (raw === null || raw === undefined || raw === '' || !Number.isFinite(Number(raw)))
+      ? null : Math.max(0, Math.min(100, Number(raw)));
+    const tip = str(w.id) && str(w.id) !== label ? `${label}\n${str(w.id)}` : label;
+    const line = el('div', { class: 'win' }, el('span', { class: 'wl', text: label, title: tip }));
+    if (pct === null) {
+      line.append(el('span', { class: 'na', text: 'Quota unavailable' }));
+      return line;
+    }
+    const level = pct <= 0 ? 'none' : pct < 20 ? 'low' : pct < 50 ? 'mid' : 'high';
+    const fill = el('i');
+    fill.style.width = `${pct}%`;
+    line.append(
+      el('span', {
+        class: 'meter', role: 'meter', 'aria-valuemin': '0', 'aria-valuemax': '100',
+        'aria-valuenow': String(Math.round(pct)), 'aria-label': `${label} remaining`,
+        dataset: { level },
+      }, fill),
+      el('span', { class: 'pct mono', text: `${Math.round(pct)}%` }));
+    const reset = parseTime(w.resetAt);
+    const rst = el('span', { class: 'rst mono' });
+    if (reset) {
+      rst.dataset.reset = String(reset);
+      rst.title = `Resets ${fmtFull(reset)}`;
+      setReset(rst, reset);
+    }
+    line.append(rst);
+    return line;
+  }
+
+  function setReset(node, t) {
+    const left = t - Date.now();
+    node.textContent = left <= 0 ? 'Resetting' : `Resets ${fmtLeft(left)}`;
+  }
+  function tick() {
+    document.querySelectorAll('[data-reset]').forEach((n) => setReset(n, Number(n.dataset.reset)));
+    if (S.data && !S.pollFailed) {
+      const was = !$('staleBar').hidden;
+      if (was !== isDataStale()) renderHeader();
+    }
+  }
+
+  function keyRow(c) {
+    const name = str(c.name) || provName(str(c.provider));
+    const kc = Number(c.keyCount);
+    const url = str(c.baseUrl);
+    return el('div', { class: 'keyrow' },
+      el('div', { class: 'kname' },
+        el('span', { text: name, title: name }),
+        el('span', { class: 'chip', text: 'API key' })),
+      el('div', { class: 'url mono', text: url, title: url }),
+      el('div', { class: 'kc', text: Number.isFinite(kc) ? (kc === 1 ? '1 key' : `${kc} keys`) : '' }));
+  }
+
+  async function toggleAccount(a, btn) {
+    btn.disabled = true;
+    const next = !a.disabled;
+    try {
+      applyStatus(await api('/local/account', { method: 'POST', body: { id: a.id, disabled: next } }));
+      toast(next ? 'Paused' : 'Resumed');
+    } catch (err) {
+      if (!(err instanceof AuthError)) toast(err.message);
+      btn.disabled = false;
+    }
+  }
+
+  function renderModels() {
+    const models = arr(S.data && S.data.models)
+      .map((m) => (typeof m === 'string' ? { id: m } : m))
+      .filter((m) => m && str(m.id));
+    const seen = new Set();
+    const uniq = [];
+    for (const m of models) {
+      const k = `${str(m.provider)}|${str(m.id)}`;
+      if (!seen.has(k)) { seen.add(k); uniq.push(m); }
+    }
+    uniq.sort((a, b) => str(a.id).localeCompare(str(b.id)));
+    $('modelCount').textContent = String(uniq.length);
+    const body = $('modelsBody');
+    body.replaceChildren();
+    if (!uniq.length) {
+      body.append(el('p', { class: 'note', text: 'No models reported.' }));
+      return;
+    }
+    const ul = el('ul', { class: 'models' });
+    for (const m of uniq) {
+      const id = str(m.id);
+      ul.append(el('li', null,
+        el('code', { text: id, title: id }),
+        str(m.provider) ? el('span', { class: 'prov', text: provName(str(m.provider)) }) : null,
+        copyBtn(id, id)));
+    }
+    body.append(ul);
+  }
+
+  function renderConnKv() {
+    const kv = $('connKv');
+    kv.replaceChildren();
+    const rows = [['Base URL', API_BASE], ...LAUNCH];
+    for (const [k, v] of rows) {
+      kv.append(el('span', { text: k }), el('code', { text: v, title: v }), copyBtn(v, k));
+    }
+  }
+
+  /* ---------- add account dialog ---------- */
+  const dlg = $('addDlg');
+
+  function keyProviders() {
+    const ps = providers().filter((p) => p.modes.length);
+    return ps;
+  }
+  function customEntry(ps) {
+    return ps.find((p) => /compat|custom/i.test(p.id));
+  }
+
+  function openAdd(pref) {
+    const sel = $('provSel');
+    sel.replaceChildren();
+    const ps = keyProviders();
+    for (const p of ps) sel.append(el('option', { value: p.id, text: p.name }));
+    if (!customEntry(ps)) {
+      sel.append(el('option', { value: CUSTOM_ID, text: 'Custom compatible' }));
+    }
+    const want = pref || (S.filter !== 'all' ? S.filter : null);
+    if (want && [...sel.options].some((o) => o.value === want)) sel.value = want;
+    resetLoginUi();
+    resetKeyUi(true);
+    syncProvider();
+    dlg.showModal();
+    sel.focus();
+  }
+
+  function currentProvider() {
+    const id = $('provSel').value;
+    if (id === CUSTOM_ID) return { id, name: 'Custom compatible', modes: ['key'], baseUrl: '', custom: true };
+    const p = providers().find((x) => x.id === id);
+    if (!p) return null;
+    return { ...p, custom: /compat|custom/i.test(p.id) };
+  }
+
+  function currentMode() {
+    const p = currentProvider();
+    if (!p) return null;
+    if (p.modes.length === 1) return p.modes[0];
+    if (!p.modes.length) return null;
+    return dlg.querySelector('input[name=mode]:checked').value;
+  }
+
+  function syncProvider() {
+    const p = currentProvider();
+    const both = !!p && p.modes.includes('oauth') && p.modes.includes('key');
+    $('modeSeg').hidden = !both;
+    if (both && !dlg.querySelector('input[name=mode]:checked')) {
+      dlg.querySelector('input[name=mode][value=oauth]').checked = true;
+    }
+    const url = $('kUrl');
+    if (!url.dataset.touched) url.value = p && p.baseUrl ? p.baseUrl : '';
+    const custom = !!(p && p.custom);
+    $('kNameLabel').textContent = custom ? 'Name' : 'Name (optional)';
+    $('kModelsLabel').textContent = custom ? 'Model IDs' : 'Model IDs (optional)';
+    $('oauthStart').textContent = p ? `Sign in to ${p.name}` : 'Sign in';
+    syncMode();
+  }
+
+  function syncMode() {
+    const m = currentMode();
+    $('oauthPane').hidden = m !== 'oauth';
+    $('keyPane').hidden = m !== 'key';
+    $('noModes').hidden = m !== null;
+  }
+
+  $('provSel').addEventListener('change', () => {
+    if (S.login) cancelLogin();
+    resetLoginUi();
+    resetKeyUi(true);
+    syncProvider();
+  });
+  dlg.querySelectorAll('input[name=mode]').forEach((r) => r.addEventListener('change', syncMode));
+  $('kUrl').addEventListener('input', (e) => { e.target.dataset.touched = '1'; });
+  $('addBtn').addEventListener('click', () => openAdd());
+  $('addClose').addEventListener('click', () => dlg.close());
+  dlg.addEventListener('close', () => {
+    cancelLogin();
+    resetKeyUi(true);
+  });
+
+  /* OAuth */
+  function resetLoginUi() {
+    $('oauthWait').hidden = true;
+    $('oauthOk').hidden = true;
+    $('oauthErr').hidden = true;
+    $('oauthFallback').hidden = true;
+    $('oauthFallback').removeAttribute('href');
+    $('oauthCode').hidden = true;
+    $('oauthCodeText').textContent = '';
+    $('oauthCancel').hidden = true;
+    $('oauthStart').disabled = false;
+    $('provSel').disabled = false;
+  }
+
+  function stopLoginPoll() {
+    if (S.login) {
+      clearTimeout(S.login.timer);
+      S.login.stopped = true;
+    }
+    S.login = null;
+  }
+
+  function cancelLogin() {
+    if (!S.login) return;
+    const w = S.login.popup;
+    stopLoginPoll();
+    try { if (w && !w.closed) w.close(); } catch { /* ignore */ }
+    resetLoginUi();
+  }
+
+  function loginError(msg) {
+    stopLoginPoll();
+    resetLoginUi();
+    const e = $('oauthErr');
+    e.textContent = msg;
+    e.hidden = false;
+    $('oauthStart').textContent = 'Try again';
+  }
+
+  $('oauthCancel').addEventListener('click', () => { cancelLogin(); syncProvider(); });
+  $('oauthCodeCopy').addEventListener('click', () => {
+    const c = $('oauthCodeText').textContent;
+    if (c) copy(c);
+  });
+
+  $('oauthStart').addEventListener('click', async () => {
+    const p = currentProvider();
+    if (!p) return;
+    // Open synchronously inside the click so popup blockers allow it.
+    let popup = null;
+    try { popup = window.open('', 'cliproxy-signin', 'popup,width=520,height=720'); } catch { popup = null; }
+    if (popup) {
+      try {
+        popup.document.title = 'Sign in';
+        popup.document.body.style.cssText = 'background:#0F1317;color:#8794A2;font:14px system-ui,sans-serif;padding:24px';
+        popup.document.body.textContent = 'Opening sign-in...';
+      } catch { /* cross origin from a previous attempt */ }
+    }
+    resetLoginUi();
+    $('oauthStart').disabled = true;
+    $('provSel').disabled = true;
+    $('oauthCancel').hidden = false;
+    $('oauthWaitText').textContent = 'Starting sign-in';
+    $('oauthWait').hidden = false;
+    const session = { popup, stopped: false, timer: null, started: Date.now(), provider: p.id };
+    S.login = session;
+
+    let res;
+    try {
+      res = await api('/local/login', { method: 'POST', body: { provider: p.id } });
+    } catch (err) {
+      try { if (popup && !popup.closed) popup.close(); } catch { /* ignore */ }
+      if (session.stopped || err instanceof AuthError) return;
+      loginError(err.message);
+      return;
+    }
+    if (session.stopped) { try { if (popup && !popup.closed) popup.close(); } catch { /* ignore */ } return; }
+    const url = safeUrl(res && res.url);
+    const state = str(res && res.state);
+    if (!url || !state) { loginError('The proxy did not return a sign-in link.'); return; }
+
+    let opened = false;
+    if (popup && !popup.closed) {
+      try { popup.opener = null; popup.location.href = url; opened = true; } catch { opened = false; }
+    }
+    if (!opened) {
+      const a = $('oauthFallback');
+      a.href = url;
+      a.hidden = false;
+    }
+    const userCode = str(res.userCode || res.user_code);
+    if (userCode) {
+      $('oauthCodeText').textContent = userCode;
+      $('oauthCode').hidden = false;
+    }
+    $('oauthWaitText').textContent = opened
+      ? (userCode ? 'Enter this code in the sign-in window' : 'Waiting for sign-in')
+      : 'Open the sign-in window to continue';
+    pollLogin(session, state);
+  });
+
+  function pollLogin(session, state) {
+    session.timer = setTimeout(async () => {
+      if (session.stopped) return;
+      if (Date.now() - session.started > LOGIN_TIMEOUT_MS) { loginError('Sign-in timed out.'); return; }
+      let r;
+      try {
+        r = await api(`/local/login-status?state=${encodeURIComponent(state)}`);
+      } catch (err) {
+        if (session.stopped || err instanceof AuthError) return;
+        pollLogin(session, state); // transient; keep waiting
+        return;
+      }
+      if (session.stopped) return;
+      const st = str(r && r.status);
+      if (st === 'ok') {
+        stopLoginPoll();
+        resetLoginUi();
+        $('oauthWait').hidden = false;
+        $('oauthWaitText').textContent = 'Updating accounts';
+        try {
+          applyStatus(await api('/local/refresh', { method: 'POST' }));
+        } catch (err) {
+          if (err instanceof AuthError) return;
+          poll();
+        }
+        $('oauthWait').hidden = true;
+        $('oauthOk').textContent = 'Signed in. Account added.';
+        $('oauthOk').hidden = false;
+        $('oauthStart').textContent = 'Sign in another account';
+        $('oauthStart').focus();
+      } else if (st === 'error') {
+        loginError(str(r.error) || 'Sign-in failed.');
+      } else {
+        pollLogin(session, state);
+      }
+    }, LOGIN_POLL_MS);
+  }
+
+  /* API key */
+  function resetKeyUi(full) {
+    $('kKey').value = '';
+    $('keyErr').hidden = true;
+    $('keyOk').hidden = true;
+    if (full) {
+      $('kName').value = '';
+      $('kModels').value = '';
+      delete $('kUrl').dataset.touched;
+    }
+  }
+
+  $('keyPane').addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    const p = currentProvider();
+    if (!p) return;
+    const name = $('kName').value.trim();
+    const baseUrl = $('kUrl').value.trim();
+    const apiKey = $('kKey').value.trim();
+    const models = $('kModels').value.split(',').map((s) => s.trim()).filter(Boolean);
+    const e = $('keyErr');
+    $('keyOk').hidden = true;
+
+    let msg = '', focus = null;
+    if (p.custom && !name) { msg = 'Enter a name.'; focus = 'kName'; }
+    else if (!baseUrl) { msg = 'Enter a base URL.'; focus = 'kUrl'; }
+    else if (!safeUrl(baseUrl) || !/^https?:\/\//i.test(baseUrl)) { msg = 'Base URL must start with http:// or https://.'; focus = 'kUrl'; }
+    else if (!apiKey) { msg = 'Enter an API key.'; focus = 'kKey'; }
+    else if (p.custom && !models.length) { msg = 'Enter at least one model ID.'; focus = 'kModels'; }
+    if (msg) { e.textContent = msg; e.hidden = false; $(focus).focus(); return; }
+    e.hidden = true;
+
+    const btn = $('keySave');
+    btn.disabled = true;
+    try {
+      const data = await api('/local/connect', {
+        method: 'POST',
+        body: { provider: p.id, name, baseUrl, apiKey, models },
+      });
+      resetKeyUi(true);
+      syncProvider();
+      applyStatus(data);
+      $('keyOk').textContent = 'Connection saved.';
+      $('keyOk').hidden = false;
+    } catch (err) {
+      $('kKey').value = '';
+      if (err instanceof AuthError) return;
+      e.textContent = `${err.message} Re-enter the API key to try again.`;
+      e.hidden = false;
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  /* ---------- boot ---------- */
+  (async () => {
+    if (!sessionStorage.getItem(PW_KEY)) { showGate(); return; }
+    try {
+      startApp(await api('/local/status'));
+    } catch (err) {
+      if (err instanceof AuthError) return;
+      showGate(err.message);
+    }
+  })();
+})();
+</script>
+</body>
+</html>

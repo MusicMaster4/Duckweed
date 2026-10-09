@@ -107,13 +107,13 @@ object RelayClient {
         )
     }
 
-    data class PendingMessage(val id: String, val sentAt: Long)
+    data class PendingMessage(val id: String, val sentAt: Long, val payload: EncryptedEnvelope? = null)
 
     /** Recover relay payloads even when Android or FCM dropped the wake-up push. */
     fun pendingMessages(credentials: PairCredentials): List<PendingMessage> {
         val result = request(
             method = "GET",
-            url = "${credentials.relayUrl}/v1/pairings/${credentials.pairId}/messages",
+            url = "${credentials.relayUrl}/v1/pairings/${credentials.pairId}/messages?inline=1",
             bearer = credentials.receiveToken,
         )
         val messages = result.optJSONArray("messages") ?: JSONArray()
@@ -121,14 +121,16 @@ object RelayClient {
             val message = messages.optJSONObject(index) ?: return@mapNotNull null
             val id = message.optString("messageId")
             if (runCatching { UUID.fromString(id) }.isFailure) return@mapNotNull null
-            PendingMessage(id, message.optLong("sentAt"))
+            PendingMessage(id, message.optLong("sentAt"), message.optJSONObject("payload")?.let {
+                EncryptedEnvelope(it.getString("nonce"), it.getString("ciphertext"))
+            })
         }
     }
 
-    fun acknowledge(credentials: PairCredentials, messageId: String) {
+    fun acknowledge(credentials: PairCredentials, messageId: String, sentAt: Long? = null) {
         request(
             method = "DELETE",
-            url = "${credentials.relayUrl}/v1/pairings/${credentials.pairId}/messages/$messageId",
+            url = "${credentials.relayUrl}/v1/pairings/${credentials.pairId}/messages/$messageId${sentAt?.let { "?sentAt=$it" }.orEmpty()}",
             bearer = credentials.receiveToken,
         )
     }
@@ -256,6 +258,19 @@ object RelayClient {
             .put("terminalId", terminalId),
     )
 
+    fun agentControl(
+        credentials: PairCredentials, terminalId: String, action: String, value: String? = null,
+        text: String? = null, scheduledAt: Long? = null, targetTerminalId: String? = null,
+        attachment: MobileImageAttachment? = null,
+    ): SentCommand = sendEncryptedCommand(credentials, JSONObject()
+        .put("kind", "agent_control").put("terminalId", terminalId)
+        .put("action", action).put("value", value).put("text", text)
+        .put("scheduledAt", scheduledAt).put("targetTerminalId", targetTerminalId)
+        .put("images", JSONArray().apply {
+            if (attachment != null) put(JSONObject().put("id", attachment.id).put("name", attachment.name)
+                .put("mimeType", attachment.mimeType).put("dataUrl", attachment.dataUrl).put("size", attachment.size))
+        }))
+
     private fun sendEncryptedCommand(
         credentials: PairCredentials,
         fields: JSONObject,
@@ -293,7 +308,7 @@ object RelayClient {
             bearer = credentials.receiveToken,
         ).optBoolean("pending", false)
 
-    fun requestWorkspaceRefresh(credentials: PairCredentials) {
+    fun requestWorkspaceRefresh(credentials: PairCredentials, terminalId: String? = null) {
         val commandId = UUID.randomUUID().toString()
         val sentAt = System.currentTimeMillis()
         val plain = JSONObject()
@@ -301,6 +316,7 @@ object RelayClient {
             .put("id", commandId)
             .put("sentAt", sentAt)
             .put("kind", "refresh")
+            .put("terminalId", terminalId)
             .toString()
             .toByteArray(Charsets.UTF_8)
         val encrypted = Crypto.encrypt(credentials, commandId, "command", plain)
@@ -328,8 +344,8 @@ object RelayClient {
     ): JSONObject {
         val connection = (URL(url).openConnection() as HttpURLConnection).apply {
             requestMethod = method
-            connectTimeout = 12_000
-            readTimeout = 18_000
+            connectTimeout = 5_000
+            readTimeout = 8_000
             setRequestProperty("Accept", "application/json")
             setRequestProperty("User-Agent", "DuckweedCompanion/${BuildConfig.VERSION_NAME}")
             if (bearer != null) setRequestProperty("Authorization", "Bearer $bearer")

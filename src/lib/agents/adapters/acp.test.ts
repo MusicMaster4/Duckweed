@@ -485,6 +485,42 @@ describe("acp adapter", () => {
     ).toBeUndefined();
   });
 
+  test("does not complete an ACP subagent on its async launch acknowledgement", async () => {
+    const h = harness();
+    await h.handshake();
+    h.update({
+      sessionUpdate: "tool_call",
+      toolCallId: "background_agent",
+      title: "Author the shots",
+      status: "in_progress",
+      rawInput: { tool: "Agent", description: "Author the shots" },
+    });
+    h.update({
+      sessionUpdate: "tool_call_update",
+      toolCallId: "background_agent",
+      status: "completed",
+      content: [{ type: "content", content: { type: "text", text: "Async agent launched successfully." } }],
+    });
+    expect(h.state().items[0]).toMatchObject({
+      kind: "tool", tool: "task", status: "running", subagent: { activity: "Working" },
+    });
+
+    h.update({
+      sessionUpdate: "tool_call_update",
+      toolCallId: "background_agent",
+      status: "completed",
+    });
+    expect(h.state().items[0]).toMatchObject({ status: "running" });
+
+    h.update({
+      sessionUpdate: "tool_call_update",
+      toolCallId: "background_agent",
+      status: "completed",
+      content: [{ type: "content", content: { type: "text", text: "All shots rendered" } }],
+    });
+    expect(h.state().items[0]).toMatchObject({ status: "done" });
+  });
+
   test("turns a diff content block into a file change", async () => {
     const h = harness();
     await h.handshake();

@@ -9,7 +9,8 @@ import type {
   ToolItem,
   ToolKind,
 } from "../../../lib/agents/types";
-import { openUrl } from "../../../lib/ipc";
+import { markdownLinkAt } from "../../../lib/agentMarkdownLinks";
+import { AgentMarkdownImage, AgentMarkdownLink } from "../AgentMarkdownAssets";
 import { AgentAsciiLoader } from "../AgentAsciiLoader";
 import { AgentDiff } from "../AgentDiff";
 import { AgentImageAttachments } from "../AgentImageAttachments";
@@ -203,67 +204,45 @@ export function traceSummary(text: string, fallback = "Thinking"): string {
   return cleaned.length > 132 ? `${cleaned.slice(0, 129).trimEnd()}…` : cleaned;
 }
 
-function ExternalLink({
-  href,
-  children,
-}: {
-  href: string;
-  children: ReactNode;
-}) {
-  return (
-    <a
-      href={href}
-      target="_blank"
-      rel="noreferrer"
-      onClick={(event) => {
-        event.preventDefault();
-        void openUrl(href).catch((error) => {
-          console.warn("failed to open agent link", href, error);
-        });
-      }}
-    >
-      {children}
-    </a>
-  );
-}
-
 function inlineMarkdown(text: string, keyPrefix: string): ReactNode[] {
   const nodes: ReactNode[] = [];
   const token =
-    /(`[^`\n]+`|\*\*[^*\n]+\*\*|__[^_\n]+__|\[[^\]\n]+\]\(https?:\/\/[^)\s]+\)|https?:\/\/[^\s<]+|\*[^*\n]+\*|_[^_\n]+_)/g;
+    /(`[^`\n]+`|\\[\\`*_[\]!]|!\[|\[|\*\*[^*\n]+\*\*|__[^_\n]+__|https?:\/\/[^\s<]+|\*[^*\n]+\*|_[^_\n]+_)/g;
   let cursor = 0;
   let match: RegExpExecArray | null;
 
   while ((match = token.exec(text))) {
     if (match.index > cursor) nodes.push(text.slice(cursor, match.index));
-    const value = match[0];
+    let value = match[0];
     const key = `${keyPrefix}-${match.index}`;
-    if (value.startsWith("`")) {
+    if (value === "[" || value === "![") {
+      const link = markdownLinkAt(text, match.index);
+      if (link) {
+        value = text.slice(match.index, link.end);
+        token.lastIndex = link.end;
+        nodes.push(link.image
+          ? <AgentMarkdownImage key={key} src={link.destination} alt={link.label} title={link.title} />
+          : <AgentMarkdownLink key={key} href={link.destination} title={link.title}>
+              {inlineMarkdown(link.label, `${key}-label`)}
+            </AgentMarkdownLink>);
+      } else nodes.push(value);
+    } else if (value.startsWith("\\")) {
+      nodes.push(value.slice(1));
+    } else if (value.startsWith("`")) {
       nodes.push(<code key={key}>{value.slice(1, -1)}</code>);
     } else if (value.startsWith("**") || value.startsWith("__")) {
-      nodes.push(<strong key={key}>{value.slice(2, -2)}</strong>);
-    } else if (value.startsWith("[")) {
-      const link = /^\[([^\]]+)\]\((https?:\/\/[^)]+)\)$/.exec(value);
-      nodes.push(
-        link ? (
-          <ExternalLink key={key} href={link[2]}>
-            {link[1]}
-          </ExternalLink>
-        ) : (
-          value
-        ),
-      );
+      nodes.push(<strong key={key}>{inlineMarkdown(value.slice(2, -2), key)}</strong>);
     } else if (/^https?:\/\//.test(value)) {
       const trailing = /[),.;:!?]+$/.exec(value)?.[0] ?? "";
       const href = trailing ? value.slice(0, -trailing.length) : value;
       nodes.push(
-        <ExternalLink key={key} href={href}>
+        <AgentMarkdownLink key={key} href={href}>
           {href}
-        </ExternalLink>,
+        </AgentMarkdownLink>,
       );
       if (trailing) nodes.push(trailing);
     } else {
-      nodes.push(<em key={key}>{value.slice(1, -1)}</em>);
+      nodes.push(<em key={key}>{inlineMarkdown(value.slice(1, -1), key)}</em>);
     }
     cursor = match.index + value.length;
   }

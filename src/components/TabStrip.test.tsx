@@ -23,11 +23,11 @@ const tabs: Tab[] = [
   },
 ];
 
-function render(workingTabIds: ReadonlySet<string>): string {
+function render(workingTabIds: ReadonlySet<string>, displayTabs = tabs): string {
   const noop = () => {};
   return renderToStaticMarkup(
     <TabStrip
-      tabs={tabs}
+      tabs={displayTabs}
       activeTabId="tab-working"
       paneCounts={{ "tab-working": 1, "tab-idle": 1 }}
       workingTabIds={workingTabIds}
@@ -73,5 +73,38 @@ describe("TabStrip agent activity", () => {
 
   test("does not render a shimmer when every agent is idle", () => {
     expect(render(new Set())).not.toContain("tab-work-shimmer");
+  });
+});
+
+
+describe("TabStrip groups", () => {
+  const grouped = (collapsed: boolean) => tabs.map((tab) => ({ ...tab, group: { id: "work", name: "Work", collapsed } }));
+
+  test("members inherit group color while explicit tab colors take priority", () => {
+    const colored = grouped(false).map((tab, index) => ({ ...tab, color: index === 0 ? "rose" : null, group: { ...tab.group, color: "teal" } }));
+    const html = render(new Set(), colored);
+    expect(html).toContain('--group-color:#45cec4');
+    expect(html).toContain('--tab-color:#45cec4');
+    expect(html).toContain('--tab-color:#f2686f');
+  });
+
+  test("collapsed group hides its tabs and aggregates work on the focused tab", () => {
+    const html = render(new Set(["tab-working"]), grouped(true));
+    expect(html).toContain('aria-expanded="false"');
+    expect(html).toContain('aria-label="Work, 2 tabs, agent working"');
+    expect(html.match(/tab-work-shimmer/g)).toHaveLength(1);
+    expect(html).not.toContain('data-tab-id=');
+  });
+
+  test("expanded group renders one label and all its tabs", () => {
+    const html = render(new Set(["tab-idle"]), grouped(false));
+    expect(html.match(/data-group-id=/g)).toHaveLength(1);
+    expect(html.match(/data-tab-id=/g)).toHaveLength(2);
+    expect(html.match(/tab-work-shimmer/g)).toHaveLength(2);
+    expect(html).toContain('aria-expanded="true"');
+  });
+
+  test("idle collapsed group has no shimmer", () => {
+    expect(render(new Set(), grouped(true))).not.toContain("tab-work-shimmer");
   });
 });

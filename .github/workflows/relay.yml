@@ -43,6 +43,12 @@ jobs:
           CLOUDFLARE_D1_DATABASE_ID: ${{ vars.CLOUDFLARE_D1_DATABASE_ID }}
         run: node relay/scripts/configure-deploy.mjs
 
+      - name: Reclaim expired relay deliveries before migrating
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: npx --prefix relay wrangler d1 execute DB --remote --config relay/wrangler.deploy.json --command="$(cat relay/scripts/prune-expired.sql)"
+
       - name: Apply D1 migrations
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}

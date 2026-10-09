@@ -15,12 +15,10 @@ const HAVE_CURRENT_DATA = 2;
 
 let audioPlayers: HTMLAudioElement[] | null = null;
 let activePlayer: HTMLAudioElement | null = null;
-/** Cleared for the session once the native player reports it cannot play. */
-let nativePlayerUsable = true;
 /** True after a successful play (or silent unlock) under a user gesture. */
 let unlocked = false;
 let unlockBound = false;
-/** Bumps so a late `canplay` retry cannot restart a superseded cue. */
+/** Bumps so late native failures and `canplay` retries cannot revive old cues. */
 let playGeneration = 0;
 
 function completionAudios(): HTMLAudioElement[] {
@@ -64,6 +62,7 @@ function bindGestureUnlock(): void {
     if (unlocked) {
       window.removeEventListener("pointerdown", onGesture, true);
       window.removeEventListener("keydown", onGesture, true);
+      unlockBound = false;
       return;
     }
     const players = completionAudios();
@@ -90,6 +89,7 @@ function bindGestureUnlock(): void {
         unlocked = true;
         window.removeEventListener("pointerdown", onGesture, true);
         window.removeEventListener("keydown", onGesture, true);
+        unlockBound = false;
       }
     });
   };
@@ -121,6 +121,8 @@ function attemptPlay(player: HTMLAudioElement, generation: number): void {
     })
     .catch(() => {
       if (generation !== playGeneration) return;
+      unlocked = false;
+      bindGestureUnlock();
 
       // Decode not finished yet. Wait once, then try again.
       if (player.readyState < HAVE_CURRENT_DATA) {
@@ -134,7 +136,9 @@ function attemptPlay(player: HTMLAudioElement, generation: number): void {
               unlocked = true;
             })
             .catch(() => {
-              // Autoplay still blocked, or the asset failed. Visual markers continue.
+              if (generation !== playGeneration) return;
+              unlocked = false;
+              bindGestureUnlock();
             });
         };
         player.addEventListener("canplay", onReady);
@@ -143,8 +147,6 @@ function attemptPlay(player: HTMLAudioElement, generation: number): void {
         }, 3_000);
         return;
       }
-      // Policy / decode failure: keep listening for a gesture so the next cue works.
-      bindGestureUnlock();
     });
 }
 
@@ -157,7 +159,6 @@ function attemptPlay(player: HTMLAudioElement, generation: number): void {
  */
 function nativePlayerAvailable(): boolean {
   return (
-    nativePlayerUsable &&
     typeof window !== "undefined" &&
     "__TAURI_INTERNALS__" in window
   );
@@ -183,18 +184,26 @@ export function preloadCompletionSound(): void {
  * completions restart the cue instead of stacking several copies.
  */
 export function playCompletionSound(cue: CompletionCue = chooseCompletionCue()): void {
+  const generation = ++playGeneration;
   if (nativePlayerAvailable()) {
+    // A previous cue may have used the WebView while the device was unavailable.
+    // Stop it before returning to native audio so completions still coalesce.
+    if (activePlayer) {
+      activePlayer.pause();
+      safeRewind(activePlayer);
+      activePlayer = null;
+    }
     void playCompletionCue(cue).catch(() => {
-      // No output device the app process can open, or an older build without
-      // the command. Hand the rest of the session to the WebView so
-      // completions stay audible even with the wrong name in the mixer.
-      nativePlayerUsable = false;
+      if (generation !== playGeneration) return;
+      // Device failures can be temporary (sleep, unplugging, driver restart).
+      // Fall back for this cue, then retry native audio on the next completion.
+      bindGestureUnlock();
       const player = completionAudio(cue);
-      if (player) attemptPlay(player, ++playGeneration);
+      if (player) attemptPlay(player, generation);
     });
     return;
   }
   bindGestureUnlock();
   const player = completionAudio(cue);
-  if (player) attemptPlay(player, ++playGeneration);
+  if (player) attemptPlay(player, generation);
 }

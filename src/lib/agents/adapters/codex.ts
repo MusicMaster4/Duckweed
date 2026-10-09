@@ -10,6 +10,7 @@ import {
   type AgentCommandResult,
 } from "../adapter";
 import { isAuthenticationFailure } from "../auth";
+import { isCodexCapacityError } from "../capacityReply";
 import { applyEvent, type AgentEvent } from "../events";
 import type { AgentLaunch } from "../launch";
 import {
@@ -42,7 +43,7 @@ import {
  * timeline entry means both passes update the same row.
  *
  * Method and payload names follow openai/codex's published app-server schema,
- * verified against codex 0.145. There is no slash-command channel: the TUI's
+ * verified against codex 0.159. There is no slash-command channel: the TUI's
  * commands are client-side, so this adapter wires the important ones itself —
  * `/model` and `/effort` are `turn/start` overrides ("for this turn and
  * subsequent turns", so they stick), `/compact` is `thread/compact/start`,
@@ -89,6 +90,8 @@ const DEFAULT_CHILD_STREAM_PUBLISH_MS = 125;
  * recover before the composer looks wedged.
  */
 const RESUME_RPC_TIMEOUT_MS = 10_000;
+const RPC_TIMEOUT_MS = 30_000;
+const STOP_RPC_TIMEOUT_MS = 5_000;
 const SIDE_DEVELOPER_INSTRUCTIONS = `You are in an ephemeral side conversation, not the main thread.
 Use the inherited conversation only as reference context. Answer only the question submitted after the fork. Do not continue tasks, plans, or tool calls inherited from the parent thread. Keep the response focused and do not modify files or workspace state.`;
 
@@ -110,6 +113,8 @@ function pickSideAnswer(messages: Map<string, CodexSideMessage>): string {
 }
 
 interface CodexAdapterOptions {
+  /** Test seam; account notifications are backed up by a periodic read. */
+  authPollIntervalMs?: number;
   /** Test seam; production uses the same 800 ms quiet window as raw Codex. */
   completionQuietMs?: number;
   /** Test seam; production batches nested transcript reduction and paints to this cadence. */
@@ -122,6 +127,9 @@ interface CodexAdapterOptions {
    * production recovers by forking. `0` disables the timer (interrupt-only).
    */
   resumeTimeoutMs?: number;
+  /** Control RPCs must not hold Stop or the Tasks panel indefinitely. */
+  stopTimeoutMs?: number;
+  rpcTimeoutMs?: number;
 }
 
 const EXEC_STATUS: Record<string, ToolStatus> = {
@@ -312,10 +320,33 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     options.childStreamPublishMs ?? DEFAULT_CHILD_STREAM_PUBLISH_MS;
   const reduceChildEvent = options.childEventReducer ?? applyEvent;
   const resumeTimeoutMs = options.resumeTimeoutMs ?? RESUME_RPC_TIMEOUT_MS;
+  const stopTimeoutMs = options.stopTimeoutMs ?? STOP_RPC_TIMEOUT_MS;
+  const rpcTimeoutMs = options.rpcTimeoutMs ?? RPC_TIMEOUT_MS;
+  let stoppedByUser = false;
+  let currentGoal: CodexGoal | null = null;
+  let stopRecovery: { generation: number; promise: Promise<boolean> } | null = null;
+  let disposed = false;
+  let initialized = false;
+  let authenticationRequired = false;
+  let accountSignature: string | null = null;
+  let accountGeneration = 0;
+  let accountUpdateVersion = 0;
+  let accountCachesDirty = false;
+  let rejectedAuthVersion: number | null = null;
+  let loginId: string | null = null;
+  let authOperation = false;
+  let authPollTimer: ReturnType<typeof setInterval> | null = null;
+  let accountRead: Promise<void> | null = null;
+  let accountSignedIn = false;
+  let usesOpenaiAuth = true;
+  let modelProvider: string | null = null;
+  let accountReloadDeferred = false;
+  let openingThread: Promise<void> | null = null;
   let nextId = 1;
   const pending = new Map<RequestKey, Pending>();
   let threadId: string | null = null;
   let currentTurnId: string | null = null;
+  let rootStartRequestId: RequestKey | null = null;
   /**
    * True from the moment Duckweed asks Codex to start/rejoin root work until
    * either completion channel settles it. `turn/started` is normally first,
@@ -327,10 +358,19 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
   let rootTurnStatusConfirmed = false;
   /** Invalidates late `turn/start` responses after the represented turn ended. */
   let rootTurnGeneration = 0;
+  /** `rootTurnGeneration` whose turn/start was stopped before its id arrived. */
+  let stopRequestedForGeneration: number | null = null;
   /** Advances when a live root completion beats an in-flight resume snapshot. */
   let rootCompletionVersion = 0;
   /** Bounded memory of completions used to reject stale RPC/resume snapshots. */
   const completedRootTurnIds = new Set<string>();
+  /**
+   * The subset Codex itself reported finished (`turn/completed`) or that an
+   * acknowledged interrupt stopped. Other retirements are local inferences,
+   * such as a thread-idle fallback, and live output for them proves the turn
+   * is still running.
+   */
+  const finishedRootTurnIds = new Set<string>();
   let rootCompletionTimer: ReturnType<typeof setTimeout> | null = null;
   /**
    * A completion is not settled until its quiet window expires. Keeping the
@@ -400,7 +440,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
    */
   const streamed = new Set<string>();
   /** Permission id → the JSON-RPC id Codex is waiting on, and its shape. */
-  const approvals = new Map<string, { id: string | number; kind: "command" | "file" }>();
+  const approvals = new Map<string, { id: string | number; kind: "command" | "file" | "permissions"; permissions?: Record<string, unknown> }>();
   const questions = new Map<
     string,
     {
@@ -451,6 +491,36 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       const oldest = completedRootTurnIds.values().next().value;
       if (oldest) completedRootTurnIds.delete(oldest);
     }
+  }
+
+  /** Record proof only; the turn is still retired by settling it. */
+  function rememberRootTurnFinished(turnId: string | null): void {
+    if (!turnId) return;
+    finishedRootTurnIds.add(turnId);
+    if (finishedRootTurnIds.size > 64) {
+      const oldest = finishedRootTurnIds.values().next().value;
+      if (oldest) finishedRootTurnIds.delete(oldest);
+    }
+  }
+
+  /**
+   * Make `turnId` the live root turn again. Codex keeps one active turn per
+   * thread and folds a `turn/start` sent while it runs into that same turn,
+   * without a new `turn/started`. If Duckweed had closed the turn early, every
+   * later frame looked stale and the pane froze on the Thinking placeholder
+   * while Codex kept working.
+   */
+  function adoptRootTurn(turnId: string, ctx: AdapterContext): void {
+    if (currentTurnId && currentTurnId !== turnId) rememberRootTurnCompleted(currentTurnId);
+    completedRootTurnIds.delete(turnId);
+    cancelPendingRootCompletion();
+    currentTurnId = turnId;
+    rootTurnCompletionObserved = false;
+    rootTurnMayBeActive = true;
+    rootTurnStatusConfirmed = true;
+    rootTurnWasSteered = false;
+    rootCompletionSeenDuringSteer = undefined;
+    ctx.emit({ type: "status", status: "working" });
   }
 
   /**
@@ -815,7 +885,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
           });
           turns = asArray(page.data).reverse();
         }
-        const status = threadStatus(thread.status) ?? "idle";
+        const status = threadStatus(thread.status);
         if (
           status === "working" &&
           (!child.hasLiveStatus || child.state.status === "working")
@@ -862,7 +932,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         }
         // Live status events can overtake thread/read. Never flash a completed
         // child back to working because an older snapshot arrived late.
-        if (!child.hasLiveStatus) {
+        if (!child.hasLiveStatus && status) {
           hydratedState = applyEvent(hydratedState, { type: "status", status });
         } else {
           hydratedState = {
@@ -1032,7 +1102,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     method: string,
     params: unknown,
   ): Promise<Record<string, unknown>> {
-    return requestWithId(ctx, nextId++, method, params);
+    return requestWithTimeout(ctx, nextId++, method, params, rpcTimeoutMs);
   }
 
   function requestWithId(
@@ -1043,8 +1113,22 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
   ): Promise<Record<string, unknown>> {
     return new Promise((resolve, reject) => {
       pending.set(id, { resolve, reject });
-      ctx.send({ jsonrpc: "2.0", id, method, params });
+      sendRequest(ctx, id, method, params);
     });
+  }
+
+  function sendRequest(ctx: AdapterContext, id: RequestKey, method: string, params: unknown): void {
+    const failed = (error: unknown) => {
+      const waiting = pending.get(id);
+      pending.delete(id);
+      waiting?.reject(asRecord(error) ?? { message: String(error) });
+    };
+    try {
+      const sending = ctx.send({ jsonrpc: "2.0", id, method, params });
+      if (sending) void Promise.resolve(sending).catch(failed);
+    } catch (error: unknown) {
+      failed(error);
+    }
   }
 
   function resumeErrorCode(error: unknown): string | null {
@@ -1065,8 +1149,10 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     id: RequestKey,
     method: string,
     params: unknown,
+    timeoutMs = resumeTimeoutMs,
   ): Promise<Record<string, unknown>> {
-    if (resumeTimeoutMs <= 0) return requestWithId(ctx, id, method, params);
+    if (disposed) return Promise.reject({ code: "duckweed_closed", message: "Codex connection closed." });
+    if (timeoutMs <= 0) return requestWithId(ctx, id, method, params);
     return new Promise((resolve, reject) => {
       let settled = false;
       let timer: ReturnType<typeof setTimeout> | null = null;
@@ -1079,18 +1165,20 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       };
       timer = setTimeout(() => {
         finish(() => {
+          const cancelledBeforeDelivery = ctx.cancelPendingSend?.(id) === true;
           notify(ctx, "$/cancelRequest", { id });
           reject({
-            code: RESUME_TIMEOUT,
-            message: "Codex did not resume that conversation.",
+            cancelledBeforeDelivery,
+            code: method === "thread/resume" || method === "thread/fork" || method === "thread/turns/list" ? RESUME_TIMEOUT : "duckweed_rpc_timeout",
+            message: `Codex did not answer ${method}.`,
           });
         });
-      }, resumeTimeoutMs);
+      }, timeoutMs);
       pending.set(id, {
         resolve: (result) => finish(() => resolve(result)),
         reject: (error) => finish(() => reject(error)),
       });
-      ctx.send({ jsonrpc: "2.0", id, method, params });
+      sendRequest(ctx, id, method, params);
     });
   }
 
@@ -1109,7 +1197,12 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
   }
 
   function notify(ctx: AdapterContext, method: string, params: unknown) {
-    ctx.send({ jsonrpc: "2.0", method, params });
+    try {
+      const sending = ctx.send({ jsonrpc: "2.0", method, params });
+      if (sending) void Promise.resolve(sending).catch(() => {});
+    } catch {
+      // The waiting RPC's watchdog still settles when the transport is gone.
+    }
   }
 
   function extensionRows(result: Record<string, unknown>, kind: AgentExtension["kind"]): AgentExtension[] {
@@ -1194,7 +1287,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
 
   async function listRuntimeTasks(ctx: AdapterContext): Promise<AgentRuntimeTask[]> {
     if (!threadId) return [];
-    const result = await request(ctx, "thread/backgroundTerminals/list", { threadId, limit: 100 });
+    const result = await requestWithTimeout(ctx, nextId++, "thread/backgroundTerminals/list", { threadId, limit: 100 }, stopTimeoutMs);
     return asArray(result.data)
       .map((raw) => asRecord(raw))
       .filter((row): row is Record<string, unknown> => row !== null)
@@ -1450,31 +1543,51 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
           requestAttestation: false,
         },
       });
+      if (disposed) return;
       notify(ctx, "initialized", {});
+      initialized = true;
 
       // thread/start succeeds without credentials. The first turn then
       // retries a 401 several times, which used to leave the UI working
       // forever. account/read detects that state before opening the thread.
       try {
-        const account = await requestWithId(
+        const account = await requestWithTimeout(
           ctx,
           "duckweed-account-read",
           "account/read",
           { refreshToken: false },
+          5_000,
         );
-        if (account.requiresOpenaiAuth === true && account.account == null) {
-          ctx.emit({
-            type: "status",
-            status: "error",
-            error: "Codex is not signed in.",
-          });
-          return;
-        }
+        if (disposed) return;
+        usesOpenaiAuth = account.requiresOpenaiAuth !== false;
+        applyAccount(account, ctx);
       } catch {
         // Older app-server builds do not expose account/read. Continue and
         // catch any auth failure from the provider's normal error stream.
       }
+      const interval = options.authPollIntervalMs ?? 5_000;
+      if (interval > 0) authPollTimer = setInterval(() => {
+        void refreshAccount(ctx, true);
+        void refreshRuntimeProcesses(ctx);
+      }, interval);
+      if (authenticationRequired) {
+        ctx.emit({ type: "status", status: "idle" });
+        return;
+      }
+      await ensureThread(ctx);
+    } catch (error) {
+      if (!disposed) ctx.emit({ type: "status", status: "error", error: asString(asRecord(error)?.message) ?? "Codex refused to initialize." });
+    }
+  }
 
+  function ensureThread(ctx: AdapterContext): Promise<void> {
+    if (disposed || authenticationRequired || threadId) return Promise.resolve();
+    if (!openingThread) openingThread = openThread(ctx).finally(() => { openingThread = null; });
+    return openingThread;
+  }
+
+  async function openThread(ctx: AdapterContext) {
+    try {
       currentModel = ctx.launch.model;
       currentEffort = ctx.launch.effort;
       currentServiceTier = null;
@@ -1485,6 +1598,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         ...(currentModel ? { model: currentModel } : {}),
       });
       const started = asRecord(thread.thread) ?? thread;
+      if (disposed) return;
       threadId = asString(started.id);
       if (!threadId) {
         ctx.emit({ type: "status", status: "error", error: "Codex did not return a thread id." });
@@ -1494,6 +1608,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       // An explicit launch flag still wins: the server has not seen it yet
       // (thread/start carries no effort), so its answer here is the default,
       // and the first turn/start is what applies the request.
+      modelProvider = asString(thread.modelProvider);
       currentModel = ctx.launch.model ?? asString(thread.model) ?? currentModel;
       currentEffort = ctx.launch.effort ?? asString(thread.reasoningEffort) ?? currentEffort;
       currentServiceTier = asString(thread.serviceTier);
@@ -1533,64 +1648,214 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       ctx.emit({ type: "status", status: "idle" });
 
       // Not awaited: /model and /effort validate leniently until this lands.
-      void request(ctx, "model/list", {})
-        .then((result) => {
-          const advertisedModels = asArray(result.data)
-            .map((raw) => asRecord(raw))
-            .filter((model): model is Record<string, unknown> => model !== null)
-            .map((model) => ({
-              id: asString(model.id) ?? "",
-              displayName: asString(model.displayName) ?? asString(model.id) ?? "",
-              efforts: asArray(model.supportedReasoningEfforts)
-                .map((raw) => asRecord(raw))
-                .filter((effort): effort is Record<string, unknown> => effort !== null)
-                .map((effort) => asString(effort.reasoningEffort) ?? "")
-                .filter(Boolean),
-              serviceTiers: [
-                ...asArray(model.serviceTiers)
-                  .map((raw) => asRecord(raw))
-                  .filter((tier): tier is Record<string, unknown> => tier !== null)
-                  .map((tier) => asString(tier.id) ?? ""),
-                ...asArray(model.additionalSpeedTiers).map((tier) => asString(tier) ?? ""),
-              ].filter((tier, index, all) => Boolean(tier) && all.indexOf(tier) === index),
-              hidden: model.hidden === true,
-              isDefault: model.isDefault === true,
-            }))
-            .filter((model) => model.id);
-          models = advertisedModels.filter((model) => !model.hidden);
-          if (models.length) {
-            const hiddenCurrent = advertisedModels.some(
-              (model) =>
-                model.hidden &&
-                (model.id === currentModel || model.displayName === currentModel),
-            );
-            let repairedModel: string | undefined;
-            if (hiddenCurrent) {
-              repairedModel = (models.find((model) => model.isDefault) ?? models[0]).id;
-              currentModel = repairedModel;
-            }
-            ctx.emit({
-              type: "session",
-              ...(repairedModel ? { model: repairedModel } : {}),
-              models: models.map((model) => ({
-                id: model.id,
-                label: model.displayName || model.id,
-                efforts: [...model.efforts],
-              })),
-            });
-          }
-        })
-        .catch(() => {
-          // A server too old for model/list just leaves validation lenient.
-        });
+      void refreshModels(ctx);
     } catch (error) {
       const record = asRecord(error);
-      ctx.emit({
+      if (!disposed) ctx.emit({
         type: "status",
         status: "error",
         error: asString(record?.message) ?? "Codex refused to start a thread.",
       });
     }
+  }
+
+  function refreshModels(ctx: AdapterContext): Promise<void> {
+    const generation = accountGeneration;
+    return request(ctx, "model/list", {})
+      .then(async (result) => {
+        const data = [...asArray(result.data)];
+        const cursors = new Set<string>();
+        let cursor = asString(result.nextCursor);
+        while (cursor && !cursors.has(cursor) && cursors.size < 20) {
+          if (disposed || generation !== accountGeneration) return;
+          cursors.add(cursor);
+          result = await request(ctx, "model/list", { cursor });
+          data.push(...asArray(result.data));
+          cursor = asString(result.nextCursor);
+        }
+        if (disposed || generation !== accountGeneration) return;
+        const advertisedModels = data
+          .map((raw) => asRecord(raw))
+          .filter((model): model is Record<string, unknown> => model !== null)
+          .map((model) => ({
+            id: asString(model.model) ?? asString(model.id) ?? "",
+            displayName: asString(model.displayName) ?? asString(model.id) ?? "",
+            efforts: asArray(model.supportedReasoningEfforts)
+              .map((raw) => asRecord(raw))
+              .filter((effort): effort is Record<string, unknown> => effort !== null)
+              .map((effort) => asString(effort.reasoningEffort) ?? "")
+              .filter(Boolean),
+            serviceTiers: [
+              ...asArray(model.serviceTiers)
+                .map((raw) => asRecord(raw))
+                .filter((tier): tier is Record<string, unknown> => tier !== null)
+                .map((tier) => asString(tier.id) ?? ""),
+              ...asArray(model.additionalSpeedTiers).map((tier) => asString(tier) ?? ""),
+            ].filter((tier, index, all) => Boolean(tier) && all.indexOf(tier) === index),
+            hidden: model.hidden === true,
+            isDefault: model.isDefault === true,
+          }))
+          .filter((model) => model.id);
+        // CLIProxy aggregates every provider into /models. Keep this harness on
+        // its OpenAI model family while retaining the CLI's effort metadata.
+        // Other custom endpoints may intentionally serve their own model names.
+        models = advertisedModels.filter((model) => !model.hidden &&
+          (modelProvider?.toLowerCase() !== "cliproxy" || /^(?:openai\/)?(?:gpt-|o\d(?:-|$)|codex(?:-|$))/i.test(model.id)));
+        const hiddenCurrent = advertisedModels.some(
+          (model) =>
+            model.hidden &&
+            (model.id === currentModel || model.displayName === currentModel),
+        );
+        let repairedModel: string | undefined;
+        if (hiddenCurrent && models.length) {
+          repairedModel = (models.find((model) => model.isDefault) ?? models[0]).id;
+          currentModel = repairedModel;
+        }
+        ctx.emit({
+          type: "session",
+          ...(repairedModel ? { model: repairedModel } : {}),
+          models: models.map((model) => ({
+            id: model.id,
+            label: model.displayName || model.id,
+            efforts: [...model.efforts],
+          })),
+        });
+      })
+      .catch(() => {
+        // A server too old for model/list just leaves validation lenient.
+      });
+  }
+  function applyAccount(account: Record<string, unknown>, ctx: AdapterContext): boolean {
+    const signature = JSON.stringify([account.account ?? null, account.workspaceRouting ?? null, account.requiresOpenaiAuth]);
+    const changed = signature !== accountSignature;
+    const wasRequired = authenticationRequired;
+    accountSignedIn = account.account != null;
+    authenticationRequired = account.requiresOpenaiAuth === true && account.account == null;
+    accountSignature = signature;
+    if (wasRequired && !authenticationRequired) ctx.emit({ type: "status", status: "starting" });
+    ctx.emit({ type: "authentication", required: authenticationRequired });
+    if (changed) {
+      accountGeneration += 1;
+      models = [];
+      ctx.emit({ type: "session", models: [] });
+      ctx.emit({ type: "extensions", extensions: [], extensionsLoaded: false, loading: false });
+    }
+    if (authenticationRequired && (!wasRequired || changed)) {
+      if (threadId && currentTurnId) void request(ctx, "turn/interrupt", { threadId, turnId: currentTurnId }).catch(() => {});
+      cancelPendingRootCompletion();
+      // Deliberately stopped: its trailing frames must not reopen the pane.
+      rememberRootTurnFinished(currentTurnId);
+      settleRootTurn(currentTurnId);
+      ctx.emit({ type: "permission", permission: null });
+      ctx.emit({ type: "notice", tone: "info", text: "Codex is signed out. Use /login or sign in from the Codex CLI to continue." });
+      if (threadId) ctx.emit({ type: "status", status: "idle" });
+    }
+    return changed;
+  }
+
+  function refreshAccount(ctx: AdapterContext, synchronize = false): Promise<void> {
+    if (!initialized || disposed || authOperation) return Promise.resolve();
+    if (accountRead) return accountRead;
+    const version = accountUpdateVersion;
+    const read = () => requestWithTimeout(ctx, "duckweed-account-sync", "account/read", { refreshToken: false }, 5_000);
+    accountRead = (synchronize && usesOpenaiAuth && ctx.syncAccount ? ctx.syncAccount(accountSignedIn)
+      .then((result) => {
+        if (disposed || result === "restarted") return null;
+        if (result === "deferred") {
+          if (!accountReloadDeferred) ctx.emit({ type: "notice", tone: "info", text: "The Codex account changed in the CLI. The shared service will reload after active turns and background terminals finish." });
+          accountReloadDeferred = true;
+          // The running daemon still owns valid credentials. Keep its active
+          // turn and steer usable until the shared service can safely reload.
+          return read();
+        }
+        accountReloadDeferred = false;
+        return read();
+      }) : read())
+      .then(async (account) => {
+        if (!account || disposed || version !== accountUpdateVersion) return;
+        if (rejectedAuthVersion === version) return;
+        usesOpenaiAuth = account.requiresOpenaiAuth !== false;
+        const changed = applyAccount(account, ctx) || accountCachesDirty;
+        accountCachesDirty = false;
+        if (authenticationRequired) return;
+        const hadThread = Boolean(threadId);
+        await ensureThread(ctx);
+        if (changed && hadThread) {
+          void refreshModels(ctx);
+          void publishExtensions(ctx);
+          if (!rootTurnMayBeActive) ctx.emit({ type: "status", status: "idle" });
+        }
+      })
+      .catch(() => { /* A transient or unsupported account read must not end a running turn. */ })
+      .finally(() => {
+        accountRead = null;
+        if (!disposed && version !== accountUpdateVersion) void refreshAccount(ctx);
+      });
+    return accountRead;
+  }
+
+  async function authenticate(action: "login" | "logout", ctx: AdapterContext, device = false): Promise<boolean> {
+    if (!initialized || disposed || authOperation) return true;
+    authOperation = true;
+    try {
+      if (loginId) {
+        await requestWithTimeout(ctx, nextId++, "account/login/cancel", { loginId }, 5_000);
+        loginId = null;
+      }
+      if (action === "logout") {
+        await requestWithTimeout(ctx, nextId++, "account/logout", {}, 5_000);
+      } else {
+        const result = await requestWithTimeout(ctx, nextId++, "account/login/start", { type: device ? "chatgptDeviceCode" : "chatgpt" }, 15_000);
+        if (disposed) return true;
+        loginId = asString(result.loginId);
+        const url = asString(result.authUrl) ?? asString(result.verificationUrl);
+        const code = asString(result.userCode);
+        ctx.emit({ type: "notice", tone: "info", text: code ? `Open ${url ?? "the Codex sign-in page"} and enter code ${code}.` : `Complete Codex sign-in in your browser.${url ? `\n${url}` : ""}` });
+        if (url && ctx.openUrl) await ctx.openUrl(url).catch(() => {
+          ctx.emit({ type: "notice", tone: "error", text: "Could not open the sign-in page. Open the link above in your browser." });
+        });
+      }
+    } catch (error) {
+      if (asRecord(error)?.code === -32601) return false;
+      if (!disposed) ctx.emit({ type: "notice", tone: "error", text: asString(asRecord(error)?.message) ?? `Codex could not ${action === "login" ? "start sign-in" : "sign out"}.` });
+    } finally {
+      authOperation = false;
+      if (!disposed) void refreshAccount(ctx);
+    }
+    return true;
+  }
+
+  let publishingExtensions: Promise<void> | null = null;
+  function publishExtensions(ctx: AdapterContext): Promise<void> {
+    if (publishingExtensions) return publishingExtensions;
+    const generation = accountGeneration;
+    publishingExtensions = listExtensions(ctx).then((extensions) => {
+      if (!disposed && generation === accountGeneration) ctx.emit({ type: "extensions", extensions, extensionsLoaded: true, loading: false });
+    }).catch(() => {}).finally(() => {
+      publishingExtensions = null;
+      if (!disposed && !authenticationRequired && generation !== accountGeneration) void publishExtensions(ctx);
+    });
+    return publishingExtensions;
+  }
+
+  let runtimeProcessRead: Promise<void> | null = null;
+  let runtimeProcessesSupported = true;
+  function refreshRuntimeProcesses(ctx: AdapterContext): Promise<void> {
+    if (!ctx.runtimeProcesses || disposed || !threadId || !runtimeProcessesSupported) return Promise.resolve();
+    if (runtimeProcessRead) return runtimeProcessRead;
+    const parent = threadId;
+    const threads = [parent, ...children.keys()];
+    runtimeProcessRead = Promise.all(threads.map((threadId) =>
+      requestWithTimeout(ctx, nextId++, "thread/backgroundTerminals/list", { threadId, limit: 100 }, 5_000)
+    )).then(async (results) => {
+      if (disposed || parent !== threadId) return;
+      const pids = results.flatMap((result) => asArray(result.data).map((row) => asRecord(row)?.osPid))
+        .filter((pid): pid is number => typeof pid === "number" && Number.isInteger(pid) && pid > 0);
+      await ctx.runtimeProcesses?.([...new Set(pids)]);
+    }).catch((error) => {
+      if (asRecord(error)?.code === -32601) runtimeProcessesSupported = false;
+    }).finally(() => { runtimeProcessRead = null; });
+    return runtimeProcessRead;
   }
 
   /** One thread item, in whichever state it arrived. */
@@ -1827,6 +2092,12 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       }
       case "subAgentActivity": {
         const kind = asString(item.kind) ?? "interacted";
+        const activityStatus: ToolStatus =
+          kind === "completed" || kind === "finished"
+            ? "done"
+            : kind === "interrupted" || kind === "failed"
+              ? "error"
+              : "running";
         const agentPath = asString(item.agentPath);
         const agentThreadId = asString(item.agentThreadId);
         // Codex also reports activity for the root participant during a
@@ -1848,7 +2119,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
           child.hasLiveStatus = true;
           child.state = applyEvent(child.state, {
             type: "status",
-            status: kind === "interrupted" ? "error" : kind === "started" ? "working" : "idle",
+            status: activityStatus === "error" ? "error" : activityStatus === "done" ? "idle" : "working",
           });
           if (child.callId) {
             syncChild(agentThreadId, ctx);
@@ -1868,7 +2139,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
           name: "subagent",
           tool: "task",
           title: agentPath ? `Subagent ${agentPath}` : "Subagent activity",
-          status: kind === "interrupted" ? "error" : kind === "started" ? "running" : "done",
+          status: activityStatus,
           output: [
             agentThreadId ? `Thread: ${agentThreadId}` : "",
             kind ? `Activity: ${kind}` : "",
@@ -2052,6 +2323,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     switch (method) {
       case "thread/goal/updated": {
         const goal = readGoal(params.goal);
+        currentGoal = goal;
         if (goal) {
           ctx.emit({
             type: "goal",
@@ -2061,6 +2333,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         return;
       }
       case "thread/goal/cleared":
+        currentGoal = null;
         ctx.emit({ type: "goal", goal: null });
         return;
       case "thread/started": {
@@ -2078,6 +2351,18 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         const turn = asRecord(params.turn);
         const startedTurnId = asString(turn?.id);
         if (startedTurnId && completedRootTurnIds.has(startedTurnId)) return;
+        if (
+          startedTurnId && threadId && (stoppedByUser || (!rootTurnMayBeActive &&
+          stopRequestedForGeneration === rootTurnGeneration))
+        ) {
+          // The turn Stop could not address yet. Interrupt it now instead of
+          // reopening the pane for work the user already cancelled.
+          stopRequestedForGeneration = null;
+          rememberRootTurnCompleted(startedTurnId);
+          void stopTurn(threadId, startedTurnId, ctx, rootTurnGeneration)
+            .then((stopped) => { if (stopped) rememberRootTurnFinished(startedTurnId); });
+          return;
+        }
         if (startedTurnId !== currentTurnId) {
           rememberRootTurnCompleted(currentTurnId);
           rootTurnWasSteered = false;
@@ -2095,6 +2380,8 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         const turn = asRecord(params.turn);
         const completedTurnId = asString(turn?.id);
         if (rootTurnSignalIsStale(completedTurnId)) return;
+        rememberRootTurnFinished(completedTurnId);
+        if (stoppedByUser) return;
         rootTurnCompletionObserved = true;
         const error = asRecord(turn?.error);
         if (error) {
@@ -2115,14 +2402,17 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       case "thread/status/changed": {
         const status = threadStatus(params.status);
         if (status === "working") {
+          if (stoppedByUser) return;
           cancelPendingRootCompletion();
           rootTurnMayBeActive = true;
           rootTurnStatusConfirmed = true;
           ctx.emit({ type: "status", status: "working" });
         } else if (status === "idle") {
+          if (stoppedByUser) return;
           // This is Codex's thread-level reconciliation channel. It closes the
           // turn when a start/completed notification was lost or reordered.
-          const wasActive = rootTurnStatusConfirmed || currentTurnId !== null;
+          const wasActive = currentTurnId !== null ||
+            (rootStartRequestId === null && rootTurnStatusConfirmed);
           // Sending turn/start only proves that Duckweed asked for work. Until
           // Codex acknowledges that turn, a thread-idle frame can still belong
           // to the turn that just released a queued follow-up.
@@ -2444,6 +2734,36 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     });
   }
 
+  function handlePermissionsApproval(id: RequestKey, params: Record<string, unknown>, ctx: AdapterContext): void {
+    const requested = asRecord(params.permissions) ?? {};
+    const permissions = Object.fromEntries(Object.entries(requested).filter(([key, value]) =>
+      (key === "network" || key === "fileSystem") && value !== null,
+    ));
+    const fileSystem = asRecord(permissions.fileSystem);
+    const detail = [asString(params.reason),
+      asRecord(permissions.network)?.enabled === true ? "Network access" : null,
+      ...asArray(fileSystem?.read).map((path) => `Read: ${String(path)}`),
+      ...asArray(fileSystem?.write).map((path) => `Write: ${String(path)}`),
+      ...asArray(fileSystem?.entries).map((entry) => {
+        const rule = asRecord(entry);
+        const path = asRecord(rule?.path);
+        const special = asRecord(path?.value);
+        const location = asString(path?.path) ?? asString(path?.pattern) ?? asString(path?.value) ?? asString(special?.kind) ?? "requested location";
+        return `${asString(rule?.access) ?? "Access"}: ${location}`;
+      }),
+    ].filter(Boolean).join("\n");
+    const permissionId = `perm-${String(id)}`;
+    approvals.set(permissionId, { id, kind: "permissions", permissions });
+    ctx.emit({ type: "permission", permission: {
+      id: permissionId, title: "Allow additional access", detail, command: null, changes: [],
+      options: [
+        { id: "accept", label: "Allow for this turn", kind: "allow" },
+        { id: "acceptForSession", label: "Allow for this session", kind: "allow-always" },
+        { id: "decline", label: "Decline", kind: "reject" },
+      ],
+    } });
+  }
+
   function handleUserInput(
     id: string | number,
     params: Record<string, unknown>,
@@ -2637,6 +2957,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
 
   function showGoalResult(result: Record<string, unknown>, ctx: AdapterContext): void {
     const goal = readGoal(result.goal);
+    currentGoal = goal;
     ctx.emit({
       type: "goal",
       goal: goal ? { objective: goal.objective, status: goal.status } : null,
@@ -2661,6 +2982,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     if (!threadId) return;
     void request(ctx, "thread/goal/clear", { threadId })
       .then((result) => {
+        currentGoal = null;
         ctx.emit({ type: "goal", goal: null });
         ctx.emit({
           type: "notice",
@@ -2673,6 +2995,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
 
   function setGoalStatus(status: "active" | "paused", ctx: AdapterContext): void {
     if (!threadId) return;
+    if (status === "active") { stoppedByUser = false; rootTurnGeneration += 1; }
     void request(ctx, "thread/goal/set", { threadId, status })
       .then((result) => showGoalResult(result, ctx))
       .catch((error: unknown) =>
@@ -2712,6 +3035,8 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
 
   function replaceGoal(objective: string, ctx: AdapterContext): void {
     if (!threadId) return;
+    stoppedByUser = false;
+    rootTurnGeneration += 1;
     // A new `/goal <objective>` starts fresh accounting, matching Codex's TUI.
     void request(ctx, "thread/goal/clear", { threadId })
       .then(() =>
@@ -2971,6 +3296,66 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     return "handled";
   }
 
+  function recoverStop(ctx: AdapterContext, generation: number): Promise<boolean> {
+    if (disposed || generation !== rootTurnGeneration || !stoppedByUser) return Promise.resolve(false);
+    if (stopRecovery?.generation === generation) return stopRecovery.promise;
+    const promise = Promise.resolve().then(() => {
+      if (!ctx.interruptFallback) throw new Error("Codex did not confirm that the work stopped.");
+      return ctx.interruptFallback();
+    }).then(() => {
+      if (disposed || generation !== rootTurnGeneration || !stoppedByUser) return false;
+      rememberRootTurnFinished(currentTurnId);
+      cancelPendingRootCompletion();
+      settleRootTurn(null);
+      ctx.emit({ type: "runtime-tasks", tasks: [] });
+      ctx.emit({ type: "turn-end" });
+      return true;
+    }).catch((error: unknown) => {
+      if (disposed || generation !== rootTurnGeneration || !stoppedByUser) return false;
+      cancelPendingRootCompletion();
+      ctx.emit({ type: "notice", tone: "error", text:
+        asString(asRecord(error)?.message) ?? (typeof error === "string" ? error : "Codex did not confirm that the work stopped.") });
+      ctx.emit({ type: "status", status: "error", error: "Codex did not confirm that the work stopped." });
+      ctx.emit({ type: "turn-end" });
+      return false;
+    });
+    stopRecovery = { generation, promise };
+    return promise;
+  }
+
+  function stopTurn(targetThread: string, turn: string, ctx: AdapterContext, generation: number): Promise<boolean> {
+    return requestWithTimeout(ctx, nextId++, "turn/interrupt", { threadId: targetThread, turnId: turn }, stopTimeoutMs)
+      .then(() => true).catch(() => recoverStop(ctx, generation));
+  }
+
+  function stopBackgroundWork(ctx: AdapterContext, generation: number): Promise<boolean>[] {
+    const work: Promise<boolean>[] = [];
+    const targets = new Set([threadId, ...children.keys(), ...sideThreads.keys()]);
+    if (threadId && currentGoal?.status === "active") {
+      const goal = currentGoal;
+      work.push(requestWithTimeout(ctx, nextId++, "thread/goal/set", { threadId, status: "paused" }, stopTimeoutMs)
+        .then(() => {
+          if (disposed || generation !== rootTurnGeneration) return false;
+          currentGoal = { ...goal, status: "paused" };
+          ctx.emit({ type: "goal", goal: { objective: goal.objective, status: "paused" } });
+          return true;
+        }).catch(() => recoverStop(ctx, generation)));
+    }
+    for (const target of targets) {
+      if (!target) continue;
+      const childTurn = children.get(target)?.currentTurnId ?? sideThreads.get(target)?.currentTurnId;
+      if (childTurn) work.push(stopTurn(target, childTurn, ctx, generation));
+      work.push(requestWithTimeout(ctx, nextId++, "thread/backgroundTerminals/clean", { threadId: target }, stopTimeoutMs)
+        .then(() => {
+          if (!disposed && generation === rootTurnGeneration && target === threadId) {
+            ctx.emit({ type: "runtime-tasks", tasks: [] });
+          }
+          return true;
+        }).catch(() => recoverStop(ctx, generation)));
+    }
+    return work;
+  }
+
   return {
     args: (_launch: AgentLaunch) => [],
 
@@ -2978,7 +3363,59 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       void handshake(ctx);
     },
 
+    authenticate,
+
+    connectionLost: () => {
+      for (const waiting of [...pending.values()]) {
+        waiting.reject({ code: "duckweed_connection_closed", message: "Codex disconnected. Your message has been kept for retry." });
+      }
+      pending.clear();
+    },
+
+    dispose: async (ctx, options) => {
+      if (disposed) return;
+      disposed = true;
+      if (authPollTimer !== null) clearInterval(authPollTimer);
+      if (childStreamFlushTimer !== null) clearTimeout(childStreamFlushTimer);
+      cancelPendingRootCompletion();
+      const active = [
+        { threadId, turnId: currentTurnId },
+        ...[...children].map(([threadId, child]) => ({ threadId, turnId: child.currentTurnId })),
+        ...[...sideThreads].map(([threadId, side]) => ({ threadId, turnId: side.currentTurnId })),
+      ];
+      const sends: Promise<void>[] = [];
+      const sendCleanup = (method: string, params: unknown) => {
+        try {
+          sends.push(Promise.resolve(ctx.send({ jsonrpc: "2.0", id: nextId++, method, params })));
+        } catch {
+          // Native teardown owns the backstop when the transport is gone.
+        }
+      };
+      if (!options?.preserveWork && loginId) sendCleanup("account/login/cancel", { loginId });
+      for (const entry of options?.preserveWork ? [] : active) {
+        if (!entry.threadId) continue;
+        sendCleanup("thread/goal/set", { threadId: entry.threadId, status: "paused" });
+        if (entry.turnId) sendCleanup("turn/interrupt", entry);
+        sendCleanup("thread/backgroundTerminals/clean", { threadId: entry.threadId });
+        sendCleanup("thread/unsubscribe", { threadId: entry.threadId });
+      }
+      for (const [id, waiting] of [...pending]) {
+        ctx.cancelPendingSend?.(id);
+        waiting.reject({ code: "duckweed_closed", message: "Codex connection closed." });
+      }
+      pending.clear();
+      // Never wait indefinitely on a full pipe before the session invokes the
+      // native teardown. Its separate control connection can finish cleanup.
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([
+        Promise.allSettled(sends),
+        new Promise<void>((resolve) => { timer = setTimeout(resolve, stopTimeoutMs); }),
+      ]);
+      if (timer !== undefined) clearTimeout(timer);
+    },
+
     receive: (line, ctx) => {
+      if (disposed) return;
       const frame = parseJson(line);
       if (!frame) return;
 
@@ -2988,6 +3425,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
             ? frame.id
             : null;
         if (id === null) return;
+        ctx.acknowledgeSend?.(id);
         const waiting = pending.get(id);
         if (!waiting) return;
         pending.delete(id);
@@ -3001,27 +3439,67 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       if (!method) return;
       const params = asRecord(frame.params) ?? {};
 
+      if (method === "account/updated") {
+        accountUpdateVersion += 1;
+        // Invalidates account-scoped caches even when two workspaces have the
+        // same email and plan in account/read.
+        accountGeneration += 1;
+        accountCachesDirty = true;
+        models = [];
+        ctx.emit({ type: "session", models: [] });
+        ctx.emit({ type: "extensions", extensions: [], extensionsLoaded: false, loading: false });
+        void refreshAccount(ctx);
+        return;
+      }
+      if (method === "account/login/completed") {
+        if (loginId && asString(params.loginId) === loginId) {
+          loginId = null;
+          if (params.success !== true) ctx.emit({ type: "notice", tone: "error", text: asString(params.error) ?? "Codex sign-in did not complete." });
+          else ctx.emit({ type: "notice", tone: "info", text: "Codex sign-in completed." });
+        }
+        void refreshAccount(ctx);
+        return;
+      }
+      if (method === "skills/changed" || method === "app/list/updated" || method === "mcpServer/oauthLogin/completed" || method === "mcpServer/startupStatus/updated") {
+        const target = asString(params.threadId);
+        if (target && threadId && target !== threadId) return;
+        if (params.failureReason === "reauthenticationRequired") ctx.emit({ type: "notice", tone: "error", text: `${asString(params.name) ?? "An MCP server"} needs to be reconnected because its sign-in expired.` });
+        if (!authenticationRequired) void publishExtensions(ctx);
+        return;
+      }
+
       // A missing or expired credential is reported as a retrying `error`
       // notification after turn/start has already succeeded. Treat it as a
       // terminal auth failure immediately instead of leaving the turn active
       // through every reconnect attempt.
       if (method === "error") {
+        const target = asString(params.threadId);
+        if (target && target !== threadId && !children.has(target) && !sideThreads.has(target)) return;
         const error = asRecord(params.error);
         const detail = [asString(error?.message), asString(error?.additionalDetails)]
           .filter((part): part is string => Boolean(part))
           .join("\n");
         if (isAuthenticationFailure(detail)) {
-          ctx.emit({
-            type: "status",
-            status: "error",
-            error: detail || "Codex authentication failed.",
-          });
+          rejectedAuthVersion = accountUpdateVersion;
+          const cachedSignedIn = accountSignedIn;
+          applyAccount({ account: null, requiresOpenaiAuth: true }, ctx);
+          accountSignedIn = cachedSignedIn;
+          ctx.emit({ type: "notice", tone: "error", text: detail || "Codex authentication failed." });
+          ctx.emit({ type: "status", status: "idle" });
         }
         return;
       }
 
       if (frame.id !== undefined) {
         const id = frame.id as string | number;
+        if (method === "currentTime/read") {
+          ctx.send({ jsonrpc: "2.0", id, result: { currentTimeAt: Math.floor(Date.now() / 1_000) } });
+          return;
+        }
+        if (method === "item/permissions/requestApproval") {
+          handlePermissionsApproval(id, params, ctx);
+          return;
+        }
         if (
           method === "item/commandExecution/requestApproval" ||
           method === "item/fileChange/requestApproval"
@@ -3071,28 +3549,54 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       // dropped and the pane freezes on the empty Thinking placeholder.
       const incomingTurnId = asString(params.turnId) ?? asString(asRecord(params.turn)?.id);
       const awaitingUnconfirmedRootTurn =
-        rootTurnMayBeActive && !rootTurnStatusConfirmed;
+        rootTurnMayBeActive && currentTurnId === null;
+      const liveOutput = method.startsWith("item/") || method === "turn/plan/updated";
       if (
         incomingTurnId && incomingTurnId !== currentTurnId &&
-        !completedRootTurnIds.has(incomingTurnId) &&
-        (rootPendingCompletion || rootTurnCompletionObserved || awaitingUnconfirmedRootTurn) &&
-        (method.startsWith("item/") || method === "turn/plan/updated" || method === "turn/started")
+        !finishedRootTurnIds.has(incomingTurnId)
       ) {
-        rememberRootTurnCompleted(currentTurnId);
-        cancelPendingRootCompletion();
-        currentTurnId = incomingTurnId;
-        rootTurnCompletionObserved = false;
-        rootTurnMayBeActive = true;
-        rootTurnStatusConfirmed = true;
-        rootTurnWasSteered = false;
-        ctx.emit({ type: "status", status: "working" });
+        const rootTurnUnsettled = Boolean(
+          rootPendingCompletion || rootTurnCompletionObserved || awaitingUnconfirmedRootTurn,
+        );
+        const continuesNewTurn =
+          !completedRootTurnIds.has(incomingTurnId) &&
+          rootTurnUnsettled &&
+          (liveOutput || method === "turn/started");
+        // Only a local fallback retired this turn, so new output means it was
+        // still running. A finishing turn can still record leftover steered
+        // input after the next one started, so user echoes prove nothing.
+        const revivesClosedTurn =
+          completedRootTurnIds.has(incomingTurnId) &&
+          (currentTurnId === null || rootTurnUnsettled) &&
+          liveOutput &&
+          asString(asRecord(params.item)?.type) !== "userMessage";
+        if (!stoppedByUser && (continuesNewTurn || revivesClosedTurn)) adoptRootTurn(incomingTurnId, ctx);
+      }
+      if (
+        method === "turn/completed" && incomingTurnId && currentTurnId &&
+        incomingTurnId !== currentTurnId
+      ) {
+        // Codex publishes thread idle just before turn/completed. When both
+        // belong to a turn that was already replaced, the idle fallback armed
+        // a completion for the newer turn, which is still running.
+        if (!finishedRootTurnIds.has(incomingTurnId) && !rootTurnCompletionObserved) {
+          if (rootPendingCompletion) cancelPendingRootCompletion();
+          rootCompletionSeenDuringSteer = undefined;
+        }
+        rememberRootTurnCompleted(incomingTurnId);
+        rememberRootTurnFinished(incomingTurnId);
       }
       if (!notificationBelongsToRoot(method, params)) return;
       handleNotification(method, params, ctx);
+      if (rootStartRequestId !== null && currentTurnId && rootTurnStatusConfirmed &&
+          (method === "turn/started" || liveOutput)) {
+        ctx.acknowledgeSend?.(rootStartRequestId);
+      }
     },
 
     prompt: (prompt, ctx) => {
-      if (!threadId) return;
+      if (!threadId || authenticationRequired || disposed) return;
+      stoppedByUser = false;
       cancelPendingRootCompletion();
       rootTurnCompletionObserved = false;
       rootTurnWasSteered = false;
@@ -3110,7 +3614,9 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       // to close this turn.
       rootTurnStatusConfirmed = false;
       const generation = ++rootTurnGeneration;
-      void request(ctx, "turn/start", {
+      const requestId = nextId++;
+      rootStartRequestId = requestId;
+      void requestWithTimeout(ctx, requestId, "turn/start", {
         threadId,
         input: [
           ...(prompt.text ? [{ type: "text", text: prompt.text }] : []),
@@ -3140,36 +3646,79 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         // discipline: `effort` is the exact field name in TurnStartParams.
         ...(currentEffort ? { effort: currentEffort } : {}),
         ...serviceTierParamsFor(currentModel),
-      })
+      }, rpcTimeoutMs)
         .then((result) => {
-          const responseTurnId = asString(asRecord(result.turn)?.id);
-          if (!responseTurnId) return;
+          const responseTurn = asRecord(result.turn);
+          const responseTurnId = asString(responseTurn?.id);
+          if (!responseTurnId?.trim()) {
+            if (generation !== rootTurnGeneration || !rootTurnMayBeActive ||
+                (currentTurnId && rootTurnStatusConfirmed)) return;
+            throw { code: "duckweed_invalid_turn", message: "Codex did not confirm the start of this message. Your message has been kept for retry." };
+          }
           if (generation !== rootTurnGeneration || !rootTurnMayBeActive) {
             // A completion/status fallback won the race. Remember the late
             // response's id so it cannot be mistaken for a later fast turn.
             rememberRootTurnCompleted(responseTurnId);
+            if (
+              stopRequestedForGeneration === generation &&
+              generation === rootTurnGeneration &&
+              !finishedRootTurnIds.has(responseTurnId) &&
+              threadId
+            ) {
+              // Stop arrived before the id did. Without this the turn kept
+              // running unseen and swallowed the next prompt.
+              stopRequestedForGeneration = null;
+              void stopTurn(threadId, responseTurnId, ctx, generation)
+                .then((stopped) => { if (stopped) rememberRootTurnFinished(responseTurnId); });
+            }
             return;
           }
-          if (!completedRootTurnIds.has(responseTurnId)) {
-            // The response is a second authoritative source for the ID. This
-            // keeps interrupt and completion matching correct if the matching
-            // `turn/started` notification was missed.
-            currentTurnId ??= responseTurnId;
+          if (finishedRootTurnIds.has(responseTurnId)) return;
+          if (["completed", "interrupted", "failed"].includes(asString(responseTurn?.status) ?? "")) {
+            currentTurnId = responseTurnId;
             rootTurnStatusConfirmed = true;
+            handleNotification("turn/completed", { threadId, turn: responseTurn }, ctx);
+            return;
           }
+          if (completedRootTurnIds.has(responseTurnId)) {
+            // On a busy thread Codex steers this input into the running turn
+            // and answers with that turn's id, without a new turn/started.
+            // Duckweed had closed it early, so it must become live again.
+            adoptRootTurn(responseTurnId, ctx);
+            return;
+          }
+          // The response is a second authoritative source for the ID. This
+          // keeps interrupt and completion matching correct if the matching
+          // `turn/started` notification was missed.
+          currentTurnId ??= responseTurnId;
+          rootTurnStatusConfirmed = true;
         })
         .catch((error: unknown) => {
-          if (generation !== rootTurnGeneration) return;
+          if (disposed || generation !== rootTurnGeneration || stoppedByUser || !rootTurnMayBeActive) return;
+          // Coarse thread status does not prove this message was accepted. A
+          // turn identity with live notifications does, even if its reply was lost.
+          if (resumeErrorCode(error) === "duckweed_rpc_timeout" &&
+              asRecord(error)?.cancelledBeforeDelivery !== true && currentTurnId && rootTurnStatusConfirmed) return;
+          stoppedByUser = true;
+          stopRequestedForGeneration = generation;
           cancelPendingRootCompletion();
           settleRootTurn(null);
           const record = asRecord(error);
+          // Capacity errors confirm delivery and have their own optional follow-up flow.
+          if (!isCodexCapacityError(asString(record?.message) ?? "")) {
+            ctx.emit({ type: "prompt-failed", prompt });
+          }
           ctx.emit({
             type: "notice",
             tone: "error",
             text: asString(record?.message) ?? "Codex could not start the turn.",
           });
           ctx.emit({ type: "turn-end" });
-        });
+          if (["duckweed_rpc_timeout", "duckweed_invalid_turn"].includes(resumeErrorCode(error) ?? "") && ctx.interruptFallback) {
+            void recoverStop(ctx, generation);
+          }
+        })
+        .finally(() => { if (rootStartRequestId === requestId) rootStartRequestId = null; });
     },
 
     steer: async (prompt, ctx) => {
@@ -3326,6 +3875,8 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
      * arrived so the composer does not sit on "Loading conversation" forever.
      */
     resume: (sessionId, ctx) => {
+      stoppedByUser = false;
+      currentGoal = null;
       cancelPendingRootCompletion();
       rootTurnCompletionObserved = false;
       hydratingResume = true;
@@ -3474,6 +4025,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         void request(ctx, "thread/goal/get", { threadId })
           .then((goalResult) => {
             const goal = readGoal(goalResult.goal);
+            currentGoal = goal;
             ctx.emit({
               type: "goal",
               goal: goal ? { objective: goal.objective, status: goal.status } : null,
@@ -3530,6 +4082,11 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
 
     interrupt: (ctx) => {
       cancelPendingRootCompletion();
+      if (rootStartRequestId !== null && ctx.cancelPendingSend?.(rootStartRequestId)) {
+        const id = rootStartRequestId;
+        rootStartRequestId = null;
+        pending.get(id)?.reject({ code: "duckweed_prompt_cancelled" });
+      }
       if (resumeRequestId !== null || hydratingResume) {
         resumeAborted = true;
       }
@@ -3539,6 +4096,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         const inFlight = pending.get(requestId);
         pending.delete(requestId);
         inFlight?.reject({ code: RESUME_CANCELLED });
+        ctx.cancelPendingSend?.(requestId);
         notify(ctx, "$/cancelRequest", { id: requestId });
         return;
       }
@@ -3550,26 +4108,32 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       if (!threadId || !currentTurnId) {
         // Working without an interruptible turn is stale adapter state. Let the
         // session recover instead of leaving a Stop button that cannot work.
+        // A pending turn/start still interrupts its turn once the id arrives.
+        if (rootTurnMayBeActive) {
+          stoppedByUser = true;
+          stopRequestedForGeneration = rootTurnGeneration;
+          stopBackgroundWork(ctx, rootTurnGeneration);
+          if (ctx.interruptFallback) {
+            void recoverStop(ctx, rootTurnGeneration);
+            return;
+          }
+        }
         settleRootTurn(null);
         ctx.emit({ type: "turn-end" });
         return;
       }
       const turnId = currentTurnId;
-      void request(ctx, "turn/interrupt", { threadId, turnId })
-        .then(() => {
-          if (currentTurnId !== turnId) return;
-          cancelPendingRootCompletion();
-          settleRootTurn(turnId);
-          ctx.emit({ type: "turn-end" });
-        })
-        .catch(() => {
-          // The turn may have finished between the click and the call. Either
-          // way, keeping the local session marked as working would be stale.
-          if (currentTurnId !== turnId) return;
-          cancelPendingRootCompletion();
-          settleRootTurn(turnId);
-          ctx.emit({ type: "turn-end" });
-        });
+      const generation = rootTurnGeneration;
+      stoppedByUser = true;
+      const work = stopBackgroundWork(ctx, generation);
+      work.push(stopTurn(threadId, turnId, ctx, generation));
+      void Promise.all(work).then((stopped) => {
+        if (stopped.some((result) => !result) || disposed || generation !== rootTurnGeneration || currentTurnId !== turnId) return;
+        rememberRootTurnFinished(turnId);
+        cancelPendingRootCompletion();
+        settleRootTurn(turnId);
+        ctx.emit({ type: "turn-end" });
+      });
     },
 
     respond: (permissionId, optionId, ctx) => {
@@ -3595,7 +4159,10 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         return;
       }
       approvals.delete(permissionId);
-      ctx.send({ jsonrpc: "2.0", id: approval.id, result: { decision: optionId } });
+      ctx.send({ jsonrpc: "2.0", id: approval.id, result: approval.kind === "permissions" ? {
+        permissions: optionId === "accept" || optionId === "acceptForSession" ? approval.permissions ?? {} : {},
+        scope: optionId === "acceptForSession" ? "session" : "turn",
+      } : { decision: optionId } });
       ctx.emit({ type: "permission", permission: null });
       ctx.emit({ type: "status", status: "working" });
     },
@@ -3665,7 +4232,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     refreshTasks: listRuntimeTasks,
     stopTask: async (processId, ctx) => {
       if (!threadId) return false;
-      await request(ctx, "thread/backgroundTerminals/terminate", { threadId, processId });
+      await requestWithTimeout(ctx, nextId++, "thread/backgroundTerminals/terminate", { threadId, processId }, stopTimeoutMs);
       return true;
     },
   };

@@ -98,6 +98,11 @@ data class RemoteTerminal(
     val conversation: List<RemoteConversationMessage> = emptyList(),
     val permission: RemotePermission? = null,
     val terminalOutput: String? = null,
+    val experience: String? = null,
+    val history: String? = null,
+    val historyError: String? = null,
+    val historyRequestId: String? = null,
+    val scheduled: String? = null,
     val pendingAction: PendingMobileAction? = null,
 ) {
     val isWorking: Boolean get() = status == "working" || status == "waiting"
@@ -113,6 +118,14 @@ data class PendingReadSync(
 data class RemoteSlashCommand(
     val name: String,
     val description: String,
+    val options: List<RemoteCommandOption> = emptyList(),
+)
+
+data class RemoteCommandOption(
+    val value: String,
+    val label: String,
+    val description: String,
+    val current: Boolean = false,
 )
 
 data class RemoteAgentActivity(

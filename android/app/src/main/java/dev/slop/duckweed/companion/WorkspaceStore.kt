@@ -48,7 +48,7 @@ class WorkspaceStore(private val context: Context) {
                 }
                 val commands = JSONArray().apply {
                     terminal.commands.forEach { command ->
-                        put(JSONObject().put("name", command.name).put("description", command.description))
+                        put(SlashCommandJson.write(command))
                     }
                 }
                 val activity = JSONArray().apply {
@@ -155,7 +155,12 @@ class WorkspaceStore(private val context: Context) {
                         .put("activity", activity)
                         .put("conversation", conversation)
                         .put("permission", permission)
-                        .put("terminalOutput", terminal.terminalOutput),
+                        .put("terminalOutput", terminal.terminalOutput)
+                        .put("experience", terminal.experience?.let { JSONObject(it) })
+                        .put("history", terminal.history?.let { JSONArray(it) })
+                        .put("historyError", terminal.historyError)
+                        .put("historyRequestId", terminal.historyRequestId)
+                        .put("scheduled", terminal.scheduled?.let { JSONObject(it) }),
                 )
             }
             projects.put(
@@ -235,9 +240,7 @@ class WorkspaceStore(private val context: Context) {
                                 readCompletionSeq = if (terminal.isNull("readCompletionSeq")) null else terminal.optLong("readCompletionSeq"),
                                 commands = (0 until commandsJson.length()).mapNotNull { commandIndex ->
                                     val command = commandsJson.optJSONObject(commandIndex) ?: return@mapNotNull null
-                                    val name = command.optString("name").trim()
-                                    if (!name.startsWith("/")) return@mapNotNull null
-                                    RemoteSlashCommand(name, command.optString("description").trim())
+                                    SlashCommandJson.read(command)
                                 },
                                 activity = parseAgentActivities(activityJson, json.optLong("updatedAt")),
                                 conversation = (0 until conversationJson.length()).mapNotNull { messageIndex ->
@@ -257,6 +260,11 @@ class WorkspaceStore(private val context: Context) {
                                 },
                                 permission = parseRemotePermission(permissionJson),
                                 terminalOutput = terminalOutput,
+                                experience = terminal.optJSONObject("experience")?.toString(),
+                                history = terminal.optJSONArray("history")?.toString(),
+                                historyError = terminal.optString("historyError").takeIf { it.isNotBlank() && it != "null" },
+                                historyRequestId = terminal.optString("historyRequestId").takeIf { it.isNotBlank() && it != "null" },
+                                scheduled = terminal.optJSONObject("scheduled")?.toString(),
                             )
                         },
                     )

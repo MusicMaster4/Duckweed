@@ -8,13 +8,14 @@
 //! name and icon.
 
 use std::io::Cursor;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rodio::cpal::traits::{DeviceTrait, HostTrait};
-use rodio::cpal::DeviceId;
+use rodio::cpal::{DeviceId, StreamError};
+use rodio::mixer::Mixer;
 use rodio::{Decoder, DeviceSinkBuilder, MixerDeviceSink, Player};
 
 /// The cues live in the binary. The copies Vite emits into `dist/` stay there
@@ -38,17 +39,38 @@ struct Request {
     reply: SyncSender<Result<(), String>>,
 }
 
+/// A device can stop delivering samples without changing its ID, especially
+/// after sleep or a driver restart. CPAL reports that on its own callback thread.
+#[derive(Default)]
+struct OutputState {
+    device: Option<DeviceId>,
+    failed: Arc<AtomicBool>,
+}
+
+impl OutputState {
+    fn reusable_for(&self, device: &Option<DeviceId>) -> bool {
+        self.device == *device && !self.failed.load(Ordering::Acquire)
+    }
+
+    fn error_callback(&self) -> impl FnMut(StreamError) + Send + Clone + 'static {
+        let failed = Arc::clone(&self.failed);
+        move |error| {
+            // An underrun is a transient glitch, not a stopped stream.
+            if !matches!(error, StreamError::BufferUnderrun) {
+                failed.store(true, Ordering::Release);
+            }
+            eprintln!("duckweed: audio output failed: {error}");
+        }
+    }
+}
+
 /// The open output device and the track feeding it.
 struct Output {
-    /// Which device this was opened on, so a later default-device change can be
-    /// noticed: an open stream keeps playing to the device it was built for
-    /// even after Windows moves the system default elsewhere.
-    device: Option<DeviceId>,
-    player: Player,
-    /// Dropping this closes the device and silences the player, so it is held
-    /// for as long as the app might play another cue. Declared last so the
-    /// player stops before the device it feeds goes away.
-    _sink: MixerDeviceSink,
+    state: OutputState,
+    player: Option<Player>,
+    /// Keep the session open between cues so the mixer continues to list
+    /// Duckweed. Declared last so the player stops before its device closes.
+    sink: MixerDeviceSink,
 }
 
 /// Handle to the audio thread. Cheap to clone; the thread starts on first use.
@@ -119,36 +141,62 @@ fn run_worker(requests: Receiver<Request>) {
 
 fn start(output: &mut Option<Output>, cue: &'static [u8]) -> Result<(), String> {
     let device = default_device_id();
-    if output.as_ref().is_some_and(|open| open.device != device) {
-        // The user switched output devices; reopen so the cue follows them.
+    if output
+        .as_ref()
+        .is_some_and(|open| !open.state.reusable_for(&device))
+    {
+        // Reopen after a default-device change OR an asynchronous stream error.
+        // Keeping a dead stream would accept cues without ever making a sound.
         *output = None;
     }
     if output.is_none() {
-        let mut sink = DeviceSinkBuilder::open_default_sink()
+        let device = rodio::cpal::default_host()
+            .default_output_device()
+            .ok_or("no default audio output device")?;
+        let state = OutputState {
+            device: device.id().ok(),
+            ..OutputState::default()
+        };
+        let mut sink = DeviceSinkBuilder::from_device(device)
+            .map_err(|error| format!("could not configure an audio output: {error}"))?
+            .with_error_callback(state.error_callback())
+            .open_sink_or_fallback()
             .map_err(|error| format!("could not open an audio output: {error}"))?;
-        // Closing the device on the way out is the intended behaviour here, so
-        // rodio's warning about it would only be noise on stderr.
         sink.log_on_drop(false);
-        let player = Player::connect_new(sink.mixer());
         *output = Some(Output {
-            device,
-            player,
-            _sink: sink,
+            state,
+            player: None,
+            sink,
         });
     }
     let open = output
         .as_mut()
         .ok_or("the audio output disappeared while opening it")?;
+    replace_cue(&mut open.player, open.sink.mixer(), cue)?;
+    if open.state.failed.load(Ordering::Acquire) {
+        // Catch errors delivered while opening/starting, so this completion
+        // can use the WebView fallback instead of being reported as audible.
+        *output = None;
+        return Err("the audio output failed while starting a cue".into());
+    }
+    Ok(())
+}
 
+fn replace_cue(
+    player: &mut Option<Player>,
+    mixer: &Mixer,
+    cue: &'static [u8],
+) -> Result<(), String> {
     let source = Decoder::new(Cursor::new(cue))
         .map_err(|error| format!("could not decode a cue: {error}"))?;
-    if !open.player.empty() {
-        // Two completions at once restart the cue instead of queueing a copy
-        // behind the one already sounding.
-        open.player.clear();
-    }
-    open.player.append(source);
-    open.player.play();
+    // Player::clear() waits for the device to drain its queue. If the stream
+    // dies during that wait, the audio worker never answers another request.
+    // Dropping the old player stops it without waiting for a device callback.
+    *player = None;
+    let next = Player::connect_new(mixer);
+    next.append(source);
+    next.play();
+    *player = Some(next);
     Ok(())
 }
 
@@ -200,6 +248,86 @@ mod tests {
         assert!(picks.windows(2).any(|pair| pair[0] != pair[1]));
     }
 
+    #[test]
+    fn stream_errors_invalidate_output_even_when_the_device_id_is_unchanged() {
+        for error in [
+            StreamError::DeviceNotAvailable,
+            StreamError::StreamInvalidated,
+        ] {
+            let device = Some(DeviceId(
+                rodio::cpal::default_host().id(),
+                "speakers".into(),
+            ));
+            let state = OutputState {
+                device: device.clone(),
+                ..OutputState::default()
+            };
+            let mut on_error = state.error_callback();
+            assert!(state.reusable_for(&device));
+            on_error(error);
+            assert!(!state.reusable_for(&device));
+        }
+    }
+
+    #[test]
+    fn changing_the_default_device_invalidates_a_healthy_output() {
+        let device = Some(DeviceId(
+            rodio::cpal::default_host().id(),
+            "speakers".into(),
+        ));
+        let other = Some(DeviceId(
+            rodio::cpal::default_host().id(),
+            "headphones".into(),
+        ));
+        let state = OutputState {
+            device: device.clone(),
+            ..OutputState::default()
+        };
+        assert!(state.reusable_for(&device));
+        assert!(!state.reusable_for(&other));
+        assert!(!state.reusable_for(&None));
+    }
+
+    #[test]
+    fn an_underrun_does_not_discard_a_working_stream() {
+        let state = OutputState::default();
+        state.error_callback()(StreamError::BufferUnderrun);
+        assert!(state.reusable_for(&None));
+    }
+
+    #[test]
+    fn a_late_error_from_the_old_stream_does_not_invalidate_its_replacement() {
+        let old = OutputState::default();
+        let mut on_error = old.error_callback();
+        let replacement = OutputState::default();
+        on_error(StreamError::DeviceNotAvailable);
+        assert!(!old.reusable_for(&None));
+        assert!(replacement.reusable_for(&None));
+    }
+
+    #[test]
+    fn replacing_a_cue_does_not_wait_for_a_stalled_device() {
+        let (finished, completion) = mpsc::sync_channel(1);
+        let worker = std::thread::spawn(move || {
+            // No device callback consumes this mixer. The old clear() path
+            // blocked forever here when a second completion interrupted a cue.
+            let (mixer, mut samples) = rodio::mixer::mixer(
+                rodio::ChannelCount::new(2).unwrap(),
+                rodio::SampleRate::new(48_000).unwrap(),
+            );
+            let mut player = None;
+            replace_cue(&mut player, &mixer, CUES[0]).unwrap();
+            replace_cue(&mut player, &mixer, CUES[1]).unwrap();
+            assert_eq!(player.as_ref().unwrap().len(), 1);
+            assert!(samples.by_ref().take(48_000).any(|sample| sample != 0.0));
+            finished.send(()).unwrap();
+        });
+        completion
+            .recv_timeout(Duration::from_secs(1))
+            .expect("replacing a cue must not wait for audio samples to drain");
+        worker.join().unwrap();
+    }
+
     /// Hand check on a machine with speakers, since CI runners have none:
     /// `cargo test -- --ignored plays_a_cue_on_the_default_device`.
     /// While it sleeps, the volume mixer lists the test binary, proof that the
@@ -209,6 +337,19 @@ mod tests {
     fn plays_a_cue_on_the_default_device() {
         let player = SoundPlayer::default();
         player.play(None).expect("the cue starts");
+        std::thread::sleep(Duration::from_secs(3));
+    }
+
+    #[test]
+    #[ignore = "opens and reopens the default output device and makes noise"]
+    fn reopens_the_default_device_after_a_stream_error() {
+        let mut output = None;
+        start(&mut output, CUES[0]).expect("the first cue starts");
+        std::thread::sleep(Duration::from_millis(100));
+        let device = output.as_ref().unwrap().state.device.clone();
+        output.as_ref().unwrap().state.error_callback()(StreamError::StreamInvalidated);
+        start(&mut output, CUES[1]).expect("the next cue reopens the device");
+        assert!(output.as_ref().unwrap().state.reusable_for(&device));
         std::thread::sleep(Duration::from_secs(3));
     }
 
