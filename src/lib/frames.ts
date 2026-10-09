@@ -153,6 +153,7 @@ export function createFrameBuffer(write: (chunk: FrameWrite) => void): FrameBuff
   let frame = "";
   let open = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let disposed = false;
 
   function disarm(): void {
     if (timer === undefined) return;
@@ -170,6 +171,13 @@ export function createFrameBuffer(write: (chunk: FrameWrite) => void): FrameBuff
   }
 
   function push(chunk: string): void {
+    if (disposed || !chunk) return;
+    // Ordinary shell output needs neither escape-tail parsing nor a fresh
+    // private-mode regex. Deliver the original string without assembling it.
+    if (!open && !carry && !chunk.includes(ESC)) {
+      write({ text: chunk, synchronized: false, complete: true });
+      return;
+    }
     let text = carry + chunk;
     carry = "";
 
@@ -249,6 +257,12 @@ export function createFrameBuffer(write: (chunk: FrameWrite) => void): FrameBuff
     push,
     isFraming: () => open,
     flush,
-    dispose: disarm,
+    dispose() {
+      disarm();
+      disposed = true;
+      carry = "";
+      frame = "";
+      open = false;
+    },
   };
 }

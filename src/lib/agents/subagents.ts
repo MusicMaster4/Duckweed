@@ -83,7 +83,22 @@ function firstSentence(text: string, limit = 120): string {
   return compact(sentence, limit);
 }
 
+// Reducer items are immutable. Weak keys release projections with their transcript.
+const summaryCache = new WeakMap<ToolItem, SubagentSummary>();
+const fleetCache = new WeakMap<AgentItem, SubagentSummary[]>();
+const rosterCache = new WeakMap<ToolItem, SubagentRoster>();
+const rostersCache = new WeakMap<AgentItem, SubagentRoster[]>();
+const EMPTY_SUMMARIES: SubagentSummary[] = [];
+const EMPTY_ROSTERS: SubagentRoster[] = [];
+
+function sameEntries<T>(previous: T[] | undefined, next: T[]): boolean {
+  return previous !== undefined && previous.length === next.length &&
+    previous.every((entry, index) => entry === next[index]);
+}
+
 function summaryFor(item: ToolItem): SubagentSummary {
+  const cached = summaryCache.get(item);
+  if (cached) return cached;
   const meta: SubagentMeta = item.subagent ?? {};
   const role = clean(meta.role);
   const prompt = clean(meta.prompt);
@@ -99,7 +114,7 @@ function summaryFor(item: ToolItem): SubagentSummary {
           ? "Delegated work failed"
           : "Delegated work completed");
 
-  return {
+  const summary: SubagentSummary = {
     id: clean(meta.threadId) ?? item.callId,
     callId: item.callId,
     label: compact(label, 80),
@@ -116,6 +131,8 @@ function summaryFor(item: ToolItem): SubagentSummary {
     startedAt: item.at,
     item,
   };
+  summaryCache.set(item, summary);
+  return summary;
 }
 
 function currentTurnStart(items: AgentItem[]): number {
@@ -136,14 +153,20 @@ function currentTurnStart(items: AgentItem[]): number {
 export function subagentsForTurn(items: AgentItem[]): SubagentSummary[] {
   const turnStart = currentTurnStart(items);
 
-  return items
-    .filter(
-      (item, index): item is ToolItem =>
-        item.kind === "tool" &&
-        item.tool === "task" &&
-        (index > turnStart || item.status === "running" || item.status === "pending"),
-    )
-    .map(summaryFor);
+  const summaries: SubagentSummary[] = [];
+  for (let index = 0; index < items.length; index += 1) {
+    const item = items[index];
+    if (item.kind === "tool" && item.tool === "task" &&
+        (index > turnStart || item.status === "running" || item.status === "pending")) {
+      summaries.push(summaryFor(item));
+    }
+  }
+  if (!summaries.length) return EMPTY_SUMMARIES;
+  const anchor = items[turnStart] ?? items[0];
+  const previous = fleetCache.get(anchor);
+  if (sameEntries(previous, summaries)) return previous!;
+  fleetCache.set(anchor, summaries);
+  return summaries;
 }
 
 /**
@@ -170,11 +193,19 @@ export function subagentRosters(items: AgentItem[]): SubagentRoster[] {
       if (item.kind === "tool" && item.tool === "task") tasks.push(item);
     }
     if (!tasks.length) continue;
-    rosters.push({
-      anchorItemId: tasks[0].id,
-      subagents: tasks.map(summaryFor),
-    });
+    const subagents = tasks.map(summaryFor);
+    const previous = rosterCache.get(tasks[0]);
+    const roster = previous && sameEntries(previous.subagents, subagents)
+      ? previous
+      : { anchorItemId: tasks[0].id, subagents };
+    rosterCache.set(tasks[0], roster);
+    rosters.push(roster);
   }
+  if (!rosters.length) return EMPTY_ROSTERS;
+  const anchor = items[0];
+  const previous = rostersCache.get(anchor);
+  if (sameEntries(previous, rosters)) return previous!;
+  rostersCache.set(anchor, rosters);
   return rosters;
 }
 

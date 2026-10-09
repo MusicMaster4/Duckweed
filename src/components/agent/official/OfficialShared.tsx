@@ -18,7 +18,7 @@ import { AgentMessageText } from "../AgentMessageText";
 import { MessageCopyButton } from "../MessageCopyButton";
 import { AgentProviderIcon } from "../AgentProviderIcon";
 import { SubagentBoardAnchor } from "../subagents/SubagentBoard";
-import { useSubagentUi } from "../subagents/SubagentUiContext";
+import { useSubagentActivityUi } from "../subagents/SubagentUiContext";
 import { toolLoadingPhase } from "../toolLoadingPhase";
 import { preparingMessageFor, thinkingHeadlineFor } from "./preparingMessages";
 import { thinkingPulsePatternFor } from "./thinkingPulsePatterns";
@@ -626,7 +626,7 @@ export const ToolActivity = memo(function ToolActivity({
   compact?: boolean;
   expandSubagentLocally?: boolean;
 }) {
-  const { absorbedCallIds, peekedCallId, peekSubagent } = useSubagentUi();
+  const { absorbedCallIds, peekedCallId, peekSubagent } = useSubagentActivityUi();
   const isSubagent = item.tool === "task";
   const absorbed = isSubagent && !expandSubagentLocally && absorbedCallIds.has(item.callId);
   const hasOutput = item.output.trim().length > 0;
@@ -1013,7 +1013,7 @@ export const ActivityHistory = memo(function ActivityHistory({
    */
   clusterId: string;
 }) {
-  const { absorbedCallIds, rosterAnchorIds } = useSubagentUi();
+  const { absorbedCallIds, rosterAnchorIds } = useSubagentActivityUi();
   const thoughts = activities.filter(
     (item): item is ThinkingItem => item.kind === "thinking",
   );
@@ -1209,6 +1209,10 @@ export function activityClusterHiddenByComment(
   );
 }
 
+// Settled phases remain stable while a later response streams. Weak keys avoid
+// retaining a closed conversation just to cache its presentation objects.
+const activityGroupCache = new WeakMap<ThinkingItem | ToolItem, ActivityGroup>();
+
 /**
  * Keep reasoning/tool activity scoped to the user turn and the assistant
  * comment that preceded it. A comment followed by more work starts a fresh
@@ -1219,24 +1223,32 @@ export function activityGroups(items: AgentItem[]): ActivityGroup[] {
   let turnStart = 0;
 
   const collectTurn = (start: number, end: number) => {
-    let activity: Array<{
-      item: ToolItem | Extract<AgentItem, { kind: "thinking" }>;
-      index: number;
-    }> = [];
+    let activity: ActivityGroup["activities"] = [];
+    let firstIndex = -1;
 
     const flush = (
       answerId: string | null,
       replacedByCommentId: string | null = null,
     ) => {
       if (!activity.length) return;
-      groups.push({
-        firstId: activity[0].item.id,
-        firstIndex: activity[0].index,
-        activities: activity.map(({ item }) => item),
+      const first = activity[0];
+      const previous = activityGroupCache.get(first);
+      const unchanged = previous && previous.firstIndex === firstIndex &&
+        previous.answerId === answerId &&
+        previous.replacedByCommentId === replacedByCommentId &&
+        previous.activities.length === activity.length &&
+        previous.activities.every((item, index) => item === activity[index]);
+      const group = unchanged ? previous : {
+        firstId: first.id,
+        firstIndex,
+        activities: activity,
         answerId,
         replacedByCommentId,
-      });
+      };
+      activityGroupCache.set(first, group);
+      groups.push(group);
       activity = [];
+      firstIndex = -1;
     };
 
     let lastActivityIndex = -1;
@@ -1251,7 +1263,8 @@ export function activityGroups(items: AgentItem[]): ActivityGroup[] {
     for (let index = start; index < end; index += 1) {
       const item = items[index];
       if (item.kind === "thinking" || item.kind === "tool") {
-        activity.push({ item, index });
+        if (!activity.length) firstIndex = index;
+        activity.push(item);
         continue;
       }
       if (item.kind !== "assistant" || !activity.length) continue;

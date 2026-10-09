@@ -146,14 +146,18 @@ fn discover_shells() -> Vec<ShellInfo> {
 /// several panes opened together share the same result. A newly installed
 /// shell becomes available after Duckweed restarts, just like a PATH change.
 pub fn available_shells() -> Vec<ShellInfo> {
+    shell_catalog().to_vec()
+}
+
+fn shell_catalog() -> &'static [ShellInfo] {
     static SHELLS: OnceLock<Vec<ShellInfo>> = OnceLock::new();
-    SHELLS.get_or_init(discover_shells).clone()
+    SHELLS.get_or_init(discover_shells)
 }
 
 /// The shell we spawn when the frontend does not ask for anything specific.
 pub fn default_shell() -> ShellInfo {
-    if let Some(first) = available_shells().into_iter().next() {
-        return first;
+    if let Some(first) = shell_catalog().first() {
+        return first.clone();
     }
 
     // Last-resort fallbacks so we always have something to spawn.
@@ -181,9 +185,10 @@ pub fn default_shell() -> ShellInfo {
 pub fn resolve_shell(id: Option<&str>) -> ShellInfo {
     match id {
         None => default_shell(),
-        Some(id) => available_shells()
-            .into_iter()
-            .find(|s| s.id == id)
+        Some(id) => shell_catalog()
+            .iter()
+            .find(|shell| shell.id == id)
+            .cloned()
             .unwrap_or_else(default_shell),
     }
 }

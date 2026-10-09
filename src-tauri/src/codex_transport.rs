@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Output, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use tungstenite::protocol::{Role, WebSocketConfig};
 use tungstenite::{Message, WebSocket};
@@ -440,23 +440,41 @@ fn command_output(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     hide_console(&mut command);
-    let mut child = command.spawn().map_err(|error| error.to_string())?;
-    let deadline = Instant::now() + timeout;
-    loop {
-        if child
-            .try_wait()
-            .map_err(|error| error.to_string())?
-            .is_some()
-        {
-            return child.wait_with_output().map_err(|error| error.to_string());
-        }
-        if Instant::now() >= deadline {
-            kill_tree(child.id());
-            let _ = child.wait();
-            return Err(format!("Codex {action} timed out."));
-        }
-        std::thread::sleep(Duration::from_millis(25));
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
     }
+    let mut child = command.spawn().map_err(|error| error.to_string())?;
+    let pid = child.id();
+    let (done, wait) = mpsc::channel();
+    let watchdog = match std::thread::Builder::new()
+        .name("codex-command-timeout".into())
+        .spawn(move || {
+            if matches!(wait.recv_timeout(timeout), Err(mpsc::RecvTimeoutError::Timeout)) {
+                kill_tree(pid);
+                true
+            } else {
+                false
+            }
+        }) {
+        Ok(watchdog) => watchdog,
+        Err(error) => {
+            kill_tree(pid);
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error.to_string());
+        }
+    };
+    // Drain both pipes while the process runs. Waiting for exit first can
+    // deadlock a command as soon as either OS pipe buffer fills. The watchdog
+    // supplies the deadline without repeatedly polling the process handle.
+    let output = child.wait_with_output();
+    let _ = done.send(());
+    if watchdog.join().unwrap_or(false) {
+        return Err(format!("Codex {action} timed out."));
+    }
+    output.map_err(|error| error.to_string())
 }
 
 /// Old Codex builds keep their stdio server. Supported builds use the same
@@ -587,6 +605,46 @@ pub fn oversized_reply(line: &str, limit: usize) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An isolated child process for command capture and timeout tests.
+    #[test]
+    #[ignore]
+    fn command_output_helper() {
+        let Some(mode) = std::env::var_os("DUCKWEED_COMMAND_OUTPUT_HELPER") else {
+            return;
+        };
+        if mode == "timeout" {
+            std::thread::sleep(Duration::from_secs(30));
+            return;
+        }
+        std::io::stdout().write_all(&vec![0xff; 256 * 1024]).unwrap();
+        std::io::stdout().flush().unwrap();
+        std::io::stderr().write_all(&vec![0xfe; 256 * 1024]).unwrap();
+        std::io::stderr().flush().unwrap();
+    }
+
+    fn output_helper_command(mode: &str) -> std::process::Command {
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command.args(["--exact", "codex_transport::tests::command_output_helper", "--ignored", "--nocapture"])
+            .env("DUCKWEED_COMMAND_OUTPUT_HELPER", mode);
+        command
+    }
+
+    #[test]
+    fn command_capture_drains_both_pipes_before_the_child_exits() {
+        let output = command_output(output_helper_command("output"), Duration::from_secs(5), "fixture").unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout.iter().filter(|byte| **byte == 0xff).count(), 256 * 1024);
+        assert_eq!(output.stderr.iter().filter(|byte| **byte == 0xfe).count(), 256 * 1024);
+    }
+
+    #[test]
+    fn command_capture_keeps_its_timeout_and_reaps_the_child() {
+        let started = std::time::Instant::now();
+        let result = command_output(output_helper_command("timeout"), Duration::from_millis(100), "fixture");
+        assert_eq!(result.unwrap_err(), "Codex fixture timed out.");
+        assert!(started.elapsed() < Duration::from_secs(3));
+    }
 
     #[test]
     fn account_rotation_and_native_renewal_have_different_revisions() {

@@ -6,7 +6,7 @@
 //! explorer can show a file in a popup without shelling out.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::io::Write;
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -268,11 +268,26 @@ pub fn search_projects(
                     .replace('\\', "/");
                 let path = entry.path().to_string_lossy().to_string();
                 for (line_index, line_with_newline) in text.split_inclusive('\n').enumerate() {
+                    if !current.is_current(generation) || truncated.load(Ordering::Relaxed) != 0 {
+                        return WalkState::Quit;
+                    }
                     let line_text = line_with_newline.trim_end_matches(['\r', '\n']);
+                    let mut previous_end = 0;
+                    let mut previous_column = 0;
                     for found in matcher.find_iter(line_text) {
-                        let column = line_text[..found.start()].encode_utf16().count();
+                        if !current.is_current(generation) {
+                            return WalkState::Quit;
+                        }
+                        // Matches do not overlap. Count each preceding character
+                        // once even when one long line contains thousands of hits.
+                        let column = previous_column
+                            + line_text[previous_end..found.start()]
+                                .encode_utf16()
+                                .count();
                         let (preview, preview_column, match_length) =
                             bounded_search_preview(line_text, found.start(), found.end());
+                        previous_end = found.end();
+                        previous_column = column + match_length;
                         let mut guard = matches
                             .lock()
                             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -299,17 +314,18 @@ pub fn search_projects(
     }
 
     let cancelled = !current.is_current(generation);
-    let mut found = matches
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .clone();
-    found.sort_by(|a, b| {
-        a.project_name
-            .to_lowercase()
-            .cmp(&b.project_name.to_lowercase())
-            .then_with(|| a.relative.to_lowercase().cmp(&b.relative.to_lowercase()))
-            .then_with(|| a.line.cmp(&b.line))
-            .then_with(|| a.column.cmp(&b.column))
+    let mut found = std::mem::take(
+        &mut *matches
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()),
+    );
+    found.sort_by_cached_key(|found| {
+        (
+            found.project_name.to_lowercase(),
+            found.relative.to_lowercase(),
+            found.line,
+            found.column,
+        )
     });
     Ok(SearchResponse {
         matches: found,
@@ -389,7 +405,7 @@ pub fn workspace_paths(path: &str) -> Result<Vec<WorkspacePath>, String> {
         }
     }
 
-    files.sort_by(|a, b| a.relative.to_lowercase().cmp(&b.relative.to_lowercase()));
+    files.sort_by_cached_key(|file| file.relative.to_lowercase());
     Ok(files)
 }
 
@@ -420,14 +436,23 @@ fn ignored_names(dir: &Path, names: &[String]) -> HashSet<String> {
     };
     // Feeding the names through stdin rather than argv: a folder can hold tens
     // of thousands of entries, well past the command-line length limit.
-    if let Some(mut stdin) = child.stdin.take() {
-        for name in names {
-            if writeln!(stdin, "{name}").is_err() {
-                break;
-            }
+    let stdin = child.stdin.take();
+    // Read stdout while stdin is fed: a large ignored directory can fill both
+    // pipes and deadlock if the entire input is written before output is read.
+    let output = std::thread::scope(|scope| {
+        if let Some(stdin) = stdin {
+            scope.spawn(move || {
+                let mut stdin = BufWriter::new(stdin);
+                for name in names {
+                    if writeln!(stdin, "{name}").is_err() {
+                        break;
+                    }
+                }
+            });
         }
-    }
-    let Ok(out) = child.wait_with_output() else {
+        child.wait_with_output()
+    });
+    let Ok(out) = output else {
         return HashSet::new();
     };
     // Exit code 1 just means nothing matched; stdout is empty and that is fine.
@@ -466,11 +491,7 @@ pub fn list_dir(path: &str) -> Result<Vec<DirEntry>, String> {
         })
         .collect();
 
-    entries.sort_by(|a, b| {
-        b.is_dir
-            .cmp(&a.is_dir)
-            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-    });
+    entries.sort_by_cached_key(|entry| (!entry.is_dir, entry.name.to_lowercase()));
     Ok(entries)
 }
 
@@ -683,6 +704,32 @@ mod tests {
     }
 
     #[test]
+    fn ignored_names_handles_input_and_output_larger_than_pipe_buffers() {
+        let root = temporary_root("large-ignored-directory");
+        std::fs::create_dir_all(&root).unwrap();
+        let mut git = Command::new("git");
+        git.arg("-C").arg(&root).args(["init", "--quiet"]);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            git.creation_flags(0x0800_0000);
+        }
+        assert!(git.output().unwrap().status.success());
+        std::fs::write(root.join(".gitignore"), "*.tmp\n").unwrap();
+        let names: Vec<_> = (0..8_000)
+            .map(|index| format!("{}-{index}.tmp", "ignored".repeat(10)))
+            .collect();
+        let ignored = ignored_names(&root, &names);
+        assert_eq!(ignored.len(), names.len());
+        assert!(names.iter().all(|name| ignored.contains(name)));
+        std::fs::remove_file(root.join(".gitignore")).unwrap();
+        std::fs::remove_file(root.join(".git/config")).unwrap();
+        // No Git objects are written by this test, so the temporary repository
+        // has no read-only files on Windows.
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn workspace_index_returns_relative_files_and_skips_dependencies() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -743,6 +790,31 @@ mod tests {
         assert_eq!(response.matches[0].column, 3);
         assert_eq!(response.matches[0].preview_column, 3);
 
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn project_search_preserves_columns_for_multiple_matches_after_unicode() {
+        let root = temporary_root("unicode-search-columns");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("matches.txt"),
+            "\u{1f600}needle\u{e9} needle\u{1f600}needle\n",
+        )
+        .unwrap();
+        let response = search_projects(
+            vec![SearchProject {
+                path: root.to_string_lossy().to_string(),
+                name: "Unicode project".into(),
+            }],
+            "needle".into(),
+            1,
+            Arc::new(SearchGeneration::default()),
+        )
+        .unwrap();
+        let columns: Vec<_> = response.matches.iter().map(|found| found.column).collect();
+        assert_eq!(columns, [2, 10, 18]);
+        assert!(response.matches.iter().all(|found| found.match_length == 6));
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -24,7 +24,7 @@ pub struct Context {
 impl Context {
     pub fn for_request(model: &str, tier: &str, tokens: &crate::usage::Tokens) -> Self {
         let model = normalize(model);
-        let long_capable = ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"]
+        let long_capable = ["gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna"]
             .iter()
             .any(|name| model.starts_with(name))
             || model.starts_with("gpt-5.6-")
@@ -148,8 +148,9 @@ static TABLE: &[Entry] = &[
     e("claude-3-haiku", 0.25, 1.25),
     e("claude-haiku", 1.0, 5.0),
     // ---- OpenAI / Codex ----
-    // https://developers.openai.com/api/docs/pricing (2026-09-24).
+    // https://developers.openai.com/api/docs/pricing (2026-10-09).
     e("gpt-6-astra", 10.0, 50.0),
+    e("gpt-6.1-sol", 2.0, 10.0),
     e("gpt-6-sol", 2.0, 10.0),
     e("gpt-6-luna", 0.1, 0.5),
     e("gpt-5.6-sol", 4.0, 20.0),
@@ -268,6 +269,7 @@ pub fn lookup(model: &str, overrides: &Overrides) -> (Rates, bool) {
             let mut rates = Rates::new(input, output);
             rates.cache_read = match fragment {
                 "claude-fable-5-1" | "claude-mythos-5-1" => input * 0.025,
+                "gpt-6.1-sol" => input * 0.05,
                 "gpt-4.1" | "gpt-4.1-mini" | "o3" | "o4-mini" | "codex-mini" => input * 0.25,
                 "gpt-4o" | "gpt-4o-mini" | "o3-mini" => input * 0.5,
                 "gpt-5.5-pro" | "gpt-5.4-pro" | "gpt-5.2-pro" => 0.0,
@@ -338,6 +340,7 @@ mod tests {
         for (model, input, output) in [
             ("gpt-5.1-codex-mini", 0.25, 2.0),
             ("gpt-6-astra", 10.0, 50.0),
+            ("gpt-6.1-sol", 2.0, 10.0),
             ("gpt-6-sol", 2.0, 10.0),
             ("gpt-6-luna", 0.1, 0.5),
             ("gpt-5.6-sol", 4.0, 20.0),
@@ -374,7 +377,7 @@ mod tests {
     }
 
     #[test]
-    fn gpt_6_sol_and_luna_apply_cache_tier_and_long_context_rates() {
+    fn gpt_6_and_6_1_apply_cache_tier_and_long_context_rates() {
         let tokens = crate::usage::Tokens {
             input: 100_000,
             cache_read: 180_000,
@@ -384,6 +387,7 @@ mod tests {
             ..Default::default()
         };
         for (model, expected_standard, expected_fast, expected_batch) in [
+            ("gpt-6.1-sol", 0.686, 1.372, 0.343),
             ("gpt-6-sol", 0.722, 1.444, 0.361),
             ("gpt-6-luna", 0.0361, 0.0722, 0.01805),
         ] {
@@ -404,6 +408,27 @@ mod tests {
             };
             assert!(!Context::for_request(model, "", &boundary).long);
         }
+    }
+
+    #[test]
+    fn gpt_6_1_sol_uses_its_own_cached_input_price_and_allows_overrides() {
+        let model = "openai/gpt-6.1-sol-2026-09-28";
+        let (rates, known) = lookup(model, &Overrides::new());
+        assert!(known);
+        assert_eq!(rates.cache_read, 0.1);
+        assert_eq!(lookup("gpt-6-sol", &Overrides::new()).0.cache_read, 0.2);
+        assert!(!lookup("gpt-6.2-sol", &Overrides::new()).1);
+        let tokens = crate::usage::Tokens {
+            input: 200,
+            cache_read: 800,
+            output: 60,
+            reasoning: 40,
+            ..Default::default()
+        };
+        assert!((rates.cost(&tokens) - 0.00148).abs() < 1e-12);
+        let custom = Rates::new(3.0, 12.0);
+        let overrides = Overrides::from([(normalize(model), custom)]);
+        assert_eq!(lookup(model, &overrides).0, custom);
     }
 
     #[test]

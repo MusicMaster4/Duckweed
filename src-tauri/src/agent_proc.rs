@@ -124,10 +124,14 @@ impl CodexOwnership {
         }
     }
 
-    fn received(&mut self, line: &str) {
+    /// Update ownership and report account changes from the same parse. Large
+    /// transcript responses should not be deserialized again just to inspect
+    /// their top-level method.
+    fn received(&mut self, line: &str) -> bool {
         let Ok(frame) = serde_json::from_str::<serde_json::Value>(line) else {
-            return;
+            return false;
         };
+        let account_updated = frame["method"] == "account/updated";
         if let Some(id) = frame.get("id") {
             let key = id.to_string();
             self.closing.remove(&key);
@@ -157,7 +161,7 @@ impl CodexOwnership {
                     }
                 }
             }
-            return;
+            return account_updated;
         }
         let method = frame["method"].as_str().unwrap_or_default();
         let params = &frame["params"];
@@ -195,6 +199,7 @@ impl CodexOwnership {
                 }
             }
         }
+        account_updated
     }
 
     fn shutdown_requests(&self) -> Vec<serde_json::Value> {
@@ -754,13 +759,9 @@ pub fn start(
                         tungstenite::Message::Text(line) => {
                             {
                                 let mut process = process.lock().unwrap();
-                                process.ownership.received(&line);
-                                if let Ok(frame) = serde_json::from_str::<serde_json::Value>(&line)
-                                {
-                                    if frame["method"] == "account/updated" {
-                                        if let Some(service) = &process.service {
-                                            service.acknowledge();
-                                        }
+                                if process.ownership.received(&line) {
+                                    if let Some(service) = &process.service {
+                                        service.acknowledge();
                                     }
                                 }
                             }
@@ -927,6 +928,15 @@ fn trimmed_line(buffer: &[u8], limit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn account_changes_are_reported_without_affecting_ownership() {
+        let mut owner = CodexOwnership::default();
+        assert!(owner.received(r#"{"method":"account/updated","params":{"authMode":"chatgpt"}}"#));
+        assert!(!owner.received(r#"{"method":"account/rateLimits/updated","params":{}}"#));
+        assert!(!owner.received("invalid json"));
+        assert!(owner.threads.is_empty());
+    }
 
     #[test]
     fn shared_shutdown_owns_only_subscribed_threads_and_their_children() {

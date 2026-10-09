@@ -15,7 +15,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime};
@@ -277,13 +277,7 @@ impl AgentActivityManager {
             .collect();
         for (id, agent) in ready {
             pending.remove(&id);
-            let _ = app.emit(
-                "agent:complete",
-                CompletionPayload {
-                    id,
-                    agent,
-                },
-            );
+            let _ = app.emit("agent:complete", CompletionPayload { id, agent });
         }
         // Drop hooks for panes that were unwatched or rebound mid-quiet.
         pending.retain(|id, hook| {
@@ -679,20 +673,37 @@ fn read_appended_lines(path: &Path, offset: &mut u64) -> Vec<Vec<u8>> {
     if len == *offset || file.seek(SeekFrom::Start(*offset)).is_err() {
         return Vec::new();
     }
-    let mut bytes = Vec::new();
-    if file.read_to_end(&mut bytes).is_err() {
-        return Vec::new();
+    let mut lines = Vec::new();
+    for_each_complete_line(&mut BufReader::new(file), offset, |line| {
+        lines.push(line.to_vec());
+    });
+    lines
+}
+
+/// Consume one complete appended line at a time. Holding an entire transcript
+/// delta duplicates all of its text before classification, even though only
+/// the final working/completed signal is retained. A partial final line stays
+/// at the current offset so a later poll reads it once its newline arrives.
+fn for_each_complete_line<R: BufRead>(
+    reader: &mut R,
+    offset: &mut u64,
+    mut on_line: impl FnMut(&[u8]),
+) {
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        let Ok(read) = reader.read_until(b'\n', &mut line) else {
+            break;
+        };
+        if read == 0 || line.last() != Some(&b'\n') {
+            break;
+        }
+        *offset += read as u64;
+        line.pop();
+        if !line.is_empty() {
+            on_line(&line);
+        }
     }
-    let Some(last_newline) = bytes.iter().rposition(|byte| *byte == b'\n') else {
-        return Vec::new();
-    };
-    let complete = &bytes[..=last_newline];
-    *offset += complete.len() as u64;
-    complete
-        .split(|byte| *byte == b'\n')
-        .filter(|line| !line.is_empty())
-        .map(<[u8]>::to_vec)
-        .collect()
 }
 
 fn parse_hook_event(line: &[u8]) -> Option<(&str, &str)> {
@@ -1069,26 +1080,13 @@ fn ingest_session_lines(watch: &mut Watch) -> LineSignal {
         return LineSignal::None;
     }
 
-    let mut bytes = Vec::new();
-    if file.read_to_end(&mut bytes).is_err() {
-        return LineSignal::None;
-    }
-    let Some(last_newline) = bytes.iter().rposition(|byte| *byte == b'\n') else {
-        return LineSignal::None;
-    };
-    let complete = &bytes[..=last_newline];
-    watch.offset += complete.len() as u64;
-
     let mut last = LineSignal::None;
-    for line in complete
-        .split(|byte| *byte == b'\n')
-        .filter(|line| !line.is_empty())
-    {
+    for_each_complete_line(&mut BufReader::new(file), &mut watch.offset, |line| {
         let next = classify_session_line(&watch.agent, line);
         if next != LineSignal::None {
             last = next;
         }
-    }
+    });
     last
 }
 
@@ -1129,9 +1127,7 @@ fn classify_claude(value: &Value) -> LineSignal {
     match value.get("type").and_then(Value::as_str) {
         // Claude Code writes this once the full turn is done (including tool
         // loops). Prefer it over intermediate assistant stop_reason records.
-        Some("system")
-            if value.get("subtype").and_then(Value::as_str) == Some("turn_duration") =>
-        {
+        Some("system") if value.get("subtype").and_then(Value::as_str) == Some("turn_duration") => {
             LineSignal::Completed
         }
         Some("assistant") => {
@@ -1217,7 +1213,10 @@ fn classify_grok(value: &Value) -> LineSignal {
         Some("turn_completed") => {
             // Background Task tool completions are tagged as turn_completed
             // with a synthetic prompt id while the parent turn continues.
-            let prompt_id = update.get("prompt_id").and_then(Value::as_str).unwrap_or("");
+            let prompt_id = update
+                .get("prompt_id")
+                .and_then(Value::as_str)
+                .unwrap_or("");
             // Synthetic ids look like `task-completed-call-<uuid>-N`.
             if prompt_id.starts_with("task-completed-call-") {
                 LineSignal::None
@@ -1240,11 +1239,12 @@ fn is_completion_line(agent: &str, line: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_line_signal, claude_project_slug, classify_session_line, discover_session_in_home,
-        discovery_roots, gemini_defaults, ingest_session_lines, initial_offset,
-        install_antigravity_plugin, install_copilot_hook, install_opencode_plugin,
+        apply_line_signal, classify_session_line, claude_project_slug, discover_session_in_home,
+        discovery_roots, for_each_complete_line, gemini_defaults, ingest_session_lines,
+        initial_offset, install_antigravity_plugin, install_copilot_hook, install_opencode_plugin,
         is_completion_line, nearest_new_session, parse_hook_event, qwen_defaults,
-        read_appended_lines, write_hook_script, LineSignal, SessionCandidate, Watch, START_TOLERANCE,
+        read_appended_lines, write_hook_script, LineSignal, SessionCandidate, Watch,
+        START_TOLERANCE,
     };
     use chrono::{DateTime, Utc};
     use rusqlite::{params, Connection};
@@ -1448,8 +1448,8 @@ mod tests {
         drop(connection);
 
         let watch = bare_watch("codex", None, 0);
-        let found = discover_session_in_home(&watch, &Default::default(), &home)
-            .map(|(path, _)| path);
+        let found =
+            discover_session_in_home(&watch, &Default::default(), &home).map(|(path, _)| path);
         assert_eq!(found.as_deref(), Some(rollout.as_path()));
 
         fs::remove_dir_all(home).unwrap();
@@ -1506,7 +1506,11 @@ mod tests {
                 strong: true,
                 pending_complete: None,
             };
-            assert_eq!(ingest_session_lines(&mut watch), LineSignal::Completed, "{agent}");
+            assert_eq!(
+                ingest_session_lines(&mut watch),
+                LineSignal::Completed,
+                "{agent}"
+            );
         }
 
         fs::remove_dir_all(dir).unwrap();
@@ -1645,6 +1649,36 @@ mod tests {
             .pointer("/hooks/Stop/0/hooks/0/command")
             .and_then(serde_json::Value::as_str)
             .is_some_and(|command| command.ends_with(" qwen")));
+    }
+
+    #[test]
+    fn appended_line_stream_preserves_bytes_and_partial_offsets() {
+        use std::io::{BufReader, Cursor};
+
+        let input = b"first\r\n\n\xf0\x9f\x8c\xb1\npartial";
+        let mut reader = BufReader::with_capacity(3, Cursor::new(input));
+        let mut offset = 17;
+        let mut lines = Vec::new();
+        for_each_complete_line(&mut reader, &mut offset, |line| lines.push(line.to_vec()));
+        assert_eq!(
+            lines,
+            vec![b"first\r".to_vec(), b"\xf0\x9f\x8c\xb1".to_vec()]
+        );
+        assert_eq!(offset, 17 + 7 + 1 + 5);
+    }
+
+    #[test]
+    fn appended_line_stream_keeps_a_large_line_intact() {
+        use std::io::{BufReader, Cursor};
+
+        let mut input = vec![b'x'; 2 * 1024 * 1024];
+        input.extend_from_slice(b"\nend\n");
+        let mut reader = BufReader::with_capacity(1024, Cursor::new(&input));
+        let mut offset = 0;
+        let mut lengths = Vec::new();
+        for_each_complete_line(&mut reader, &mut offset, |line| lengths.push(line.len()));
+        assert_eq!(lengths, vec![2 * 1024 * 1024, 3]);
+        assert_eq!(offset, input.len() as u64);
     }
 
     #[test]

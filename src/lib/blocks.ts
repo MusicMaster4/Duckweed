@@ -43,6 +43,9 @@ export interface CommandBlock {
 
 export class BlockTracker {
   private blocks: CommandBlock[] = [];
+  /** xterm marks trimmed/reflowed markers disposed and emits onDispose. */
+  private needsPrune = false;
+  private readonly onMarkerDisposed = () => { this.needsPrune = true; };
   private nextId = 1;
   private press: { x: number; y: number; line: number } | null = null;
   private selectedId: number | null = null;
@@ -200,6 +203,7 @@ export class BlockTracker {
     }
     const start = this.term.registerMarker(startLine - cursorLine);
     if (!start) return;
+    start.onDispose(this.onMarkerDisposed);
 
     const block: CommandBlock = {
       id: this.nextId++,
@@ -238,6 +242,7 @@ export class BlockTracker {
   clear(): void {
     for (const b of this.blocks) disposeBlock(b);
     this.blocks = [];
+    this.needsPrune = false;
     this.visibleBlocks.clear();
     this.press = null;
     this.selectedId = null;
@@ -250,6 +255,7 @@ export class BlockTracker {
   }
 
   dispose(): void {
+    this.setActive(false);
     this.clear();
     this.promptCover.remove();
     this.selectFill.remove();
@@ -733,13 +739,18 @@ export class BlockTracker {
   /** Find the block that owns an absolute buffer line. */
   atLine(line: number): CommandBlock | null {
     this.prune();
-    for (let i = this.blocks.length - 1; i >= 0; i--) {
-      const block = this.blocks[i];
-      const range = this.rangeAt(i);
-      if (!range) continue;
-      if (line >= range.start && line <= range.end) return block;
+    // Starts stay ordered as xterm reflows/scrolls. Only the newest block
+    // beginning at or before this line can own it, including coincident starts.
+    let low = 0;
+    let high = this.blocks.length;
+    while (low < high) {
+      const mid = (low + high) >>> 1;
+      if (this.blocks[mid].start.line <= line) low = mid + 1;
+      else high = mid;
     }
-    return null;
+    const index = low - 1;
+    const range = this.rangeAt(index);
+    return range && line >= range.start && line <= range.end ? this.blocks[index] : null;
   }
 
   /**
@@ -979,6 +990,9 @@ export class BlockTracker {
   }
 
   private prune(): void {
+    // Most layouts and pointer moves do not trim history. Avoid copying and
+    // visiting all blocks until xterm actually disposes one of their markers.
+    if (!this.needsPrune) return;
     this.blocks = this.blocks.filter((b) => {
       if (!b.start.isDisposed && b.start.line >= 0) return true;
       disposeBlock(b);
@@ -986,6 +1000,7 @@ export class BlockTracker {
       if (this.selectedId === b.id) this.selectedId = null;
       return false;
     });
+    this.needsPrune = false;
   }
 
   private handleMouseDown(e: MouseEvent): void {

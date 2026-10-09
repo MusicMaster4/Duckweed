@@ -2567,7 +2567,7 @@ describe("codex adapter", () => {
     ]);
   });
 
-  test("reads token usage and how much context it has eaten", async () => {
+  test("counts cached input once and uses the last request for context occupancy", async () => {
     const h = harness();
     await h.handshake();
     h.notify("thread/tokenUsage/updated", {
@@ -2576,15 +2576,34 @@ describe("codex adapter", () => {
       tokenUsage: {
         modelContextWindow: 1000,
         last: { inputTokens: 10, cachedInputTokens: 0, outputTokens: 5, reasoningOutputTokens: 0, totalTokens: 15 },
-        total: { inputTokens: 100, cachedInputTokens: 150, outputTokens: 50, reasoningOutputTokens: 20, totalTokens: 300 },
+        total: { inputTokens: 250, cachedInputTokens: 150, outputTokens: 50, reasoningOutputTokens: 20, totalTokens: 300 },
       },
     });
 
     expect(h.state().usage).toMatchObject({
       inputTokens: 250,
       outputTokens: 50,
-      contextUsed: 0.3,
+      contextUsed: 0.015,
     });
+  });
+
+  test("repeated usage snapshots replace totals and missing request usage leaves context unknown", async () => {
+    const h = harness();
+    await h.handshake();
+    const tokenUsage = {
+      modelContextWindow: 1000,
+      last: { inputTokens: 250, cachedInputTokens: 150, outputTokens: 50, totalTokens: 300 },
+      total: { inputTokens: 2500, cachedInputTokens: 1500, outputTokens: 500, totalTokens: 3000 },
+    };
+    for (let i = 0; i < 2; i++) {
+      h.notify("thread/tokenUsage/updated", { threadId: "thread_1", tokenUsage });
+    }
+    expect(h.state().usage).toMatchObject({ inputTokens: 2500, outputTokens: 500, contextUsed: 0.3 });
+    h.notify("thread/tokenUsage/updated", {
+      threadId: "thread_1",
+      tokenUsage: { total: tokenUsage.total, modelContextWindow: 1000 },
+    });
+    expect(h.state().usage).toMatchObject({ inputTokens: 2500, outputTokens: 500, contextUsed: null });
   });
 
   test("asks before running a command, and forwards the decision", async () => {

@@ -2498,16 +2498,19 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       case "thread/tokenUsage/updated": {
         const usage = asRecord(params.tokenUsage);
         const total = asRecord(usage?.total);
+        const last = asRecord(usage?.last);
         const window = usage?.modelContextWindow;
         const number = (value: unknown) => (typeof value === "number" ? value : 0);
         ctx.emit({
           type: "usage",
           usage: {
-            inputTokens: number(total?.inputTokens) + number(total?.cachedInputTokens),
+            // Cached input is a subset of inputTokens in Codex Responses usage.
+            inputTokens: number(total?.inputTokens),
             outputTokens: number(total?.outputTokens),
             contextUsed:
-              typeof window === "number" && window > 0
-                ? Math.min(1, number(total?.totalTokens) / window)
+              // Context occupancy describes the latest request, not lifetime usage.
+              typeof window === "number" && window > 0 && typeof last?.totalTokens === "number"
+                ? Math.min(1, Math.max(0, last.totalTokens) / window)
                 : null,
           },
         });

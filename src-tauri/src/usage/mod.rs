@@ -25,6 +25,7 @@ pub mod quota;
 pub mod sources;
 
 use std::collections::{HashMap, HashSet};
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
@@ -44,7 +45,7 @@ const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 /// How far back the duty cycle looks. Kept inside [`RECENT_DAYS`] so every row
 /// it reads still has five-minute resolution rather than a collapsed day.
 const DUTY_DAYS: i64 = 7;
-const INDEX_VERSION: u32 = 4;
+const INDEX_VERSION: u32 = 5;
 
 // ---------------------------------------------------------------- tokens
 
@@ -815,11 +816,17 @@ fn save_index(path: &Path, index: &Index) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
-    let body = serde_json::to_vec(index).map_err(|error| error.to_string())?;
     // Write beside the target and rename, so a crash mid-write cannot leave a
     // truncated index that the next launch would silently treat as empty.
+    // Stream through a small buffer instead of allocating a second complete
+    // copy of a potentially multi-megabyte index.
     let temp = path.with_extension("json.tmp");
-    std::fs::write(&temp, body).map_err(|error| error.to_string())?;
+    {
+        let file = std::fs::File::create(&temp).map_err(|error| error.to_string())?;
+        let mut writer = BufWriter::new(file);
+        serde_json::to_writer(&mut writer, index).map_err(|error| error.to_string())?;
+        writer.flush().map_err(|error| error.to_string())?;
+    }
     std::fs::rename(&temp, path).map_err(|error| error.to_string())
 }
 
@@ -1067,6 +1074,110 @@ mod tests {
         assert_eq!(warm.totals.tokens.input, 300);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cliproxy_codex_usage_is_priced_after_append_reload_and_index_upgrade() {
+        use std::io::Write;
+        let dir =
+            std::env::temp_dir().join(format!("duckweed-cliproxy-usage-{}", uuid::Uuid::new_v4()));
+        let home = dir.join("home");
+        let sessions = home.join(".codex/sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let path = sessions.join("rollout.jsonl");
+        let index_path = dir.join("index.json");
+        let now = chrono::Utc::now();
+        let meta =
+            serde_json::json!({"type":"session_meta","payload":{"model_provider":"cliproxy"}});
+        let context = serde_json::json!({"type":"turn_context","payload":{"model":"gpt-6.1-sol"}});
+        let event = |seconds,
+                     input,
+                     cached,
+                     output,
+                     reasoning,
+                     total_input,
+                     total_cached,
+                     total_output,
+                     total_reasoning| {
+            serde_json::json!({"timestamp":(now - chrono::Duration::seconds(seconds)).to_rfc3339(),
+            "type":"event_msg","payload":{"type":"token_count","info":{
+                "last_token_usage":{"input_tokens":input,"cached_input_tokens":cached,
+                    "output_tokens":output,"reasoning_output_tokens":reasoning,"total_tokens":input + output},
+                "total_token_usage":{"input_tokens":total_input,"cached_input_tokens":total_cached,
+                    "output_tokens":total_output,"reasoning_output_tokens":total_reasoning,"total_tokens":total_input + total_output}
+            }}})
+        };
+        let first = event(2, 1000, 800, 100, 40, 1000, 800, 100, 40);
+        std::fs::write(&path, format!("{meta}\n{context}\n{first}\n{first}\n")).unwrap();
+        let state = UsageState::default();
+        let query = Query {
+            days: 7,
+            refresh: true,
+        };
+        let overrides = Overrides::new();
+        let read = |state: &UsageState| {
+            scan(&home, &index_path, &overrides, state, &query, &|_, _| {}).unwrap()
+        };
+        let cold = read(&state);
+        assert_eq!(cold.totals.tokens.total(), 1100);
+        assert_eq!(cold.totals.tokens.input, 200);
+        assert_eq!(cold.totals.tokens.cache_read, 800);
+        assert_eq!(cold.totals.tokens.output, 60);
+        assert_eq!(cold.totals.tokens.reasoning, 40);
+        assert!(cold.unpriced.is_empty());
+        assert!((cold.totals.cost - 0.00148).abs() < 1e-12);
+        assert_eq!(read(&state).scan.files_read, 0);
+        let fast = serde_json::json!({"type":"turn_context","payload":{"model":"gpt-6.1-sol","service_tier":"fast"}});
+        let standard = serde_json::json!({"type":"turn_context","payload":{"model":"gpt-6.1-sol","service_tier":"default"}});
+        let second = event(1, 1000, 800, 100, 40, 2000, 1600, 200, 80);
+        let long = event(0, 300000, 200000, 1000, 400, 302000, 201600, 1200, 480);
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        writeln!(
+            file,
+            "{first}\n{fast}\n{second}\n{standard}\n{long}\n{long}"
+        )
+        .unwrap();
+        drop(file);
+        let assert_totals = |snapshot: Snapshot| {
+            assert_eq!(snapshot.totals.requests, 3);
+            assert_eq!(snapshot.totals.tokens.total(), 303200);
+            assert!(snapshot.unpriced.is_empty());
+            assert!((snapshot.totals.cost - 0.45944).abs() < 1e-12);
+            assert!(
+                (snapshot.days.iter().map(|d| d.totals.cost).sum::<f64>() - 0.45944).abs() < 1e-12
+            );
+            let model = snapshot
+                .models
+                .iter()
+                .find(|m| m.model == "gpt-6.1-sol")
+                .unwrap();
+            assert!(model.priced);
+            assert!((model.totals.cost - 0.45944).abs() < 1e-12);
+        };
+        assert_totals(read(&state));
+        let archive = home.join(".codex/archived_sessions");
+        std::fs::create_dir_all(&archive).unwrap();
+        std::fs::copy(&path, archive.join("copy.jsonl")).unwrap();
+        assert_totals(read(&state));
+        let reloaded = read(&UsageState::default());
+        assert_eq!(reloaded.scan.files_read, 0);
+        assert_totals(reloaded);
+        // Old indexes lack GPT-6.1's per-request long-context condition.
+        let mut old = load_index(&index_path);
+        old.version = INDEX_VERSION - 1;
+        for entry in old.files.values_mut() {
+            for row in &mut entry.rows {
+                row.pricing.long = false;
+            }
+        }
+        save_index(&index_path, &old).unwrap();
+        let upgraded = read(&UsageState::default());
+        assert_eq!(upgraded.scan.files_read, 2);
+        assert_totals(upgraded);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

@@ -980,7 +980,7 @@ function paintVisualCursor(session: Session): void {
  * status/footer position.
  */
 function scheduleVisualCursor(session: Session, forceSettle = false): void {
-  if (!session.cursorFocused || !session.container || session.agentUi) {
+  if (session.editorMode || !session.cursorFocused || !session.container || session.agentUi) {
     hideVisualCursor(session);
     return;
   }
@@ -1969,15 +1969,20 @@ export function dispose(id: string): void {
   const session = sessions.get(id);
   if (!session) return;
   session.observer?.disconnect();
+  session.observer = null;
+  session.container = null;
   session.frames.dispose();
   session.blocks.dispose();
   clearTyping(session);
   hideVisualCursor(session);
   inputFocusers.delete(id);
   inputPasters.delete(id);
-  if (session.agent && TAURI_RUNTIME) void agentUnwatch(id);
+  unbindAgent(session);
   agentSessions.stop(id);
   for (const off of session.unlisten) off();
+  // Tauri retains the channel callback until the native PTY closes. Replace
+  // its closure so late output cannot retain or write to a disposed terminal.
+  if (session.dataChannel) session.dataChannel.onmessage = () => {};
   session.dataChannel = null;
   if (TAURI_RUNTIME) void ptyKill(id);
   session.term.dispose();

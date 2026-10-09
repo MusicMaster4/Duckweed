@@ -172,8 +172,7 @@ object NotificationTools {
         if (message.kind != "attention") return emptyList()
         val pairId = message.pairId ?: return emptyList()
         val terminalId = message.terminalId ?: return emptyList()
-        val target = WorkspaceStore(context).all()
-            .firstOrNull { it.pairId == pairId }
+        val target = WorkspaceStore(context).get(pairId)
             ?.projects
             ?.asSequence()
             ?.mapNotNull { project ->
@@ -230,8 +229,7 @@ object NotificationTools {
             .map { it.id }
             .toSet()
         if (activeIds.isEmpty()) return
-        MessageStore(context).use { it.latest() }
-            .filter { it.kind == "attention" && it.id.hashCode() in activeIds }
+        MessageStore(context).use { it.activeAttentionMessages(activeIds) }
             .forEach { show(context, it) }
     }
 

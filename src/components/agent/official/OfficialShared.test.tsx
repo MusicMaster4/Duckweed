@@ -1279,3 +1279,61 @@ describe("official agent presentation", () => {
     expect(html).toContain("agent-activity-cluster");
   });
 });
+
+
+describe("activity group projection reuse", () => {
+  test("keeps settled groups stable across a later streaming response", () => {
+    const user: AgentItem = { kind: "user", id: "projection-user", at: 1, text: "Inspect" };
+    const thought: AgentItem = {
+      kind: "thinking", id: "projection-thought", at: 2, text: "Inspecting", streaming: false,
+    };
+    const answer: AgentItem = {
+      kind: "assistant", id: "projection-answer", at: 3, text: "Complete", streaming: false,
+    };
+    const nextUser: AgentItem = { kind: "user", id: "projection-next", at: 4, text: "Continue" };
+    const items = [user, thought, answer, nextUser];
+    const previous = activityGroups(items);
+    for (let index = 0; index < 25; index += 1) {
+      const streamed: AgentItem[] = [...items, {
+        kind: "assistant", id: "projection-live", at: 5,
+        text: `Progress ${index}`, streaming: true,
+      }];
+      const next = activityGroups(streamed);
+      expect(next[0]).toBe(previous[0]);
+      expect(next[0].activities).toBe(previous[0].activities);
+      expect(next[0].answerId).toBe(answer.id);
+    }
+  });
+
+  test("updates group metadata and contents when the phase changes", () => {
+    const thought: AgentItem = {
+      kind: "thinking", id: "projection-phase", at: 1, text: "Inspecting", streaming: false,
+    };
+    const answer: AgentItem = {
+      kind: "assistant", id: "projection-comment", at: 2, text: "Progress", streaming: false,
+    };
+    const laterThought: AgentItem = {
+      kind: "thinking", id: "projection-later", at: 3, text: "Checking", streaming: true,
+    };
+    const unanswered = activityGroups([thought])[0];
+    const answered = activityGroups([thought, answer])[0];
+    expect(answered).not.toBe(unanswered);
+    expect(answered.answerId).toBe(answer.id);
+    const replaced = activityGroups([thought, answer, laterThought]);
+    expect(replaced[0]).not.toBe(answered);
+    expect(replaced[0].answerId).toBeNull();
+    expect(replaced[0].replacedByCommentId).toBe(answer.id);
+    const updated: AgentItem = { ...laterThought, text: "Done", streaming: false };
+    const refreshed = activityGroups([thought, answer, updated]);
+    expect(refreshed[0]).toBe(replaced[0]);
+    expect(refreshed[1]).not.toBe(replaced[1]);
+    expect(refreshed[1].activities).toEqual([updated]);
+    const shifted = activityGroups([
+      { kind: "notice", id: "projection-notice", at: 0, text: "Resumed", tone: "info" },
+      thought, answer, updated,
+    ]);
+    expect(shifted[0]).not.toBe(refreshed[0]);
+    expect(shifted[0].firstIndex).toBe(1);
+    expect(activityGroups([thought])[0]).toEqual(unanswered);
+  });
+});
