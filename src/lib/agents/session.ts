@@ -115,7 +115,7 @@ interface Session {
    * user may have asked for it (`--continue`) before there was a protocol to
    * ask on.
    */
-  pendingResume: { id: string; title: string } | null;
+  pendingResume: { id: string; title: string; silent?: boolean } | null;
   restoring: boolean;
   recovery: AgentRecovery | null;
   /** Coalesces streamed deltas into one notification per frame. */
@@ -976,7 +976,7 @@ function emitNow(session: Session, event: AgentEvent): void {
     const wanted = session.pendingResume;
     session.pendingResume = null;
     notify(session);
-    void applyResume(session, wanted.id, wanted.title);
+    void applyResume(session, wanted.id, wanted.title, wanted.silent);
     return;
   }
 
@@ -1221,8 +1221,9 @@ export async function start(
   // the conversation the user meant to continue. It can also let an opening
   // prompt start on the blank thread before a late resume swaps `threadId`
   // underneath the active turn.
-  const startupResume: { id: string; title: string } | null = adapter.resume && launch.resumeId
-    ? { id: launch.resumeId, title: "" }
+  // Automatic recovery reattaches the existing conversation without a user resume notice.
+  const startupResume: Session["pendingResume"] = adapter.resume && launch.resumeId
+    ? { id: launch.resumeId, title: "", silent: !!recovery }
     : null;
   const startupResumeLookup =
     adapter.resume && launch.resume && !startupResume
@@ -1403,7 +1404,7 @@ export async function start(
       await agentProcStop(termId).catch(() => {});
       return null;
     }
-    if (found) session.pendingResume = { id: found.id, title: found.title };
+    if (found) session.pendingResume = { id: found.id, title: found.title, silent: !!recovery };
   }
 
   adapter.start(session.context);
@@ -1869,7 +1870,7 @@ export function configure(
  * Hand a stored conversation to a running agent, in whatever way it accepts
  * one. Emits the transcript marker only once the agent has taken it.
  */
-async function applyResume(session: Session, sessionId: string, title: string): Promise<void> {
+async function applyResume(session: Session, sessionId: string, title: string, silent = false): Promise<void> {
   cancelCapacityReply(session);
   // Rejoining is an explicit request. Idle history stays silent because its
   // working -> idle transition occurs under `loadingHistory`; a live turn
@@ -1914,7 +1915,7 @@ async function applyResume(session: Session, sessionId: string, title: string): 
       .map((entry) => ({ ...entry.prompt, id: entry.id })) };
     session.restoring = false;
     session.recovery = null;
-    emit(session, { type: "resumed", sessionId, title });
+    emit(session, { type: "resumed", sessionId, title, silent });
   } else failed();
 }
 

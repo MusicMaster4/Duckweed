@@ -255,6 +255,7 @@ describe("Custom agent UI sessions", () => {
     await flush();
     expect(session.get(termId)?.status).toBe("idle");
     expect(session.get(termId)?.error).toBeNull();
+    expect(session.get(termId)?.items.filter((item) => item.kind === "notice")).toEqual([]);
     expect(session.getDraft(termId)).toBe("Keep this prompt");
     expect(session.getDraftImages(termId)).toEqual([image]);
     expect(sent.map(rpc).filter((message) => message.method === "turn/start")).toHaveLength(1);
@@ -382,6 +383,7 @@ describe("Custom agent UI sessions", () => {
     }] } } });
     await flush();
     expect(session.get(termId)?.status).toBe("working");
+    expect(session.get(termId)?.items.filter((item) => item.kind === "notice")).toEqual([]);
     expect(session.getDraft(termId)).toBe("Newer draft");
     expect(session.getDraftImages(termId)).toEqual([image]);
     expect(session.get(termId)?.pending).toEqual([expect.objectContaining({ text: "Queued follow-up", images: [image] })]);
@@ -682,6 +684,9 @@ describe("Custom agent UI sessions", () => {
         })),
       } } });
       await resuming;
+      expect(session.get(termId)?.items.filter((item) => item.kind === "notice")).toEqual([
+        expect.objectContaining({ text: "Resumed the previous session" }),
+      ]);
       expect(session.localPromptHistory(termId)).toEqual([...new Set(prompts)]);
     }
     session.submit(termId, "New follow-up");
