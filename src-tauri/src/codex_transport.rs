@@ -6,7 +6,7 @@ use base64::Engine;
 use sha2::{Digest, Sha256};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, ChildStdout, Output, Stdio};
+use std::process::{Child, ChildStdout, Output, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
@@ -16,14 +16,60 @@ use tungstenite::{Message, WebSocket};
 
 use crate::agent_proc::{build_command, hide_console, kill_tree, AgentSpawnOptions};
 
-type SharedStdin = Arc<Mutex<ChildStdin>>;
+struct PipeWrite {
+    bytes: Vec<u8>,
+    done: Option<mpsc::Sender<io::Result<()>>>,
+}
+
+/// The reader must keep draining stdout even while stdin is full. In
+/// particular, tungstenite writes automatic Pong/Close frames from read().
+/// Sharing a blocking stdin mutex with it creates a duplex pipe deadlock.
+/// One worker serializes whole writes; only application sends await delivery.
+#[derive(Clone)]
+struct ProxyInput(mpsc::SyncSender<PipeWrite>);
+
+impl ProxyInput {
+    fn new(mut stdin: impl Write + Send + 'static) -> io::Result<Self> {
+        let (send, receive) = mpsc::sync_channel::<PipeWrite>(16);
+        std::thread::Builder::new().name("codex-proxy-input".into()).spawn(move || {
+            while let Ok(write) = receive.recv() {
+                let result = stdin.write_all(&write.bytes).and_then(|()| stdin.flush());
+                let failed = result.is_err();
+                if let Some(done) = write.done { let _ = done.send(result); }
+                if failed { break; }
+            }
+        })?;
+        Ok(Self(send))
+    }
+
+    fn control(&self, bytes: &[u8]) -> io::Result<usize> {
+        self.0.try_send(PipeWrite { bytes: bytes.to_vec(), done: None })
+            .map_err(|error| match error {
+                mpsc::TrySendError::Full(_) => io::Error::new(io::ErrorKind::ConnectionAborted, "Codex proxy control queue is full"),
+                mpsc::TrySendError::Disconnected(_) => Self::closed(),
+            })?;
+        Ok(bytes.len())
+    }
+
+    fn write(&self, bytes: &[u8]) -> io::Result<usize> {
+        let (done, wait) = mpsc::channel();
+        self.0.send(PipeWrite { bytes: bytes.to_vec(), done: Some(done) })
+            .map_err(|_| Self::closed())?;
+        wait.recv().map_err(|_| Self::closed())??;
+        Ok(bytes.len())
+    }
+
+    fn closed() -> io::Error {
+        io::Error::new(io::ErrorKind::BrokenPipe, "Codex proxy input closed")
+    }
+}
 
 pub struct ProxyReader {
     stdout: ChildStdout,
-    stdin: SharedStdin,
+    stdin: ProxyInput,
 }
 
-pub struct ProxyWriter(SharedStdin);
+pub struct ProxyWriter(ProxyInput);
 
 impl Read for ProxyReader {
     fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
@@ -42,21 +88,21 @@ impl Read for ProxyWriter {
 
 impl Write for ProxyReader {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.stdin.lock().unwrap().write_all(bytes)?;
-        Ok(bytes.len())
+        self.stdin.control(bytes)
     }
     fn flush(&mut self) -> io::Result<()> {
-        self.stdin.lock().unwrap().flush()
+        // Control frames are flushed by the worker without blocking reads.
+        Ok(())
     }
 }
 
 impl Write for ProxyWriter {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.0.lock().unwrap().write_all(bytes)?;
-        Ok(bytes.len())
+        self.0.write(bytes)
     }
     fn flush(&mut self) -> io::Result<()> {
-        self.0.lock().unwrap().flush()
+        // write() already waits for the worker's flush.
+        Ok(())
     }
 }
 
@@ -527,9 +573,14 @@ fn proxy_connection(
         command.process_group(0);
     }
     let mut child = command.spawn().map_err(|error| error.to_string())?;
-    let stdin = Arc::new(Mutex::new(
-        child.stdin.take().ok_or("Codex proxy has no stdin")?,
-    ));
+    let stdin = match ProxyInput::new(child.stdin.take().ok_or("Codex proxy has no stdin")?) {
+        Ok(stdin) => stdin,
+        Err(error) => {
+            kill_tree(child.id());
+            let _ = child.wait();
+            return Err(format!("Could not start Codex proxy input: {error}"));
+        }
+    };
     let stream = ProxyReader {
         stdout: child.stdout.take().ok_or("Codex proxy has no stdout")?,
         stdin: stdin.clone(),
@@ -605,6 +656,81 @@ pub fn oversized_reply(line: &str, limit: usize) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct BlockedPipe {
+        entered: mpsc::Sender<()>,
+        release: mpsc::Receiver<()>,
+        writes: Arc<Mutex<Vec<Vec<u8>>>>,
+        fail: bool,
+    }
+
+    impl Write for BlockedPipe {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if self.writes.lock().unwrap().is_empty() {
+                let _ = self.entered.send(());
+                self.release.recv().unwrap();
+            }
+            if self.fail { return Err(io::Error::new(io::ErrorKind::BrokenPipe, "fixture closed")); }
+            self.writes.lock().unwrap().push(bytes.to_vec());
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> { Ok(()) }
+    }
+
+    #[test]
+    fn control_frames_do_not_block_on_full_stdin_and_writes_stay_ordered() {
+        let (entered, wait) = mpsc::channel();
+        let (release, blocked) = mpsc::channel();
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        let input = ProxyInput::new(BlockedPipe { entered, release: blocked, writes: writes.clone(), fail: false }).unwrap();
+        let sender = input.clone();
+        let (done, sent) = mpsc::channel();
+        let writer = std::thread::spawn(move || { done.send(sender.write(b"application frame")).unwrap(); });
+        wait.recv_timeout(Duration::from_secs(2)).unwrap();
+        // This is what tungstenite's reader does when a Ping arrives while an
+        // application frame is blocked. The read loop must remain free to read.
+        let reader_input = input.clone();
+        let (done, control) = mpsc::channel();
+        let reader = std::thread::spawn(move || { done.send(reader_input.control(b"pong frame")).unwrap(); });
+        let control_result = control.recv_timeout(Duration::from_secs(2));
+        let application_pending = sent.try_recv().is_err();
+        release.send(()).unwrap();
+        writer.join().unwrap();
+        reader.join().unwrap();
+        input.write(b"barrier").unwrap();
+        assert!(control_result.unwrap().is_ok(), "a control frame blocked the reader");
+        assert!(application_pending, "application delivery was acknowledged before writing");
+        assert_eq!(*writes.lock().unwrap(), vec![b"application frame".to_vec(), b"pong frame".to_vec(), b"barrier".to_vec()]);
+    }
+
+    #[test]
+    fn control_backlog_is_bounded_without_waiting_for_stdin() {
+        let (entered, wait) = mpsc::channel();
+        let (release, blocked) = mpsc::channel();
+        let input = ProxyInput::new(BlockedPipe { entered, release: blocked,
+            writes: Arc::new(Mutex::new(Vec::new())), fail: false }).unwrap();
+        input.control(b"first").unwrap();
+        wait.recv_timeout(Duration::from_secs(2)).unwrap();
+        for _ in 0..16 { input.control(b"pong").unwrap(); }
+        let result = input.control(b"overflow");
+        release.send(()).unwrap();
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::ConnectionAborted);
+    }
+
+    #[test]
+    fn a_failed_pipe_rejects_application_delivery_and_future_control_frames() {
+        let (entered, wait) = mpsc::channel();
+        let (release, blocked) = mpsc::channel();
+        let input = ProxyInput::new(BlockedPipe { entered, release: blocked,
+            writes: Arc::new(Mutex::new(Vec::new())), fail: true }).unwrap();
+        let sender = input.clone();
+        let writer = std::thread::spawn(move || sender.write(b"application"));
+        wait.recv_timeout(Duration::from_secs(2)).unwrap();
+        release.send(()).unwrap();
+        assert_eq!(writer.join().unwrap().unwrap_err().kind(), io::ErrorKind::BrokenPipe);
+        assert_eq!(input.write(b"later").unwrap_err().kind(), io::ErrorKind::BrokenPipe);
+        assert_eq!(input.control(b"pong").unwrap_err().kind(), io::ErrorKind::BrokenPipe);
+    }
 
     /// An isolated child process for command capture and timeout tests.
     #[test]

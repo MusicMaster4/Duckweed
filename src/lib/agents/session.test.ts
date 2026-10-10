@@ -262,6 +262,64 @@ describe("Custom agent UI sessions", () => {
     expect(session.get(termId)?.status).toBe("idle");
   });
 
+  test.each(["turn/start", "thread/backgroundTerminals/list"])("a stalled %s reconnects without interrupting work or replaying input", async (method) => {
+    const termId = `stalled-${method}`;
+    const threadId = "stalled-thread";
+    await session.start(termId, codexLaunch, "H:/project");
+    await codexHandshake(threadId);
+    if (method !== "turn/start") {
+      session.submit(termId, "Accepted work");
+      await flush();
+      const turn = sent.map(rpc).findLast((message) => message.method === "turn/start");
+      feed({ id: turn?.id, result: { turn: { id: "live-turn" } } });
+      await flush();
+    }
+    const oldSink = frameSink;
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    sendOverride = async (line) => { if (rpc(line).method === method) await blocked; };
+    // Fire the real writer watchdog deterministically, without a ten-second sleep.
+    const originalTimeout = globalThis.setTimeout;
+    let expire!: () => void;
+    globalThis.setTimeout = ((callback: () => void, delay?: number, ...args: unknown[]) => {
+      if (delay === 10_000) expire = callback;
+      return originalTimeout(callback, delay, ...args);
+    }) as typeof setTimeout;
+    try {
+      if (method === "turn/start") session.submit(termId, "Unconfirmed prompt", [image]);
+      else void session.refreshTasks(termId);
+      await flush();
+    } finally { globalThis.setTimeout = originalTimeout; }
+    expect(expire).toBeDefined();
+    session.setDraft(termId, "Newer draft");
+    expire();
+    await flush();
+    expect(session.get(termId)?.status).toBe("starting");
+    oldSink?.({ kind: "exit", code: 1, reconnect: true });
+    sendOverride = null;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await codexHandshake("provisional-thread");
+    const resume = sent.map(rpc).findLast((message) => message.method === "thread/resume");
+    expect(resume?.params).toMatchObject({ threadId });
+    feed({ id: resume?.id, result: { thread: { id: threadId,
+      activeTurnId: "live-turn", turns: [{ id: "live-turn", status: "inProgress", items: [] }],
+    } } });
+    await flush();
+    release();
+    await flush();
+    oldSink?.({ kind: "exit", code: 1, reconnect: true });
+    expect(session.get(termId)?.status).toBe("working");
+    expect(session.get(termId)?.error).toBeNull();
+    expect(session.getDraft(termId)).toBe("Newer draft");
+    if (method === "turn/start") {
+      expect(session.get(termId)?.pending).toEqual([expect.objectContaining({ text: "Unconfirmed prompt", images: [image] })]);
+    }
+    expect(sent.map(rpc).filter((message) => message.method === "turn/start")).toHaveLength(1);
+    expect(sent.map(rpc).some((message) => ["turn/interrupt", "thread/goal/set", "thread/backgroundTerminals/clean"].includes(String(message.method)))).toBe(false);
+    expect(nativeStopModes.length).toBeGreaterThan(0);
+    expect(nativeStopModes.every(Boolean)).toBe(true);
+  });
+
   test("a pipe closing during initialization cannot leave a stale fatal state", async () => {
     const termId = "initialization-pipe-loss";
     let failed = false;

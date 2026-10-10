@@ -1240,9 +1240,11 @@ export async function start(
     (error) => {
       if (session.disposed) return;
       session.queuePaused = true;
-      if (error.code === "duckweed_connection_closed" && reconnect(session)) return;
-      failConnection(session, error.message,
-        session.state.agent === "codex" && error.code === "duckweed_connection_closed");
+      // A write deadline means delivery is uncertain, not that the daemon's
+      // work failed. Replace only the proxy, just as for a closed pipe.
+      const recoverable = error.code === "duckweed_connection_closed" || error.code === "duckweed_send_timeout";
+      if (recoverable && reconnect(session)) return;
+      failConnection(session, error.message, session.state.agent === "codex");
     },
   );
   const session: Session = {
