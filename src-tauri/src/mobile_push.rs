@@ -649,6 +649,24 @@ fn read_state(path: &Path) -> StoredState {
         .unwrap_or_default()
 }
 
+fn stored_pairing_status(path: &Path) -> Option<bool> {
+    match std::fs::read(path) {
+        Ok(bytes) => serde_json::from_slice::<StoredState>(&bytes)
+            .ok()
+            .map(|state| !state.devices.is_empty()),
+        // A new installation has no state file. During another process's save,
+        // its temporary file means the missing final file is only transitional.
+        Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound
+                && !path.with_extension("json.tmp").exists() =>
+        {
+            Some(false)
+        }
+        // Preserve the last known pairing through damaged JSON or transient IO.
+        Err(_) => None,
+    }
+}
+
 fn save_state(path: &Path, state: &StoredState) -> Result<(), String> {
     let parent = path.parent().ok_or("mobile settings path has no parent")?;
     std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
@@ -1395,6 +1413,16 @@ struct ScheduledCompletion {
     terminal_id: String,
     selected: bool,
     cancelled: Arc<AtomicBool>,
+    timer: Option<tokio::task::AbortHandle>,
+}
+
+impl ScheduledCompletion {
+    fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+        if let Some(timer) = &self.timer {
+            timer.abort();
+        }
+    }
 }
 
 #[derive(Default)]
@@ -1411,11 +1439,29 @@ impl ScheduledCompletionRegistry {
                 terminal_id,
                 selected,
                 cancelled: cancelled.clone(),
+                timer: None,
             },
         ) {
-            previous.cancelled.store(true, Ordering::Release);
+            previous.cancel();
         }
         cancelled
+    }
+
+    fn attach_timer(
+        &mut self,
+        key: &str,
+        cancelled: &Arc<AtomicBool>,
+        timer: tokio::task::AbortHandle,
+    ) {
+        if let Some(completion) = self.pending.get_mut(key).filter(|completion| {
+            Arc::ptr_eq(&completion.cancelled, cancelled)
+                && !completion.cancelled.load(Ordering::Acquire)
+        }) {
+            completion.timer = Some(timer);
+        } else {
+            // Cancellation or replacement can win before the timer is attached.
+            timer.abort();
+        }
     }
 
     fn cancel_terminal(&mut self, terminal_id: &str) {
@@ -1423,14 +1469,14 @@ impl ScheduledCompletionRegistry {
             if completion.terminal_id != terminal_id {
                 return true;
             }
-            completion.cancelled.store(true, Ordering::Release);
+            completion.cancel();
             false
         });
     }
 
     fn cancel_key(&mut self, key: &str) {
         if let Some(completion) = self.pending.remove(key) {
-            completion.cancelled.store(true, Ordering::Release);
+            completion.cancel();
         }
     }
 
@@ -1439,7 +1485,7 @@ impl ScheduledCompletionRegistry {
             if !completion.selected {
                 return true;
             }
-            completion.cancelled.store(true, Ordering::Release);
+            completion.cancel();
             false
         });
     }
@@ -1477,11 +1523,28 @@ pub fn start_presence_monitor(app: AppHandle) -> std::io::Result<()> {
     let tick_app = app.clone();
     std::thread::Builder::new()
         .name("mobile-sync-tick".into())
-        .spawn(move || loop {
-            // Native events keep input and queued workspace updates moving
-            // while Windows throttles a minimized WebView's JavaScript timers.
-            let _ = tick_app.emit("mobile:sync-tick", ());
-            std::thread::sleep(Duration::from_millis(1_200));
+        .spawn(move || {
+            let mut paired = None;
+            loop {
+                // Re-read the stored list to notice pairing from another window
+                // or process on the next tick, without querying credentials.
+                let current = state_path(&tick_app).ok().and_then(|path| {
+                    let _guard = FILE_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+                    stored_pairing_status(&path)
+                });
+                if let Some(current) = current {
+                    if paired != Some(current) {
+                        paired = Some(current);
+                        let _ = tick_app.emit("mobile:devices-changed", current);
+                    }
+                }
+                // Native events keep input and queued workspace updates moving
+                // while Windows throttles a minimized WebView's JavaScript timers.
+                if paired == Some(true) {
+                    let _ = tick_app.emit("mobile:sync-tick", ());
+                }
+                std::thread::sleep(Duration::from_millis(1_200));
+            }
         })?;
     std::thread::Builder::new()
         .name("mobile-presence".into())
@@ -1641,23 +1704,22 @@ fn schedule_completion(
         .clone()
         .filter(|id| !id.trim().is_empty())
         .ok_or("scheduled mobile completion requires a terminal")?;
-    let cancelled =
-        scheduled_completions()
+    let mut registry = scheduled_completions().lock().unwrap();
+    let cancelled = registry.insert(key.clone(), terminal_id.clone(), selected);
+    let timer_cancelled = cancelled.clone();
+    let timer_key = key.clone();
+    let timer = tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+        let active = scheduled_completions()
             .lock()
             .unwrap()
-            .insert(key.clone(), terminal_id.clone(), selected);
-    let thread_key = key.clone();
-    std::thread::Builder::new()
-        .name("mobile-completion-delay".into())
-        .spawn(move || {
-            std::thread::sleep(Duration::from_millis(delay_ms));
-            let active = scheduled_completions()
-                .lock()
-                .unwrap()
-                .take_if_active(&thread_key, &cancelled);
-            if !active {
-                return;
-            }
+            .take_if_active(&timer_key, &timer_cancelled);
+        if !active {
+            return;
+        }
+        // HTTP and credential-store access stay off the shared async threads.
+        // Blocking work starts only after the cancellable delay has elapsed.
+        let _ = tauri::async_runtime::spawn_blocking(move || {
             let result = match send_blocking(&app, message) {
                 Ok(result) => result,
                 Err(error) => SendResult {
@@ -1669,7 +1731,7 @@ fn schedule_completion(
             let _ = app.emit(
                 "mobile:completion-delivered",
                 ScheduledCompletionDelivery {
-                    key: thread_key,
+                    key: timer_key,
                     terminal_id,
                     selected,
                     completed_at,
@@ -1677,11 +1739,10 @@ fn schedule_completion(
                 },
             );
         })
-        .map(|_| ())
-        .map_err(|error| {
-            scheduled_completions().lock().unwrap().pending.remove(&key);
-            error.to_string()
-        })
+        .await;
+    });
+    registry.attach_timer(&key, &cancelled, timer.inner().abort_handle());
+    Ok(())
 }
 
 async fn blocking<T, F>(job: F) -> Result<T, String>
@@ -1804,8 +1865,8 @@ pub async fn mobile_send_test(app: AppHandle) -> Result<SendResult, String> {
 mod tests {
     use super::{
         bounded_preview_plaintext, client, decrypt, encrypt, encrypt_with_nonce,
-        encrypted_ciphertext_len, pairing_is_gone, pairing_proof, truncate_utf8,
-        workspace_collapse_key, PlainRemoteCommand, ScheduledCompletionRegistry,
+        encrypted_ciphertext_len, pairing_is_gone, pairing_proof, stored_pairing_status,
+        truncate_utf8, workspace_collapse_key, PlainRemoteCommand, ScheduledCompletionRegistry,
         WorkspaceUsageLimit, MAX_PREVIEW_CIPHERTEXT, MAX_WORKSPACE_PLAINTEXT_BYTES,
     };
 
@@ -1831,6 +1892,65 @@ mod tests {
 
         assert!(!registry.take_if_active("reviewed", &reviewed));
         assert!(registry.take_if_active("untouched", &untouched));
+    }
+
+    #[test]
+    fn replaced_completion_cannot_take_or_cancel_the_new_generation() {
+        let mut registry = ScheduledCompletionRegistry::default();
+        let previous = registry.insert("same".into(), "term-1".into(), false);
+        let current = registry.insert("same".into(), "term-1".into(), false);
+        assert!(previous.load(std::sync::atomic::Ordering::Acquire));
+        assert!(!registry.take_if_active("same", &previous));
+        assert!(registry.take_if_active("same", &current));
+    }
+
+    #[test]
+    fn cancelled_delay_releases_its_captured_payload_immediately() {
+        struct Payload(std::sync::mpsc::Sender<()>);
+        impl Drop for Payload {
+            fn drop(&mut self) {
+                let _ = self.0.send(());
+            }
+        }
+        let (released, received) = std::sync::mpsc::channel();
+        let payload = Payload(released);
+        let timer = tauri::async_runtime::spawn(async move {
+            let _payload = payload;
+            tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+        });
+        let mut registry = ScheduledCompletionRegistry::default();
+        let cancelled = registry.insert("delay".into(), "term-1".into(), false);
+        registry.attach_timer("delay", &cancelled, timer.inner().abort_handle());
+        registry.cancel_terminal("term-1");
+        received
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        assert!(!registry.take_if_active("delay", &cancelled));
+    }
+
+    #[test]
+    fn stored_pairing_changes_preserve_last_known_status_on_transient_errors() {
+        let directory =
+            std::env::temp_dir().join(format!("duckweed-mobile-pairing-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("mobile.json");
+        assert_eq!(stored_pairing_status(&path), Some(false));
+        std::fs::write(path.with_extension("json.tmp"), "{}").unwrap();
+        assert_eq!(stored_pairing_status(&path), None);
+        std::fs::remove_file(path.with_extension("json.tmp")).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"devices":[{"id":"phone","name":"Phone","pairedAt":1}]}"#,
+        )
+        .unwrap();
+        assert_eq!(stored_pairing_status(&path), Some(true));
+        std::fs::write(&path, "damaged").unwrap();
+        assert_eq!(stored_pairing_status(&path), None);
+        assert_eq!(stored_pairing_status(&directory), None);
+        std::fs::write(&path, r#"{"devices":[]}"#).unwrap();
+        assert_eq!(stored_pairing_status(&path), Some(false));
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(directory).unwrap();
     }
 
     #[test]

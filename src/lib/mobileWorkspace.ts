@@ -44,23 +44,40 @@ export function utf8ByteLength(value: string): number {
   return encoder.encode(value).byteLength;
 }
 
+/** UTF-8 width, including TextEncoder's replacement for unpaired surrogates. */
+function codePointBytes(value: string, index: number): number {
+  const code = value.charCodeAt(index);
+  if (code < 0x80) return 1;
+  if (code < 0x800) return 2;
+  if (code >= 0xd800 && code <= 0xdbff) {
+    const next = value.charCodeAt(index + 1);
+    if (next >= 0xdc00 && next <= 0xdfff) return 4;
+  }
+  return 3;
+}
+
 /** Truncate at a UTF-8 boundary without splitting a surrogate pair. */
 export function truncateUtf8(value: string, maxBytes: number): string {
   if (maxBytes <= 0) return "";
-  if (utf8ByteLength(value) <= maxBytes) return value;
-
-  const marker = "…";
-  const markerBytes = utf8ByteLength(marker);
-  let end = Math.min(value.length, maxBytes);
-  while (end > 0 && utf8ByteLength(value.slice(0, end)) > maxBytes) end -= 1;
-  while (end > 0 && end < value.length && /[\uD800-\uDBFF]/.test(value[end - 1])) {
-    end -= 1;
+  let end = 0;
+  let bytes = 0;
+  while (end < value.length) {
+    const width = codePointBytes(value, end);
+    if (bytes + width > maxBytes) break;
+    bytes += width;
+    end += width === 4 ? 2 : 1;
   }
+  if (end === value.length) return value;
 
+  // Keep the same boundary behavior for a dangling high surrogate.
+  while (end > 0) {
+    const last = value.charCodeAt(end - 1);
+    if (last < 0xd800 || last > 0xdbff) break;
+    end -= 1;
+    bytes -= 3;
+  }
   const prefix = value.slice(0, end);
-  return markerBytes <= maxBytes && utf8ByteLength(prefix) + markerBytes <= maxBytes
-    ? `${prefix}${marker}`
-    : prefix;
+  return bytes + 3 <= maxBytes ? `${prefix}\u2026` : prefix;
 }
 
 /** Keep the newest terminal screen/scrollback without cutting UTF-8 text. */
@@ -69,15 +86,23 @@ export function truncateUtf8Tail(value: string, maxBytes: number): string {
   if (utf8ByteLength(value) <= maxBytes) return value;
 
   const marker = "\u2026\n";
-  const markerBytes = utf8ByteLength(marker);
+  const markerBytes = 4;
   if (maxBytes < markerBytes) return "";
   const contentBudget = maxBytes - markerBytes;
-  let start = Math.max(0, value.length - contentBudget);
-  while (start < value.length && utf8ByteLength(value.slice(start)) > contentBudget) {
-    start += 1;
+  let start = value.length;
+  let bytes = 0;
+  while (start > 0) {
+    const index = start - 1;
+    // When extending a suffix across a surrogate pair, its low surrogate
+    // already contributed three replacement bytes. The complete pair adds one.
+    const pointBytes = codePointBytes(value, index);
+    const width = pointBytes === 4 ? 1 : pointBytes;
+    if (bytes + width > contentBudget) break;
+    bytes += width;
+    start = index;
   }
-  // A JS index can land between a UTF-16 surrogate pair.
-  if (start < value.length && /[\uDC00-\uDFFF]/.test(value[start] ?? "")) start += 1;
+  const first = value.charCodeAt(start);
+  if (first >= 0xdc00 && first <= 0xdfff) start += 1;
   return `${marker}${value.slice(start)}`;
 }
 

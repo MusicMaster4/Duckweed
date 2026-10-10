@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { memo, useCallback, type ReactNode } from "react";
 
 import {
   rosterForAnchor,
@@ -14,7 +14,7 @@ import {
   type SubagentSummary,
 } from "../../../lib/agents/subagents";
 import type { AgentId, AgentItem } from "../../../lib/agents/types";
-import { useSubagentUi } from "./SubagentUiContext";
+import { useSubagentActivityUi, useSubagentUi } from "./SubagentUiContext";
 
 function PeekPreview({ subagent }: { subagent: SubagentSummary }) {
   const tools = subagentPeekTools(subagent);
@@ -94,7 +94,7 @@ function RosterRow({
   );
 }
 
-export function SubagentBoard({
+export const SubagentBoard = memo(function SubagentBoard({
   agent,
   roster,
   now,
@@ -146,7 +146,14 @@ export function SubagentBoard({
       )}
     </section>
   );
-}
+}, (previous, next) => {
+  if (previous.agent !== next.agent || previous.roster !== next.roster ||
+      previous.peekedCallId !== next.peekedCallId || previous.onPeek !== next.onPeek ||
+      previous.onOpen !== next.onOpen) return false;
+  return previous.now === next.now || !next.roster.subagents.some(
+    (subagent) => subagent.status === "running" || subagent.status === "pending",
+  );
+});
 
 /** Renders the roster whose first task lives in this activity cluster. */
 export function SubagentBoardAnchor({ itemId }: { itemId: string }) {
@@ -159,6 +166,10 @@ export function SubagentBoardAnchor({ itemId }: { itemId: string }) {
     openSubagent,
     closePeek,
   } = useSubagentUi();
+  const togglePeek = useCallback((callId: string) => {
+    if (peekedCallId === callId) closePeek();
+    else peekSubagent(callId);
+  }, [closePeek, peekedCallId, peekSubagent]);
   const roster = rosterForAnchor(rosters, itemId);
   if (!agent || !roster) return null;
 
@@ -168,10 +179,7 @@ export function SubagentBoardAnchor({ itemId }: { itemId: string }) {
       roster={roster}
       now={now}
       peekedCallId={peekedCallId}
-      onPeek={(callId) => {
-        if (peekedCallId === callId) closePeek();
-        else peekSubagent(callId);
-      }}
+      onPeek={togglePeek}
       onOpen={openSubagent}
     />
   );
@@ -185,7 +193,7 @@ export function SubagentBoardForActivities({
   activities: AgentItem[];
   wrap?: (board: ReactNode) => ReactNode;
 }) {
-  const { rosterAnchorIds } = useSubagentUi();
+  const { rosterAnchorIds } = useSubagentActivityUi();
   const rosterAnchorId = activities.find(
     (item) => item.kind === "tool" && rosterAnchorIds.has(item.id),
   )?.id;

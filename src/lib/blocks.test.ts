@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { Terminal } from "@xterm/xterm";
 
 import {
   BlockTracker,
@@ -240,7 +241,7 @@ describe("BlockTracker.open OSC 133 anchoring", () => {
   type Row = { text: string; isWrapped?: boolean };
 
   function openableTracker(rows: Record<number, Row>, cursorLine: number) {
-    const markers: { line: number; isDisposed: boolean }[] = [];
+    const markers: { line: number; isDisposed: boolean; dispose(): void }[] = [];
     const term = {
       buffer: {
         active: {
@@ -260,7 +261,22 @@ describe("BlockTracker.open OSC 133 anchoring", () => {
       },
       registerMarker(offset: number) {
         const line = this.buffer.active.baseY + this.buffer.active.cursorY + offset;
-        const m = { line, isDisposed: false };
+        const callbacks = new Set<() => void>();
+        const m = {
+          line,
+          isDisposed: false,
+          onDispose(callback: () => void) {
+            callbacks.add(callback);
+            return { dispose() { callbacks.delete(callback); } };
+          },
+          dispose() {
+            if (this.isDisposed) return;
+            this.isDisposed = true;
+            this.line = -1;
+            for (const callback of callbacks) callback();
+            callbacks.clear();
+          },
+        };
         markers.push(m);
         return m;
       },
@@ -270,12 +286,13 @@ describe("BlockTracker.open OSC 133 anchoring", () => {
       term,
       blocks: [],
       nextId: 1,
+      needsPrune: false,
+      onMarkerDisposed() {
+        (tracker as unknown as { needsPrune: boolean }).needsPrune = true;
+      },
       selectedId: null,
       selectOverlay: { hidden: true },
       visibleBlocks: new Set(),
-      prune() {
-        // no-op for these unit tests
-      },
       scheduleLayout() {
         // no-op for these unit tests
       },
@@ -340,6 +357,48 @@ describe("BlockTracker.open OSC 133 anchoring", () => {
     expect(blocks).toHaveLength(1);
     expect(blocks[0].startedAt).toBe(1200);
     expect(blocks[0].start.line).toBe(5);
+  });
+
+  test("retains history until xterm disposes a marker, then prunes its selection", () => {
+    const { tracker, markers, term } = openableTracker({
+      0: { text: "PS H:\\proj> first" },
+      3: { text: "PS H:\\proj> second" },
+    }, 0);
+    tracker.open("first", 1000);
+    term.buffer.active.cursorY = 3;
+    term.buffer.active.length = 4;
+    tracker.open("second", 2000);
+    const state = tracker as unknown as { blocks: CommandBlock[]; selectedId: number | null };
+    const initialHistory = state.blocks;
+    expect(tracker.ids()).toEqual([1, 2]);
+    expect(tracker.ids()).toEqual([1, 2]);
+    expect(state.blocks).toBe(initialHistory);
+
+    state.selectedId = 1;
+    markers[0].dispose();
+    expect(tracker.ids()).toEqual([2]);
+    expect(tracker.selectedBlockId()).toBeNull();
+    const retainedHistory = state.blocks;
+    expect(tracker.ids()).toEqual([2]);
+    expect(state.blocks).toBe(retainedHistory);
+  });
+
+  test("prunes command blocks when the real xterm scrollback trims their markers", async () => {
+    const term = new Terminal({ allowProposedApi: true, cols: 40, rows: 2, scrollback: 2 });
+    const { tracker } = openableTracker({}, 0);
+    Object.assign(tracker as object, { term });
+    const write = (text: string) => new Promise<void>((resolve) => term.write(text, resolve));
+    try {
+      await write("PS> first");
+      tracker.open("first", 1000);
+      await write("\r\noutput\r\nPS> second");
+      tracker.open("second", 2000);
+      expect(tracker.ids()).toEqual([1, 2]);
+      await write("\r\nresult".repeat(8));
+      expect(tracker.ids()).toEqual([]);
+    } finally {
+      term.dispose();
+    }
   });
 
   test("keeps repeated composer submissions as separate blocks", () => {
@@ -425,5 +484,49 @@ describe("wrappedCommandEnd", () => {
   test("stops before output and never passes the block boundary", () => {
     expect(wrappedCommandEnd((y) => y === 6, 5, 5)).toBe(5);
     expect(wrappedCommandEnd((y) => y === 6, 5, 9)).toBe(6);
+  });
+});
+
+
+describe("BlockTracker pointer lookup", () => {
+  function trackerWithBlocks(starts: number[]) {
+    let markerReads = 0;
+    const blocks = starts.map((line, index) => ({
+      id: index + 1,
+      command: `command ${index + 1}`,
+      start: {
+        get line() { markerReads += 1; return line; },
+        isDisposed: false,
+      },
+    }));
+    const tracker = Object.create(BlockTracker.prototype) as BlockTracker;
+    Object.assign(tracker as object, {
+      needsPrune: false,
+      blocks,
+      term: {
+        buffer: { active: {
+          baseY: starts[starts.length - 1] ?? 0,
+          cursorY: 1,
+          getLine() { return { isWrapped: false, translateToString() { return "output"; } }; },
+        } },
+      },
+    });
+    return { tracker, blocks, reads: () => markerReads };
+  }
+
+  test("finds early scrollback blocks with logarithmic marker reads", () => {
+    const { tracker, blocks, reads } = trackerWithBlocks(Array.from({ length: 20_000 }, (_, i) => i * 3));
+    expect(tracker.atLine(32)).toBe(blocks[10] as unknown as CommandBlock);
+    expect(reads()).toBeLessThan(25);
+  });
+
+  test("keeps newest ownership when successive commands begin on the same line", () => {
+    const { tracker, blocks } = trackerWithBlocks([0, 3, 3, 6]);
+    expect(tracker.atLine(-1)).toBeNull();
+    expect(tracker.atLine(2)).toBe(blocks[0] as unknown as CommandBlock);
+    expect(tracker.atLine(3)).toBe(blocks[2] as unknown as CommandBlock);
+    expect(tracker.atLine(5)).toBe(blocks[2] as unknown as CommandBlock);
+    expect(tracker.atLine(7)).toBe(blocks[3] as unknown as CommandBlock);
+    expect(tracker.atLine(8)).toBeNull();
   });
 });

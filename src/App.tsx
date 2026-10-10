@@ -1099,7 +1099,8 @@ export default function App() {
     let hasPairedDevice = false;
 
     const publish = (urgent = false) => {
-      if (stopped) return;
+      // An unpaired desktop has no recipient for this expensive projection.
+      if (stopped || !hasPairedDevice) return;
       if (timer) window.clearTimeout(timer);
       timer = 0;
       if (publishing) {
@@ -1270,7 +1271,7 @@ export default function App() {
     };
 
     const schedule = (delay = 250) => {
-      if (stopped) return;
+      if (stopped || !hasPairedDevice) return;
       if (publishing) {
         publishQueued = true;
         publishDelay = Math.max(publishDelay, delay);
@@ -1320,7 +1321,24 @@ export default function App() {
     // animation frames are paused by a minimized desktop window.
     const offTurnEnds = agentSessions.subscribeTurnEnd(() => publish(true));
     const syncTick = listen("mobile:sync-tick", () => {
+      if (stopped) return;
+      // Native ticks are emitted only for a currently paired workspace, which
+      // also catches phones paired from another desktop window or process.
+      if (!hasPairedDevice) paired();
       if (timer || publishQueued) publish(true);
+    });
+    const deviceChanges = listen<boolean>("mobile:devices-changed", ({ payload }) => {
+      if (stopped) return;
+      if (payload) {
+        if (!hasPairedDevice) paired();
+      } else {
+        hasPairedDevice = false;
+        if (timer) window.clearTimeout(timer);
+        timer = 0;
+        publishQueued = false;
+        urgentPublishQueued = false;
+        mobileWorkspaceSnapshotRef.current = "";
+      }
     });
     // Keep phone meters on the same live provider reading as the desktop Usage
     // panel, not the snapshot from when the pairing was first opened.
@@ -1331,6 +1349,7 @@ export default function App() {
       if (stopped || status.devices.length === 0) return;
       hasPairedDevice = true;
       refreshUsageLimits();
+      schedule();
     }).catch((error) => {
       if (!stopped) console.error("mobile usage limits status", error);
     });
@@ -1345,6 +1364,7 @@ export default function App() {
       window.removeEventListener("duckweed:mobile-read", read);
       offTurnEnds();
       void syncTick.then((off) => off());
+      void deviceChanges.then((off) => off());
       offAgents();
       offTerminals.forEach((off) => off());
       offTerminalOutput.forEach((off) => off());

@@ -22,6 +22,25 @@ describe("terminal output syntax highlighting", () => {
     expect(output).toContain(paint(highlightColors.number, "42"));
   });
 
+  test("preserves the palette for every token alternative and alias", () => {
+    const tokens = [
+      ["url", "https://example.com/42"],
+      ["string", '\"Error 42\"'],
+      ["path", "C:\\demo\\config.json"],
+      ["path", "/tmp/config.json"],
+      ["error", "Error"],
+      ["warn", "warning"],
+      ["ok", "success"],
+      ["number", "true"],
+      ["muted", "abcdef0123456789"],
+      ["flag", "--verbose"],
+      ["number", "42"],
+    ] as const;
+    const source = tokens.map(([, token]) => token).join(" ");
+    const expected = tokens.map(([kind, token]) => paint(highlightColors[kind], token)).join(" ");
+    expect(createHighlighter()(source)).toBe(expected);
+  });
+
   test("handles Windows PowerShell ConPTY output with reset and native colour in the same read", async () => {
     // Captured from portable-pty / ConPTY with Write-Output and Write-Host.
     const highlighter = createHighlighter();

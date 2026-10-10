@@ -1,4 +1,4 @@
-import { createContext, useContext, useMemo, type ReactNode } from "react";
+import { createContext, useContext, useMemo, useRef, type ReactNode } from "react";
 
 import type { SubagentRoster } from "../../../lib/agents/subagents";
 import type { AgentId } from "../../../lib/agents/types";
@@ -32,6 +32,9 @@ const EMPTY_SUBAGENT_UI: SubagentUiValue = {
 };
 
 const SubagentUiContext = createContext<SubagentUiValue>(EMPTY_SUBAGENT_UI);
+type SubagentActivityUiValue = Pick<SubagentUiValue,
+  "absorbedCallIds" | "rosterAnchorIds" | "peekedCallId" | "peekSubagent">;
+const SubagentActivityUiContext = createContext<SubagentActivityUiValue>(EMPTY_SUBAGENT_UI);
 
 export function SubagentUiProvider({
   agent,
@@ -56,17 +59,27 @@ export function SubagentUiProvider({
   onLeaveFocus: () => void;
   children: ReactNode;
 }) {
-  const absorbedCallIds = useMemo(() => {
-    const ids = new Set<string>();
+  const membershipRef = useRef({
+    absorbedCallIds: EMPTY_SUBAGENT_UI.absorbedCallIds,
+    rosterAnchorIds: EMPTY_SUBAGENT_UI.rosterAnchorIds,
+  });
+  const { absorbedCallIds, rosterAnchorIds } = useMemo(() => {
+    const absorbedCallIds = new Set<string>();
+    const rosterAnchorIds = new Set<string>();
     for (const roster of rosters) {
-      for (const subagent of roster.subagents) ids.add(subagent.callId);
+      rosterAnchorIds.add(roster.anchorItemId);
+      for (const subagent of roster.subagents) absorbedCallIds.add(subagent.callId);
     }
-    return ids;
+    const previous = membershipRef.current;
+    if (previous.absorbedCallIds.size === absorbedCallIds.size &&
+        previous.rosterAnchorIds.size === rosterAnchorIds.size &&
+        [...absorbedCallIds].every((id) => previous.absorbedCallIds.has(id)) &&
+        [...rosterAnchorIds].every((id) => previous.rosterAnchorIds.has(id))) {
+      return previous;
+    }
+    membershipRef.current = { absorbedCallIds, rosterAnchorIds };
+    return membershipRef.current;
   }, [rosters]);
-  const rosterAnchorIds = useMemo(
-    () => new Set(rosters.map((roster) => roster.anchorItemId)),
-    [rosters],
-  );
   const value = useMemo(
     () => ({
       agent,
@@ -96,11 +109,28 @@ export function SubagentUiProvider({
     ],
   );
 
+  // Transcript chrome only needs membership and peek interaction. Clock ticks
+  // and child output updates belong to the boards, not every historical tool.
+  const activityValue = useMemo<SubagentActivityUiValue>(() => ({
+    absorbedCallIds,
+    rosterAnchorIds,
+    peekedCallId,
+    peekSubagent: onPeek,
+  }), [absorbedCallIds, rosterAnchorIds, peekedCallId, onPeek]);
+
   return (
-    <SubagentUiContext.Provider value={value}>{children}</SubagentUiContext.Provider>
+    <SubagentUiContext.Provider value={value}>
+      <SubagentActivityUiContext.Provider value={activityValue}>
+        {children}
+      </SubagentActivityUiContext.Provider>
+    </SubagentUiContext.Provider>
   );
 }
 
 export function useSubagentUi(): SubagentUiValue {
   return useContext(SubagentUiContext);
+}
+
+export function useSubagentActivityUi(): SubagentActivityUiValue {
+  return useContext(SubagentActivityUiContext);
 }

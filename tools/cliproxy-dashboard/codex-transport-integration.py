@@ -25,6 +25,10 @@ root = Path(tempfile.mkdtemp(prefix="cliproxy-codex-http-test-"))
 pending_requests = queue.Queue()
 requests = []
 shutdown = threading.Event()
+fixture_usage = {"input_tokens": 1000, "input_tokens_details": {"cached_tokens": 800},
+                 "output_tokens": 100, "output_tokens_details": {"reasoning_tokens": 40}, "total_tokens": 1100}
+fixture_last = {"inputTokens": 1000, "cachedInputTokens": 800, "cacheWriteInputTokens": 0,
+                "outputTokens": 100, "reasoningOutputTokens": 40, "totalTokens": 1100}
 
 
 class Upstream(BaseHTTPRequestHandler):
@@ -45,7 +49,7 @@ class Upstream(BaseHTTPRequestHandler):
         item = {"id": "fixture-message-" + str(len(requests)), "type": "message", "role": "assistant", "status": "completed",
                 "content": [{"type": "output_text", "text": "HTTP_STREAM_OK", "annotations": []}]}
         response = {"id": response_id, "object": "response", "status": "completed", "model": "gpt-6.1-sol", "output": [item],
-                    "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}}
+                    "usage": fixture_usage}
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.end_headers()
@@ -55,7 +59,7 @@ class Upstream(BaseHTTPRequestHandler):
             self.wfile.flush()
 
         try:
-            emit({"type": "response.created", "response": {**response, "status": "in_progress", "output": []}})
+            emit({"type": "response.created", "response": {**response, "status": "in_progress", "output": [], "usage": None}})
             if "WAIT_FOR_CONTROL" in text and "FINISH_HTTP" not in text:
                 release = threading.Event()
                 pending_requests.put(release)
@@ -220,10 +224,33 @@ multi_agent = false
     assert requests and all("websocket" not in request for request in requests), requests
     if large_history:
         assert max(request["bytes"] for request in requests) > 28 * 1024 * 1024, "Large history was not sent to the provider: " + json.dumps(requests)
+    # Verify the real proxy preserves the Responses subsets and the installed
+    # app-server exposes inclusive input/output both live and in its rollouts.
+    usage_frames = [f["params"]["tokenUsage"] for f in frames if f.get("method") == "thread/tokenUsage/updated"]
+    assert usage_frames, "Codex did not report token usage"
+    for usage in usage_frames:
+        assert usage["last"] == fixture_last, usage
+        total = usage["total"]
+        calls = total["inputTokens"] // 1000
+        assert calls > 0 and total == {k: v * calls for k, v in fixture_last.items()}, usage
+    rollout_events = []
+    for path in (codex_home / "sessions").rglob("*.jsonl"):
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if '"token_count"' not in line:
+                continue
+            info = json.loads(line).get("payload", {}).get("info")
+            if info:
+                rollout_events.append(info)
+    assert rollout_events, "Codex did not persist usage"
+    for info in rollout_events:
+        last = info["last_token_usage"]
+        assert last["input_tokens"] == 1000 and last["cached_input_tokens"] == 800, info
+        assert last["output_tokens"] == 100 and last["reasoning_output_tokens"] == 40, info
+        assert last["total_tokens"] == 1100, info
     assert all(frame.get("method") != "error" for frame in frames), frames
     print(json.dumps({"codexHttpStreaming": "passed", "reloadExistingThread": "not-run" if large_history else "passed",
                       "largeHistory": "passed" if large_history else "not-run", "steering": "passed",
-                      "interrupt": "passed", "continueAfterInterrupt": "passed", "providerRequests": len(requests),
+                      "interrupt": "passed", "continueAfterInterrupt": "passed", "usagePreserved": "passed", "providerRequests": len(requests),
                       "largestRequestBytes": max(request.get("bytes", 0) for request in requests), "codexBinary": str(codex_binary)}))
 
 finally:

@@ -486,16 +486,31 @@ fn count_lines_many(root: &Path, names: &[String]) -> Vec<usize> {
             .collect();
     }
 
+    // A thread per path reserves one stack per file and can exhaust the OS
+    // on large diffs. Keep disk reads parallel with a fixed-size worker set.
+    let workers = thread::available_parallelism()
+        .map(|available| available.get().min(8))
+        .unwrap_or(2)
+        .min(names.len());
+    let chunk_size = names.len().div_ceil(workers);
+    let mut counts = vec![0; names.len()];
     thread::scope(|scope| {
         let handles: Vec<_> = names
-            .iter()
-            .map(|name| scope.spawn(move || count_lines(&root.join(name))))
+            .chunks(chunk_size)
+            .zip(counts.chunks_mut(chunk_size))
+            .map(|(names, counts)| {
+                scope.spawn(move || {
+                    for (name, count) in names.iter().zip(counts) {
+                        *count = count_lines(&root.join(name));
+                    }
+                })
+            })
             .collect();
-        handles
-            .into_iter()
-            .map(|handle| handle.join().unwrap_or(0))
-            .collect()
-    })
+        for handle in handles {
+            let _ = handle.join();
+        }
+    });
+    counts
 }
 
 /// Every uncommitted change under `root`, at `context` lines of context.
@@ -507,7 +522,13 @@ fn collect(root: &Path, only: Option<&str>, context: u32) -> Result<Vec<FileDiff
     let unified = format!("--unified={context}");
 
     let mut stat_args = vec!["diff", "--numstat", "-z", base];
-    let mut patch_args = vec!["diff", "--no-ext-diff", "--no-color", unified.as_str(), base];
+    let mut patch_args = vec![
+        "diff",
+        "--no-ext-diff",
+        "--no-color",
+        unified.as_str(),
+        base,
+    ];
     if let Some(name) = only {
         stat_args.extend_from_slice(&["--", name]);
         patch_args.extend_from_slice(&["--", name]);
@@ -527,7 +548,9 @@ fn collect(root: &Path, only: Option<&str>, context: u32) -> Result<Vec<FileDiff
         }
     });
     let entries = entries?;
-    let parsed = parse_patch(&patch_text?);
+    let patch_text = patch_text?;
+    let mut parsed = parse_patch(&patch_text);
+    drop(patch_text);
 
     // Line counts for surviving files are independent; fan them out so a large
     // multi-file change is not one full-file read after another.
@@ -577,7 +600,10 @@ fn collect(root: &Path, only: Option<&str>, context: u32) -> Result<Vec<FileDiff
             deletions: entry.deletions,
             binary,
             new_lines,
-            hunks: patch.map(|f| f.hunks.clone()).unwrap_or_default(),
+            hunks: parsed
+                .get_mut(i)
+                .map(|file| std::mem::take(&mut file.hunks))
+                .unwrap_or_default(),
         });
     }
 
@@ -754,6 +780,36 @@ mod tests {
 
     fn numbered(count: usize) -> String {
         (1..=count).map(|i| format!("line {i}\n")).collect()
+    }
+
+    #[test]
+    fn parallel_line_counts_preserve_order_and_existing_file_rules() {
+        let root =
+            std::env::temp_dir().join(format!("duckweed-line-counts-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut names = Vec::new();
+        for index in 0..96 {
+            let name = format!("file-{index}.txt");
+            std::fs::write(root.join(&name), numbered(index)).unwrap();
+            names.push(name);
+        }
+        for (name, bytes) in [
+            ("empty.txt", b"".as_slice()),
+            ("no-newline.txt", b"one\r\ntwo".as_slice()),
+            ("binary.bin", b"one\0\ntwo".as_slice()),
+        ] {
+            std::fs::write(root.join(name), bytes).unwrap();
+            names.push(name.to_string());
+        }
+        names.push("missing.txt".to_string());
+        let sequential: Vec<_> = names
+            .iter()
+            .map(|name| count_lines(&root.join(name)))
+            .collect();
+        assert_eq!(count_lines_many(&root, &names), sequential);
+        assert_eq!(&sequential[96..], &[0, 2, 0, 0]);
+        assert!(count_lines_many(&root, &[]).is_empty());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

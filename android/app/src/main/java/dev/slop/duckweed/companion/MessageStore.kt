@@ -288,6 +288,25 @@ class MessageStore(context: Context) : SQLiteOpenHelper(context, "duckweed-messa
             arrayOf("completed", "attention"),
         ).filter { it.kind == "completed" || it.kind == "attention" }
 
+    fun activeAttentionMessages(notificationIds: Set<Int>): List<CompletionRecord> {
+        if (notificationIds.isEmpty()) return emptyList()
+        val ids = mutableListOf<String>()
+        // NotificationManager exposes integer hashes. Resolve only matching ids
+        // from routing metadata before decrypting their response payloads.
+        readableDatabase.query(
+            "messages", arrayOf("id"), "kind IN (?, ?) OR kind IS NULL",
+            arrayOf("completed", "attention"), null, null, "sent_at DESC", "500",
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                val id = cursor.getString(0)
+                if (id.hashCode() in notificationIds) ids += id
+            }
+        }
+        if (ids.isEmpty()) return emptyList()
+        return read("id IN (${ids.joinToString(",") { "?" }})", ids.toTypedArray())
+            .filter { it.kind == "attention" }
+    }
+
     fun latestForOpenAgents(
         openTerminals: Set<Pair<String, String>>,
         limit: Int = 50,
@@ -399,59 +418,69 @@ class MessageStore(context: Context) : SQLiteOpenHelper(context, "duckweed-messa
         val clearedNotificationIds = mutableListOf<String>()
         database.beginTransaction()
         try {
+            // Snapshot tails repeat on every update. Read their small routing
+            // metadata once so unchanged history requires no writes or encryption.
+            val storedRoutes = syncedMessageRouting(database)
             snapshot.projects.forEach { project ->
                 project.terminals.forEach { terminal ->
                     val mobileReadAt = conversationReadAt(database, snapshot.pairId, terminal.id)
+                    val mobileReadSeq = conversationReadSeq(database, snapshot.pairId, terminal.id)
                     val latestAssistantId = terminal.conversation
                         .lastOrNull { it.role == "assistant" && !it.streaming }
                         ?.id
                     terminal.conversation.filterNot { it.streaming }.forEach { message ->
                         val id = "workspace:${snapshot.pairId}:${terminal.id}:${message.id}"
-                        val unread = MobileSyncPolicy.isSyncedMessageUnread(
-                            terminal.unreadOnDesktop,
-                            message.id == latestAssistantId,
-                            message.sentAt,
-                            mobileReadAt,
-                            terminal.completionSeq,
-                            conversationReadSeq(database, snapshot.pairId, terminal.id),
-                        )
-                        val record = CompletionRecord(
-                            id = id,
-                            pairId = snapshot.pairId,
-                            sentAt = message.sentAt,
-                            agent = terminal.agent ?: "Agent",
-                            project = project.name,
-                            projectId = project.id,
-                            terminalId = terminal.id,
-                            terminalTitle = terminal.title,
-                            kind = if (message.role == "user") "user" else "completed",
-                            response = message.text,
-                            durationMs = null,
-                            soundCue = null,
-                            workspace = null,
-                            readAt = message.sentAt.takeUnless { unread },
-                            unreadOnDesktop = terminal.unreadOnDesktop,
-                            completionSeq = terminal.completionSeq,
-                        )
-                        if (!recordExists(database, id)) {
+                        val kind = if (message.role == "user") "user" else "completed"
+                        val existing = storedRoutes[id]
+                        if (existing == null) {
+                            val unread = MobileSyncPolicy.isSyncedMessageUnread(
+                                terminal.unreadOnDesktop,
+                                message.id == latestAssistantId,
+                                message.sentAt,
+                                mobileReadAt,
+                                terminal.completionSeq,
+                                mobileReadSeq,
+                            )
+                            val record = CompletionRecord(
+                                id = id,
+                                pairId = snapshot.pairId,
+                                sentAt = message.sentAt,
+                                agent = terminal.agent ?: "Agent",
+                                project = project.name,
+                                projectId = project.id,
+                                terminalId = terminal.id,
+                                terminalTitle = terminal.title,
+                                kind = kind,
+                                response = message.text,
+                                durationMs = null,
+                                soundCue = null,
+                                workspace = null,
+                                readAt = message.sentAt.takeUnless { unread },
+                                unreadOnDesktop = terminal.unreadOnDesktop,
+                                completionSeq = terminal.completionSeq,
+                            )
                             database.insertWithOnConflict(
                                 "messages",
                                 null,
                                 valuesFor(record, message.sentAt, record.readAt),
                                 SQLiteDatabase.CONFLICT_IGNORE,
                             )
+                            storedRoutes[id] = StoredMessageRouting(snapshot.pairId, terminal.id, kind)
+                        } else if (existing.pairId != snapshot.pairId || existing.terminalId != terminal.id || existing.kind != kind) {
+                            // Repair legacy routing columns without rewriting the
+                            // payload or changing existing read/notification state.
+                            database.update(
+                                "messages",
+                                ContentValues().apply {
+                                    put("pair_id", snapshot.pairId)
+                                    put("terminal_id", terminal.id)
+                                    put("kind", kind)
+                                },
+                                "id = ?",
+                                arrayOf(id),
+                            )
+                            storedRoutes[id] = StoredMessageRouting(snapshot.pairId, terminal.id, kind)
                         }
-                        // Records created by older app versions did not have routing columns.
-                        database.update(
-                            "messages",
-                            ContentValues().apply {
-                                put("pair_id", snapshot.pairId)
-                                put("terminal_id", terminal.id)
-                                put("kind", record.kind)
-                            },
-                            "id = ?",
-                            arrayOf(id),
-                        )
                     }
                     if (terminal.unreadOnDesktop == false || terminal.readCompletionSeq != null) {
                         val through = if (terminal.unreadOnDesktop == false) snapshot.updatedAt else 0L
@@ -478,6 +507,25 @@ class MessageStore(context: Context) : SQLiteOpenHelper(context, "duckweed-messa
             database.endTransaction()
         }
         return clearedNotificationIds
+    }
+
+    private data class StoredMessageRouting(val pairId: String?, val terminalId: String?, val kind: String?)
+
+    private fun syncedMessageRouting(database: SQLiteDatabase): MutableMap<String, StoredMessageRouting> {
+        val routing = mutableMapOf<String, StoredMessageRouting>()
+        database.query(
+            "messages", arrayOf("id", "pair_id", "terminal_id", "kind"),
+            "id LIKE ?", arrayOf("workspace:%"), null, null, null,
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                routing[cursor.getString(0)] = StoredMessageRouting(
+                    if (cursor.isNull(1)) null else cursor.getString(1),
+                    if (cursor.isNull(2)) null else cursor.getString(2),
+                    if (cursor.isNull(3)) null else cursor.getString(3),
+                )
+            }
+        }
+        return routing
     }
 
     private fun read(selection: String?, selectionArgs: Array<String>? = null): List<CompletionRecord> {

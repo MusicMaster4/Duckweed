@@ -5,7 +5,7 @@ import { AgentImageAttachments } from "../AgentImageAttachments";
 import { AgentMessageText } from "../AgentMessageText";
 import { MessageCopyButton } from "../MessageCopyButton";
 import { SubagentBoardAnchor, SubagentBoardForActivities } from "../subagents/SubagentBoard";
-import { useSubagentUi } from "../subagents/SubagentUiContext";
+import { useSubagentActivityUi } from "../subagents/SubagentUiContext";
 import { toolLoadingPhase, type ToolLoadingPhase } from "../toolLoadingPhase";
 import {
   ActivityHistory,
@@ -255,7 +255,7 @@ function OpenCodePlan({ steps }: { steps: AgentPlanStep[] }) {
 
 /** A turn OpenCode handed to another agent — its `task` calls. */
 function OpenCodeSubagent({ item, elapsed }: { item: ToolItem; elapsed: string | null }) {
-  const { absorbedCallIds, rosterAnchorIds, peekedCallId, peekSubagent } = useSubagentUi();
+  const { absorbedCallIds, rosterAnchorIds, peekedCallId, peekSubagent } = useSubagentActivityUi();
   const loadingPhase = toolLoadingPhase(item.status);
   if (rosterAnchorIds.has(item.id)) return <SubagentBoardAnchor itemId={item.id} />;
   if (absorbedCallIds.has(item.callId)) return null;

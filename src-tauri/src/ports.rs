@@ -3,7 +3,7 @@
 //! Ownership is derived from process ancestry. A PID must descend from a live
 //! PTY shell or headless agent before it can be listed, stopped, or tunneled.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -772,7 +772,9 @@ fn spawn_tunnel_supervisor(
                 {
                     let mut runtime = tunnel.runtime.lock().unwrap();
                     runtime.status = ForwardStatus::Reconnecting;
-                    runtime.warning = Some("The provider changed the public address. Verifying the new link...".into());
+                    runtime.warning = Some(
+                        "The provider changed the public address. Verifying the new link...".into(),
+                    );
                 }
                 if wait_for_reachable_public_url(&url, &tunnel.stop).is_ok() {
                     if tunnel.stop.load(Ordering::Acquire) {
@@ -834,7 +836,11 @@ fn spawn_tunnel_supervisor(
     })
 }
 
-fn start_public_tunnel(proxy_port: u16, tools_dir: &Path, stop: &AtomicBool) -> Result<PublicTunnel, String> {
+fn start_public_tunnel(
+    proxy_port: u16,
+    tools_dir: &Path,
+    stop: &AtomicBool,
+) -> Result<PublicTunnel, String> {
     if stop.load(Ordering::Acquire) {
         return Err("Public sharing was stopped".into());
     }
@@ -877,7 +883,11 @@ fn start_public_tunnel(proxy_port: u16, tools_dir: &Path, stop: &AtomicBool) -> 
     }
 }
 
-fn start_ngrok_tunnel(ngrok: PathBuf, proxy_port: u16, stop: &AtomicBool) -> Result<PublicTunnel, String> {
+fn start_ngrok_tunnel(
+    ngrok: PathBuf,
+    proxy_port: u16,
+    stop: &AtomicBool,
+) -> Result<PublicTunnel, String> {
     let origin = format!("http://127.0.0.1:{proxy_port}");
     let mut command = Command::new(ngrok);
     command.args(["http", &origin, "--log", "stdout", "--log-format", "json"]);
@@ -931,7 +941,10 @@ fn probe_public_url(client: &reqwest::blocking::Client, url: &str) -> Result<(),
     if body == "duckweed-ready" {
         Ok(())
     } else {
-        Err("the provider returned a browser warning or another page instead of the shared server".into())
+        Err(
+            "the provider returned a browser warning or another page instead of the shared server"
+                .into(),
+        )
     }
 }
 
@@ -1011,7 +1024,11 @@ fn lookup_public_dns(host: &str) -> PublicDns {
     }
 }
 
-fn start_ssh_tunnel(proxy_port: u16, tools_dir: &Path, stop: &AtomicBool) -> Result<PublicTunnel, String> {
+fn start_ssh_tunnel(
+    proxy_port: u16,
+    tools_dir: &Path,
+    stop: &AtomicBool,
+) -> Result<PublicTunnel, String> {
     let ssh = executable_on_path("ssh").ok_or_else(|| "OpenSSH is not installed".to_string())?;
     std::fs::create_dir_all(tools_dir).map_err(err)?;
     let known_hosts = tools_dir.join("public-tunnel-known-hosts");
@@ -1047,7 +1064,11 @@ fn start_verified_tunnel(command: Command, stop: &AtomicBool) -> Result<PublicTu
         return Err("Public sharing was stopped".into());
     }
     let (child, lines) = spawn_tunnel_process(command)?;
-    let mut tunnel = PublicTunnel { child, lines, url: String::new() };
+    let mut tunnel = PublicTunnel {
+        child,
+        lines,
+        url: String::new(),
+    };
     tunnel.url = wait_for_tunnel_url(&mut tunnel.child, &tunnel.lines, stop)?;
     wait_for_reachable_public_url(&tunnel.url, stop)?;
     Ok(tunnel)
@@ -1080,7 +1101,11 @@ fn drain_tunnel_output(reader: impl Read + Send + 'static, sender: mpsc::Sender<
     });
 }
 
-fn wait_for_tunnel_url(child: &mut Child, lines: &mpsc::Receiver<String>, stop: &AtomicBool) -> Result<String, String> {
+fn wait_for_tunnel_url(
+    child: &mut Child,
+    lines: &mpsc::Receiver<String>,
+    stop: &AtomicBool,
+) -> Result<String, String> {
     let deadline = std::time::Instant::now() + Duration::from_secs(35);
     let mut public_url = None;
     let mut recent = Vec::new();
@@ -1290,21 +1315,24 @@ fn owner_map_from_roots(
 ) -> HashMap<u32, Owner> {
     let mut owners: HashMap<u32, Owner> = roots.into_iter().collect();
 
-    // Process snapshots are not guaranteed to be parent-first. Repeated passes
-    // propagate each known root through the full descendant tree.
-    loop {
-        let mut changed = false;
-        for process in processes {
-            if owners.contains_key(&process.pid) {
-                continue;
+    // Index each parent once, then visit only descendants of managed roots.
+    // Already-owned roots are never overwritten when one managed process is
+    // nested inside another, and the visited map also bounds malformed cycles.
+    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+    for process in processes {
+        children.entry(process.ppid).or_default().push(process.pid);
+    }
+    let mut pending: VecDeque<u32> = owners.keys().copied().collect();
+    while let Some(parent) = pending.pop_front() {
+        let Some(descendants) = children.get(&parent) else {
+            continue;
+        };
+        let owner = owners[&parent].clone();
+        for &pid in descendants {
+            if let std::collections::hash_map::Entry::Vacant(entry) = owners.entry(pid) {
+                entry.insert(owner.clone());
+                pending.push_back(pid);
             }
-            if let Some(owner) = owners.get(&process.ppid).cloned() {
-                owners.insert(process.pid, owner);
-                changed = true;
-            }
-        }
-        if !changed {
-            break;
         }
     }
     owners
@@ -1515,6 +1543,121 @@ fn kill_process_tree(pid: u32) -> Result<(), String> {
 
 #[cfg(windows)]
 fn platform_listeners() -> Vec<Listener> {
+    // Read both address families in-process. Retain the CLI fallback if the
+    // native table cannot be read, so discovery still recovers on API errors.
+    windows_native_listeners().unwrap_or_else(|_| windows_netstat_listeners())
+}
+
+#[cfg(windows)]
+fn windows_tcp_table(family: u32) -> io::Result<Vec<u32>> {
+    use windows_sys::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, NO_ERROR};
+    use windows_sys::Win32::NetworkManagement::IpHelper::{
+        GetExtendedTcpTable, TCP_TABLE_OWNER_PID_LISTENER,
+    };
+    let mut bytes = 0_u32;
+    // The first call asks Windows for the required allocation size.
+    let status = unsafe {
+        GetExtendedTcpTable(
+            std::ptr::null_mut(),
+            &mut bytes,
+            0,
+            family,
+            TCP_TABLE_OWNER_PID_LISTENER,
+            0,
+        )
+    };
+    if status != ERROR_INSUFFICIENT_BUFFER && status != NO_ERROR {
+        return Err(io::Error::from_raw_os_error(status as i32));
+    }
+    // u32 storage provides the alignment required by both native row layouts.
+    let mut table = Vec::<u32>::new();
+    for _ in 0..4 {
+        table.resize((bytes as usize).div_ceil(std::mem::size_of::<u32>()), 0);
+        let mut capacity = (table.len() * std::mem::size_of::<u32>()) as u32;
+        let status = unsafe {
+            GetExtendedTcpTable(
+                table.as_mut_ptr().cast(),
+                &mut capacity,
+                0,
+                family,
+                TCP_TABLE_OWNER_PID_LISTENER,
+                0,
+            )
+        };
+        if status == NO_ERROR {
+            return Ok(table);
+        }
+        if status != ERROR_INSUFFICIENT_BUFFER {
+            return Err(io::Error::from_raw_os_error(status as i32));
+        }
+        // Listeners may be added between the size query and the actual read.
+        bytes = capacity;
+    }
+    Err(io::Error::other("the TCP listener table kept growing"))
+}
+
+#[cfg(windows)]
+fn windows_native_listeners() -> io::Result<Vec<Listener>> {
+    use windows_sys::Win32::NetworkManagement::IpHelper::{
+        MIB_TCP6ROW_OWNER_PID, MIB_TCP6TABLE_OWNER_PID, MIB_TCPROW_OWNER_PID,
+        MIB_TCPTABLE_OWNER_PID, MIB_TCP_STATE_LISTEN,
+    };
+    use windows_sys::Win32::Networking::WinSock::{AF_INET, AF_INET6};
+    let mut listeners = Vec::new();
+    for family in [AF_INET, AF_INET6] {
+        let table = windows_tcp_table(family as u32)?;
+        let count = *table
+            .first()
+            .ok_or_else(|| io::Error::other("empty TCP table"))? as usize;
+        let (offset, row_size) = if family == AF_INET {
+            (
+                std::mem::offset_of!(MIB_TCPTABLE_OWNER_PID, table),
+                std::mem::size_of::<MIB_TCPROW_OWNER_PID>(),
+            )
+        } else {
+            (
+                std::mem::offset_of!(MIB_TCP6TABLE_OWNER_PID, table),
+                std::mem::size_of::<MIB_TCP6ROW_OWNER_PID>(),
+            )
+        };
+        let end = count
+            .checked_mul(row_size)
+            .and_then(|size| offset.checked_add(size));
+        if end.is_none_or(|end| end > table.len() * std::mem::size_of::<u32>()) {
+            return Err(io::Error::other("truncated TCP listener table"));
+        }
+        for index in 0..count {
+            // Bounds were checked against the native entry count above. The
+            // Windows structs contain only integer fields, so every bit pattern
+            // is valid; read_unaligned also avoids layout/alignment assumptions.
+            let row = unsafe { table.as_ptr().cast::<u8>().add(offset + index * row_size) };
+            let (state, address, port, pid) = if family == AF_INET {
+                let row = unsafe { row.cast::<MIB_TCPROW_OWNER_PID>().read_unaligned() };
+                (
+                    row.dwState,
+                    std::net::Ipv4Addr::from(row.dwLocalAddr.to_ne_bytes()).to_string(),
+                    u16::from_be(row.dwLocalPort as u16),
+                    row.dwOwningPid,
+                )
+            } else {
+                let row = unsafe { row.cast::<MIB_TCP6ROW_OWNER_PID>().read_unaligned() };
+                (
+                    row.dwState,
+                    std::net::Ipv6Addr::from(row.ucLocalAddr).to_string(),
+                    u16::from_be(row.dwLocalPort as u16),
+                    row.dwOwningPid,
+                )
+            };
+            if state == MIB_TCP_STATE_LISTEN as u32 {
+                listeners.push(Listener { address, port, pid });
+            }
+        }
+    }
+    Ok(listeners)
+}
+
+#[cfg(windows)]
+fn windows_netstat_listeners() -> Vec<Listener> {
     let mut command = Command::new("netstat");
     command.args(["-ano", "-p", "tcp"]);
     hide_console(&mut command);
@@ -1706,6 +1849,30 @@ mod tests {
         assert_eq!(ports.len(), 2);
         assert_eq!((ports[0].port, ports[0].pid), (3000, 42));
         assert_eq!((ports[1].port, ports[1].pid), (5173, 99));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_windows_discovery_includes_live_ipv4_and_ipv6_listener_owners() {
+        let ipv4 = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let ipv6 = TcpListener::bind(("::1", 0)).unwrap();
+        let pid = std::process::id();
+        let listeners = windows_native_listeners().unwrap();
+        for (listener, address) in [(&ipv4, "127.0.0.1"), (&ipv6, "::1")] {
+            let port = listener.local_addr().unwrap().port();
+            assert!(
+                listeners.iter().any(|entry| {
+                    entry.pid == pid && entry.port == port && entry.address == address
+                }),
+                "missing native listener {address}:{port} for PID {pid}"
+            );
+        }
+        let netstat = windows_netstat_listeners();
+        // The legacy `netstat -p tcp` fallback only reports IPv4 on Windows.
+        let port = ipv4.local_addr().unwrap().port();
+        assert!(netstat
+            .iter()
+            .any(|entry| entry.pid == pid && entry.port == port));
     }
 
     #[test]
@@ -2098,7 +2265,12 @@ mod tests {
                 if let Some(worker) = self.1.take() { let _ = worker.join(); }
             }
         }
-        let worker = spawn_tunnel_supervisor(tunnel.clone(), proxy_port, tools, Duration::from_millis(500));
+        let worker = spawn_tunnel_supervisor(
+            tunnel.clone(),
+            proxy_port,
+            tools,
+            Duration::from_millis(500),
+        );
         let _supervisor = SupervisorGuard(tunnel.clone(), Some(worker));
         events.send(format!("Your tunnel is {replacement_url}")).unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(15);
@@ -2319,6 +2491,61 @@ mod tests {
             Some("term-1")
         );
         assert!(!owners.contains_key(&90));
+    }
+
+    #[test]
+    fn ownership_preserves_nested_managed_roots_and_terminates_on_cycles() {
+        let processes = [
+            ProcessInfo {
+                pid: 11,
+                ppid: 10,
+                name: "agent".into(),
+            },
+            ProcessInfo {
+                pid: 12,
+                ppid: 11,
+                name: "node".into(),
+            },
+            ProcessInfo {
+                pid: 10,
+                ppid: 12,
+                name: "shell".into(),
+            },
+            ProcessInfo {
+                pid: 90,
+                ppid: 91,
+                name: "unmanaged".into(),
+            },
+            ProcessInfo {
+                pid: 91,
+                ppid: 90,
+                name: "unmanaged".into(),
+            },
+        ];
+        let owners = owner_map_from_roots(
+            &processes,
+            [
+                (
+                    10,
+                    Owner {
+                        id: "terminal".into(),
+                        kind: "terminal",
+                    },
+                ),
+                (
+                    11,
+                    Owner {
+                        id: "agent".into(),
+                        kind: "agent",
+                    },
+                ),
+            ],
+        );
+        assert_eq!(owners[&10].id, "terminal");
+        assert_eq!(owners[&11].id, "agent");
+        assert_eq!(owners[&12].id, "agent");
+        assert!(!owners.contains_key(&90));
+        assert!(!owners.contains_key(&91));
     }
 
     #[test]

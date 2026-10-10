@@ -11,7 +11,10 @@ use std::time::{Duration, Instant};
 
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
-use tauri::{ipc::Channel, AppHandle, Emitter, Manager};
+use tauri::{
+    ipc::{Channel, Response},
+    AppHandle, Emitter, Manager,
+};
 
 use crate::process_tree;
 use crate::shells;
@@ -167,13 +170,7 @@ impl PtyManager {
             .lock()
             .unwrap()
             .iter()
-            .filter_map(|(id, session)| {
-                session
-                    .lock()
-                    .unwrap()
-                    .pid
-                    .map(|pid| (id.clone(), pid))
-            })
+            .filter_map(|(id, session)| session.lock().unwrap().pid.map(|pid| (id.clone(), pid)))
             .collect()
     }
 
@@ -257,7 +254,7 @@ pub fn start_busy_monitor(app: AppHandle) -> Result<(), String> {
 pub fn spawn(
     app: &AppHandle,
     manager: &PtyManager,
-    on_data: Channel<Vec<u8>>,
+    on_data: Channel<Response>,
     id: String,
     cwd: Option<String>,
     shell_id: Option<String>,
@@ -332,7 +329,11 @@ pub fn spawn(
         .and_then(|values| values.get("ZDOTDIR"))
         .filter(|value| !value.is_empty())
         .cloned()
-        .or_else(|| std::env::var("ZDOTDIR").ok().filter(|value| !value.is_empty()));
+        .or_else(|| {
+            std::env::var("ZDOTDIR")
+                .ok()
+                .filter(|value| !value.is_empty())
+        });
     if let Some(env) = env {
         for (k, v) in env {
             cmd.env(k, v);
@@ -424,21 +425,20 @@ pub fn spawn(
                         break;
                     }
                     match rx.recv_timeout(deadline - now) {
-                        Ok(mut more) => {
+                        Ok(more) => {
                             batch.extend_from_slice(&more);
-                            more.clear();
-                            more.resize(READ_BUF, 0);
-                            let _ = recycle_tx.try_send(more);
+                            recycle_read_buffer(more, &recycle_tx);
                         }
                         Err(_) => break,
                     }
                 }
-                if on_data.send(batch.clone()).is_err() {
+                // Response keeps bytes raw. A Vec<u8> response would encode
+                // every byte as a JSON number before the webview decoded it.
+                // Move the aggregate into IPC rather than cloning it; only
+                // fixed-size reader chunks return to the recycle pool.
+                if on_data.send(Response::new(batch)).is_err() {
                     break;
                 }
-                batch.clear();
-                batch.resize(READ_BUF, 0);
-                let _ = recycle_tx.try_send(batch);
             }
         })
         .map_err(err)?;
@@ -464,6 +464,61 @@ pub fn spawn(
         program: shell.program,
         cwd: resolved_cwd,
     })
+}
+
+/// Keep only read-sized buffers in the pool. Aggregated output is owned by IPC
+/// and can be much larger than a reader chunk.
+fn recycle_read_buffer(mut buffer: Vec<u8>, recycle: &std::sync::mpsc::SyncSender<Vec<u8>>) {
+    buffer.clear();
+    let _ = recycle.try_send(buffer);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tauri::ipc::{InvokeResponseBody, IpcResponse};
+
+    #[test]
+    fn terminal_output_uses_raw_binary_without_changing_bytes() {
+        let bytes = b"\x1b[31mhello\r\n\xf0\x9f\x8c\xb1\0".to_vec();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let channel = Channel::<Response>::new(move |body| {
+            tx.send(body).unwrap();
+            Ok(())
+        });
+        channel.send(Response::new(bytes.clone())).unwrap();
+        match rx.recv().unwrap() {
+            InvokeResponseBody::Raw(received) => assert_eq!(received, bytes),
+            InvokeResponseBody::Json(_) => panic!("terminal output must be binary"),
+        }
+        assert!(matches!(
+            Response::new(Vec::<u8>::new()).body().unwrap(),
+            InvokeResponseBody::Raw(_)
+        ));
+    }
+
+    #[test]
+    fn reader_recycling_does_not_retain_aggregated_output() {
+        let (tx, rx) = std::sync::mpsc::sync_channel(OUTPUT_QUEUE_CHUNKS);
+        let mut batch = vec![b'a'; READ_BUF];
+        for _ in 1..(EMIT_MAX / READ_BUF) {
+            let chunk = vec![b'b'; READ_BUF];
+            batch.extend_from_slice(&chunk);
+            recycle_read_buffer(chunk, &tx);
+        }
+        assert_eq!(batch.len(), EMIT_MAX);
+        let recycled: Vec<_> = rx.try_iter().collect();
+        assert!(recycled
+            .iter()
+            .all(|buffer| buffer.is_empty() && buffer.capacity() == READ_BUF));
+        assert_eq!(recycled.len(), EMIT_MAX / READ_BUF - 1);
+        let InvokeResponseBody::Raw(sent) = Response::new(batch).body().unwrap() else {
+            panic!("terminal output must be binary");
+        };
+        assert_eq!(sent.len(), EMIT_MAX);
+        assert_eq!(&sent[..READ_BUF], vec![b'a'; READ_BUF]);
+        assert!(sent[READ_BUF..].iter().all(|byte| *byte == b'b'));
+    }
 }
 
 fn home_dir() -> Option<std::path::PathBuf> {

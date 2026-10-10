@@ -48,3 +48,41 @@ Validated with `cargo test --manifest-path src-tauri/Cargo.toml usage:: -- --qui
 Rates are built-in list-price estimates, with user overrides; they are not an invoice reconciliation or a historical tariff database. Separate tool fees, taxes, regional premiums, negotiated rates, and subscription credits are not reconstructed. Unknown models remain flagged as unpriced. Missing service tiers use standard rates instead of applying today's configuration to old usage. Incomplete logs cannot recover missing calls. Fork histories with rewritten event identities are not covered by the exact-event duplicate guarantee.
 
 Official references: [OpenAI pricing](https://developers.openai.com/api/docs/pricing), [GPT-5.1-Codex Mini](https://developers.openai.com/api/docs/models/gpt-5.1-codex-mini), [Anthropic pricing](https://platform.claude.com/docs/en/about-claude/pricing), and [Gemini pricing](https://ai.google.dev/gemini-api/docs/pricing).
+
+
+## CLIProxy Codex correction, October 9, 2026
+
+A read-only audit of 29,535 Codex usage events in the October session directory
+found 2,547 repeated cumulative snapshots. The existing history parser skips
+those snapshots, and the remaining cumulative changes agreed with the recorded
+per-request deltas. The local index included 27,973 `gpt-6.1-sol` requests, but
+that model had no built-in rate, so its estimated API token cost was zero.
+These counts describe the files inspected at audit time, not a provider invoice.
+
+Corrections:
+
+- Register `gpt-6.1-sol` separately from `gpt-6-sol`: $2 input, $0.10 cached
+  input, $2.50 cache writes and $10 output per million tokens at standard
+  short-context rates. Apply the published long-context and service-tier
+  conditions per request. Provider prefixes and dated model IDs work with the
+  same entry, and user rate overrides retain precedence.
+- Read inclusive `inputTokens` directly in the conversation adapter. Adding
+  `cachedInputTokens` again overstated conversation totals. Output already
+  includes reasoning, so it also remains a single inclusive count.
+- Calculate context occupancy from `last.totalTokens`, rather than cumulative
+  lifetime tokens. Leave it unknown when the latest request count is absent.
+- Upgrade the index to version 5. Existing indexes rebuild on the next scan
+  so GPT-6.1 requests recover their per-request long-context conditions.
+
+The installed Codex app-server and CLIProxy were exercised against an isolated
+HTTP/SSE upstream with dummy keys. A response with 1,000 input tokens (800
+cached) and 100 output tokens (40 reasoning) stayed intact in live notifications
+and persisted rollouts through resume, steering, interruption and continuation.
+Its normalized total is 1,100 tokens and standard API estimate is $0.00148.
+Regression fixtures cover repeated snapshots, append scans, archive copies,
+warm index reuse, reload, index upgrade, Fast and long-context pricing, and
+agreement between daily, model and overall costs.
+
+Rates were checked against [official OpenAI API pricing](https://developers.openai.com/api/docs/pricing).
+CLIProxy subscription-backed requests still show estimated API token value;
+the proxy does not turn that estimate into an actual per-request cash charge.

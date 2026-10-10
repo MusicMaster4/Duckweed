@@ -490,7 +490,8 @@ fn claude_sessions(home: &Path, cwd: &Path) -> Vec<AgentSessionSummary> {
         }
     }
 
-    files.sort_by_key(|path| std::cmp::Reverse(modified_millis(path)));
+    // Metadata lookups must happen once per path, not once per comparison.
+    files.sort_by_cached_key(|path| std::cmp::Reverse(modified_millis(path)));
     files.truncate(MAX_RESULTS);
 
     files

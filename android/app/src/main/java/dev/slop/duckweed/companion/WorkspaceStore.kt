@@ -189,10 +189,8 @@ class WorkspaceStore(private val context: Context) {
         return true
     }
 
-    fun all(): List<WorkspaceSnapshot> = preferences.all.values.mapNotNull { stored ->
-        val encrypted = stored as? String ?: return@mapNotNull null
-        runCatching {
-            val json = JSONObject(String(SecretStore.decryptLocal(encrypted), Charsets.UTF_8))
+    private fun decode(stored: String): WorkspaceSnapshot? = runCatching {
+            val json = JSONObject(String(SecretStore.decryptLocal(stored), Charsets.UTF_8))
             val projectsJson = json.optJSONArray("projects") ?: JSONArray()
             WorkspaceSnapshot(
                 pairId = json.getString("pairId"),
@@ -277,9 +275,18 @@ class WorkspaceStore(private val context: Context) {
                 },
             )
         }.getOrNull()
-    }.map { snapshot ->
+
+    private fun withPresence(snapshot: WorkspaceSnapshot): WorkspaceSnapshot =
         snapshot.copy(presenceAt = maxOf(snapshot.lastSeenAt, presence.getLong(snapshot.pairId, 0L)))
-    }.sortedByDescending { it.updatedAt }
+
+    fun get(pairId: String): WorkspaceSnapshot? =
+        preferences.getString(pairId, null)?.let(::decode)?.let(::withPresence)
+
+    fun all(): List<WorkspaceSnapshot> = preferences.all.values.asSequence()
+        .mapNotNull { stored -> (stored as? String)?.let(::decode) }
+        .map(::withPresence)
+        .sortedByDescending { it.updatedAt }
+        .toList()
 
     fun markPresence(pairId: String, at: Long): Boolean =
         synchronized(PRESENCE_LOCK) { markPresenceLocked(pairId, at) }

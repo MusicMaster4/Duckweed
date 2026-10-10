@@ -12,7 +12,6 @@ const LARGE_IMAGE: &str = "duckweed";
 const DOWNLOAD_URL: &str = "https://github.com/MusicMaster4/Duckweed/releases/latest";
 const UPDATE_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const RECONNECT_INTERVAL: Duration = Duration::from_secs(15);
-const STOP_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 /// Owns Duckweed's connection to the local Discord client.
 ///
@@ -43,6 +42,7 @@ impl DiscordPresence {
         self.stop.store(true, Ordering::Release);
         if let Ok(mut worker) = self.worker.lock() {
             if let Some(worker) = worker.take() {
+                worker.thread().unpark();
                 let _ = worker.join();
             }
         }
@@ -54,6 +54,7 @@ impl Drop for DiscordPresence {
         self.stop.store(true, Ordering::Release);
         if let Ok(worker) = self.worker.get_mut() {
             if let Some(worker) = worker.take() {
+                worker.thread().unpark();
                 let _ = worker.join();
             }
         }
@@ -123,11 +124,15 @@ fn agent_count_label(count: usize) -> String {
 }
 
 fn wait_or_stop(stop: &AtomicBool, duration: Duration) {
-    let mut remaining = duration;
-    while !stop.load(Ordering::Acquire) && !remaining.is_zero() {
-        let sleep_for = remaining.min(STOP_POLL_INTERVAL);
-        thread::sleep(sleep_for);
-        remaining = remaining.saturating_sub(sleep_for);
+    let deadline = std::time::Instant::now() + duration;
+    while !stop.load(Ordering::Acquire) {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        // A stop request unparks this thread immediately. Spurious wakes still
+        // wait until the original refresh deadline instead of sending early.
+        thread::park_timeout(remaining);
     }
 }
 
@@ -160,10 +165,28 @@ mod tests {
     }
 
     #[test]
+    fn stop_interrupts_a_parked_presence_wait() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = Arc::clone(&stop);
+        let (ready, waiting) = std::sync::mpsc::channel();
+        let (done, finished) = std::sync::mpsc::channel();
+        let worker = thread::spawn(move || {
+            ready.send(()).unwrap();
+            wait_or_stop(&worker_stop, UPDATE_INTERVAL);
+            done.send(()).unwrap();
+        });
+        waiting.recv_timeout(Duration::from_secs(1)).unwrap();
+        stop.store(true, Ordering::Release);
+        worker.thread().unpark();
+        finished.recv_timeout(Duration::from_secs(1)).unwrap();
+        worker.join().unwrap();
+    }
+
+    #[test]
     fn stopped_wait_returns_without_sleeping_for_the_update_interval() {
         let stop = AtomicBool::new(true);
         let before = std::time::Instant::now();
         wait_or_stop(&stop, UPDATE_INTERVAL);
-        assert!(before.elapsed() < STOP_POLL_INTERVAL);
+        assert!(before.elapsed() < Duration::from_millis(250));
     }
 }

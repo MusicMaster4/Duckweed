@@ -358,3 +358,78 @@ describe("peek and focus fields", () => {
     expect(visible.rows.length + visible.hiddenCompleted).toBe(subagents.length);
   });
 });
+
+
+describe("subagent projection reuse", () => {
+  test("does not reread settled output while a parent response streams", () => {
+    const user: AgentItem = { kind: "user", id: "cache-user", at: 1, text: "Inspect" };
+    const child = task("cache-child", "done");
+    let outputReads = 0;
+    Object.defineProperty(child, "output", {
+      get() {
+        outputReads += 1;
+        return "Completed inspection\n".repeat(500);
+      },
+    });
+    const items: AgentItem[] = [user, child];
+    const fleet = subagentsForTurn(items);
+    const rosters = subagentRosters(items);
+    const readsAfterProjection = outputReads;
+    for (let index = 0; index < 25; index += 1) {
+      const streamed: AgentItem[] = [...items, {
+        kind: "assistant", id: "cache-answer", at: 3,
+        text: `Progress ${index}`, streaming: true,
+      }];
+      expect(subagentsForTurn(streamed)).toBe(fleet);
+      expect(subagentRosters(streamed)).toBe(rosters);
+      expect(rosters[0].subagents[0]).toBe(fleet[0]);
+    }
+    expect(outputReads).toBe(readsAfterProjection);
+    expect(fleet[0].activity).toBe("Completed inspection");
+  });
+
+  test("invalidates only the worker and roster whose immutable item changes", () => {
+    const user: AgentItem = { kind: "user", id: "cache-update-user", at: 1, text: "Inspect" };
+    const one = task("cache-one", "done", { output: "Old result" });
+    const two = task("cache-two", "running", { output: "Reading fixtures" });
+    const items: AgentItem[] = [user, one, two];
+    const fleet = subagentsForTurn(items);
+    const rosters = subagentRosters(items);
+    const updated: AgentItem[] = [user, one, {
+      ...two, status: "done", output: "Reviewed all fixtures",
+      subagent: { threadId: "updated-thread", label: "Fixture review" },
+    }];
+    const nextFleet = subagentsForTurn(updated);
+    const nextRosters = subagentRosters(updated);
+    expect(nextFleet).not.toBe(fleet);
+    expect(nextFleet[0]).toBe(fleet[0]);
+    expect(nextFleet[1]).not.toBe(fleet[1]);
+    expect(nextFleet[1]).toMatchObject({
+      status: "done", activity: "Reviewed all fixtures",
+      threadId: "updated-thread", label: "Fixture review",
+    });
+    expect(nextRosters).not.toBe(rosters);
+    expect(nextRosters[0].subagents[0]).toBe(rosters[0].subagents[0]);
+    expect(nextRosters[0].subagents[1]).toBe(nextFleet[1]);
+    expect(subagentsForTurn(items)[1]).toBe(fleet[1]);
+  });
+
+  test("keeps historical rosters stable and removes workers without stale cache entries", () => {
+    const oldUser: AgentItem = { kind: "user", id: "cache-old-user", at: 1, text: "First" };
+    const liveUser: AgentItem = { kind: "user", id: "cache-live-user", at: 2, text: "Second" };
+    const old = task("cache-old", "done");
+    const live = task("cache-live", "running");
+    const items: AgentItem[] = [oldUser, old, liveUser, live];
+    const rosters = subagentRosters(items);
+    const updated = [oldUser, old, liveUser, { ...live, output: "Current result" }];
+    const next = subagentRosters(updated);
+    expect(next[0]).toBe(rosters[0]);
+    expect(next[1]).not.toBe(rosters[1]);
+    const removed = [oldUser, old, liveUser];
+    expect(subagentsForTurn(removed)).toEqual([]);
+    expect(subagentRosters(removed)).toEqual([rosters[0]]);
+    expect(subagentRosters(items)).toEqual(rosters);
+    expect(subagentsForTurn([liveUser])).toBe(subagentsForTurn([]));
+    expect(subagentRosters([liveUser])).toBe(subagentRosters([]));
+  });
+});

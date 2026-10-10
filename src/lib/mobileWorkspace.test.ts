@@ -50,6 +50,22 @@ describe("mobile workspace payload bounds", () => {
     expect(truncateUtf8Tail("too long", 1)).toBe("");
   });
 
+  test("preserves truncation output at every mixed Unicode byte boundary", () => {
+    const value = "A\u00e9\u6f22\ud83e\udd86Z";
+    const prefixes = ["", "A", "A", "A\u00e9", "A\u00e9", "A\u00e9", "A\u00e9\u6f22", "A\u00e9\u6f22", "A\u00e9\u6f22", "A\u00e9\u6f22\u2026", "A\u00e9\u6f22\ud83e\udd86", value];
+    const tails = ["", "", "", "", "\u2026\n", "\u2026\nZ", "\u2026\nZ", "\u2026\nZ", "\u2026\nZ", "\u2026\n\ud83e\udd86Z", "\u2026\n\ud83e\udd86Z", value];
+    for (let budget = 0; budget < prefixes.length; budget += 1) {
+      expect(truncateUtf8(value, budget)).toBe(prefixes[budget]);
+      expect(truncateUtf8Tail(value, budget)).toBe(tails[budget]);
+    }
+  });
+
+  test("keeps the established handling of malformed UTF-16 text", () => {
+    expect(truncateUtf8("A\ud800\ud800ZZ", 7)).toBe("A\u2026");
+    expect(truncateUtf8Tail("old output \udc00\udc00\udc00\u6f22\ud83e\udd86\u00e9\n\u00e9", 25))
+      .toBe("\u2026\n\udc00\udc00\u6f22\ud83e\udd86\u00e9\n\u00e9");
+  });
+
   test("fits the serialized snapshot, including JSON escaping", () => {
     const snapshot: MobileWorkspaceSnapshot = {
       projects: [{
