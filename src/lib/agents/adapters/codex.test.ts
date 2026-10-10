@@ -247,6 +247,79 @@ describe("codex adapter", () => {
     expect(h.state().items.at(-1)).toMatchObject({ kind: "notice", text: expect.stringContaining("401 Unauthorized") });
   });
 
+  test("shows a retrying 429 without losing the active turn's Stop target", async () => {
+    const h = harness();
+    await h.handshake();
+    h.adapter.prompt({ text: "hello", images: [] }, h.ctx);
+    h.notify("turn/started", { threadId: "thread_1", turn: { id: "limited-turn", status: "inProgress" } });
+    h.notify("error", {
+      threadId: "thread_1", turnId: "limited-turn", willRetry: true,
+      error: { message: "Reconnecting... 1/5", additionalDetails: "Exceeded retry limit, last status: 429 Too Many Requests" },
+    });
+    expect(h.state()).toMatchObject({ status: "working", authenticationRequired: false });
+    expect(h.state().items.at(-1)).toMatchObject({ kind: "notice", tone: "error",
+      text: expect.stringContaining("waiting for the provider's retry deadline") });
+    expect(h.state().items.at(-1)).toMatchObject({ text: expect.stringContaining("429 Too Many Requests") });
+    h.adapter.interrupt(h.ctx);
+    const stop = h.sent.findLast((frame) => frame.method === "turn/interrupt")!;
+    expect(stop).toMatchObject({ params: { threadId: "thread_1", turnId: "limited-turn" } });
+    h.feed({ id: stop.id, result: {} });
+    const clean = h.sent.findLast((frame) => frame.method === "thread/backgroundTerminals/clean")!;
+    h.feed({ id: clean.id, result: {} });
+    for (let step = 0; step < 8; step += 1) await Promise.resolve();
+    expect(h.state().status).toBe("idle");
+    await h.adapter.dispose?.(h.ctx, { preserveWork: true });
+  });
+
+  test("settles a non-retrying error even without a turn/completed notification", async () => {
+    const h = harness();
+    await h.handshake();
+    h.adapter.prompt({ text: "hello", images: [] }, h.ctx);
+    h.notify("turn/started", { threadId: "thread_1", turn: { id: "failed-turn", status: "inProgress" } });
+    h.notify("error", { threadId: "thread_1", turnId: "failed-turn", willRetry: false,
+      error: { message: "The usage limit has been reached" } });
+    expect(h.state().status).toBe("idle");
+    expect(h.state().items.at(-1)).toMatchObject({ kind: "notice", tone: "error", text: "The usage limit has been reached" });
+    // Delayed provider output cannot revive a definitively failed turn.
+    h.notify("item/agentMessage/delta", { threadId: "thread_1", turnId: "failed-turn", itemId: "late", delta: "Late output" });
+    expect(h.state().items.some((item) => item.kind === "assistant")).toBe(false);
+    await h.adapter.dispose?.(h.ctx, { preserveWork: true });
+  });
+
+  test("ignores retry errors belonging to another thread or a retired turn", async () => {
+    const h = harness();
+    await h.handshake();
+    h.notify("turn/started", { threadId: "thread_1", turn: { id: "old-turn", status: "inProgress" } });
+    h.notify("turn/completed", { threadId: "thread_1", turn: { id: "old-turn", status: "completed" } });
+    h.notify("turn/started", { threadId: "thread_1", turn: { id: "new-turn", status: "inProgress" } });
+    const before = h.events.length;
+    for (const [threadId, turnId] of [["foreign-thread", "foreign-turn"], ["thread_1", "old-turn"]]) {
+      h.notify("error", { threadId, turnId, willRetry: false, error: { message: "429 Too Many Requests" } });
+    }
+    expect(h.events).toHaveLength(before);
+    expect(h.state().status).toBe("working");
+    await h.adapter.dispose?.(h.ctx, { preserveWork: true });
+  });
+
+  test("routes a child's retry notice into its transcript without settling the parent", async () => {
+    const h = harness();
+    await h.handshake();
+    h.notify("turn/started", { threadId: "thread_1", turn: { id: "parent-turn", status: "inProgress" } });
+    h.notify("item/started", { threadId: "thread_1", item: {
+      id: "child-activity", type: "subAgentActivity", kind: "started",
+      agentThreadId: "limited-child", agentPath: "/root/reviewer",
+    } });
+    h.notify("turn/started", { threadId: "limited-child", turn: { id: "child-turn", status: "inProgress" } });
+    h.notify("error", { threadId: "limited-child", turnId: "child-turn", willRetry: true,
+      error: { message: "Reconnecting... 1/5", codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 429 } } } });
+    const tool = h.state().items.find((item) => item.kind === "tool" && item.subagent?.threadId === "limited-child");
+    expect(tool?.kind === "tool" && tool.subagent?.items?.at(-1)).toMatchObject({ kind: "notice", tone: "error",
+      text: expect.stringContaining("waiting for the provider's retry deadline") });
+    expect(h.state().status).toBe("working");
+    expect(h.state().items.some((item) => item.kind === "notice")).toBe(false);
+    await h.adapter.dispose?.(h.ctx, { preserveWork: true });
+  });
+
   test("adopts a CLI login after starting signed out without reinitializing", async () => {
     const h = harness();
     h.adapter.start(h.ctx);

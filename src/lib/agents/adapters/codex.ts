@@ -193,6 +193,20 @@ function numberOr(value: unknown, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
 
+function codexErrorDetail(params: Record<string, unknown>): string {
+  const error = asRecord(params.error);
+  const detail = [asString(error?.message), asString(error?.additionalDetails)]
+    .filter((part): part is string => Boolean(part))
+    .join("\n");
+  const info = asRecord(error?.codexErrorInfo);
+  const rateLimited = /\b429\b|\brate.?limit|\bmodel_cooldown\b/i.test(detail) ||
+    error?.codexErrorInfo === "usageLimitExceeded" ||
+    Object.values(info ?? {}).some((value) => asRecord(value)?.httpStatusCode === 429);
+  return params.willRetry === true && rateLimited
+    ? `${detail || "Codex is rate limited (HTTP 429)."}\nCodex is waiting for the provider's retry deadline. Stop this turn to cancel the wait.`
+    : detail || "Codex reported an error.";
+}
+
 function readGoal(value: unknown): CodexGoal | null {
   const goal = asRecord(value);
   const objective = asString(goal?.objective);
@@ -1366,6 +1380,16 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     const side = sideThreads.get(sideThreadId);
     if (!side) return;
     switch (method) {
+      case "error": {
+        const detail = codexErrorDetail(params);
+        if (params.willRetry === true) {
+          side.sideQuestion.answer = detail;
+          emitSide(side, ctx);
+        } else {
+          finishSide(sideThreadId, "error", ctx, detail);
+        }
+        return;
+      }
       case "turn/started":
         side.currentTurnId = asString(asRecord(params.turn)?.id);
         return;
@@ -2321,6 +2345,19 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       rootTurnStatusConfirmed = true;
     }
     switch (method) {
+      case "error": {
+        if (stoppedByUser || rootTurnSignalIsStale(notificationTurnId)) return;
+        ctx.emit({ type: "notice", tone: "error", text: codexErrorDetail(params) });
+        // Retry-After can be hours. Keep Stop and steering attached to the
+        // provider-owned turn, but make its wait visible instead of hiding it.
+        if (params.willRetry === false) {
+          rememberRootTurnFinished(notificationTurnId ?? currentTurnId);
+          cancelPendingRootCompletion();
+          settleRootTurn(notificationTurnId);
+          ctx.emit({ type: "turn-end" });
+        }
+        return;
+      }
       case "thread/goal/updated": {
         const goal = readGoal(params.goal);
         currentGoal = goal;
@@ -2592,6 +2629,18 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
   ): void {
     const nested = childContext(childThreadId, ctx);
     switch (method) {
+      case "error": {
+        const child = childFor(childThreadId);
+        const errorTurnId = asString(params.turnId);
+        if (errorTurnId && child.currentTurnId && errorTurnId !== child.currentTurnId) return;
+        const detail = codexErrorDetail(params);
+        emitChild(childThreadId, { type: "notice", tone: "error", text: detail }, ctx);
+        if (params.willRetry === false) {
+          child.currentTurnId = null;
+          emitChild(childThreadId, { type: "status", status: "error", error: detail }, ctx);
+        }
+        return;
+      }
       case "thread/started": {
         const thread = asRecord(params.thread);
         if (thread) adoptChildThread(thread, ctx, false, true);
@@ -3489,8 +3538,8 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
           accountSignedIn = cachedSignedIn;
           ctx.emit({ type: "notice", tone: "error", text: detail || "Codex authentication failed." });
           ctx.emit({ type: "status", status: "idle" });
+          return;
         }
-        return;
       }
 
       if (frame.id !== undefined) {

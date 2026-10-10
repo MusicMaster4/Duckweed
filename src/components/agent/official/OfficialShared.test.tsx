@@ -131,6 +131,19 @@ describe("official agent presentation", () => {
     resetPreparingMessageAssignmentsForTests();
   });
 
+  test("shows Codex retry errors instead of an empty Thinking placeholder", () => {
+    const prompt: AgentItem = { kind: "user", id: "prompt", at: 1, text: "Investigate the issue" };
+    const error: AgentItem = { kind: "notice", id: "retry", at: 3, tone: "error",
+      text: "Reconnecting... 1/5\n429 Too Many Requests. Waiting for the provider's retry deadline." };
+    for (const previous of [[], [{ kind: "assistant", id: "update", at: 2,
+      text: "I will investigate. ".repeat(20), streaming: false } as AgentItem]]) {
+      const html = renderAgentActivity("codex", [prompt, ...previous, error]);
+      expect(html).toContain("429 Too Many Requests");
+      expect(html).not.toContain('role="timer"');
+      expect(html).not.toContain("agent-activity-pulse");
+    }
+  });
+
   test("formats the live activity clock without noisy milliseconds", () => {
     expect(formatActivityElapsed(-1)).toBe("0s");
     expect(formatActivityElapsed(59_999)).toBe("59s");
