@@ -165,7 +165,7 @@ describe("mobile pairing continuity", () => {
     expect(desktop).toContain("mobileScheduleCompletion(");
     expect(desktop).not.toContain("mobileCompletionTimers");
     expect(ipc).toContain('invoke<void>("mobile_schedule_completion"');
-    expect(native).toContain("std::thread::sleep(Duration::from_millis(delay_ms))");
+    expect(native).toContain("tokio::time::sleep(Duration::from_millis(delay_ms)).await");
     expect(native).toContain("cancel_terminal(&terminal_id)");
     expect(native).toContain("cancel_selected()");
     expect(main).toContain("mobile_push::mobile_schedule_completion");

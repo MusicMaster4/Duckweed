@@ -398,22 +398,24 @@ export async function handleRequest(request: Request, env: Env, push: PushSender
     if (request.method === "GET" && parts.length === 4 && parts[3] === "messages") {
       const found = await requireReceive(env, pairId, request);
       if (!found) return fail(401, "invalid receiver credential");
+      const inline = new URL(request.url).searchParams.get("inline") === "1";
+      // Inline recovery returns eight payloads. Read just one extra row to
+      // determine hasMore instead of materializing up to 100 large ciphertexts.
+      // Id-only recovery never needs to read the encrypted payload columns.
       const pending = await env.DB.prepare(`
-        SELECT message_id, sent_at, payload_nonce, payload_ciphertext, collapse_key
+        SELECT message_id, sent_at${inline ? ", payload_nonce, payload_ciphertext" : ""}
           FROM messages
          WHERE pair_id = ? AND expires_at > ?
          ORDER BY CASE WHEN collapse_key LIKE 'workspace:%' THEN 0 ELSE 1 END, created_at DESC
-         LIMIT 100
-      `).bind(pairId, Date.now()).all<{
+         LIMIT ?
+      `).bind(pairId, Date.now(), inline ? 9 : 100).all<{
         message_id: string;
         sent_at: number;
         payload_nonce: string;
         payload_ciphertext: string;
-        collapse_key: string | null;
       }>();
       // Foreground clients download the newest workspace in the same request.
       // Bound the batch so an offline week's completions cannot monopolize sync.
-      const inline = new URL(request.url).searchParams.get("inline") === "1";
       const messages = inline ? pending.results.slice(0, 8) : pending.results;
       return response({
         messages: messages.map((message) => ({

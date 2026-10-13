@@ -57,6 +57,7 @@ export function ChatGPTExperience(props: ExperienceProps) {
   const hasActivityAfterPrompt = transcriptItems.slice(latestUserIndex + 1).some((item) => {
     if (item.kind === "user") return false;
     if (item.kind === "assistant") return Boolean(item.text.trim());
+    if (item.kind === "notice" && item.tone === "error") return true;
     return item.kind === "thinking" || item.kind === "tool" || item.kind === "plan";
   });
   const needsEmptyLiveTrace =
@@ -69,7 +70,8 @@ export function ChatGPTExperience(props: ExperienceProps) {
     if (
       item.kind === "assistant" ||
       item.kind === "thinking" ||
-      item.kind === "tool"
+      item.kind === "tool" ||
+      (item.kind === "notice" && item.tone === "error")
     ) {
       latestLiveContent = item;
       break;

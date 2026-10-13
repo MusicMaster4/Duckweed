@@ -13,28 +13,29 @@ import androidx.work.OutOfQuotaPolicy
 
 class ReadSyncWorker(context: Context, parameters: WorkerParameters) : Worker(context, parameters) {
     override fun doWork(): Result {
-        val store = MessageStore(applicationContext)
-        var retry = false
-        store.pendingReadSyncs().forEach { sync ->
-            val credentials = SecretStore.load(applicationContext, sync.pairId)
-            if (credentials == null) {
-                retry = true
-                return@forEach
+        return MessageStore(applicationContext).use { store ->
+            var retry = false
+            store.pendingReadSyncs().forEach { sync ->
+                val credentials = SecretStore.load(applicationContext, sync.pairId)
+                if (credentials == null) {
+                    retry = true
+                    return@forEach
+                }
+                runCatching {
+                    RelayClient.sendRead(
+                        credentials,
+                        sync.terminalId,
+                        sync.completionSeq,
+                        sync.commandId,
+                    )
+                }.onSuccess {
+                    store.completeReadSync(sync)
+                }.onFailure {
+                    retry = true
+                }
             }
-            runCatching {
-                RelayClient.sendRead(
-                    credentials,
-                    sync.terminalId,
-                    sync.completionSeq,
-                    sync.commandId,
-                )
-            }.onSuccess {
-                store.completeReadSync(sync)
-            }.onFailure {
-                retry = true
-            }
+            if (retry) Result.retry() else Result.success()
         }
-        return if (retry) Result.retry() else Result.success()
     }
 }
 

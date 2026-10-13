@@ -408,7 +408,7 @@ async fn git_file_diff(path: String, file: String) -> Result<FileDiff, String> {
 async fn pty_spawn(
     app: AppHandle,
     manager: State<'_, PtyManager>,
-    on_data: Channel<Vec<u8>>,
+    on_data: Channel<tauri::ipc::Response>,
     id: String,
     cwd: Option<String>,
     shell: Option<String>,

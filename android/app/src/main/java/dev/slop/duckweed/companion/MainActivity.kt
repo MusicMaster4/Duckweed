@@ -243,7 +243,7 @@ class MainActivity : AppCompatActivity() {
         if (granted) {
             showPendingNotifications()
         } else {
-            MessageStore(this).dismissPendingNotifications()
+            MessageStore(this).use { it.dismissPendingNotifications() }
         }
     }
 
@@ -313,7 +313,7 @@ class MainActivity : AppCompatActivity() {
         draftStore = DraftStore(this)
         pendingActionStore = PendingMobileActionStore(this)
         pendingMobileActions = pendingActionStore.all()
-        storageExecutor.execute { MessageStore(this).recoverInterruptedSends() }
+        storageExecutor.execute { MessageStore(this).use { it.recoverInterruptedSends() } }
         ReadSyncScheduler.enqueue(this)
 
         pairingStatus = findViewById(R.id.pairing_status)
@@ -880,9 +880,10 @@ class MainActivity : AppCompatActivity() {
             if (enabled == notificationsAreActive()) return@setOnCheckedChangeListener
             if (!enabled) {
                 NotificationPreference.setEnabled(this, false)
-                val store = MessageStore(this)
-                store.dismissPendingNotifications()
-                NotificationTools.cancel(this, store.latest())
+                MessageStore(this).use { store ->
+                    store.dismissPendingNotifications()
+                    NotificationTools.cancel(this, store.latest())
+                }
                 return@setOnCheckedChangeListener
             }
             if (needsNotificationPermission()) {
@@ -1004,7 +1005,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun requestNotificationPermissionIfEnabled() {
         if (!NotificationPreference.isEnabled(this)) {
-            MessageStore(this).dismissPendingNotifications()
+            MessageStore(this).use { it.dismissPendingNotifications() }
             return
         }
         if (needsNotificationPermission()) {
@@ -1217,7 +1218,7 @@ class MainActivity : AppCompatActivity() {
                             .onSuccess {
                                 SecretStore.remove(this, pairing.pairId)
                                 WorkspaceStore(this).remove(pairing.pairId)
-                                MessageStore(this).discardReadSyncs(pairing.pairId)
+                                MessageStore(this).use { it.discardReadSyncs(pairing.pairId) }
                                 PendingMobileActionStore(this).removePair(pairing.pairId)
                             }
                             .onFailure { failures += it.message ?: pairing.pairId }
@@ -1342,12 +1343,13 @@ class MainActivity : AppCompatActivity() {
                             .map { Pair(snapshot.pairId, it.id) }
                     }
                 }.toSet()
-                val store = MessageStore(this)
-                Triple(
-                    snapshots,
-                    store.latestForOpenAgents(openAgentTerminals, 50),
-                    store.unreadConversationKeys(),
-                )
+                MessageStore(this).use { store ->
+                    Triple(
+                        snapshots,
+                        store.latestForOpenAgents(openAgentTerminals, 50),
+                        store.unreadConversationKeys(),
+                    )
+                }
             }
             runOnUiThread {
                 remoteStateLoading = false
@@ -1554,16 +1556,14 @@ class MainActivity : AppCompatActivity() {
         val pairId = message.pairId
         val terminalId = message.terminalId
         if (pairId != null && terminalId != null) {
-            val cleared = MessageStore(this).markConversationRead(
-                pairId,
-                terminalId,
-                message.completionSeq,
-            )
+            val cleared = MessageStore(this).use {
+                it.markConversationRead(pairId, terminalId, message.completionSeq)
+            }
             NotificationTools.cancelIds(this, cleared)
             ReadSyncScheduler.enqueue(this)
             messageAdapter.markConversationRead(pairId, terminalId)
         } else {
-            MessageStore(this).markRead(message.id)
+            MessageStore(this).use { it.markRead(message.id) }
             messageAdapter.markRead(message.id)
         }
         selectedTarget = null
@@ -3224,7 +3224,7 @@ class MainActivity : AppCompatActivity() {
                     sentAt,
                 )
             }.onSuccess {
-                MessageStore(this).updateOutgoingState(commandId, "sent")
+                MessageStore(this).use { it.updateOutgoingState(commandId, "sent") }
                 runOnUiThread {
                     if (isFinishing || isDestroyed) return@runOnUiThread
                     outgoingMessages[commandId] = outgoing.copy(deliveryState = "sent")
@@ -3241,11 +3241,9 @@ class MainActivity : AppCompatActivity() {
                     )
                 }
             }.onFailure { error ->
-                MessageStore(this).updateOutgoingState(
-                    commandId,
-                    "failed",
-                    error.message ?: "Could not send this message.",
-                )
+                MessageStore(this).use {
+                    it.updateOutgoingState(commandId, "failed", error.message ?: "Could not send this message.")
+                }
                 runOnUiThread {
                     if (isFinishing || isDestroyed) return@runOnUiThread
                     outgoingMessages[commandId] = outgoing.copy(
@@ -3276,7 +3274,7 @@ class MainActivity : AppCompatActivity() {
         refreshConversation(reloadHistory = false)
         commandExecutor.execute {
             runCatching {
-                MessageStore(this).updateOutgoingState(message.id, "sending")
+                MessageStore(this).use { it.updateOutgoingState(message.id, "sending") }
                 val credentials = SecretStore.load(this, pairId)
                     ?: error("Desktop pairing is no longer available. Pair this desktop again.")
                 RelayClient.sendCommand(
@@ -3289,7 +3287,7 @@ class MainActivity : AppCompatActivity() {
                     System.currentTimeMillis(),
                 )
             }.onSuccess {
-                MessageStore(this).updateOutgoingState(message.id, "sent")
+                MessageStore(this).use { it.updateOutgoingState(message.id, "sent") }
                 runOnUiThread {
                     if (isFinishing || isDestroyed) return@runOnUiThread
                     outgoingMessages[message.id] = message.copy(deliveryState = "sent", deliveryError = null)
@@ -3303,11 +3301,9 @@ class MainActivity : AppCompatActivity() {
                     )
                 }
             }.onFailure { error ->
-                MessageStore(this).updateOutgoingState(
-                    message.id,
-                    "failed",
-                    error.message ?: "Could not send this message.",
-                )
+                MessageStore(this).use {
+                    it.updateOutgoingState(message.id, "failed", error.message ?: "Could not send this message.")
+                }
                 runOnUiThread {
                     if (isFinishing || isDestroyed) return@runOnUiThread
                     outgoingMessages[message.id] = message.copy(deliveryState = "failed", deliveryError = error.message)
@@ -3419,7 +3415,7 @@ class MainActivity : AppCompatActivity() {
     private fun openIntentResponse() {
         if (isAppLockEnabled() && !appUnlocked) return
         val messageId = intent.getStringExtra("message_id") ?: return
-        val message = MessageStore(this).response(messageId) ?: return
+        val message = MessageStore(this).use { it.response(messageId) } ?: return
         intent.removeExtra("message_id")
         navigateToPage(Page.ACTIVITY)
         openResponse(message)

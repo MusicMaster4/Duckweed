@@ -269,6 +269,16 @@ describe("resumed", () => {
     ]);
   });
 
+  test("automatic recovery adopts the resumed session without adding a notice", () => {
+    const before = blank();
+    const state = applyEvent(before, {
+      type: "resumed", sessionId: "abc-123", title: "", silent: true,
+    });
+    expect(state.sessionId).toBe("abc-123");
+    expect(state.started).toBe(true);
+    expect(state.items).toBe(before.items);
+  });
+
   test("still says something when the store had no title", () => {
     const state = applyEvent(blank(), { type: "resumed", sessionId: "abc-123", title: "" });
     expect(state.items[0]).toMatchObject({

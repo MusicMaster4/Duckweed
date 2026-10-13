@@ -22,8 +22,7 @@ class ApprovalActionReceiver : BroadcastReceiver() {
             val result = runCatching {
                 val credentials = SecretStore.load(context, pairId)
                     ?: error("This desktop is no longer paired.")
-                val permission = WorkspaceStore(context).all()
-                    .firstOrNull { it.pairId == pairId }
+                val permission = WorkspaceStore(context).get(pairId)
                     ?.projects
                     ?.asSequence()
                     ?.flatMap { it.terminals.asSequence() }
@@ -42,12 +41,12 @@ class ApprovalActionReceiver : BroadcastReceiver() {
             }
             Handler(Looper.getMainLooper()).post {
                 result.onSuccess {
-                    MessageStore(context).markRead(messageId)
+                    MessageStore(context).use { it.markRead(messageId) }
                     NotificationManagerCompat.from(context).cancel(messageId.hashCode())
                     Toast.makeText(context, "Decision sent securely", Toast.LENGTH_SHORT).show()
                     NotificationTools.announceChanged(context)
                 }.onFailure { error ->
-                    MessageStore(context).response(messageId)?.let { NotificationTools.show(context, it) }
+                    MessageStore(context).use { it.response(messageId) }?.let { NotificationTools.show(context, it) }
                     Toast.makeText(
                         context,
                         error.message ?: "Could not send this decision. Try again.",

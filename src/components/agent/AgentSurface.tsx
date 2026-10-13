@@ -182,9 +182,9 @@ export function AgentSurface({
   }, []);
 
   const inspectSubagent = useCallback((callId: string) => {
-    const subagent = subagentForCallId(items, callId);
+    const subagent = subagentForCallId(agents.get(termId)?.items ?? EMPTY_ITEMS, callId);
     void agents.inspectSubagent(termId, callId, subagent?.threadId ?? null);
-  }, [items, termId]);
+  }, [termId]);
 
   const leaveFocus = useCallback(() => {
     setMultiPane(false);
@@ -359,7 +359,9 @@ export function AgentSurface({
 
   useEffect(() => {
     const available = new Set(fleet.map((subagent) => subagent.callId));
-    setMultiPaneCallIds((current) => current.filter((callId) => available.has(callId)));
+    setMultiPaneCallIds((current) => current.every((callId) => available.has(callId))
+      ? current
+      : current.filter((callId) => available.has(callId)));
     if (fleet.length === 0) {
       setSubagentNavigatorOpen(false);
       setMultiPane(false);
@@ -415,10 +417,10 @@ export function AgentSurface({
     peekSubagent,
   ]);
 
+  const childrenLive = fleet.some(
+    (subagent) => subagent.status === "running" || subagent.status === "pending",
+  );
   useEffect(() => {
-    const childrenLive = fleet.some(
-      (subagent) => subagent.status === "running" || subagent.status === "pending",
-    );
     if (
       (session?.status !== "working" || session.workStartedAt === null) &&
       !childrenLive
@@ -428,7 +430,7 @@ export function AgentSurface({
     setClockNow(Date.now());
     const timer = window.setInterval(() => setClockNow(Date.now()), 1_000);
     return () => window.clearInterval(timer);
-  }, [fleet, session?.status, session?.workStartedAt]);
+  }, [childrenLive, session?.status, session?.workStartedAt]);
 
   useEffect(() => {
     if (!workflow || !workflowComplete) {

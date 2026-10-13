@@ -233,6 +233,54 @@ describe("encrypted notification relay", () => {
     expect((await handleRequest(request(`/v1/pairings/${pairId}/messages?inline=1`, "GET", sendToken), env, accept)).status).toBe(401);
   });
 
+  it("bounds inline recovery, preserves workspace priority, and omits ciphertext from id-only recovery", async () => {
+    const pairId = "81000000-0000-4000-8000-000000000001";
+    const receiveToken = "x".repeat(43);
+    const now = Date.now();
+    await env.DB.prepare(`
+      INSERT INTO pairings (pair_id, registration_token_hash, send_token_hash, created_at, receive_token_hash)
+      VALUES (?, ?, ?, ?, ?)
+    `).bind(pairId, "unused", "unused", now, await hash(receiveToken)).run();
+    const payload = { nonce: "Y".repeat(16), ciphertext: "Z".repeat(10_000) };
+    const workspaceId = "82000000-0000-4000-8000-000000000000";
+    const id = (index: number) => `82000000-0000-4000-8000-${String(index).padStart(12, "0")}`;
+    await env.DB.batch(Array.from({ length: 105 }, (_, index) => env.DB.prepare(`
+      INSERT INTO messages (pair_id, message_id, payload_nonce, payload_ciphertext, sent_at, created_at, expires_at, collapse_key)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).bind(pairId, id(index), payload.nonce, payload.ciphertext, now + index, now + index, now + 60_000,
+      index === 0 ? `workspace:${pairId}` : null)));
+
+    const queries: string[] = [];
+    const measuredEnv: Env = { ...env, DB: {
+      prepare(query: string) { queries.push(query); return env.DB.prepare(query); },
+    } as D1Database };
+    const recover = async () => {
+      const result = await handleRequest(request(`/v1/pairings/${pairId}/messages?inline=1`, "GET", receiveToken), measuredEnv);
+      return result.json() as Promise<{ messages: Array<{ messageId: string; payload: typeof payload }>; hasMore: boolean }>;
+    };
+    const inline = await recover();
+    expect(inline.messages.map(message => message.messageId)).toEqual([workspaceId, ...[104, 103, 102, 101, 100, 99, 98].map(id)]);
+    expect(inline.messages.every(message => message.payload.ciphertext === payload.ciphertext)).toBe(true);
+    expect(inline.hasMore).toBe(true);
+
+    queries.length = 0;
+    const opaque = await handleRequest(request(`/v1/pairings/${pairId}/messages`, "GET", receiveToken), measuredEnv);
+    const opaqueBody = await opaque.json() as { messages: Array<{ messageId: string; sentAt: number }> };
+    expect(opaqueBody.messages).toHaveLength(100);
+    expect(opaqueBody.messages[0]).toEqual({ messageId: workspaceId, sentAt: now });
+    expect(JSON.stringify(opaqueBody)).not.toContain("payload");
+    // The id-only route must avoid bringing encrypted transcripts into Worker memory.
+    expect(queries.find(query => query.includes("FROM messages"))).not.toContain("payload_ciphertext");
+
+    await env.DB.prepare("DELETE FROM messages WHERE pair_id = ? AND message_id != ? AND created_at < ?")
+      .bind(pairId, workspaceId, now + 98).run();
+    const exactBatch = await recover();
+    expect(exactBatch.messages).toEqual(inline.messages);
+    expect(exactBatch.hasMore).toBe(false);
+    await env.DB.prepare("UPDATE messages SET expires_at = ? WHERE pair_id = ?").bind(now - 1, pairId).run();
+    expect(await recover()).toEqual({ messages: [], hasMore: false });
+  });
+
   it("relays encrypted phone commands back to the paired desktop", async () => {
     const pairId = "50000000-0000-4000-8000-000000000005";
     const commandId = "60000000-0000-4000-8000-000000000006";

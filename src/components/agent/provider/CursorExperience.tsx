@@ -6,7 +6,7 @@ import { AgentImageAttachments } from "../AgentImageAttachments";
 import { AgentMessageText } from "../AgentMessageText";
 import { MessageCopyButton } from "../MessageCopyButton";
 import { SubagentBoardAnchor, SubagentBoardForActivities } from "../subagents/SubagentBoard";
-import { useSubagentUi } from "../subagents/SubagentUiContext";
+import { useSubagentActivityUi } from "../subagents/SubagentUiContext";
 import { toolLoadingPhase, type ToolLoadingPhase } from "../toolLoadingPhase";
 import {
   ActivityHistory,
@@ -171,7 +171,7 @@ function CursorTracker({ plan }: { plan: PlanSummary }) {
  * its own live marker, and the sub-agent's output folded behind it.
  */
 function CursorSubagent({ item, elapsed }: { item: ToolItem; elapsed: string | null }) {
-  const { absorbedCallIds, rosterAnchorIds, peekedCallId, peekSubagent } = useSubagentUi();
+  const { absorbedCallIds, rosterAnchorIds, peekedCallId, peekSubagent } = useSubagentActivityUi();
   const loadingPhase = toolLoadingPhase(item.status);
   if (rosterAnchorIds.has(item.id)) return <SubagentBoardAnchor itemId={item.id} />;
   if (absorbedCallIds.has(item.callId)) return null;
@@ -362,7 +362,7 @@ const CursorNode = memo(function CursorNode({
 });
 
 export function CursorExperience({ session, items, className }: ProviderExperienceProps) {
-  const { peekSubagent } = useSubagentUi();
+  const { peekSubagent } = useSubagentActivityUi();
   const list = items ?? session.items;
   const plan = useMemo(() => planSummary(list), [list]);
   const activity = useMemo(() => activitySummary(list), [list]);

@@ -117,7 +117,7 @@ export type AgentEvent =
    * reads as a continuation rather than a first turn, whether or not the
    * agent could replay the history behind it.
    */
-  | { type: "resumed"; sessionId: string; title: string }
+  | { type: "resumed"; sessionId: string; title: string; silent?: boolean }
   | { type: "permission"; permission: AgentPermission | null }
   | {
       type: "extensions";
@@ -696,7 +696,7 @@ function reduceEvent(state: AgentSessionState, event: AgentEvent): AgentSessionS
         // The empty state offers to start something new; a resumed pane is
         // the opposite of that even before its first reply lands.
         started: true,
-        items: [
+        items: event.silent ? state.items : [
           ...state.items,
           {
             kind: "notice",

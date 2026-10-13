@@ -14,16 +14,12 @@ class ReadActionReceiver : BroadcastReceiver() {
         val pendingResult = goAsync()
         Thread({
             val result = runCatching {
-                val store = MessageStore(context)
-                val message = store.response(messageId) ?: error("This response is no longer available.")
-                val pairId = message.pairId ?: error("This response is not linked to a desktop.")
-                val terminalId = message.terminalId ?: error("This response is not linked to a terminal.")
-                val cleared = store.markConversationRead(
-                    pairId,
-                    terminalId,
-                    message.completionSeq,
-                    at = message.sentAt,
-                )
+                val cleared = MessageStore(context).use { store ->
+                    val message = store.response(messageId) ?: error("This response is no longer available.")
+                    val pairId = message.pairId ?: error("This response is not linked to a desktop.")
+                    val terminalId = message.terminalId ?: error("This response is not linked to a terminal.")
+                    store.markConversationRead(pairId, terminalId, message.completionSeq, at = message.sentAt)
+                }
                 NotificationTools.cancelIds(context, cleared.ifEmpty { listOf(messageId) })
                 ReadSyncScheduler.enqueue(context)
                 NotificationTools.announceChanged(context)

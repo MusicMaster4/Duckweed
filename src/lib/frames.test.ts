@@ -33,6 +33,35 @@ describe("synchronized terminal frames", () => {
     frames.dispose();
   });
 
+  test("preserves ordinary chunks and a marker completed by a text-only read", () => {
+    const writes = [];
+    const frames = createFrameBuffer((write) => writes.push(write));
+    frames.push("plain\r\n");
+    frames.push("");
+    frames.push(`${OPEN}body${ESC}[?20`);
+    frames.push("26l");
+    frames.push("after\r\n");
+    expect(writes).toEqual([
+      { text: "plain\r\n", synchronized: false, complete: true },
+      { text: `${OPEN}body${CLOSE}`, synchronized: true, complete: true },
+      { text: "after\r\n", synchronized: false, complete: true },
+    ]);
+    frames.dispose();
+  });
+
+  test("disposal drops held output and ignores late PTY deliveries", () => {
+    const writes = [];
+    const frames = createFrameBuffer((write) => writes.push(write));
+    frames.push(`${OPEN}held${ESC}[?20`);
+    expect(frames.isFraming()).toBe(true);
+    frames.dispose();
+    expect(frames.isFraming()).toBe(false);
+    frames.flush();
+    frames.push(`26lafter${OPEN}late${CLOSE}`);
+    frames.dispose();
+    expect(writes).toEqual([]);
+  });
+
   test("keeps a safety-flushed frame logically open", () => {
     const writes = [];
     const frames = createFrameBuffer((write) => writes.push(write));

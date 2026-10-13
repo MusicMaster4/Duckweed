@@ -124,18 +124,22 @@ function highlightLine(line: string): string {
   }
 
   TOKENS.lastIndex = 0;
-  const painted = body.replace(TOKENS, (match, ...rest) => {
-    const groups = rest[rest.length - 1] as Record<string, string | undefined>;
-    for (const kind of Object.keys(groups)) {
-      if (groups[kind] === undefined) continue;
-      // Group names carry the colour. `winpath` aliases `path`, and a trailing
-      // digit (`number1`) marks an extra alternative sharing an earlier colour —
-      // regexes reject duplicate group names, so the suffix is how they coexist.
-      const key = (kind === "winpath" ? "path" : kind.replace(/\d+$/, "")) as
-        keyof typeof highlightColors;
-      return paint(key, match);
-    }
-    return match;
+  // Captures follow TOKENS' alternatives. Reading them directly avoids a
+  // rest array, Object.keys and alias regex for every token in build output.
+  const painted = body.replace(TOKENS, (
+    match, url, quoted, winpath, path, error, warn, ok, literal, muted, flag, number,
+  ) => {
+    const kind = url !== undefined ? "url"
+      : quoted !== undefined ? "string"
+      : winpath !== undefined || path !== undefined ? "path"
+      : error !== undefined ? "error"
+      : warn !== undefined ? "warn"
+      : ok !== undefined ? "ok"
+      : literal !== undefined || number !== undefined ? "number"
+      : muted !== undefined ? "muted"
+      : flag !== undefined ? "flag"
+      : null;
+    return kind === null ? match : paint(kind, match);
   });
 
   return head + painted;
@@ -224,6 +228,13 @@ export function createHighlighter() {
 
   return function process(chunk: string, enabled = true): string {
     if (!chunk) return chunk;
+    // Most reads contain only text. With no unfinished escape, no styles or
+    // screen modes can change, so skip span objects and both scanning passes.
+    if (!pending && !chunk.includes(ESC)) {
+      return enabled && !ownsScreen() && styles.size === 0 && !/\r(?!\n)|\x08/.test(chunk)
+        ? highlightText(chunk)
+        : chunk;
+    }
     const spans: { text: string; sequence?: string }[] = [];
     let at = 0;
     if (pending) {
