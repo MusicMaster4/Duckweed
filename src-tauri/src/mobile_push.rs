@@ -34,6 +34,7 @@ const MAX_PREVIEW_CIPHERTEXT: usize = 3_000;
 const MAX_WORKSPACE_PLAINTEXT_BYTES: usize = 225_000;
 const PRESENCE_INTERVAL: Duration = Duration::from_secs(30);
 
+static PROMPT_SYNC_LOCK: OnceLock<Mutex<i64>> = OnceLock::new();
 static FILE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static HTTP_CLIENT: OnceLock<Result<Client, String>> = OnceLock::new();
 static SCHEDULED_COMPLETIONS: OnceLock<Mutex<ScheduledCompletionRegistry>> = OnceLock::new();
@@ -1288,6 +1289,141 @@ fn send_workspace_to_device(
     Ok(())
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobilePromptTemplate {
+    id: String,
+    title: String,
+    content: String,
+    created_at: i64,
+    updated_at: i64,
+}
+
+// Whole templates fit in an encrypted envelope, including worst-case JSON
+// escaping. Never trim prompt content to fit a workspace or relay limit.
+fn prompt_template_chunks(
+    templates: &[MobilePromptTemplate],
+) -> Result<Vec<Vec<MobilePromptTemplate>>, String> {
+    if templates.len() > 200 {
+        return Err("Too many prompt templates".into());
+    }
+    let mut chunks = vec![Vec::new()];
+    let mut bytes = 0;
+    for template in templates {
+        if template.id.is_empty()
+            || template.id.len() > 160
+            || template.title.trim().is_empty()
+            || template.content.trim().is_empty()
+            || template.title.encode_utf16().count() > 80
+            || template.content.encode_utf16().count() > 20_000
+        {
+            return Err("Invalid prompt template".into());
+        }
+        let size = serde_json::to_vec(template)
+            .map_err(|e| e.to_string())?
+            .len()
+            + 1;
+        if bytes + size > 200_000 {
+            chunks.push(Vec::new());
+            bytes = 0;
+        }
+        chunks.last_mut().unwrap().push(template.clone());
+        bytes += size;
+    }
+    Ok(chunks)
+}
+
+fn prompt_templates_blocking(
+    app: &AppHandle,
+    templates: Vec<MobilePromptTemplate>,
+) -> Result<SendResult, String> {
+    let chunks = prompt_template_chunks(&templates)?;
+    // Keep complete revisions ordered across windows and effect restarts.
+    let mut sync_clock = PROMPT_SYNC_LOCK.get_or_init(|| Mutex::new(0)).lock().unwrap();
+    *sync_clock = now_ms().max(*sync_clock + 1);
+    let sent_at = *sync_clock;
+    let state = {
+        let _guard = FILE_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        read_state(&state_path(app)?)
+    };
+    let revision = Uuid::new_v4().to_string();
+    let mut result = SendResult {
+        sent: 0,
+        failed: 0,
+        errors: Vec::new(),
+    };
+    for device in &state.devices {
+        let send = || -> Result<(), String> {
+            let secret = load_secret(&device.id)?;
+            for (index, templates) in chunks.iter().enumerate() {
+                let message_id = Uuid::new_v4().to_string();
+                let collapse_key = format!("prompt-templates:{}:{}", device.id, index);
+                let preview_plain = serde_json::to_vec(&serde_json::json!({
+                    "version": 1, "id": message_id, "sentAt": sent_at, "kind": "prompt_templates",
+                }))
+                .map_err(|e| e.to_string())?;
+                let full_plain = serde_json::to_vec(&serde_json::json!({
+                    "version": 1, "id": message_id, "sentAt": sent_at, "kind": "prompt_templates",
+                    "revision": revision, "part": index, "parts": chunks.len(), "templates": templates,
+                })).map_err(|e| e.to_string())?;
+                if full_plain.len() > MAX_WORKSPACE_PLAINTEXT_BYTES {
+                    return Err("Prompt payload exceeds relay limit".into());
+                }
+                let preview = encrypt(
+                    &secret.master_key,
+                    &device.id,
+                    &message_id,
+                    "preview",
+                    &preview_plain,
+                )?;
+                let payload = encrypt(
+                    &secret.master_key,
+                    &device.id,
+                    &message_id,
+                    "payload",
+                    &full_plain,
+                )?;
+                checked(
+                    send_request(
+                        client()?
+                            .post(format!(
+                                "{}/v1/pairings/{}/messages",
+                                relay_url(),
+                                device.id
+                            ))
+                            .bearer_auth(&secret.send_token)
+                            .json(&SendMessage {
+                                message_id: &message_id,
+                                sent_at,
+                                collapse_key: Some(&collapse_key),
+                                preview: &preview,
+                                payload: &payload,
+                            }),
+                    )
+                    .map_err(|e| request_error("could not sync prompt templates", &e))?,
+                )?;
+            }
+            Ok(())
+        };
+        match send() {
+            Ok(()) => result.sent += 1,
+            Err(error) => {
+                result.failed += 1;
+                result.errors.push(format!("{}: {}", device.name, error));
+            }
+        }
+    }
+    Ok(result)
+}
+
+#[tauri::command]
+pub async fn mobile_send_prompt_templates(
+    app: AppHandle,
+    templates: Vec<MobilePromptTemplate>,
+) -> Result<SendResult, String> {
+    blocking(move || prompt_templates_blocking(&app, templates)).await
+}
+
 fn workspace_collapse_key(device_id: &str) -> String {
     format!("workspace:{device_id}")
 }
@@ -2220,5 +2356,49 @@ mod tests {
             workspace_collapse_key("phone-one"),
             workspace_collapse_key("phone-two")
         );
+    }
+}
+
+#[cfg(test)]
+mod prompt_template_tests {
+    use super::*;
+    #[test]
+    fn chunks_preserve_full_text_under_the_encrypted_payload_budget() {
+        let templates: Vec<_> = (0..200)
+            .map(|index| MobilePromptTemplate {
+                id: format!("prompt-{index}"),
+                title: "Review".into(),
+                content: "\u{0001}".repeat(20_000),
+                created_at: 1,
+                updated_at: 2,
+            })
+            .collect();
+        let chunks = prompt_template_chunks(&templates).unwrap();
+        assert_eq!(chunks.len(), 200);
+        for chunk in &chunks {
+            assert!(serde_json::to_vec(chunk).unwrap().len() < 200_000);
+        }
+        let flattened: Vec<_> = chunks.into_iter().flatten().collect();
+        assert_eq!(
+            serde_json::to_value(flattened).unwrap(),
+            serde_json::to_value(templates).unwrap()
+        );
+    }
+    #[test]
+    fn empty_library_sends_a_part_to_clear_mobile_templates() {
+        let chunks = prompt_template_chunks(&[]).unwrap();
+        assert_eq!(chunks.len(), 1);
+        assert!(chunks[0].is_empty());
+    }
+    #[test]
+    fn invalid_templates_are_rejected_instead_of_truncated() {
+        let template = MobilePromptTemplate {
+            id: "p".into(),
+            title: "Test".into(),
+            content: "a".repeat(20_001),
+            created_at: 1,
+            updated_at: 2,
+        };
+        assert!(prompt_template_chunks(&[template]).is_err());
     }
 }

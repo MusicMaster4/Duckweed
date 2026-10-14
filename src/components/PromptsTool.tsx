@@ -155,7 +155,7 @@ export function PromptsTool() {
           <span className="tools-section-note">
             {atTemplateLimit
               ? `${MAX_TEMPLATES} template limit reached`
-              : "Shared across every agent"}
+              : "Shared across agents and paired phones"}
           </span>
         </div>
         <button

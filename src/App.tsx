@@ -1,3 +1,4 @@
+import { startMobilePromptSync } from "./lib/mobilePromptSync";
 import { mobileAgentExperience } from "./lib/mobileExperience";
 import * as mobileAgentHistory from "./lib/agents/history";
 import { mobileSlashCommands } from "./lib/mobileWorkspace";
@@ -1082,6 +1083,10 @@ export default function App() {
     },
     [cancelSchedule, sendDraftNow],
   );
+
+  useEffect(() => {
+    if (TAURI_RUNTIME) return startMobilePromptSync();
+  }, []);
 
   // Keep a compact remote workspace on paired phones. Structured agents send
   // conversation rows; ordinary shells and raw agent TUIs send a bounded tail

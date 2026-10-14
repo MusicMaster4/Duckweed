@@ -41,6 +41,10 @@ class MessageFetchWorker(context: Context, parameters: WorkerParameters) : Worke
             val workspaceStore = WorkspaceStore(applicationContext)
             if (message.kind == "presence") {
                 workspaceStore.markPresence(pairId, receivedAt)
+            } else if (message.kind == "prompt_templates") {
+                val part = message.promptTemplatesPart ?: error("Missing prompt templates payload")
+                PromptTemplateStore(applicationContext).put(pairId, part)
+                workspaceStore.markPresence(pairId, receivedAt)
             } else if (message.workspace != null) {
                 if (workspaceStore.put(message.workspace, receivedAt)) {
                     val cleared = MessageStore(applicationContext).use {

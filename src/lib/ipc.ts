@@ -322,6 +322,9 @@ export const mobileSendWorkspace = (snapshot: MobileWorkspaceSnapshot) => {
   return send;
 };
 
+export const mobileSendPromptTemplates = (templates: readonly import("./promptTemplates").PromptTemplate[]) =>
+  invoke<MobileSendResult>("mobile_send_prompt_templates", { templates });
+
 export const mobileSendPresence = () =>
   invoke<MobileSendResult>("mobile_send_presence");
 
