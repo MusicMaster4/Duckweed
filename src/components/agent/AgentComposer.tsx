@@ -242,6 +242,10 @@ export function AgentComposer({
   const mention = useMemo(() => activeFileMention(value, cursor), [value, cursor]);
   const mentionKey = mention ? `${mention.start}:${mention.query}` : null;
   const commandMenu = buildMenu(value, session);
+  const choosingModel = /^\/model(?:\s|$)/i.test(value);
+  useEffect(() => {
+    if (choosingModel && !ended) agents.refreshModels(session.termId);
+  }, [choosingModel, ended, session.termId]);
   const providerExtensionMenu = useMemo(
     () => extensionMenu(value, cursor, session),
     [
@@ -1107,6 +1111,7 @@ export function AgentComposer({
           session={session}
           placement="composer"
           onSelect={(kind, value) => agents.configure(session.termId, kind, value)}
+          onRefreshModels={() => agents.refreshModels(session.termId)}
         />
       </div>
     </div>

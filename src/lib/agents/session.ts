@@ -1633,6 +1633,13 @@ export function canPromptSubagent(termId: string): boolean {
   return Boolean(session && !session.disposed && session.adapter.promptSubagent);
 }
 
+/** Refresh model choices in place, including while a turn is running. */
+export function refreshModels(termId: string): void {
+  const session = sessions.get(termId);
+  if (!session || session.disposed || session.state.status === "exited" || session.state.status === "error") return;
+  session.adapter.refreshModels?.(session.context);
+}
+
 /** Ask the live provider for its current extension inventory. */
 export async function refreshExtensions(termId: string): Promise<boolean> {
   const session = sessions.get(termId);

@@ -613,12 +613,12 @@ export function shortModelLabel(model: string): string {
     const name = versioned[1][0].toUpperCase() + versioned[1].slice(1);
     return `${name} ${versioned[2].replace("-", ".")}${lower.includes("[1m]") ? " (1M)" : ""}`;
   }
-  if (lower.includes("fable")) return lower.includes("1m") ? "Fable 5.1 (1M)" : "Fable 5.1";
+  if (lower.includes("fable")) return lower.includes("1m") ? "Fable (1M)" : "Fable";
   if (lower.includes("opus") && !lower.includes("plan")) {
-    return lower.includes("1m") ? "Opus 5.5 (1M)" : "Opus 5.5";
+    return lower.includes("1m") ? "Opus (1M)" : "Opus";
   }
-  if (lower.includes("sonnet")) return lower.includes("1m") ? "Sonnet 5 (1M)" : "Sonnet 5";
-  if (lower.includes("haiku")) return "Haiku 4.5";
+  if (lower.includes("sonnet")) return lower.includes("1m") ? "Sonnet (1M)" : "Sonnet";
+  if (lower.includes("haiku")) return "Haiku";
   if (lower === "default") return "Default";
   if (lower === "best") return "Best";
   if (lower === "opusplan") return "Opus Plan";

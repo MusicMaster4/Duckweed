@@ -96,6 +96,7 @@ const FALLBACKS: Record<AgentId, { name: string; description: string }[]> = {
  * Fallback while Claude's initialize control request discovers the live
  * model catalog, or for older CLIs that do not support discovery. The
  * system/init event only names the active model and can refresh its label.
+ * Keep these aliases versionless; only the CLI knows their current versions.
  *
  * Effort levels match `/effort` usage plus `ultracode` (needs dynamic
  * workflows / plan — still listed so the picker mirrors the CLI; rejected
@@ -104,11 +105,11 @@ const FALLBACKS: Record<AgentId, { name: string; description: string }[]> = {
 const CLAUDE_EFFORTS = ["low", "medium", "high", "xhigh", "max", "auto", "ultracode"];
 const CLAUDE_MODELS: AgentModelChoice[] = [
   { id: "default", label: "Default (recommended)", efforts: CLAUDE_EFFORTS },
-  { id: "opus", label: "Opus 5.5", efforts: CLAUDE_EFFORTS },
-  { id: "fable", label: "Fable 5.1", efforts: CLAUDE_EFFORTS },
-  { id: "sonnet", label: "Sonnet 5", efforts: CLAUDE_EFFORTS },
-  { id: "haiku", label: "Haiku 4.5", efforts: CLAUDE_EFFORTS },
-  { id: "opus[1m]", label: "Opus 5.5 (1M context)", efforts: CLAUDE_EFFORTS },
+  { id: "opus", label: "Opus", efforts: CLAUDE_EFFORTS },
+  { id: "fable", label: "Fable", efforts: CLAUDE_EFFORTS },
+  { id: "sonnet", label: "Sonnet", efforts: CLAUDE_EFFORTS },
+  { id: "haiku", label: "Haiku", efforts: CLAUDE_EFFORTS },
+  { id: "opus[1m]", label: "Opus (1M context)", efforts: CLAUDE_EFFORTS },
 ];
 
 /** Update both alias labels when Claude reports a versioned model in init. */

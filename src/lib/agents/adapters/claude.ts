@@ -545,6 +545,23 @@ export function createClaudeAdapter(): AgentAdapter {
   let settledMessageSeq = 0;
   let controlSeq = 0;
   let initializeRequestId: string | null = null;
+  let catalogRequest: { id: string; sentAt: number } | null = null;
+
+  function refreshModels(ctx: AdapterContext): void {
+    if (ctx.launch.program === "claudex" || initializeRequestId) return;
+    // Coalesce picker opens while a request is in flight. A lost reply must
+    // not prevent discovery the next time the user opens the picker.
+    if (catalogRequest && Date.now() - catalogRequest.sentAt < 10_000) return;
+    const id = `dw-models-${++controlSeq}`;
+    catalogRequest = { id, sentAt: Date.now() };
+    void Promise.resolve(ctx.send({
+      type: "control_request",
+      request_id: id,
+      request: { subtype: "list_models" },
+    })).catch(() => {
+      if (catalogRequest?.id === id) catalogRequest = null;
+    });
+  }
   /** Control request ids Claude is waiting on, keyed by our permission id. */
   const pendingPermissions = new Map<
     string,
@@ -1474,8 +1491,10 @@ export function createClaudeAdapter(): AgentAdapter {
     const response = asRecord(frame.response);
     const requestId = asString(response?.request_id);
     if (!requestId) return;
-    if (requestId === initializeRequestId) {
-      initializeRequestId = null;
+    const initialized = requestId === initializeRequestId;
+    if (initialized || requestId === catalogRequest?.id) {
+      if (initialized) initializeRequestId = null;
+      else catalogRequest = null;
       if (response?.subtype !== "success" || ctx.launch.program === "claudex") return;
       const payload = asRecord(response.response);
       const fallbackEfforts = fallbackModels("claude")[0]?.efforts ?? [];
@@ -1483,7 +1502,7 @@ export function createClaudeAdapter(): AgentAdapter {
       for (const raw of asArray(payload?.models)) {
         const row = asRecord(raw);
         const id = asString(row?.value)?.trim();
-        if (!id || models.some((model) => model.id === id)) continue;
+        if (!id || row?.disabled === true || models.some((model) => model.id === id)) continue;
         const efforts = row?.supportsEffort === false ? []
           : Array.isArray(row?.supportedEffortLevels)
             ? asArray(row.supportedEffortLevels)
@@ -1506,6 +1525,9 @@ export function createClaudeAdapter(): AgentAdapter {
         return name && !name.startsWith("__") ? [{ name: name.startsWith("/") ? name : `/${name}`, description: asString(command?.description) ?? "" }] : [];
       });
       if (models.length || commands.length) ctx.emit({ type: "session", ...(models.length ? { models } : {}), ...(commands.length ? { commands } : {}) });
+      // initialize can precede remote model settings. Use the dedicated
+      // catalog query for subsequent updates instead of reinitializing.
+      if (initialized) refreshModels(ctx);
       return;
     }
     const side = pendingSideQuestions.get(requestId);
@@ -2069,6 +2091,7 @@ export function createClaudeAdapter(): AgentAdapter {
       ctx.emit({ type: "permission", permission: null });
       ctx.emit({ type: "status", status: "working" });
     },
+    refreshModels,
     refreshExtensions: () => extensions.map((extension) => ({ ...extension })),
     refreshTasks: () => runtimeTaskRows(),
   };

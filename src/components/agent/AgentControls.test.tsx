@@ -96,7 +96,7 @@ describe("next-message agent controls", () => {
     claude.model = "claude-opus-5-5-20260923[1m]";
     claude.models = fallbackModels("claude");
     const html = renderToStaticMarkup(<AgentControls session={claude} onSelect={() => {}} />);
-    expect(html).toContain("Opus 5.5 (1M context)");
+    expect(html).toContain("Opus 5.5 (1M)");
     expect(html).not.toContain('>Opus 5.5</span>');
   });
 

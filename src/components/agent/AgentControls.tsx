@@ -13,6 +13,7 @@ interface Props {
   session: AgentSessionState;
   /** Apply a picker choice without exposing its internal slash syntax as chat. */
   onSelect: (kind: "model" | "effort" | "access", value: string) => void;
+  onRefreshModels?: () => void;
   /**
    * Where the menus open relative to the triggers.
    * Composer footer (T3-style) opens upward; header opens downward.
@@ -39,7 +40,7 @@ const SEARCH_THRESHOLD = 8;
  * and `/effort` through the adapter while keeping that implementation syntax
  * out of the conversation.
  */
-export function AgentControls({ session, onSelect, placement = "composer" }: Props) {
+export function AgentControls({ session, onSelect, onRefreshModels, placement = "composer" }: Props) {
   const [menu, setMenu] = useState<MenuKind>(null);
   const [highlighted, setHighlighted] = useState(0);
   const [query, setQuery] = useState("");
@@ -216,7 +217,10 @@ export function AgentControls({ session, onSelect, placement = "composer" }: Pro
           open={menu === "model"}
           interactive={canPickModel && !ended}
           pending={Boolean(session.nextModel)}
-          onToggle={() => setMenu((current) => (current === "model" ? null : "model"))}
+          onToggle={() => {
+            if (menu !== "model") onRefreshModels?.();
+            setMenu((current) => (current === "model" ? null : "model"));
+          }}
         />
       )}
       {effortLabel && (
@@ -369,7 +373,9 @@ function ControlTrigger({
 
 function displayModelLabel(current: string, models: AgentModelChoice[]): string {
   const match = findModelChoice(current, models);
-  if (match?.label) return match.label;
+  // A fallback alias has no authoritative version. Preserve the explicit
+  // model reported by the process until discovery resolves that alias.
+  if (match?.label && (match.resolvedModel || !/^claude-.*-\d/i.test(current))) return match.label;
   return shortModelLabel(current);
 }
 
