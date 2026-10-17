@@ -70,6 +70,40 @@ export function markdownLinkAt(text: string, start: number): MarkdownLink | null
   return { label, destination, title, image, end: index + 1 };
 }
 
+export interface CodexFileCitation {
+  label: string;
+  path: string;
+  end: number;
+}
+
+/** Read Codex artifact directives without treating their paths as Markdown. */
+export function codexFileCitationAt(text: string, start: number): CodexFileCitation | null {
+  const prefix = /^:codex-file-citation(?:\[([^\]\r\n]*)\])?\{/.exec(text.slice(start));
+  if (!prefix) return null;
+  let index = start + prefix[0].length;
+  const attribute = /\s*([\w-]+)\s*=\s*(?:"([^"\r\n]*)"|'([^'\r\n]*)')\s*/y;
+  let path: string | undefined;
+  while (index < text.length) {
+    attribute.lastIndex = index;
+    const match = attribute.exec(text);
+    if (!match) return null;
+    if (match[1] === "path") {
+      if (path !== undefined) return null;
+      // Backslashes are literal Windows path separators, not string escapes.
+      path = match[2] ?? match[3];
+    }
+    index = attribute.lastIndex;
+    if (text[index] === "}") {
+      if (!path?.trim()) return null;
+      const label = prefix[1]?.trim() || path.split(/[\\/]/).pop() || path;
+      return { label, path, end: index + 1 };
+    }
+    // Attributes must be separated by whitespace.
+    if (!/\s/.test(text[index - 1])) return null;
+  }
+  return null;
+}
+
 export type AgentMarkdownTarget = { kind: "web"; href: string } | { kind: "file"; path: string };
 
 /** Allow web URLs and local paths without accepting arbitrary URI schemes. */
