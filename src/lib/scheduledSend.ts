@@ -13,9 +13,13 @@ export interface ScheduledSend {
   triggered?: boolean;
 }
 
-/** A local time to submit the terminal's current draft. */
+/** One independent message, or a legacy live draft, to submit at a local time. */
 export interface TimedSend {
   at: number;
+  id?: string;
+  text?: string;
+  images?: import("./agents/types").AgentImageAttachment[];
+  source?: "terminal" | "custom";
 }
 
 export type SubmitDelivery = "default" | "alternate";
@@ -29,6 +33,28 @@ export function deliverDueSends(
   const remaining = new Map(sends);
   for (const [termId, send] of sends) {
     if (send.at <= now && deliver(termId)) remaining.delete(termId);
+  }
+  return remaining;
+}
+
+/** Deliver in time order, retaining failures and blocking later sends to that terminal. */
+export function deliverDueMessageQueues(
+  queues: ReadonlyMap<string, TimedSend[]>,
+  now: number,
+  deliver: (termId: string, send: TimedSend) => boolean,
+): Map<string, TimedSend[]> {
+  const remaining = new Map(queues);
+  for (const [termId, messages] of queues) {
+    const ordered = [...messages].sort((a, b) => a.at - b.at);
+    let delivered = 0;
+    for (const send of ordered) {
+      if (send.at > now || !deliver(termId, send)) break;
+      delivered++;
+    }
+    if (!delivered) continue;
+    const pending = ordered.slice(delivered);
+    if (pending.length) remaining.set(termId, pending);
+    else remaining.delete(termId);
   }
   return remaining;
 }

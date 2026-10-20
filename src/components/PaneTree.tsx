@@ -48,11 +48,11 @@ export interface PaneTreeShared {
   highlightedAgentTermId: string | null;
   onAgentTargetHover: (termId: string | null) => void;
   scheduledSends: ReadonlyMap<string, ScheduledSend>;
-  timedSends: ReadonlyMap<string, TimedSend>;
+  timedSends: ReadonlyMap<string, TimedSend[]>;
   onScheduleSend: (termId: string, target: AgentTarget) => void;
   onCancelSchedule: (termId: string) => void;
   onScheduleTimedSend: (termId: string, send: TimedSend) => void;
-  onCancelTimedSend: (termId: string) => void;
+  onCancelTimedSend: (termId: string, messageId?: string) => void;
   onBeforeSubmit: (
     termId: string,
     text: string,
@@ -130,7 +130,7 @@ export const PaneTree = memo(function PaneTree({
         agentTargets={shared.agentTargets}
         onAgentTargetHover={shared.onAgentTargetHover}
         scheduledSend={shared.scheduledSends.get(node.term) ?? null}
-        timedSend={shared.timedSends.get(node.term) ?? null}
+        timedMessages={shared.timedSends.get(node.term) ?? []}
         onScheduleSend={shared.onScheduleSend}
         onCancelSchedule={shared.onCancelSchedule}
         onScheduleTimedSend={shared.onScheduleTimedSend}
