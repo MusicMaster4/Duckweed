@@ -19,6 +19,12 @@ import {
   slotShift,
 } from "../lib/tabReorder";
 import type { DragState } from "../hooks/useDragPane";
+import {
+  useTabStripMotion,
+  TAB_STRIP_MOTION_MS,
+  TAB_STRIP_MOTION_EASE,
+  reducedTabMotion,
+} from "../hooks/useTabStripMotion";
 import { ProjectMenu } from "./ProjectMenu";
 import { TabContextMenu } from "./TabContextMenu";
 import { TabGroupLabel } from "./TabGroupLabel";
@@ -99,8 +105,8 @@ type Reorder = {
 const DRAG_SLOP = 4;
 
 /** How long tabs take to slide into a new order. */
-const SLIDE_MS = 170;
-const SLIDE_EASE = "cubic-bezier(0.22, 1, 0.36, 1)";
+const SLIDE_MS = TAB_STRIP_MOTION_MS;
+const SLIDE_EASE = TAB_STRIP_MOTION_EASE;
 
 const TabGlyph = ({ iconId }: { iconId: string | null | undefined }) => {
   const def = tabIconDef(iconId);
@@ -164,6 +170,7 @@ export function TabStrip({
   const [editing, setEditing] = useState<string | null>(null);
   const [picker, setPicker] = useState<Picker | null>(null);
   const [context, setContext] = useState<ContextMenu | null>(null);
+  const motion = useTabStripMotion(stripRef);
 
   useEffect(() => {
     /**
@@ -178,6 +185,7 @@ export function TabStrip({
     const snapshot = (tabId: string) => {
       const strip = stripRef.current;
       if (!strip) return null;
+      motion.prepareForDrag();
       const sourceGroup = tabs.find((tab) => tab.id === tabId)?.group?.id;
       const els = [...strip.querySelectorAll<HTMLElement>("[data-strip-id]")]
         .filter((el) => !sourceGroup || el.dataset.tabGroup === sourceGroup);
@@ -201,6 +209,7 @@ export function TabStrip({
     /** Slide everything into the new order, then hand it to React. */
     const settle = (state: Reorder) => {
       const { slots, from, to, pinnedCount } = state;
+      const duration = reducedTabMotion() ? 0 : SLIDE_MS;
       const width = slots[from].width;
       const rest = restingLeft(slots, from, to);
 
@@ -208,7 +217,7 @@ export function TabStrip({
         const { el } = slots[i];
         const shift =
           i === from ? rest - slots[from].left : slotShift(i, from, to, width, pinnedCount);
-        el.style.transition = `transform ${SLIDE_MS}ms ${SLIDE_EASE}`;
+        el.style.transition = `transform ${duration}ms ${SLIDE_EASE}`;
         el.style.transform = shift ? `translateX(${shift}px)` : "translateX(0px)";
       }
 
@@ -234,7 +243,7 @@ export function TabStrip({
       settling.current = commit;
       window.setTimeout(() => {
         if (settling.current === commit) commit();
-      }, SLIDE_MS);
+      }, duration);
     };
 
     /** End the gesture — dropping the tab where it currently reads as being. */
@@ -381,20 +390,29 @@ export function TabStrip({
   }, [activeTabId, settingsActive, tabs, onUpdateGroup]);
 
   useEffect(() => {
+    if (motion.isHovered()) return;
     const strip = stripRef.current;
     const selected = strip?.querySelector<HTMLElement>('[aria-selected="true"]')
       ?? strip?.querySelector<HTMLElement>(".tab-group-label.is-active");
     selected?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
-  }, [activeTabId, settingsActive, tabs]);
+  }, [activeTabId, settingsActive, tabs, motion.revision]);
 
   return (
     <div className="tabstrip">
-      <div className="tabs" ref={stripRef} role="tablist" aria-label="Open tabs">
+      <div
+        className="tabs"
+        ref={stripRef}
+        role="tablist"
+        aria-label="Open tabs"
+        onPointerEnter={motion.onPointerEnter}
+        onPointerLeave={motion.onPointerLeave}
+      >
         {stripItems.map((item, index) => {
           if (item.kind === "settings") {
             return (
               <div
                 key={SETTINGS_TAB_ID}
+                data-strip-motion-id="settings"
                 data-strip-id={SETTINGS_TAB_ID}
                 role="tab"
                 aria-selected={settingsActive}
@@ -479,6 +497,7 @@ export function TabStrip({
                 title={tab.title}
                 data-tab-group={group?.id}
                 data-group-end={lastInGroup ? "true" : undefined}
+                data-strip-motion-id={`tab:${tab.id}`}
                 data-strip-id={tab.id}
                 data-tab-id={tab.id}
                 data-pinned={tab.pinned ? "true" : undefined}
@@ -591,7 +610,7 @@ export function TabStrip({
           );
         })}
 
-        <div className={`tab-new-wrap ${allowNewTab ? "" : "is-locked"}`}>
+        <div data-strip-motion-id="new-tab" className={`tab-new-wrap ${allowNewTab ? "" : "is-locked"}`}>
           <button
             type="button"
             {...(allowNewTab ? { "data-new-tab": "" } : {})}

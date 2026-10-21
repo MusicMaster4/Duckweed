@@ -388,6 +388,7 @@ button.chip:hover {
 }
 
 .tabs {
+  position: relative;
   display: flex;
   flex: 1;
   align-items: center;
@@ -396,6 +397,26 @@ button.chip:hover {
   height: 100%;
   overflow-x: auto;
   scrollbar-width: none;
+}
+
+/* Layout motion uses the left edge as its anchor, including exit copies. */
+.tabs > [data-strip-motion-id],
+.tab-strip-exit {
+  transform-origin: left center;
+}
+
+.tabs > [data-strip-width-held] {
+  flex: 0 0 var(--strip-held-width);
+  width: var(--strip-held-width);
+  min-width: var(--strip-held-width);
+  max-width: var(--strip-held-width);
+}
+
+.tabs > .tab-strip-exit {
+  position: absolute;
+  margin: 0;
+  pointer-events: none;
+  z-index: 1;
 }
 
 .tabs::-webkit-scrollbar {
@@ -532,10 +553,14 @@ body.is-dragging-tab .tab-folder {
    itself is pinned to the pointer, so it must not be smoothed at all. */
 body.is-dragging-tab .tab {
   transition:
-    transform 170ms cubic-bezier(0.22, 1, 0.36, 1),
+    transform 140ms cubic-bezier(0.2, 0.8, 0.2, 1),
     background 120ms ease,
     color 120ms ease,
     border-color 120ms ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  body.is-dragging-tab .tab { transition: none; }
 }
 
 /* The dragged tab is lifted off the strip and follows the pointer. */
@@ -12578,7 +12603,7 @@ body.is-dragging-rail * {
   height: 12px;
   flex: none;
   color: var(--text-faint);
-  transition: transform 150ms ease, color 120ms ease;
+  transition: transform 140ms cubic-bezier(0.2, 0.8, 0.2, 1), color 120ms ease;
 }
 .tab-group-label[aria-expanded="true"] .tab-group-chevron { transform: rotate(90deg); }
 .tab-group-label.is-active .tab-group-chevron { color: var(--text); }

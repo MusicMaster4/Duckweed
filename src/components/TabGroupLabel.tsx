@@ -49,6 +49,7 @@ export function TabGroupLabel({ group, count, working, active, unread, onUpdate,
       className={`tab-group-label${active ? " is-active" : ""}${unread ? " is-unread" : ""}${color ? " is-colored" : ""}`}
       style={color ? { "--group-color": color } as CSSProperties : undefined}
       data-group-id={group.id}
+      data-strip-motion-id={`group:${group.id}`}
       aria-expanded={!group.collapsed}
       aria-label={`${group.name}, ${count} tabs${working ? ", agent working" : ""}`}
       title={`${group.name}: click to ${group.collapsed ? "expand" : "collapse"}, right-click to edit`}
