@@ -1449,17 +1449,20 @@ class MainActivity : AppCompatActivity() {
         val remaining = java.util.concurrent.atomic.AtomicInteger(credentials.size)
         credentials.forEach { pairing -> syncExecutor.execute {
             try {
-                runCatching { RelayClient.pendingMessages(pairing) }
-                    .getOrDefault(emptyList())
-                    .forEach { pending ->
-                        runCatching {
-                            MessageFetchWorker.fetchAndStore(applicationContext, pairing, pending.id, pending.payload, pending.sentAt)
-                        }.onFailure { error ->
-                            if (error !is RelayHttpException || error.status != 404) {
-                                MessageFetchScheduler.enqueue(applicationContext, pairing.pairId, pending.id)
+                runCatching {
+                    PendingRelayRecovery.drain(
+                        fetchPage = { RelayClient.pendingMessages(pairing) },
+                        receive = { pending ->
+                            runCatching {
+                                MessageFetchWorker.fetchAndStore(applicationContext, pairing, pending.id, pending.payload, pending.sentAt)
+                            }.onFailure { error ->
+                                if (error !is RelayHttpException || error.status != 404) {
+                                    MessageFetchScheduler.enqueue(applicationContext, pairing.pairId, pending.id)
+                                }
                             }
-                        }
-                    }
+                        },
+                    )
+                }
             } finally {
                 if (remaining.decrementAndGet() == 0) relayRecoveryRunning.set(false)
             }

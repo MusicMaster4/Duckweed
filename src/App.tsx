@@ -1443,12 +1443,14 @@ export default function App() {
                     const timed = command.scheduledAt && command.scheduledAt > Date.now() && command.scheduledAt < Date.now() + 31 * 86_400_000;
                     const triggered = command.targetTerminalId && command.targetTerminalId !== command.terminalId && terminals.getMeta(command.targetTerminalId);
                     if (timed || triggered) {
-                      agentSessions.setDraft(command.terminalId, command.text ?? "");
-                      agentSessions.setDraftImages(command.terminalId, command.images);
                       cancelSchedule(command.terminalId);
                       if (!timed) cancelTimedSend(command.terminalId);
                       if (timed) scheduleTimedSend(command.terminalId, { at: command.scheduledAt!, text: command.text ?? "", images: command.images });
                       else if (command.targetTerminalId) {
+                        // Completion-triggered schedules send the live composer draft.
+                        // Timed messages keep their payload only in timedMessages.
+                        agentSessions.setDraft(command.terminalId, command.text ?? "");
+                        agentSessions.setDraftImages(command.terminalId, command.images);
                         const target = agentSessions.get(command.targetTerminalId);
                         scheduleSend(command.terminalId, { termId: command.targetTerminalId, label: target?.label ?? "Terminal", detail: target?.cwd ?? "" });
                       }
