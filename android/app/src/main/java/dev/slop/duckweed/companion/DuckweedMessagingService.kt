@@ -41,7 +41,7 @@ class DuckweedMessagingService : FirebaseMessagingService() {
         // reachable. Use the phone's clock so clock skew cannot turn a message
         // that just arrived into an "offline" state.
         WorkspaceStore(this).markPresence(pairId, System.currentTimeMillis())
-        if (preview.kind != "workspace" && preview.kind != "presence") {
+        if (preview.kind != "workspace" && preview.kind != "presence" && preview.kind != "prompt_templates") {
             NotificationHealth.recordDelivery(this, remoteMessage)
             MessageStore(this).use { store ->
                 // A delayed preview must not replace an already downloaded answer.

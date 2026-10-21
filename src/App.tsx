@@ -1,3 +1,4 @@
+import { startMobilePromptSync } from "./lib/mobilePromptSync";
 import { mobileAgentExperience } from "./lib/mobileExperience";
 import * as mobileAgentHistory from "./lib/agents/history";
 import { mobileSlashCommands } from "./lib/mobileWorkspace";
@@ -133,7 +134,7 @@ import { toggleFullscreen } from "./lib/window";
 import { DEFAULT_TOOLS_WIDTH, load, pushRecent, rehydrate, save } from "./lib/persist";
 import { flushDurableStorage } from "./lib/durableStorage";
 import { workspaceRecovery } from "./lib/workspaceRecovery";
-import { deliverDueSends } from "./lib/scheduledSend";
+import { deliverDueMessageQueues } from "./lib/scheduledSend";
 import {
   shouldPlayCompletionSound,
   shouldSignalCompletion,
@@ -448,10 +449,11 @@ export default function App() {
       return send && targetExists ? [[node.term, send] as const] : [];
     }))),
   );
-  const [timedSends, setTimedSends] = useState<Map<string, TimedSend>>(
+  const [timedSends, setTimedSends] = useState<Map<string, TimedSend[]>>(
     () => new Map(initial.tabs.flatMap((tab) => leaves(tab.root).flatMap((node) => {
-      const send = workspaceRecovery.get(node.term)?.timed;
-      return send ? [[node.term, send] as const] : [];
+      const pane = workspaceRecovery.get(node.term);
+      const messages = pane?.timedMessages?.length ? pane.timedMessages : pane?.timed ? [{ ...pane.timed, id: crypto.randomUUID() }] : [];
+      return messages.length ? [[node.term, messages] as const] : [];
     }))),
   );
   const unreadTermIdsRef = useRef(unreadTermIds);
@@ -920,17 +922,25 @@ export default function App() {
   const scheduleTimedSend = useCallback((termId: string, send: TimedSend) => {
     if (!Number.isFinite(send.at) || send.at <= Date.now()) return;
     const next = new Map(timedSendsRef.current);
-    next.set(termId, send);
-    workspaceRecovery.update(termId, { timed: send });
+    const hasCustomMessage = Boolean(send.text?.trim()) || Boolean(send.images?.length);
+    const message: TimedSend = {
+      ...send, id: crypto.randomUUID(),
+      text: hasCustomMessage ? send.text : undefined,
+      images: hasCustomMessage ? send.images : undefined,
+    };
+    next.set(termId, [...(next.get(termId) ?? []), message].sort((a, b) => a.at - b.at));
+    workspaceRecovery.update(termId, { timed: null, timedMessages: next.get(termId) });
     timedSendsRef.current = next;
     setTimedSends(next);
   }, []);
 
-  const cancelTimedSend = useCallback((termId: string) => {
+  const cancelTimedSend = useCallback((termId: string, messageId?: string) => {
     if (!timedSendsRef.current.has(termId)) return;
     const next = new Map(timedSendsRef.current);
-    next.delete(termId);
-    workspaceRecovery.update(termId, { timed: null });
+    const pending = messageId ? next.get(termId)!.filter(send => send.id !== messageId) : [];
+    if (pending.length) next.set(termId, pending);
+    else next.delete(termId);
+    workspaceRecovery.update(termId, { timed: null, timedMessages: pending });
     timedSendsRef.current = next;
     setTimedSends(next);
   }, []);
@@ -941,25 +951,28 @@ export default function App() {
       text: string,
       images: AgentImageAttachment[],
       delivery: SubmitDelivery = "default",
+      preserveDraft = false,
     ): boolean => {
       const agent = agentSessions.get(termId);
       if (agent) {
         if (agent.status === "exited" || agent.status === "error") return false;
-        agentSessions.submit(termId, text, images, delivery);
+        if (!agentSessions.submit(termId, text, images, delivery, { preserveDraft })) return false;
         agentSessions.flushRecovery();
-        bus.emit("term:clear-draft", { termId });
+        if (!preserveDraft) bus.emit("term:clear-draft", { termId });
         return true;
       }
 
       const meta = terminals.getMeta(termId);
       if (!meta || meta.exited || images.length > 0 || !text.trim()) return false;
-      terminals.setDraft(termId, "");
+      if (!preserveDraft) terminals.setDraft(termId, "");
       if (meta.agent || meta.busy) {
         terminals.writeRaw(termId, `${text}\r`);
       } else {
+        const draft = preserveDraft ? terminals.getDraft(termId) : "";
         terminals.submitCommand(termId, text);
+        if (preserveDraft) terminals.setDraft(termId, draft);
       }
-      bus.emit("term:clear-draft", { termId });
+      if (!preserveDraft) bus.emit("term:clear-draft", { termId });
       return true;
     },
     [],
@@ -970,21 +983,21 @@ export default function App() {
     let timer = 0;
     const checkDue = () => {
       const previous = timedSendsRef.current;
-      const next = deliverDueSends(previous, Date.now(), (termId) => {
+      const next = deliverDueMessageQueues(previous, Date.now(), (termId, send) => {
         if (dailyLockedRef.current || !terminals.readyForScheduledSend(termId)) return false;
         const agent = agentSessions.get(termId);
-        const text = agent ? agentSessions.getDraft(termId) : terminals.getDraft(termId);
-        const images = agent ? agentSessions.getDraftImages(termId) : [];
-        return hasSendablePayload(text, images) && sendDraftNow(termId, text, images);
+        const text = send.text ?? (agent ? agentSessions.getDraft(termId) : terminals.getDraft(termId));
+        const images = send.text !== undefined ? send.images ?? [] : agent ? agentSessions.getDraftImages(termId) : [];
+        return hasSendablePayload(text, images) && sendDraftNow(termId, text, images, "default", send.text !== undefined);
       });
-      if (next.size !== previous.size) {
+      if ([...previous].some(([id, messages]) => next.get(id) !== messages)) {
         for (const termId of previous.keys()) {
-          if (!next.has(termId)) workspaceRecovery.update(termId, { timed: null });
+          workspaceRecovery.update(termId, { timed: null, timedMessages: next.get(termId) ?? [] });
         }
         timedSendsRef.current = next;
         setTimedSends(next);
       }
-      const nextAt = Math.min(...[...timedSendsRef.current.values()].map((send) => send.at));
+      const nextAt = Math.min(...[...timedSendsRef.current.values()].flatMap((messages) => messages.map(send => send.at)));
       window.clearTimeout(timer);
       if (Number.isFinite(nextAt)) {
         timer = window.setTimeout(checkDue, Math.max(250, Math.min(nextAt - Date.now(), 30_000)));
@@ -1082,6 +1095,10 @@ export default function App() {
     },
     [cancelSchedule, sendDraftNow],
   );
+
+  useEffect(() => {
+    if (TAURI_RUNTIME) return startMobilePromptSync();
+  }, []);
 
   // Keep a compact remote workspace on paired phones. Structured agents send
   // conversation rows; ordinary shells and raw agent TUIs send a bounded tail
@@ -1197,7 +1214,7 @@ export default function App() {
               history: mobileHistoryRef.current.get(node.term)?.rows,
               historyError: mobileHistoryRef.current.get(node.term)?.error,
               historyRequestId: mobileHistoryRef.current.get(node.term)?.requestId,
-              scheduled: timedSendsRef.current.has(node.term) ? { at: timedSendsRef.current.get(node.term)!.at }
+              scheduled: timedSendsRef.current.has(node.term) ? { at: timedSendsRef.current.get(node.term)![0].at }
                 : scheduledSendsRef.current.has(node.term) ? { targetLabel: scheduledSendsRef.current.get(node.term)!.targetLabel } : null,
               commands: mobileSlashCommands(session ? { ...session, model: session.nextModel ?? session.model, effort: session.nextEffort ?? session.effort } : null),
               activity: mobileAgentActivity(session?.items ?? []),
@@ -1426,12 +1443,14 @@ export default function App() {
                     const timed = command.scheduledAt && command.scheduledAt > Date.now() && command.scheduledAt < Date.now() + 31 * 86_400_000;
                     const triggered = command.targetTerminalId && command.targetTerminalId !== command.terminalId && terminals.getMeta(command.targetTerminalId);
                     if (timed || triggered) {
-                      agentSessions.setDraft(command.terminalId, command.text ?? "");
-                      agentSessions.setDraftImages(command.terminalId, command.images);
                       cancelSchedule(command.terminalId);
-                      cancelTimedSend(command.terminalId);
-                      if (timed) scheduleTimedSend(command.terminalId, { at: command.scheduledAt! });
+                      if (!timed) cancelTimedSend(command.terminalId);
+                      if (timed) scheduleTimedSend(command.terminalId, { at: command.scheduledAt!, text: command.text ?? "", images: command.images });
                       else if (command.targetTerminalId) {
+                        // Completion-triggered schedules send the live composer draft.
+                        // Timed messages keep their payload only in timedMessages.
+                        agentSessions.setDraft(command.terminalId, command.text ?? "");
+                        agentSessions.setDraftImages(command.terminalId, command.images);
                         const target = agentSessions.get(command.targetTerminalId);
                         scheduleSend(command.terminalId, { termId: command.targetTerminalId, label: target?.label ?? "Terminal", detail: target?.cwd ?? "" });
                       }

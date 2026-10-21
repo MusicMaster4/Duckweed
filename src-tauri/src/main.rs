@@ -1330,6 +1330,7 @@ fn main() {
             mobile_push::mobile_cancel_terminal_completions,
             mobile_push::mobile_cancel_selected_completions,
             mobile_push::mobile_send_workspace,
+            mobile_push::mobile_send_prompt_templates,
             mobile_push::mobile_send_presence,
             mobile_push::mobile_poll_commands,
             mobile_push::mobile_ack_command,

@@ -23,6 +23,7 @@ data class CompletionRecord(
     val terminalTitle: String? = null,
     val soundCue: Int? = null,
     val workspace: WorkspaceSnapshot? = null,
+    val promptTemplatesPart: PromptTemplatesPart? = null,
     val readAt: Long? = null,
     val attachments: List<MobileImageAttachment> = emptyList(),
     val deliveryState: String? = null,

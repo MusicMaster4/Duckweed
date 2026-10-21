@@ -30,7 +30,7 @@ describe("prompts panel", () => {
       content: "Review this implementation for correctness and missing tests.",
     });
     const html = renderToStaticMarkup(<PromptsTool />);
-    expect(html).toContain("Shared across every agent");
+    expect(html).toContain("Shared across agents and paired phones");
     expect(html).toContain("Review implementation");
     expect(html).toContain("Copy");
     expect(html).not.toContain("Use template");

@@ -60,6 +60,14 @@ function read(): PromptTemplate[] {
 let templates = read();
 const listeners = new Set<() => void>();
 
+if (typeof window !== "undefined") {
+  window.addEventListener("storage", (event) => {
+    if (event.key !== PROMPT_TEMPLATES_KEY && event.key !== null) return;
+    templates = read();
+    for (const listener of listeners) listener();
+  });
+}
+
 function write(): void {
   const raw = JSON.stringify({ version: 1, templates });
   try {

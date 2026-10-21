@@ -10,11 +10,12 @@ import { subagentForCallId, subagentRosters } from "../lib/agents/subagents";
 import { emptyUsage, type AgentItem, type AgentSessionState } from "../lib/agents/types";
 import { latestWorkflow } from "../lib/agentWorkflow";
 import type { MobileAgentExperience } from "../lib/mobileExperience";
+import { mobileConversationTimeline, type MobileOutgoingMessage } from "../lib/mobileConversation";
 import "../styles.css";
 import "../components/agent/subagents/subagents.css";
 import "./mobile.css";
 
-interface Update { key: string; experience: MobileAgentExperience; online: boolean; outgoing?: Array<{ id: string; at: number; text: string; state: string }> }
+interface Update { key: string; experience: MobileAgentExperience; online: boolean; outgoing?: MobileOutgoingMessage[] }
 declare global { interface Window { duckweedUpdate: (value: Update) => void; duckweedPause: () => void } }
 
 function Conversation() {
@@ -61,9 +62,7 @@ function Conversation() {
     ...experience, status: update.online && !paused ? experience.status : "idle", items,
     usage: experience.usage ?? emptyUsage(),
   };
-  const outgoing = (update.outgoing ?? []).filter(message =>
-    !items.some(item => item.kind === "user" && item.text.trim() === message.text.trim() && item.at >= message.at - 10_000));
-  const visibleItems: AgentItem[] = [...items, ...outgoing.map(message => ({ kind: "user" as const, id: message.id, at: message.at, text: message.text }))];
+  const { visibleItems, outgoing } = mobileConversationTimeline(items, update.outgoing ?? []);
   const plan = latestWorkflow(items);
   const child = focused ? subagentForCallId(items, focused) : null;
   const variant = session.agent === "codex" ? "chatgpt" : session.agent;

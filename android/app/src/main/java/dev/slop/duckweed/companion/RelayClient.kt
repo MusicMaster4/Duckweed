@@ -109,15 +109,17 @@ object RelayClient {
 
     data class PendingMessage(val id: String, val sentAt: Long, val payload: EncryptedEnvelope? = null)
 
+    data class PendingPage(val messages: List<PendingMessage>, val hasMore: Boolean)
+
     /** Recover relay payloads even when Android or FCM dropped the wake-up push. */
-    fun pendingMessages(credentials: PairCredentials): List<PendingMessage> {
+    fun pendingMessages(credentials: PairCredentials): PendingPage {
         val result = request(
             method = "GET",
             url = "${credentials.relayUrl}/v1/pairings/${credentials.pairId}/messages?inline=1",
             bearer = credentials.receiveToken,
         )
         val messages = result.optJSONArray("messages") ?: JSONArray()
-        return (0 until messages.length()).mapNotNull { index ->
+        val pending = (0 until messages.length()).mapNotNull { index ->
             val message = messages.optJSONObject(index) ?: return@mapNotNull null
             val id = message.optString("messageId")
             if (runCatching { UUID.fromString(id) }.isFailure) return@mapNotNull null
@@ -125,6 +127,7 @@ object RelayClient {
                 EncryptedEnvelope(it.getString("nonce"), it.getString("ciphertext"))
             })
         }
+        return PendingPage(pending, result.optBoolean("hasMore", false))
     }
 
     fun acknowledge(credentials: PairCredentials, messageId: String, sentAt: Long? = null) {

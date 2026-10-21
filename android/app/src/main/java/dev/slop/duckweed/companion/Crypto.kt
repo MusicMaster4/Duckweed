@@ -70,6 +70,7 @@ object Crypto {
                 null
             },
             workspace = parseWorkspace(credentials.pairId, json),
+            promptTemplatesPart = PromptTemplatesJson.readPart(json),
         )
     }
 

@@ -13,9 +13,9 @@ account is required.
   nonces.
 - Cloudflare D1 receives only opaque ciphertext, routing identifiers, token
   hashes, and an FCM delivery token. Cloudflare cannot read the project, agent,
-  or response.
+  response, or prompt templates.
 - Firebase Cloud Messaging receives the encrypted preview and routing
-  identifiers. It does not receive the plaintext project, agent, or response.
+  identifiers. It does not receive the plaintext project, agent, response, or prompt templates.
 - The Android companion decrypts the preview before showing the agent and
   project. Its lock-screen public version is intentionally generic.
 - The phone fetches the encrypted full response, decrypts it locally, saves it
@@ -341,3 +341,30 @@ feedback while both network submission and draft persistence are blocked. The
 screen-off test checks that Android receives an unread notification with an
 audible channel; it does not measure production FCM transport latency or physical
 speaker output on a particular phone.
+
+## Prompt templates on your phone
+
+The companion's **Prompts** tab shows the reusable templates saved in desktop
+**Tools > Prompts**. Search the title or body, open **View** to read the complete
+prompt, or use **Copy prompt** to paste it into any chat app.
+
+Pair the companion from desktop **Settings > Agents > Mobile notifications**.
+Templates sync automatically on pairing and whenever you create, edit, or delete
+one on the desktop. Opening or refreshing the companion requests a fresh copy.
+Both devices need internet access to receive changes. After a successful sync,
+the encrypted local library stays available when the desktop is offline.
+Disconnecting a desktop removes its downloaded templates.
+
+Templates use a separate end-to-end encrypted transfer, so terminal snapshots
+cannot truncate their content. Large libraries are divided into whole-template
+parts and committed on the phone only when every part of the same revision has
+arrived. The previous complete library remains available during a transfer.
+The relay retains the latest encrypted part for each position and sends silent
+FCM wake hints at normal priority. A refresh replaces expired or missed parts.
+
+This feature requires updated desktop and Android builds plus the relay version
+that supports `prompt-templates:<pairId>:<part>` state keys. Deploy the updated
+relay with the existing **Deploy notification relay** workflow before releasing
+the clients. No new database migration or credentials are required. Existing workspace
+and completion endpoints remain compatible. Update both clients together
+to enable prompt template synchronization.

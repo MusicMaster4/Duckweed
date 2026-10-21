@@ -1,5 +1,5 @@
 ﻿import { describe, expect, test } from "bun:test";
-import { agentMarkdownTarget, markdownLinkAt } from "./agentMarkdownLinks";
+import { agentMarkdownTarget, codexFileCitationAt, markdownLinkAt } from "./agentMarkdownLinks";
 
 describe("agent Markdown links", () => {
   test("reads local artifact links and images with spaces in angle brackets", () => {
@@ -50,6 +50,55 @@ describe("agent Markdown links", () => {
       .toEqual({ kind: "web", href: "https://example.com/a%20b" });
     for (const source of ["javascript:alert(1)", "data:text/html,test", "vbscript:test", "file://server/report.html", "\\\\server\\report.html", "//server/report.html", "file:///tmp/a%00.html", "https://example.com/a\n"]) {
       expect(agentMarkdownTarget(source, "H:/project")).toBeNull();
+    }
+  });
+});
+
+
+describe("Codex file citations", () => {
+  test("reads complete directives at an offset without consuming following text", () => {
+    const path = "C:/Users/jubar/Pdf audio/output/A_Flor_do_Mamulengo.docx";
+    const citation = `:codex-file-citation{path="${path}" purpose="output"}`;
+    const source = `Ready: ${citation} Done.`;
+    expect(codexFileCitationAt(source, 7)).toEqual({
+      path, label: "A_Flor_do_Mamulengo.docx", end: 7 + citation.length,
+    });
+    expect(codexFileCitationAt(source, 0)).toBeNull();
+  });
+
+  test("handles optional labels, reordered attributes, and quoted braces", () => {
+    const source = ":codex-file-citation[Download PDF]{ purpose='output' path='/tmp/{draft}/report.pdf' }";
+    expect(codexFileCitationAt(source, 0)).toEqual({
+      path: "/tmp/{draft}/report.pdf", label: "Download PDF", end: source.length,
+    });
+    expect(codexFileCitationAt(':codex-file-citation[]{path="/tmp/report.pdf"}', 0)?.label)
+      .toBe("report.pdf");
+  });
+
+  test("preserves Windows backslashes and apostrophes in double quoted paths", () => {
+    const path = String.raw`D:\The stuff you'll need\report_v2_final.docx`;
+    const source = `:codex-file-citation{path="${path}" purpose="output"}`;
+    expect(codexFileCitationAt(source, 0)).toEqual({
+      path, label: "report_v2_final.docx", end: source.length,
+    });
+  });
+
+  test("leaves every incomplete streamed prefix unparsed", () => {
+    const source = ':codex-file-citation[Report]{path="/tmp/report.pdf" purpose="output"}';
+    for (let end = 0; end < source.length; end += 1) {
+      expect(codexFileCitationAt(source.slice(0, end), 0)).toBeNull();
+    }
+    expect(codexFileCitationAt(source, 0)?.end).toBe(source.length);
+  });
+
+  test("rejects missing, blank, duplicate, unquoted, or malformed attributes", () => {
+    for (const attributes of [
+      '', 'purpose="output"', 'path=""', 'path=" "', 'path=/tmp/report.pdf',
+      'path="/tmp/report.pdf" path="/tmp/other.pdf"',
+      'path="/tmp/report.pdf"purpose="output"', 'path="/tmp/report.pdf" invalid',
+      'path="/tmp/report\n.pdf"',
+    ]) {
+      expect(codexFileCitationAt(`:codex-file-citation{${attributes}}`, 0)).toBeNull();
     }
   });
 });

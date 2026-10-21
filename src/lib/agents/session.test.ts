@@ -583,6 +583,26 @@ describe("Custom agent UI sessions", () => {
     expect(sent.map(rpc).filter((message) => message.type === "user")).toHaveLength(0);
   });
 
+  test("independent timed delivery preserves the composer draft and images through recovery", async () => {
+    const termId = "recover-independent-timed-message";
+    await session.start(termId, { ...grokLaunch, agent: "claude", program: "claude" }, "H:/project");
+    feed({ type: "system", subtype: "init", session_id: "timed-session" });
+    session.setDraft(termId, "Unfinished desktop draft");
+    session.setDraftImages(termId, [image]);
+    const timedMessages = [{ id: "phone-message", at: 1234, text: "Scheduled from phone", images: [] }];
+    workspaceRecovery.update(termId, { timedMessages });
+    expect(session.submit(termId, timedMessages[0].text, [], "default", { preserveDraft: true })).toBe(true);
+    session.flushRecovery();
+    expect(session.getDraft(termId)).toBe("Unfinished desktop draft");
+    expect(session.getDraftImages(termId)).toEqual([image]);
+    const saved = JSON.parse(JSON.stringify(workspaceRecovery.get(termId)?.agent));
+    session.stop(termId);
+    await session.start(termId, { ...saved.launch, resumeId: saved.sessionId }, saved.cwd, saved);
+    expect(session.getDraft(termId)).toBe("Unfinished desktop draft");
+    expect(session.getDraftImages(termId)).toEqual([image]);
+    expect(workspaceRecovery.get(termId)?.timedMessages).toEqual(timedMessages);
+  });
+
   test("a failed recovery retains its draft and blocks scheduled delivery", async () => {
     const termId = "recover-failure";
     await session.start(termId, { ...grokLaunch, agent: "claude", program: "claude" }, "H:/project");

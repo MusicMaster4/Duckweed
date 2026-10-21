@@ -73,8 +73,14 @@ import java.util.Locale
 import java.util.UUID
 
 class MainActivity : AppCompatActivity() {
-    private enum class Page { ACTIVITY, PROJECTS, CONVERSATIONS, SETTINGS }
+    private enum class Page { ACTIVITY, PROJECTS, CONVERSATIONS, PROMPTS, SETTINGS }
 
+    private data class LoadedRemoteState(val snapshots: List<WorkspaceSnapshot>, val messages: List<CompletionRecord>,
+        val unreadKeys: Set<Pair<String, String>>, val prompts: List<PromptTemplateRow>)
+    private lateinit var promptsRefresh: SwipeRefreshLayout
+    private val promptAdapter = PromptTemplateAdapter(::viewPromptTemplate, ::copyPromptTemplate)
+    private var cachedPrompts: List<PromptTemplateRow> = emptyList()
+    private var promptQuery = ""
     private lateinit var appRoot: View
     private lateinit var pairingStatus: TextView
     private lateinit var scanButton: Button
@@ -460,6 +466,24 @@ class MainActivity : AppCompatActivity() {
             }
         }
         configureWorkspaceTools()
+        promptsRefresh = findViewById(R.id.prompts_page)
+        findViewById<RecyclerView>(R.id.prompt_list).apply {
+            layoutManager = LinearLayoutManager(this@MainActivity)
+            adapter = promptAdapter
+        }
+        promptsRefresh.setOnChildScrollUpCallback { _, _ -> findViewById<RecyclerView>(R.id.prompt_list).canScrollVertically(-1) }
+        promptsRefresh.setOnRefreshListener { requestRemoteRefresh() }
+        findViewById<EditText>(R.id.prompt_search).apply {
+            addTextChangedListener(object : TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
+                override fun afterTextChanged(s: Editable?) { promptQuery = s.toString(); refreshPrompts() }
+            })
+            setOnEditorActionListener { _, _, _ ->
+                getSystemService(InputMethodManager::class.java).hideSoftInputFromWindow(windowToken, 0)
+                clearFocus(); true
+            }
+        }
         conversationAttach.setOnClickListener {
             it.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
             imagePicker.launch("image/*")
@@ -623,6 +647,7 @@ class MainActivity : AppCompatActivity() {
         bind(R.id.nav_responses, Page.ACTIVITY)
         bind(R.id.nav_projects, Page.PROJECTS)
         bind(R.id.nav_conversations, Page.CONVERSATIONS)
+        bind(R.id.nav_prompts, Page.PROMPTS)
         bind(R.id.settings_button, Page.SETTINGS)
         showPage(Page.CONVERSATIONS)
     }
@@ -727,12 +752,14 @@ class MainActivity : AppCompatActivity() {
             Page.ACTIVITY to R.id.responses_page,
             Page.PROJECTS to R.id.projects_page,
             Page.CONVERSATIONS to R.id.conversations_page,
+            Page.PROMPTS to R.id.prompts_page,
             Page.SETTINGS to R.id.connections_page,
         )
         val navigation = mapOf(
             Page.ACTIVITY to R.id.nav_responses,
             Page.PROJECTS to R.id.nav_projects,
             Page.CONVERSATIONS to R.id.nav_conversations,
+            Page.PROMPTS to R.id.nav_prompts,
         )
         if (previousPage == page) {
             pages.forEach { (candidate, id) ->
@@ -769,6 +796,40 @@ class MainActivity : AppCompatActivity() {
         selectedPage = page
         navigation.forEach { (candidate, id) -> findViewById<View>(id).isSelected = candidate == page }
         findViewById<View>(R.id.settings_button).isSelected = page == Page.SETTINGS
+    }
+
+    private fun refreshPrompts() {
+        val rows = PromptTemplatesJson.search(cachedPrompts, promptQuery)
+        promptAdapter.submit(rows)
+        findViewById<TextView>(R.id.prompts_empty).apply {
+            visibility = if (rows.isEmpty()) View.VISIBLE else View.GONE
+            text = when {
+                promptQuery.isNotBlank() -> "No matching templates. Try another word from the title or prompt text."
+                SecretStore.loadAll(this@MainActivity).isEmpty() -> "Connect your desktop in Settings to sync prompt templates."
+                else -> "Create a prompt template in Duckweed on your desktop. It will sync here automatically. If you already have templates, update Duckweed on your desktop and pull to refresh."
+            }
+        }
+    }
+
+    private fun copyPromptTemplate(template: RemotePromptTemplate) {
+        val clipboard = getSystemService(android.content.ClipboardManager::class.java)
+        clipboard.setPrimaryClip(android.content.ClipData.newPlainText(template.title, template.content))
+        if (Build.VERSION.SDK_INT < 33) Toast.makeText(this, "Prompt copied", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun viewPromptTemplate(template: RemotePromptTemplate) {
+        val density = resources.displayMetrics.density
+        val body = TextView(this).apply {
+            text = template.content
+            textSize = 15f
+            setTextColor(ContextCompat.getColor(this@MainActivity, R.color.duckweed_text))
+            setPadding((24 * density).toInt(), (12 * density).toInt(), (24 * density).toInt(), (12 * density).toInt())
+            setTextIsSelectable(true)
+        }
+        val scroll = android.widget.ScrollView(this).apply { addView(body) }
+        AlertDialog.Builder(this).setTitle(template.title).setView(scroll)
+            .setPositiveButton("Copy prompt") { _, _ -> copyPromptTemplate(template) }
+            .setNegativeButton("Close", null).show()
     }
 
     private fun configureWorkspaceTools() {
@@ -1344,17 +1405,20 @@ class MainActivity : AppCompatActivity() {
                     }
                 }.toSet()
                 MessageStore(this).use { store ->
-                    Triple(
+                    LoadedRemoteState(
                         snapshots,
                         store.latestForOpenAgents(openAgentTerminals, 50),
                         store.unreadConversationKeys(),
+                        PromptTemplateStore(this).all(SecretStore.loadAll(this).map { it.pairId }.toSet()),
                     )
                 }
             }
             runOnUiThread {
                 remoteStateLoading = false
                 if (!isFinishing && !isDestroyed) {
-                    loaded.onSuccess { (snapshots, messages, unreadKeys) ->
+                    loaded.onSuccess { (snapshots, messages, unreadKeys, prompts) ->
+                        cachedPrompts = prompts
+                        refreshPrompts()
                         applyRemoteState(snapshots, messages, unreadKeys)
                     }.onFailure {
                         connectionHealth.text = "Could not load encrypted mobile state."
@@ -1385,17 +1449,20 @@ class MainActivity : AppCompatActivity() {
         val remaining = java.util.concurrent.atomic.AtomicInteger(credentials.size)
         credentials.forEach { pairing -> syncExecutor.execute {
             try {
-                runCatching { RelayClient.pendingMessages(pairing) }
-                    .getOrDefault(emptyList())
-                    .forEach { pending ->
-                        runCatching {
-                            MessageFetchWorker.fetchAndStore(applicationContext, pairing, pending.id, pending.payload, pending.sentAt)
-                        }.onFailure { error ->
-                            if (error !is RelayHttpException || error.status != 404) {
-                                MessageFetchScheduler.enqueue(applicationContext, pairing.pairId, pending.id)
+                runCatching {
+                    PendingRelayRecovery.drain(
+                        fetchPage = { RelayClient.pendingMessages(pairing) },
+                        receive = { pending ->
+                            runCatching {
+                                MessageFetchWorker.fetchAndStore(applicationContext, pairing, pending.id, pending.payload, pending.sentAt)
+                            }.onFailure { error ->
+                                if (error !is RelayHttpException || error.status != 404) {
+                                    MessageFetchScheduler.enqueue(applicationContext, pairing.pairId, pending.id)
+                                }
                             }
-                        }
-                    }
+                        },
+                    )
+                }
             } finally {
                 if (remaining.decrementAndGet() == 0) relayRecoveryRunning.set(false)
             }
@@ -3103,6 +3170,7 @@ class MainActivity : AppCompatActivity() {
             if (selectedPage == Page.PROJECTS) projectsRefresh.isRefreshing = true
             if (selectedPage == Page.ACTIVITY) responsesRefresh.isRefreshing = true
             if (selectedPage == Page.CONVERSATIONS) conversationsRefresh.isRefreshing = true
+            if (selectedPage == Page.PROMPTS) promptsRefresh.isRefreshing = true
         }
         // Resume, pull-to-refresh and network callbacks share one in-flight request.
         val focus = selectedTarget?.let { Pair(it.pairId, it.terminal.id) }
@@ -3160,6 +3228,7 @@ class MainActivity : AppCompatActivity() {
         if (::responsesRefresh.isInitialized) responsesRefresh.isRefreshing = false
         if (::projectsRefresh.isInitialized) projectsRefresh.isRefreshing = false
         if (::conversationsRefresh.isInitialized) conversationsRefresh.isRefreshing = false
+        if (::promptsRefresh.isInitialized) promptsRefresh.isRefreshing = false
         if (::retryConnectionButton.isInitialized) retryConnectionButton.isEnabled = true
         refreshConnectionHealth()
         if (report && failed) {

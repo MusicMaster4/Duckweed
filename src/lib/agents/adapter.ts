@@ -153,6 +153,8 @@ export interface AgentAdapter {
     answers: AgentQuestionAnswer[],
     ctx: AdapterContext,
   ) => void;
+  /** Refresh the selectable model catalog without starting a conversation turn. */
+  refreshModels?: (ctx: AdapterContext) => void;
   /** Refresh provider-owned skills, apps, plugins, MCP servers and hooks. */
   refreshExtensions?: (ctx: AdapterContext) => Promise<AgentExtension[]> | AgentExtension[];
   /** Refresh provider-owned background terminals, tasks and worktrees. */

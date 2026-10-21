@@ -371,6 +371,68 @@ describe("official agent presentation", () => {
     }
   });
 
+  test("renders Codex file citations as document links with intact paths and filenames", () => {
+    const native = globalThis as typeof globalThis & { isTauri?: boolean };
+    const previous = native.isTauri;
+    native.isTauri = true;
+    try {
+      const directory = "C:/Users/jubar/Desktop/Michail Korolev - 2026-09-26/Pdf audio/output";
+      const paths = [
+        `${directory}/docx/Imagenscomaudiodescricoes.docx`,
+        `${directory}/pdf/AFlordoMamulengoaudiodescricoesfp83emdianteeditavel.pdf`,
+        `${directory}/docx/AFlordoMamulengoaudiodescricoesfp83em_diante.docx`,
+      ];
+      const text = 'Files ready.\n\n' + paths.map((path) =>
+        `:codex-file-citation{path="${path}" purpose="output"}`,
+      ).join('\n\n') + '\n\nAll done.';
+      const html = renderAgentActivity("codex", [{
+        kind: "assistant", id: "citation-answer", at: 1, text, streaming: false,
+      }], "idle");
+      for (const path of paths) {
+        expect(html).toContain(`href="${path}" title="${path}"`);
+        expect(html).toContain(`>${path.split('/').pop()}</a>`);
+      }
+      expect(html).not.toContain(":codex-file-citation");
+      expect(html).not.toContain('purpose=');
+      expect(html).toContain('All done.');
+    } finally {
+      if (previous === undefined) delete native.isTauri;
+      else native.isTauri = previous;
+    }
+  });
+
+  test("renders labeled citations inline and preserves backslashes and literal filename formatting", () => {
+    const text = String.raw`Before :codex-file-citation[Open document]{purpose="output" path="D:\The stuff you'll need\report_v2_final.docx"} after. :codex-file-citation{path="/tmp/report_v2_final.pdf"}`;
+    const html = renderToStaticMarkup(<AssistantMarkdown text={text} />);
+    expect(html).toContain('Before <span title="D:\\The stuff you&#x27;ll need\\report_v2_final.docx">Open document</span> after.');
+    expect(html).toContain('title="/tmp/report_v2_final.pdf">report_v2_final.pdf</span>');
+    expect(html).not.toContain('<em>');
+    expect(html).not.toContain(':codex-file-citation');
+  });
+
+  test("keeps citation examples and partial streamed citations as text", () => {
+    const citation = ':codex-file-citation{path="/tmp/report.pdf" purpose="output"}';
+    const partial = citation.slice(0, -1);
+    const html = renderToStaticMarkup(<AssistantMarkdown text={
+      '`' + citation + '`\n\n```text\n' + citation + '\n```\n\n' + partial
+    } />);
+    const escaped = citation.replaceAll('"', '&quot;');
+    expect(html).toContain(`<code>${escaped}</code>`);
+    expect(html.split(`<code>${escaped}</code>`)).toHaveLength(3);
+    expect(html).toContain(partial.replaceAll('"', '&quot;'));
+    expect(html).not.toContain('<a ');
+    expect(html).not.toContain('title="/tmp/report.pdf"');
+  });
+
+  test("does not open unsafe destinations from file citations", () => {
+    const html = renderToStaticMarkup(<AssistantMarkdown text={
+      ':codex-file-citation[Run]{path="javascript:alert(1)"} :codex-file-citation[Remote]{path="file://server/report.pdf"}'
+    } />);
+    expect(html).toContain('Run');
+    expect(html).toContain('Remote');
+    expect(html).not.toContain('<a ');
+  });
+
   test("renders remote images, titled links, and formatting inside link labels", () => {
     const html = renderToStaticMarkup(<AssistantMarkdown text={
       '[**Docs**](https://example.com/a_(b) "Documentation") ![Preview](<https://example.com/preview image.png>)'

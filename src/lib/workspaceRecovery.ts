@@ -29,6 +29,7 @@ export interface PaneRecovery {
   history?: string[];
   agent?: AgentRecovery | null;
   timed?: TimedSend | null;
+  timedMessages?: TimedSend[];
   scheduled?: ScheduledSend | null;
 }
 
@@ -66,6 +67,12 @@ export function parseRecovery(raw: string | null): RecoveryState {
         title: typeof pane.title === "string" ? pane.title : undefined,
         draft: typeof pane.draft === "string" ? pane.draft : "",
         history: Array.isArray(pane.history) ? pane.history.filter((entry) => typeof entry === "string") : [],
+        timedMessages: Array.isArray(pane.timedMessages) ? pane.timedMessages.filter(send =>
+          send && Number.isFinite(send.at) && typeof send.id === "string" &&
+          (send.text === undefined || typeof send.text === "string") && (!send.images || (Array.isArray(send.images) &&
+            send.images.every(image => image && typeof image.id === "string" &&
+              typeof image.name === "string" && typeof image.dataUrl === "string" &&
+              ["image/png", "image/jpeg", "image/gif", "image/webp"].includes(image.mimeType))))) : [],
         timed: pane.timed && Number.isFinite(pane.timed.at) ? pane.timed : null,
         scheduled: typeof pane.scheduled?.targetTermId === "string" &&
           typeof pane.scheduled.targetLabel === "string" ? pane.scheduled : null,

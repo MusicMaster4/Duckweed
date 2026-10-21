@@ -144,3 +144,28 @@ describe("workspace crash recovery", () => {
     expect(saved.panes.invalid).toBeUndefined();
   });
 });
+
+test("recovers independent messages alongside a terminal draft", () => {
+  const { store, writes, tick } = recoveryHarness();
+  const messages = [
+    { id: "one", at: 1000, text: "Saved terminal draft", source: "terminal" as const },
+    { id: "two", at: 2000, text: "Custom message", source: "custom" as const },
+  ];
+  store.update("pane", { draft: "Still writing", timedMessages: messages });
+  tick();
+  const recovered = parseRecovery(writes.at(-1)!).panes.pane;
+  expect(recovered.timedMessages).toEqual(messages);
+  expect(recovered.draft).toBe("Still writing");
+});
+
+test("keeps a legacy live draft when persisted alongside new messages", () => {
+  const recovered = parseRecovery(JSON.stringify({ version: 1, panes: {
+    pane: { timedMessages: [
+      { id: "legacy", at: 1000 },
+      { id: "new", at: 2000, text: "Independent" },
+    ] },
+  } }));
+  expect(recovered.panes.pane.timedMessages).toEqual([
+    { id: "legacy", at: 1000 }, { id: "new", at: 2000, text: "Independent" },
+  ]);
+});

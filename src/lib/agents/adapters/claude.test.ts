@@ -112,6 +112,69 @@ describe("claude adapter", () => {
     expect(h.state().model).toBe("future-model");
   });
 
+  test("refreshes the live catalog and selects a newly released Haiku without a chat turn", async () => {
+    const h = harness();
+    h.adapter.start(h.ctx);
+    const initialize = h.sent[0] as { request_id: string };
+    h.adapter.refreshModels?.(h.ctx);
+    expect(h.sent).toHaveLength(1);
+    h.feed({ type: "control_response", response: {
+      subtype: "success", request_id: initialize.request_id,
+      response: { models: [{ value: "haiku", displayName: "Haiku", resolvedModel: "claude-haiku-4-5-20251001" }] },
+    } });
+    const first = h.sent.at(-1) as { request_id: string };
+    expect(first).toMatchObject({ request: { subtype: "list_models" } });
+    h.feed({ type: "control_response", response: {
+      subtype: "success", request_id: first.request_id,
+      response: { models: [{ value: "haiku", displayName: "Haiku", resolvedModel: "claude-haiku-4-5-20251001" }] },
+    } });
+    h.ctx.emit({ type: "status", status: "working" });
+    h.adapter.refreshModels?.(h.ctx);
+    const refresh = h.sent.at(-1) as { request_id: string };
+    const sentCount = h.sent.length;
+    h.adapter.refreshModels?.(h.ctx);
+    expect(h.sent).toHaveLength(sentCount);
+    h.feed({ type: "control_response", response: {
+      subtype: "success", request_id: refresh.request_id,
+      response: { models: [
+        { value: "haiku", displayName: "Haiku", resolvedModel: "claude-haiku-5-5", supportedEffortLevels: ["low", "high"] },
+        { value: "new-family", displayName: "New family" },
+        { value: "retired", displayName: "Retired", disabled: true },
+      ] },
+    } });
+    expect(h.state().models).toEqual([
+      { id: "haiku", label: "Haiku 5.5", resolvedModel: "claude-haiku-5-5", efforts: ["low", "high"] },
+      { id: "new-family", label: "New family", efforts: [] },
+    ]);
+    expect(h.state().status).toBe("working");
+    expect(h.state().items).toEqual([]);
+    const change = h.adapter.configure?.("model", "haiku", h.ctx);
+    const request = h.sent.at(-1) as { request_id: string };
+    expect(request).toMatchObject({ request: { subtype: "set_model", model: "haiku" } });
+    h.feed({ type: "control_response", response: { subtype: "success", request_id: request.request_id } });
+    await change;
+    expect(h.state().model).toBe("haiku");
+    expect(h.sent.every((message) => (message as { type: string }).type === "control_request")).toBe(true);
+  });
+
+  test("retains the discovered catalog on refresh errors and allows another refresh", () => {
+    for (const reply of [
+      { subtype: "error", error: "Unsupported request" },
+      { subtype: "success", response: { models: [] } },
+      { subtype: "success", response: { models: [null, {}, { value: " " }] } },
+    ]) {
+      const h = harness();
+      const models = [{ id: "haiku", label: "Haiku 5.5", resolvedModel: "claude-haiku-5-5", efforts: [] }];
+      h.ctx.emit({ type: "session", models });
+      h.adapter.refreshModels?.(h.ctx);
+      const request = h.sent.at(-1) as { request_id: string };
+      h.feed({ type: "control_response", response: { ...reply, request_id: request.request_id } });
+      expect(h.state().models).toEqual(models);
+      h.adapter.refreshModels?.(h.ctx);
+      expect(h.sent).toHaveLength(2);
+    }
+  });
+
   test("uses resolved CLI versions, preserves selection aliases and discovers native commands", async () => {
     const h = harness();
     h.adapter.start(h.ctx);
@@ -161,6 +224,7 @@ describe("claude adapter", () => {
   test("does not discover Anthropic models for the Claudex proxy", () => {
     const h = harness({ program: "claudex" });
     h.adapter.start(h.ctx);
+    h.adapter.refreshModels?.(h.ctx);
     expect(h.sent).toEqual([]);
   });
 

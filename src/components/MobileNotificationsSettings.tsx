@@ -185,8 +185,8 @@ export function MobileNotificationsSettings({ channel }: { channel: Channel }) {
           <span className="settings-copy">
             <strong>{device.name}</strong>
             <span>
-              Paired {new Date(device.pairedAt).toLocaleDateString()} · Agent, project, and
-              response are encrypted end to end
+              Paired {new Date(device.pairedAt).toLocaleDateString()} · Workspace, responses, and prompt templates
+              are encrypted end to end
             </span>
           </span>
           <span className="mobile-device-actions">

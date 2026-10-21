@@ -9,7 +9,7 @@ import type {
   ToolItem,
   ToolKind,
 } from "../../../lib/agents/types";
-import { markdownLinkAt } from "../../../lib/agentMarkdownLinks";
+import { codexFileCitationAt, markdownLinkAt } from "../../../lib/agentMarkdownLinks";
 import { AgentMarkdownImage, AgentMarkdownLink } from "../AgentMarkdownAssets";
 import { AgentAsciiLoader } from "../AgentAsciiLoader";
 import { AgentDiff } from "../AgentDiff";
@@ -207,7 +207,7 @@ export function traceSummary(text: string, fallback = "Thinking"): string {
 function inlineMarkdown(text: string, keyPrefix: string): ReactNode[] {
   const nodes: ReactNode[] = [];
   const token =
-    /(`[^`\n]+`|\\[\\`*_[\]!]|!\[|\[|\*\*[^*\n]+\*\*|__[^_\n]+__|https?:\/\/[^\s<]+|\*[^*\n]+\*|_[^_\n]+_)/g;
+    /(`[^`\n]+`|\\[\\`*_[\]!]|:codex-file-citation(?=\{|\[)|!\[|\[|\*\*[^*\n]+\*\*|__[^_\n]+__|https?:\/\/[^\s<]+|\*[^*\n]+\*|_[^_\n]+_)/g;
   let cursor = 0;
   let match: RegExpExecArray | null;
 
@@ -215,7 +215,18 @@ function inlineMarkdown(text: string, keyPrefix: string): ReactNode[] {
     if (match.index > cursor) nodes.push(text.slice(cursor, match.index));
     let value = match[0];
     const key = `${keyPrefix}-${match.index}`;
-    if (value === "[" || value === "![") {
+    if (value === ":codex-file-citation") {
+      const citation = codexFileCitationAt(text, match.index);
+      if (citation) {
+        value = text.slice(match.index, citation.end);
+        token.lastIndex = citation.end;
+        nodes.push(
+          <AgentMarkdownLink key={key} href={citation.path} title={citation.path}>
+            {citation.label}
+          </AgentMarkdownLink>,
+        );
+      } else nodes.push(value);
+    } else if (value === "[" || value === "![") {
       const link = markdownLinkAt(text, match.index);
       if (link) {
         value = text.slice(match.index, link.end);

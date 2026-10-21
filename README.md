@@ -249,8 +249,10 @@ each [versioned beta release](https://github.com/MusicMaster4/Duckweed/releases?
 
 Install the [stable Android companion](https://github.com/MusicMaster4/Duckweed/releases/latest/download/duckweed-companion.apk)
 or the [beta Android companion](https://github.com/MusicMaster4/Duckweed/releases/download/channel-testing/duckweed-companion-beta.apk)
-to receive encrypted agent-completion notifications and read the completed
-response on your phone. Pair it from **Settings > Agents > Mobile
+to receive encrypted agent-completion notifications, read completed responses,
+and access your prompt templates on your phone. The **Prompts** tab lets you
+search and copy the full text into any chat. Templates sync automatically from
+the desktop and stay available offline after they have been downloaded. Pair it from **Settings > Agents > Mobile
 notifications**. See [mobile notifications](docs/mobile-notifications.md) for
 the privacy model and deployment setup.
 

@@ -36,6 +36,11 @@ describe("encrypted notification relay", () => {
     expect(androidPushConfig({ ...data, message_id: data.pair_id }, data.pair_id)).toEqual({
       priority: "normal", ttl: "604800s", collapse_key: data.pair_id,
     });
+    expect(androidPushConfig(data, "prompt-templates:desktop-1:199")).toEqual({
+      priority: "normal", ttl: "604800s", collapse_key: "prompt-templates:desktop-1",
+    });
+    expect(androidPushConfig(data, "prompt-templates:other-desktop:0").priority).toBe("high");
+    expect(androidPushConfig(data, "prompt-templates:desktop-1:200").priority).toBe("high");
     expect(androidPushConfig(data, "completion-1").priority).toBe("high");
     expect(androidPushConfig(data, "workspace:other-desktop").priority).toBe("high");
     expect(androidPushConfig(data, data.pair_id).priority).toBe("high");
@@ -198,8 +203,8 @@ describe("encrypted notification relay", () => {
     await Promise.all(background);
   });
 
-  it("collapses workspace snapshots, serves inline ciphertext, and ignores stale replacement and ACKs", async () => {
-    const pairId = "70000000-0000-4000-8000-000000000007";
+  it.each(["workspace", "prompt-templates"])("collapses %s snapshots and ignores stale replacement and ACKs", async (kind) => {
+    const pairId = kind === "workspace" ? "70000000-0000-4000-8000-000000000007" : "80000000-0000-4000-8000-000000000007";
     const sendToken = "m".repeat(43), receiveToken = "n".repeat(43), registrationToken = "o".repeat(43);
     const accept = async () => {};
     await handleRequest(request("/v1/pairings", "POST", undefined, {
@@ -208,6 +213,7 @@ describe("encrypted notification relay", () => {
     await handleRequest(request(`/v1/pairings/${pairId}/register`, "POST", undefined, {
       registrationToken, receiveToken, fcmToken: "token", deviceId: "phone", name: "Phone", proof: "p".repeat(43),
     }), env, accept);
+    const stateKey = kind === "workspace" ? `workspace:${pairId}` : `prompt-templates:${pairId}:0`;
     const at = Date.now();
     const preview = { nonce: "Q".repeat(16), ciphertext: "R".repeat(64) };
     const payload = { nonce: "S".repeat(16), ciphertext: "T".repeat(64) };
@@ -216,13 +222,20 @@ describe("encrypted notification relay", () => {
     const first = "71000000-0000-4000-8000-000000000001";
     const latest = "71000000-0000-4000-8000-000000000002";
     const completion = "71000000-0000-4000-8000-000000000003";
-    await send(first, at, `workspace:${pairId}`);
-    await send(latest, at + 1, `workspace:${pairId}`);
-    await send(first, at, `workspace:${pairId}`);
+    expect((await send(first, at, stateKey)).status).toBe(202);
+    expect((await send(latest, at + 1, stateKey)).status).toBe(202);
+    expect((await send(first, at, stateKey)).status).toBe(202);
     await send(completion, at + 2);
     const pending = await handleRequest(request(`/v1/pairings/${pairId}/messages?inline=1`, "GET", receiveToken), env, accept);
-    expect(await pending.json()).toMatchObject({ messages: [{ messageId: latest, payload }, { messageId: completion, payload }], hasMore: false });
+    expect(await pending.json()).toMatchObject({ messages: (kind === "workspace" ? [latest, completion] : [completion, latest]).map(messageId => ({ messageId, payload })), hasMore: false });
     expect((await handleRequest(request(`/v1/pairings/${pairId}/messages/${first}`, "GET", receiveToken), env, accept)).status).toBe(404);
+    if (kind === "prompt-templates") {
+      const secondPart = "71000000-0000-4000-8000-000000000004";
+      expect((await send(secondPart, at + 2, `prompt-templates:${pairId}:1`)).status).toBe(202);
+      const parts = await handleRequest(request(`/v1/pairings/${pairId}/messages?inline=1`, "GET", receiveToken), env, accept);
+      expect(((await parts.json()) as { messages: Array<{ messageId: string }> }).messages.map(row => row.messageId).sort())
+        .toEqual([latest, secondPart, completion].sort());
+    }
     // Heartbeats reuse their id; an ACK for the older revision must not erase the newer one.
     await send(pairId, at, pairId);
     await send(pairId, at + 3, pairId);

@@ -304,6 +304,7 @@ class WorkspaceStore(private val context: Context) {
     fun remove(pairId: String) {
         synchronized(STORE_LOCK) {
             preferences.edit().remove(pairId).apply()
+            PromptTemplateStore(context).remove(pairId)
             synchronized(PRESENCE_LOCK) { presence.edit().remove(pairId).apply() }
         }
     }
