@@ -5,6 +5,7 @@ mod agent_activity;
 mod agent_documents;
 mod agent_proc;
 mod agent_sessions;
+mod codex_desktop;
 mod codex_transport;
 mod discord_presence;
 mod fs;
@@ -557,6 +558,13 @@ async fn opencode_models_refresh() -> Result<(), String> {
     blocking(agent_proc::refresh_opencode_models).await
 }
 
+/// Browser and Computer Use connection settings for a new Codex provider thread.
+/// `None` means the ChatGPT desktop app is not running or not signed in.
+#[tauri::command]
+async fn codex_desktop_bridge(codex_home: Option<String>) -> Result<Option<codex_desktop::DesktopBridge>, String> {
+    blocking(move || Ok(codex_desktop::bridge(codex_home.as_deref()))).await
+}
+
 /// Launch a coding agent in its line-delimited JSON mode.
 #[tauri::command]
 async fn agent_proc_start(
@@ -817,6 +825,28 @@ fn set_webview_bounds(window: &tauri::WebviewWindow, width: u32, height: u32) {
 #[tauri::command]
 fn open_url(url: String) -> Result<(), String> {
     open_external_url(&url)
+}
+
+/// Use a dedicated command so arbitrary terminal links remain HTTP-only.
+#[tauri::command]
+fn open_codex_desktop(thread_id: Option<String>, cwd: String, prompt: Option<String>) -> Result<(), String> {
+    open_with_default_handler(&codex_desktop_url(thread_id.as_deref(), &cwd, prompt.as_deref())?)
+}
+
+fn codex_desktop_url(thread_id: Option<&str>, cwd: &str, prompt: Option<&str>) -> Result<String, String> {
+    if let Some(id) = thread_id {
+        if id.is_empty() || id.len() > 128 || id == "new" ||
+            !id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_') {
+            return Err("Invalid Codex thread id".into());
+        }
+        return Ok(format!("codex://threads/{id}"));
+    }
+    let mut url = reqwest::Url::parse("codex://threads/new").map_err(|error| error.to_string())?;
+    url.query_pairs_mut().append_pair("path", cwd);
+    if let Some(prompt) = prompt.filter(|prompt| !prompt.is_empty()) {
+        url.query_pairs_mut().append_pair("prompt", prompt);
+    }
+    Ok(url.into())
 }
 
 /// Open an explicitly clicked local document from an agent response.
@@ -1308,6 +1338,8 @@ fn main() {
             toggle_window_fullscreen,
             sync_webview_bounds,
             open_url,
+            open_codex_desktop,
+            codex_desktop_bridge,
             open_agent_document,
             play_completion_sound,
             power_action,
@@ -1360,6 +1392,23 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn desktop_links_only_open_local_threads_and_encode_new_chat_context() {
+        assert_eq!(codex_desktop_url(Some("01a12345-abcd-7654-abcd-0123456789ab"), "H:/project", None).unwrap(),
+            "codex://threads/01a12345-abcd-7654-abcd-0123456789ab");
+        for id in ["", "new", "../settings", "thread?x=y", "thread#hash", "thread\n", "thread/path"] {
+            assert!(codex_desktop_url(Some(id), "H:/project", None).is_err(), "accepted {id:?}");
+        }
+        let url = codex_desktop_url(None, "H:/A project", Some("Check Chrome & keep #context")).unwrap();
+        let parsed = reqwest::Url::parse(&url).unwrap();
+        let query: std::collections::HashMap<_, _> = parsed.query_pairs().into_owned().collect();
+        assert_eq!(parsed.scheme(), "codex");
+        assert_eq!(parsed.host_str(), Some("threads"));
+        assert_eq!(parsed.path(), "/new");
+        assert_eq!(query["path"], "H:/A project");
+        assert_eq!(query["prompt"], "Check Chrome & keep #context");
+    }
 
     #[test]
     fn settings_checkpoint_replaces_existing_file_and_keeps_a_readable_backup() {

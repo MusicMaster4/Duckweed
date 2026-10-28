@@ -402,9 +402,24 @@ Finish or stop the active turn before switching interfaces.
 Extension availability depends on the installed CLI version, account, plugins,
 MCP configuration, and workspace settings. If Duckweed was already running
 while you installed an update or rebuilt it from source, restart the app before
-testing the new interface. Desktop Computer Use, screen control, mouse control,
-and keyboard automation are intentionally not integrated into the custom agent
-UI.
+testing the new interface. **Refresh** also asks Codex to reload MCP configuration
+from disk before fetching fresh skills, apps, and plugins. The service queues
+that configuration refresh for loaded threads without restarting the daemon.
+
+Codex browser control (the Chrome plugin) and Computer Use run through the
+ChatGPT desktop app's local access host. Keep the desktop app open, signed in to
+the same ChatGPT account as Codex, with the Chrome extension installed and the
+controls enabled under **Computer use** in its settings. When Duckweed opens,
+resumes, or forks a Codex conversation, it reads the desktop app's current host
+settings and gives them to that conversation's `node_repl` and `cua_repl` tools.
+The desktop app still decides whether access is allowed. If the desktop app
+starts or restarts later, Duckweed reconnects idle conversations automatically.
+A saved conversation takes about twenty seconds to reconnect, and a message
+sent meanwhile waits for it. If a tool still reports a missing connection, the
+provider-features panel shows the reason.
+
+See [Desktop connection diagnostics](docs/codex-desktop-connections.md) for the
+root cause, the connection lifecycle, and how it was verified.
 
 Supported custom interfaces currently include:
 

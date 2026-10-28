@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 
 interface Props {
@@ -15,6 +15,7 @@ interface Props {
 const OFFSET = 8;
 const MARGIN = 8;
 const DELAY_MS = 320;
+const TOOLTIP_OPEN_EVENT = "duckweed:tooltip-open";
 
 interface TipContent {
   title: string;
@@ -101,6 +102,7 @@ export function Tooltip({ title, detail, shortcut, children }: Props) {
 
   const show = useCallback(
     (immediate: boolean) => {
+      document.dispatchEvent(new Event(TOOLTIP_OPEN_EVENT));
       if (timer.current !== null) clearTimeout(timer.current);
       const open = () => {
         const rect = triggerRect();
@@ -112,7 +114,13 @@ export function Tooltip({ title, detail, shortcut, children }: Props) {
     [triggerRect],
   );
 
-  useEffect(() => () => hide(), [hide]);
+  useEffect(() => {
+    document.addEventListener(TOOLTIP_OPEN_EVENT, hide);
+    return () => {
+      document.removeEventListener(TOOLTIP_OPEN_EVENT, hide);
+      hide();
+    };
+  }, [hide]);
 
   // Anything that moves the trigger out from under the bubble should take the
   // bubble with it: a scroll, a resize, or the window losing focus.
@@ -169,55 +177,36 @@ export function Tooltip({ title, detail, shortcut, children }: Props) {
  *
  * Keeping this at the application root covers controls, truncated paths and
  * dynamically rendered agent surfaces without adding wrappers that can alter
- * their layout. The native attribute is restored as soon as the pointer or
- * keyboard focus leaves the trigger.
+ * their layout. Titles stay in a data attribute for the lifetime of this
+ * component, so pointer dismissal and React updates cannot revive native tips.
  */
 export function NativeTitleTooltips() {
   const [content, setContent] = useState<TipContent | null>(null);
   const [at, setAt] = useState<{ x: number; y: number } | null>(null);
   const active = useRef<{
     node: HTMLElement;
-    title: string;
-    addedAriaLabel: boolean;
   } | null>(null);
   const bubble = useRef<HTMLDivElement>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const restoreTitle = useCallback(() => {
-    const current = active.current;
-    if (current?.node.isConnected) {
-      if (!current.node.hasAttribute("title")) {
-        current.node.setAttribute("title", current.title);
-      }
-      if (current.addedAriaLabel) current.node.removeAttribute("aria-label");
-    }
-    active.current = null;
-  }, []);
-
   const hide = useCallback(() => {
     if (timer.current !== null) clearTimeout(timer.current);
     timer.current = null;
-    restoreTitle();
+    active.current = null;
     setAt(null);
     setContent(null);
-  }, [restoreTitle]);
+  }, []);
 
   const show = useCallback((node: HTMLElement, immediate: boolean) => {
-    const title = node.getAttribute("title");
-    if (!title) return;
+    const title = node.getAttribute("data-app-tooltip");
+    if (!title) {
+      hide();
+      return;
+    }
 
+    document.dispatchEvent(new Event(TOOLTIP_OPEN_EVENT));
     if (timer.current !== null) clearTimeout(timer.current);
-    restoreTitle();
-    const hasAccessibleName =
-      node.hasAttribute("aria-label") ||
-      node.hasAttribute("aria-labelledby") ||
-      Boolean(node.textContent?.trim()) ||
-      (node instanceof HTMLImageElement && Boolean(node.alt)) ||
-      ("labels" in node && Boolean((node as HTMLInputElement).labels?.length));
-    const addedAriaLabel = !hasAccessibleName;
-    if (addedAriaLabel) node.setAttribute("aria-label", splitNativeTitle(title).title);
-    active.current = { node, title, addedAriaLabel };
-    node.removeAttribute("title");
+    active.current = { node };
 
     const open = () => {
       const rect = node.getBoundingClientRect();
@@ -228,21 +217,91 @@ export function NativeTitleTooltips() {
 
     if (immediate) open();
     else timer.current = setTimeout(open, DELAY_MS);
-  }, [restoreTitle]);
+  }, [hide]);
 
-  useEffect(() => {
-    const titledElement = (target: EventTarget | null) =>
-      target instanceof Element ? target.closest<HTMLElement>("[title]") : null;
+  useLayoutEffect(() => {
+    // Move titles before the browser can display them. Observe React updates as
+    // well as new controls, including portals outside the application root.
+    // Disconnect during our own writes so an intentional React title removal
+    // can be distinguished from the clearing performed by this conversion.
+    const options: MutationObserverInit = {
+      subtree: true, childList: true, attributes: true, attributeFilter: ["title"],
+    };
+    const accessibleNames = new WeakMap<Element, string>();
+    const restoreAccessibleName = (node: Element) => {
+      const generated = accessibleNames.get(node);
+      if (generated !== undefined && node.getAttribute("aria-label") === generated) {
+        node.removeAttribute("aria-label");
+      }
+      accessibleNames.delete(node);
+    };
+    const convertTitle = (node: Element) => {
+      const title = node.getAttribute("title");
+      restoreAccessibleName(node);
+      if (title === null) node.removeAttribute("data-app-tooltip");
+      else {
+        node.setAttribute("data-app-tooltip", title);
+        // Keep an empty attribute so React removing the title still produces
+        // a mutation. Removing it ourselves would make that update invisible.
+        node.setAttribute("title", "");
+        const hasAccessibleName =
+          node.hasAttribute("aria-label") || node.hasAttribute("aria-labelledby") ||
+          Boolean(node.textContent?.trim()) ||
+          (node instanceof HTMLImageElement && Boolean(node.alt)) ||
+          ("labels" in node && Boolean((node as HTMLInputElement).labels?.length));
+        if (title && !hasAccessibleName) {
+          const label = splitNativeTitle(title).title;
+          node.setAttribute("aria-label", label);
+          accessibleNames.set(node, label);
+        }
+      }
+      if (node === active.current?.node) hide();
+    };
+    const convertTree = (node: Element) => {
+      if (node.hasAttribute("title")) convertTitle(node);
+      node.querySelectorAll("[title]").forEach(convertTitle);
+    };
+    const observer = new MutationObserver((records) => {
+      observer.disconnect();
+      const changed = new Set<Element>();
+      for (const record of records) {
+        if (record.type === "attributes") changed.add(record.target as Element);
+        else record.addedNodes.forEach((node) => {
+          if (!(node instanceof Element)) return;
+          const collect = (child: Element) => {
+            // Moving an existing subtree must not replace its saved text with
+            // the empty native title left by the previous conversion.
+            if (child.getAttribute("title") === "" && child.hasAttribute("data-app-tooltip")) return;
+            changed.add(child);
+          };
+          if (node.hasAttribute("title")) collect(node);
+          node.querySelectorAll("[title]").forEach(collect);
+        });
+      }
+      changed.forEach(convertTitle);
+      if (active.current && !active.current.node.isConnected) hide();
+      observer.observe(document.body, options);
+    });
+    convertTree(document.body);
+    observer.observe(document.body, options);
+
+    const titledElement = (target: EventTarget | null) => {
+      // Explicit Tooltip wrappers own their content and must not open a second
+      // app tooltip for a title on one of their children.
+      if (!(target instanceof Element) || target.closest(".tip-anchor")) return null;
+      return target.closest<HTMLElement>("[data-app-tooltip]");
+    };
 
     const onPointerOver = (event: PointerEvent) => {
+      if (event.target instanceof Element && event.target.closest(".tip-anchor")) {
+        hide();
+        return;
+      }
       const node = titledElement(event.target);
       const current = active.current?.node;
       // A titled control may live inside another titled surface, as the pane
       // buttons do inside the draggable pane header. Prefer that more specific
-      // target. Once a title is active its attribute is temporarily removed,
-      // though, so moving into one of its SVG children can make `closest` find
-      // the titled parent instead. Keep the active child in that case; only a
-      // titled descendant is allowed to replace an active ancestor.
+      // target, while retaining the active tooltip when entering its children.
       if (current?.contains(event.target as Node) && (!node || !current.contains(node))) {
         return;
       }
@@ -265,6 +324,7 @@ export function NativeTitleTooltips() {
       hide();
     };
 
+    document.addEventListener(TOOLTIP_OPEN_EVENT, hide);
     document.addEventListener("pointerover", onPointerOver);
     document.addEventListener("pointerout", onPointerOut);
     document.addEventListener("pointerdown", hide);
@@ -274,6 +334,13 @@ export function NativeTitleTooltips() {
     window.addEventListener("resize", hide);
     window.addEventListener("blur", hide);
     return () => {
+      observer.disconnect();
+      document.querySelectorAll("[data-app-tooltip]").forEach((node) => {
+        node.setAttribute("title", node.getAttribute("data-app-tooltip") ?? "");
+        node.removeAttribute("data-app-tooltip");
+        restoreAccessibleName(node);
+      });
+      document.removeEventListener(TOOLTIP_OPEN_EVENT, hide);
       document.removeEventListener("pointerover", onPointerOver);
       document.removeEventListener("pointerout", onPointerOut);
       document.removeEventListener("pointerdown", hide);

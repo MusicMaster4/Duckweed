@@ -52,6 +52,7 @@ export type AgentEvent =
       /** Replaces the switchable-model list when the adapter learns it. */
       models?: AgentModelChoice[];
       capabilities?: AgentCapabilities;
+      desktopConnectionError?: string | null;
     }
   | { type: "status"; status: AgentStatus; error?: string }
   | { type: "authentication"; required: boolean }
@@ -412,6 +413,7 @@ function reduceEvent(state: AgentSessionState, event: AgentEvent): AgentSessionS
             ? refreshClaudeModelLabels(state.models, event.model)
             : state.models,
         capabilities: event.capabilities ?? state.capabilities,
+        desktopConnectionError: event.desktopConnectionError !== undefined ? event.desktopConnectionError : state.desktopConnectionError,
       };
 
     case "authentication":

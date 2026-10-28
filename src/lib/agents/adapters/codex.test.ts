@@ -445,11 +445,16 @@ describe("codex adapter", () => {
     }
   });
 
-  test("lists callable skills with their invocation names and excludes Computer Use", async () => {
+  test("refreshes cached configuration and exposes the standalone Computer Use skill", async () => {
     const h = harness();
     await h.handshake();
 
     const refresh = h.adapter.refreshExtensions?.(h.ctx);
+    const reload = h.sent.find(message => message.method === "config/mcpServer/reload")!;
+    expect(reload).toBeDefined();
+    expect(h.sent.some(message => message.method === "skills/list")).toBe(false);
+    h.feed({ id: reload.id, result: {} });
+    await Promise.resolve(); await Promise.resolve();
     const calls = h.sent.filter((message) =>
       ["skills/list", "app/list", "plugin/list", "hooks/list", "mcpServerStatus/list"].includes(
         String(message.method),
@@ -502,6 +507,9 @@ describe("codex adapter", () => {
       h.feed({ jsonrpc: "2.0", id: call.id, result });
     }
 
+    expect(calls.find(call => call.method === "skills/list")?.params).toMatchObject({ forceReload: true });
+    expect(calls.find(call => call.method === "app/list")?.params).toMatchObject({ forceRefetch: true, threadId: "thread_1" });
+    expect(calls.find(call => call.method === "plugin/list")?.params).toMatchObject({ forceRefetch: true });
     const extensions = await refresh;
     expect(extensions).toEqual([
       expect.objectContaining({
@@ -509,6 +517,13 @@ describe("codex adapter", () => {
         name: "documents:documents",
         path: "H:/skills/documents/SKILL.md",
         callable: true,
+      }),
+      expect.objectContaining({
+        kind: "skill",
+        name: "computer-use:computer-use",
+        enabled: true,
+        callable: true,
+        status: "ready",
       }),
       expect.objectContaining({
         id: "app:calendar",
@@ -519,6 +534,56 @@ describe("codex adapter", () => {
         callable: true,
       }),
     ]);
+  });
+
+  test("desktop links use the actual thread id rather than a distinct session alias", async () => {
+    const h = harness();
+    await h.handshake({ thread: { id: "local-thread", sessionId: "session-alias" } });
+    expect(h.state().sessionId).toBe("session-alias");
+    expect(h.adapter.desktopThreadId?.()).toBe("local-thread");
+  });
+
+  test("surfaces desktop bridge errors even when the MCP tool call completed", async () => {
+    const h = harness();
+    await h.handshake();
+    h.notify("item/completed", {
+      threadId: "thread_1",
+      item: { id: "desktop-call", type: "mcpToolCall", server: "cua_repl", tool: "js", status: "completed",
+        result: { content: [{ type: "text", text: JSON.stringify({ apps: [], browsers: [], errors: ["The browser access host is unavailable"] }) }] } },
+    });
+    expect(h.state().desktopConnectionError).toContain("Browser control is not connected");
+    expect(h.events).toContainEqual(expect.objectContaining({ type: "tool", callId: "desktop-call", status: "error" }));
+  });
+
+  test("does not claim MCP startup or authentication failures are ready", async () => {
+    const h = harness();
+    await h.handshake();
+    const refresh = h.adapter.refreshExtensions?.(h.ctx);
+    const reload = h.sent.find(message => message.method === "config/mcpServer/reload")!;
+    h.feed({ id: reload.id, error: { code: -32601, message: "Method not found" } });
+    await Promise.resolve(); await Promise.resolve();
+    for (const call of h.sent.filter(message => ["skills/list", "app/list", "plugin/list", "hooks/list", "mcpServerStatus/list"].includes(String(message.method)))) {
+      h.feed({ id: call.id, result: call.method === "mcpServerStatus/list" ? { data: [
+        { name: "connected", runtimeStatus: "connected" },
+        { name: "starting", runtimeStatus: "starting" },
+        { name: "auth", runtimeStatus: "authenticationRequired" },
+        { name: "stale", runtimeStatus: null },
+        { name: "tools-error", runtimeStatus: "connected", toolsError: "Discovery failed" },
+      ] } : { data: [], marketplaces: [] } });
+    }
+    expect((await refresh)?.map(row => [row.name, row.status])).toEqual([
+      ["connected", "ready"], ["starting", "connecting"], ["auth", "error"], ["stale", "connecting"], ["tools-error", "error"],
+    ]);
+  });
+
+  test("reports reload failures without pretending the cached inventory was refreshed", async () => {
+    const h = harness();
+    await h.handshake();
+    const refresh = h.adapter.refreshExtensions?.(h.ctx);
+    const reload = h.sent.find(message => message.method === "config/mcpServer/reload")!;
+    h.feed({ id: reload.id, error: { code: -32000, message: "Configuration is invalid" } });
+    await expect(refresh).rejects.toMatchObject({ message: "Configuration is invalid" });
+    expect(h.sent.some(message => message.method === "skills/list")).toBe(false);
   });
 
   test("preserves MCP boolean, numeric, and multi-select form values", async () => {
@@ -4589,7 +4654,9 @@ describe("codex adapter", () => {
       id: number;
       params: Record<string, unknown>;
     };
-    expect(fork.params).toMatchObject({ threadId: "thread_stuck_active" });
+    expect(fork.params).toMatchObject({
+      threadId: "thread_stuck_active",
+    });
     h.feed({ jsonrpc: "2.0", id: fork.id, result: { thread: { id: "thread_copy" } } });
     await Promise.resolve();
     await Promise.resolve();

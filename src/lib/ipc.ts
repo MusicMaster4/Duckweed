@@ -571,6 +571,20 @@ export const agentProcCloseStdin = (id: string) =>
 export const agentProcStop = (id: string, preserveCodexWork = false) =>
   invoke<void>("agent_proc_stop", { id, preserveCodexWork });
 
+/** Open only a local Codex conversation through the official desktop URL handler. */
+export const openCodexDesktop = (threadId: string | null, cwd: string, prompt?: string) =>
+  invoke<void>("open_codex_desktop", { threadId, cwd, prompt });
+
+/** Per-thread MCP settings that reach the ChatGPT desktop app's browser and Computer Use host. */
+export interface CodexDesktopBridge {
+  /** Changes when the desktop app restarts with a new pipe or signing key. */
+  fingerprint: string;
+  config: Record<string, unknown>;
+}
+
+export const codexDesktopBridge = (codexHome: string | null) =>
+  invoke<CodexDesktopBridge | null>("codex_desktop_bridge", { codexHome });
+
 export const agentCodexAuthSync = (id: string, signedIn: boolean) =>
   invoke<"unchanged" | "deferred" | "restarted">("agent_codex_auth_sync", { id, signedIn });
 

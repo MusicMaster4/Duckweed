@@ -11,6 +11,7 @@ import {
 } from "../adapter";
 import { isAuthenticationFailure } from "../auth";
 import { isCodexCapacityError } from "../capacityReply";
+import { desktopConnectionFailure } from "../codexDesktop";
 import { applyEvent, type AgentEvent } from "../events";
 import type { AgentLaunch } from "../launch";
 import {
@@ -130,7 +131,24 @@ interface CodexAdapterOptions {
   /** Control RPCs must not hold Stop or the Tasks panel indefinitely. */
   stopTimeoutMs?: number;
   rpcTimeoutMs?: number;
+  /**
+   * Browser and Computer Use settings from the running ChatGPT desktop app.
+   * Omitted outside Tauri, where no desktop host can be read.
+   */
+  desktopBridge?: (codexHome: string | null) => Promise<CodexDesktopBridge | null>;
+  /** Test seam; how long a released thread may take to unload before rebinding. */
+  desktopRebindUnloadMs?: number;
 }
+
+/** Same shape as the Tauri command; kept local so tests need no IPC module. */
+export interface CodexDesktopBridge {
+  fingerprint: string;
+  config: Record<string, unknown>;
+}
+
+const DESKTOP_BRIDGE_TIMEOUT_MS = 3_000;
+/** app-server unloads a released idle thread after roughly twenty seconds. */
+const DESKTOP_REBIND_UNLOAD_MS = 60_000;
 
 const EXEC_STATUS: Record<string, ToolStatus> = {
   inProgress: "running",
@@ -356,6 +374,21 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
   let modelProvider: string | null = null;
   let accountReloadDeferred = false;
   let openingThread: Promise<void> | null = null;
+  let codexHome: string | null = null;
+  /**
+   * Desktop host fingerprint whose settings the loaded root thread received.
+   * Codex fixes MCP server environments when it loads a thread, so a desktop
+   * restart or a thread that was already loaded needs a reload to reconnect.
+   */
+  let boundDesktopBridge: string | null = null;
+  /** The loaded thread may not have received the current settings. */
+  let desktopBridgeUnverified = false;
+  /** Prevents repeated reloads when the host itself keeps refusing access. */
+  let lastDesktopRebind: string | null = null;
+  let desktopRebind: Promise<void> | null = null;
+  let desktopRebindUnloaded: (() => void) | null = null;
+  /** The root thread has a rollout, so it can be released and resumed. */
+  let rootThreadMaterialized = false;
   let nextId = 1;
   const pending = new Map<RequestKey, Pending>();
   let threadId: string | null = null;
@@ -1196,9 +1229,10 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     });
   }
 
-  function resumeThreadParams(targetId: string): Record<string, unknown> {
+  function resumeThreadParams(targetId: string, bridge: CodexDesktopBridge | null): Record<string, unknown> {
     return {
       threadId: targetId,
+      ...desktopBridgeParams(bridge),
       excludeTurns: true,
       initialTurnsPage: {
         limit: RESUME_PAGE_SIZE,
@@ -1208,6 +1242,139 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         itemsView: "summary",
       },
     };
+  }
+
+  function desktopBridgeParams(bridge: CodexDesktopBridge | null): { config?: Record<string, unknown> } {
+    return bridge ? { config: bridge.config } : {};
+  }
+
+  /** A slow or missing desktop host must never hold up opening a conversation. */
+  async function currentDesktopBridge(): Promise<CodexDesktopBridge | null> {
+    if (!options.desktopBridge) return null;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    try {
+      return await Promise.race([
+        options.desktopBridge(codexHome),
+        new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), DESKTOP_BRIDGE_TIMEOUT_MS); }),
+      ]);
+    } catch {
+      return null;
+    } finally {
+      if (timer !== null) clearTimeout(timer);
+    }
+  }
+
+  /** Resuming a thread that is already loaded keeps its existing MCP servers. */
+  async function threadIsLoaded(ctx: AdapterContext, target: string): Promise<boolean> {
+    try {
+      let cursor: string | null = null;
+      for (let page = 0; page < 20; page += 1) {
+        const result = await requestWithTimeout(ctx, nextId++, "thread/loaded/list", cursor ? { cursor } : {}, rpcTimeoutMs);
+        if (asArray(result.data).includes(target)) return true;
+        cursor = asString(result.nextCursor);
+        if (!cursor) return false;
+      }
+    } catch {
+      // Older services without this method still get the settings on resume.
+    }
+    return false;
+  }
+
+  function rootIdleForRebind(): boolean {
+    return Boolean(threadId) && !disposed && !rootTurnMayBeActive && currentTurnId === null &&
+      rootStartRequestId === null && rootPendingCompletion === null && rootSteerRequestsInFlight === 0 &&
+      !hydratingResume && !openingThread && !pendingSideThread && !activeSideThreadId;
+  }
+
+  /**
+   * Reconnect an idle conversation after the desktop app (re)starts. MCP
+   * server environments are fixed when Codex loads a thread, so the thread is
+   * released, allowed to unload, and resumed with the current settings. Each
+   * desktop launch gets one attempt so a refusing host cannot cause a loop.
+   */
+  async function maybeRebindDesktopBridge(ctx: AdapterContext): Promise<void> {
+    if (!options.desktopBridge || desktopRebind || !rootIdleForRebind()) return;
+    const bridge = await currentDesktopBridge();
+    if (!bridge || desktopRebind || !rootIdleForRebind()) return;
+    const stale = bridge.fingerprint !== boundDesktopBridge || desktopBridgeUnverified;
+    if (!stale || lastDesktopRebind === bridge.fingerprint) return;
+    const target = threadId as string;
+    // Unloading a thread ends its background terminals, such as a dev server.
+    // Wait until they finish instead of stopping the user's work.
+    if (rootThreadMaterialized && await hasBackgroundTerminals(ctx, target)) return;
+    if (desktopRebind || threadId !== target || !rootIdleForRebind()) return;
+    lastDesktopRebind = bridge.fingerprint;
+    desktopRebind = (rootThreadMaterialized
+      ? reloadThreadWithBridge(ctx, target, bridge)
+      : reopenEmptyThread(ctx, target)
+    ).finally(() => { desktopRebind = null; });
+    await desktopRebind;
+  }
+
+  async function hasBackgroundTerminals(ctx: AdapterContext, target: string): Promise<boolean> {
+    try {
+      const threads = [target, ...children.keys()];
+      const results = await Promise.all(threads.map((id) =>
+        requestWithTimeout(ctx, nextId++, "thread/backgroundTerminals/list", { threadId: id, limit: 1 }, stopTimeoutMs)));
+      return results.some((result) => asArray(result.data).length > 0);
+    } catch (error) {
+      // Services without the method have no terminals to preserve.
+      return asRecord(error)?.code !== -32601;
+    }
+  }
+
+  /** A thread without turns has no rollout to resume, so open a fresh one. */
+  async function reopenEmptyThread(ctx: AdapterContext, target: string): Promise<void> {
+    if (threadId !== target || openingThread) return;
+    // Keep the old id until the new thread exists so a prompt is never dropped.
+    openingThread = openThread(ctx).finally(() => { openingThread = null; });
+    await openingThread;
+    if (threadId !== target) void request(ctx, "thread/unsubscribe", { threadId: target }).catch(() => {});
+  }
+
+  async function reloadThreadWithBridge(ctx: AdapterContext, target: string, bridge: CodexDesktopBridge): Promise<void> {
+    let released = false;
+    try {
+      const unloaded = new Promise<void>((resolve) => { desktopRebindUnloaded = resolve; });
+      await request(ctx, "thread/unsubscribe", { threadId: target });
+      const deadline = Date.now() + (options.desktopRebindUnloadMs ?? DESKTOP_REBIND_UNLOAD_MS);
+      while (!released && !disposed && Date.now() < deadline) {
+        released = await Promise.race([
+          unloaded.then(() => true),
+          new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 2_000)),
+        ]);
+        if (!released) released = !(await threadIsLoaded(ctx, target));
+      }
+    } catch {
+      // Fall through and attach again so this pane keeps receiving events.
+    } finally {
+      desktopRebindUnloaded = null;
+    }
+    if (disposed || threadId !== target) return;
+    try {
+      await requestWithTimeout(ctx, nextId++, "thread/resume", {
+        threadId: target,
+        ...desktopBridgeParams(bridge),
+        excludeTurns: true,
+      });
+      if (released) {
+        boundDesktopBridge = bridge.fingerprint;
+        desktopBridgeUnverified = false;
+        ctx.emit({ type: "session", desktopConnectionError: null });
+      } else {
+        ctx.emit({
+          type: "notice",
+          tone: "info",
+          text: "Browser and Computer Use could not reconnect because another window still has this conversation open. Close it there or start a new conversation.",
+        });
+      }
+    } catch (error) {
+      ctx.emit({
+        type: "notice",
+        tone: "error",
+        text: `Could not reconnect browser and Computer Use for this conversation: ${asString(asRecord(error)?.message) ?? "Codex did not resume it."}`,
+      });
+    }
   }
 
   function notify(ctx: AdapterContext, method: string, params: unknown) {
@@ -1226,7 +1393,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         : kind === "app"
           ? asArray(result.data)
           : kind === "plugin"
-            ? asArray(result.marketplaces).flatMap((entry) => asArray(asRecord(entry)?.plugins))
+            ? asArray(result.marketplaces).flatMap((entry) => asArray(asRecord(entry)?.plugins).map(plugin => ({ ...asRecord(plugin), marketplaceName: asRecord(entry)?.name })))
             : kind === "hook"
               ? asArray(result.data).flatMap((entry) => asArray(asRecord(entry)?.hooks))
               : asArray(result.data ?? result.servers);
@@ -1255,6 +1422,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
           kind,
           name,
           description:
+            (kind === "mcp" ? asString(row.toolsError) : null) ??
             asString(row.description) ??
             asString(row.shortDescription) ??
             asString(info?.shortDescription) ??
@@ -1264,32 +1432,25 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
           callable:
             kind === "skill" ? enabled : kind === "app" ? enabled : false,
           status:
-            runtimeStatus === "failed"
-              ? "error"
-              : runtimeStatus === "starting"
-                ? "connecting"
-                : enabled
-                  ? "ready"
-                  : "disabled",
+            !enabled ? "disabled"
+              : ["failed", "authenticationRequired", "cancelled"].includes(runtimeStatus ?? "") || row.toolsError
+                ? "error"
+                : ["starting", "notStarted"].includes(runtimeStatus ?? "") || (kind === "mcp" && !runtimeStatus)
+                  ? "connecting"
+                  : "ready",
           path: asString(row.path) ?? asString(row.sourcePath) ?? undefined,
           uri: kind === "app" ? `app://${id}` : undefined,
-          source: asString(row.scope) ?? asString(row.pluginId) ?? undefined,
+          source: asString(row.scope) ?? asString(row.pluginId) ?? asString(row.marketplaceName) ?? undefined,
         } satisfies AgentExtension;
       })
-      .filter((row) => {
-        if (!row.id || !row.name) return false;
-        // Computer Use was deliberately excluded from Duckweed's custom UI.
-        // Keep it out of both the callable picker and the provider inventory.
-        const identity = `${row.id} ${row.name}`.toLowerCase().replace(/[\s_]+/g, "-");
-        return !identity.includes("computer-use");
-      });
+      .filter((row) => Boolean(row.id && row.name));
   }
 
-  async function listExtensions(ctx: AdapterContext): Promise<AgentExtension[]> {
+  async function listExtensions(ctx: AdapterContext, force = false): Promise<AgentExtension[]> {
     const calls: [AgentExtension["kind"], Promise<Record<string, unknown>>][] = [
-      ["skill", request(ctx, "skills/list", { cwds: [ctx.cwd], forceReload: false })],
-      ["app", request(ctx, "app/list", { forceRefetch: false, threadId })],
-      ["plugin", request(ctx, "plugin/list", { cwds: [ctx.cwd], forceRefetch: false })],
+      ["skill", request(ctx, "skills/list", { cwds: [ctx.cwd], forceReload: force })],
+      ["app", request(ctx, "app/list", { forceRefetch: force, threadId })],
+      ["plugin", request(ctx, "plugin/list", { cwds: [ctx.cwd], forceRefetch: force })],
       ["hook", request(ctx, "hooks/list", { cwds: [ctx.cwd] })],
       ["mcp", request(ctx, "mcpServerStatus/list", { threadId })],
     ];
@@ -1506,14 +1667,18 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     pendingSideThread = side;
     emitSide(side, ctx);
     const parentThreadId = threadId;
-    void request(ctx, "thread/fork", {
+    const forkParams = {
       threadId: parentThreadId,
       ephemeral: true,
       excludeTurns: true,
       developerInstructions: SIDE_DEVELOPER_INSTRUCTIONS,
       ...threadAccessParams("read-only"),
       ...(currentModel ? { model: currentModel } : {}),
-    })
+    };
+    // A fork loads a new thread, so it needs the desktop settings of its own.
+    void (options.desktopBridge
+      ? currentDesktopBridge().then((bridge) => request(ctx, "thread/fork", { ...forkParams, ...desktopBridgeParams(bridge) }))
+      : request(ctx, "thread/fork", forkParams))
       .then(async (result) => {
         const forked = asRecord(result.thread) ?? result;
         const sideThreadId = asString(forked.id);
@@ -1556,7 +1721,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
 
   async function handshake(ctx: AdapterContext) {
     try {
-      await request(ctx, "initialize", {
+      const initializeResult = await request(ctx, "initialize", {
         clientInfo: { name: "duckweed", title: "Duckweed", version: "0.1.0" },
         // `thread/settings/update` is currently part of app-server's
         // experimental surface. Fast Mode uses that method to change the
@@ -1568,6 +1733,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         },
       });
       if (disposed) return;
+      codexHome = asString(asRecord(initializeResult)?.codexHome);
       notify(ctx, "initialized", {});
       initialized = true;
 
@@ -1593,6 +1759,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       if (interval > 0) authPollTimer = setInterval(() => {
         void refreshAccount(ctx, true);
         void refreshRuntimeProcesses(ctx);
+        void maybeRebindDesktopBridge(ctx);
       }, interval);
       if (authenticationRequired) {
         ctx.emit({ type: "status", status: "idle" });
@@ -1616,11 +1783,25 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       currentEffort = ctx.launch.effort;
       currentServiceTier = null;
       currentAccess = ctx.launch.accessMode ?? "default";
-      const thread = await request(ctx, "thread/start", {
+      const startParams = {
         cwd: ctx.cwd,
         ...threadAccessParams(currentAccess),
         ...(currentModel ? { model: currentModel } : {}),
-      });
+      };
+      let bridge = options.desktopBridge ? await currentDesktopBridge() : null;
+      if (disposed) return;
+      let thread: Record<string, unknown>;
+      try {
+        thread = await request(ctx, "thread/start", { ...startParams, ...desktopBridgeParams(bridge) });
+      } catch (error) {
+        // Browser settings must never be the reason a conversation cannot open.
+        if (!bridge || disposed) throw error;
+        bridge = null;
+        thread = await request(ctx, "thread/start", startParams);
+      }
+      boundDesktopBridge = bridge?.fingerprint ?? null;
+      desktopBridgeUnverified = false;
+      rootThreadMaterialized = false;
       const started = asRecord(thread.thread) ?? thread;
       if (disposed) return;
       threadId = asString(started.id);
@@ -1960,13 +2141,20 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         const server = asString(item.server);
         const status = asString(item.status) ?? "";
         const name = server ? `${server}/${tool}` : tool;
+        const desktopFailure = settled ? desktopConnectionFailure(item) : null;
+        if (desktopFailure) {
+          // Reload this thread's MCP servers once the turn is idle.
+          if (desktopFailure.reconnect) desktopBridgeUnverified = true;
+          ctx.emit({ type: "session", desktopConnectionError: desktopFailure.message });
+        }
+        const toolFailed = asRecord(item.result)?.isError === true || desktopFailure !== null;
         ctx.emit({
           type: "tool",
           callId: id,
           name,
           tool: toolKind(tool),
           title: oneLine(name),
-          status: status === "completed" ? "done" : status === "failed" ? "error" : "running",
+          status: toolFailed || status === "failed" ? "error" : status === "completed" ? "done" : "running",
         });
         return;
       }
@@ -3576,6 +3764,13 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       }
 
       const eventThreadId = notificationThreadId(method, params);
+      if (
+        desktopRebindUnloaded && eventThreadId === threadId &&
+        (method === "thread/closed" ||
+          (method === "thread/status/changed" && asString(asRecord(params.status)?.type) === "notLoaded"))
+      ) {
+        desktopRebindUnloaded();
+      }
       if (eventThreadId && sideThreads.has(eventThreadId)) {
         handleSideNotification(eventThreadId, method, params, ctx);
         return;
@@ -3668,7 +3863,8 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       const generation = ++rootTurnGeneration;
       const requestId = nextId++;
       rootStartRequestId = requestId;
-      void requestWithTimeout(ctx, requestId, "turn/start", {
+      rootThreadMaterialized = true;
+      const startTurn = () => requestWithTimeout(ctx, requestId, "turn/start", {
         threadId,
         input: [
           ...(prompt.text ? [{ type: "text", text: prompt.text }] : []),
@@ -3698,7 +3894,13 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         // discipline: `effort` is the exact field name in TurnStartParams.
         ...(currentEffort ? { effort: currentEffort } : {}),
         ...serviceTierParamsFor(currentModel),
-      }, rpcTimeoutMs)
+      }, rpcTimeoutMs);
+      const pendingRebind = desktopRebind;
+      if (pendingRebind) {
+        ctx.emit({ type: "notice", tone: "info", transient: true, text: "Reconnecting browser and Computer Use before sending…" });
+      }
+      // The request stays synchronous unless a reconnect has released the thread.
+      void (pendingRebind ? pendingRebind.then(startTurn) : startTurn())
         .then((result) => {
           const responseTurn = asRecord(result.turn);
           const responseTurnId = asString(responseTurn?.id);
@@ -3948,19 +4150,30 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       const resumeGeneration = ++rootTurnGeneration;
       const resumeCompletionVersion = rootCompletionVersion;
 
-      const callResume = (id: string): Promise<Record<string, unknown>> => {
+      const callResume = async (id: string): Promise<Record<string, unknown>> => {
+        throwIfResumeAborted();
+        const bridge = options.desktopBridge ? await currentDesktopBridge() : null;
+        // Codex ignores new settings for a thread it already has loaded.
+        const alreadyLoaded = bridge ? await threadIsLoaded(ctx, id) : false;
         throwIfResumeAborted();
         const requestId = nextId++;
         resumeRequestId = requestId;
-        return requestWithTimeout(ctx, requestId, "thread/resume", resumeThreadParams(id));
+        const result = await requestWithTimeout(ctx, requestId, "thread/resume", resumeThreadParams(id, bridge));
+        boundDesktopBridge = bridge?.fingerprint ?? null;
+        desktopBridgeUnverified = alreadyLoaded;
+        rootThreadMaterialized = true;
+        return result;
       };
 
       const recoverHungResume = async (hungId: string): Promise<Record<string, unknown>> => {
+        throwIfResumeAborted();
+        const bridge = options.desktopBridge ? await currentDesktopBridge() : null;
         throwIfResumeAborted();
         const forkRequestId = nextId++;
         resumeRequestId = forkRequestId;
         const forked = await requestWithTimeout(ctx, forkRequestId, "thread/fork", {
           threadId: hungId,
+          ...desktopBridgeParams(bridge),
           excludeTurns: true,
           cwd: ctx.cwd,
           ...threadAccessParams(currentAccess),
@@ -3971,7 +4184,10 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         if (!copyId) throw { message: "Codex could not copy that thread." };
         threadId = copyId;
         targetId = copyId;
-        return callResume(copyId);
+        const resumed = await callResume(copyId);
+        // The fork itself loaded the copy with these settings.
+        if (bridge && boundDesktopBridge === bridge.fingerprint) desktopBridgeUnverified = false;
+        return resumed;
       };
 
       const load = async (): Promise<boolean> => {
@@ -4280,7 +4496,19 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       ctx.emit({ type: "status", status: "working" });
     },
 
-    refreshExtensions: listExtensions,
+    desktopThreadId: () => threadId,
+    refreshExtensions: async (ctx) => {
+      // The shared service outlives the desktop app. Re-read updated plugin
+      // endpoints on explicit Refresh instead of returning its cached inventory.
+      // Codex queues the refresh for loaded threads, preserving active work.
+      try {
+        await requestWithTimeout(ctx, nextId++, "config/mcpServer/reload", {}, rpcTimeoutMs);
+      } catch (error) {
+        const record = asRecord(error);
+        if (record?.code !== -32601 && !/method not found|unknown method/i.test(asString(record?.message) ?? "")) throw error;
+      }
+      return listExtensions(ctx, true);
+    },
     refreshTasks: listRuntimeTasks,
     stopTask: async (processId, ctx) => {
       if (!threadId) return false;
