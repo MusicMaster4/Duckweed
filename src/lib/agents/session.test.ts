@@ -38,6 +38,8 @@ let spawnFailure: string | null = null;
 let spawnFailureOnce = false;
 let sendOverride: ((line: string) => Promise<void>) | null = null;
 let nativeStops = 0;
+const desktopOpens: { threadId: string | null; cwd: string; prompt?: string }[] = [];
+let desktopFailure = false;
 const nativeStopModes: boolean[] = [];
 
 mock.module("../durableStorage", () => ({
@@ -80,6 +82,10 @@ mock.module("../ipc", () => ({
   agentProcProbe: async () => [],
   openCodeModelsRefresh: async () => {},
   openUrl: async () => {},
+  openCodexDesktop: async (threadId: string | null, cwd: string, prompt?: string) => {
+    if (desktopFailure) throw new Error("No desktop URL handler");
+    desktopOpens.push({ threadId, cwd, prompt });
+  },
   agentSessionTranscript: async () => [],
   agentSessionsList: async () => [],
   homeDir: async () => "H:/",
@@ -1275,6 +1281,47 @@ describe("Custom agent UI sessions", () => {
     } finally {
       unsubscribe();
     }
+  });
+
+  test("opens a new desktop conversation with the workspace and keeps the draft", async () => {
+    await session.start("desktop-empty", codexLaunch, "H:/project");
+    await codexHandshake("provisional");
+    session.setDraft("desktop-empty", "Use my open Chrome");
+    const stops = nativeStops;
+    expect(await session.continueInCodexDesktop("desktop-empty")).toBe(true);
+    expect(desktopOpens.at(-1)).toEqual({ threadId: null, cwd: "H:/project", prompt: "Use my open Chrome" });
+    expect(session.getDraft("desktop-empty")).toBe("Use my open Chrome");
+    expect(nativeStops).toBe(stops);
+    expect(session.get("desktop-empty")).not.toBeNull();
+  });
+
+  test("opens the persisted desktop thread and refuses handoff during work", async () => {
+    await session.start("desktop-persisted", codexLaunch, "H:/project");
+    await codexHandshake("saved-thread");
+    session.submit("desktop-persisted", "Check Chrome");
+    await flush();
+    const starts = sent.map(rpc).filter(message => message.method === "turn/start");
+    const call = starts.at(-1)!;
+    feed({ id: call.id, result: { turn: { id: "desktop-turn" } } });
+    const opens = desktopOpens.length;
+    expect(await session.continueInCodexDesktop("desktop-persisted")).toBe(false);
+    expect(desktopOpens).toHaveLength(opens);
+    feed({ method: "turn/completed", params: { threadId: "saved-thread", turn: { id: "desktop-turn", status: "completed", items: [] } } });
+    await new Promise(resolve => setTimeout(resolve, 850));
+    expect(await session.continueInCodexDesktop("desktop-persisted")).toBe(true);
+    expect(desktopOpens.at(-1)).toEqual({ threadId: "saved-thread", cwd: "H:/project", prompt: undefined });
+  });
+
+  test("desktop launch errors preserve the conversation and draft", async () => {
+    await session.start("desktop-failure", codexLaunch, "H:/project");
+    await codexHandshake("provisional");
+    session.setDraft("desktop-failure", "Keep this");
+    desktopFailure = true;
+    try {
+      expect(await session.continueInCodexDesktop("desktop-failure")).toBe(false);
+      expect(session.getDraft("desktop-failure")).toBe("Keep this");
+      expect(session.get("desktop-failure")?.items.at(-1)).toMatchObject({ kind: "notice", text: expect.stringContaining("No desktop URL handler") });
+    } finally { desktopFailure = false; }
   });
 
   test("routes /side with an image into a fork instead of the main Codex turn", async () => {

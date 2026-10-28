@@ -8,6 +8,7 @@ interface Props {
   onRefreshTasks: () => void;
   onStopTask: (taskId: string) => void;
   onNative: () => void;
+  onDesktop?: () => void;
 }
 
 type Tab = "extensions" | "tasks" | "capabilities";
@@ -28,6 +29,7 @@ export const AgentRuntimePanel = forwardRef<HTMLElement, Props>(function AgentRu
   onRefreshTasks,
   onStopTask,
   onNative,
+  onDesktop,
 }, ref) {
   const [tab, setTab] = useState<Tab>("extensions");
   const groups = useMemo(() => {
@@ -40,7 +42,7 @@ export const AgentRuntimePanel = forwardRef<HTMLElement, Props>(function AgentRu
     return [...result];
   }, [session.extensions]);
   const tasks = session.runtimeTasks ?? [];
-  const busy = session.status === "working" || session.status === "waiting";
+  const busy = session.status === "starting" || session.status === "working" || session.status === "waiting";
   const capabilities = session.capabilities;
 
   return (
@@ -64,6 +66,16 @@ export const AgentRuntimePanel = forwardRef<HTMLElement, Props>(function AgentRu
       </div>
 
       <div className="agent-runtime-body">
+        {session.agent === "codex" && session.desktopConnectionError && (
+          <div className="agent-native-fallback">
+            <strong>Browser and computer control</strong>
+            <p>{session.desktopConnectionError}</p>
+            <button type="button" disabled={busy || !onDesktop} onClick={onDesktop}>
+              Open in Codex desktop
+            </button>
+            {busy && <small>Finish or stop the active turn first.</small>}
+          </div>
+        )}
         {tab === "extensions" && (
           <>
             <div className="agent-runtime-section-head">
