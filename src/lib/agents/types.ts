@@ -551,6 +551,8 @@ export interface AgentSessionState {
   localSkillsLoaded?: boolean;
   extensionsLoading?: boolean;
   extensionsError?: string | null;
+  /** A desktop bridge failure observed in this live Codex connection. */
+  desktopConnectionError?: string | null;
   /** Long-running provider processes that can outlive a single tool row. */
   runtimeTasks?: AgentRuntimeTask[];
   /** True once any turn has run — the empty state steps aside. */

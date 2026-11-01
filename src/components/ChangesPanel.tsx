@@ -5,6 +5,7 @@ import { gitDiff, gitDiscardAll, gitFileDiff } from "../lib/ipc";
 import { confirmCloseRunning, getConfirmClose } from "../lib/confirmClose";
 import type { Diff, DiffHunk, FileDiff, ProjectInfo } from "../lib/types";
 import { highlightDiffHunk } from "../lib/diffSyntax";
+import { createRefreshQueue } from "../lib/refreshQueue";
 import { AsciiAmbient } from "./AsciiAmbient";
 
 interface Props {
@@ -190,8 +191,8 @@ export function ChangesPanel({ project, onClose }: Props) {
   const actionsRef = useRef<HTMLDivElement>(null);
   /** Files already sized up once, so a refresh cannot re-fold what was opened. */
   const judged = useRef(new Set<string>());
-  /** Monotonic token so an older gitDiff cannot overwrite a newer one. */
-  const loadGen = useRef(0);
+  const reader = useRef<ReturnType<typeof createRefreshQueue<Diff>> | null>(null);
+  const [refreshError, setRefreshError] = useState<string | null>(null);
 
   const applyDiff = useCallback((diff: Diff, preserveUi: boolean) => {
     setLoad({ kind: "ready", diff });
@@ -215,35 +216,44 @@ export function ChangesPanel({ project, onClose }: Props) {
     });
   }, []);
 
-  const reload = useCallback(() => {
-    const path = project.path;
-    const cached = diffCache.get(path);
-    const gen = ++loadGen.current;
-    // Stale-while-revalidate: keep the last good view up while git re-reads.
-    if (cached) setLoad({ kind: "ready", diff: cached });
-    else setLoad({ kind: "loading" });
-
-    gitDiff(path)
-      .then((diff) => {
-        if (gen !== loadGen.current) return;
-        rememberDiff(path, diff);
-        applyDiff(diff, Boolean(cached));
-      })
-      .catch((error: unknown) => {
-        if (gen !== loadGen.current) return;
-        // Keep the cached panel up rather than replacing a useful view with an error.
-        if (!cached) setLoad({ kind: "error", message: String(error) });
-      });
-  }, [applyDiff, project.path]);
+  const reload = useCallback(() => reader.current?.refresh(), []);
 
   useEffect(() => {
-    // Fold/expand choices are per project; a path change starts a fresh judgment.
+    const path = project.path;
+    const cached = diffCache.get(path);
     judged.current = new Set();
     setClosed(new Set());
     setExpanded(new Set());
     setFull({});
-    reload();
-  }, [reload]);
+    setRefreshError(null);
+    if (cached) applyDiff(cached, false);
+    else setLoad({ kind: "loading" });
+
+    const queue = createRefreshQueue(
+      () => {
+        setRefreshError(null);
+        if (!diffCache.has(path)) setLoad({ kind: "loading" });
+        return gitDiff(path);
+      },
+      (diff) => {
+        const preserveUi = diffCache.has(path);
+        rememberDiff(path, diff);
+        setRefreshError(null);
+        applyDiff(diff, preserveUi);
+      },
+      (error) => {
+        const message = String(error);
+        if (diffCache.has(path)) setRefreshError(message);
+        else setLoad({ kind: "error", message });
+      },
+    );
+    reader.current = queue;
+    queue.refresh();
+    return () => {
+      queue.stop();
+      if (reader.current === queue) reader.current = null;
+    };
+  }, [applyDiff, project.path]);
 
   useEffect(() => {
     let disposed = false;
@@ -363,17 +373,17 @@ export function ChangesPanel({ project, onClose }: Props) {
       setClosed(new Set());
       setExpanded(new Set());
       setFull({});
-      reload();
+      reader.current?.invalidate();
     } catch (error: unknown) {
       setDiscardError(String(error));
       // Reset or clean can fail after making partial progress. Re-read the
       // repository so the panel never keeps showing the pre-discard snapshot.
       diffCache.delete(project.path);
-      reload();
+      reader.current?.invalidate();
     } finally {
       setDiscarding(false);
     }
-  }, [files, project.path, reload]);
+  }, [files, project.path]);
 
   const body = useMemo(
     () =>
@@ -430,10 +440,13 @@ export function ChangesPanel({ project, onClose }: Props) {
               <StatChip insertions={file.insertions} deletions={file.deletions} />
             </header>
 
-            {!isClosed && view.binary && (
+            {!isClosed && view.binary && !view.too_large && (
               <div className="diff-empty">Binary file — nothing to show.</div>
             )}
-            {!isClosed && !view.binary && rows.length === 0 && (
+            {!isClosed && view.too_large && (
+              <div className="diff-empty">File is too large to preview.</div>
+            )}
+            {!isClosed && !view.binary && !view.too_large && rows.length === 0 && (
               <div className="diff-empty">No textual changes.</div>
             )}
 
@@ -539,6 +552,10 @@ export function ChangesPanel({ project, onClose }: Props) {
             </button>
           )}
         </div>
+
+        {refreshError && (
+          <div className="changes-error" role="alert">{refreshError}</div>
+        )}
 
         {discardError && (
           <div className="changes-error" role="alert">

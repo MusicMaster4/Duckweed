@@ -4,9 +4,12 @@
 //! checking out and diffing are real git operations — so these shell out, and
 //! report git's own stderr when it refuses (dirty tree, unknown branch, no repo).
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
+use std::sync::mpsc;
 use std::thread;
+use std::time::Duration;
 
 use serde::Serialize;
 
@@ -21,18 +24,26 @@ pub struct Branches {
 
 /// Run git in `dir`, returning stdout — or git's own message as the error.
 fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
+    run_git(dir, args, None)
+}
+
+/// Reads must not keep a blocking worker or the changes panel waiting forever.
+fn git_read(dir: &Path, args: &[&str]) -> Result<String, String> {
+    run_git(dir, args, Some(Duration::from_secs(30)))
+}
+
+fn run_git(dir: &Path, args: &[&str], timeout: Option<Duration>) -> Result<String, String> {
     let mut cmd = Command::new("git");
     cmd.arg("-C").arg(dir).args(args);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        // Without this the release build flashes a console window per call.
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
-    let out = cmd
-        .output()
-        .map_err(|e| format!("could not run git: {e}"))?;
+    crate::agent_proc::hide_console(&mut cmd);
+    let out = if let Some(timeout) = timeout {
+        // A read should not rewrite the index and trigger its own file watcher.
+        cmd.env("GIT_OPTIONAL_LOCKS", "0");
+        read_output(cmd, timeout)?
+    } else {
+        cmd.output()
+            .map_err(|e| format!("could not run git: {e}"))?
+    };
     if !out.status.success() {
         let message = String::from_utf8_lossy(&out.stderr).trim().to_string();
         return Err(if message.is_empty() {
@@ -42,6 +53,50 @@ fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
         });
     }
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+/// Drain both pipes while Git runs. A watchdog terminates the process tree so
+/// a stuck driver cannot keep the pipes open after Git itself is killed.
+fn read_output(mut cmd: Command, timeout: Duration) -> Result<Output, String> {
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    crate::agent_proc::hide_console(&mut cmd);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    let mut child = cmd.spawn().map_err(|e| format!("could not run git: {e}"))?;
+    let pid = child.id();
+    let (done, wait) = mpsc::channel();
+    let watchdog = match thread::Builder::new()
+        .name("git-read-timeout".into())
+        .spawn(move || {
+            if matches!(
+                wait.recv_timeout(timeout),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ) {
+                crate::agent_proc::kill_tree(pid);
+                true
+            } else {
+                false
+            }
+        }) {
+        Ok(watchdog) => watchdog,
+        Err(error) => {
+            crate::agent_proc::kill_tree(pid);
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error.to_string());
+        }
+    };
+    let output = child.wait_with_output();
+    let _ = done.send(());
+    if watchdog.join().unwrap_or(false) {
+        return Err("Reading changes timed out. Click refresh to try again.".into());
+    }
+    output.map_err(|e| format!("could not read git output: {e}"))
 }
 
 fn has_local(dir: &Path, name: &str) -> bool {
@@ -219,8 +274,9 @@ pub struct FileDiff {
     pub status: &'static str,
     pub insertions: usize,
     pub deletions: usize,
-    /// Nothing to show: a binary file, or one too large to read.
     pub binary: bool,
+    /// Either revision exceeds the preview limit. Counts remain available.
+    pub too_large: bool,
     /// Lines the file has now, so the viewer can size the unmodified run that
     /// follows the last hunk. Zero when the file is gone or unreadable.
     pub new_lines: usize,
@@ -240,7 +296,7 @@ fn repo_root(path: &str) -> Result<PathBuf, String> {
     if !dir.is_dir() {
         return Err(format!("`{path}` is not a directory"));
     }
-    let out = git(dir, &["rev-parse", "--show-toplevel"])?;
+    let out = git_read(dir, &["rev-parse", "--show-toplevel"])?;
     let root = out.trim();
     if root.is_empty() {
         return Err("not a git repository".to_string());
@@ -250,7 +306,7 @@ fn repo_root(path: &str) -> Result<PathBuf, String> {
 
 /// What the working tree is measured against.
 fn diff_base(root: &Path) -> &'static str {
-    if git(root, &["rev-parse", "--verify", "--quiet", "HEAD"]).is_ok() {
+    if git_read(root, &["rev-parse", "--verify", "--quiet", "HEAD"]).is_ok() {
         "HEAD"
     } else {
         EMPTY_TREE
@@ -267,7 +323,7 @@ struct NumStat {
 }
 
 fn numstat(root: &Path, args: &[&str]) -> Result<Vec<NumStat>, String> {
-    Ok(parse_numstat(&git(root, args)?))
+    Ok(parse_numstat(&git_read(root, args)?))
 }
 
 /// `git diff --numstat -z` writes `adds\tdels\tpath\0`, and for a rename
@@ -310,15 +366,13 @@ fn parse_numstat(out: &str) -> Vec<NumStat> {
 
 /// Files git has never been told about. `git diff` says nothing about these, so
 /// they are built from what is on disk instead.
-fn untracked_paths(root: &Path) -> Vec<String> {
-    git(root, &["ls-files", "--others", "--exclude-standard", "-z"])
-        .map(|out| {
-            out.split('\0')
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default()
+fn untracked_paths(root: &Path) -> Result<Vec<String>, String> {
+    git_read(root, &["ls-files", "--others", "--exclude-standard", "-z"]).map(|out| {
+        out.split('\0')
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect()
+    })
 }
 
 /// The file's lines, or `None` when it is binary, missing or too large to show.
@@ -513,6 +567,27 @@ fn count_lines_many(root: &Path, names: &[String]) -> Vec<usize> {
     counts
 }
 
+/// Blob sizes let us omit an oversized old revision even after it was deleted
+/// or replaced with a small file. Tree metadata does not read the blob bodies.
+fn committed_sizes(root: &Path, base: &str) -> Result<HashMap<String, u64>, String> {
+    if base == EMPTY_TREE {
+        return Ok(HashMap::new());
+    }
+    let tree = git_read(root, &["ls-tree", "-r", "-l", "-z", base])?;
+    Ok(tree
+        .split('\0')
+        .filter_map(|record| {
+            let (header, path) = record.split_once('\t')?;
+            let size = header.split_whitespace().last()?.parse().ok()?;
+            Some((path.to_string(), size))
+        })
+        .collect())
+}
+
+fn too_large(path: &Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|meta| meta.len() > MAX_PREVIEW_BYTES)
+}
+
 /// Every uncommitted change under `root`, at `context` lines of context.
 ///
 /// `only` narrows it to one path, which is how a file gets re-read with its
@@ -521,10 +596,20 @@ fn collect(root: &Path, only: Option<&str>, context: u32) -> Result<Vec<FileDiff
     let base = diff_base(root);
     let unified = format!("--unified={context}");
 
-    let mut stat_args = vec!["diff", "--numstat", "-z", base];
+    let mut stat_args = vec![
+        "diff",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--diff-algorithm=histogram",
+        "--numstat",
+        "-z",
+        base,
+    ];
     let mut patch_args = vec![
         "diff",
         "--no-ext-diff",
+        "--no-textconv",
+        "--diff-algorithm=histogram",
         "--no-color",
         unified.as_str(),
         base,
@@ -534,22 +619,50 @@ fn collect(root: &Path, only: Option<&str>, context: u32) -> Result<Vec<FileDiff
         patch_args.extend_from_slice(&["--", name]);
     }
 
-    // numstat and the patch walk the same tree; overlapping them cuts wall time
-    // roughly in half when either side is non-trivial.
-    let (entries, patch_text) = thread::scope(|scope| {
-        let stat = scope.spawn(|| numstat(root, &stat_args));
-        let patch = scope.spawn(|| git(root, &patch_args));
-        match (stat.join(), patch.join()) {
-            (Ok(entries), Ok(patch)) => (entries, patch),
-            (Err(_), _) | (_, Err(_)) => (
-                Err("diff worker panicked".to_string()),
-                Err("diff worker panicked".to_string()),
-            ),
-        }
-    });
-    let entries = entries?;
-    let patch_text = patch_text?;
-    let mut parsed = parse_patch(&patch_text);
+    // Determine preview eligibility before asking Git for a patch. Folding a
+    // file in React is too late if IPC already serialized millions of lines.
+    let entries = numstat(root, &stat_args)?;
+    let old_sizes = committed_sizes(root, base)?;
+    let omitted: HashSet<&str> = entries
+        .iter()
+        .filter(|entry| {
+            too_large(&root.join(&entry.path))
+                || old_sizes
+                    .get(entry.old_path.as_deref().unwrap_or(&entry.path))
+                    .is_some_and(|size| *size > MAX_PREVIEW_BYTES)
+        })
+        .map(|entry| entry.path.as_str())
+        .collect();
+    let exclusions: Vec<String> = entries
+        .iter()
+        .filter(|entry| omitted.contains(entry.path.as_str()))
+        .flat_map(|entry| std::iter::once(entry.path.as_str()).chain(entry.old_path.as_deref()))
+        .map(|path| format!(":(top,literal,exclude){path}"))
+        .collect();
+    if only.is_none() {
+        patch_args.extend_from_slice(&["--", "."]);
+    }
+    patch_args.extend(exclusions.iter().map(String::as_str));
+    let patch_text = if omitted.len() == entries.len() {
+        String::new()
+    } else {
+        git_read(root, &patch_args)?
+    };
+    let mut patches = parse_patch(&patch_text).into_iter();
+    let mut parsed: Vec<ParsedFile> = entries
+        .iter()
+        .map(|entry| {
+            if omitted.contains(entry.path.as_str()) {
+                ParsedFile {
+                    new_file: entry.old_path.is_none() && !old_sizes.contains_key(&entry.path),
+                    deleted: !root.join(&entry.path).exists(),
+                    ..ParsedFile::default()
+                }
+            } else {
+                patches.next().unwrap_or_default()
+            }
+        })
+        .collect();
     drop(patch_text);
 
     // Line counts for surviving files are independent; fan them out so a large
@@ -561,7 +674,7 @@ fn collect(root: &Path, only: Option<&str>, context: u32) -> Result<Vec<FileDiff
             let patch = parsed.get(i);
             let deleted = patch.is_some_and(|f| f.deleted);
             let binary = entry.binary || patch.is_some_and(|f| f.binary);
-            if binary || deleted {
+            if binary || deleted || omitted.contains(entry.path.as_str()) {
                 None
             } else {
                 Some(entry.path.clone())
@@ -599,6 +712,7 @@ fn collect(root: &Path, only: Option<&str>, context: u32) -> Result<Vec<FileDiff
             insertions: entry.insertions,
             deletions: entry.deletions,
             binary,
+            too_large: omitted.contains(entry.path.as_str()),
             new_lines,
             hunks: parsed
                 .get_mut(i)
@@ -607,16 +721,18 @@ fn collect(root: &Path, only: Option<&str>, context: u32) -> Result<Vec<FileDiff
         });
     }
 
-    let untracked = untracked_paths(root);
+    let untracked = untracked_paths(root)?;
     for name in untracked {
         if only.is_some_and(|wanted| wanted != name) {
             continue;
         }
+        let oversized = too_large(&root.join(&name));
         let Some(lines) = text_lines(&root.join(&name)) else {
             files.push(FileDiff {
                 path: name,
                 status: "untracked",
-                binary: true,
+                binary: !oversized,
+                too_large: oversized,
                 ..FileDiff::default()
             });
             continue;
@@ -643,6 +759,7 @@ fn collect(root: &Path, only: Option<&str>, context: u32) -> Result<Vec<FileDiff
             insertions: count,
             deletions: 0,
             binary: false,
+            too_large: false,
             new_lines: count,
             hunks: if count == 0 { Vec::new() } else { vec![hunk] },
         });
@@ -669,10 +786,23 @@ pub fn diff_stats(path: &str) -> Result<DiffStats, String> {
 
     // Tracked numstat and the untracked listing are independent git walks.
     let (entries, untracked) = thread::scope(|scope| {
-        let tracked = scope.spawn(|| numstat(&root, &["diff", "--numstat", "-z", base]));
+        let tracked = scope.spawn(|| {
+            numstat(
+                &root,
+                &[
+                    "diff",
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    "--diff-algorithm=histogram",
+                    "--numstat",
+                    "-z",
+                    base,
+                ],
+            )
+        });
         let others = scope.spawn(|| untracked_paths(&root));
         match (tracked.join(), others.join()) {
-            (Ok(entries), Ok(untracked)) => (entries, Ok(untracked)),
+            (Ok(entries), Ok(untracked)) => (entries, untracked),
             (Err(_), _) | (_, Err(_)) => (
                 Err("diff worker panicked".to_string()),
                 Err("diff worker panicked".to_string()),
@@ -810,6 +940,114 @@ mod tests {
         assert_eq!(&sequential[96..], &[0, 2, 0, 0]);
         assert!(count_lines_many(&root, &[]).is_empty());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn oversized_revisions_keep_counts_without_patch_bodies_or_shifted_files() {
+        let repo = TempRepo::new("oversized");
+        let big = "large line\n".repeat(MAX_PREVIEW_BYTES as usize / 10 + 1);
+        repo.write("removed-large.txt", &big);
+        repo.write("truncated-large.txt", &big);
+        repo.write("modified-small.txt", "before\n");
+        repo.git(&["add", "-A"]);
+        repo.git(&["commit", "-m", "first"]);
+        repo.git(&["rm", "removed-large.txt"]);
+        repo.write("truncated-large.txt", "short\n");
+        repo.write("modified-small.txt", "after\n");
+        repo.write("added-large.txt", &big.replace("large", "added"));
+        repo.git(&["add", "added-large.txt"]);
+        repo.write("untracked-large.txt", &big);
+
+        let changes = diff(repo.path()).unwrap();
+        assert_eq!(changes.files.len(), 5);
+        let added = &changes.files[0];
+        assert_eq!(added.status, "added");
+        assert_eq!(added.insertions, big.lines().count());
+        let small = &changes.files[1];
+        assert!(!small.too_large);
+        assert_eq!(small.hunks[0].lines[1].text, "after");
+        assert_eq!(changes.files[2].status, "deleted");
+        assert_eq!(changes.files[3].status, "modified");
+        assert_eq!(changes.files[4].status, "untracked");
+        for index in [0, 2, 3, 4] {
+            assert!(changes.files[index].too_large);
+            assert!(changes.files[index].hunks.is_empty());
+        }
+        assert!(
+            file_diff(repo.path(), "truncated-large.txt")
+                .unwrap()
+                .too_large
+        );
+        let stats = diff_stats(repo.path()).unwrap();
+        assert_eq!(
+            (stats.insertions, stats.deletions),
+            (changes.stats.insertions, changes.stats.deletions)
+        );
+    }
+
+    #[test]
+    fn diff_ignores_external_drivers_and_text_conversion() {
+        let repo = TempRepo::new("drivers");
+        repo.write(".gitattributes", "*.txt diff=fixture\n");
+        repo.write("edited.txt", "before\n");
+        repo.git(&["add", "-A"]);
+        repo.git(&["commit", "-m", "first"]);
+        repo.git(&["config", "diff.fixture.textconv", "false"]);
+        repo.git(&["config", "diff.external", "false"]);
+        repo.write("edited.txt", "after\n");
+
+        let stats = diff_stats(repo.path()).expect("stats without drivers");
+        let changes = diff(repo.path()).expect("diff without drivers");
+        assert_eq!((stats.files, stats.insertions, stats.deletions), (1, 1, 1));
+        assert_eq!((changes.stats.insertions, changes.stats.deletions), (1, 1));
+        assert_eq!(changes.files[0].hunks[0].lines[1].text, "after");
+    }
+
+    #[test]
+    #[ignore]
+    fn read_output_helper() {
+        use std::io::Write;
+        let Some(mode) = std::env::var_os("DUCKWEED_GIT_OUTPUT_HELPER") else {
+            return;
+        };
+        if mode == "timeout" {
+            thread::sleep(Duration::from_secs(30));
+            return;
+        }
+        std::io::stdout()
+            .write_all(&vec![b'a'; 256 * 1024])
+            .unwrap();
+        std::io::stderr()
+            .write_all(&vec![b'b'; 256 * 1024])
+            .unwrap();
+    }
+
+    fn read_helper(mode: &str) -> Command {
+        let mut cmd = Command::new(std::env::current_exe().unwrap());
+        cmd.args([
+            "--exact",
+            "git::tests::read_output_helper",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env("DUCKWEED_GIT_OUTPUT_HELPER", mode);
+        cmd
+    }
+
+    #[test]
+    fn git_read_drains_large_stdout_and_stderr() {
+        let output = read_output(read_helper("output"), Duration::from_secs(5)).unwrap();
+        assert!(output.status.success());
+        assert!(output.stdout.len() >= 256 * 1024);
+        assert!(output.stderr.len() >= 256 * 1024);
+    }
+
+    #[test]
+    fn git_read_terminates_a_stuck_process() {
+        let started = std::time::Instant::now();
+        let error = read_output(read_helper("timeout"), Duration::from_millis(100)).unwrap_err();
+        assert!(error.contains("timed out"));
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 
     #[test]

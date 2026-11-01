@@ -837,6 +837,7 @@ export function AgentSurface({
           onRefreshTasks={() => void agents.refreshTasks(termId)}
           onStopTask={(taskId) => void agents.stopTask(termId, taskId)}
           onNative={() => agents.handoffToNative(termId)}
+          onDesktop={() => void agents.continueInCodexDesktop(termId)}
         />
       )}
 

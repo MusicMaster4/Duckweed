@@ -167,8 +167,9 @@ export interface FileDiff {
   status: FileStatus;
   insertions: number;
   deletions: number;
-  /** Nothing to show: a binary file, or one too large to read. */
   binary: boolean;
+  /** Either revision exceeds the preview limit. Counts remain available. */
+  too_large: boolean;
   /** Lines the file has now — what sizes the run after the last hunk. */
   new_lines: number;
   hunks: DiffHunk[];

@@ -155,6 +155,8 @@ export interface AgentAdapter {
   ) => void;
   /** Refresh the selectable model catalog without starting a conversation turn. */
   refreshModels?: (ctx: AdapterContext) => void;
+  /** Actual local thread id for desktop links, which can differ from the session id. */
+  desktopThreadId?: () => string | null;
   /** Refresh provider-owned skills, apps, plugins, MCP servers and hooks. */
   refreshExtensions?: (ctx: AdapterContext) => Promise<AgentExtension[]> | AgentExtension[];
   /** Refresh provider-owned background terminals, tasks and worktrees. */

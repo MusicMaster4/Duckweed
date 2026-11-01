@@ -7,6 +7,8 @@ import type { AgentFollowupMode } from "./agents/types";
 import { agentUiPreferences, type AgentUiPreferences } from "./agents/uiPreferences";
 import { codexCapacityReplySettings, type CodexCapacityReplySettings } from "./agents/capacityReply";
 
+import { automaticApprovalSetting, type AutomaticApproval } from "./agents/automaticApproval";
+
 const KEY = "duckweed:state:v1";
 const MAX_RECENTS = 12;
 export const DEFAULT_TOOLS_WIDTH = 260;
@@ -64,6 +66,7 @@ export interface Persisted {
    * This is opt-in because unattended approvals can cause destructive changes.
    */
   autoApproveLockedRequests: boolean;
+  automaticApproval: AutomaticApproval;
   /** Warp-style command editor, or a conventional raw terminal. */
   inputMode: InputMode;
   /**
@@ -156,6 +159,7 @@ export function load(): Persisted | null {
       codexCapacityReply: codexCapacityReplySettings(parsed.codexCapacityReply),
       // Never infer consent from an older save.
       autoApproveLockedRequests: parsed.autoApproveLockedRequests === true,
+      automaticApproval: automaticApprovalSetting(parsed.automaticApproval),
       inputMode: parsed.inputMode === "raw" ? "raw" : "editor",
       // Default on so a missing field from older saves still asks before killing work.
       confirmCloseRunning:
@@ -183,6 +187,7 @@ export function save(state: {
   agentFollowupMode: AgentFollowupMode;
   codexCapacityReply: CodexCapacityReplySettings;
   autoApproveLockedRequests: boolean;
+  automaticApproval: AutomaticApproval;
   inputMode: InputMode;
   confirmCloseRunning: boolean;
   toolsOpen: boolean;
@@ -206,6 +211,7 @@ export function save(state: {
       agentFollowupMode: state.agentFollowupMode,
       codexCapacityReply: state.codexCapacityReply,
       autoApproveLockedRequests: state.autoApproveLockedRequests,
+      automaticApproval: automaticApprovalSetting(state.automaticApproval),
       inputMode: state.inputMode,
       confirmCloseRunning: state.confirmCloseRunning,
       toolsOpen: state.toolsOpen,

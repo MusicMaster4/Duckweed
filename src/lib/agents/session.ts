@@ -9,6 +9,8 @@ import {
   agentProcStop,
   agentCodexAuthSync,
   openCodeModelsRefresh,
+  codexDesktopBridge,
+  openCodexDesktop,
   openUrl,
   type AgentFrame,
 } from "../ipc";
@@ -540,7 +542,7 @@ function createAdapter(agent: AgentId): AgentAdapter {
     case "claude-stream-json":
       return createClaudeAdapter();
     case "codex-app-server":
-      return createCodexAdapter();
+      return createCodexAdapter(TAURI_RUNTIME ? { desktopBridge: codexDesktopBridge } : {});
     case "acp":
       return createAcpAdapter(agent);
   }
@@ -619,6 +621,25 @@ export function handoffToNative(termId: string): boolean {
   };
   for (const listener of [...authRequestListeners]) listener(request);
   return true;
+}
+
+/** The terminal fallback cannot establish the desktop app's browser authorization. */
+export async function continueInCodexDesktop(termId: string): Promise<boolean> {
+  const session = sessions.get(termId);
+  if (!session || session.disposed || session.state.agent !== "codex" ||
+      session.state.status === "starting" || session.state.status === "working" ||
+      session.state.status === "waiting" || session.configuring || session.reconnecting) return false;
+  const persisted = session.state.items.some((item) => item.kind === "user");
+  try {
+    // Keep this pane, its queue, and drafts intact if the OS handler fails.
+    // Opening the desktop app must never restart the shared daemon.
+    const threadId = persisted ? session.adapter.desktopThreadId?.() ?? session.state.sessionId : null;
+    await openCodexDesktop(threadId, session.state.cwd, persisted ? undefined : session.draft);
+    return true;
+  } catch (error) {
+    emit(session, { type: "notice", tone: "error", text: `Could not open Codex desktop: ${String(error)}` });
+    return false;
+  }
 }
 
 export function probeAvailability(): Promise<Set<string>> {

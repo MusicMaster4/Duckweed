@@ -1,5 +1,7 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
+import { AutomaticApprovalDialog } from "./AutomaticApprovalDialog";
+import { automaticApprovalDeadline, type AutomaticApproval } from "../lib/agents/automaticApproval";
 import { UsagePanel } from "./UsagePanel";
 import { MobileNotificationsSettings } from "./MobileNotificationsSettings";
 import {
@@ -35,6 +37,7 @@ interface Props {
   agentFollowupMode: AgentFollowupMode;
   codexCapacityReply: CodexCapacityReplySettings;
   autoApproveLockedRequests: boolean;
+  automaticApproval: AutomaticApproval;
   confirmCloseRunning: boolean;
   /** Windows Explorer folder verbs; null when unavailable. */
   explorerIntegration: ShellIntegrationStatus | null;
@@ -54,6 +57,7 @@ interface Props {
   onAgentFollowupMode: (mode: AgentFollowupMode) => void;
   onCodexCapacityReply: (settings: CodexCapacityReplySettings) => void;
   onAutoApproveLockedRequests: (enabled: boolean) => void;
+  onAutomaticApproval: (setting: AutomaticApproval) => void;
   onToggleConfirmCloseRunning: () => void;
   onToggleExplorerTab: () => void;
   onToggleExplorerWindow: () => void;
@@ -174,6 +178,7 @@ export function SettingsMenu({
   agentFollowupMode,
   codexCapacityReply,
   autoApproveLockedRequests,
+  automaticApproval,
   confirmCloseRunning,
   explorerIntegration,
   shell,
@@ -192,6 +197,7 @@ export function SettingsMenu({
   onAgentFollowupMode,
   onCodexCapacityReply,
   onAutoApproveLockedRequests,
+  onAutomaticApproval,
   onToggleConfirmCloseRunning,
   onToggleExplorerTab,
   onToggleExplorerWindow,
@@ -202,6 +208,8 @@ export function SettingsMenu({
   const [section, setSectionState] = useState<SettingsSection>(lastSettingsSection);
   const [query, setQuery] = useState("");
   const [suggestionsCleared, setSuggestionsCleared] = useState(false);
+  const [automaticApprovalOpen, setAutomaticApprovalOpen] = useState(false);
+  const closeAutomaticApproval = useCallback(() => setAutomaticApprovalOpen(false), []);
   const [approvalConsentOpen, setApprovalConsentOpen] = useState(false);
   const contentRef = useRef<HTMLElement | null>(null);
   const sectionRef = useRef(section);
@@ -244,6 +252,7 @@ export function SettingsMenu({
   const agentUiHit = matches("custom agent ui coding agent interface overlay cli harness");
   const agentUiAgentHit = (agent: AgentId) =>
     matches(`${AGENTS[agent].label} ${AGENTS[agent].binaries.join(" ")}`);
+  const automaticApprovalHit = matches("automatically allow everything automatic approvals permissions agents danger hour hours until disabled");
   const capacityReplyHit = matches("codex automatic capacity reply retry message selected model is at capacity continue two seconds");
   const showAppearance =
     (section === "General" || section === "Appearance" || searching) &&
@@ -268,7 +277,7 @@ export function SettingsMenu({
       matches("reset suggestions ghost autocomplete history learning clear forget"));
   const showAgents =
     (section === "General" || section === "Agents" || searching) &&
-    (agentUiHit || AGENT_IDS.some(agentUiAgentHit) || capacityReplyHit ||
+    (agentUiHit || AGENT_IDS.some(agentUiAgentHit) || capacityReplyHit || automaticApprovalHit ||
       matches(
         "active turn messages follow-up queue steer send now alt shift enter agent delivery",
       ) ||
@@ -664,6 +673,24 @@ export function SettingsMenu({
                   </select>
                 </label>
               )}
+              {automaticApprovalHit && (
+                <button type="button" className="settings-row settings-action"
+                  aria-pressed={automaticApproval !== null}
+                  onClick={() => automaticApproval !== null
+                    ? onAutomaticApproval(null) : setAutomaticApprovalOpen(true)}>
+                  <span className="settings-copy">
+                    <strong>Automatically allow everything</strong>
+                    <span>
+                      {automaticApproval === null
+                        ? "Allow agent permission requests after 1 second across all tabs"
+                        : automaticApproval === "until-disabled"
+                          ? "Enabled until you turn it off. Click to disable"
+                          : `Enabled until ${new Date(automaticApproval).toLocaleString("en-US", { dateStyle: "medium", timeStyle: "short" })}. Click to disable`}
+                    </span>
+                  </span>
+                  <Toggle enabled={automaticApproval !== null} />
+                </button>
+              )}
               {capacityReplyHit && (
                 <>
                   <button
@@ -844,6 +871,13 @@ export function SettingsMenu({
           )}
         </div>
       </main>
+      {active && automaticApprovalOpen && (
+        <AutomaticApprovalDialog onCancel={closeAutomaticApproval}
+          onConfirm={(duration) => {
+            onAutomaticApproval(automaticApprovalDeadline(duration));
+            setAutomaticApprovalOpen(false);
+          }} />
+      )}
       {approvalConsentOpen && (
         <ApprovalConsentDialog
           onCancel={() => setApprovalConsentOpen(false)}
