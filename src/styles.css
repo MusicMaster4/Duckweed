@@ -1290,6 +1290,10 @@ svg.tab-glyph-fill path {
   opacity: 0.42;
 }
 
+.automatic-approval-duration {
+  padding: 12px 0;
+}
+
 /* --------------------------------------------------- daily usage lockout */
 
 .app.is-daily-locked > .workbench,

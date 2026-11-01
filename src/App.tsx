@@ -55,6 +55,7 @@ import * as agentSessions from "./lib/agents/session";
 import type { AgentId, AgentImageAttachment } from "./lib/agents/types";
 import { agentUiPreferences } from "./lib/agents/uiPreferences";
 import { codexCapacityReplySettings } from "./lib/agents/capacityReply";
+import { automaticApprovalSetting, startAutomaticApprovals } from "./lib/agents/automaticApproval";
 import { handleUnattendedPermission } from "./lib/agents/autoApproval";
 import {
   confirmCloseRunning,
@@ -302,6 +303,7 @@ function boot() {
       agentFollowupMode: saved.agentFollowupMode,
       codexCapacityReply: saved.codexCapacityReply,
       autoApproveLockedRequests: saved.autoApproveLockedRequests,
+      automaticApproval: saved.automaticApproval,
       inputMode: saved.inputMode,
       confirmCloseRunning: saved.confirmCloseRunning,
       toolsOpen: saved.toolsOpen,
@@ -334,6 +336,7 @@ function boot() {
     agentFollowupMode: "queue" as const,
     codexCapacityReply: codexCapacityReplySettings(),
     autoApproveLockedRequests: false,
+    automaticApproval: automaticApprovalSetting(),
     inputMode: "editor" as terminals.InputMode,
     confirmCloseRunning: true,
     toolsOpen: false,
@@ -390,6 +393,9 @@ export default function App() {
   const [autoApproveLockedRequests, setAutoApproveLockedRequests] = useState(
     initial.autoApproveLockedRequests,
   );
+  const [automaticApproval, setAutomaticApproval] = useState(initial.automaticApproval);
+  const automaticApprovalRef = useRef(automaticApproval);
+  automaticApprovalRef.current = automaticApproval;
   const [inputMode, setInputMode] = useState(initial.inputMode);
   const [confirmCloseRunningPref, setConfirmCloseRunningPref] = useState(() => {
     // Honour the saved preference before any close handler can run.
@@ -1849,6 +1855,29 @@ export default function App() {
     };
   }, [dailyLocked, probeActivity, termIdsKey]);
 
+  useEffect(() => {
+    if (automaticApproval === null) return;
+    const stop = startAutomaticApprovals(agentSessions, () => automaticApprovalRef.current);
+    // Use a wall-clock deadline so time spent closed or asleep counts too.
+    const expire = () => {
+      if (automaticApprovalSetting(automaticApprovalRef.current) === null) {
+        automaticApprovalRef.current = null;
+        setAutomaticApproval(null);
+      }
+    };
+    const timer = typeof automaticApproval === "number"
+      ? window.setTimeout(expire, Math.max(0, automaticApproval - Date.now()))
+      : null;
+    window.addEventListener("focus", expire);
+    document.addEventListener("visibilitychange", expire);
+    return () => {
+      stop();
+      if (timer !== null) window.clearTimeout(timer);
+      window.removeEventListener("focus", expire);
+      document.removeEventListener("visibilitychange", expire);
+    };
+  }, [automaticApproval]);
+
   // With explicit consent, keep unattended agents moving after the daily limit
   // screen takes over. Structured questions follow the consented unattended
   // policy by choosing the first option for each question.
@@ -1858,6 +1887,8 @@ export default function App() {
     const approvePending = () => {
       for (const termId of agentSessions.activeTermIds()) {
         const permission = agentSessions.get(termId)?.permission ?? null;
+        if (permission?.kind !== "question" &&
+          automaticApprovalSetting(automaticApprovalRef.current) !== null) continue;
         handleUnattendedPermission(permission, {
           respond: (permissionId, optionId) =>
             agentSessions.respond(termId, permissionId, optionId),
@@ -1869,7 +1900,7 @@ export default function App() {
 
     approvePending();
     return agentSessions.subscribeAll(approvePending);
-  }, [autoApproveLockedRequests, dailyLocked]);
+  }, [autoApproveLockedRequests, dailyLocked, automaticApproval]);
 
   // After the user sends locked work to the background, exit quietly once the
   // last entry settles (including if midnight unlocks the app first). A visible
@@ -2970,6 +3001,7 @@ export default function App() {
       agentFollowupMode,
       codexCapacityReply,
       autoApproveLockedRequests,
+      automaticApproval,
       inputMode,
       confirmCloseRunning: confirmCloseRunningPref,
       toolsOpen,
@@ -2996,6 +3028,7 @@ export default function App() {
     agentFollowupMode,
     codexCapacityReply,
     autoApproveLockedRequests,
+    automaticApproval,
     inputMode,
     confirmCloseRunningPref,
     toolsOpen,
@@ -4227,6 +4260,7 @@ export default function App() {
                 agentFollowupMode={agentFollowupMode}
                 codexCapacityReply={codexCapacityReply}
                 autoApproveLockedRequests={autoApproveLockedRequests}
+                automaticApproval={automaticApproval}
                 confirmCloseRunning={confirmCloseRunningPref}
                 explorerIntegration={explorerIntegration}
                 shell={shell}
@@ -4251,6 +4285,10 @@ export default function App() {
                   setAgentFollowupMode(mode);
                 }}
                 onAutoApproveLockedRequests={setAutoApproveLockedRequests}
+                onAutomaticApproval={(setting) => {
+                  automaticApprovalRef.current = setting;
+                  setAutomaticApproval(setting);
+                }}
                 onCodexCapacityReply={(settings) => {
                   agentSessions.setCodexCapacityReply(settings);
                   setCodexCapacityReply(settings);
