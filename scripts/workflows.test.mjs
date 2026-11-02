@@ -154,7 +154,7 @@ describe("the build job", () => {
       bundles: "deb,appimage",
     });
     expect(matrix.find((entry) => entry.platform === "macos")).toMatchObject({
-      runner: "macos-latest",
+      runner: "macos-15-intel",
       // app produces the updater archive; dmg is the installable image.
       bundles: "app,dmg",
       target_args: "--target universal-apple-darwin",
@@ -278,7 +278,7 @@ describe("CI workflow", () => {
 
   test("compiles the Rust backend on Linux, macOS, and Windows", () => {
     const rust = ci.jobs.rust;
-    expect(rust.strategy.matrix.os).toEqual(["ubuntu-22.04", "macos-latest", "windows-latest"]);
+    expect(rust.strategy.matrix.os).toEqual(["ubuntu-22.04", "macos-15-intel", "windows-latest"]);
     expect(rust.strategy["fail-fast"]).toBe(false);
     const linuxDeps = rust.steps.find((step) => step.if?.includes("ubuntu-22.04"));
     expect(linuxDeps.run).toContain("libwebkit2gtk-4.1-dev");

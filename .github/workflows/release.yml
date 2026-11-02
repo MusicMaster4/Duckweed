@@ -199,7 +199,8 @@ jobs:
             bundle_dir: src-tauri/target/release/bundle
           - platform: macos
             label: macOS universal (DMG)
-            runner: macos-latest
+            # Avoid the constrained ARM64 hosted pool; cross-compile both architectures.
+            runner: macos-15-intel
             # `app` is required so createUpdaterArtifacts emits .app.tar.gz;
             # `dmg` alone only packages the installer and cleans the .app away.
             bundles: app,dmg
