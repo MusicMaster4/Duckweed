@@ -32,8 +32,8 @@ export const openAgentDocument = (path: string) => invoke<void>("open_agent_docu
  * Play one completion cue from the app process instead of the WebView, so the
  * Windows volume mixer lists it as Duckweed. Resolves when the cue starts.
  */
-export const playCompletionCue = (cueIndex: number) =>
-  invoke<void>("play_completion_sound", { cueIndex });
+export const playCompletionCue = (cueIndex: number, semitones = 0) =>
+  invoke<void>("play_completion_sound", { cueIndex, semitones });
 
 export interface MobileDevice {
   id: string;

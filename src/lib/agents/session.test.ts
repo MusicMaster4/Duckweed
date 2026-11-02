@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import type { AgentFrame, AgentSpawnOptions } from "../ipc";
 import type { AgentLaunch } from "./launch";
 import type { AgentImageAttachment } from "./types";
+import { startAutomaticApprovals } from "./automaticApproval";
 
 const store = new Map<string, string>();
 const stubWindow = {
@@ -78,6 +79,7 @@ mock.module("../ipc", () => ({
   },
   agentProcStop: async (_id: string, preserveCodexWork = false) => { nativeStops += 1; nativeStopModes.push(preserveCodexWork); },
   agentCodexAuthSync: async () => "unchanged",
+  codexDesktopBridge: async () => null,
   agentProcCloseStdin: async () => {},
   agentProcProbe: async () => [],
   openCodeModelsRefresh: async () => {},
@@ -177,6 +179,51 @@ const session = await import("./session");
 const { workspaceRecovery, RECOVERY_KEY, parseRecovery } = await import("../workspaceRecovery");
 
 describe("Custom agent UI sessions", () => {
+
+  test("automatic approvals receive Claude permissions while animation frames are suspended", async () => {
+    const termId = "background-claude-approval";
+    const originalFrame = stubWindow.requestAnimationFrame;
+    stubWindow.requestAnimationFrame = () => 123;
+    const timers = new Map<number, () => void>();
+    let nextTimer = 0;
+    const stop = startAutomaticApprovals(session, () => "until-disabled", {
+      now: () => Date.now(),
+      schedule: (callback) => {
+        const id = ++nextTimer;
+        timers.set(id, callback);
+        return id as unknown as ReturnType<typeof setTimeout>;
+      },
+      cancel: (id) => { timers.delete(id as unknown as number); },
+    });
+    try {
+      await session.start(termId, { ...grokLaunch, agent: "claude", program: "claudex" }, "H:/project");
+      await flush();
+      feed({ type: "system", subtype: "init", session_id: "background-session" });
+      // Two successive decisions must work without a single paint, including
+      // clearing the previous permission and scheduling the next one.
+      for (const requestId of ["background-1", "background-2"]) {
+        feed({ type: "control_request", request_id: requestId, request: {
+          subtype: "can_use_tool", tool_name: "Bash", input: { command: "echo test" },
+        } });
+        expect(session.get(termId)?.status).toBe("waiting");
+        expect(timers.size).toBe(1);
+        const callbacks = [...timers.values()];
+        timers.clear();
+        for (const callback of callbacks) callback();
+        await flush();
+        expect(sent.map(rpc)).toContainEqual({ type: "control_response", response: {
+          subtype: "success", request_id: requestId,
+          response: { behavior: "allow", updatedInput: { command: "echo test" } },
+        } });
+        expect(session.get(termId)?.permission).toBeNull();
+        expect(session.get(termId)?.status).toBe("working");
+      }
+    } finally {
+      stop();
+      session.stop(termId);
+      stubWindow.requestAnimationFrame = originalFrame;
+    }
+  });
 
   test("a rejected native send restores the message and images and stops the broken connection", async () => {
     const termId = "send-rejected";

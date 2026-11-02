@@ -12700,3 +12700,23 @@ body.is-dragging-rail * {
   white-space: nowrap;
   color: var(--text-faint);
 }
+
+/* Ended sessions keep the existing review outline, in yellow without a glow. */
+.pane.has-exited::after,
+.pane.has-exited .pane-completion-flash {
+  border-color: var(--amber);
+  box-shadow: none;
+}
+.tab.has-exited::after,
+.tab.has-exited .tab-completion-review {
+  box-shadow: inset 0 0 0 2px var(--amber);
+}
+.zoom-rail-item.is-unread.has-exited {
+  border-color: var(--amber);
+  box-shadow: inset 0 0 0 1px var(--amber);
+}
+
+.tab-group-label.is-unread.has-exited .tab-group-count {
+  color: var(--amber);
+  background: color-mix(in srgb, var(--amber) 16%, transparent);
+}

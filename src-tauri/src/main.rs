@@ -882,9 +882,10 @@ async fn power_action(action: String) -> Result<(), String> {
 async fn play_completion_sound(
     player: State<'_, SoundPlayer>,
     cue_index: Option<usize>,
+    semitones: Option<i32>,
 ) -> Result<(), String> {
     let player = player.inner().clone();
-    blocking(move || player.play(cue_index)).await
+    blocking(move || player.play(cue_index, semitones.unwrap_or(0))).await
 }
 
 /// Validate and hand `url` to the OS default handler.

@@ -1061,10 +1061,12 @@ function emitNow(session: Session, event: AgentEvent): void {
   }
   // Browser animation frames can stop while the desktop window is minimized.
   // Settled states are also synchronization boundaries for the mobile
-  // companion, so publish them immediately instead of waiting for a paint that
+  // companion. Permissions also drive unattended approvals, including when
+  // the window is hidden, so publish them without waiting for a paint that
   // may never happen until the user restores Duckweed.
   if (
     event.type === "turn-end" ||
+    event.type === "permission" ||
     (event.type === "status" &&
       (event.status === "idle" ||
         event.status === "waiting" ||
