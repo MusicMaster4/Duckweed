@@ -1158,6 +1158,21 @@ function reconnect(session: Session): boolean {
 function handleFrame(session: Session, frame: AgentFrame): void {
   if (session.disposed || session.connectionError) return;
   switch (frame.kind) {
+    case "automaticapproval": {
+      // The native transport already sent this response. Let the adapter release
+      // its request bookkeeping without writing a duplicate or clearing a newer
+      // prompt that arrived while the renderer was suspended.
+      const current = session.state.permission?.id === frame.permission_id;
+      session.adapter.respond(frame.permission_id, frame.option_id, {
+        ...session.context,
+        send: () => {},
+        emit: (event) => {
+          if (!current && (event.type === "permission" || event.type === "status")) return;
+          session.context.emit(event);
+        },
+      });
+      return;
+    }
     case "stdout":
       if (session.protocolWriter.failure || session.reconnecting) return;
       session.adapter.receive(frame.line, session.context);

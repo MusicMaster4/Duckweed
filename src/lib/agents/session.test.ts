@@ -225,6 +225,36 @@ describe("Custom agent UI sessions", () => {
     }
   });
 
+  test("native approvals reconcile suspended Claude UI without duplicate writes or clearing newer prompts", async () => {
+    const termId = "native-background-claude";
+    await session.start(termId, { ...grokLaunch, agent: "claude", program: "claudex" }, "H:/project");
+    await flush();
+    feed({ type: "system", subtype: "init", session_id: "native-session" });
+    const originalFrame = stubWindow.requestAnimationFrame;
+    stubWindow.requestAnimationFrame = () => 123;
+    try {
+      for (const requestId of ["native-1", "native-2"]) {
+        feed({ type: "control_request", request_id: requestId, request: {
+          subtype: "can_use_tool", tool_name: "Bash", input: { command: "echo test" },
+        } });
+      }
+      const before = sent.length;
+      frameSink?.({ kind: "automaticapproval", permission_id: "perm-native-1", option_id: "allow" });
+      expect(session.get(termId)?.permission?.id).toBe("perm-native-2");
+      expect(session.get(termId)?.status).toBe("waiting");
+      frameSink?.({ kind: "automaticapproval", permission_id: "perm-native-2", option_id: "allow" });
+      expect(session.get(termId)?.permission).toBeNull();
+      expect(session.get(termId)?.status).toBe("working");
+      // Replayed acknowledgements and UI clicks cannot answer the native decision again.
+      session.respond(termId, "perm-native-2", "allow");
+      frameSink?.({ kind: "automaticapproval", permission_id: "perm-native-2", option_id: "allow" });
+      await flush();
+      expect(sent.length).toBe(before);
+    } finally {
+      stubWindow.requestAnimationFrame = originalFrame;
+    }
+  });
+
   test("a rejected native send restores the message and images and stops the broken connection", async () => {
     const termId = "send-rejected";
     await session.start(termId, codexLaunch, "H:/project");

@@ -497,6 +497,7 @@ export const agentUnwatch = (id: string) => invoke<void>("agent_unwatch", { id }
 export type AgentFrame =
   | { kind: "stdout"; line: string }
   | { kind: "stderr"; line: string }
+  | { kind: "automaticapproval"; permission_id: string; option_id: string }
   | { kind: "exit"; code: number | null; reconnect?: boolean };
 
 export interface AgentAvailability {
@@ -559,6 +560,10 @@ export const agentProcStart = (
   options: AgentSpawnOptions,
   onFrame: Channel<AgentFrame>,
 ) => invoke<AgentStarted>("agent_proc_start", { id, options, onFrame });
+
+/** Global native policy also applies to agents launched after this call. */
+export const agentAutomaticApproval = (setting: number | "until-disabled" | null) =>
+  invoke<void>("agent_automatic_approval", { setting });
 
 export const agentProcSend = (id: string, line: string) =>
   invoke<void>("agent_proc_send", { id, line });

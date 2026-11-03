@@ -80,6 +80,7 @@ import * as suggestFeedback from "./lib/suggestFeedback";
 import { observeDesktopActivity } from "./lib/desktopActivity";
 import {
   frontendReady,
+  agentAutomaticApproval,
   listShells,
   mobileAckCommand,
   mobileCancelCompletion,
@@ -1870,8 +1871,16 @@ export default function App() {
   }, [dailyLocked, probeActivity, termIdsKey]);
 
   useEffect(() => {
+    // Native approval execution must not depend on renderer timers or tab mounts.
+    // Synchronize off as well, so disabling immediately cancels native work.
+    if (TAURI_RUNTIME) {
+      void agentAutomaticApproval(automaticApproval).catch((error) => {
+        console.error("Could not synchronize automatic approvals", error);
+      });
+    }
     if (automaticApproval === null) return;
-    const stop = startAutomaticApprovals(agentSessions, () => automaticApprovalRef.current);
+    const stop = TAURI_RUNTIME ? () => {} :
+      startAutomaticApprovals(agentSessions, () => automaticApprovalRef.current);
     // Use a wall-clock deadline so time spent closed or asleep counts too.
     const expire = () => {
       if (automaticApprovalSetting(automaticApprovalRef.current) === null) {

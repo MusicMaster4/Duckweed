@@ -5,6 +5,7 @@ mod agent_activity;
 mod agent_documents;
 mod agent_proc;
 mod agent_sessions;
+mod automatic_approval;
 mod codex_desktop;
 mod codex_transport;
 mod discord_presence;
@@ -575,6 +576,12 @@ async fn agent_proc_start(
 ) -> Result<AgentStarted, String> {
     let manager = manager.inner().clone();
     blocking(move || agent_proc::start(&manager, on_frame, id, options)).await
+}
+
+/// Global unattended permission policy, independent of window focus or visibility.
+#[tauri::command]
+fn agent_automatic_approval(manager: State<'_, AgentProcManager>, setting: serde_json::Value) {
+    manager.set_automatic_approval(&setting);
 }
 
 /// One protocol message to the agent's stdin.
@@ -1280,6 +1287,7 @@ fn main() {
                 let _ = disable_browser_accelerator_keys(&window);
                 let _ = recover_failed_webview_renderer(&window);
             }
+            app.state::<AgentProcManager>().start_approval_monitor();
             pty::start_busy_monitor(app.handle().clone())?;
             agent_activity::start_monitor(app.handle().clone())?;
             watch::start_monitor(app.handle().clone())?;
@@ -1330,6 +1338,7 @@ fn main() {
             opencode_models_refresh,
             agent_proc_start,
             agent_proc_send,
+            agent_automatic_approval,
             agent_proc_set_runtime_roots,
             agent_codex_auth_sync,
             agent_proc_close_stdin,
