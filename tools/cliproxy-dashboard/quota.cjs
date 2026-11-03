@@ -2,6 +2,8 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { applyTransport } = require('./codex-transport-policy.cjs');
+const { recoverQuotaCooldown } = require('./quota-recovery.cjs');
+const { reconcileClaudeCooldown } = require('./cooldown-recovery.cjs');
 const root = process.env.CLIPROXY_HOME || path.join(os.homedir(), '.cli-proxy-api');
 const proxyBase = process.env.CLIPROXY_API_URL || 'http://127.0.0.1:8317';
 const base = proxyBase + '/v0/management';
@@ -80,7 +82,8 @@ function codexWindows(usage) {
   const additional = usage.additional_rate_limits || {};
   for (const [id, value] of Object.entries(additional)) append(value.rate_limit || value, id, value.limit_name || id);
   const core = windows.filter(w => w.id.startsWith('main-'));
-  return { windows, available: core.length ? core.every(w => w.remainingPercent === null || w.remainingPercent > 0) : null,
+  return { windows, available: core.length ? main.allowed !== false && main.limit_reached !== true
+    && core.every(w => Number.isFinite(w.remainingPercent) && w.remainingPercent > 0) : null,
     weeklyResetAt: core.find(w => w.label === 'Weekly')?.resetAt || null, plan: usage.plan_type || null, quotaSupported: true };
 }
 function claudeWindows(usage) {
@@ -264,13 +267,23 @@ async function update(authIndex) {
         const old = previous.accounts.find(a => a.id === account.auth_index);
         const item = { ...safeAccount(account), plan: old?.plan || null, windows: old?.windows || [], checkedAt: old?.checkedAt || null,
           attemptedAt: old?.attemptedAt || null, retryAt: old?.retryAt || null, errorStatus: old?.errorStatus || null,
-          rateLimitFailures: old?.rateLimitFailures || 0, ...(account.provider === 'claude' && old?.usage ? { usage: old.usage } : {}),
+          rateLimitFailures: old?.rateLimitFailures || 0, ...(old?.routingRecovery ? { routingRecovery: old.routingRecovery } : {}), ...(account.provider === 'claude' && old?.usage ? { usage: old.usage } : {}),
           weeklyResetAt: old?.weeklyResetAt || null, available: old?.available ?? null, quotaSupported: old?.quotaSupported ?? false };
         if (account.disabled) return { ...item, error: null };
         if (authIndex && account.auth_index !== authIndex) return { ...item, error: old?.error || null };
         if (!shouldProbe(old, account.provider)) return { ...item, error: old?.error || null };
-        try { return { ...item, ...(await probe(account)), checkedAt: new Date().toISOString(), attemptedAt: new Date().toISOString(),
-          error: null, errorStatus: null, retryAt: null, rateLimitFailures: 0 }; }
+        try {
+          const probeStartedAt = Date.now();
+          const result = { ...item, ...(await probe(account)), checkedAt: new Date().toISOString(), attemptedAt: new Date(probeStartedAt).toISOString(),
+            error: null, errorStatus: null, retryAt: null, rateLimitFailures: 0 };
+          if (account.provider === 'claude') {
+            result.routingRecovery = await reconcileClaudeCooldown(account, old, result, probeStartedAt, management);
+          } else if (account.provider === 'codex') {
+            try { await recoverQuotaCooldown(account, result, management); }
+            catch (error) { result.cooldownResetError = error.message; }
+          }
+          return result;
+        }
         catch (error) { return { ...item, ...failureState(error, old, account.provider) }; }
       })));
     }
