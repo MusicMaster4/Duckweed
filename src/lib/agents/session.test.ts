@@ -39,6 +39,8 @@ let spawnFailure: string | null = null;
 let spawnFailureOnce = false;
 let sendOverride: ((line: string) => Promise<void>) | null = null;
 let nativeStops = 0;
+let nativeStarts = 0;
+let attachOverride: ((id: string, sequence: number, channel: { onmessage?: (frame: AgentFrame) => void }) => Promise<boolean>) | null = null;
 const desktopOpens: { threadId: string | null; cwd: string; prompt?: string }[] = [];
 let desktopFailure = false;
 const nativeStopModes: boolean[] = [];
@@ -69,10 +71,12 @@ mock.module("../ipc", () => ({
       if (spawnFailureOnce) { spawnFailure = null; spawnFailureOnce = false; }
       throw new Error(reason);
     }
+    nativeStarts += 1;
     spawn = options;
     frameSink = (frame) => onFrame.onmessage?.(frame);
     return { program: options.program, pid: 1 };
   },
+  agentProcAttach: async (id: string, _instanceId: string, sequence: number, channel: { onmessage?: (frame: AgentFrame) => void }) => attachOverride ? attachOverride(id, sequence, channel) : false,
   agentProcSend: async (_id: string, line: string) => {
     sent.push(line);
     await sendOverride?.(line);
@@ -166,7 +170,9 @@ async function codexHandshake(sessionId = "01900000-0000-7000-8000-000000000001"
   const accountRead = sent.map(rpc).findLast((message) => message.method === "account/read");
   feed({ jsonrpc: "2.0", id: accountRead?.id, result: { account: { type: "chatgpt" } } });
   await flush();
-  const threadStart = sent.map(rpc).findLast((message) => message.method === "thread/start");
+  const connectionStart = sent.findLastIndex((line) => rpc(line).method === "initialize");
+  const threadStart = sent.slice(connectionStart).map(rpc).findLast((message) => message.method === "thread/start");
+  if (!threadStart) return;
   feed({
     jsonrpc: "2.0",
     id: threadStart?.id,
@@ -701,6 +707,101 @@ describe("Custom agent UI sessions", () => {
     expect(session.getDraft(termId)).toBe("Keep this prompt");
   });
 
+  test("renderer recovery reattaches live Claude with partial output and a pending permission", async () => {
+    const termId = "renderer-recovery-live-claude";
+    const launch: AgentLaunch = { ...grokLaunch, agent: "claude", program: "claudex" };
+    await session.start(termId, launch, "H:/project");
+    const native = (sequence: number, frame: unknown) => frameSink?.({ kind: "sequenced", sequence,
+      frame: { kind: "stdout", line: JSON.stringify(frame) } });
+    native(1, { type: "system", subtype: "init", session_id: "same-live-claude" });
+    session.submit(termId, "Continue my task");
+    await flush();
+    native(2, { type: "stream_event", event: { type: "message_start" } });
+    native(3, { type: "stream_event", event: { type: "content_block_start", index: 0, content_block: { type: "text" } } });
+    native(4, { type: "stream_event", event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Before crash" } } });
+    native(5, { type: "control_request", request_id: "pending-native-permission", request: {
+      subtype: "can_use_tool", tool_name: "Bash", input: { command: "echo recovery" },
+    } });
+    session.setDraft(termId, "Keep my draft");
+    session.setDraftImages(termId, [image]);
+    session.flushRecovery();
+    const saved = JSON.parse(JSON.stringify(workspaceRecovery.get(termId)?.agent));
+    expect(saved.runtime.sequence).toBe(5);
+    session.stop(termId);
+    await flush();
+    const startsBefore = nativeStarts;
+    const stopsBefore = nativeStops;
+    sent.length = 0;
+    attachOverride = async (id, sequence, channel) => {
+      expect(id).toBe(termId);
+      expect(sequence).toBe(5);
+      frameSink = (frame) => channel.onmessage?.(frame);
+      native(6, { type: "stream_event", event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: " after crash" } } });
+      return true;
+    };
+    try {
+      await session.start(termId, { ...saved.launch, resumeId: saved.sessionId }, saved.cwd, saved);
+      session.flushRecovery();
+      expect(nativeStarts).toBe(startsBefore);
+      expect(nativeStops).toBe(stopsBefore);
+      expect(sent).toEqual([]);
+      expect(session.get(termId)).toMatchObject({ sessionId: "same-live-claude", status: "waiting", error: null });
+      expect(session.get(termId)?.items.filter((item) => item.kind === "assistant")).toEqual([
+        expect.objectContaining({ text: "Before crash after crash", id: "m1-b0" }),
+      ]);
+      expect(session.getDraft(termId)).toBe("Keep my draft");
+      expect(session.getDraftImages(termId)).toEqual([image]);
+      // A duplicate native frame cannot append text twice.
+      native(6, { type: "stream_event", event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: " duplicate" } } });
+      session.respond(termId, "perm-pending-native-permission", "allow");
+      await flush();
+      expect(sent.map(rpc)).toContainEqual({ type: "control_response", response: {
+        subtype: "success", request_id: "pending-native-permission",
+        response: { behavior: "allow", updatedInput: { command: "echo recovery" } },
+      } });
+      expect(session.get(termId)?.status).toBe("working");
+      expect(workspaceRecovery.get(termId)?.agent?.runtime?.sequence).toBe(6);
+    } finally { attachOverride = null; }
+  });
+
+  test("renderer recovery preserves active Codex work and resumes without creating another thread", async () => {
+    const termId = "renderer-recovery-live-codex";
+    await session.start(termId, codexLaunch, "H:/project");
+    await codexHandshake("original-renderer-thread");
+    session.submit(termId, "Continue the existing task");
+    await flush();
+    const turn = sent.map(rpc).findLast((message) => message.method === "turn/start");
+    feed({ id: turn?.id, result: { turn: { id: "running-turn" } } });
+    session.submit(termId, "Queued follow-up", [image]);
+    session.setDraft(termId, "Keep my new draft");
+    session.setDraftImages(termId, [image]);
+    session.flushRecovery();
+    const saved = JSON.parse(JSON.stringify(workspaceRecovery.get(termId)?.agent));
+    // Drop the old JS fixture, then observe only the renderer's restore path.
+    session.stop(termId);
+    await flush();
+    const beforeStops = nativeStopModes.length;
+    sent.length = 0;
+    await session.start(termId, { ...saved.launch, resumeId: saved.sessionId }, saved.cwd, saved);
+    await codexHandshake();
+    expect(nativeStopModes.slice(beforeStops)).toEqual([true]);
+    expect(sent.map(rpc).some((message) => message.method === "thread/start")).toBe(false);
+    const resume = sent.map(rpc).findLast((message) => message.method === "thread/resume");
+    expect(resume?.params).toMatchObject({ threadId: "original-renderer-thread" });
+    feed({ id: resume?.id, result: { thread: {
+      id: "original-renderer-thread", activeTurnId: "running-turn",
+      turns: [{ id: "running-turn", status: "inProgress", items: [] }],
+    } } });
+    await flush();
+    expect(session.get(termId)).toMatchObject({ sessionId: "original-renderer-thread", status: "working", error: null });
+    expect(session.getDraft(termId)).toBe("Keep my new draft");
+    expect(session.getDraftImages(termId)).toEqual([image]);
+    expect(session.get(termId)?.pending).toEqual([expect.objectContaining({ text: "Queued follow-up", images: [image] })]);
+    const forbidden = ["thread/start", "thread/fork", "turn/start", "turn/interrupt", "thread/goal/set", "thread/backgroundTerminals/clean"];
+    expect(sent.map(rpc).some((message) => forbidden.includes(String(message.method)))).toBe(false);
+    expect(workspaceRecovery.get(termId)?.agent?.sessionId).toBe("original-renderer-thread");
+  });
+
   test("Codex recovery waits for the exact saved thread before releasing follow-ups", async () => {
     const termId = "recover-codex";
     await session.start(termId, codexLaunch, "H:/project");
@@ -1160,6 +1261,52 @@ describe("Custom agent UI sessions", () => {
     expect(session.get(termId)?.status).toBe(mode === "queue" ? "working" : "idle");
     expect(sent.map(rpc).filter((message) => message.method === "turn/start")).toHaveLength(mode === "queue" ? 2 : 1);
   });
+
+  test.each(["steer", "queue"] as const)(
+    "keeps Claude background work active without premature completion in %s mode", async (mode) => {
+      const termId = `claude-background-${mode}`;
+      const completions: string[] = [];
+      const unsubscribe = session.subscribeTurnEnd((id) => completions.push(id));
+      try {
+        await session.start(termId, { ...grokLaunch, agent: "claude", program: "claude" }, "H:/project");
+        await flush();
+        session.setFollowupMode(mode);
+        session.submit(termId, "Review the repository");
+        await flush();
+        const startedAt = session.get(termId)?.workStartedAt;
+        feed({ type: "assistant", message: { content: [{ type: "tool_use", id: "call-1",
+          name: "Agent", input: { description: "Review parser" } }] } });
+        feed({ type: "user", toolUseResult: { status: "async_launched", agentId: "agent-1" },
+          message: { content: [{ type: "tool_result", tool_use_id: "call-1", content: "Launched" }] } });
+        feed({ type: "assistant", message: { stop_reason: "end_turn",
+          content: [{ type: "text", text: "I will continue when the agent finishes." }] } });
+        feed({ type: "result", is_error: false });
+        expect(session.get(termId)?.status).toBe("working");
+        expect(session.get(termId)?.workStartedAt).toBe(startedAt);
+        expect(completions).toHaveLength(0);
+
+        session.submit(termId, "Also check the tests");
+        await flush();
+        const userMessages = () => sent.map(rpc).filter((message) => message.type === "user");
+        expect(userMessages()).toHaveLength(mode === "steer" ? 2 : 1);
+        expect(session.get(termId)?.pending).toHaveLength(mode === "queue" ? 1 : 0);
+        feed({ type: "system", subtype: "task_notification", task_id: "agent-1",
+          status: "completed", summary: "Parser reviewed" });
+        expect(session.get(termId)?.status).toBe("working");
+        expect(completions).toHaveLength(0);
+        feed({ type: "assistant", message: { stop_reason: "end_turn",
+          content: [{ type: "text", text: "The review is complete." }] } });
+        await flush();
+        expect(session.get(termId)?.status).toBe(mode === "queue" ? "working" : "idle");
+        expect(userMessages()).toHaveLength(2);
+        expect(session.get(termId)?.pending).toHaveLength(0);
+        if (mode === "queue") feed({ type: "result", is_error: false });
+        expect(completions).toEqual([termId]);
+      } finally {
+        unsubscribe();
+      }
+    },
+  );
 
   test("does not overlay GROK_CONFIG follow_up_behavior when spawning Grok", async () => {
     expect(await session.start("t-grok-env", grokLaunch, "H:/project")).toBeNull();

@@ -7,6 +7,14 @@ import type { ScheduledSend, TimedSend } from "./scheduledSend";
 export const RECOVERY_KEY = "duckweed:workspace-recovery:v1";
 
 export interface AgentRecovery {
+  runtime?: {
+    instanceId: string;
+    sequence: number;
+    adapter: unknown;
+    userInitiatedTurn: boolean;
+    interrupted: boolean;
+    state: Omit<AgentSessionState, "items" | "pending">;
+  };
   launch: AgentLaunch;
   cwd: string;
   sessionId: string | null;

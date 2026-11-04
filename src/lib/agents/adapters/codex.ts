@@ -12,7 +12,7 @@ import {
 import { isAuthenticationFailure } from "../auth";
 import { isCodexCapacityError } from "../capacityReply";
 import { desktopConnectionFailure } from "../codexDesktop";
-import { applyEvent, type AgentEvent } from "../events";
+import { applyEvent, clampEnd, MAX_TEXT, MAX_TOOL_OUTPUT, type AgentEvent } from "../events";
 import type { AgentLaunch } from "../launch";
 import {
   emptyUsage,
@@ -738,22 +738,14 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     return null;
   }
 
-  function mergeChildStreamEvent(
-    previous: AgentEvent | undefined,
-    event: AgentEvent,
-  ): AgentEvent {
-    if (!previous || previous.type !== event.type) return event;
-    if (
-      (event.type === "assistant-delta" || event.type === "thinking-delta") &&
-      (previous.type === "assistant-delta" || previous.type === "thinking-delta")
-    ) {
-      return { ...event, text: previous.text + event.text };
+  function mergeChildStreamEvent(previous: AgentEvent | undefined, event: AgentEvent): AgentEvent {
+    if (event.type === "assistant-delta" || event.type === "thinking-delta") {
+      const earlier = previous?.type === event.type ? previous.text : "";
+      return { ...event, text: clampEnd(earlier + event.text, MAX_TEXT) };
     }
-    if (event.type === "tool" && previous.type === "tool") {
-      return {
-        ...event,
-        outputDelta: (previous.outputDelta ?? "") + (event.outputDelta ?? ""),
-      };
+    if (event.type === "tool") {
+      const earlier = previous?.type === "tool" ? previous.outputDelta ?? "" : "";
+      return { ...event, outputDelta: clampEnd(earlier + (event.outputDelta ?? ""), MAX_TOOL_OUTPUT) };
     }
     return event;
   }
@@ -1791,13 +1783,20 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       let bridge = options.desktopBridge ? await currentDesktopBridge() : null;
       if (disposed) return;
       let thread: Record<string, unknown>;
-      try {
-        thread = await request(ctx, "thread/start", { ...startParams, ...desktopBridgeParams(bridge) });
-      } catch (error) {
-        // Browser settings must never be the reason a conversation cannot open.
-        if (!bridge || disposed) throw error;
-        bridge = null;
-        thread = await request(ctx, "thread/start", startParams);
+      if (ctx.launch.resumeId) {
+        // The session coordinator resumes this exact conversation on idle.
+        // Opening a provisional thread first wastes memory and can leave an
+        // unrelated blank session behind after a renderer crash.
+        thread = { thread: { id: ctx.launch.resumeId } };
+      } else {
+        try {
+          thread = await request(ctx, "thread/start", { ...startParams, ...desktopBridgeParams(bridge) });
+        } catch (error) {
+          // Browser settings must never be the reason a conversation cannot open.
+          if (!bridge || disposed) throw error;
+          bridge = null;
+          thread = await request(ctx, "thread/start", startParams);
+        }
       }
       boundDesktopBridge = bridge?.fingerprint ?? null;
       desktopBridgeUnverified = false;
@@ -4128,7 +4127,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
      * idle fork resumes immediately), and still paint whatever history pages
      * arrived so the composer does not sit on "Loading conversation" forever.
      */
-    resume: (sessionId, ctx) => {
+    resume: (sessionId, ctx, resumeOptions) => {
       stoppedByUser = false;
       currentGoal = null;
       cancelPendingRootCompletion();
@@ -4196,7 +4195,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         try {
           result = await callResume(targetId);
         } catch (error: unknown) {
-          if (resumeErrorCode(error) !== RESUME_TIMEOUT) throw error;
+          if (resumeErrorCode(error) !== RESUME_TIMEOUT || resumeOptions?.allowFork === false) throw error;
           result = await recoverHungResume(targetId);
           recoveredFromHang = true;
         }
@@ -4323,6 +4322,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       return load()
         .catch((error: unknown) => {
           hydratingResume = false;
+          if (resumeOptions?.allowFork === false && resumeErrorCode(error) === RESUME_TIMEOUT && ctx.reconnect?.()) return false;
           if (rootTurnGeneration === resumeGeneration) {
             threadId = previousThreadId;
             settleRootTurn(null);

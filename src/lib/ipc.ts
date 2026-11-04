@@ -495,6 +495,7 @@ export const agentUnwatch = (id: string) => invoke<void>("agent_unwatch", { id }
 
 /** One line of an agent's headless protocol, or the notice that it ended. */
 export type AgentFrame =
+  | { kind: "sequenced"; sequence: number; frame: AgentFrame }
   | { kind: "stdout"; line: string }
   | { kind: "stderr"; line: string }
   | { kind: "automaticapproval"; permission_id: string; option_id: string }
@@ -507,6 +508,7 @@ export interface AgentAvailability {
 }
 
 export interface AgentSpawnOptions {
+  renderer_recovery_id?: string;
   program: string;
   args: string[];
   cwd?: string | null;
@@ -560,6 +562,10 @@ export const agentProcStart = (
   options: AgentSpawnOptions,
   onFrame: Channel<AgentFrame>,
 ) => invoke<AgentStarted>("agent_proc_start", { id, options, onFrame });
+
+/** Reconnect to a local agent without restarting or resending its prompt. */
+export const agentProcAttach = (id: string, instanceId: string, sequence: number, onFrame: Channel<AgentFrame>) =>
+  invoke<boolean>("agent_proc_attach", { id, instanceId, sequence, onFrame });
 
 /** Global native policy also applies to agents launched after this call. */
 export const agentAutomaticApproval = (setting: number | "until-disabled" | null) =>

@@ -3104,10 +3104,10 @@ export default function App() {
     const cleanup = () => {
       saveWorkspaceRef.current();
       agentSessions.flushRecovery();
-      // Killing processes is cleanup, not a request to forget the open panes.
       workspaceRecovery.freeze();
       void flushDurableStorage();
-      terminals.disposeAll();
+      // A document reload must leave native agents and PTYs available to the
+      // replacement renderer. The native window owns cleanup on actual exit.
     };
     window.addEventListener("beforeunload", cleanup);
     window.addEventListener("blur", checkpoint);

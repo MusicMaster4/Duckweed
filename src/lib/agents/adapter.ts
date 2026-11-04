@@ -32,6 +32,8 @@ export interface AdapterContext {
   acknowledgeSend?: (id: string | number) => void;
   /** Report something the UI should show. */
   emit: (event: AgentEvent) => void;
+  /** Retry a lost transport while preserving the provider-owned conversation. */
+  reconnect?: () => boolean;
   /** Open a provider-managed sign-in URL in the system browser. */
   openUrl?: (url: string) => Promise<void>;
   /** Provider-owned processes may live under a shared daemon instead of our transport. */
@@ -67,6 +69,9 @@ export interface AgentAdapter {
   args: (launch: AgentLaunch) => string[];
   /** The process is up: send whatever handshake the protocol needs. */
   start: (ctx: AdapterContext) => void;
+  /** Serializable protocol bookkeeping for reattaching a surviving process. */
+  checkpoint?: () => unknown;
+  restore?: (checkpoint: unknown) => boolean;
   /** One line from the agent's stdout. */
   receive: (line: string, ctx: AdapterContext) => void;
   /** The user submitted text and optional images. */
@@ -136,9 +141,14 @@ export interface AgentAdapter {
    * (`session/load`) can swap conversations without restarting. A fulfilled
    * promise reports whether the protocol accepted the requested session.
    * Returning `false`, or leaving this out as Claude does, means the running
-   * adapter cannot resume through its protocol.
+   * adapter cannot resume through its protocol. Automatic recovery disables
+   * forking so a slow connection cannot silently replace the original thread.
    */
-  resume?: (sessionId: string, ctx: AdapterContext) => Promise<boolean> | false;
+  resume?: (
+    sessionId: string,
+    ctx: AdapterContext,
+    options?: { allowFork?: boolean },
+  ) => Promise<boolean> | false;
   /** The user asked the current turn to stop. */
   interrupt: (ctx: AdapterContext) => void;
   /** The user answered a permission prompt. */

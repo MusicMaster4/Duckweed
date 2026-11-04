@@ -6,6 +6,7 @@ import {
   agentProcProbe,
   agentProcSend,
   agentProcStart,
+  agentProcAttach,
   agentProcStop,
   agentCodexAuthSync,
   openCodeModelsRefresh,
@@ -31,6 +32,9 @@ import { ProtocolWriter } from "./protocolWriter";
 import { AGENTS, agentPresentation, agentSpawnEnv } from "./catalog";
 import {
   applyEvent,
+  clampEnd,
+  MAX_TEXT,
+  MAX_TOOL_OUTPUT,
   didStatusEnterIdle,
   isAnnounceableTurn,
   isTurnEnd,
@@ -88,6 +92,9 @@ const STREAM_FLUSH_INTERVAL_MS = 50;
 
 interface Session {
   termId: string;
+  instanceId: string;
+  frameSequence: number;
+  handlingFrame: boolean;
   state: AgentSessionState;
   adapter: AgentAdapter;
   context: AdapterContext;
@@ -179,6 +186,9 @@ const RECONNECT_WINDOW_MS = 60_000;
 const recoveryTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
 function checkpoint(session: Session): void {
+  if (session.handlingFrame) { scheduleCheckpoint(session); return; }
+  // The protocol cursor and adapter state must describe the same painted data.
+  flushStreamEvents(session);
   const timer = recoveryTimers.get(session.termId);
   if (timer) clearTimeout(timer);
   recoveryTimers.delete(session.termId);
@@ -186,9 +196,19 @@ function checkpoint(session: Session): void {
   // Empty Codex threads have an id but no resumable rollout on disk yet.
   const sessionId = session.pendingResume?.id ??
     (session.restoring ? session.launch.resumeId :
-      session.state.agent === "codex" && !session.state.items.some((item) => item.kind === "user")
+      session.state.agent === "codex" && !session.launch.resumeId &&
+          !session.state.items.some((item) => item.kind === "user")
         ? null : session.state.sessionId);
+  const { items: _items, pending: _pending, ...runtimeState } = session.state;
   workspaceRecovery.update(session.termId, { agent: {
+    ...(session.adapter.checkpoint ? { runtime: {
+      instanceId: session.instanceId,
+      sequence: session.frameSequence,
+      adapter: session.adapter.checkpoint(),
+      userInitiatedTurn: session.userInitiatedTurn,
+      interrupted: session.interrupted,
+      state: runtimeState,
+    } } : {}),
     launch: {
       ...session.launch,
       prompt: null,
@@ -513,15 +533,15 @@ function streamEventKey(event: AgentEvent): string | null {
 }
 
 function mergeStreamEvent(previous: AgentEvent | undefined, event: AgentEvent): AgentEvent {
-  if (!previous || previous.type !== event.type) return event;
-  if (
-    (event.type === "assistant-delta" || event.type === "thinking-delta") &&
-    (previous.type === "assistant-delta" || previous.type === "thinking-delta")
-  ) {
-    return { ...event, text: previous.text + event.text };
+  // Bound the pending batch too. Background WebView timers can be delayed,
+  // so the reducer's eventual clamp alone cannot bound a fast native stream.
+  if (event.type === "assistant-delta" || event.type === "thinking-delta") {
+    const earlier = previous?.type === event.type ? previous.text : "";
+    return { ...event, text: clampEnd(earlier + event.text, MAX_TEXT) };
   }
-  if (event.type === "tool" && previous.type === "tool") {
-    return { ...event, outputDelta: (previous.outputDelta ?? "") + (event.outputDelta ?? "") };
+  if (event.type === "tool") {
+    const earlier = previous?.type === "tool" ? previous.outputDelta ?? "" : "";
+    return { ...event, outputDelta: clampEnd(earlier + (event.outputDelta ?? ""), MAX_TOOL_OUTPUT) };
   }
   return event;
 }
@@ -1158,6 +1178,17 @@ function reconnect(session: Session): boolean {
 function handleFrame(session: Session, frame: AgentFrame): void {
   if (session.disposed || session.connectionError) return;
   switch (frame.kind) {
+    case "sequenced": {
+      if (frame.sequence <= session.frameSequence) return;
+      session.handlingFrame = true;
+      try { handleFrame(session, frame.frame); }
+      finally {
+        session.handlingFrame = false;
+        session.frameSequence = frame.sequence;
+        scheduleCheckpoint(session);
+      }
+      return;
+    }
     case "automaticapproval": {
       // The native transport already sent this response. Let the adapter release
       // its request bookkeeping without writing a duplicate or clearing a newer
@@ -1250,7 +1281,7 @@ export async function start(
   launch = recovery ? launch : withRememberedPreferences(launch);
 
   const definition = AGENTS[launch.agent];
-  const adapter = createAdapter(launch.agent);
+  let adapter = createAdapter(launch.agent);
   const presentation = agentPresentation(launch.agent, launch.program);
 
   // Resolve "continue the latest conversation" before starting the protocol.
@@ -1288,6 +1319,9 @@ export async function start(
   );
   const session: Session = {
     termId,
+    instanceId: recovery?.runtime?.instanceId ?? crypto.randomUUID(),
+    frameSequence: recovery?.runtime?.sequence ?? 0,
+    handlingFrame: false,
     adapter,
     launch,
     stderr: [],
@@ -1363,6 +1397,7 @@ export async function start(
       cancelPendingSend: (id) => protocolWriter.cancel(id),
       acknowledgeSend: (id) => protocolWriter.acknowledge(id),
       emit: (event) => emit(session, event),
+      reconnect: () => reconnect(session),
       openUrl,
       runtimeProcesses: (pids) => invoke<void>("agent_proc_set_runtime_roots", { id: termId, pids }),
       syncAccount: (signedIn) => agentCodexAuthSync(termId, signedIn),
@@ -1382,24 +1417,53 @@ export async function start(
     },
   };
 
+  const liveRecovery = recovery?.runtime && adapter.restore ? recovery.runtime : null;
+  const restoredAdapter = !liveRecovery || adapter.restore!(liveRecovery.adapter);
+  if (liveRecovery && restoredAdapter) {
+    session.state = { ...session.state, ...liveRecovery.state, termId, items: session.state.items, pending: session.state.pending };
+    session.userInitiatedTurn = liveRecovery.userInitiatedTurn;
+    session.interrupted = liveRecovery.interrupted;
+  }
   sessions.set(termId, session);
-  checkpoint(session);
+  if (restoredAdapter) checkpoint(session);
   announce(termId);
 
   const channel = new Channel<AgentFrame>();
   channel.onmessage = (frame) => handleFrame(session, frame);
 
+  let attached = false;
   try {
-    // A WebView crash can leave the old native process alive under this id.
-    if (recovery) await agentProcStop(termId, options.preserveCodexWork).catch(() => {});
+    if (liveRecovery) {
+      if (!restoredAdapter) throw new Error("Could not restore the live agent checkpoint. Its process has been kept running.");
+      session.restoring = true;
+      attached = await agentProcAttach(termId, session.instanceId, session.frameSequence, channel);
+      session.restoring = false;
+      if (attached) {
+        session.recovery = null;
+        emit(session, { type: "resumed", sessionId: session.state.sessionId ?? "", title: "", silent: true });
+      }
+    }
+    if (liveRecovery && !attached) {
+      // The native app itself restarted, so there is no surviving pipe.
+      // Resume from the provider record using fresh protocol bookkeeping.
+      adapter = createAdapter(launch.agent);
+      session.adapter = adapter;
+      session.instanceId = crypto.randomUUID();
+      session.frameSequence = 0;
+      session.state = { ...session.state, status: "starting", permission: null };
+      checkpoint(session);
+    }
+    // Shared-service recovery replaces only the proxy, preserving its work.
+    if (!attached && recovery) await agentProcStop(termId, launch.agent === "codex" || options.preserveCodexWork).catch(() => {});
     if (session.disposed) return null;
-    await agentProcStart(
+    if (!attached) await agentProcStart(
       termId,
       {
         // Prefer the typed executable so wrappers like `claudex` still set their
         // proxy env before re-execing Claude Code. Canonical binaries remain the
         // fallback when a profile alias was resolved to one.
         program: launch.program,
+        renderer_recovery_id: adapter.checkpoint && adapter.restore ? session.instanceId : undefined,
         // Wrapper flags (`claudex --g`) must precede headless protocol args so
         // the wrapper can strip them before handing the rest to Claude.
         args: [
@@ -1442,10 +1506,13 @@ export async function start(
       await agentProcStop(termId).catch(() => {});
       return null;
     }
-    if (found) session.pendingResume = { id: found.id, title: found.title, silent: !!recovery };
+    if (found) {
+      session.pendingResume = { id: found.id, title: found.title, silent: !!recovery };
+      session.context.launch = { ...session.context.launch, resumeId: found.id };
+    }
   }
 
-  adapter.start(session.context);
+  if (!attached) adapter.start(session.context);
 
   // Claude only reports model/effort on the first turn's system/init. Until
   // then, seed the header and pickers from the same settings file the real
@@ -1925,6 +1992,7 @@ async function applyResume(session: Session, sessionId: string, title: string, s
   session.restoring = true;
   session.launch = { ...session.launch, resumeId: sessionId };
   const failed = () => {
+    if (session.disposed || session.reconnecting) return;
     session.userInitiatedTurn = false;
     if (session.recovery) {
       session.state = { ...session.state, items: session.recovery.items, sessionId };
@@ -1936,7 +2004,7 @@ async function applyResume(session: Session, sessionId: string, title: string, s
   };
   let attempt;
   try {
-    attempt = session.adapter.resume?.(sessionId, session.context);
+    attempt = session.adapter.resume?.(sessionId, session.context, { allowFork: !silent });
   } catch {
     failed();
     return;
