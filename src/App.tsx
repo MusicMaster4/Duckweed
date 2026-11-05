@@ -55,7 +55,11 @@ import * as agentSessions from "./lib/agents/session";
 import type { AgentId, AgentImageAttachment } from "./lib/agents/types";
 import { agentUiPreferences } from "./lib/agents/uiPreferences";
 import { codexCapacityReplySettings } from "./lib/agents/capacityReply";
-import { automaticApprovalSetting, startAutomaticApprovals } from "./lib/agents/automaticApproval";
+import {
+  automaticApprovalSetting,
+  hasPendingAutomaticApproval,
+  startAutomaticApprovals,
+} from "./lib/agents/automaticApproval";
 import { handleUnattendedPermission } from "./lib/agents/autoApproval";
 import {
   confirmCloseRunning,
@@ -1619,9 +1623,10 @@ export default function App() {
       }
 
       const previous = processState.current.get(termId);
+      const agentState = agentSessions.get(termId);
       const current = {
         busy: meta.busy,
-        exited: isSessionExited(meta.exited, agentSessions.get(termId)?.status),
+        exited: isSessionExited(meta.exited, agentState?.status),
         completionSeq: meta.completionSeq,
         completionStartedAt: meta.completionStartedAt,
         agent: meta.agent,
@@ -1645,6 +1650,9 @@ export default function App() {
 
       const sessionExited = !previous.exited && current.exited;
       if (!sessionExited && !shouldSignalCompletion(previous, current)) return;
+      // Record the sequence above so automatic permission prompts cannot leak a
+      // delayed sound, unread marker, or phone notification after approval.
+      if (!sessionExited && hasPendingAutomaticApproval(agentState, automaticApprovalRef.current)) return;
       const completionCue =
         !dailyLockedRef.current &&
         completionSoundEnabledRef.current &&
