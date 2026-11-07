@@ -567,6 +567,10 @@ export const agentProcStart = (
 export const agentProcAttach = (id: string, instanceId: string, sequence: number, onFrame: Channel<AgentFrame>) =>
   invoke<boolean>("agent_proc_attach", { id, instanceId, sequence, onFrame });
 
+/** Newest frame the native side produced for this renderer instance, or null when it is gone. */
+export const agentProcSequence = (id: string, instanceId: string) =>
+  invoke<number | null>("agent_proc_sequence", { id, instanceId });
+
 /** Global native policy also applies to agents launched after this call. */
 export const agentAutomaticApproval = (setting: number | "until-disabled" | null) =>
   invoke<void>("agent_automatic_approval", { setting });

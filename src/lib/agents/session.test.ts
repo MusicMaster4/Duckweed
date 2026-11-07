@@ -41,6 +41,9 @@ let sendOverride: ((line: string) => Promise<void>) | null = null;
 let nativeStops = 0;
 let nativeStarts = 0;
 let attachOverride: ((id: string, sequence: number, channel: { onmessage?: (frame: AgentFrame) => void }) => Promise<boolean>) | null = null;
+const attachedChannels: Array<{ onmessage?: ((frame: AgentFrame) => void) | null }> = [];
+let startedChannel: { onmessage?: ((frame: AgentFrame) => void) | null } | null = null;
+let nativeSequence: number | null = null;
 const desktopOpens: { threadId: string | null; cwd: string; prompt?: string }[] = [];
 let desktopFailure = false;
 const nativeStopModes: boolean[] = [];
@@ -73,10 +76,15 @@ mock.module("../ipc", () => ({
     }
     nativeStarts += 1;
     spawn = options;
+    startedChannel = onFrame;
     frameSink = (frame) => onFrame.onmessage?.(frame);
     return { program: options.program, pid: 1 };
   },
-  agentProcAttach: async (id: string, _instanceId: string, sequence: number, channel: { onmessage?: (frame: AgentFrame) => void }) => attachOverride ? attachOverride(id, sequence, channel) : false,
+  agentProcAttach: async (id: string, _instanceId: string, sequence: number, channel: { onmessage?: (frame: AgentFrame) => void }) => {
+    attachedChannels.push(channel);
+    return attachOverride ? attachOverride(id, sequence, channel) : false;
+  },
+  agentProcSequence: async () => nativeSequence,
   agentProcSend: async (_id: string, line: string) => {
     sent.push(line);
     await sendOverride?.(line);
@@ -762,6 +770,111 @@ describe("Custom agent UI sessions", () => {
       expect(session.get(termId)?.status).toBe("working");
       expect(workspaceRecovery.get(termId)?.agent?.runtime?.sequence).toBe(6);
     } finally { attachOverride = null; }
+  });
+
+  test("app restart starts restored Claude on a fresh channel after the declined attach ended its own", async () => {
+    const termId = "app-restart-fresh-claude-channel";
+    const launch: AgentLaunch = { ...grokLaunch, agent: "claude", program: "claude" };
+    await session.start(termId, launch, "H:/project");
+    frameSink?.({ kind: "sequenced", sequence: 1,
+      frame: { kind: "stdout", line: JSON.stringify({ type: "system", subtype: "init", session_id: "before-restart" }) } });
+    session.flushRecovery();
+    const saved = JSON.parse(JSON.stringify(workspaceRecovery.get(termId)?.agent));
+    expect(saved.runtime.sequence).toBe(1);
+    session.stop(termId);
+    await flush();
+    attachedChannels.length = 0;
+    // Tauri ends a channel the native side dropped. Later writes to its id are discarded.
+    attachOverride = async (_id, _sequence, channel) => {
+      (channel as { onmessage?: unknown }).onmessage = null;
+      return false;
+    };
+    try {
+      await session.start(termId, { ...saved.launch, resumeId: saved.sessionId }, saved.cwd, saved);
+      expect(attachedChannels).toHaveLength(1);
+      expect(startedChannel).not.toBe(attachedChannels[0]);
+      frameSink?.({ kind: "sequenced", sequence: 1,
+        frame: { kind: "stdout", line: JSON.stringify({ type: "system", subtype: "init", session_id: "after-restart" }) } });
+      expect(session.get(termId)?.sessionId).toBe("after-restart");
+    } finally {
+      attachOverride = null;
+      session.stop(termId);
+    }
+  });
+
+  test("a renderer that stops receiving native frames reattaches and replays the missed output", async () => {
+    const termId = "stalled-claude-channel";
+    const launch: AgentLaunch = { ...grokLaunch, agent: "claude", program: "claude" };
+    await session.start(termId, launch, "H:/project");
+    const line = (frame: unknown): AgentFrame => ({ kind: "stdout", line: JSON.stringify(frame) });
+    const stalled = startedChannel;
+    stalled?.onmessage?.({ kind: "sequenced", sequence: 1,
+      frame: line({ type: "system", subtype: "init", session_id: "stalled-session" }) });
+    session.submit(termId, "Keep working");
+    await flush();
+    attachedChannels.length = 0;
+    const replay = [
+      line({ type: "stream_event", event: { type: "message_start" } }),
+      line({ type: "stream_event", event: { type: "content_block_start", index: 0, content_block: { type: "text" } } }),
+      line({ type: "stream_event", event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Still here" } } }),
+    ];
+    nativeSequence = 4;
+    let attachedFrom: number | null = null;
+    attachOverride = async (_id, sequence, channel) => {
+      attachedFrom = sequence;
+      replay.forEach((frame, index) => channel.onmessage?.({ kind: "sequenced", sequence: index + 2, frame }));
+      return true;
+    };
+    try {
+      // One poll behind may just be a busy renderer; two without progress is a lost channel.
+      await session.verifyDelivery(termId);
+      expect(attachedChannels).toHaveLength(0);
+      await session.verifyDelivery(termId);
+      expect(attachedFrom).toBe(1);
+      expect(attachedChannels).toHaveLength(1);
+      expect(attachedChannels[0]).not.toBe(stalled);
+      session.flushRecovery();
+      expect(session.get(termId)?.items.filter((item) => item.kind === "assistant")).toEqual([
+        expect.objectContaining({ text: "Still here" }),
+      ]);
+      // The muted channel cannot interleave late frames with the replay.
+      stalled?.onmessage?.({ kind: "sequenced", sequence: 5,
+        frame: line({ type: "stream_event", event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: " twice" } } }) });
+      session.flushRecovery();
+      expect(session.get(termId)?.items.filter((item) => item.kind === "assistant")).toEqual([
+        expect.objectContaining({ text: "Still here" }),
+      ]);
+      // Caught up: no further reattach.
+      await session.verifyDelivery(termId);
+      await session.verifyDelivery(termId);
+      expect(attachedChannels).toHaveLength(1);
+    } finally {
+      attachOverride = null;
+      nativeSequence = null;
+      session.stop(termId);
+    }
+  });
+
+  test("a renderer error in one frame does not stop later frames", async () => {
+    const termId = "frame-handler-error";
+    const launch: AgentLaunch = { ...grokLaunch, agent: "claude", program: "claude" };
+    await session.start(termId, launch, "H:/project");
+    const channel = startedChannel!;
+    const errors = console.error;
+    console.error = () => {};
+    try {
+      // Tauri stops dispatching a channel whose handler throws, so it must never escape.
+      expect(() => channel.onmessage?.({ kind: "sequenced", sequence: 1, frame: null } as unknown as AgentFrame)).not.toThrow();
+    } finally {
+      console.error = errors;
+    }
+    channel.onmessage?.({ kind: "sequenced", sequence: 2,
+      frame: { kind: "stdout", line: JSON.stringify({ type: "system", subtype: "init", session_id: "after-error" }) } });
+    expect(session.get(termId)?.sessionId).toBe("after-error");
+    expect(session.get(termId)?.items).toContainEqual(expect.objectContaining({
+      kind: "notice", tone: "error", text: expect.stringContaining("could not display an agent update"),
+    }));
+    session.stop(termId);
   });
 
   test("renderer recovery preserves active Codex work and resumes without creating another thread", async () => {

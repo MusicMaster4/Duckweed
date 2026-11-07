@@ -608,6 +608,15 @@ impl AgentProcManager {
         }
     }
 
+    /// Newest frame produced for a replayable renderer. A renderer that stays
+    /// behind it is not receiving its channel and must reattach.
+    pub fn sequence(&self, id: &str, instance_id: &str) -> Option<u64> {
+        let handle = self.get(id)?;
+        let delivery = handle.lock().unwrap().channel.clone();
+        let delivery = delivery.lock().unwrap();
+        (delivery.instance_id.as_deref() == Some(instance_id)).then_some(delivery.sequence)
+    }
+
     /// Atomically replace a lost renderer channel and replay only newer frames.
     pub fn attach(&self, id: &str, instance_id: &str, sequence: u64, channel: Channel<AgentFrame>) -> Result<bool, String> {
         let Some(handle) = self.get(id) else { return Ok(false); };
@@ -1277,6 +1286,9 @@ mod tests {
         // to this one or discard the output needed by its actual renderer.
         assert!(manager.attach("live-recovery", "other-process", checkpoint, Channel::new(|_| Ok(()))).is_err());
         let latest = delivery.lock().unwrap().sequence;
+        // The renderer compares this cursor with its own to detect a silent channel.
+        assert!(manager.sequence("live-recovery", "local-fixture").is_some_and(|sequence| sequence >= latest && sequence > checkpoint));
+        assert_eq!(manager.sequence("live-recovery", "other-process"), None);
         manager.checkpoint_saved("live-recovery", "other-process", latest);
         let (new_tx, new_rx) = mpsc::channel();
         assert!(manager.attach("live-recovery", "local-fixture", checkpoint, Channel::new(move |body| { let _ = new_tx.send(body); Ok(()) })).unwrap());

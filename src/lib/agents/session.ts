@@ -7,6 +7,7 @@ import {
   agentProcSend,
   agentProcStart,
   agentProcAttach,
+  agentProcSequence,
   agentProcStop,
   agentCodexAuthSync,
   openCodeModelsRefresh,
@@ -95,6 +96,14 @@ interface Session {
   instanceId: string;
   frameSequence: number;
   handlingFrame: boolean;
+  /** The channel the native side currently writes to; replaced on reattach. */
+  channel: Channel<AgentFrame> | null;
+  /** Polls the native cursor so a channel that silently stopped delivering is replaced. */
+  deliveryWatch: ReturnType<typeof setInterval> | null;
+  /** Local cursor seen behind the native one on the previous poll. */
+  deliveryStalledAt: number | null;
+  reattaching: boolean;
+  frameFailureReported: boolean;
   state: AgentSessionState;
   adapter: AgentAdapter;
   context: AdapterContext;
@@ -1175,6 +1184,107 @@ function reconnect(session: Session): boolean {
   return true;
 }
 
+/** How often a live session compares its frame cursor with the native one. */
+const DELIVERY_CHECK_INTERVAL_MS = 4_000;
+
+/**
+ * A fresh channel for every native call. Tauri ends a channel when the Rust
+ * side drops it, as `agent_proc_attach` does when no live process remains, and
+ * an ended channel silently discards everything later written to its id.
+ */
+function frameChannel(session: Session): Channel<AgentFrame> {
+  const channel = new Channel<AgentFrame>();
+  channel.onmessage = (frame) => {
+    // Tauri never delivers later messages on a channel whose handler threw.
+    try { handleFrame(session, frame); }
+    catch (error) { reportFrameFailure(session, error); }
+  };
+  return channel;
+}
+
+function reportFrameFailure(session: Session, error: unknown): void {
+  const detail = error instanceof Error ? error.message : String(error);
+  console.error("Duckweed could not apply an agent update", error);
+  session.stderr.push(`Renderer error: ${detail}`);
+  if (session.stderr.length > 50) session.stderr.shift();
+  if (session.frameFailureReported) return;
+  session.frameFailureReported = true;
+  try {
+    emit(session, { type: "notice", tone: "error", text: `Duckweed could not display an agent update: ${detail}` });
+  } catch {}
+}
+
+function watchDelivery(session: Session): void {
+  if (!TAURI_RUNTIME || session.deliveryWatch || session.disposed) return;
+  if (!session.adapter.checkpoint || !session.adapter.restore) return;
+  session.deliveryWatch = setInterval(() => void verifySessionDelivery(session), DELIVERY_CHECK_INTERVAL_MS);
+}
+
+function stopDeliveryWatch(session: Session): void {
+  if (session.deliveryWatch) clearInterval(session.deliveryWatch);
+  session.deliveryWatch = null;
+}
+
+/**
+ * Reattach when the native side has produced frames this renderer never saw.
+ * A lost large-payload fetch, a failed eval or an ended channel all look the
+ * same from here: the agent keeps working while the timeline stays frozen.
+ * Two consecutive polls without progress rule out a renderer that is merely busy.
+ */
+export async function verifyDelivery(termId: string): Promise<void> {
+  const session = sessions.get(termId);
+  if (session) await verifySessionDelivery(session);
+}
+
+async function verifySessionDelivery(session: Session): Promise<void> {
+  if (session.disposed || sessions.get(session.termId) !== session) {
+    stopDeliveryWatch(session);
+    return;
+  }
+  if (session.reattaching || !session.channel) return;
+  const local = session.frameSequence;
+  const remote = await agentProcSequence(session.termId, session.instanceId).catch(() => null);
+  if (sessions.get(session.termId) !== session || session.disposed || session.reattaching) return;
+  if (remote === null || remote <= local || session.frameSequence !== local) {
+    session.deliveryStalledAt = null;
+    return;
+  }
+  if (session.deliveryStalledAt !== local) {
+    session.deliveryStalledAt = local;
+    return;
+  }
+  session.deliveryStalledAt = null;
+  await reattachDelivery(session);
+}
+
+async function reattachDelivery(session: Session): Promise<void> {
+  const previous = session.channel;
+  const previousHandler = previous?.onmessage;
+  // Mute the stalled channel first. Its late frames are replayed in order on
+  // the new one, and interleaving both could skip a sequence.
+  if (previous) previous.onmessage = () => {};
+  const channel = frameChannel(session);
+  session.reattaching = true;
+  try {
+    if (await agentProcAttach(session.termId, session.instanceId, session.frameSequence, channel)) {
+      session.channel = channel;
+    } else if (previous && previousHandler) {
+      previous.onmessage = previousHandler;
+    }
+  } catch (error) {
+    if (previous && previousHandler) previous.onmessage = previousHandler;
+    stopDeliveryWatch(session);
+    emit(session, {
+      type: "notice",
+      tone: "error",
+      text: `Lost the live output of ${session.state.label}. ${error instanceof Error ? error.message : String(error)}`,
+    });
+    notifyNow(session);
+  } finally {
+    session.reattaching = false;
+  }
+}
+
 function handleFrame(session: Session, frame: AgentFrame): void {
   if (session.disposed || session.connectionError) return;
   switch (frame.kind) {
@@ -1322,6 +1432,11 @@ export async function start(
     instanceId: recovery?.runtime?.instanceId ?? crypto.randomUUID(),
     frameSequence: recovery?.runtime?.sequence ?? 0,
     handlingFrame: false,
+    channel: null,
+    deliveryWatch: null,
+    deliveryStalledAt: null,
+    reattaching: false,
+    frameFailureReported: false,
     adapter,
     launch,
     stderr: [],
@@ -1428,17 +1543,16 @@ export async function start(
   if (restoredAdapter) checkpoint(session);
   announce(termId);
 
-  const channel = new Channel<AgentFrame>();
-  channel.onmessage = (frame) => handleFrame(session, frame);
-
   let attached = false;
   try {
     if (liveRecovery) {
       if (!restoredAdapter) throw new Error("Could not restore the live agent checkpoint. Its process has been kept running.");
       session.restoring = true;
+      const channel = frameChannel(session);
       attached = await agentProcAttach(termId, session.instanceId, session.frameSequence, channel);
       session.restoring = false;
       if (attached) {
+        session.channel = channel;
         session.recovery = null;
         emit(session, { type: "resumed", sessionId: session.state.sessionId ?? "", title: "", silent: true });
       }
@@ -1456,7 +1570,10 @@ export async function start(
     // Shared-service recovery replaces only the proxy, preserving its work.
     if (!attached && recovery) await agentProcStop(termId, launch.agent === "codex" || options.preserveCodexWork).catch(() => {});
     if (session.disposed) return null;
-    if (!attached) await agentProcStart(
+    // Never reuse the attach channel: a declined attach ended it on the native
+    // side, so a process started on it would stream into nothing.
+    const channel = attached ? null : frameChannel(session);
+    if (channel) await agentProcStart(
       termId,
       {
         // Prefer the typed executable so wrappers like `claudex` still set their
@@ -1477,6 +1594,7 @@ export async function start(
       },
       channel,
     );
+    if (channel) session.channel = channel;
   } catch (error) {
     if (sessions.get(termId) !== session) return null;
     // Daemon maintenance can also close the replacement proxy during its
@@ -1513,6 +1631,7 @@ export async function start(
   }
 
   if (!attached) adapter.start(session.context);
+  watchDelivery(session);
 
   // Claude only reports model/effort on the first turn's system/init. Until
   // then, seed the header and pickers from the same settings file the real
@@ -2088,6 +2207,7 @@ export async function resume(
   // announced in between either — a pane that blinked back to its shell and
   // then to the agent would read as a crash.
   session.disposed = true;
+  stopDeliveryWatch(session);
   session.protocolWriter.close();
   cancelCapacityReply(session);
   sessions.delete(termId);
@@ -2149,6 +2269,7 @@ export async function newChat(termId: string): Promise<string | null> {
   const { launch } = session;
   const cwd = session.state.cwd;
   session.disposed = true;
+  stopDeliveryWatch(session);
   session.protocolWriter.close();
   cancelCapacityReply(session);
   sessions.delete(termId);
@@ -2254,6 +2375,7 @@ function disposeSession(termId: string, keepSurface = false, preserveCodexWork =
   }
   cancelCapacityReply(session);
   session.disposed = true;
+  stopDeliveryWatch(session);
   session.protocolWriter.close();
   const recoveryTimer = recoveryTimers.get(termId);
   if (recoveryTimer) clearTimeout(recoveryTimer);

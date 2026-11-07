@@ -603,6 +603,12 @@ fn agent_proc_attach(
     manager.attach(&id, &instance_id, sequence, on_frame)
 }
 
+/// Newest frame sequence produced for a live agent's renderer.
+#[tauri::command]
+fn agent_proc_sequence(manager: State<'_, AgentProcManager>, id: String, instance_id: String) -> Option<u64> {
+    manager.sequence(&id, &instance_id)
+}
+
 /// Global unattended permission policy, independent of window focus or visibility.
 #[tauri::command]
 fn agent_automatic_approval(manager: State<'_, AgentProcManager>, setting: serde_json::Value) {
@@ -1363,6 +1369,7 @@ fn main() {
             opencode_models_refresh,
             agent_proc_start,
             agent_proc_attach,
+            agent_proc_sequence,
             agent_proc_send,
             agent_automatic_approval,
             agent_proc_set_runtime_roots,
