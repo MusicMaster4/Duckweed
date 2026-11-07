@@ -23,6 +23,7 @@ import {
   type AgentAccessMode,
   type AgentFileChange,
   type AgentGoal,
+  type AgentItem,
   type AgentModelChoice,
   type AgentExtension,
   type AgentPrompt,
@@ -1298,7 +1299,7 @@ export function createClaudeAdapter(): AgentAdapter {
             callId,
             status: "running",
             output,
-            subagent: { activity: "Working" },
+            subagent: { activity: "Working", ...(agentId ? { taskId: agentId } : {}) },
           });
           continue;
         }
@@ -1417,7 +1418,9 @@ export function createClaudeAdapter(): AgentAdapter {
         if (callId && toolKind(tools.get(callId)?.name ?? "") === "task") {
           backgroundAgentCallByTaskId.set(taskId, callId);
           const status = backgroundAgents.get(callId);
-          if (status !== "done" && status !== "error") {
+          // `SendMessage` resumes a finished agent under its original task id.
+          // Only a fresh start may reopen it; late progress must not.
+          if (subtype === "task_started" || (status !== "done" && status !== "error")) {
             backgroundAgents.set(callId, "running");
             ctx.emit({
               type: "tool",
@@ -1863,9 +1866,26 @@ export function createClaudeAdapter(): AgentAdapter {
     } catch { return false; }
   }
 
+  /**
+   * A relaunched CLI keeps the conversation but not this bookkeeping. Agents
+   * from the restored rows can still report back, or be resumed by
+   * `SendMessage`, and those frames must find their original row.
+   */
+  function adoptTranscript(items: AgentItem[]): void {
+    for (const item of items) {
+      if (item.kind !== "tool" || toolKind(item.name) !== "task") continue;
+      if (!tools.has(item.callId)) tools.set(item.callId, { name: item.name, partialInput: "" });
+      const taskId = item.subagent?.taskId?.trim();
+      if (taskId && !backgroundAgentCallByTaskId.has(taskId)) {
+        backgroundAgentCallByTaskId.set(taskId, item.callId);
+      }
+    }
+  }
+
   return {
     checkpoint,
     restore,
+    adoptTranscript,
     endsOnStdinClose: true,
 
     // No `resume` here on purpose: `stream-json` has no method for swapping

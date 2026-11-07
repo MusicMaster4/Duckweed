@@ -641,6 +641,59 @@ describe("claude adapter", () => {
     expect(h.state().status).toBe("idle");
   });
 
+  test("reopens a finished background agent that SendMessage resumes", () => {
+    const h = harness();
+    h.adapter.prompt({ text: "Review", images: [] }, h.ctx);
+    launchBackgroundAgent(h, "call-1", "agent-1");
+    expect(h.state().items.find((item) => item.kind === "tool"))
+      .toMatchObject({ status: "running", subagent: { taskId: "agent-1" } });
+    h.feed({ type: "result", is_error: false });
+    h.feed({ type: "system", subtype: "task_notification", task_id: "agent-1",
+      status: "completed", summary: "First pass done" });
+    h.feed({ type: "assistant", message: { stop_reason: "end_turn", content: [] } });
+    expect(h.state().status).toBe("idle");
+
+    h.adapter.prompt({ text: "Ask it for more", images: [] }, h.ctx);
+    h.feed({ type: "assistant", message: { content: [{ type: "tool_use", id: "send-1",
+      name: "SendMessage", input: { to: "agent-1", message: "Add the sources" } }] } });
+    h.feed({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "send-1",
+      content: "{\"success\":true}" }] } });
+    h.feed({ type: "system", subtype: "task_started", task_id: "agent-1", tool_use_id: "send-1",
+      description: "Adding sources" });
+    const tasks = () => h.state().items.filter((item) => item.kind === "tool" && item.tool === "task");
+    expect(tasks()).toHaveLength(1);
+    expect(tasks()[0]).toMatchObject({ callId: "call-1", status: "running",
+      subagent: { activity: "Adding sources" } });
+    h.feed({ type: "result", is_error: false });
+    expect(h.state().status).toBe("working");
+    h.feed({ type: "system", subtype: "task_notification", task_id: "agent-1", tool_use_id: "send-1",
+      status: "completed", summary: "Sources added" });
+    expect(tasks()[0]).toMatchObject({ status: "done", output: "Sources added" });
+  });
+
+  test("routes frames for agents restored from history to their original rows", () => {
+    const h = harness();
+    const items = [
+      { kind: "user" as const, id: "user-1", at: 1, text: "Make the video" },
+      { kind: "tool" as const, id: "tool-call-1", at: 2, callId: "call-1", name: "Agent",
+        tool: "task" as const, title: "Research dossier", status: "error" as const, command: null,
+        output: "Stopped before reporting back.", changes: [],
+        subagent: { label: "Research dossier", taskId: "agent-1" } },
+    ];
+    h.events.push({ type: "transcript", items });
+    h.adapter.adoptTranscript!(items);
+    h.adapter.prompt({ text: "Ask research to continue", images: [] }, h.ctx);
+    h.feed({ type: "system", subtype: "task_started", task_id: "agent-1", tool_use_id: "send-1" });
+    const tasks = () => h.state().items.filter((item) => item.kind === "tool");
+    expect(tasks()).toHaveLength(1);
+    expect(tasks()[0]).toMatchObject({ callId: "call-1", status: "running" });
+    h.feed({ type: "user", message: { content: [{ type: "text", text:
+      "<task-notification><task-id>agent-1</task-id><tool-use-id>send-1</tool-use-id>" +
+      "<status>completed</status><summary>Dossier saved</summary></task-notification>" }] } });
+    expect(tasks()).toHaveLength(1);
+    expect(tasks()[0]).toMatchObject({ status: "done", output: "Dossier saved" });
+  });
+
   test.each(["structured", "xml"])("correlates %s completion by tool-use id without a launch task id", (format) => {
     const h = harness();
     h.adapter.prompt({ text: "Review", images: [] }, h.ctx);

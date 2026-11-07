@@ -322,6 +322,8 @@ export interface SubagentMeta {
   role?: string;
   /** Child thread id when the protocol exposes one. */
   threadId?: string;
+  /** Provider id for background work, which later completions report against. */
+  taskId?: string;
   /** Parent delegation call for nested protocol messages. */
   parentCallId?: string;
   /** Model selected for this child. */

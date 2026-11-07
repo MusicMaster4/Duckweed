@@ -1012,6 +1012,7 @@ function emitNow(session: Session, event: AgentEvent): void {
   // Record incoming user turns too, so resumed sessions and remote prompts are
   // available to Up/Down navigation without leaking prompts from another thread.
   if (event.type === "transcript") {
+    session.adapter.adoptTranscript?.(next.items);
     session.promptHistory = [];
     for (const item of next.items) {
       if (item.kind === "user") recordPromptHistory(session, item.text);
@@ -1630,7 +1631,11 @@ export async function start(
     }
   }
 
-  if (!attached) adapter.start(session.context);
+  if (!attached) {
+    // Rows recovered from a previous process were not streamed by this adapter.
+    if (session.state.items.length) adapter.adoptTranscript?.(session.state.items);
+    adapter.start(session.context);
+  }
   watchDelivery(session);
 
   // Claude only reports model/effort on the first turn's system/init. Until

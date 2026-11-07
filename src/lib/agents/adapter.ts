@@ -3,6 +3,7 @@ import type { AgentLaunch } from "./launch";
 import type {
   AgentAccessMode,
   AgentImageAttachment,
+  AgentItem,
   AgentPrompt,
   AgentQuestionAnswer,
   AgentExtension,
@@ -72,6 +73,11 @@ export interface AgentAdapter {
   /** Serializable protocol bookkeeping for reattaching a surviving process. */
   checkpoint?: () => unknown;
   restore?: (checkpoint: unknown) => boolean;
+  /**
+   * Learn the calls in a transcript this adapter did not stream itself, such as
+   * history restored after a relaunch, so later frames can update those rows.
+   */
+  adoptTranscript?: (items: AgentItem[]) => void;
   /** One line from the agent's stdout. */
   receive: (line: string, ctx: AdapterContext) => void;
   /** The user submitted text and optional images. */
