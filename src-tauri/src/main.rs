@@ -5,6 +5,7 @@ mod agent_activity;
 mod agent_documents;
 mod agent_proc;
 mod agent_sessions;
+mod automatic_approval;
 mod codex_desktop;
 mod codex_transport;
 mod discord_presence;
@@ -253,7 +254,16 @@ async fn settings_save(
             return Err("unsupported settings key".into());
         }
         // Reject corrupt payloads before they can replace the last good copy.
-        serde_json::from_str::<serde_json::Value>(&value).map_err(|error| error.to_string())?;
+        let parsed = serde_json::from_str::<serde_json::Value>(&value).map_err(|error| error.to_string())?;
+        let cursors: Vec<(String, String, u64)> = if key == "duckweed:workspace-recovery:v1" {
+            parsed["panes"].as_object().into_iter().flat_map(|panes| panes.iter())
+                .filter_map(|(id, pane)| {
+                    let runtime = &pane["agent"]["runtime"];
+                    Some((id.clone(), runtime["instanceId"].as_str()?.to_owned(), runtime["sequence"].as_u64()?))
+                })
+                .collect()
+        } else { Vec::new() };
+        drop(parsed);
 
         let state = app.state::<DurableSettings>();
         let _guard = state.0.lock().map_err(|error| error.to_string())?;
@@ -273,7 +283,11 @@ async fn settings_save(
 
         settings.insert(key, value);
         let raw = serde_json::to_vec_pretty(&settings).map_err(|error| error.to_string())?;
-        write_settings_file(&path, &raw)
+        write_settings_file(&path, &raw)?;
+        if let Some(manager) = app.try_state::<AgentProcManager>() {
+            for (id, instance_id, sequence) in cursors { manager.checkpoint_saved(&id, &instance_id, sequence); }
+        }
+        Ok(())
     })
     .await
 }
@@ -575,6 +589,30 @@ async fn agent_proc_start(
 ) -> Result<AgentStarted, String> {
     let manager = manager.inner().clone();
     blocking(move || agent_proc::start(&manager, on_frame, id, options)).await
+}
+
+/// Rebind a surviving local agent after the WebView document was replaced.
+#[tauri::command]
+fn agent_proc_attach(
+    manager: State<'_, AgentProcManager>,
+    id: String,
+    instance_id: String,
+    sequence: u64,
+    on_frame: Channel<AgentFrame>,
+) -> Result<bool, String> {
+    manager.attach(&id, &instance_id, sequence, on_frame)
+}
+
+/// Newest frame sequence produced for a live agent's renderer.
+#[tauri::command]
+fn agent_proc_sequence(manager: State<'_, AgentProcManager>, id: String, instance_id: String) -> Option<u64> {
+    manager.sequence(&id, &instance_id)
+}
+
+/// Global unattended permission policy, independent of window focus or visibility.
+#[tauri::command]
+fn agent_automatic_approval(manager: State<'_, AgentProcManager>, setting: serde_json::Value) {
+    manager.set_automatic_approval(&setting);
 }
 
 /// One protocol message to the agent's stdin.
@@ -882,9 +920,10 @@ async fn power_action(action: String) -> Result<(), String> {
 async fn play_completion_sound(
     player: State<'_, SoundPlayer>,
     cue_index: Option<usize>,
+    semitones: Option<i32>,
 ) -> Result<(), String> {
     let player = player.inner().clone();
-    blocking(move || player.play(cue_index)).await
+    blocking(move || player.play(cue_index, semitones.unwrap_or(0))).await
 }
 
 /// Validate and hand `url` to the OS default handler.
@@ -1160,10 +1199,10 @@ fn recover_failed_webview_renderer(window: &tauri::WebviewWindow) -> tauri::Resu
                         // conversation reset. Reload only after WebView2 says
                         // the renderer actually exited.
                         if renderer_exited {
-                            // The old JS channel is gone and cannot own these
-                            // headless processes after the document rebuilds.
+                            // Release stale renderer connections without pausing
+                            // provider-owned turns, goals or background terminals.
                             if let Some(manager) = app.try_state::<AgentProcManager>() {
-                                manager.stop_all();
+                                manager.recover_renderer();
                             }
                             let _ = sender.Reload();
                         }
@@ -1279,6 +1318,7 @@ fn main() {
                 let _ = disable_browser_accelerator_keys(&window);
                 let _ = recover_failed_webview_renderer(&window);
             }
+            app.state::<AgentProcManager>().start_approval_monitor();
             pty::start_busy_monitor(app.handle().clone())?;
             agent_activity::start_monitor(app.handle().clone())?;
             watch::start_monitor(app.handle().clone())?;
@@ -1328,7 +1368,10 @@ fn main() {
             agent_proc_probe,
             opencode_models_refresh,
             agent_proc_start,
+            agent_proc_attach,
+            agent_proc_sequence,
             agent_proc_send,
+            agent_automatic_approval,
             agent_proc_set_runtime_roots,
             agent_codex_auth_sync,
             agent_proc_close_stdin,

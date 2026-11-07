@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import type { AgentFrame, AgentSpawnOptions } from "../ipc";
 import type { AgentLaunch } from "./launch";
 import type { AgentImageAttachment } from "./types";
+import { startAutomaticApprovals } from "./automaticApproval";
 
 const store = new Map<string, string>();
 const stubWindow = {
@@ -38,6 +39,11 @@ let spawnFailure: string | null = null;
 let spawnFailureOnce = false;
 let sendOverride: ((line: string) => Promise<void>) | null = null;
 let nativeStops = 0;
+let nativeStarts = 0;
+let attachOverride: ((id: string, sequence: number, channel: { onmessage?: (frame: AgentFrame) => void }) => Promise<boolean>) | null = null;
+const attachedChannels: Array<{ onmessage?: ((frame: AgentFrame) => void) | null }> = [];
+let startedChannel: { onmessage?: ((frame: AgentFrame) => void) | null } | null = null;
+let nativeSequence: number | null = null;
 const desktopOpens: { threadId: string | null; cwd: string; prompt?: string }[] = [];
 let desktopFailure = false;
 const nativeStopModes: boolean[] = [];
@@ -68,16 +74,24 @@ mock.module("../ipc", () => ({
       if (spawnFailureOnce) { spawnFailure = null; spawnFailureOnce = false; }
       throw new Error(reason);
     }
+    nativeStarts += 1;
     spawn = options;
+    startedChannel = onFrame;
     frameSink = (frame) => onFrame.onmessage?.(frame);
     return { program: options.program, pid: 1 };
   },
+  agentProcAttach: async (id: string, _instanceId: string, sequence: number, channel: { onmessage?: (frame: AgentFrame) => void }) => {
+    attachedChannels.push(channel);
+    return attachOverride ? attachOverride(id, sequence, channel) : false;
+  },
+  agentProcSequence: async () => nativeSequence,
   agentProcSend: async (_id: string, line: string) => {
     sent.push(line);
     await sendOverride?.(line);
   },
   agentProcStop: async (_id: string, preserveCodexWork = false) => { nativeStops += 1; nativeStopModes.push(preserveCodexWork); },
   agentCodexAuthSync: async () => "unchanged",
+  codexDesktopBridge: async () => null,
   agentProcCloseStdin: async () => {},
   agentProcProbe: async () => [],
   openCodeModelsRefresh: async () => {},
@@ -164,7 +178,9 @@ async function codexHandshake(sessionId = "01900000-0000-7000-8000-000000000001"
   const accountRead = sent.map(rpc).findLast((message) => message.method === "account/read");
   feed({ jsonrpc: "2.0", id: accountRead?.id, result: { account: { type: "chatgpt" } } });
   await flush();
-  const threadStart = sent.map(rpc).findLast((message) => message.method === "thread/start");
+  const connectionStart = sent.findLastIndex((line) => rpc(line).method === "initialize");
+  const threadStart = sent.slice(connectionStart).map(rpc).findLast((message) => message.method === "thread/start");
+  if (!threadStart) return;
   feed({
     jsonrpc: "2.0",
     id: threadStart?.id,
@@ -177,6 +193,81 @@ const session = await import("./session");
 const { workspaceRecovery, RECOVERY_KEY, parseRecovery } = await import("../workspaceRecovery");
 
 describe("Custom agent UI sessions", () => {
+
+  test("automatic approvals receive Claude permissions while animation frames are suspended", async () => {
+    const termId = "background-claude-approval";
+    const originalFrame = stubWindow.requestAnimationFrame;
+    stubWindow.requestAnimationFrame = () => 123;
+    const timers = new Map<number, () => void>();
+    let nextTimer = 0;
+    const stop = startAutomaticApprovals(session, () => "until-disabled", {
+      now: () => Date.now(),
+      schedule: (callback) => {
+        const id = ++nextTimer;
+        timers.set(id, callback);
+        return id as unknown as ReturnType<typeof setTimeout>;
+      },
+      cancel: (id) => { timers.delete(id as unknown as number); },
+    });
+    try {
+      await session.start(termId, { ...grokLaunch, agent: "claude", program: "claudex" }, "H:/project");
+      await flush();
+      feed({ type: "system", subtype: "init", session_id: "background-session" });
+      // Two successive decisions must work without a single paint, including
+      // clearing the previous permission and scheduling the next one.
+      for (const requestId of ["background-1", "background-2"]) {
+        feed({ type: "control_request", request_id: requestId, request: {
+          subtype: "can_use_tool", tool_name: "Bash", input: { command: "echo test" },
+        } });
+        expect(session.get(termId)?.status).toBe("waiting");
+        expect(timers.size).toBe(1);
+        const callbacks = [...timers.values()];
+        timers.clear();
+        for (const callback of callbacks) callback();
+        await flush();
+        expect(sent.map(rpc)).toContainEqual({ type: "control_response", response: {
+          subtype: "success", request_id: requestId,
+          response: { behavior: "allow", updatedInput: { command: "echo test" } },
+        } });
+        expect(session.get(termId)?.permission).toBeNull();
+        expect(session.get(termId)?.status).toBe("working");
+      }
+    } finally {
+      stop();
+      session.stop(termId);
+      stubWindow.requestAnimationFrame = originalFrame;
+    }
+  });
+
+  test("native approvals reconcile suspended Claude UI without duplicate writes or clearing newer prompts", async () => {
+    const termId = "native-background-claude";
+    await session.start(termId, { ...grokLaunch, agent: "claude", program: "claudex" }, "H:/project");
+    await flush();
+    feed({ type: "system", subtype: "init", session_id: "native-session" });
+    const originalFrame = stubWindow.requestAnimationFrame;
+    stubWindow.requestAnimationFrame = () => 123;
+    try {
+      for (const requestId of ["native-1", "native-2"]) {
+        feed({ type: "control_request", request_id: requestId, request: {
+          subtype: "can_use_tool", tool_name: "Bash", input: { command: "echo test" },
+        } });
+      }
+      const before = sent.length;
+      frameSink?.({ kind: "automaticapproval", permission_id: "perm-native-1", option_id: "allow" });
+      expect(session.get(termId)?.permission?.id).toBe("perm-native-2");
+      expect(session.get(termId)?.status).toBe("waiting");
+      frameSink?.({ kind: "automaticapproval", permission_id: "perm-native-2", option_id: "allow" });
+      expect(session.get(termId)?.permission).toBeNull();
+      expect(session.get(termId)?.status).toBe("working");
+      // Replayed acknowledgements and UI clicks cannot answer the native decision again.
+      session.respond(termId, "perm-native-2", "allow");
+      frameSink?.({ kind: "automaticapproval", permission_id: "perm-native-2", option_id: "allow" });
+      await flush();
+      expect(sent.length).toBe(before);
+    } finally {
+      stubWindow.requestAnimationFrame = originalFrame;
+    }
+  });
 
   test("a rejected native send restores the message and images and stops the broken connection", async () => {
     const termId = "send-rejected";
@@ -622,6 +713,206 @@ describe("Custom agent UI sessions", () => {
     expect(session.readyForScheduledSend(termId)).toBe(false);
     session.submit(termId, "Keep this prompt");
     expect(session.getDraft(termId)).toBe("Keep this prompt");
+  });
+
+  test("renderer recovery reattaches live Claude with partial output and a pending permission", async () => {
+    const termId = "renderer-recovery-live-claude";
+    const launch: AgentLaunch = { ...grokLaunch, agent: "claude", program: "claudex" };
+    await session.start(termId, launch, "H:/project");
+    const native = (sequence: number, frame: unknown) => frameSink?.({ kind: "sequenced", sequence,
+      frame: { kind: "stdout", line: JSON.stringify(frame) } });
+    native(1, { type: "system", subtype: "init", session_id: "same-live-claude" });
+    session.submit(termId, "Continue my task");
+    await flush();
+    native(2, { type: "stream_event", event: { type: "message_start" } });
+    native(3, { type: "stream_event", event: { type: "content_block_start", index: 0, content_block: { type: "text" } } });
+    native(4, { type: "stream_event", event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Before crash" } } });
+    native(5, { type: "control_request", request_id: "pending-native-permission", request: {
+      subtype: "can_use_tool", tool_name: "Bash", input: { command: "echo recovery" },
+    } });
+    session.setDraft(termId, "Keep my draft");
+    session.setDraftImages(termId, [image]);
+    session.flushRecovery();
+    const saved = JSON.parse(JSON.stringify(workspaceRecovery.get(termId)?.agent));
+    expect(saved.runtime.sequence).toBe(5);
+    session.stop(termId);
+    await flush();
+    const startsBefore = nativeStarts;
+    const stopsBefore = nativeStops;
+    sent.length = 0;
+    attachOverride = async (id, sequence, channel) => {
+      expect(id).toBe(termId);
+      expect(sequence).toBe(5);
+      frameSink = (frame) => channel.onmessage?.(frame);
+      native(6, { type: "stream_event", event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: " after crash" } } });
+      return true;
+    };
+    try {
+      await session.start(termId, { ...saved.launch, resumeId: saved.sessionId }, saved.cwd, saved);
+      session.flushRecovery();
+      expect(nativeStarts).toBe(startsBefore);
+      expect(nativeStops).toBe(stopsBefore);
+      expect(sent).toEqual([]);
+      expect(session.get(termId)).toMatchObject({ sessionId: "same-live-claude", status: "waiting", error: null });
+      expect(session.get(termId)?.items.filter((item) => item.kind === "assistant")).toEqual([
+        expect.objectContaining({ text: "Before crash after crash", id: "m1-b0" }),
+      ]);
+      expect(session.getDraft(termId)).toBe("Keep my draft");
+      expect(session.getDraftImages(termId)).toEqual([image]);
+      // A duplicate native frame cannot append text twice.
+      native(6, { type: "stream_event", event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: " duplicate" } } });
+      session.respond(termId, "perm-pending-native-permission", "allow");
+      await flush();
+      expect(sent.map(rpc)).toContainEqual({ type: "control_response", response: {
+        subtype: "success", request_id: "pending-native-permission",
+        response: { behavior: "allow", updatedInput: { command: "echo recovery" } },
+      } });
+      expect(session.get(termId)?.status).toBe("working");
+      expect(workspaceRecovery.get(termId)?.agent?.runtime?.sequence).toBe(6);
+    } finally { attachOverride = null; }
+  });
+
+  test("app restart starts restored Claude on a fresh channel after the declined attach ended its own", async () => {
+    const termId = "app-restart-fresh-claude-channel";
+    const launch: AgentLaunch = { ...grokLaunch, agent: "claude", program: "claude" };
+    await session.start(termId, launch, "H:/project");
+    frameSink?.({ kind: "sequenced", sequence: 1,
+      frame: { kind: "stdout", line: JSON.stringify({ type: "system", subtype: "init", session_id: "before-restart" }) } });
+    session.flushRecovery();
+    const saved = JSON.parse(JSON.stringify(workspaceRecovery.get(termId)?.agent));
+    expect(saved.runtime.sequence).toBe(1);
+    session.stop(termId);
+    await flush();
+    attachedChannels.length = 0;
+    // Tauri ends a channel the native side dropped. Later writes to its id are discarded.
+    attachOverride = async (_id, _sequence, channel) => {
+      (channel as { onmessage?: unknown }).onmessage = null;
+      return false;
+    };
+    try {
+      await session.start(termId, { ...saved.launch, resumeId: saved.sessionId }, saved.cwd, saved);
+      expect(attachedChannels).toHaveLength(1);
+      expect(startedChannel).not.toBe(attachedChannels[0]);
+      frameSink?.({ kind: "sequenced", sequence: 1,
+        frame: { kind: "stdout", line: JSON.stringify({ type: "system", subtype: "init", session_id: "after-restart" }) } });
+      expect(session.get(termId)?.sessionId).toBe("after-restart");
+    } finally {
+      attachOverride = null;
+      session.stop(termId);
+    }
+  });
+
+  test("a renderer that stops receiving native frames reattaches and replays the missed output", async () => {
+    const termId = "stalled-claude-channel";
+    const launch: AgentLaunch = { ...grokLaunch, agent: "claude", program: "claude" };
+    await session.start(termId, launch, "H:/project");
+    const line = (frame: unknown): AgentFrame => ({ kind: "stdout", line: JSON.stringify(frame) });
+    const stalled = startedChannel;
+    stalled?.onmessage?.({ kind: "sequenced", sequence: 1,
+      frame: line({ type: "system", subtype: "init", session_id: "stalled-session" }) });
+    session.submit(termId, "Keep working");
+    await flush();
+    attachedChannels.length = 0;
+    const replay = [
+      line({ type: "stream_event", event: { type: "message_start" } }),
+      line({ type: "stream_event", event: { type: "content_block_start", index: 0, content_block: { type: "text" } } }),
+      line({ type: "stream_event", event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Still here" } } }),
+    ];
+    nativeSequence = 4;
+    let attachedFrom: number | null = null;
+    attachOverride = async (_id, sequence, channel) => {
+      attachedFrom = sequence;
+      replay.forEach((frame, index) => channel.onmessage?.({ kind: "sequenced", sequence: index + 2, frame }));
+      return true;
+    };
+    try {
+      // One poll behind may just be a busy renderer; two without progress is a lost channel.
+      await session.verifyDelivery(termId);
+      expect(attachedChannels).toHaveLength(0);
+      await session.verifyDelivery(termId);
+      expect(attachedFrom).toBe(1);
+      expect(attachedChannels).toHaveLength(1);
+      expect(attachedChannels[0]).not.toBe(stalled);
+      session.flushRecovery();
+      expect(session.get(termId)?.items.filter((item) => item.kind === "assistant")).toEqual([
+        expect.objectContaining({ text: "Still here" }),
+      ]);
+      // The muted channel cannot interleave late frames with the replay.
+      stalled?.onmessage?.({ kind: "sequenced", sequence: 5,
+        frame: line({ type: "stream_event", event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: " twice" } } }) });
+      session.flushRecovery();
+      expect(session.get(termId)?.items.filter((item) => item.kind === "assistant")).toEqual([
+        expect.objectContaining({ text: "Still here" }),
+      ]);
+      // Caught up: no further reattach.
+      await session.verifyDelivery(termId);
+      await session.verifyDelivery(termId);
+      expect(attachedChannels).toHaveLength(1);
+    } finally {
+      attachOverride = null;
+      nativeSequence = null;
+      session.stop(termId);
+    }
+  });
+
+  test("a renderer error in one frame does not stop later frames", async () => {
+    const termId = "frame-handler-error";
+    const launch: AgentLaunch = { ...grokLaunch, agent: "claude", program: "claude" };
+    await session.start(termId, launch, "H:/project");
+    const channel = startedChannel!;
+    const errors = console.error;
+    console.error = () => {};
+    try {
+      // Tauri stops dispatching a channel whose handler throws, so it must never escape.
+      expect(() => channel.onmessage?.({ kind: "sequenced", sequence: 1, frame: null } as unknown as AgentFrame)).not.toThrow();
+    } finally {
+      console.error = errors;
+    }
+    channel.onmessage?.({ kind: "sequenced", sequence: 2,
+      frame: { kind: "stdout", line: JSON.stringify({ type: "system", subtype: "init", session_id: "after-error" }) } });
+    expect(session.get(termId)?.sessionId).toBe("after-error");
+    expect(session.get(termId)?.items).toContainEqual(expect.objectContaining({
+      kind: "notice", tone: "error", text: expect.stringContaining("could not display an agent update"),
+    }));
+    session.stop(termId);
+  });
+
+  test("renderer recovery preserves active Codex work and resumes without creating another thread", async () => {
+    const termId = "renderer-recovery-live-codex";
+    await session.start(termId, codexLaunch, "H:/project");
+    await codexHandshake("original-renderer-thread");
+    session.submit(termId, "Continue the existing task");
+    await flush();
+    const turn = sent.map(rpc).findLast((message) => message.method === "turn/start");
+    feed({ id: turn?.id, result: { turn: { id: "running-turn" } } });
+    session.submit(termId, "Queued follow-up", [image]);
+    session.setDraft(termId, "Keep my new draft");
+    session.setDraftImages(termId, [image]);
+    session.flushRecovery();
+    const saved = JSON.parse(JSON.stringify(workspaceRecovery.get(termId)?.agent));
+    // Drop the old JS fixture, then observe only the renderer's restore path.
+    session.stop(termId);
+    await flush();
+    const beforeStops = nativeStopModes.length;
+    sent.length = 0;
+    await session.start(termId, { ...saved.launch, resumeId: saved.sessionId }, saved.cwd, saved);
+    await codexHandshake();
+    expect(nativeStopModes.slice(beforeStops)).toEqual([true]);
+    expect(sent.map(rpc).some((message) => message.method === "thread/start")).toBe(false);
+    const resume = sent.map(rpc).findLast((message) => message.method === "thread/resume");
+    expect(resume?.params).toMatchObject({ threadId: "original-renderer-thread" });
+    feed({ id: resume?.id, result: { thread: {
+      id: "original-renderer-thread", activeTurnId: "running-turn",
+      turns: [{ id: "running-turn", status: "inProgress", items: [] }],
+    } } });
+    await flush();
+    expect(session.get(termId)).toMatchObject({ sessionId: "original-renderer-thread", status: "working", error: null });
+    expect(session.getDraft(termId)).toBe("Keep my new draft");
+    expect(session.getDraftImages(termId)).toEqual([image]);
+    expect(session.get(termId)?.pending).toEqual([expect.objectContaining({ text: "Queued follow-up", images: [image] })]);
+    const forbidden = ["thread/start", "thread/fork", "turn/start", "turn/interrupt", "thread/goal/set", "thread/backgroundTerminals/clean"];
+    expect(sent.map(rpc).some((message) => forbidden.includes(String(message.method)))).toBe(false);
+    expect(workspaceRecovery.get(termId)?.agent?.sessionId).toBe("original-renderer-thread");
   });
 
   test("Codex recovery waits for the exact saved thread before releasing follow-ups", async () => {
@@ -1083,6 +1374,52 @@ describe("Custom agent UI sessions", () => {
     expect(session.get(termId)?.status).toBe(mode === "queue" ? "working" : "idle");
     expect(sent.map(rpc).filter((message) => message.method === "turn/start")).toHaveLength(mode === "queue" ? 2 : 1);
   });
+
+  test.each(["steer", "queue"] as const)(
+    "keeps Claude background work active without premature completion in %s mode", async (mode) => {
+      const termId = `claude-background-${mode}`;
+      const completions: string[] = [];
+      const unsubscribe = session.subscribeTurnEnd((id) => completions.push(id));
+      try {
+        await session.start(termId, { ...grokLaunch, agent: "claude", program: "claude" }, "H:/project");
+        await flush();
+        session.setFollowupMode(mode);
+        session.submit(termId, "Review the repository");
+        await flush();
+        const startedAt = session.get(termId)?.workStartedAt;
+        feed({ type: "assistant", message: { content: [{ type: "tool_use", id: "call-1",
+          name: "Agent", input: { description: "Review parser" } }] } });
+        feed({ type: "user", toolUseResult: { status: "async_launched", agentId: "agent-1" },
+          message: { content: [{ type: "tool_result", tool_use_id: "call-1", content: "Launched" }] } });
+        feed({ type: "assistant", message: { stop_reason: "end_turn",
+          content: [{ type: "text", text: "I will continue when the agent finishes." }] } });
+        feed({ type: "result", is_error: false });
+        expect(session.get(termId)?.status).toBe("working");
+        expect(session.get(termId)?.workStartedAt).toBe(startedAt);
+        expect(completions).toHaveLength(0);
+
+        session.submit(termId, "Also check the tests");
+        await flush();
+        const userMessages = () => sent.map(rpc).filter((message) => message.type === "user");
+        expect(userMessages()).toHaveLength(mode === "steer" ? 2 : 1);
+        expect(session.get(termId)?.pending).toHaveLength(mode === "queue" ? 1 : 0);
+        feed({ type: "system", subtype: "task_notification", task_id: "agent-1",
+          status: "completed", summary: "Parser reviewed" });
+        expect(session.get(termId)?.status).toBe("working");
+        expect(completions).toHaveLength(0);
+        feed({ type: "assistant", message: { stop_reason: "end_turn",
+          content: [{ type: "text", text: "The review is complete." }] } });
+        await flush();
+        expect(session.get(termId)?.status).toBe(mode === "queue" ? "working" : "idle");
+        expect(userMessages()).toHaveLength(2);
+        expect(session.get(termId)?.pending).toHaveLength(0);
+        if (mode === "queue") feed({ type: "result", is_error: false });
+        expect(completions).toEqual([termId]);
+      } finally {
+        unsubscribe();
+      }
+    },
+  );
 
   test("does not overlay GROK_CONFIG follow_up_behavior when spawning Grok", async () => {
     expect(await session.start("t-grok-env", grokLaunch, "H:/project")).toBeNull();

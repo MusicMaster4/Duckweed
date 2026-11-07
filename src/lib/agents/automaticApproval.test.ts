@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
-  automaticApprovalDeadline, automaticApprovalSetting, startAutomaticApprovals,
+  automaticApprovalDeadline, automaticApprovalSetting, hasPendingAutomaticApproval, startAutomaticApprovals,
   type AutomaticApproval,
 } from "./automaticApproval";
 import type { AgentPermission } from "./types";
@@ -142,5 +142,42 @@ describe("delayed approvals across sessions", () => {
       expect(h.timers.size).toBe(0);
       stop();
     }
+  });
+});
+
+describe("automatic permission notification suppression", () => {
+  const now = 100_000;
+  const waiting = () => ({ status: "waiting" as const, permission: prompt() });
+
+  test("silences approval prompts with active timed or indefinite access", () => {
+    for (const setting of [now + 1, "until-disabled"] as const) {
+      expect(hasPendingAutomaticApproval(waiting(), setting, now)).toBe(true);
+    }
+    const always = { ...prompt(), options: [prompt().options[1]] };
+    expect(hasPendingAutomaticApproval({ status: "waiting", permission: always }, "until-disabled", now)).toBe(true);
+  });
+
+  test("keeps permission notifications when disabled or expired", () => {
+    for (const setting of [null, now - 1, now]) {
+      expect(hasPendingAutomaticApproval(waiting(), setting, now)).toBe(false);
+    }
+  });
+
+  test("keeps questions and requests without an affirmative option visible", () => {
+    for (const permission of [
+      { ...prompt(), kind: "question" as const },
+      { ...prompt(), options: [prompt().options[0]] },
+      null,
+    ]) {
+      expect(hasPendingAutomaticApproval({ status: "waiting", permission }, "until-disabled", now)).toBe(false);
+    }
+  });
+
+  test("keeps completion, error, exit, and terminal-only notifications", () => {
+    for (const status of ["idle", "working", "error", "exited"] as const) {
+      expect(hasPendingAutomaticApproval({ status, permission: null }, "until-disabled", now)).toBe(false);
+    }
+    expect(hasPendingAutomaticApproval(null, "until-disabled", now)).toBe(false);
+    expect(hasPendingAutomaticApproval(undefined, "until-disabled", now)).toBe(false);
   });
 });

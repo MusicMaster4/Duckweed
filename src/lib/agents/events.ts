@@ -140,10 +140,10 @@ export type AgentEvent =
   | { type: "turn-end" };
 
 /** Keep a tool's collected output bounded — panes render it, not tail it. */
-const MAX_TOOL_OUTPUT = 20_000;
+export const MAX_TOOL_OUTPUT = 20_000;
 
 /** Cap a streamed block so one runaway response cannot grow without bound. */
-const MAX_TEXT = 160_000;
+export const MAX_TEXT = 160_000;
 
 /** Child detail is auxiliary UI and must never be able to evict the parent chat. */
 const MAX_CHILD_ITEMS = 160;
@@ -196,7 +196,7 @@ function boundChildItems(items: AgentItem[]): AgentItem[] {
   return start === 0 ? items : items.slice(start);
 }
 
-function clampEnd(text: string, limit: number): string {
+export function clampEnd(text: string, limit: number): string {
   return text.length <= limit ? text : `…${text.slice(text.length - limit)}`;
 }
 
@@ -361,7 +361,11 @@ function mergeSubagentMeta(
   if (!current && !patch && !nestedItem) return undefined;
   const baseItems = patch?.items ?? current?.items ?? [];
   if (!nestedItem) {
-    return { ...current, ...patch };
+    return {
+      ...current,
+      ...patch,
+      ...(baseItems.length ? { items: boundChildItems(baseItems) } : {}),
+    };
   }
 
   const items = baseItems.slice();
@@ -371,7 +375,7 @@ function mergeSubagentMeta(
   } else {
     items[index] = { ...items[index], ...nestedItem } as AgentItem;
   }
-  return { ...current, ...patch, items };
+  return { ...current, ...patch, items: boundChildItems(items) };
 }
 
 /**

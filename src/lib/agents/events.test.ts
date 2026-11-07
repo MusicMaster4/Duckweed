@@ -187,6 +187,35 @@ describe("renderer memory bounds", () => {
     expect(state.items.at(-1)).toMatchObject({ kind: "notice", text: "child row 199" });
   });
 
+  test("bounds child detail embedded in a root tool without removing parent messages", () => {
+    let state = applyEvent(blank(), { type: "user", text: "Keep the parent conversation" });
+    state = applyEvent(state, { type: "assistant-snapshot", id: "root-answer", text: "Parent response" });
+    for (let index = 0; index < 240; index++) {
+      state = applyEvent(state, {
+        type: "tool", callId: "child", subagentItem: {
+          kind: "assistant", id: `child-${index}`, at: index, text: "x".repeat(10_000), streaming: false,
+        },
+      });
+    }
+    expect(state.items).toHaveLength(3);
+    expect(state.items[0]).toMatchObject({ kind: "user", text: "Keep the parent conversation" });
+    expect(state.items[1]).toMatchObject({ kind: "assistant", text: "Parent response" });
+    const tool = state.items[2];
+    if (tool.kind !== "tool") throw new Error("Missing child tool");
+    expect(tool.subagent?.items).toHaveLength(100);
+    expect(tool.subagent?.items?.at(-1)?.id).toBe("child-239");
+    state = applyEvent(state, {
+      type: "tool", callId: "child", subagent: { items: Array.from({ length: 200 }, (_, index) => ({
+        kind: "notice" as const, id: `snapshot-${index}`, at: index, tone: "info" as const, text: "child row",
+      })) },
+    });
+    const snapshot = state.items[2];
+    if (snapshot.kind !== "tool") throw new Error("Missing child snapshot");
+    expect(snapshot.subagent?.items).toHaveLength(160);
+    expect(snapshot.subagent?.items?.[0].id).toBe("snapshot-40");
+    expect(state.items[0]).toMatchObject({ text: "Keep the parent conversation" });
+  });
+
   test("caps a single streamed response", () => {
     const state = applyEvent(blank(), {
       type: "assistant-delta",

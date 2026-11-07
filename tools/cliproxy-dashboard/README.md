@@ -8,7 +8,7 @@ Run `cliproxy dashboard` to open it. Its password is stored in `C:\Users\jubar\.
 
 Choose **Add account**, select a provider, and sign in. Repeat with another account. The provider's sign-in page controls account selection. Adding an account preserves the existing credentials. API key connections also support multiple keys.
 
-The backend checks for due refreshes every minute; Claude usage is fetched at most once every ten minutes to avoid throttling. The panel checks for updates every ten seconds and updates reset countdowns locally. Provider errors preserve the last successful result and mark it stale. Rate limiting delays retries with exponential backoff and respects `Retry-After`, starting at ten minutes for Claude and five minutes for other providers. The panel never estimates an unavailable quota or resets a provider's allowance.
+The backend checks for due refreshes every minute; Claude usage is fetched at most once every ten minutes to avoid throttling. The panel checks for updates every ten seconds and updates reset countdowns locally. Provider errors preserve the last successful result and mark it stale. Rate limiting delays retries with exponential backoff and respects `Retry-After`, starting at ten minutes for Claude and five minutes for other providers. The panel never estimates an unavailable quota or resets a provider's allowance. After a fresh Claude quota reading confirms recovery (including an upgrade), the monitor clears an obsolete local quota cooldown through the native routing API. It checks the current credential again before resetting, preserves authentication and other non-quota restrictions, and records the reconciliation in `priority-status.json`. An unchanged balance cannot repeatedly clear a new rate limit; cached or failed quota readings cannot release a cooldown. The normal ten-minute Claude polling interval still applies.
 
 The full manager automatically updates Claude, Codex, Antigravity and Grok quota readings every minute while its browser tab is visible. Updates preserve the current cards until fresh readings arrive, prevent overlapping requests and reject results from an old login session. Failed updates retain the last reading and back off. The native **Quota Management** page shares Claude's cache and retry deadline through the local dashboard. Cached readings display their timestamp and any pending retry. Glow and text shadows are disabled. `patch-management.cjs` backs up the installed management page before applying the bridge, validates the expected bundle before editing it, and reapplies the patch when the dashboard starts or the proxy replaces the page. If a future management UI changes its bundle, the patch leaves that version unchanged and logs a message.
 
@@ -61,6 +61,7 @@ Live Duckweed protocol checks passed for Claude, Codex and Grok, including tool 
 node --test tools/cliproxy-dashboard/dashboard.test.cjs
 node --test tools/cliproxy-dashboard/codex-transport.test.cjs
 node --test tools/cliproxy-dashboard/quota-cache.test.cjs
+node --test tools/cliproxy-dashboard/cooldown-recovery.test.cjs tools/cliproxy-dashboard/quota-recovery.test.cjs
 python tools/cliproxy-dashboard/routing-integration.py
 python tools/cliproxy-dashboard/codex-transport-integration.py
 python tools/cliproxy-dashboard/codex-transport-integration.py --large-history

@@ -55,7 +55,11 @@ import * as agentSessions from "./lib/agents/session";
 import type { AgentId, AgentImageAttachment } from "./lib/agents/types";
 import { agentUiPreferences } from "./lib/agents/uiPreferences";
 import { codexCapacityReplySettings } from "./lib/agents/capacityReply";
-import { automaticApprovalSetting, startAutomaticApprovals } from "./lib/agents/automaticApproval";
+import {
+  automaticApprovalSetting,
+  hasPendingAutomaticApproval,
+  startAutomaticApprovals,
+} from "./lib/agents/automaticApproval";
 import { handleUnattendedPermission } from "./lib/agents/autoApproval";
 import {
   confirmCloseRunning,
@@ -80,6 +84,7 @@ import * as suggestFeedback from "./lib/suggestFeedback";
 import { observeDesktopActivity } from "./lib/desktopActivity";
 import {
   frontendReady,
+  agentAutomaticApproval,
   listShells,
   mobileAckCommand,
   mobileCancelCompletion,
@@ -138,6 +143,7 @@ import { workspaceRecovery } from "./lib/workspaceRecovery";
 import { deliverDueMessageQueues } from "./lib/scheduledSend";
 import {
   shouldPlayCompletionSound,
+  isSessionExited,
   shouldSignalCompletion,
   type ProcessState,
 } from "./lib/processActivity";
@@ -435,6 +441,7 @@ export default function App() {
   /** Kept here because the dock unmounts while Settings is up: the tool the
       user left open has to be the one waiting when they switch back. */
   const [toolsSection, setToolsSection] = useState<ToolsSectionId>("files");
+  const [exitedTermIds, setExitedTermIds] = useState<Set<string>>(() => new Set());
   const [unreadTermIds, setUnreadTermIds] = useState<Set<string>>(() => new Set());
   // Selected panes do not get a desktop unread outline. Once their idle grace
   // period really expires, keep the matching phone alert unread until local
@@ -873,6 +880,7 @@ export default function App() {
     }
     spawnOpts.current.delete(term);
     processState.current.delete(term);
+    setExitedTermIds((previous) => acknowledgeCompletion(previous, term));
     const previousSchedules = scheduledSendsRef.current;
     const nextSchedules = new Map(previousSchedules);
     for (const [sourceTermId, scheduled] of previousSchedules) {
@@ -1615,9 +1623,10 @@ export default function App() {
       }
 
       const previous = processState.current.get(termId);
+      const agentState = agentSessions.get(termId);
       const current = {
         busy: meta.busy,
-        exited: meta.exited,
+        exited: isSessionExited(meta.exited, agentState?.status),
         completionSeq: meta.completionSeq,
         completionStartedAt: meta.completionStartedAt,
         agent: meta.agent,
@@ -1625,17 +1634,29 @@ export default function App() {
         processStartedAt: meta.processStartedAt,
       };
       processState.current.set(termId, current);
+      if (previous?.exited !== current.exited) {
+        setExitedTermIds((previousIds) => {
+          const next = new Set(previousIds);
+          if (current.exited) next.add(termId);
+          else next.delete(termId);
+          return next;
+        });
+      }
       if (!previous) return;
 
       if (current.completionSeq > previous.completionSeq) {
         completeScheduledSendsForTarget(termId);
       }
 
-      if (!shouldSignalCompletion(previous, current)) return;
+      const sessionExited = !previous.exited && current.exited;
+      if (!sessionExited && !shouldSignalCompletion(previous, current)) return;
+      // Record the sequence above so automatic permission prompts cannot leak a
+      // delayed sound, unread marker, or phone notification after approval.
+      if (!sessionExited && hasPendingAutomaticApproval(agentState, automaticApprovalRef.current)) return;
       const completionCue =
         !dailyLockedRef.current &&
         completionSoundEnabledRef.current &&
-        shouldPlayCompletionSound(previous, current)
+        (sessionExited || shouldPlayCompletionSound(previous, current))
           ? chooseCompletionCue()
           : null;
       // Agent turns are also delivered to paired phones. The transport runs in
@@ -1695,8 +1716,8 @@ export default function App() {
       // Every eligible completion gets one cue. The shared audio player
       // coalesces simultaneous finishes, so several agents returning together
       // do not stack copies of the effect.
-      if (completionCue !== null) playCompletionSound(completionCue);
-      if (isFocusedTerm(termId)) {
+      if (completionCue !== null) playCompletionSound(completionCue, sessionExited ? -12 : 0);
+      if (!sessionExited && isFocusedTerm(termId)) {
         if (completionHighlightsRef.current) flashCompletion(termId, "focused");
         return;
       }
@@ -1711,7 +1732,9 @@ export default function App() {
 
     const unsubscribers = termIds.map((termId) => {
       readState(termId);
-      return terminals.subscribeSession(termId, () => readState(termId));
+      const offTerminal = terminals.subscribeSession(termId, () => readState(termId));
+      const offAgent = agentSessions.subscribe(termId, () => readState(termId));
+      return () => { offTerminal(); offAgent(); };
     });
     return () => {
       for (const unsubscribe of unsubscribers) unsubscribe();
@@ -1856,8 +1879,16 @@ export default function App() {
   }, [dailyLocked, probeActivity, termIdsKey]);
 
   useEffect(() => {
+    // Native approval execution must not depend on renderer timers or tab mounts.
+    // Synchronize off as well, so disabling immediately cancels native work.
+    if (TAURI_RUNTIME) {
+      void agentAutomaticApproval(automaticApproval).catch((error) => {
+        console.error("Could not synchronize automatic approvals", error);
+      });
+    }
     if (automaticApproval === null) return;
-    const stop = startAutomaticApprovals(agentSessions, () => automaticApprovalRef.current);
+    const stop = TAURI_RUNTIME ? () => {} :
+      startAutomaticApprovals(agentSessions, () => automaticApprovalRef.current);
     // Use a wall-clock deadline so time spent closed or asleep counts too.
     const expire = () => {
       if (automaticApprovalSetting(automaticApprovalRef.current) === null) {
@@ -3081,10 +3112,10 @@ export default function App() {
     const cleanup = () => {
       saveWorkspaceRef.current();
       agentSessions.flushRecovery();
-      // Killing processes is cleanup, not a request to forget the open panes.
       workspaceRecovery.freeze();
       void flushDurableStorage();
-      terminals.disposeAll();
+      // A document reload must leave native agents and PTYs available to the
+      // replacement renderer. The native window owns cleanup on actual exit.
     };
     window.addEventListener("beforeunload", cleanup);
     window.addEventListener("blur", checkpoint);
@@ -3954,6 +3985,10 @@ export default function App() {
       ),
     [tabs, unreadTermIds],
   );
+  const exitedTabIds = new Set(tabs.filter((tab) =>
+    leaves(tab.root).some((node) => exitedTermIds.has(node.term) &&
+      (unreadTermIds.has(node.term) || completionFlashes.has(node.term))),
+  ).map((tab) => tab.id));
   const completionReviewFlashes = useMemo(
     () =>
       Object.fromEntries(
@@ -4177,6 +4212,7 @@ export default function App() {
           paneCounts={paneCounts}
           workingTabIds={workingAgentTabIds}
           unreadCounts={unreadCounts}
+          exitedTabIds={exitedTabIds}
           completionReviewFlashes={completionReviewFlashes}
           completionHighlights={completionHighlights}
           drag={drag}

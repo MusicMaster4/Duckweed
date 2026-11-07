@@ -82,6 +82,16 @@ function streamBlock(index: number, block: unknown, deltas: unknown[]) {
   ];
 }
 
+function launchBackgroundAgent(h: ReturnType<typeof harness>, callId: string, taskId: string) {
+  h.feed({ type: "assistant", message: { content: [{
+    type: "tool_use", id: callId, name: "Agent", input: { description: `Work on ${taskId}` },
+  }] } });
+  h.feed({ type: "user", toolUseResult: { status: "async_launched", agentId: taskId },
+    message: { content: [{ type: "tool_result", tool_use_id: callId,
+      content: `Async agent launched successfully. Agent ID: ${taskId}` }] },
+  });
+}
+
 describe("claude adapter", () => {
   test("discovers new models before the first prompt and can select them", async () => {
     const h = harness();
@@ -517,6 +527,7 @@ describe("claude adapter", () => {
 
   test("keeps an asynchronously launched Agent running until its task notification", () => {
     const h = harness();
+    h.adapter.prompt({ text: "Build the animations", images: [] }, h.ctx);
     h.feed({
       type: "assistant",
       message: {
@@ -541,21 +552,169 @@ describe("claude adapter", () => {
     });
     h.feed({ type: "result", subtype: "success", is_error: false });
 
-    expect(h.state().items[0]).toMatchObject({
+    expect(h.state().items.find((item) => item.kind === "tool")).toMatchObject({
       kind: "tool",
       status: "running",
       subagent: { activity: "Working" },
     });
+    expect(h.state().status).toBe("working");
+    expect(h.state().workStartedAt).not.toBeNull();
+    expect(h.events.filter((event) => event.type === "turn-end")).toHaveLength(0);
 
     h.feed({
       type: "queue-operation",
       content: "<task-notification><task-id>agent-42</task-id><status>completed</status><summary>All shots rendered</summary></task-notification>",
     });
-    expect(h.state().items[0]).toMatchObject({
+    expect(h.state().items.find((item) => item.kind === "tool")).toMatchObject({
       kind: "tool",
       status: "done",
       output: "All shots rendered",
     });
+    expect(h.state().status).toBe("working");
+    h.feed({ type: "assistant", message: { stop_reason: "end_turn",
+      content: [{ type: "text", text: "The animations are ready." }] } });
+    expect(h.state().status).toBe("idle");
+    expect(h.events.filter((event) => event.type === "turn-end")).toHaveLength(1);
+  });
+
+  test.each(["completed", "failed", "stopped"])(
+    "waits for all background agents and the parent continuation when a child is %s", (status) => {
+      const h = harness();
+      h.adapter.prompt({ text: "Review the project", images: [] }, h.ctx);
+      launchBackgroundAgent(h, "call-1", "agent-1");
+      launchBackgroundAgent(h, "call-2", "agent-2");
+      h.feed({ type: "result", is_error: false });
+      h.feed({ type: "system", subtype: "task_notification", task_id: "agent-1",
+        status, summary: "First child finished" });
+      h.feed({ type: "assistant", message: { stop_reason: "end_turn",
+        content: [{ type: "text", text: "Still waiting for the other agent." }] } });
+      h.feed({ type: "result", is_error: false });
+      expect(h.state().status).toBe("working");
+      expect(h.state().workStartedAt).not.toBeNull();
+      expect(h.state().items.find((item) => item.kind === "tool" && item.callId === "call-1"))
+        .toMatchObject({ status: status === "completed" ? "done" : "error" });
+      expect(h.events.filter((event) => event.type === "turn-end")).toHaveLength(0);
+
+      h.feed({ type: "system", subtype: "task_notification", task_id: "agent-2",
+        status: "completed", summary: "Second child finished" });
+      // A child end_turn belongs to the child, not the parent continuation.
+      h.feed({ type: "assistant", parent_tool_use_id: "call-2", message: {
+        stop_reason: "end_turn", content: [{ type: "text", text: "Done." }],
+      } });
+      expect(h.state().status).toBe("working");
+      h.feed({ type: "assistant", message: { stop_reason: "tool_use", content: [{
+        type: "tool_use", id: "verify", name: "Bash", input: { command: "bun test" },
+      }] } });
+      expect(h.state().status).toBe("working");
+      h.feed({ type: "assistant", message: { stop_reason: "end_turn",
+        content: [{ type: "text", text: "The review is ready." }] } });
+      expect(h.state().status).toBe("idle");
+      expect(h.events.filter((event) => event.type === "turn-end")).toHaveLength(1);
+
+      // Completed agents must not keep the next ordinary prompt open.
+      h.adapter.prompt({ text: "Thanks", images: [] }, h.ctx);
+      h.feed({ type: "result", is_error: false });
+      expect(h.state().status).toBe("idle");
+    },
+  );
+
+  test("tracks structured task lifecycle and ignores late progress and launch acknowledgements", () => {
+    const h = harness();
+    h.adapter.prompt({ text: "Review", images: [] }, h.ctx);
+    h.feed({ type: "assistant", message: { content: [{ type: "tool_use", id: "call-1",
+      name: "Agent", input: { description: "Inspect parser" } }] } });
+    h.feed({ type: "system", subtype: "task_started", task_id: "agent-1", tool_use_id: "call-1" });
+    h.feed({ type: "system", subtype: "task_progress", task_id: "agent-1",
+      description: "Checking parser fixtures" });
+    expect(h.state().items.find((item) => item.kind === "tool"))
+      .toMatchObject({ status: "running", subagent: { activity: "Checking parser fixtures" } });
+    h.feed({ type: "result", is_error: false });
+    expect(h.state().status).toBe("working");
+    h.feed({ type: "system", subtype: "task_notification", task_id: "agent-1",
+      status: "completed", summary: "Parser reviewed" });
+    h.feed({ type: "system", subtype: "task_progress", task_id: "agent-1", description: "Late update" });
+    h.feed({ type: "user", tool_use_result: { status: "async_launched", agent_id: "agent-1" },
+      message: { content: [{ type: "tool_result", tool_use_id: "call-1", content: "Launched" }] } });
+    expect(h.state().items.find((item) => item.kind === "tool"))
+      .toMatchObject({ status: "done", output: "Parser reviewed" });
+    h.feed({ type: "assistant", message: { stop_reason: "end_turn", content: [] } });
+    expect(h.state().status).toBe("idle");
+  });
+
+  test.each(["structured", "xml"])("correlates %s completion by tool-use id without a launch task id", (format) => {
+    const h = harness();
+    h.adapter.prompt({ text: "Review", images: [] }, h.ctx);
+    h.feed({ type: "assistant", message: { content: [{ type: "tool_use", id: "call-1",
+      name: "Task", input: { description: "Inspect parser" } }] } });
+    h.feed({ type: "user", toolUseResult: { status: "async_launched" },
+      message: { content: [{ type: "tool_result", tool_use_id: "call-1", content: "Launched" }] } });
+    h.feed({ type: "result", is_error: false });
+    expect(h.state().status).toBe("working");
+    h.feed(format === "structured"
+      ? { type: "system", subtype: "task_notification", task_id: "agent-1", tool_use_id: "call-1",
+          status: "completed", summary: "Reviewed" }
+      : { type: "user", message: { content: [{ type: "text", text:
+          "<task-notification><task-id>agent-1</task-id><tool-use-id>call-1</tool-use-id>" +
+          "<status>completed</status><summary>Reviewed</summary></task-notification>" }] } });
+    h.feed({ type: "assistant", message: { stop_reason: "end_turn", content: [] } });
+    expect(h.state().status).toBe("idle");
+  });
+
+  test("a synchronous Agent result closes structured task activity", () => {
+    const h = harness();
+    h.adapter.prompt({ text: "Review", images: [] }, h.ctx);
+    h.feed({ type: "assistant", message: { content: [{ type: "tool_use", id: "call-1",
+      name: "Agent", input: { description: "Inspect parser" } }] } });
+    h.feed({ type: "system", subtype: "task_started", task_id: "agent-1", tool_use_id: "call-1" });
+    h.feed({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "call-1",
+      content: "Parser reviewed" }] } });
+    h.feed({ type: "result", is_error: false });
+    expect(h.state().status).toBe("idle");
+  });
+
+  test("background agents do not swallow a failed parent result", () => {
+    const h = harness();
+    h.adapter.prompt({ text: "Review", images: [] }, h.ctx);
+    launchBackgroundAgent(h, "call-1", "agent-1");
+    h.feed({ type: "result", is_error: true, result: "Execution failed" });
+    expect(h.events.filter((event) => event.type === "turn-end")).toHaveLength(1);
+    expect(h.state().status).toBe("idle");
+  });
+
+  test("processes multiple task notifications in one message", () => {
+    const h = harness();
+    h.adapter.prompt({ text: "Review", images: [] }, h.ctx);
+    launchBackgroundAgent(h, "call-1", "agent-1");
+    launchBackgroundAgent(h, "call-2", "agent-2");
+    h.feed({ type: "result", is_error: false });
+    h.feed({ type: "attachment", attachment: { prompt: ["agent-1", "agent-2"].map((id) =>
+      `<task-notification><task-id>${id}</task-id><status>completed</status></task-notification>`,
+    ).join("\n") } });
+    h.feed({ type: "assistant", message: { stop_reason: "end_turn", content: [] } });
+    expect(h.state().status).toBe("idle");
+    expect(h.state().items.filter((item) => item.kind === "tool" && item.status === "done"))
+      .toHaveLength(2);
+  });
+
+  test("Stop accepts a successful foreground result while background agents remain alive", () => {
+    const h = harness();
+    h.adapter.prompt({ text: "Review", images: [] }, h.ctx);
+    launchBackgroundAgent(h, "call-1", "agent-1");
+    h.feed({ type: "result", is_error: false });
+    expect(h.state().status).toBe("working");
+    h.adapter.interrupt(h.ctx);
+    h.feed({ type: "result", is_error: false });
+    expect(h.state().status).toBe("idle");
+  });
+
+  test("unrelated background shell tasks do not block an ordinary result", () => {
+    const h = harness();
+    h.adapter.prompt({ text: "Review", images: [] }, h.ctx);
+    h.feed({ type: "assistant", message: { content: [{ type: "tool_use", id: "shell",
+      name: "Bash", input: { command: "bun test" } }] } });
+    h.feed({ type: "system", subtype: "task_started", task_id: "shell-task", tool_use_id: "shell" });
+    h.feed({ type: "result", is_error: false });
+    expect(h.state().status).toBe("idle");
   });
 
   test("attributes complete child messages and tools through parent_tool_use_id", () => {

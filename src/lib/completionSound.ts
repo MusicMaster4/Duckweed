@@ -99,7 +99,7 @@ function bindGestureUnlock(): void {
   window.addEventListener("keydown", onGesture, true);
 }
 
-function attemptPlay(player: HTMLAudioElement, generation: number): void {
+function attemptPlay(player: HTMLAudioElement, generation: number, semitones = 0): void {
   if (generation !== playGeneration) return;
 
   // Stop the previous cue so simultaneous completions still coalesce cleanly.
@@ -111,6 +111,8 @@ function attemptPlay(player: HTMLAudioElement, generation: number): void {
     }
     safeRewind(activePlayer);
   }
+  player.preservesPitch = false;
+  player.playbackRate = 2 ** (semitones / 12);
   activePlayer = player;
   safeRewind(player);
 
@@ -183,7 +185,7 @@ export function preloadCompletionSound(): void {
  * Signal a completion once with a randomly selected cue. Simultaneous
  * completions restart the cue instead of stacking several copies.
  */
-export function playCompletionSound(cue: CompletionCue = chooseCompletionCue()): void {
+export function playCompletionSound(cue: CompletionCue = chooseCompletionCue(), semitones = 0): void {
   const generation = ++playGeneration;
   if (nativePlayerAvailable()) {
     // A previous cue may have used the WebView while the device was unavailable.
@@ -193,17 +195,17 @@ export function playCompletionSound(cue: CompletionCue = chooseCompletionCue()):
       safeRewind(activePlayer);
       activePlayer = null;
     }
-    void playCompletionCue(cue).catch(() => {
+    void playCompletionCue(cue, semitones).catch(() => {
       if (generation !== playGeneration) return;
       // Device failures can be temporary (sleep, unplugging, driver restart).
       // Fall back for this cue, then retry native audio on the next completion.
       bindGestureUnlock();
       const player = completionAudio(cue);
-      if (player) attemptPlay(player, generation);
+      if (player) attemptPlay(player, generation, semitones);
     });
     return;
   }
   bindGestureUnlock();
   const player = completionAudio(cue);
-  if (player) attemptPlay(player, generation);
+  if (player) attemptPlay(player, generation, semitones);
 }
