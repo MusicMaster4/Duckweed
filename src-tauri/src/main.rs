@@ -239,12 +239,77 @@ fn read_settings(path: &Path) -> HashMap<String, String> {
         .unwrap_or_default()
 }
 
+const RECOVERY_KEY: &str = "duckweed:workspace-recovery:v1";
+
+/// The recovery snapshot holds whole transcripts and is checkpointed while
+/// agents stream. Kept inside the shared settings file, every save of any small
+/// setting had to parse, re-escape, back up and rewrite that snapshot too.
+fn recovery_path(settings: &Path) -> PathBuf {
+    settings.with_file_name("workspace-recovery.json")
+}
+
+fn read_recovery(path: &Path) -> Option<String> {
+    let read = |candidate: &Path| {
+        std::fs::read_to_string(candidate)
+            .ok()
+            .filter(|raw| serde_json::from_str::<serde::de::IgnoredAny>(raw).is_ok())
+    };
+    read(path).or_else(|| read(&path.with_extension("json.bak")))
+}
+
+fn write_settings_map(path: &Path, settings: &HashMap<String, String>) -> Result<(), String> {
+    let raw = serde_json::to_vec_pretty(settings).map_err(|error| error.to_string())?;
+    write_settings_file(path, &raw)
+}
+
+/// Every durable setting, with the recovery snapshot read from its own file.
+fn load_settings_at(path: &Path) -> HashMap<String, String> {
+    let mut settings = read_settings(path);
+    if let Some(recovery) = read_recovery(&recovery_path(path)) {
+        settings.insert(RECOVERY_KEY.into(), recovery);
+    }
+    settings
+}
+
+/// Store one validated setting. Callers hold the settings lock.
+fn save_setting_at(path: &Path, key: String, value: String, replace: bool) -> Result<(), String> {
+    let recovery = recovery_path(path);
+    if key == RECOVERY_KEY {
+        write_settings_file(&recovery, value.as_bytes())?;
+        // One-time move out of the shared file written by earlier versions.
+        let mut settings = read_settings(path);
+        if settings.remove(RECOVERY_KEY).is_some() {
+            write_settings_map(path, &settings)?;
+        }
+        return Ok(());
+    }
+
+    let mut settings = read_settings(path);
+    if let Some(legacy) = settings.remove(RECOVERY_KEY) {
+        if read_recovery(&recovery).is_none() {
+            write_settings_file(&recovery, legacy.as_bytes())?;
+        }
+    }
+    // History accumulates across windows, builds and updates; everything else
+    // is a single-writer snapshot that simply replaces the stored copy.
+    let value = if key == COMMAND_HISTORY_KEY && !replace {
+        merge_history(
+            settings.get(&key).map(String::as_str).unwrap_or("[]"),
+            &value,
+        )
+    } else {
+        value
+    };
+    settings.insert(key, value);
+    write_settings_map(path, &settings)
+}
+
 #[tauri::command]
 async fn settings_load(app: AppHandle) -> Result<HashMap<String, String>, String> {
     blocking(move || {
         let state = app.state::<DurableSettings>();
         let _guard = state.0.lock().map_err(|error| error.to_string())?;
-        Ok(read_settings(&settings_path(&app)?))
+        Ok(load_settings_at(&settings_path(&app)?))
     })
     .await
 }
@@ -263,7 +328,7 @@ async fn settings_save(
             return Err("unsupported settings key".into());
         }
         // Reject corrupt payloads before they can replace the last good copy.
-        let cursors = if key == "duckweed:workspace-recovery:v1" {
+        let cursors = if key == RECOVERY_KEY {
             recovery_cursors(&value)?
         } else {
             serde_json::from_str::<serde::de::IgnoredAny>(&value).map_err(|error| error.to_string())?;
@@ -272,23 +337,7 @@ async fn settings_save(
 
         let state = app.state::<DurableSettings>();
         let _guard = state.0.lock().map_err(|error| error.to_string())?;
-        let path = settings_path(&app)?;
-        let mut settings = read_settings(&path);
-
-        // History accumulates across windows, builds and updates; everything else
-        // is a single-writer snapshot that simply replaces the stored copy.
-        let value = if key == COMMAND_HISTORY_KEY && !replace.unwrap_or(false) {
-            merge_history(
-                settings.get(&key).map(String::as_str).unwrap_or("[]"),
-                &value,
-            )
-        } else {
-            value
-        };
-
-        settings.insert(key, value);
-        let raw = serde_json::to_vec_pretty(&settings).map_err(|error| error.to_string())?;
-        write_settings_file(&path, &raw)?;
+        save_setting_at(&settings_path(&app)?, key, value, replace.unwrap_or(false))?;
         if let Some(manager) = app.try_state::<AgentProcManager>() {
             for (id, instance_id, sequence) in cursors { manager.checkpoint_saved(&id, &instance_id, sequence); }
         }
@@ -1529,6 +1578,36 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         std::fs::remove_file(path.with_extension("json.bak")).unwrap();
         std::fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn recovery_snapshot_lives_apart_from_small_settings_and_migrates() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let directory = std::env::temp_dir().join(format!("duckweed-recovery-{}-{unique}", std::process::id()));
+        let path = directory.join("durable-settings.json");
+        // A file written by an earlier version keeps the snapshot inline.
+        let legacy = HashMap::from([
+            (RECOVERY_KEY.to_string(), r#"{"version":1,"panes":{"a":{}}}"#.to_string()),
+            ("duckweed:state:v1".to_string(), r#"{"tabs":1}"#.to_string()),
+        ]);
+        write_settings_map(&path, &legacy).unwrap();
+
+        save_setting_at(&path, "duckweed:usage:v1".into(), "{}".into(), false).unwrap();
+        assert!(!read_settings(&path).contains_key(RECOVERY_KEY));
+        assert_eq!(load_settings_at(&path)[RECOVERY_KEY], r#"{"version":1,"panes":{"a":{}}}"#);
+
+        save_setting_at(&path, RECOVERY_KEY.into(), r#"{"version":1,"panes":{}}"#.into(), false).unwrap();
+        let loaded = load_settings_at(&path);
+        assert_eq!(loaded[RECOVERY_KEY], r#"{"version":1,"panes":{}}"#);
+        assert_eq!(loaded["duckweed:state:v1"], r#"{"tabs":1}"#);
+        assert_eq!(loaded["duckweed:usage:v1"], "{}");
+        assert!(!read_settings(&path).contains_key(RECOVERY_KEY));
+
+        // A damaged snapshot falls back to its previous copy.
+        std::fs::write(recovery_path(&path), "damaged").unwrap();
+        assert_eq!(load_settings_at(&path)[RECOVERY_KEY], r#"{"version":1,"panes":{"a":{}}}"#);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     fn commands(raw: &str) -> Vec<String> {
