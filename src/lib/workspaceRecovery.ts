@@ -94,11 +94,25 @@ export function parseRecovery(raw: string | null): RecoveryState {
 }
 
 export const RECOVERY_SAVE_INTERVAL_MS = 250;
+export const RECOVERY_SAVE_MAX_INTERVAL_MS = 10_000;
 
-type ScheduleSave = (save: () => void) => () => void;
+/**
+ * Every checkpoint copies the whole snapshot through IPC and onto disk. Long
+ * transcripts make that tens of megabytes, and repeating it four times a
+ * second while agents stream exhausts the renderer's memory. Space checkpoints
+ * in proportion to their size instead; native replay covers the gap.
+ */
+export function recoverySaveDelay(snapshotLength: number): number {
+  return Math.min(RECOVERY_SAVE_MAX_INTERVAL_MS, Math.max(RECOVERY_SAVE_INTERVAL_MS, Math.ceil(snapshotLength / 2048)));
+}
 
-const scheduleSave: ScheduleSave = (save) => {
-  const timer = setTimeout(save, RECOVERY_SAVE_INTERVAL_MS);
+/** Larger snapshots cannot fit the WebView quota and only live in app-data. */
+export const RECOVERY_LOCAL_STORAGE_MAX_LENGTH = 1_000_000;
+
+type ScheduleSave = (save: () => void, delayMs: number) => () => void;
+
+const scheduleSave: ScheduleSave = (save, delayMs) => {
+  const timer = setTimeout(save, delayMs);
   return () => clearTimeout(timer);
 };
 
@@ -116,6 +130,7 @@ export function createRecoveryStore(
   let frozen = false;
   let dirty = false;
   let cancelSave: (() => void) | null = null;
+  let snapshotLength = 0;
   // Recovery patches replace pane snapshots. Reuse JSON for untouched panes
   // instead of walking their histories and image attachments on every save.
   const serialized = new Map<string, { pane: PaneRecovery; json: string }>();
@@ -134,12 +149,14 @@ export function createRecoveryStore(
       }
       return cached.json;
     });
-    write(`{"version":1,"savedAt":${current.savedAt},"panes":{${panes.join(",")}}}`);
+    const raw = `{"version":1,"savedAt":${current.savedAt},"panes":{${panes.join(",")}}}`;
+    snapshotLength = raw.length;
+    write(raw);
     dirty = false;
   };
   const persist = () => {
     dirty = true;
-    cancelSave ??= schedule(flush);
+    cancelSave ??= schedule(flush, recoverySaveDelay(snapshotLength));
   };
   return {
     get(id: string): PaneRecovery | undefined { return load().panes[id]; },
@@ -194,8 +211,13 @@ export function createRecoveryStore(
 export const workspaceRecovery = createRecoveryStore(
   () => readStoredValue(RECOVERY_KEY),
   (raw) => {
-    try { (globalThis.window?.localStorage ?? globalThis.localStorage).setItem(RECOVERY_KEY, raw); }
-    catch (error) { console.error("failed to save local workspace recovery", error); }
+    try {
+      const storage = globalThis.window?.localStorage ?? globalThis.localStorage;
+      // A doomed write still copies the whole snapshot before the quota
+      // rejects it. Drop the stale local copy so it cannot outvote app-data.
+      if (raw.length > RECOVERY_LOCAL_STORAGE_MAX_LENGTH) storage.removeItem(RECOVERY_KEY);
+      else storage.setItem(RECOVERY_KEY, raw);
+    } catch (error) { console.error("failed to save local workspace recovery", error); }
     // Images can exceed the WebView quota. Still save the native copy.
     saveDurably(RECOVERY_KEY, raw);
   },

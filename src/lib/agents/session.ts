@@ -15,6 +15,7 @@ import {
   openCodexDesktop,
   openUrl,
   type AgentFrame,
+  type SystemMemory,
 } from "../ipc";
 import type { AdapterContext, AgentAdapter } from "./adapter";
 import {
@@ -1131,11 +1132,37 @@ function emitNow(session: Session, event: AgentEvent): void {
 }
 
 /** Settle uncertain input before releasing a connection that cannot recover. */
+/** How long a launch may stay silent before memory pressure is checked. */
+const SLOW_START_CHECK_MS = 20_000;
+
+/**
+ * An exhausted operating system makes agents stall or drop their connection,
+ * and no retry inside Duckweed can fix that. Say so instead of leaving a
+ * generic failure or an endless spinner.
+ */
+function explainLowMemory(session: Session): void {
+  if (!TAURI_RUNTIME) return;
+  void invoke<SystemMemory | null>("system_memory_status").catch(() => null).then((memory) => {
+    if (!memory?.low || session.disposed || sessions.get(session.termId) !== session) return;
+    const gigabytes = (bytes: number) => (bytes / 1024 ** 3).toFixed(1);
+    try {
+      emit(session, {
+        type: "notice",
+        tone: "error",
+        text: `This computer is almost out of memory: only ${gigabytes(memory.commitAvailableBytes)} GB of ` +
+          `${gigabytes(memory.commitLimitBytes)} GB can still be allocated. Agents stall or disconnect ` +
+          "until other programs release memory. Close the heaviest ones, then reopen this conversation.",
+      });
+    } catch {}
+  });
+}
+
 function failConnection(session: Session, message: string, preserveCodexWork = false): void {
   session.queuePaused = true;
   session.connectionError = message;
   session.adapter.connectionLost?.(session.context);
   emit(session, { type: "status", status: "error", error: message });
+  explainLowMemory(session);
   // Let rejected prompt RPCs preserve their input before adapter disposal.
   const teardown = new Promise<void>((resolve) => setTimeout(resolve, 0)).then(async () => {
     try { await session.adapter.dispose?.(session.context, { preserveWork: preserveCodexWork }); } catch {}
@@ -1543,6 +1570,12 @@ export async function start(
   sessions.set(termId, session);
   if (restoredAdapter) checkpoint(session);
   announce(termId);
+
+  // Covers a launch that never returns as well as one that never answers.
+  const slowStart = setTimeout(() => {
+    if (!session.disposed && session.state.status === "starting") explainLowMemory(session);
+  }, SLOW_START_CHECK_MS);
+  (slowStart as { unref?: () => void }).unref?.();
 
   let attached = false;
   try {

@@ -12,6 +12,7 @@ mod discord_presence;
 mod fs;
 mod git;
 mod launch;
+mod memory;
 mod mobile_push;
 mod ports;
 mod power;
@@ -75,6 +76,9 @@ struct CrashRecoveryRecord {
     active_agent_sessions: usize,
     protocol_frames_forwarded: u64,
     protocol_bytes_forwarded: u64,
+    /// Operating-system headroom when the failure happened. A nearly empty
+    /// commit budget means the whole machine ran out of memory, not Duckweed.
+    system_memory: Option<memory::SystemMemory>,
     recovery_action: String,
 }
 
@@ -254,16 +258,12 @@ async fn settings_save(
             return Err("unsupported settings key".into());
         }
         // Reject corrupt payloads before they can replace the last good copy.
-        let parsed = serde_json::from_str::<serde_json::Value>(&value).map_err(|error| error.to_string())?;
-        let cursors: Vec<(String, String, u64)> = if key == "duckweed:workspace-recovery:v1" {
-            parsed["panes"].as_object().into_iter().flat_map(|panes| panes.iter())
-                .filter_map(|(id, pane)| {
-                    let runtime = &pane["agent"]["runtime"];
-                    Some((id.clone(), runtime["instanceId"].as_str()?.to_owned(), runtime["sequence"].as_u64()?))
-                })
-                .collect()
-        } else { Vec::new() };
-        drop(parsed);
+        let cursors = if key == "duckweed:workspace-recovery:v1" {
+            recovery_cursors(&value)?
+        } else {
+            serde_json::from_str::<serde::de::IgnoredAny>(&value).map_err(|error| error.to_string())?;
+            Vec::new()
+        };
 
         let state = app.state::<DurableSettings>();
         let _guard = state.0.lock().map_err(|error| error.to_string())?;
@@ -290,6 +290,54 @@ async fn settings_save(
         Ok(())
     })
     .await
+}
+
+/// Validate a recovery snapshot and read each live agent's frame cursor.
+///
+/// Snapshots hold whole transcripts and are saved continuously. Building a
+/// generic JSON tree for one costs several times its size on every save, so
+/// only the cursors are materialized and the rest is skipped while parsing.
+fn recovery_cursors(raw: &str) -> Result<Vec<(String, String, u64)>, String> {
+    use serde::de::IgnoredAny;
+    use serde_json::Value;
+
+    #[derive(serde::Deserialize)]
+    struct Snapshot {
+        #[serde(default)]
+        panes: HashMap<String, Pane>,
+    }
+    // Unknown fields, which is where the transcripts are, are skipped unbuffered.
+    #[derive(serde::Deserialize)]
+    struct Pane {
+        #[serde(default)]
+        agent: Option<Agent>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Agent {
+        #[serde(default)]
+        runtime: Option<Runtime>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Runtime {
+        // Scalars. A malformed cursor is ignored rather than failing the save.
+        #[serde(default, rename = "instanceId")]
+        instance_id: Value,
+        #[serde(default)]
+        sequence: Value,
+    }
+
+    let snapshot: Snapshot = match serde_json::from_str(raw) {
+        Ok(snapshot) => snapshot,
+        // Any other valid JSON is still saved, exactly as before.
+        Err(_) => {
+            serde_json::from_str::<IgnoredAny>(raw).map_err(|error| error.to_string())?;
+            return Ok(Vec::new());
+        }
+    };
+    Ok(snapshot.panes.into_iter().filter_map(|(id, pane)| {
+        let runtime = pane.agent?.runtime?;
+        Some((id, runtime.instance_id.as_str()?.to_owned(), runtime.sequence.as_u64()?))
+    }).collect())
 }
 
 fn write_settings_file(path: &Path, raw: &[u8]) -> Result<(), String> {
@@ -577,6 +625,12 @@ async fn opencode_models_refresh() -> Result<(), String> {
 #[tauri::command]
 async fn codex_desktop_bridge(codex_home: Option<String>) -> Result<Option<codex_desktop::DesktopBridge>, String> {
     blocking(move || Ok(codex_desktop::bridge(codex_home.as_deref()))).await
+}
+
+/// Operating-system memory headroom, or `None` where it is not measured.
+#[tauri::command]
+fn system_memory_status() -> Option<memory::SystemMemory> {
+    memory::status()
 }
 
 /// Launch a coding agent in its line-delimited JSON mode.
@@ -1181,6 +1235,7 @@ fn recover_failed_webview_renderer(window: &tauri::WebviewWindow) -> tauri::Resu
                                 active_agent_sessions,
                                 protocol_frames_forwarded: protocol_frames,
                                 protocol_bytes_forwarded: protocol_bytes,
+                                system_memory: memory::status(),
                                 recovery_action: if renderer_exited {
                                     "reload_renderer"
                                 } else {
@@ -1367,6 +1422,7 @@ fn main() {
             agent_session_transcript,
             agent_proc_probe,
             opencode_models_refresh,
+            system_memory_status,
             agent_proc_start,
             agent_proc_attach,
             agent_proc_sequence,
@@ -1495,6 +1551,13 @@ mod tests {
             active_agent_sessions: 2,
             protocol_frames_forwarded: 12_345,
             protocol_bytes_forwarded: 6_789_012,
+            system_memory: Some(memory::SystemMemory {
+                commit_limit_bytes: 8_000,
+                commit_available_bytes: 100,
+                physical_total_bytes: 6_000,
+                physical_available_bytes: 2_000,
+                low: true,
+            }),
             recovery_action: "reload_renderer".into(),
         };
 
@@ -1504,9 +1567,26 @@ mod tests {
         assert_eq!(parsed["reason"], "out_of_memory");
         assert_eq!(parsed["processFailedKind"], "render_process_exited");
         assert_eq!(parsed["protocolFramesForwarded"], 12_345);
+        assert_eq!(parsed["systemMemory"]["commitAvailableBytes"], 100);
+        assert_eq!(parsed["systemMemory"]["low"], true);
         assert!(raw.ends_with('\n'));
 
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn recovery_cursors_skip_transcripts_and_tolerate_other_shapes() {
+        let raw = r#"{"version":1,"savedAt":5,"panes":{
+            "live":{"draft":"x","agent":{"items":[{"kind":"tool","output":"big"}],
+                "runtime":{"instanceId":"abc","sequence":42,"adapter":{"deep":[1,2,{"a":null}]}}}},
+            "resumed":{"agent":{"items":[]}},
+            "shell":{"cwd":"H:/","agent":null},
+            "odd":{"agent":{"runtime":{"instanceId":7,"sequence":"x"}}}}}"#;
+        assert_eq!(recovery_cursors(raw).unwrap(), [("live".to_string(), "abc".to_string(), 42)]);
+        // Unexpected but valid JSON is still accepted, as it always was.
+        assert!(recovery_cursors(r#"{"panes":[1,2]}"#).unwrap().is_empty());
+        assert!(recovery_cursors("[]").unwrap().is_empty());
+        assert!(recovery_cursors(r#"{"panes":{"a":{"agent":"#).is_err());
     }
 
     #[test]

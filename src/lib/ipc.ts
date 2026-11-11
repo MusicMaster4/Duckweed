@@ -556,6 +556,18 @@ export const agentProcProbe = (names: string[]) =>
 /** Refresh OpenCode's cached model registry, including its OpenRouter models. */
 export const openCodeModelsRefresh = () => invoke<void>("opencode_models_refresh");
 
+export interface SystemMemory {
+  commitLimitBytes: number;
+  commitAvailableBytes: number;
+  physicalTotalBytes: number;
+  physicalAvailableBytes: number;
+  /** New processes and large allocations are likely to fail. */
+  low: boolean;
+}
+
+/** Operating-system memory headroom, or null where it is not measured. */
+export const systemMemoryStatus = () => invoke<SystemMemory | null>("system_memory_status");
+
 /** Launch a coding agent in its line-delimited JSON mode. */
 export const agentProcStart = (
   id: string,

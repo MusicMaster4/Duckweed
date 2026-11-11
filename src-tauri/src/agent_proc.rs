@@ -533,6 +533,11 @@ impl AgentProcManager {
             // ends; it is not an error.
             None => return Ok(()),
         };
+        Self::stop_handle(handle, preserve_codex_work)
+    }
+
+    /// Finish stopping a process already removed from the registry.
+    fn stop_handle(handle: Arc<Mutex<Process>>, preserve_codex_work: bool) -> Result<(), String> {
         let (stdin, requests, service, threads) = {
             let mut process = handle.lock().unwrap();
             process.approvals.lock().unwrap().clear();
@@ -586,6 +591,7 @@ impl AgentProcManager {
     /// live while the new document reconnects to its original conversations.
     pub fn recover_renderer(&self) {
         let ids: Vec<String> = self.inner.processes.lock().unwrap().keys().cloned().collect();
+        let mut stale = Vec::new();
         for id in ids {
             let Some(handle) = self.get(&id) else { continue; };
             let delivery = handle.lock().unwrap().channel.clone();
@@ -593,9 +599,25 @@ impl AgentProcManager {
             if delivery.replayable {
                 delivery.channel = None;
             } else {
-                drop(delivery);
-                let _ = self.disconnect(&id);
+                stale.push(id);
             }
+        }
+        // This runs on the UI thread, inside WebView2's failure callback. Free
+        // the ids now so the reloaded document can start replacements, but kill
+        // the old process trees elsewhere: `taskkill` can take seconds, or never
+        // return, on a machine that is already out of memory.
+        let handles: Vec<_> = {
+            let mut processes = self.inner.processes.lock().unwrap();
+            stale.iter().filter_map(|id| processes.remove(id)).collect()
+        };
+        if handles.is_empty() { return; }
+        let cleanup = thread::Builder::new().name("agent-renderer-recovery".into()).spawn(move || {
+            for handle in handles {
+                let _ = Self::stop_handle(handle, true);
+            }
+        });
+        if let Err(error) = cleanup {
+            eprintln!("duckweed: could not clean up agents after a renderer failure: {error}");
         }
     }
 
@@ -688,6 +710,78 @@ pub(crate) fn kill_tree(pid: u32) {
             .status();
     }
 }
+
+/// Ties process trees to the lifetime of this process.
+///
+/// `stop_all` only runs on a clean exit. When Duckweed crashes or is ended as
+/// "not responding", its agents used to keep running with nobody reading them,
+/// together with every shell and worker they had started. The next launch then
+/// resumed the same conversations in new processes, so each crash doubled the
+/// agents working on a session. Windows closes the job handle whenever this
+/// process ends, however it ends, and that terminates every member.
+#[cfg(windows)]
+struct KillOnExitJob(usize);
+
+#[cfg(windows)]
+impl KillOnExitJob {
+    fn new() -> Option<Self> {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::JobObjects::{
+            CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        };
+        unsafe {
+            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if job.is_null() {
+                return None;
+            }
+            let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            let configured = SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            );
+            if configured == 0 {
+                CloseHandle(job);
+                return None;
+            }
+            Some(Self(job as usize))
+        }
+    }
+
+    /// Later descendants join automatically. Failure leaves the child untied,
+    /// which is the previous behavior, so it is not an error.
+    fn adopt(&self, child: &Child) {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
+        unsafe {
+            AssignProcessToJobObject(self.0 as _, child.as_raw_handle() as _);
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for KillOnExitJob {
+    fn drop(&mut self) {
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(self.0 as _);
+        }
+    }
+}
+
+/// End `child` and its descendants when Duckweed itself goes away.
+#[cfg(windows)]
+fn kill_with_app(child: &Child) {
+    static JOB: std::sync::OnceLock<Option<KillOnExitJob>> = std::sync::OnceLock::new();
+    if let Some(job) = JOB.get_or_init(KillOnExitJob::new) {
+        job.adopt(child);
+    }
+}
+
+#[cfg(not(windows))]
+fn kill_with_app(_child: &Child) {}
 
 #[cfg(windows)]
 pub(crate) fn hide_console(command: &mut Command) {
@@ -889,14 +983,15 @@ pub fn start(
             Some(connection.writer),
             Some(connection.service),
         ),
-        None => (
-            command
+        None => {
+            let child = command
                 .spawn()
-                .map_err(|error| format!("failed to start `{}`: {error}", resolved.display()))?,
-            None,
-            None,
-            None,
-        ),
+                .map_err(|error| format!("failed to start `{}`: {error}", resolved.display()))?;
+            // Not the shared Codex proxy above: its daemon owns work that is
+            // meant to outlive this window.
+            kill_with_app(&child);
+            (child, None, None, None)
+        }
     };
     let pid = Some(child.id());
     let stdin = shared_writer
@@ -1139,6 +1234,37 @@ fn trimmed_line(buffer: &[u8], limit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn agents_and_their_children_end_when_the_app_handle_closes() {
+        let mut command = Command::new("cmd");
+        // The shell stays as the parent of a second, long-lived process.
+        command.args(["/d", "/c", "ping -n 60 127.0.0.1 >nul & exit"])
+            .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        hide_console(&mut command);
+        let mut child = command.spawn().unwrap();
+        let pid = child.id();
+        let job = KillOnExitJob::new().unwrap();
+        job.adopt(&child);
+        let descendant = || crate::process_tree::process_snapshot().into_iter()
+            .find(|process| process.ppid == pid).map(|process| process.pid);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let grandchild = loop {
+            if let Some(found) = descendant() { break found; }
+            assert!(Instant::now() < deadline, "the shell never started its child");
+            thread::sleep(Duration::from_millis(20));
+        };
+        // What Windows does to the handle when Duckweed crashes or is killed.
+        drop(job);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while child.try_wait().unwrap().is_none()
+            || crate::process_tree::process_snapshot().iter().any(|process| process.pid == grandchild)
+        {
+            if Instant::now() >= deadline { kill_tree(pid); panic!("the agent tree outlived the app"); }
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
 
     #[test]
     fn account_changes_are_reported_without_affecting_ownership() {
@@ -1412,7 +1538,13 @@ mod tests {
                 "disconnect" => manager.disconnect("fixture").unwrap(),
                 _ => manager.stop("fixture").unwrap(),
             }
-            let _ = handle.lock().unwrap().child.wait();
+            // Renderer recovery kills off the calling thread, so never hold the
+            // process lock across a blocking wait here.
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while handle.lock().unwrap().child.try_wait().unwrap().is_none() {
+                assert!(Instant::now() < deadline, "{mode} left the process running");
+                thread::sleep(Duration::from_millis(10));
+            }
             reader.join().unwrap();
             let recorded = std::fs::read_to_string(&path).unwrap();
             if preserve { assert!(recorded.is_empty(), "reconnection sent shutdown requests: {recorded}"); }
