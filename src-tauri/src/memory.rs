@@ -16,9 +16,11 @@ pub struct SystemMemory {
     pub low: bool,
 }
 
+#[cfg(any(windows, test))]
 const LOW_COMMIT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 /// Below 2 GB, or 4% of the limit on machines where that is larger.
+#[cfg(any(windows, test))]
 fn is_low(commit_limit: u64, commit_available: u64) -> bool {
     commit_available < LOW_COMMIT_BYTES.max(commit_limit / 25)
 }

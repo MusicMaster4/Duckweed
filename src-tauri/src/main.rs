@@ -59,8 +59,10 @@ struct DurableSettings(Mutex<()>);
 struct FullscreenRestore(Mutex<bool>);
 
 const COMMAND_HISTORY_KEY: &str = "duckweed:command-history:v1";
+#[cfg(any(windows, test))]
 const CRASH_RECOVERY_LOG_MAX_BYTES: u64 = 512 * 1024;
 
+#[cfg(any(windows, test))]
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CrashRecoveryRecord {
@@ -82,6 +84,7 @@ struct CrashRecoveryRecord {
     recovery_action: String,
 }
 
+#[cfg(any(windows, test))]
 fn append_crash_recovery_record(
     path: &Path,
     record: &CrashRecoveryRecord,
@@ -118,6 +121,7 @@ fn append_crash_recovery_record(
     file.flush().map_err(|error| error.to_string())
 }
 
+#[cfg(windows)]
 fn webview_failed_kind_name(code: i32) -> &'static str {
     match code {
         0 => "browser_process_exited",
@@ -134,6 +138,7 @@ fn webview_failed_kind_name(code: i32) -> &'static str {
     }
 }
 
+#[cfg(windows)]
 fn webview_failed_reason_name(code: i32) -> &'static str {
     match code {
         0 => "unexpected",

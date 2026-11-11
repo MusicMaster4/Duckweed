@@ -467,6 +467,7 @@ impl AgentProcManager {
     /// Aggregate protocol traffic since this Duckweed process started.
     /// Content is deliberately not retained; crash diagnostics only need the
     /// volume that preceded a renderer failure.
+    #[cfg(windows)]
     pub fn traffic_totals(&self) -> (u64, u64) {
         (
             self.inner.protocol_frames.load(Ordering::Relaxed),
@@ -589,6 +590,7 @@ impl AgentProcManager {
 
     /// A renderer failure is not a user Stop. Shared-service work must remain
     /// live while the new document reconnects to its original conversations.
+    #[cfg(any(windows, test))]
     pub fn recover_renderer(&self) {
         let ids: Vec<String> = self.inner.processes.lock().unwrap().keys().cloned().collect();
         let mut stale = Vec::new();
