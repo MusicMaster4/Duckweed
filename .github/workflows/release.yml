@@ -81,6 +81,7 @@ jobs:
   version:
     name: Resolve version
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     outputs:
       version: ${{ steps.calc.outputs.version }}
       tag: ${{ steps.calc.outputs.tag }}
@@ -134,6 +135,7 @@ jobs:
     name: Validate release source
     needs: version
     runs-on: ubuntu-22.04
+    timeout-minutes: 30
     defaults:
       run:
         shell: bash
@@ -215,6 +217,7 @@ jobs:
             rust_targets: ""
             bundle_dir: src-tauri/target/release/bundle
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
     defaults:
       run:
         shell: bash
@@ -291,6 +294,7 @@ jobs:
           echo "APPLE_SIGNING_IDENTITY=$CONFIGURED_SIGNING_IDENTITY" >> "$GITHUB_ENV"
 
       - name: Build native bundles and signed updater artifact
+        timeout-minutes: 75
         env:
           DUCKWEED_RELAY_URL: ${{ vars.DUCKWEED_RELAY_URL }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -371,6 +375,7 @@ jobs:
     name: Build Android companion
     needs: [version, validate]
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
 
@@ -438,6 +443,7 @@ jobs:
     name: Assemble release
     needs: [version, build, android]
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
 
@@ -497,6 +503,7 @@ jobs:
     needs: [version, manifest]
     if: needs.version.outputs.publish == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       TAG: ${{ needs.version.outputs.tag }}
