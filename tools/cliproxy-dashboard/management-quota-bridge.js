@@ -25,6 +25,30 @@
     return parts.join(' ');
   };
   globalThis.duckweedStartQuotaMonitor = (adapters, quotaStore, authStore, filesApi, cacheKey, i18n) => {
+    globalThis.duckweedAccountNames = async (id, name) => {
+      const session = authStore.getState(), api = new URL(session.apiBase);
+      if (!['http://127.0.0.1:8317', 'http://localhost:8317'].includes(api.origin)) throw new Error('Account names are available for the local proxy.');
+      const save = id !== undefined;
+      const response = await fetch(`http://${api.hostname}:8318/local/${save ? 'account-name' : 'account-names'}`, {
+        method: save ? 'POST' : 'GET',
+        headers: { Authorization: `Bearer ${session.managementKey}`, ...(save ? { 'Content-Type': 'application/json' } : {}) },
+        ...(save ? { body: JSON.stringify({ id, name }) } : {}), signal: AbortSignal.timeout(10000), cache: 'no-store'
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || 'Unable to save the account name.');
+      globalThis.duckweedLedger?.setNames(result.names || {});
+      return result.names || {};
+    };
+    globalThis.duckweedLoadQuotaHistory = async () => {
+      const session = authStore.getState();
+      const api = new URL(session.apiBase);
+      if (!['http://127.0.0.1:8317', 'http://localhost:8317'].includes(api.origin)) throw new Error('Quota history is available for the local proxy.');
+      const response = await fetch(`http://${api.hostname}:8318/local/quota-history`, {
+        headers: { Authorization: `Bearer ${session.managementKey}` }, signal: AbortSignal.timeout(10000), cache: 'no-store'
+      });
+      if (!response.ok) throw new Error('Quota history is unavailable. Run cliproxy start.');
+      return response.json();
+    };
     let busy = false;
     const retries = new Map();
     const tick = async () => {
@@ -44,7 +68,8 @@
           if (!adapter || adapter.storeSelector(quotaStore.getState())[key]?.status === 'loading') return;
           const fileGeneration = quotaStore.getState().fileGenerations[file.name];
           try {
-            const data = await adapter.fetchQuota(file, i18n.t.bind(i18n));
+            const translate = typeof i18n?.t === 'function' ? i18n.t.bind(i18n) : key => key;
+            const data = await adapter.fetchQuota(file, translate);
             const state = quotaStore.getState();
             if (state.cacheGeneration !== generation || state.fileGenerations[file.name] !== fileGeneration) return;
             state[adapter.storeSetter](previous => ({ ...previous, [key]: adapter.buildSuccessState(data) }));
@@ -57,9 +82,11 @@
       } catch { /* The next scheduled update will retry a disconnected server. */ }
       finally { busy = false; }
     };
+    globalThis.duckweedRefreshQuotas = tick;
+    const unsubscribe = authStore.subscribe?.(() => { void tick(); });
     const timer = setInterval(tick, 60000);
     document.addEventListener('visibilitychange', tick);
     setTimeout(tick, 1000);
-    return { tick, stop() { clearInterval(timer); document.removeEventListener('visibilitychange', tick); } };
+    return { tick, stop() { unsubscribe?.(); clearInterval(timer); document.removeEventListener('visibilitychange', tick); } };
   };
 })();

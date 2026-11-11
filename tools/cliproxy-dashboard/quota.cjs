@@ -301,6 +301,8 @@ async function update(authIndex) {
       }
     }
     const state = { checkedAt: new Date().toISOString(), accounts: observations };
+    try { require('./quota-history.cjs').recordHistory(root, state); }
+    catch (error) { console.error('Quota history: ' + error.message); }
     const temporary = `${statePath}.${process.pid}.tmp`;
     fs.writeFileSync(temporary, JSON.stringify(state, null, 2)); fs.renameSync(temporary, statePath);
     return state;

@@ -122,12 +122,14 @@ const server = http.createServer(async (req, res) => {
   if (![ `127.0.0.1:${PORT}`, `localhost:${PORT}` ].includes(host)) return json(res, 403, { error: 'Local access only.' });
   const url = new URL(req.url, origin);
   const nativeQuotaRequest = url.pathname === '/local/claude-quota';
-  const allowedOrigins = [origin, `http://localhost:${PORT}`, ...(nativeQuotaRequest ? ['http://127.0.0.1:8317', 'http://localhost:8317'] : [])];
+  const nativeHistoryRequest = url.pathname === '/local/quota-history';
+  const nativeNamesRequest = ['/local/account-names', '/local/account-name'].includes(url.pathname);
+  const allowedOrigins = [origin, `http://localhost:${PORT}`, ...((nativeQuotaRequest || nativeHistoryRequest || nativeNamesRequest) ? ['http://127.0.0.1:8317', 'http://localhost:8317'] : [])];
   if (req.headers.origin && !allowedOrigins.includes(req.headers.origin)) return json(res, 403, { error: 'Origin is not allowed.' });
-  if (nativeQuotaRequest && req.headers.origin) {
+  if ((nativeQuotaRequest || nativeHistoryRequest || nativeNamesRequest) && req.headers.origin) {
     res.setHeader('Access-Control-Allow-Origin', req.headers.origin);
     res.setHeader('Vary', 'Origin');
-    res.setHeader('Access-Control-Allow-Methods', 'POST');
+    res.setHeader('Access-Control-Allow-Methods', nativeHistoryRequest ? 'GET' : nativeNamesRequest ? 'GET, POST' : 'POST');
     res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
     if (req.method === 'OPTIONS') { res.writeHead(204); return res.end(); }
   }
@@ -144,6 +146,14 @@ const server = http.createServer(async (req, res) => {
   if (!url.pathname.startsWith('/local/')) return json(res, 404, { error: 'Not found.' });
   if (!authenticated(req)) return json(res, 401, { error: 'Enter the management password.' });
   try {
+    if (req.method === 'GET' && url.pathname === '/local/account-names') return json(res, 200, { names: require('./account-names.cjs').readNames(quota.root) });
+    if (req.method === 'POST' && url.pathname === '/local/account-name') {
+      const data = await body(req);
+      const { files = [] } = await quota.management('/auth-files');
+      if (!files.some(file => String(file.auth_index) === data.id)) return json(res, 404, { error: 'Account no longer exists.' });
+      return json(res, 200, { names: require('./account-names.cjs').setName(quota.root, data.id, data.name) });
+    }
+    if (req.method === 'GET' && nativeHistoryRequest) return json(res, 200, require('./quota-history.cjs').readHistory(quota.root));
     if (req.method === 'POST' && nativeQuotaRequest) {
       const data = await body(req);
       const authIndex = String(data.authIndex || data.auth_index || '');
