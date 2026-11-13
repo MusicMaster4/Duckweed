@@ -1,0 +1,65 @@
+/* Panel-wide cleanup: calmer buttons, no decorative glows, fewer explanatory paragraphs.
+   Selectors match CSS-module names without their hash so they survive panel rebuilds.
+   Hidden descriptions are copied into hover tooltips by management-polish.js. */
+
+/* Buttons: primary reads as the main action instead of a disabled grey; destructive is an outline. */
+.btn-primary{background:var(--text-primary)!important;border-color:var(--text-primary)!important;color:var(--bg-primary)!important}
+.btn-primary:hover:not(:disabled){opacity:.86}
+.btn-primary:disabled{opacity:.4}
+.btn-danger{background:transparent!important;color:var(--danger-color)!important;border:1px solid color-mix(in srgb,var(--danger-color) 45%,transparent)!important}
+.btn-danger:hover:not(:disabled){background:color-mix(in srgb,var(--danger-color) 12%,transparent)!important}
+[class*=PluginStorePage-module__cardActions___] .btn-primary,
+[class*=OAuthPage-module__featuredActions___] .btn-primary:not(:last-child){background:transparent!important;color:var(--text-primary)!important;border-color:var(--border-color)!important}
+[class*=PluginStorePage-module__cardActions___] .btn-primary:hover:not(:disabled),
+[class*=OAuthPage-module__featuredActions___] .btn-primary:not(:last-child):hover{background:var(--bg-tertiary)!important;opacity:1}
+
+/* Decorative washes and tinted cards. */
+[class*=dashboard-module__washTop___],[class*=dashboard-module__gridWash___]{display:none!important}
+[class*=OAuthPage-module__featuredCard___]{background:var(--bg-primary)!important;border-color:var(--border-color)!important}
+[class*=OAuthPage-module__featuredCard___] [class*=OAuthPage-module__cardTitle___]{font-size:18px!important}
+[class*=PluginsPage-module__statusDotOn___],[class*=PluginStorePage-module__statusDotOn___]{box-shadow:none!important}
+[class*=PluginStorePage-module__badgeUntrusted___]{background:transparent!important;border:1px solid color-mix(in srgb,var(--danger-color) 40%,transparent)}
+
+/* Oversized headings. */
+[class*=dashboard-module__heroTitle___]{font-size:clamp(32px,3.4vw,46px)!important;letter-spacing:-.025em!important}
+[class*=dashboard-module__hero___]{padding-bottom:clamp(40px,7vh,64px)!important}
+[class*=dashboard-module__sectionTitle___]{font-size:22px!important}
+[class*=SystemPage-module__aboutTitle___]{font-size:26px!important}
+[class*=SystemPage-module__aboutHeader___] img{width:56px!important;height:56px!important}
+
+/* Explanatory text moved to tooltips. Keep this list in sync with management-polish.js. */
+[class*=dashboard-module__statHint___],
+[class*=dashboard-module__sectionDescription___],
+[class*=dashboard-module__ctaDescription___],
+[class*=dashboard-module__heroPanelMeta___],
+[class*=OAuthPage-module__featuredHint___],
+[class*=OAuthPage-module__cardHint___],
+[class*=SectionCard-module__description___],
+[class*=Field-module__toggleDescription___],
+[class*=Field-module__group___] .hint,
+[class*=PluginsPage-module__description___],
+[class*=PluginsPage-module__metaPath___],
+[class*=PluginStorePage-module__description___],
+[class*=SystemPage-module__sectionDescription___],
+[class*=SystemPage-module__linkDesc___]{display:none!important}
+[class*=PluginStorePage-module__securityBannerText___]>:not(strong){display:none!important}
+[class*=PluginStorePage-module__securityBanner___]{padding-block:10px!important}
+
+/* Long filesystem paths: one line, full value on hover. */
+[class*=statusPathValue___]{display:inline-block;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:bottom}
+
+/* Auth Files: the empty quota placeholder becomes a one-line link instead of a large box. */
+[class*=AuthFileQuota-module__quotaMessageAction___]{border:0!important;background:none!important;padding:2px 0!important;min-height:0!important;justify-content:flex-start!important;text-align:left!important;font-family:inherit!important;letter-spacing:0!important;color:var(--text-secondary)!important;text-decoration:underline;text-underline-offset:3px}
+[class*=AuthFileQuota-module__quotaMessageAction___]:hover{color:var(--text-primary)!important}
+[class*=AuthFileQuota-module__quotaSection___]:has(> [class*=AuthFileQuota-module__quotaMessageAction___]:only-child){border:0!important;background:none!important;padding:0!important}
+
+/* OAuth cards: without the description paragraph the header no longer needs its gap. */
+.card:has(> [class*=OAuthPage-module__cardContent___]){padding:18px 22px!important}
+.card:has(> [class*=OAuthPage-module__cardContent___]) > .card-header{margin-bottom:0!important}
+[class*=OAuthPage-module__cardContent___] > :not([class*=Hint___]){margin-top:14px}
+
+/* Plugins: drop the separator that pointed at the hidden install path. */
+[class*=PluginsPage-module__metaDot___]:has(+ [class*=PluginsPage-module__metaPath___]){display:none!important}
+
+/* Plugin Store: "Install: …" and "Source: …" labels are marked by management-polish.js. */
+[data-dq-hide]{display:none!important}

@@ -6,6 +6,8 @@ import {
   agentProcProbe,
   agentProcSend,
   agentProcStart,
+  agentProcAttach,
+  agentProcSequence,
   agentProcStop,
   agentCodexAuthSync,
   openCodeModelsRefresh,
@@ -13,6 +15,7 @@ import {
   openCodexDesktop,
   openUrl,
   type AgentFrame,
+  type SystemMemory,
 } from "../ipc";
 import type { AdapterContext, AgentAdapter } from "./adapter";
 import {
@@ -31,6 +34,9 @@ import { ProtocolWriter } from "./protocolWriter";
 import { AGENTS, agentPresentation, agentSpawnEnv } from "./catalog";
 import {
   applyEvent,
+  clampEnd,
+  MAX_TEXT,
+  MAX_TOOL_OUTPUT,
   didStatusEnterIdle,
   isAnnounceableTurn,
   isTurnEnd,
@@ -88,6 +94,17 @@ const STREAM_FLUSH_INTERVAL_MS = 50;
 
 interface Session {
   termId: string;
+  instanceId: string;
+  frameSequence: number;
+  handlingFrame: boolean;
+  /** The channel the native side currently writes to; replaced on reattach. */
+  channel: Channel<AgentFrame> | null;
+  /** Polls the native cursor so a channel that silently stopped delivering is replaced. */
+  deliveryWatch: ReturnType<typeof setInterval> | null;
+  /** Local cursor seen behind the native one on the previous poll. */
+  deliveryStalledAt: number | null;
+  reattaching: boolean;
+  frameFailureReported: boolean;
   state: AgentSessionState;
   adapter: AgentAdapter;
   context: AdapterContext;
@@ -179,6 +196,9 @@ const RECONNECT_WINDOW_MS = 60_000;
 const recoveryTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
 function checkpoint(session: Session): void {
+  if (session.handlingFrame) { scheduleCheckpoint(session); return; }
+  // The protocol cursor and adapter state must describe the same painted data.
+  flushStreamEvents(session);
   const timer = recoveryTimers.get(session.termId);
   if (timer) clearTimeout(timer);
   recoveryTimers.delete(session.termId);
@@ -186,9 +206,19 @@ function checkpoint(session: Session): void {
   // Empty Codex threads have an id but no resumable rollout on disk yet.
   const sessionId = session.pendingResume?.id ??
     (session.restoring ? session.launch.resumeId :
-      session.state.agent === "codex" && !session.state.items.some((item) => item.kind === "user")
+      session.state.agent === "codex" && !session.launch.resumeId &&
+          !session.state.items.some((item) => item.kind === "user")
         ? null : session.state.sessionId);
+  const { items: _items, pending: _pending, ...runtimeState } = session.state;
   workspaceRecovery.update(session.termId, { agent: {
+    ...(session.adapter.checkpoint ? { runtime: {
+      instanceId: session.instanceId,
+      sequence: session.frameSequence,
+      adapter: session.adapter.checkpoint(),
+      userInitiatedTurn: session.userInitiatedTurn,
+      interrupted: session.interrupted,
+      state: runtimeState,
+    } } : {}),
     launch: {
       ...session.launch,
       prompt: null,
@@ -513,15 +543,15 @@ function streamEventKey(event: AgentEvent): string | null {
 }
 
 function mergeStreamEvent(previous: AgentEvent | undefined, event: AgentEvent): AgentEvent {
-  if (!previous || previous.type !== event.type) return event;
-  if (
-    (event.type === "assistant-delta" || event.type === "thinking-delta") &&
-    (previous.type === "assistant-delta" || previous.type === "thinking-delta")
-  ) {
-    return { ...event, text: previous.text + event.text };
+  // Bound the pending batch too. Background WebView timers can be delayed,
+  // so the reducer's eventual clamp alone cannot bound a fast native stream.
+  if (event.type === "assistant-delta" || event.type === "thinking-delta") {
+    const earlier = previous?.type === event.type ? previous.text : "";
+    return { ...event, text: clampEnd(earlier + event.text, MAX_TEXT) };
   }
-  if (event.type === "tool" && previous.type === "tool") {
-    return { ...event, outputDelta: (previous.outputDelta ?? "") + (event.outputDelta ?? "") };
+  if (event.type === "tool") {
+    const earlier = previous?.type === "tool" ? previous.outputDelta ?? "" : "";
+    return { ...event, outputDelta: clampEnd(earlier + (event.outputDelta ?? ""), MAX_TOOL_OUTPUT) };
   }
   return event;
 }
@@ -983,6 +1013,7 @@ function emitNow(session: Session, event: AgentEvent): void {
   // Record incoming user turns too, so resumed sessions and remote prompts are
   // available to Up/Down navigation without leaking prompts from another thread.
   if (event.type === "transcript") {
+    session.adapter.adoptTranscript?.(next.items);
     session.promptHistory = [];
     for (const item of next.items) {
       if (item.kind === "user") recordPromptHistory(session, item.text);
@@ -1061,10 +1092,12 @@ function emitNow(session: Session, event: AgentEvent): void {
   }
   // Browser animation frames can stop while the desktop window is minimized.
   // Settled states are also synchronization boundaries for the mobile
-  // companion, so publish them immediately instead of waiting for a paint that
+  // companion. Permissions also drive unattended approvals, including when
+  // the window is hidden, so publish them without waiting for a paint that
   // may never happen until the user restores Duckweed.
   if (
     event.type === "turn-end" ||
+    event.type === "permission" ||
     (event.type === "status" &&
       (event.status === "idle" ||
         event.status === "waiting" ||
@@ -1099,11 +1132,37 @@ function emitNow(session: Session, event: AgentEvent): void {
 }
 
 /** Settle uncertain input before releasing a connection that cannot recover. */
+/** How long a launch may stay silent before memory pressure is checked. */
+const SLOW_START_CHECK_MS = 20_000;
+
+/**
+ * An exhausted operating system makes agents stall or drop their connection,
+ * and no retry inside Duckweed can fix that. Say so instead of leaving a
+ * generic failure or an endless spinner.
+ */
+function explainLowMemory(session: Session): void {
+  if (!TAURI_RUNTIME) return;
+  void invoke<SystemMemory | null>("system_memory_status").catch(() => null).then((memory) => {
+    if (!memory?.low || session.disposed || sessions.get(session.termId) !== session) return;
+    const gigabytes = (bytes: number) => (bytes / 1024 ** 3).toFixed(1);
+    try {
+      emit(session, {
+        type: "notice",
+        tone: "error",
+        text: `This computer is almost out of memory: only ${gigabytes(memory.commitAvailableBytes)} GB of ` +
+          `${gigabytes(memory.commitLimitBytes)} GB can still be allocated. Agents stall or disconnect ` +
+          "until other programs release memory. Close the heaviest ones, then reopen this conversation.",
+      });
+    } catch {}
+  });
+}
+
 function failConnection(session: Session, message: string, preserveCodexWork = false): void {
   session.queuePaused = true;
   session.connectionError = message;
   session.adapter.connectionLost?.(session.context);
   emit(session, { type: "status", status: "error", error: message });
+  explainLowMemory(session);
   // Let rejected prompt RPCs preserve their input before adapter disposal.
   const teardown = new Promise<void>((resolve) => setTimeout(resolve, 0)).then(async () => {
     try { await session.adapter.dispose?.(session.context, { preserveWork: preserveCodexWork }); } catch {}
@@ -1153,9 +1212,136 @@ function reconnect(session: Session): boolean {
   return true;
 }
 
+/** How often a live session compares its frame cursor with the native one. */
+const DELIVERY_CHECK_INTERVAL_MS = 4_000;
+
+/**
+ * A fresh channel for every native call. Tauri ends a channel when the Rust
+ * side drops it, as `agent_proc_attach` does when no live process remains, and
+ * an ended channel silently discards everything later written to its id.
+ */
+function frameChannel(session: Session): Channel<AgentFrame> {
+  const channel = new Channel<AgentFrame>();
+  channel.onmessage = (frame) => {
+    // Tauri never delivers later messages on a channel whose handler threw.
+    try { handleFrame(session, frame); }
+    catch (error) { reportFrameFailure(session, error); }
+  };
+  return channel;
+}
+
+function reportFrameFailure(session: Session, error: unknown): void {
+  const detail = error instanceof Error ? error.message : String(error);
+  console.error("Duckweed could not apply an agent update", error);
+  session.stderr.push(`Renderer error: ${detail}`);
+  if (session.stderr.length > 50) session.stderr.shift();
+  if (session.frameFailureReported) return;
+  session.frameFailureReported = true;
+  try {
+    emit(session, { type: "notice", tone: "error", text: `Duckweed could not display an agent update: ${detail}` });
+  } catch {}
+}
+
+function watchDelivery(session: Session): void {
+  if (!TAURI_RUNTIME || session.deliveryWatch || session.disposed) return;
+  if (!session.adapter.checkpoint || !session.adapter.restore) return;
+  session.deliveryWatch = setInterval(() => void verifySessionDelivery(session), DELIVERY_CHECK_INTERVAL_MS);
+}
+
+function stopDeliveryWatch(session: Session): void {
+  if (session.deliveryWatch) clearInterval(session.deliveryWatch);
+  session.deliveryWatch = null;
+}
+
+/**
+ * Reattach when the native side has produced frames this renderer never saw.
+ * A lost large-payload fetch, a failed eval or an ended channel all look the
+ * same from here: the agent keeps working while the timeline stays frozen.
+ * Two consecutive polls without progress rule out a renderer that is merely busy.
+ */
+export async function verifyDelivery(termId: string): Promise<void> {
+  const session = sessions.get(termId);
+  if (session) await verifySessionDelivery(session);
+}
+
+async function verifySessionDelivery(session: Session): Promise<void> {
+  if (session.disposed || sessions.get(session.termId) !== session) {
+    stopDeliveryWatch(session);
+    return;
+  }
+  if (session.reattaching || !session.channel) return;
+  const local = session.frameSequence;
+  const remote = await agentProcSequence(session.termId, session.instanceId).catch(() => null);
+  if (sessions.get(session.termId) !== session || session.disposed || session.reattaching) return;
+  if (remote === null || remote <= local || session.frameSequence !== local) {
+    session.deliveryStalledAt = null;
+    return;
+  }
+  if (session.deliveryStalledAt !== local) {
+    session.deliveryStalledAt = local;
+    return;
+  }
+  session.deliveryStalledAt = null;
+  await reattachDelivery(session);
+}
+
+async function reattachDelivery(session: Session): Promise<void> {
+  const previous = session.channel;
+  const previousHandler = previous?.onmessage;
+  // Mute the stalled channel first. Its late frames are replayed in order on
+  // the new one, and interleaving both could skip a sequence.
+  if (previous) previous.onmessage = () => {};
+  const channel = frameChannel(session);
+  session.reattaching = true;
+  try {
+    if (await agentProcAttach(session.termId, session.instanceId, session.frameSequence, channel)) {
+      session.channel = channel;
+    } else if (previous && previousHandler) {
+      previous.onmessage = previousHandler;
+    }
+  } catch (error) {
+    if (previous && previousHandler) previous.onmessage = previousHandler;
+    stopDeliveryWatch(session);
+    emit(session, {
+      type: "notice",
+      tone: "error",
+      text: `Lost the live output of ${session.state.label}. ${error instanceof Error ? error.message : String(error)}`,
+    });
+    notifyNow(session);
+  } finally {
+    session.reattaching = false;
+  }
+}
+
 function handleFrame(session: Session, frame: AgentFrame): void {
   if (session.disposed || session.connectionError) return;
   switch (frame.kind) {
+    case "sequenced": {
+      if (frame.sequence <= session.frameSequence) return;
+      session.handlingFrame = true;
+      try { handleFrame(session, frame.frame); }
+      finally {
+        session.handlingFrame = false;
+        session.frameSequence = frame.sequence;
+        scheduleCheckpoint(session);
+      }
+      return;
+    }
+    case "automaticapproval": {
+      // The native transport already sent this response. Let the adapter release
+      // its request bookkeeping without writing a duplicate or clearing a newer
+      // prompt that arrived while the renderer was suspended.
+      const current = session.state.permission?.id === frame.permission_id;
+      session.adapter.respond(frame.permission_id, frame.option_id, {
+        ...session.context,
+        send: () => {},
+        emit: (event) => {
+          if (!current && (event.type === "permission" || event.type === "status")) return;
+          session.context.emit(event);
+        },
+      });
+      return;
+    }
     case "stdout":
       if (session.protocolWriter.failure || session.reconnecting) return;
       session.adapter.receive(frame.line, session.context);
@@ -1233,7 +1419,7 @@ export async function start(
   launch = recovery ? launch : withRememberedPreferences(launch);
 
   const definition = AGENTS[launch.agent];
-  const adapter = createAdapter(launch.agent);
+  let adapter = createAdapter(launch.agent);
   const presentation = agentPresentation(launch.agent, launch.program);
 
   // Resolve "continue the latest conversation" before starting the protocol.
@@ -1271,6 +1457,14 @@ export async function start(
   );
   const session: Session = {
     termId,
+    instanceId: recovery?.runtime?.instanceId ?? crypto.randomUUID(),
+    frameSequence: recovery?.runtime?.sequence ?? 0,
+    handlingFrame: false,
+    channel: null,
+    deliveryWatch: null,
+    deliveryStalledAt: null,
+    reattaching: false,
+    frameFailureReported: false,
     adapter,
     launch,
     stderr: [],
@@ -1346,6 +1540,7 @@ export async function start(
       cancelPendingSend: (id) => protocolWriter.cancel(id),
       acknowledgeSend: (id) => protocolWriter.acknowledge(id),
       emit: (event) => emit(session, event),
+      reconnect: () => reconnect(session),
       openUrl,
       runtimeProcesses: (pids) => invoke<void>("agent_proc_set_runtime_roots", { id: termId, pids }),
       syncAccount: (signedIn) => agentCodexAuthSync(termId, signedIn),
@@ -1365,24 +1560,61 @@ export async function start(
     },
   };
 
+  const liveRecovery = recovery?.runtime && adapter.restore ? recovery.runtime : null;
+  const restoredAdapter = !liveRecovery || adapter.restore!(liveRecovery.adapter);
+  if (liveRecovery && restoredAdapter) {
+    session.state = { ...session.state, ...liveRecovery.state, termId, items: session.state.items, pending: session.state.pending };
+    session.userInitiatedTurn = liveRecovery.userInitiatedTurn;
+    session.interrupted = liveRecovery.interrupted;
+  }
   sessions.set(termId, session);
-  checkpoint(session);
+  if (restoredAdapter) checkpoint(session);
   announce(termId);
 
-  const channel = new Channel<AgentFrame>();
-  channel.onmessage = (frame) => handleFrame(session, frame);
+  // Covers a launch that never returns as well as one that never answers.
+  const slowStart = setTimeout(() => {
+    if (!session.disposed && session.state.status === "starting") explainLowMemory(session);
+  }, SLOW_START_CHECK_MS);
+  (slowStart as { unref?: () => void }).unref?.();
 
+  let attached = false;
   try {
-    // A WebView crash can leave the old native process alive under this id.
-    if (recovery) await agentProcStop(termId, options.preserveCodexWork).catch(() => {});
+    if (liveRecovery) {
+      if (!restoredAdapter) throw new Error("Could not restore the live agent checkpoint. Its process has been kept running.");
+      session.restoring = true;
+      const channel = frameChannel(session);
+      attached = await agentProcAttach(termId, session.instanceId, session.frameSequence, channel);
+      session.restoring = false;
+      if (attached) {
+        session.channel = channel;
+        session.recovery = null;
+        emit(session, { type: "resumed", sessionId: session.state.sessionId ?? "", title: "", silent: true });
+      }
+    }
+    if (liveRecovery && !attached) {
+      // The native app itself restarted, so there is no surviving pipe.
+      // Resume from the provider record using fresh protocol bookkeeping.
+      adapter = createAdapter(launch.agent);
+      session.adapter = adapter;
+      session.instanceId = crypto.randomUUID();
+      session.frameSequence = 0;
+      session.state = { ...session.state, status: "starting", permission: null };
+      checkpoint(session);
+    }
+    // Shared-service recovery replaces only the proxy, preserving its work.
+    if (!attached && recovery) await agentProcStop(termId, launch.agent === "codex" || options.preserveCodexWork).catch(() => {});
     if (session.disposed) return null;
-    await agentProcStart(
+    // Never reuse the attach channel: a declined attach ended it on the native
+    // side, so a process started on it would stream into nothing.
+    const channel = attached ? null : frameChannel(session);
+    if (channel) await agentProcStart(
       termId,
       {
         // Prefer the typed executable so wrappers like `claudex` still set their
         // proxy env before re-execing Claude Code. Canonical binaries remain the
         // fallback when a profile alias was resolved to one.
         program: launch.program,
+        renderer_recovery_id: adapter.checkpoint && adapter.restore ? session.instanceId : undefined,
         // Wrapper flags (`claudex --g`) must precede headless protocol args so
         // the wrapper can strip them before handing the rest to Claude.
         args: [
@@ -1396,6 +1628,7 @@ export async function start(
       },
       channel,
     );
+    if (channel) session.channel = channel;
   } catch (error) {
     if (sessions.get(termId) !== session) return null;
     // Daemon maintenance can also close the replacement proxy during its
@@ -1425,10 +1658,18 @@ export async function start(
       await agentProcStop(termId).catch(() => {});
       return null;
     }
-    if (found) session.pendingResume = { id: found.id, title: found.title, silent: !!recovery };
+    if (found) {
+      session.pendingResume = { id: found.id, title: found.title, silent: !!recovery };
+      session.context.launch = { ...session.context.launch, resumeId: found.id };
+    }
   }
 
-  adapter.start(session.context);
+  if (!attached) {
+    // Rows recovered from a previous process were not streamed by this adapter.
+    if (session.state.items.length) adapter.adoptTranscript?.(session.state.items);
+    adapter.start(session.context);
+  }
+  watchDelivery(session);
 
   // Claude only reports model/effort on the first turn's system/init. Until
   // then, seed the header and pickers from the same settings file the real
@@ -1908,6 +2149,7 @@ async function applyResume(session: Session, sessionId: string, title: string, s
   session.restoring = true;
   session.launch = { ...session.launch, resumeId: sessionId };
   const failed = () => {
+    if (session.disposed || session.reconnecting) return;
     session.userInitiatedTurn = false;
     if (session.recovery) {
       session.state = { ...session.state, items: session.recovery.items, sessionId };
@@ -1919,7 +2161,7 @@ async function applyResume(session: Session, sessionId: string, title: string, s
   };
   let attempt;
   try {
-    attempt = session.adapter.resume?.(sessionId, session.context);
+    attempt = session.adapter.resume?.(sessionId, session.context, { allowFork: !silent });
   } catch {
     failed();
     return;
@@ -2003,6 +2245,7 @@ export async function resume(
   // announced in between either — a pane that blinked back to its shell and
   // then to the agent would read as a crash.
   session.disposed = true;
+  stopDeliveryWatch(session);
   session.protocolWriter.close();
   cancelCapacityReply(session);
   sessions.delete(termId);
@@ -2064,6 +2307,7 @@ export async function newChat(termId: string): Promise<string | null> {
   const { launch } = session;
   const cwd = session.state.cwd;
   session.disposed = true;
+  stopDeliveryWatch(session);
   session.protocolWriter.close();
   cancelCapacityReply(session);
   sessions.delete(termId);
@@ -2169,6 +2413,7 @@ function disposeSession(termId: string, keepSurface = false, preserveCodexWork =
   }
   cancelCapacityReply(session);
   session.disposed = true;
+  stopDeliveryWatch(session);
   session.protocolWriter.close();
   const recoveryTimer = recoveryTimers.get(termId);
   if (recoveryTimer) clearTimeout(recoveryTimer);

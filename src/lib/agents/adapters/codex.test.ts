@@ -911,12 +911,12 @@ describe("codex adapter", () => {
     });
   });
 
-  test("runs /side in an ephemeral read-only fork without touching the main transcript", async () => {
+  test.each(["/btw", "/side"] as const)("runs %s in an ephemeral read-only fork without touching the main transcript", async (command) => {
     const h = harness();
     await h.handshake();
 
-    expect(h.adapter.commandAvailableDuringTurn?.("/side what changed?")).toBe(true);
-    expect(h.adapter.command?.("/side what changed?", h.ctx)).toBe("handled");
+    expect(h.adapter.commandAvailableDuringTurn?.(`${command} what changed?`)).toBe(true);
+    expect(h.adapter.command?.(`${command} what changed?`, h.ctx)).toBe("handled");
     expect(h.sent.at(-1)).toMatchObject({
       id: 4,
       method: "thread/fork",
@@ -929,7 +929,7 @@ describe("codex adapter", () => {
       },
     });
     expect(h.state().sideQuestion).toMatchObject({
-      command: "/side",
+      command,
       question: "what changed?",
       status: "asking",
     });
@@ -4640,6 +4640,39 @@ describe("codex adapter", () => {
     expect(
       h.state().items.some((item) => item.kind === "notice" && item.tone === "error"),
     ).toBe(false);
+  });
+
+  test("startup resume keeps the saved identity without opening a provisional thread", async () => {
+    const h = harness({ resumeId: "saved-startup-thread" });
+    h.adapter.start(h.ctx);
+    await Promise.resolve();
+    h.feed({ id: 1, result: {} });
+    await Promise.resolve();
+    await Promise.resolve();
+    h.feed({ id: "duckweed-account-read", result: { account: { type: "chatgpt" } } });
+    for (let step = 0; step < 8; step++) await Promise.resolve();
+    expect(h.sent.some((message) => message.method === "thread/start")).toBe(false);
+    expect(h.state()).toMatchObject({ sessionId: "saved-startup-thread", status: "idle" });
+    expect(h.state().capabilities?.inputs.text).toBe(true);
+    await h.adapter.dispose?.(h.ctx, { preserveWork: true });
+  });
+
+  test("automatic recovery never forks a slow conversation or interrupts its live work", async () => {
+    const h = harness({}, { completionQuietMs: 0, resumeTimeoutMs: 40 });
+    await h.handshake();
+    let reconnects = 0;
+    h.ctx.reconnect = () => { reconnects += 1; return true; };
+    const before = h.sent.length;
+    const resumed = h.adapter.resume?.("original-running-thread", h.ctx, { allowFork: false });
+    expect(await resumed).toBe(false);
+    const methods = h.sent.slice(before).map((message) => message.method);
+    expect(reconnects).toBe(1);
+    expect(methods).toContain("thread/resume");
+    for (const method of ["thread/start", "thread/fork", "turn/start", "turn/interrupt", "thread/goal/set", "thread/backgroundTerminals/clean"]) {
+      expect(methods).not.toContain(method);
+    }
+    expect(h.state().loadingHistory).toBe(false);
+    await h.adapter.dispose?.(h.ctx, { preserveWork: true });
   });
 
   test("times out a silent thread/resume, then hydrates a forked copy", async () => {

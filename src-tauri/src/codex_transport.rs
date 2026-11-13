@@ -198,6 +198,7 @@ fn service(resolved: &Path, options: &AgentSpawnOptions) -> Service {
 #[cfg(test)]
 pub(crate) fn test_service(home: &Path) -> Service {
     service(Path::new("codex"), &AgentSpawnOptions {
+        renderer_recovery_id: None,
         program: "codex".into(), args: vec!["app-server".into()], cwd: None,
         env: Some([("CODEX_HOME".into(), home.to_string_lossy().into())].into()),
     })
@@ -796,6 +797,7 @@ mod tests {
         std::fs::create_dir(&home).unwrap();
         std::fs::write(home.join("auth.json"), r#"{"auth_mode":"apikey","OPENAI_API_KEY":"test-only-key"}"#).unwrap();
         let options = AgentSpawnOptions {
+            renderer_recovery_id: None,
             program: "missing-codex-binary".into(),
             args: vec!["app-server".into()],
             cwd: None,
@@ -846,6 +848,7 @@ mod tests {
     #[test]
     fn process_overrides_and_wrappers_keep_their_own_server() {
         let mut options = AgentSpawnOptions {
+            renderer_recovery_id: None,
             program: "omx".into(),
             args: vec!["app-server".into()],
             cwd: None,
@@ -881,6 +884,7 @@ mod tests {
         )
         .unwrap();
         let options = AgentSpawnOptions {
+            renderer_recovery_id: None,
             program: "codex".into(),
             args: vec!["app-server".into()],
             cwd: Some(root.to_string_lossy().into()),

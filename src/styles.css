@@ -444,7 +444,18 @@ button.chip:hover {
     background 120ms ease,
     color 120ms ease,
     border-color 120ms ease;
-  overflow: hidden;
+  overflow: visible;
+}
+
+/* Reach the window's top edge without changing the tab's painted bounds.
+   Keep this on the tab so selection, context menus and reordering all work. */
+.tab::before {
+  content: "";
+  position: absolute;
+  top: calc((36px - var(--titlebar-h)) / 2 - 1px);
+  left: -1px;
+  right: -1px;
+  bottom: calc(100% - 9px);
 }
 
 /*
@@ -12699,4 +12710,24 @@ body.is-dragging-rail * {
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--text-faint);
+}
+
+/* Ended sessions keep the existing review outline, in yellow without a glow. */
+.pane.has-exited::after,
+.pane.has-exited .pane-completion-flash {
+  border-color: var(--amber);
+  box-shadow: none;
+}
+.tab.has-exited::after,
+.tab.has-exited .tab-completion-review {
+  box-shadow: inset 0 0 0 2px var(--amber);
+}
+.zoom-rail-item.is-unread.has-exited {
+  border-color: var(--amber);
+  box-shadow: inset 0 0 0 1px var(--amber);
+}
+
+.tab-group-label.is-unread.has-exited .tab-group-count {
+  color: var(--amber);
+  background: color-mix(in srgb, var(--amber) 16%, transparent);
 }

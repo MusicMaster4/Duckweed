@@ -96,6 +96,9 @@ pub enum AgentTranscriptItem {
         command: Option<String>,
         output: String,
         changes: Vec<Value>,
+        /// `SubagentMeta` for delegated work, so restored rows join the fleet.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        subagent: Option<Value>,
     },
 }
 
@@ -270,19 +273,27 @@ fn claude_tool_kind(name: &str) -> &'static str {
         "grep" | "glob" => "search",
         "bash" => "execute",
         "webfetch" | "websearch" => "fetch",
-        "task" | "sendmessage" => "task",
+        // Matches the live adapter's `toolKind`. `SendMessage` only talks to an
+        // agent that already has its own row, so it is not a subagent itself.
+        "task" | "agent" => "task",
         "todowrite" | "taskcreate" | "taskupdate" | "tasklist" | "taskget" => "todo",
         _ => "other",
     }
 }
 
 fn claude_tool_title(name: &str, input: &Value) -> String {
+    if claude_tool_kind(name) == "task" {
+        let label = ["description", "subagent_type", "name", "prompt"]
+            .iter()
+            .filter_map(|key| input.get(*key).and_then(Value::as_str))
+            .find(|value| !value.trim().is_empty());
+        return clean_title(label.unwrap_or("Subagent"));
+    }
     let key = match name.to_ascii_lowercase().as_str() {
         "bash" => "command",
         "read" | "edit" | "write" | "multiedit" | "notebookedit" => "file_path",
         "grep" | "glob" => "pattern",
         "webfetch" => "url",
-        "task" => "description",
         "taskcreate" => "subject",
         "taskupdate" | "taskget" => "taskId",
         _ => "",
@@ -299,20 +310,177 @@ fn claude_tool_title(name: &str, input: &Value) -> String {
     clean_title(if detail.is_empty() { name } else { &detail })
 }
 
+fn head_text(text: &str, limit: usize) -> String {
+    if text.chars().count() <= limit {
+        return text.to_string();
+    }
+    let mut kept: String = text.chars().take(limit.saturating_sub(1)).collect();
+    kept.push('…');
+    kept
+}
+
+fn input_text<'a>(input: &'a Value, key: &str) -> Option<&'a str> {
+    input
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+/// The `SubagentMeta` the live adapter derives from the same `Agent` input.
+fn claude_subagent_meta(input: &Value) -> Value {
+    let role = input_text(input, "subagent_type");
+    let prompt = input_text(input, "prompt");
+    let mut meta = serde_json::Map::new();
+    if let Some(label) = input_text(input, "description")
+        .or(role)
+        .or_else(|| input_text(input, "name"))
+        .or(prompt)
+    {
+        meta.insert("label".into(), clean_title(label).into());
+    }
+    if let Some(role) = role {
+        meta.insert("role".into(), role.into());
+    }
+    if let Some(prompt) = prompt {
+        meta.insert(
+            "prompt".into(),
+            head_text(prompt, MAX_TRANSCRIPT_TOOL_OUTPUT).into(),
+        );
+    }
+    if let Some(model) = input_text(input, "model") {
+        meta.insert("model".into(), model.into());
+    }
+    Value::Object(meta)
+}
+
+fn set_subagent_field(subagent: &mut Option<Value>, key: &str, value: &str) {
+    if let Some(Value::Object(meta)) = subagent {
+        meta.insert(key.into(), value.into());
+    }
+}
+
+/// The agent id from an `Agent` result that only acknowledged a background launch.
+fn claude_async_agent_id(text: &str, result: Option<&Value>) -> Option<String> {
+    let structured = result
+        .filter(|result| result.get("status").and_then(Value::as_str) == Some("async_launched"));
+    if structured.is_none() && !text.contains("Async agent launched successfully") {
+        return None;
+    }
+    // The text belongs to this block; `toolUseResult` belongs to the record.
+    text.find("agentId:")
+        .and_then(|start| text[start + "agentId:".len()..].split_whitespace().next())
+        .map(|id| {
+            id.trim_end_matches(|c: char| !c.is_alphanumeric())
+                .to_string()
+        })
+        .filter(|id| !id.is_empty())
+        .or_else(|| {
+            structured
+                .and_then(|result| result.get("agentId"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+}
+
+struct ClaudeTaskNotification {
+    task_id: String,
+    tool_use_id: Option<String>,
+    failed: bool,
+    summary: String,
+    result: String,
+}
+
+fn xml_tag<'a>(text: &'a str, name: &str) -> Option<&'a str> {
+    let open = format!("<{name}>");
+    let close = format!("</{name}>");
+    let start = text.find(&open)? + open.len();
+    let end = start + text[start..].find(&close)?;
+    Some(text[start..end].trim())
+}
+
+/// `<task-notification>` turns Claude injects when background work reports back.
+fn claude_task_notifications(text: &str) -> Vec<ClaudeTaskNotification> {
+    const OPEN: &str = "<task-notification>";
+    const CLOSE: &str = "</task-notification>";
+    let mut found = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find(OPEN) {
+        let body = &rest[start + OPEN.len()..];
+        let end = body.find(CLOSE).unwrap_or(body.len());
+        let block = &body[..end];
+        rest = &body[end..];
+        let Some(task_id) = xml_tag(block, "task-id").filter(|id| !id.is_empty()) else {
+            continue;
+        };
+        let status = xml_tag(block, "status").unwrap_or("").to_ascii_lowercase();
+        if !matches!(status.as_str(), "completed" | "failed" | "stopped") {
+            continue;
+        }
+        // A report can quote markup of its own, so it runs to the last close tag.
+        let result = block
+            .find("<result>")
+            .map(|start| &block[start + "<result>".len()..])
+            .and_then(|inner| inner.rfind("</result>").map(|end| inner[..end].trim()))
+            .unwrap_or("");
+        found.push(ClaudeTaskNotification {
+            task_id: task_id.to_string(),
+            tool_use_id: xml_tag(block, "tool-use-id")
+                .filter(|id| !id.is_empty())
+                .map(str::to_string),
+            failed: status != "completed",
+            summary: xml_tag(block, "summary").unwrap_or("").to_string(),
+            result: result.to_string(),
+        });
+    }
+    found
+}
+
+/// Keep the newest rows. A resumed pane continues from the end of the
+/// conversation, so that is the part that has to be on screen.
+fn drop_oldest_transcript_items(
+    items: &mut Vec<AgentTranscriptItem>,
+    indexes: &mut [&mut HashMap<String, usize>],
+    keep: usize,
+) {
+    if items.len() <= keep {
+        return;
+    }
+    let dropped = items.len() - keep;
+    items.drain(..dropped);
+    for index in indexes.iter_mut() {
+        index.retain(|_, position| {
+            if *position < dropped {
+                return false;
+            }
+            *position -= dropped;
+            true
+        });
+    }
+}
+
 fn claude_transcript(path: &Path) -> Result<Vec<AgentTranscriptItem>, String> {
     let file =
         File::open(path).map_err(|error| format!("could not open Claude transcript: {error}"))?;
     let fallback_at = modified_millis(path);
     let mut items = Vec::new();
     let mut tools: HashMap<String, usize> = HashMap::new();
+    // Background agents report back by agent id, often through a later
+    // `SendMessage` call rather than the `Agent` call that launched them.
+    let mut agents: HashMap<String, usize> = HashMap::new();
 
     for (line_index, line) in BufReader::new(file)
         .lines()
         .map_while(Result::ok)
         .enumerate()
     {
-        if items.len() >= MAX_TRANSCRIPT_ITEMS {
-            break;
+        // Trimmed in batches so the index maps are not rebuilt on every row.
+        if items.len() >= MAX_TRANSCRIPT_ITEMS * 2 {
+            drop_oldest_transcript_items(
+                &mut items,
+                &mut [&mut tools, &mut agents],
+                MAX_TRANSCRIPT_ITEMS,
+            );
         }
         let Ok(record) = serde_json::from_str::<Value>(&line) else {
             continue;
@@ -348,22 +516,32 @@ fn claude_transcript(path: &Path) -> Result<Vec<AgentTranscriptItem>, String> {
                     let Some(index) = tools.get(call_id).copied() else {
                         continue;
                     };
-                    let output = bounded_text(
-                        &message_text(block.get("content").unwrap_or(&Value::Null)),
-                        MAX_TRANSCRIPT_TOOL_OUTPUT,
-                    );
+                    let text = message_text(block.get("content").unwrap_or(&Value::Null));
+                    let failed = block.get("is_error").and_then(Value::as_bool) == Some(true);
                     if let Some(AgentTranscriptItem::Tool {
+                        tool,
                         status,
                         output: stored_output,
+                        subagent,
                         ..
                     }) = items.get_mut(index)
                     {
-                        *status = if block.get("is_error").and_then(Value::as_bool) == Some(true) {
-                            "error".to_string()
-                        } else {
-                            "done".to_string()
-                        };
-                        *stored_output = output;
+                        // A background launch only acknowledges the work. Its
+                        // report arrives later as a task notification.
+                        if !failed && tool.as_str() == "task" {
+                            if let Some(agent_id) =
+                                claude_async_agent_id(&text, record.get("toolUseResult"))
+                            {
+                                *status = "running".to_string();
+                                stored_output.clear();
+                                set_subagent_field(subagent, "taskId", &agent_id);
+                                set_subagent_field(subagent, "activity", "Working");
+                                agents.insert(agent_id, index);
+                                continue;
+                            }
+                        }
+                        *status = if failed { "error" } else { "done" }.to_string();
+                        *stored_output = bounded_text(&text, MAX_TRANSCRIPT_TOOL_OUTPUT);
                     }
                 }
             }
@@ -371,7 +549,40 @@ fn claude_transcript(path: &Path) -> Result<Vec<AgentTranscriptItem>, String> {
                 continue;
             }
             let text = message_text(content);
-            if text.trim().is_empty() || is_synthetic_prompt(&text) {
+            let notifications = claude_task_notifications(&text);
+            for notification in &notifications {
+                let index = agents.get(&notification.task_id).copied().or_else(|| {
+                    notification
+                        .tool_use_id
+                        .as_ref()
+                        .and_then(|id| tools.get(id))
+                        .copied()
+                });
+                let Some(AgentTranscriptItem::Tool {
+                    tool,
+                    status,
+                    output,
+                    subagent,
+                    ..
+                }) = index.and_then(|index| items.get_mut(index))
+                else {
+                    continue;
+                };
+                if tool.as_str() != "task" {
+                    continue;
+                }
+                *status = if notification.failed { "error" } else { "done" }.to_string();
+                let report = if notification.result.is_empty() {
+                    &notification.summary
+                } else {
+                    &notification.result
+                };
+                *output = head_text(report, MAX_TRANSCRIPT_TOOL_OUTPUT);
+                if !notification.summary.is_empty() {
+                    set_subagent_field(subagent, "activity", &notification.summary);
+                }
+            }
+            if !notifications.is_empty() || text.trim().is_empty() || is_synthetic_prompt(&text) {
                 continue;
             }
             items.push(AgentTranscriptItem::User {
@@ -395,9 +606,6 @@ fn claude_transcript(path: &Path) -> Result<Vec<AgentTranscriptItem>, String> {
             continue;
         };
         for (block_index, block) in blocks.iter().enumerate() {
-            if items.len() >= MAX_TRANSCRIPT_ITEMS {
-                break;
-            }
             let block_type = block.get("type").and_then(Value::as_str).unwrap_or("");
             match block_type {
                 "text" => {
@@ -442,22 +650,48 @@ fn claude_transcript(path: &Path) -> Result<Vec<AgentTranscriptItem>, String> {
                     } else {
                         None
                     };
+                    let tool = claude_tool_kind(&name);
                     let index = items.len();
                     items.push(AgentTranscriptItem::Tool {
                         id: format!("tool-{call_id}"),
                         at,
                         call_id: call_id.clone(),
                         title: claude_tool_title(&name, input),
-                        tool: claude_tool_kind(&name).to_string(),
+                        tool: tool.to_string(),
                         name,
                         status: "done".to_string(),
                         command,
                         output: String::new(),
                         changes: Vec::new(),
+                        subagent: (tool == "task").then(|| claude_subagent_meta(input)),
                     });
                     tools.insert(call_id, index);
                 }
                 _ => {}
+            }
+        }
+    }
+
+    drop_oldest_transcript_items(
+        &mut items,
+        &mut [&mut tools, &mut agents],
+        MAX_TRANSCRIPT_ITEMS,
+    );
+    // Background agents live inside the CLI process. Resuming relaunches it,
+    // so work that never reported back is not running anymore.
+    for item in &mut items {
+        if let AgentTranscriptItem::Tool {
+            status,
+            output,
+            subagent,
+            ..
+        } = item
+        {
+            if status.as_str() == "running" {
+                *status = "error".to_string();
+                *output =
+                    "Stopped before reporting back. The session that ran it has ended.".to_string();
+                set_subagent_field(subagent, "activity", "Stopped before reporting back");
             }
         }
     }
@@ -1328,6 +1562,123 @@ mod tests {
             &items[3],
             AgentTranscriptItem::Assistant { text, streaming, .. }
                 if text == "Done." && !streaming
+        ));
+    }
+
+    /// `(tool, title, status, subagent)` for every restored tool row.
+    fn tool_rows(items: &[AgentTranscriptItem]) -> Vec<(&str, &str, &str, Option<&Value>)> {
+        items
+            .iter()
+            .filter_map(|item| match item {
+                AgentTranscriptItem::Tool {
+                    tool,
+                    title,
+                    status,
+                    subagent,
+                    ..
+                } => Some((
+                    tool.as_str(),
+                    title.as_str(),
+                    status.as_str(),
+                    subagent.as_ref(),
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn claude_transcript_restores_agent_calls_as_subagents() {
+        let home = temp_dir("claude-transcript-agents");
+        let file = home.join("session.jsonl");
+        write(
+            &file,
+            concat!(
+                r#"{"type":"user","uuid":"u1","message":{"role":"user","content":"Make the video"}}"#,
+                "\n",
+                r#"{"type":"assistant","uuid":"a1","message":{"role":"assistant","content":[{"type":"tool_use","id":"fg","name":"Agent","input":{"description":"Check the script","subagent_type":"Explore","prompt":"Read the script."}},{"type":"tool_use","id":"bg","name":"Agent","input":{"name":"research","description":"Research dossier","prompt":"Collect sources.","run_in_background":true}},{"type":"tool_use","id":"lost","name":"Agent","input":{"description":"Render shots","prompt":"Render."}}]}}"#,
+                "\n",
+                r#"{"type":"user","uuid":"r1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"fg","content":[{"type":"text","text":"The script is fine."}]}]}}"#,
+                "\n",
+                r#"{"type":"user","uuid":"r2","toolUseResult":{"isAsync":true,"status":"async_launched","agentId":"a93b8c1d"},"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"bg","content":[{"type":"text","text":"Async agent launched successfully.\nagentId: a93b8c1d (internal ID)"}]}]}}"#,
+                "\n",
+                r#"{"type":"user","uuid":"r3","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"lost","content":[{"type":"text","text":"Async agent launched successfully.\nagentId: b11 (internal ID)"}]}]}}"#,
+                "\n",
+                r#"{"type":"assistant","uuid":"a2","message":{"role":"assistant","content":[{"type":"tool_use","id":"msg","name":"SendMessage","input":{"to":"research","message":"Keep going"}}]}}"#,
+                "\n",
+                r#"{"type":"user","uuid":"r4","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"msg","content":[{"type":"text","text":"{\"success\":true}"}]}]}}"#,
+                "\n",
+                r#"{"type":"user","uuid":"n1","message":{"role":"user","content":"<task-notification>\n<task-id>a93b8c1d</task-id>\n<tool-use-id>msg</tool-use-id>\n<status>completed</status>\n<summary>Agent \"Research dossier\" finished</summary>\n<result>Saved 12 sources. See <b>notes</b>.</result>\n</task-notification>"}}"#,
+                "\n",
+            ),
+        );
+
+        let items = claude_transcript(&file).unwrap();
+        // The notification is plumbing, not a user turn.
+        assert_eq!(
+            items
+                .iter()
+                .filter(|item| matches!(item, AgentTranscriptItem::User { .. }))
+                .count(),
+            1
+        );
+        let rows = tool_rows(&items);
+        assert_eq!(rows.len(), 4);
+
+        let (tool, title, status, meta) = rows[0];
+        assert_eq!((tool, title, status), ("task", "Check the script", "done"));
+        let meta = meta.unwrap();
+        assert_eq!(meta["label"], "Check the script");
+        assert_eq!(meta["role"], "Explore");
+        assert_eq!(meta["prompt"], "Read the script.");
+
+        let (tool, title, status, meta) = rows[1];
+        assert_eq!((tool, title, status), ("task", "Research dossier", "done"));
+        assert_eq!(meta.unwrap()["taskId"], "a93b8c1d");
+        assert_eq!(
+            meta.unwrap()["activity"],
+            "Agent \"Research dossier\" finished"
+        );
+        assert!(matches!(
+            &items[2],
+            AgentTranscriptItem::Tool { output, .. } if output == "Saved 12 sources. See <b>notes</b>."
+        ));
+
+        let (_, _, status, meta) = rows[2];
+        assert_eq!(status, "error");
+        assert_eq!(meta.unwrap()["taskId"], "b11");
+
+        let (tool, _, _, meta) = rows[3];
+        assert_eq!(tool, "other");
+        assert!(meta.is_none());
+    }
+
+    #[test]
+    fn claude_transcript_keeps_the_newest_rows() {
+        let home = temp_dir("claude-transcript-bounds");
+        let file = home.join("session.jsonl");
+        let mut contents = String::new();
+        for index in 0..(MAX_TRANSCRIPT_ITEMS * 3 + 7) {
+            contents.push_str(&format!(
+                r#"{{"type":"user","uuid":"u{index}","message":{{"role":"user","content":"Prompt {index}"}}}}"#
+            ));
+            contents.push('\n');
+        }
+        contents.push_str(r#"{"type":"assistant","uuid":"a","message":{"role":"assistant","content":[{"type":"tool_use","id":"late","name":"Agent","input":{"description":"Late worker"}}]}}"#);
+        contents.push('\n');
+        contents.push_str(r#"{"type":"user","uuid":"r","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"late","content":"Finished"}]}}"#);
+        contents.push('\n');
+        write(&file, &contents);
+
+        let items = claude_transcript(&file).unwrap();
+        assert_eq!(items.len(), MAX_TRANSCRIPT_ITEMS);
+        assert!(matches!(
+            items.last(),
+            Some(AgentTranscriptItem::Tool { status, output, .. }) if status == "done" && output == "Finished"
+        ));
+        assert!(matches!(
+            &items[items.len() - 2],
+            AgentTranscriptItem::User { text, .. } if *text == format!("Prompt {}", MAX_TRANSCRIPT_ITEMS * 3 + 6)
         ));
     }
 

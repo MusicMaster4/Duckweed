@@ -25,9 +25,13 @@ use winreg::enums::*;
 #[cfg(windows)]
 use winreg::RegKey;
 
+#[cfg(windows)]
 const TAB_KEY: &str = "DuckweedTab";
+#[cfg(windows)]
 const WINDOW_KEY: &str = "DuckweedWindow";
+#[cfg(windows)]
 const TAB_LABEL: &str = "Open Duckweed in new tab";
+#[cfg(windows)]
 const WINDOW_LABEL: &str = "Open Duckweed in new window";
 
 /// Which Explorer verb is being toggled.
@@ -45,6 +49,7 @@ pub struct ShellIntegrationStatus {
     pub window: bool,
 }
 
+#[cfg(windows)]
 impl ShellVerb {
     fn key(self) -> &'static str {
         match self {

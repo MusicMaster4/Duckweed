@@ -1,5 +1,5 @@
 import { autoApprovalOption } from "./autoApproval";
-import type { AgentPermission } from "./types";
+import type { AgentPermission, AgentSessionState } from "./types";
 
 /** Absolute deadline survives restarts; null means disabled. */
 export type AutomaticApproval = number | "until-disabled" | null;
@@ -9,6 +9,17 @@ export const AUTOMATIC_APPROVAL_DELAY_MS = 1_000;
 export function automaticApprovalSetting(value?: unknown, now = Date.now()): AutomaticApproval {
   if (value === "until-disabled") return value;
   return typeof value === "number" && Number.isFinite(value) && value > now ? value : null;
+}
+
+/** Prompts handled automatically do not need an attention notification. */
+export function hasPendingAutomaticApproval(
+  state: Pick<AgentSessionState, "status" | "permission"> | null | undefined,
+  setting: AutomaticApproval,
+  now = Date.now(),
+): boolean {
+  return state?.status === "waiting" &&
+    automaticApprovalSetting(setting, now) !== null &&
+    autoApprovalOption(state.permission) !== null;
 }
 
 export function automaticApprovalDeadline(

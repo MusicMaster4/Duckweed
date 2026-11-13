@@ -510,6 +510,7 @@ const ZoomRailItem = memo(function ZoomRailItem({
         selected ? "is-selected" : "",
         entry.tabColor ? "is-colored" : "",
         unread ? "is-unread" : "",
+        meta?.exited || agent?.status === "exited" || agent?.status === "error" ? "has-exited" : "",
         entry.pinned ? "is-pinned" : "",
         dragging ? "is-dragging" : "",
       ]

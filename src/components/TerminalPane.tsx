@@ -6,6 +6,8 @@ import type { CompletionFlash } from "../lib/completionHighlights";
 import { edgeRadius } from "../lib/layout";
 import type { AgentTarget, ScheduledSend, SubmitDelivery, TimedSend } from "../lib/scheduledSend";
 import type { AgentImageAttachment } from "../lib/agents/types";
+import * as agentSessions from "../lib/agents/session";
+import { isSessionExited } from "../lib/processActivity";
 import * as terminals from "../lib/terminals";
 import type { DropZone, LeafNode, ProjectInfo } from "../lib/types";
 import { AgentSurface } from "./agent/AgentSurface";
@@ -113,6 +115,13 @@ export const TerminalPane = memo(function TerminalPane({
   const bodyRef = useRef<HTMLDivElement>(null);
   const copyToastTimer = useRef<number | null>(null);
   const [meta, setMeta] = useState(() => terminals.getMeta(node.term));
+  const [agentStatus, setAgentStatus] = useState(() => agentSessions.get(node.term)?.status);
+  useEffect(() => {
+    const read = () => setAgentStatus(agentSessions.get(node.term)?.status);
+    read();
+    return agentSessions.subscribe(node.term, read);
+  }, [node.term]);
+  const sessionExited = isSessionExited(meta?.exited ?? false, agentStatus);
   const [searching, setSearching] = useState(false);
   const [inputMode, setInputMode] = useState(terminals.getInputMode);
   const [copyToast, setCopyToast] = useState<CopyToast | null>(null);
@@ -273,6 +282,7 @@ export const TerminalPane = memo(function TerminalPane({
         activating ? "is-activating" : "",
         isSource ? "is-source" : "",
         meta?.exited ? "is-exited" : "",
+        sessionExited ? "has-exited" : "",
         effectiveRaw ? "is-raw" : "is-editor",
         blank ? "is-blank" : "",
         unread ? "is-unread" : "",

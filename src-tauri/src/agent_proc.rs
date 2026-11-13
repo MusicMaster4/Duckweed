@@ -11,7 +11,7 @@
 //! framing (one JSON value per line, in both directions); the frontend owns
 //! what those lines mean.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tauri::ipc::Channel;
+use crate::automatic_approval::{Policy as ApprovalPolicy, Queue as ApprovalQueue};
 
 /// Cap on one protocol line handed to the webview. Agents stream file contents
 /// and diffs inline, so the ceiling is generous — but a runaway line must not
@@ -42,10 +43,14 @@ const MAX_STDERR_LINE_BYTES: usize = 64 * 1024;
 #[derive(Serialize, Clone)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum AgentFrame {
+    /// Ordered native delivery, retained briefly for renderer reattachment.
+    Sequenced { sequence: u64, frame: Box<AgentFrame> },
     /// One protocol line from the agent's stdout.
     Stdout { line: String },
     /// One diagnostic line from the agent's stderr.
     Stderr { line: String },
+    /// A permission was answered by native code while the renderer may be asleep.
+    AutomaticApproval { permission_id: String, option_id: String },
     /// The process is gone; no further frames follow.
     Exit { code: Option<i32>, reconnect: bool },
 }
@@ -68,6 +73,7 @@ pub struct AgentAvailability {
 #[derive(Deserialize, Clone)]
 pub struct AgentSpawnOptions {
     pub program: String,
+    pub renderer_recovery_id: Option<String>,
     pub args: Vec<String>,
     pub cwd: Option<String>,
     pub env: Option<HashMap<String, String>>,
@@ -81,6 +87,74 @@ struct Process {
     ownership: CodexOwnership,
     service: Option<crate::codex_transport::Service>,
     reconnect_on_exit: bool,
+    approvals: Arc<Mutex<ApprovalQueue>>,
+    channel: Arc<Mutex<AgentDelivery>>,
+}
+
+const MAX_REPLAY_BYTES: usize = 16 * 1024 * 1024;
+const MAX_REPLAY_FRAMES: usize = 16_384;
+
+struct AgentDelivery {
+    channel: Option<Channel<AgentFrame>>,
+    replayable: bool,
+    instance_id: Option<String>,
+    sequence: u64,
+    replay_after: u64,
+    frames: VecDeque<(u64, AgentFrame, usize)>,
+    bytes: usize,
+}
+
+impl AgentDelivery {
+    fn new(channel: Channel<AgentFrame>, instance_id: Option<String>) -> Self {
+        Self { channel: Some(channel), replayable: instance_id.is_some(), instance_id, sequence: 0, replay_after: 0, frames: VecDeque::new(), bytes: 0 }
+    }
+
+    fn send(&mut self, frame: AgentFrame) -> Result<(), tauri::Error> {
+        if !self.replayable {
+            return self.channel.as_ref().map_or(Ok(()), |channel| channel.send(frame));
+        }
+        self.sequence += 1;
+        let bytes = match &frame {
+            AgentFrame::Stdout { line } | AgentFrame::Stderr { line } => line.len(),
+            _ => 128,
+        };
+        self.frames.push_back((self.sequence, frame.clone(), bytes));
+        self.bytes += bytes;
+        while self.bytes > MAX_REPLAY_BYTES || self.frames.len() > MAX_REPLAY_FRAMES {
+            let (sequence, _, bytes) = self.frames.pop_front().unwrap();
+            self.bytes -= bytes;
+            self.replay_after = sequence;
+        }
+        if let Some(channel) = &self.channel {
+            if channel.send(AgentFrame::Sequenced { sequence: self.sequence, frame: Box::new(frame) }).is_err() {
+                self.channel = None;
+            }
+        }
+        // A vanished renderer must never close a live agent's output pipe.
+        Ok(())
+    }
+
+    fn checkpoint_saved(&mut self, sequence: u64) {
+        if sequence > self.sequence || sequence < self.replay_after { return; }
+        while self.frames.front().is_some_and(|(current, _, _)| *current <= sequence) {
+            let (_, _, bytes) = self.frames.pop_front().unwrap();
+            self.bytes -= bytes;
+        }
+        self.replay_after = sequence;
+    }
+
+    fn attach(&mut self, sequence: u64, channel: Channel<AgentFrame>) -> Result<(), String> {
+        if !self.replayable || sequence > self.sequence || sequence < self.replay_after {
+            return Err("The live agent is still running, but its renderer checkpoint is too old to reconnect safely.".into());
+        }
+        for (current, frame, _) in &self.frames {
+            if *current > sequence {
+                channel.send(AgentFrame::Sequenced { sequence: *current, frame: Box::new(frame.clone()) }).map_err(err)?;
+            }
+        }
+        self.channel = Some(channel);
+        Ok(())
+    }
 }
 
 /// Track only conversations addressed by this connection. A shared service
@@ -242,6 +316,7 @@ impl ProcessInput {
 #[derive(Default)]
 struct AgentProcInner {
     processes: Mutex<HashMap<String, Arc<Mutex<Process>>>>,
+    approval_policy: Mutex<ApprovalPolicy>,
     protocol_frames: AtomicU64,
     protocol_bytes: AtomicU64,
 }
@@ -256,6 +331,85 @@ fn err(e: impl std::fmt::Display) -> String {
 }
 
 impl AgentProcManager {
+    pub fn set_automatic_approval(&self, setting: &serde_json::Value) {
+        self.inner.approval_policy.lock().unwrap().set(setting);
+    }
+
+    /// Native timers and pipe writes remain live when WebView2 throttles or
+    /// suspends the renderer. Every process, including later launches, shares policy.
+    pub fn start_approval_monitor(&self) {
+        let weak = Arc::downgrade(&self.inner);
+        tauri::async_runtime::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                let Some(inner) = weak.upgrade() else {
+                    break;
+                };
+                let handles = inner
+                    .processes
+                    .lock()
+                    .unwrap()
+                    .values()
+                    .cloned()
+                    .collect::<Vec<_>>();
+                for handle in handles {
+                    let approvals = handle.lock().unwrap().approvals.clone();
+                    let due = {
+                        let policy = inner.approval_policy.lock().unwrap();
+                        let due = approvals.lock().unwrap().due(&policy, Instant::now());
+                        due
+                    };
+                    for decision in due {
+                        let handle = handle.clone();
+                        let inner = inner.clone();
+                        tauri::async_runtime::spawn_blocking(move || {
+                            let (stdin, approvals, channel) = {
+                                let process = handle.lock().unwrap();
+                                (
+                                    process.stdin.clone(),
+                                    process.approvals.clone(),
+                                    process.channel.clone(),
+                                )
+                            };
+                            let Some(stdin) = stdin else {
+                                return;
+                            };
+                            let mut input = stdin.lock().unwrap();
+                            // Recheck after waiting for another writer. Stop, expiry,
+                            // disabling or a manual response may have won meanwhile.
+                            {
+                                let policy = inner.approval_policy.lock().unwrap();
+                                if !approvals.lock().unwrap().claim(
+                                    &decision.key,
+                                    &policy,
+                                    Instant::now(),
+                                ) {
+                                    return;
+                                }
+                            }
+                            let result = input.send(&decision.reply.to_string());
+                            drop(input);
+                            match result {
+                                Ok(()) => {
+                                    let _ = channel.lock().unwrap().send(AgentFrame::AutomaticApproval {
+                                        permission_id: decision.permission_id,
+                                        option_id: decision.option_id,
+                                    });
+                                }
+                                Err(error) => {
+                                    let _ = channel.lock().unwrap().send(AgentFrame::Stderr {
+                                        line: format!(
+                                            "Automatic approval could not reach the agent: {error}"
+                                        ),
+                                    });
+                                }
+                            }
+                        });
+                    }
+                }
+            }
+        });
+    }
     pub fn synchronize_codex_auth(&self, id: &str, signed_in: bool) -> Result<String, String> {
         let service = self
             .get(id)
@@ -313,6 +467,7 @@ impl AgentProcManager {
     /// Aggregate protocol traffic since this Duckweed process started.
     /// Content is deliberately not retained; crash diagnostics only need the
     /// volume that preceded a renderer failure.
+    #[cfg(windows)]
     pub fn traffic_totals(&self) -> (u64, u64) {
         (
             self.inner.protocol_frames.load(Ordering::Relaxed),
@@ -332,6 +487,7 @@ impl AgentProcManager {
             let mut process = handle.lock().unwrap();
             let stdin = process.stdin.clone()
                 .ok_or_else(|| format!("agent process `{id}` has no stdin"))?;
+            if !process.approvals.lock().unwrap().outgoing(line) { return Ok(()); }
             // Register before writing: a fast reply can beat the write's return.
             if process.service.is_some() { process.ownership.sent(line); }
             stdin
@@ -378,8 +534,14 @@ impl AgentProcManager {
             // ends; it is not an error.
             None => return Ok(()),
         };
+        Self::stop_handle(handle, preserve_codex_work)
+    }
+
+    /// Finish stopping a process already removed from the registry.
+    fn stop_handle(handle: Arc<Mutex<Process>>, preserve_codex_work: bool) -> Result<(), String> {
         let (stdin, requests, service, threads) = {
             let mut process = handle.lock().unwrap();
+            process.approvals.lock().unwrap().clear();
             if preserve_codex_work && process.service.is_some() {
                 process.stdin.take();
                 if let Some(pid) = process.pid { kill_tree(pid); }
@@ -424,6 +586,71 @@ impl AgentProcManager {
             }
         }
         Ok(())
+    }
+
+    /// A renderer failure is not a user Stop. Shared-service work must remain
+    /// live while the new document reconnects to its original conversations.
+    #[cfg(any(windows, test))]
+    pub fn recover_renderer(&self) {
+        let ids: Vec<String> = self.inner.processes.lock().unwrap().keys().cloned().collect();
+        let mut stale = Vec::new();
+        for id in ids {
+            let Some(handle) = self.get(&id) else { continue; };
+            let delivery = handle.lock().unwrap().channel.clone();
+            let mut delivery = delivery.lock().unwrap();
+            if delivery.replayable {
+                delivery.channel = None;
+            } else {
+                stale.push(id);
+            }
+        }
+        // This runs on the UI thread, inside WebView2's failure callback. Free
+        // the ids now so the reloaded document can start replacements, but kill
+        // the old process trees elsewhere: `taskkill` can take seconds, or never
+        // return, on a machine that is already out of memory.
+        let handles: Vec<_> = {
+            let mut processes = self.inner.processes.lock().unwrap();
+            stale.iter().filter_map(|id| processes.remove(id)).collect()
+        };
+        if handles.is_empty() { return; }
+        let cleanup = thread::Builder::new().name("agent-renderer-recovery".into()).spawn(move || {
+            for handle in handles {
+                let _ = Self::stop_handle(handle, true);
+            }
+        });
+        if let Err(error) = cleanup {
+            eprintln!("duckweed: could not clean up agents after a renderer failure: {error}");
+        }
+    }
+
+    /// Frames become dispensable only after their matching adapter state is on disk.
+    pub fn checkpoint_saved(&self, id: &str, instance_id: &str, sequence: u64) {
+        if let Some(handle) = self.get(id) {
+            let delivery = handle.lock().unwrap().channel.clone();
+            let mut delivery = delivery.lock().unwrap();
+            if delivery.instance_id.as_deref() == Some(instance_id) { delivery.checkpoint_saved(sequence); }
+        }
+    }
+
+    /// Newest frame produced for a replayable renderer. A renderer that stays
+    /// behind it is not receiving its channel and must reattach.
+    pub fn sequence(&self, id: &str, instance_id: &str) -> Option<u64> {
+        let handle = self.get(id)?;
+        let delivery = handle.lock().unwrap().channel.clone();
+        let delivery = delivery.lock().unwrap();
+        (delivery.instance_id.as_deref() == Some(instance_id)).then_some(delivery.sequence)
+    }
+
+    /// Atomically replace a lost renderer channel and replay only newer frames.
+    pub fn attach(&self, id: &str, instance_id: &str, sequence: u64, channel: Channel<AgentFrame>) -> Result<bool, String> {
+        let Some(handle) = self.get(id) else { return Ok(false); };
+        let delivery = handle.lock().unwrap().channel.clone();
+        let mut delivery = delivery.lock().unwrap();
+        if delivery.instance_id.as_deref() != Some(instance_id) {
+            return Err("This pane's live agent has changed. Its current process has been kept running.".into());
+        }
+        delivery.attach(sequence, channel)?;
+        Ok(true)
     }
 
     pub fn stop_all(&self) {
@@ -485,6 +712,78 @@ pub(crate) fn kill_tree(pid: u32) {
             .status();
     }
 }
+
+/// Ties process trees to the lifetime of this process.
+///
+/// `stop_all` only runs on a clean exit. When Duckweed crashes or is ended as
+/// "not responding", its agents used to keep running with nobody reading them,
+/// together with every shell and worker they had started. The next launch then
+/// resumed the same conversations in new processes, so each crash doubled the
+/// agents working on a session. Windows closes the job handle whenever this
+/// process ends, however it ends, and that terminates every member.
+#[cfg(windows)]
+struct KillOnExitJob(usize);
+
+#[cfg(windows)]
+impl KillOnExitJob {
+    fn new() -> Option<Self> {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::JobObjects::{
+            CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        };
+        unsafe {
+            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if job.is_null() {
+                return None;
+            }
+            let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            let configured = SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            );
+            if configured == 0 {
+                CloseHandle(job);
+                return None;
+            }
+            Some(Self(job as usize))
+        }
+    }
+
+    /// Later descendants join automatically. Failure leaves the child untied,
+    /// which is the previous behavior, so it is not an error.
+    fn adopt(&self, child: &Child) {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
+        unsafe {
+            AssignProcessToJobObject(self.0 as _, child.as_raw_handle() as _);
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for KillOnExitJob {
+    fn drop(&mut self) {
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(self.0 as _);
+        }
+    }
+}
+
+/// End `child` and its descendants when Duckweed itself goes away.
+#[cfg(windows)]
+fn kill_with_app(child: &Child) {
+    static JOB: std::sync::OnceLock<Option<KillOnExitJob>> = std::sync::OnceLock::new();
+    if let Some(job) = JOB.get_or_init(KillOnExitJob::new) {
+        job.adopt(child);
+    }
+}
+
+#[cfg(not(windows))]
+fn kill_with_app(_child: &Child) {}
 
 #[cfg(windows)]
 pub(crate) fn hide_console(command: &mut Command) {
@@ -686,14 +985,15 @@ pub fn start(
             Some(connection.writer),
             Some(connection.service),
         ),
-        None => (
-            command
+        None => {
+            let child = command
                 .spawn()
-                .map_err(|error| format!("failed to start `{}`: {error}", resolved.display()))?,
-            None,
-            None,
-            None,
-        ),
+                .map_err(|error| format!("failed to start `{}`: {error}", resolved.display()))?;
+            // Not the shared Codex proxy above: its daemon owns work that is
+            // meant to outlive this window.
+            kill_with_app(&child);
+            (child, None, None, None)
+        }
     };
     let pid = Some(child.id());
     let stdin = shared_writer
@@ -713,11 +1013,13 @@ pub fn start(
             ownership: CodexOwnership::default(),
             service,
             reconnect_on_exit: false,
+            approvals: Arc::new(Mutex::new(ApprovalQueue::default())),
+            channel: Arc::new(Mutex::new(AgentDelivery::new(on_frame, options.renderer_recovery_id))),
         })),
     );
 
     if let Some(mut reader) = shared_reader {
-        let channel = on_frame.clone();
+        let channel = manager.get(&id).ok_or("Agent process disappeared")?.lock().unwrap().channel.clone();
         let metrics = Arc::clone(&manager.inner);
         let process = manager.get(&id).ok_or("Codex proxy disappeared")?;
         std::thread::Builder::new()
@@ -732,7 +1034,7 @@ pub fn start(
                                 tungstenite::Error::ConnectionClosed
                                     | tungstenite::Error::AlreadyClosed
                             ) {
-                                let _ = channel.send(AgentFrame::Stderr {
+                                let _ = channel.lock().unwrap().send(AgentFrame::Stderr {
                                     line: format!("Codex service connection ended: {error}"),
                                 });
                             }
@@ -741,7 +1043,7 @@ pub fn start(
                     };
                     match message {
                         tungstenite::Message::Text(line) if line.len() > MAX_LINE_BYTES => {
-                            let _ = channel.send(AgentFrame::Stderr {
+                            let _ = channel.lock().unwrap().send(AgentFrame::Stderr {
                                 line: format!(
                                     "Dropped a {} byte Codex message over the {MAX_LINE_BYTES} byte limit.",
                                     line.len()
@@ -751,7 +1053,7 @@ pub fn start(
                                 crate::codex_transport::oversized_reply(&line, MAX_LINE_BYTES)
                             {
                                 process.lock().unwrap().ownership.received(&reply);
-                                if channel.send(AgentFrame::Stdout { line: reply }).is_err() {
+                                if channel.lock().unwrap().send(AgentFrame::Stdout { line: reply }).is_err() {
                                     break;
                                 }
                             }
@@ -766,14 +1068,7 @@ pub fn start(
                                 }
                             }
                             let bytes = line.len() as u64;
-                            if channel
-                                .send(AgentFrame::Stdout {
-                                    line: line.to_string(),
-                                })
-                                .is_err()
-                            {
-                                break;
-                            }
+                            if deliver_stdout(&process, &channel, line.to_string()).is_err() { break; }
                             metrics.protocol_frames.fetch_add(1, Ordering::Relaxed);
                             metrics.protocol_bytes.fetch_add(bytes, Ordering::Relaxed);
                         }
@@ -794,9 +1089,10 @@ pub fn start(
             })
             .map_err(err)?;
     } else if let Some(stdout) = stdout {
-        let channel = on_frame.clone();
+        let channel = manager.get(&id).ok_or("Agent process disappeared")?.lock().unwrap().channel.clone();
         let metrics = Arc::clone(&manager.inner);
         let thread_id = id.clone();
+        let process = manager.get(&id).ok_or("Agent process disappeared")?;
         std::thread::Builder::new()
             .name(format!("agent-out-{thread_id}"))
             .spawn(move || {
@@ -811,9 +1107,7 @@ pub fn start(
                                 continue;
                             }
                             let bytes = line.len() as u64;
-                            if channel.send(AgentFrame::Stdout { line }).is_err() {
-                                break;
-                            }
+                            if deliver_stdout(&process, &channel, line).is_err() { break; }
                             metrics.protocol_frames.fetch_add(1, Ordering::Relaxed);
                             metrics.protocol_bytes.fetch_add(bytes, Ordering::Relaxed);
                         }
@@ -824,7 +1118,7 @@ pub fn start(
     }
 
     if let Some(stderr) = stderr {
-        let channel = on_frame.clone();
+        let channel = manager.get(&id).ok_or("Agent process disappeared")?.lock().unwrap().channel.clone();
         let thread_id = id.clone();
         std::thread::Builder::new()
             .name(format!("agent-err-{thread_id}"))
@@ -839,7 +1133,7 @@ pub fn start(
                             if line.is_empty() {
                                 continue;
                             }
-                            if channel.send(AgentFrame::Stderr { line }).is_err() {
+                            if channel.lock().unwrap().send(AgentFrame::Stderr { line }).is_err() {
                                 break;
                             }
                         }
@@ -853,7 +1147,7 @@ pub fn start(
     // the child here keeps a finished agent from lingering as a zombie.
     let processes = Arc::clone(&manager_handle(manager, &id).ok_or("agent process vanished")?);
     let wait_id = id.clone();
-    let channel = on_frame;
+    let channel = processes.lock().unwrap().channel.clone();
     std::thread::Builder::new()
         .name(format!("agent-wait-{wait_id}"))
         .spawn(move || {
@@ -868,12 +1162,14 @@ pub fn start(
                     Err(_) => break None,
                 }
             };
-            let process = processes.lock().unwrap();
+            let mut process = processes.lock().unwrap();
+            process.stdin.take();
+            process.approvals.lock().unwrap().clear();
             // A proxy can exit during daemon maintenance or lose its local
             // connection while provider-owned work is still running.
             let reconnect = process.reconnect_on_exit || process.service.is_some();
             drop(process);
-            let _ = channel.send(AgentFrame::Exit { code, reconnect });
+            let _ = channel.lock().unwrap().send(AgentFrame::Exit { code, reconnect });
         })
         .map_err(err)?;
 
@@ -881,6 +1177,18 @@ pub fn start(
         program: resolved.to_string_lossy().to_string(),
         pid,
     })
+}
+
+/// Publish the request before the monitor can publish its acknowledgement.
+fn deliver_stdout(
+    process: &Arc<Mutex<Process>>,
+    channel: &Arc<Mutex<AgentDelivery>>,
+    line: String,
+) -> Result<(), tauri::Error> {
+    let queue = process.lock().unwrap().approvals.clone();
+    let mut queue = queue.lock().unwrap();
+    queue.observe(&line);
+    channel.lock().unwrap().send(AgentFrame::Stdout { line })
 }
 
 fn manager_handle(manager: &AgentProcManager, id: &str) -> Option<Arc<Mutex<Process>>> {
@@ -929,6 +1237,37 @@ fn trimmed_line(buffer: &[u8], limit: usize) -> String {
 mod tests {
     use super::*;
 
+    #[cfg(windows)]
+    #[test]
+    fn agents_and_their_children_end_when_the_app_handle_closes() {
+        let mut command = Command::new("cmd");
+        // The shell stays as the parent of a second, long-lived process.
+        command.args(["/d", "/c", "ping -n 60 127.0.0.1 >nul & exit"])
+            .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        hide_console(&mut command);
+        let mut child = command.spawn().unwrap();
+        let pid = child.id();
+        let job = KillOnExitJob::new().unwrap();
+        job.adopt(&child);
+        let descendant = || crate::process_tree::process_snapshot().into_iter()
+            .find(|process| process.ppid == pid).map(|process| process.pid);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let grandchild = loop {
+            if let Some(found) = descendant() { break found; }
+            assert!(Instant::now() < deadline, "the shell never started its child");
+            thread::sleep(Duration::from_millis(20));
+        };
+        // What Windows does to the handle when Duckweed crashes or is killed.
+        drop(job);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while child.try_wait().unwrap().is_none()
+            || crate::process_tree::process_snapshot().iter().any(|process| process.pid == grandchild)
+        {
+            if Instant::now() >= deadline { kill_tree(pid); panic!("the agent tree outlived the app"); }
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     #[test]
     fn account_changes_are_reported_without_affecting_ownership() {
         let mut owner = CodexOwnership::default();
@@ -975,6 +1314,154 @@ mod tests {
         assert!(owner.shutdown_requests().is_empty());
     }
 
+    // A real pipe round-trip without a WebView, provider CLI, or API call.
+    #[test]
+    #[ignore]
+    fn automatic_approval_helper() {
+        let Some(path) = std::env::var_os("DUCKWEED_APPROVAL_HELPER_PATH") else { return; };
+        let mut log = std::fs::File::create(path).unwrap();
+        for id in ["first", "second"] {
+            println!("{}", serde_json::json!({"type":"control_request","request_id":id,"request":{
+                "subtype":"can_use_tool","tool_name":"Bash","input":{"command":format!("echo {id}")}}}));
+        }
+        std::io::stdout().flush().unwrap();
+        for line in std::io::stdin().lock().lines().take(2) {
+            writeln!(log, "{}", line.unwrap()).unwrap();
+            log.flush().unwrap();
+        }
+    }
+
+    #[test]
+    fn native_automatic_approvals_run_without_renderer_for_existing_and_later_processes() {
+        let root = std::env::temp_dir().join(format!("duckweed-approvals-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let manager = AgentProcManager::default();
+        manager.start_approval_monitor();
+        let start_fixture = |id: &str| {
+            let path = root.join(format!("{id}.jsonl"));
+            let env = HashMap::from([("DUCKWEED_APPROVAL_HELPER_PATH".into(), path.to_string_lossy().into_owned())]);
+            start(&manager, Channel::new(|_| Ok(())), id.into(), AgentSpawnOptions {
+                program: std::env::current_exe().unwrap().to_string_lossy().into_owned(),
+                renderer_recovery_id: None, args: vec!["--exact".into(), "agent_proc::tests::automatic_approval_helper".into(),
+                    "--ignored".into(), "--nocapture".into()], cwd: None, env: Some(env),
+            }).unwrap();
+            path
+        };
+        let existing = start_fixture("existing");
+        let timeout = Instant::now() + Duration::from_secs(5);
+        loop {
+            let count = manager.get("existing").unwrap().lock().unwrap().approvals.lock().unwrap().pending_count();
+            if count == 2 { break; }
+            assert!(Instant::now() < timeout, "fixture never delivered its permission requests");
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(std::fs::read_to_string(&existing).unwrap().is_empty());
+        manager.set_automatic_approval(&serde_json::json!("until-disabled"));
+        let later = start_fixture("later");
+        let timeout = Instant::now() + Duration::from_secs(8);
+        loop {
+            let done = [&existing, &later].iter().all(|path|
+                std::fs::read_to_string(path).unwrap_or_default().lines().count() == 2);
+            if done { break; }
+            if Instant::now() >= timeout {
+                let _ = manager.stop_all();
+                panic!("native approvals stalled without a renderer");
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        for path in [&existing, &later] {
+            let replies = std::fs::read_to_string(path).unwrap();
+            for line in replies.lines() {
+                let frame: serde_json::Value = serde_json::from_str(line).unwrap();
+                assert_eq!(frame["response"]["response"]["behavior"], "allow");
+                let id = frame["response"]["request_id"].as_str().unwrap();
+                assert_eq!(frame["response"]["response"]["updatedInput"]["command"], format!("echo {id}"));
+            }
+        }
+        manager.stop_all();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn renderer_recovery_reattaches_the_same_local_process_and_replays_missed_output() {
+        let manager = AgentProcManager::default();
+        let (old_tx, old_rx) = mpsc::channel();
+        let started = start(&manager, Channel::new(move |body| { old_tx.send(body).unwrap(); Ok(()) }),
+            "live-recovery".into(), AgentSpawnOptions {
+                program: std::env::current_exe().unwrap().to_string_lossy().into_owned(),
+                renderer_recovery_id: Some("local-fixture".into()),
+                args: vec!["--exact".into(), "agent_proc::tests::backpressure_helper".into(), "--ignored".into(), "--nocapture".into()],
+                cwd: None, env: Some(HashMap::from([("DUCKWEED_BACKPRESSURE_HELPER".into(), "1".into())])),
+            }).unwrap();
+        let checkpoint = loop {
+            let tauri::ipc::InvokeResponseBody::Json(raw) = old_rx.recv_timeout(Duration::from_secs(3)).unwrap() else { panic!("expected JSON"); };
+            let frame: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            if frame["frame"]["line"].as_str().is_some_and(|line| line.contains("ready")) {
+                break frame["sequence"].as_u64().unwrap();
+            }
+        };
+        manager.recover_renderer();
+        let handle = manager.get("live-recovery").expect("renderer failure removed the local process");
+        assert_eq!(handle.lock().unwrap().pid, started.pid);
+        assert!(handle.lock().unwrap().child.try_wait().unwrap().is_none());
+        let delivery = handle.lock().unwrap().channel.clone();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !delivery.lock().unwrap().frames.iter().any(|(_, frame, _)| matches!(frame, AgentFrame::Stdout { line } if line.contains("alive"))) {
+            if Instant::now() >= deadline { manager.stop_all(); panic!("the agent stopped producing output while detached"); }
+            thread::sleep(Duration::from_millis(10));
+        }
+        // A checkpoint from an earlier process in the same pane cannot bind
+        // to this one or discard the output needed by its actual renderer.
+        assert!(manager.attach("live-recovery", "other-process", checkpoint, Channel::new(|_| Ok(()))).is_err());
+        let latest = delivery.lock().unwrap().sequence;
+        // The renderer compares this cursor with its own to detect a silent channel.
+        assert!(manager.sequence("live-recovery", "local-fixture").is_some_and(|sequence| sequence >= latest && sequence > checkpoint));
+        assert_eq!(manager.sequence("live-recovery", "other-process"), None);
+        manager.checkpoint_saved("live-recovery", "other-process", latest);
+        let (new_tx, new_rx) = mpsc::channel();
+        assert!(manager.attach("live-recovery", "local-fixture", checkpoint, Channel::new(move |body| { let _ = new_tx.send(body); Ok(()) })).unwrap());
+        let mut replayed = Vec::new();
+        while let Ok(tauri::ipc::InvokeResponseBody::Json(raw)) = new_rx.try_recv() {
+            replayed.push(serde_json::from_str::<serde_json::Value>(&raw).unwrap());
+        }
+        assert!(replayed.iter().all(|frame| frame["sequence"].as_u64().unwrap() > checkpoint));
+        assert!(replayed.iter().any(|frame| frame["frame"]["line"].as_str().is_some_and(|line| line.contains("alive"))));
+        manager.stop_all();
+    }
+
+    #[test]
+    fn persisted_checkpoints_release_old_replay_frames_without_losing_new_output() {
+        let mut delivery = AgentDelivery::new(Channel::new(|_| Ok(())), Some("fixture".into()));
+        delivery.send(AgentFrame::Stdout { line: "saved".into() }).unwrap();
+        delivery.send(AgentFrame::Stdout { line: "new".into() }).unwrap();
+        delivery.checkpoint_saved(1);
+        assert_eq!(delivery.frames.len(), 1);
+        assert_eq!(delivery.frames.front().unwrap().0, 2);
+        assert!(delivery.attach(1, Channel::new(|_| Ok(()))).is_ok());
+        delivery.checkpoint_saved(2);
+        assert_eq!(delivery.bytes, 0);
+        assert!(delivery.frames.is_empty());
+        assert!(delivery.attach(1, Channel::new(|_| Ok(()))).is_err());
+        assert!(delivery.attach(2, Channel::new(|_| Ok(()))).is_ok());
+        delivery.checkpoint_saved(100);
+        assert_eq!(delivery.replay_after, 2);
+    }
+
+    #[test]
+    fn renderer_replay_is_bounded_and_rejects_a_gap_without_discarding_the_process() {
+        let mut delivery = AgentDelivery::new(Channel::new(|_| Ok(())), Some("fixture".into()));
+        delivery.channel = None;
+        for _ in 0..20 { delivery.send(AgentFrame::Stdout { line: "x".repeat(1024 * 1024) }).unwrap(); }
+        assert!(delivery.bytes <= MAX_REPLAY_BYTES);
+        assert!(delivery.attach(0, Channel::new(|_| Ok(()))).is_err());
+        assert!(delivery.channel.is_none());
+        let latest = delivery.sequence;
+        assert!(delivery.attach(latest, Channel::new(|_| Ok(()))).is_ok());
+        assert!(delivery.attach(latest + 1, Channel::new(|_| Ok(()))).is_err());
+        for _ in 0..MAX_REPLAY_FRAMES + 1 { delivery.send(AgentFrame::Stderr { line: "x".into() }).unwrap(); }
+        assert!(delivery.frames.len() <= MAX_REPLAY_FRAMES);
+    }
+
     // Run only as the child of the backpressure test. No Codex or inference.
     #[test]
     #[ignore]
@@ -1004,11 +1491,12 @@ mod tests {
     }
 
     #[test]
-    fn disconnect_preserves_shared_work_but_stop_still_cleans_it() {
+    fn renderer_recovery_and_disconnect_preserve_shared_work_but_stop_still_cleans_it() {
         let root = std::env::temp_dir().join(format!("duckweed-disconnect-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
-        for preserve in [true, false] {
-            let path = root.join(format!("shutdown-{preserve}.jsonl"));
+        for mode in ["disconnect", "renderer", "stop"] {
+            let preserve = mode != "stop";
+            let path = root.join(format!("shutdown-{mode}.jsonl"));
             let mut command = Command::new(std::env::current_exe().unwrap());
             command.args(["--exact", "agent_proc::tests::shutdown_helper", "--ignored", "--nocapture"])
                 .env("DUCKWEED_SHUTDOWN_HELPER_PATH", &path)
@@ -1035,6 +1523,7 @@ mod tests {
                 stdin: Some(Arc::new(Mutex::new(ProcessInput::JsonLines(input)))),
                 child, pid: Some(pid), runtime_roots: Vec::new(), ownership,
                 service: Some(crate::codex_transport::test_service(&root)), reconnect_on_exit: false,
+                approvals: Arc::new(Mutex::new(ApprovalQueue::default())), channel: Arc::new(Mutex::new(AgentDelivery::new(Channel::new(|_| Ok(())), None))),
             }));
             // All cleanup requests are confirmed locally. This fixture tests
             // pipe writes and must never invoke the real control-plane fallback.
@@ -1046,9 +1535,18 @@ mod tests {
             let manager = AgentProcManager::default();
             manager.inner.processes.lock().unwrap().insert("fixture".into(), handle.clone());
             // The helper exits on EOF once the cleanup writer releases stdin.
-            if preserve { manager.disconnect("fixture").unwrap(); }
-            else { manager.stop("fixture").unwrap(); }
-            let _ = handle.lock().unwrap().child.wait();
+            match mode {
+                "renderer" => manager.recover_renderer(),
+                "disconnect" => manager.disconnect("fixture").unwrap(),
+                _ => manager.stop("fixture").unwrap(),
+            }
+            // Renderer recovery kills off the calling thread, so never hold the
+            // process lock across a blocking wait here.
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while handle.lock().unwrap().child.try_wait().unwrap().is_none() {
+                assert!(Instant::now() < deadline, "{mode} left the process running");
+                thread::sleep(Duration::from_millis(10));
+            }
             reader.join().unwrap();
             let recorded = std::fs::read_to_string(&path).unwrap();
             if preserve { assert!(recorded.is_empty(), "reconnection sent shutdown requests: {recorded}"); }
@@ -1088,6 +1586,7 @@ mod tests {
             stdin: Some(Arc::new(Mutex::new(ProcessInput::JsonLines(input)))),
             child, pid: Some(pid), runtime_roots: Vec::new(),
             ownership: CodexOwnership::default(), service: None, reconnect_on_exit: false,
+            approvals: Arc::new(Mutex::new(ApprovalQueue::default())), channel: Arc::new(Mutex::new(AgentDelivery::new(Channel::new(|_| Ok(())), None))),
         }));
         let manager = AgentProcManager::default();
         manager.inner.processes.lock().unwrap().insert("backpressure".into(), handle.clone());

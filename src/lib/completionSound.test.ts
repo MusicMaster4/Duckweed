@@ -11,6 +11,8 @@ class FakeAudio {
   preload = "";
   readyState = 4; // HAVE_ENOUGH_DATA
   muted = false;
+  preservesPitch = true;
+  playbackRate = 1;
   loads = 0;
   plays = 0;
   pauses = 0;
@@ -248,4 +250,31 @@ describe("completion sound", () => {
     }
   });
 
+});
+
+
+test("exit cues lower pitch by an octave and normal cues restore playback rate", async () => {
+  fakeTauriRuntime(() => Promise.reject(new Error("no device")));
+  const sound = await import("./completionSound");
+  sound.playCompletionSound(0, -12);
+  await flush();
+  const player = players.find((player) => player.src.includes("completion_sound_A.ogg"))!;
+  expect(player.playbackRate).toBe(0.5);
+  expect(player.preservesPitch).toBe(false);
+  sound.playCompletionSound(0);
+  await flush();
+  expect(player.playbackRate).toBe(1);
+  clearTauriRuntime();
+});
+
+test("native exit cues receive the octave shift", async () => {
+  const requests: unknown[] = [];
+  fakeTauriRuntime(() => Promise.resolve());
+  const bridge = (window as unknown as { __TAURI_INTERNALS__: { invoke: (command: string, args: unknown) => Promise<void> } }).__TAURI_INTERNALS__;
+  bridge.invoke = async (_command, args) => { requests.push(args); };
+  const sound = await import("./completionSound");
+  sound.playCompletionSound(2, -12);
+  await flush();
+  expect(requests).toEqual([{ cueIndex: 2, semitones: -12 }]);
+  clearTauriRuntime();
 });

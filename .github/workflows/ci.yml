@@ -19,6 +19,7 @@ jobs:
   frontend:
     name: Typecheck and test
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
 
@@ -39,9 +40,10 @@ jobs:
       matrix:
         os:
           - ubuntu-22.04
-          - macos-latest
+          - macos-15-intel
           - windows-latest
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
 
@@ -67,6 +69,7 @@ jobs:
   relay:
     name: Notification relay
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
 
@@ -85,6 +88,7 @@ jobs:
   android:
     name: Android companion APK
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
 

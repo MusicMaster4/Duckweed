@@ -32,8 +32,8 @@ export const openAgentDocument = (path: string) => invoke<void>("open_agent_docu
  * Play one completion cue from the app process instead of the WebView, so the
  * Windows volume mixer lists it as Duckweed. Resolves when the cue starts.
  */
-export const playCompletionCue = (cueIndex: number) =>
-  invoke<void>("play_completion_sound", { cueIndex });
+export const playCompletionCue = (cueIndex: number, semitones = 0) =>
+  invoke<void>("play_completion_sound", { cueIndex, semitones });
 
 export interface MobileDevice {
   id: string;
@@ -495,8 +495,10 @@ export const agentUnwatch = (id: string) => invoke<void>("agent_unwatch", { id }
 
 /** One line of an agent's headless protocol, or the notice that it ended. */
 export type AgentFrame =
+  | { kind: "sequenced"; sequence: number; frame: AgentFrame }
   | { kind: "stdout"; line: string }
   | { kind: "stderr"; line: string }
+  | { kind: "automaticapproval"; permission_id: string; option_id: string }
   | { kind: "exit"; code: number | null; reconnect?: boolean };
 
 export interface AgentAvailability {
@@ -506,6 +508,7 @@ export interface AgentAvailability {
 }
 
 export interface AgentSpawnOptions {
+  renderer_recovery_id?: string;
   program: string;
   args: string[];
   cwd?: string | null;
@@ -553,12 +556,36 @@ export const agentProcProbe = (names: string[]) =>
 /** Refresh OpenCode's cached model registry, including its OpenRouter models. */
 export const openCodeModelsRefresh = () => invoke<void>("opencode_models_refresh");
 
+export interface SystemMemory {
+  commitLimitBytes: number;
+  commitAvailableBytes: number;
+  physicalTotalBytes: number;
+  physicalAvailableBytes: number;
+  /** New processes and large allocations are likely to fail. */
+  low: boolean;
+}
+
+/** Operating-system memory headroom, or null where it is not measured. */
+export const systemMemoryStatus = () => invoke<SystemMemory | null>("system_memory_status");
+
 /** Launch a coding agent in its line-delimited JSON mode. */
 export const agentProcStart = (
   id: string,
   options: AgentSpawnOptions,
   onFrame: Channel<AgentFrame>,
 ) => invoke<AgentStarted>("agent_proc_start", { id, options, onFrame });
+
+/** Reconnect to a local agent without restarting or resending its prompt. */
+export const agentProcAttach = (id: string, instanceId: string, sequence: number, onFrame: Channel<AgentFrame>) =>
+  invoke<boolean>("agent_proc_attach", { id, instanceId, sequence, onFrame });
+
+/** Newest frame the native side produced for this renderer instance, or null when it is gone. */
+export const agentProcSequence = (id: string, instanceId: string) =>
+  invoke<number | null>("agent_proc_sequence", { id, instanceId });
+
+/** Global native policy also applies to agents launched after this call. */
+export const agentAutomaticApproval = (setting: number | "until-disabled" | null) =>
+  invoke<void>("agent_automatic_approval", { setting });
 
 export const agentProcSend = (id: string, line: string) =>
   invoke<void>("agent_proc_send", { id, line });

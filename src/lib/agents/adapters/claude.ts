@@ -23,6 +23,7 @@ import {
   type AgentAccessMode,
   type AgentFileChange,
   type AgentGoal,
+  type AgentItem,
   type AgentModelChoice,
   type AgentExtension,
   type AgentPrompt,
@@ -51,7 +52,7 @@ import {
  * model tokens involved (verified against claude 2.1). The one exception is
  * `/model <id>`, which we route through the `set_model` control request so
  * the header learns the new model from a structured ACK rather than by
- * parsing the CLI's friendly confirmation sentence. `/btw` also uses its
+ * parsing the CLI's friendly confirmation sentence. `/btw` and `/side` also use the
  * dedicated `side_question` control request so it can run without interrupting
  * or entering the main transcript.
  */
@@ -332,6 +333,7 @@ function backgroundAgentId(
 
 function taskNotification(text: string): {
   taskId: string;
+  toolUseId?: string;
   status: "completed" | "failed" | "stopped";
   summary: string;
 } | null {
@@ -346,6 +348,7 @@ function taskNotification(text: string): {
   }
   return {
     taskId,
+    toolUseId: /<tool-use-id>([^<]+)<\/tool-use-id>/i.exec(text)?.[1]?.trim(),
     status: rawStatus,
     summary: /<summary>([\s\S]*?)<\/summary>/i.exec(text)?.[1]?.trim() ?? "",
   };
@@ -536,16 +539,26 @@ export function createClaudeAdapter(): AgentAdapter {
   const workflowsByCallId = new Map<string, TrackedWorkflow>();
   const workflowCallByTaskId = new Map<string, string>();
   const backgroundAgentCallByTaskId = new Map<string, string>();
+  /** Async launch results are acknowledgements, not completed Agent calls. */
+  const backgroundAgents = new Map<string, ToolStatus>();
   let latestWorkflowCallId: string | null = null;
   /** Goal state before an optimistic create/update, restored if the tool fails. */
   const goalToolUndo = new Map<string, AgentGoal | null>();
-  /** The foreground result arrived, but an async Workflow still owns the turn. */
+  /** The foreground result arrived, but delegated work still owns the turn. */
   let turnResultPending = false;
+  let interruptRequested = false;
   let messageSeq = 0;
   let settledMessageSeq = 0;
   let controlSeq = 0;
   let initializeRequestId: string | null = null;
   let catalogRequest: { id: string; sentAt: number } | null = null;
+
+  function backgroundWorkRunning(): boolean {
+    return [...backgroundAgents.values()].some((status) => status === "running") ||
+      [...workflowsByCallId.values()].some(
+        (workflow) => workflow.taskId !== null && workflow.status === "running",
+      );
+  }
 
   function refreshModels(ctx: AdapterContext): void {
     if (ctx.launch.program === "claudex" || initializeRequestId) return;
@@ -587,7 +600,7 @@ export function createClaudeAdapter(): AgentAdapter {
     string,
     { mode: AgentAccessMode; announce: boolean }
   >();
-  /** Outbound one-shot `/btw` requests, separate from the main turn. */
+  /** Outbound one-shot `/btw` and `/side` requests, separate from the main turn. */
   const pendingSideQuestions = new Map<
     string,
     { sideQuestion: AgentSideQuestion }
@@ -947,7 +960,7 @@ export function createClaudeAdapter(): AgentAdapter {
       } else if (deltaType === "input_json_delta") {
         const call = tools.get(target.id);
         const fragment = asString(delta?.partial_json);
-        if (call && fragment) call.partialInput += fragment;
+        if (call && fragment) call.partialInput = (call.partialInput + fragment).slice(0, 4 * 1024 * 1024);
       }
       return;
     }
@@ -965,6 +978,7 @@ export function createClaudeAdapter(): AgentAdapter {
         const call = tools.get(target.id);
         if (call?.partialInput) {
           const input = asRecord(parseJson(call.partialInput));
+          call.partialInput = "";
           if (input) settleTool(target.id, call.name, input, ctx);
         }
       }
@@ -1109,12 +1123,9 @@ export function createClaudeAdapter(): AgentAdapter {
     // against the previous message's content-block ids.
     blocks.clear();
 
-    const backgroundWorkflowRunning = [...workflowsByCallId.values()].some(
-      (workflow) => workflow.taskId !== null && workflow.status === "running",
-    );
     if (
       turnResultPending &&
-      !backgroundWorkflowRunning &&
+      !backgroundWorkRunning() &&
       asString(message.stop_reason) === "end_turn"
     ) {
       turnResultPending = false;
@@ -1279,15 +1290,22 @@ export function createClaudeAdapter(): AgentAdapter {
         const agentId = backgroundAgentId(frame, output);
         if (agentId !== undefined) {
           if (agentId) backgroundAgentCallByTaskId.set(agentId, callId);
+          // A structured completion can race ahead of the launch result.
+          const status = backgroundAgents.get(callId);
+          if (status === "done" || status === "error") continue;
+          backgroundAgents.set(callId, "running");
           ctx.emit({
             type: "tool",
             callId,
             status: "running",
             output,
-            subagent: { activity: "Working" },
+            subagent: { activity: "Working", ...(agentId ? { taskId: agentId } : {}) },
           });
           continue;
         }
+      }
+      if (known && toolKind(known.name) === "task" && backgroundAgents.has(callId)) {
+        backgroundAgents.set(callId, failed ? "error" : "done");
       }
       trackTaskResult(
         ROOT_TASK_SCOPE,
@@ -1313,11 +1331,16 @@ export function createClaudeAdapter(): AgentAdapter {
     }
   }
 
-  function handleTaskNotification(text: string, ctx: AdapterContext): void {
-    const notification = taskNotification(text);
-    if (!notification) return;
-    const agentCallId = backgroundAgentCallByTaskId.get(notification.taskId);
+  function handleTaskNotification(
+    notification: NonNullable<ReturnType<typeof taskNotification>>,
+    ctx: AdapterContext,
+  ): void {
+    const agentCallId = backgroundAgentCallByTaskId.get(notification.taskId) ??
+      (notification.toolUseId && toolKind(tools.get(notification.toolUseId)?.name ?? "") === "task"
+        ? notification.toolUseId : undefined);
     if (agentCallId) {
+      backgroundAgentCallByTaskId.set(notification.taskId, agentCallId);
+      backgroundAgents.set(agentCallId, notification.status === "completed" ? "done" : "error");
       ctx.emit({
         type: "tool",
         callId: agentCallId,
@@ -1373,6 +1396,42 @@ export function createClaudeAdapter(): AgentAdapter {
     message: Record<string, unknown> | null,
     ctx: AdapterContext,
   ): void {
+    const subtype = asString(frame.subtype);
+    if (
+      frame.type === "system" &&
+      (subtype === "task_started" || subtype === "task_progress" || subtype === "task_notification")
+    ) {
+      const taskId = asString(frame.task_id);
+      const toolUseId = asString(frame.tool_use_id);
+      if (taskId && subtype === "task_notification") {
+        const status = asString(frame.status);
+        if (status === "completed" || status === "failed" || status === "stopped") {
+          handleTaskNotification({
+            taskId,
+            toolUseId: toolUseId ?? undefined,
+            status,
+            summary: asString(frame.summary) ?? "",
+          }, ctx);
+        }
+      } else if (taskId) {
+        const callId = backgroundAgentCallByTaskId.get(taskId) ?? toolUseId;
+        if (callId && toolKind(tools.get(callId)?.name ?? "") === "task") {
+          backgroundAgentCallByTaskId.set(taskId, callId);
+          const status = backgroundAgents.get(callId);
+          // `SendMessage` resumes a finished agent under its original task id.
+          // Only a fresh start may reopen it; late progress must not.
+          if (subtype === "task_started" || (status !== "done" && status !== "error")) {
+            backgroundAgents.set(callId, "running");
+            ctx.emit({
+              type: "tool",
+              callId,
+              status: "running",
+              subagent: { activity: asString(frame.description) ?? "Working" },
+            });
+          }
+        }
+      }
+    }
     const candidates = [
       asString(frame.content),
       asString(frame.prompt),
@@ -1385,7 +1444,10 @@ export function createClaudeAdapter(): AgentAdapter {
       }),
     ];
     for (const candidate of candidates) {
-      if (candidate) handleTaskNotification(candidate, ctx);
+      for (const match of candidate?.matchAll(/<task-notification>[\s\S]*?<\/task-notification>/gi) ?? []) {
+        const notification = taskNotification(match[0]);
+        if (notification) handleTaskNotification(notification, ctx);
+      }
     }
   }
 
@@ -1469,16 +1531,13 @@ export function createClaudeAdapter(): AgentAdapter {
       emitTurnError(asString(frame.result) ?? "The turn failed.", ctx);
     }
     goalResponsePending = false;
-    const backgroundWorkflowRunning = [...workflowsByCallId.values()].some(
-      (workflow) => workflow.taskId !== null && workflow.status === "running",
-    );
-    // A successful result after launching an asynchronous Workflow only means
+    // A successful result after launching an asynchronous Agent or Workflow only means
     // Claude's foreground response returned. The provider remains responsible
     // for the background job, so keep the turn open through its task
     // notification and the automatic final response that follows. Otherwise
     // this intermediate result produces a false completion sound and highlight
     // while the workflow is visibly still running.
-    if (backgroundWorkflowRunning && frame.is_error !== true) {
+    if (backgroundWorkRunning() && frame.is_error !== true && !interruptRequested) {
       turnResultPending = true;
       return;
     }
@@ -1633,7 +1692,7 @@ export function createClaudeAdapter(): AgentAdapter {
     const name = (space < 0 ? text : text.slice(0, space)).toLowerCase();
     const arg = space < 0 ? "" : text.slice(space + 1).trim();
 
-    if (name === "/btw") {
+    if (name === "/btw" || name === "/side") {
       if (!arg) {
         if (lastSideQuestion) {
           ctx.emit({ type: "side-question", sideQuestion: lastSideQuestion });
@@ -1641,7 +1700,7 @@ export function createClaudeAdapter(): AgentAdapter {
           ctx.emit({
             type: "notice",
             tone: "error",
-            text: "Usage: /btw <your question>",
+            text: `Usage: ${name} <your question>`,
           });
         }
         return "handled";
@@ -1658,7 +1717,7 @@ export function createClaudeAdapter(): AgentAdapter {
       const requestId = `dw-side-${controlSeq}`;
       const sideQuestion: AgentSideQuestion = {
         id: requestId,
-        command: "/btw",
+        command: name,
         question: arg,
         answer: "",
         status: "asking",
@@ -1763,7 +1822,70 @@ export function createClaudeAdapter(): AgentAdapter {
     });
   }
 
+  function checkpoint() {
+    return structuredClone({
+      version: 1, blocks: [...blocks], tools: [...tools], nestedTools: [...nestedTools],
+      taskScopes: [...taskScopes].map(([scope, tasks]) => [scope, [...tasks]] as const),
+      taskCreateKeys: [...taskCreateKeys],
+      taskUpdateUndo: [...taskUpdateUndo].map(([id, undo]) => [id, { scope: undo.scope, tasks: [...undo.tasks] }] as const),
+      workflowsByCallId: [...workflowsByCallId], workflowCallByTaskId: [...workflowCallByTaskId],
+      backgroundAgentCallByTaskId: [...backgroundAgentCallByTaskId], backgroundAgents: [...backgroundAgents],
+      latestWorkflowCallId, goalToolUndo: [...goalToolUndo], turnResultPending, interruptRequested,
+      messageSeq, settledMessageSeq, controlSeq, initializeRequestId, catalogRequest,
+      pendingPermissions: [...pendingPermissions],
+      pendingModelChanges: [...pendingModelChanges].map(([id, entry]) => [id, { model: entry.model, announce: entry.announce }] as const),
+      pendingAccessChanges: [...pendingAccessChanges], pendingSideQuestions: [...pendingSideQuestions],
+      activeSideQuestionRequestId, lastSideQuestion, seenTurnErrors: [...seenTurnErrors],
+      currentGoal, extensions, goalBeforeCommand, goalResponsePending,
+    });
+  }
+
+  function restore(value: unknown): boolean {
+    if (asRecord(value)?.version !== 1) return false;
+    try {
+      const saved = structuredClone(value) as ReturnType<typeof checkpoint>;
+      const load = <K, V>(target: Map<K, V>, entries: ReadonlyArray<readonly [K, V]>) => {
+        target.clear();
+        for (const [key, entry] of entries) target.set(key, entry);
+      };
+      load(blocks, saved.blocks); load(tools, saved.tools); load(nestedTools, saved.nestedTools);
+      load(taskScopes, saved.taskScopes.map(([scope, tasks]) => [scope, new Map(tasks)] as const));
+      load(taskCreateKeys, saved.taskCreateKeys);
+      load(taskUpdateUndo, saved.taskUpdateUndo.map(([id, undo]) => [id, { scope: undo.scope, tasks: new Map(undo.tasks) }] as const));
+      load(workflowsByCallId, saved.workflowsByCallId); load(workflowCallByTaskId, saved.workflowCallByTaskId);
+      load(backgroundAgentCallByTaskId, saved.backgroundAgentCallByTaskId); load(backgroundAgents, saved.backgroundAgents);
+      load(goalToolUndo, saved.goalToolUndo); load(pendingPermissions, saved.pendingPermissions);
+      load(pendingModelChanges, saved.pendingModelChanges); load(pendingAccessChanges, saved.pendingAccessChanges);
+      load(pendingSideQuestions, saved.pendingSideQuestions);
+      seenTurnErrors.clear();
+      for (const error of saved.seenTurnErrors) seenTurnErrors.add(error);
+      ({ latestWorkflowCallId, turnResultPending, interruptRequested, messageSeq, settledMessageSeq,
+        controlSeq, initializeRequestId, catalogRequest, activeSideQuestionRequestId, lastSideQuestion,
+        currentGoal, extensions, goalBeforeCommand, goalResponsePending } = saved);
+      return true;
+    } catch { return false; }
+  }
+
+  /**
+   * A relaunched CLI keeps the conversation but not this bookkeeping. Agents
+   * from the restored rows can still report back, or be resumed by
+   * `SendMessage`, and those frames must find their original row.
+   */
+  function adoptTranscript(items: AgentItem[]): void {
+    for (const item of items) {
+      if (item.kind !== "tool" || toolKind(item.name) !== "task") continue;
+      if (!tools.has(item.callId)) tools.set(item.callId, { name: item.name, partialInput: "" });
+      const taskId = item.subagent?.taskId?.trim();
+      if (taskId && !backgroundAgentCallByTaskId.has(taskId)) {
+        backgroundAgentCallByTaskId.set(taskId, item.callId);
+      }
+    }
+  }
+
   return {
+    checkpoint,
+    restore,
+    adoptTranscript,
     endsOnStdinClose: true,
 
     // No `resume` here on purpose: `stream-json` has no method for swapping
@@ -1957,6 +2079,7 @@ export function createClaudeAdapter(): AgentAdapter {
     prompt: (prompt, ctx) => {
       seenTurnErrors.clear();
       turnResultPending = false;
+      interruptRequested = false;
       ctx.emit({ type: "user", text: prompt.text, images: prompt.images });
       ctx.emit({ type: "status", status: "working" });
       sendUserMessage(prompt, ctx);
@@ -1978,7 +2101,7 @@ export function createClaudeAdapter(): AgentAdapter {
 
     command: handleCommand,
 
-    commandAvailableDuringTurn: (text) => /^\/btw(?:\s|$)/i.test(text.trim()),
+    commandAvailableDuringTurn: (text) => /^\/(?:btw|side)(?:\s|$)/i.test(text.trim()),
 
     configure: (kind, value, ctx) => {
       if (kind !== "model") return false;
@@ -2008,6 +2131,8 @@ export function createClaudeAdapter(): AgentAdapter {
     },
 
     interrupt: (ctx) => {
+      interruptRequested = true;
+      turnResultPending = false;
       controlSeq += 1;
       ctx.send({
         type: "control_request",
