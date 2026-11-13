@@ -1788,10 +1788,10 @@ export const meta = {
     expect(adapter.args({ ...launch, effort: "high" })).toEqual(["--effort", "high"]);
   });
 
-  test("runs /btw through Claude's side-question control channel", () => {
+  test.each(["/btw", "/side"] as const)("runs %s through Claude's side-question control channel", (command) => {
     const h = harness();
-    expect(h.adapter.commandAvailableDuringTurn?.("/btw which file was that?")).toBe(true);
-    expect(h.adapter.command?.("/btw which file was that?", h.ctx)).toBe("handled");
+    expect(h.adapter.commandAvailableDuringTurn?.(`${command} which file was that?`)).toBe(true);
+    expect(h.adapter.command?.(`${command} which file was that?`, h.ctx)).toBe("handled");
 
     const sent = h.sent.at(-1) as {
       request_id: string;
@@ -1802,7 +1802,7 @@ export const meta = {
       request: { subtype: "side_question", question: "which file was that?" },
     });
     expect(h.state().sideQuestion).toMatchObject({
-      command: "/btw",
+      command,
       question: "which file was that?",
       status: "asking",
     });
@@ -1824,9 +1824,9 @@ export const meta = {
     expect(h.state().items).toEqual([]);
   });
 
-  test("does not mix main-turn thinking into a /btw side answer", () => {
+  test.each(["/btw", "/side"] as const)("does not mix main-turn thinking into a %s side answer", (command) => {
     const h = harness();
-    expect(h.adapter.command?.("/btw which file was that?", h.ctx)).toBe("handled");
+    expect(h.adapter.command?.(`${command} which file was that?`, h.ctx)).toBe("handled");
     const sent = h.sent.at(-1) as { request_id: string };
 
     for (const frame of streamBlock(0, { type: "thinking" }, [

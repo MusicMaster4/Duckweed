@@ -911,12 +911,12 @@ describe("codex adapter", () => {
     });
   });
 
-  test("runs /side in an ephemeral read-only fork without touching the main transcript", async () => {
+  test.each(["/btw", "/side"] as const)("runs %s in an ephemeral read-only fork without touching the main transcript", async (command) => {
     const h = harness();
     await h.handshake();
 
-    expect(h.adapter.commandAvailableDuringTurn?.("/side what changed?")).toBe(true);
-    expect(h.adapter.command?.("/side what changed?", h.ctx)).toBe("handled");
+    expect(h.adapter.commandAvailableDuringTurn?.(`${command} what changed?`)).toBe(true);
+    expect(h.adapter.command?.(`${command} what changed?`, h.ctx)).toBe("handled");
     expect(h.sent.at(-1)).toMatchObject({
       id: 4,
       method: "thread/fork",
@@ -929,7 +929,7 @@ describe("codex adapter", () => {
       },
     });
     expect(h.state().sideQuestion).toMatchObject({
-      command: "/side",
+      command,
       question: "what changed?",
       status: "asking",
     });

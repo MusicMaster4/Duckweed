@@ -15,6 +15,12 @@ const LOCAL_COMMANDS = [
   },
 ] as const;
 
+/** Both spellings open the same separate response in the custom UI. */
+const SIDE_COMMANDS = [
+  { name: "/btw", description: "Ask a side question without interrupting the main conversation" },
+  { name: "/side", description: "Ask a side question without interrupting the main conversation" },
+];
+
 /**
  * Static slash-command catalogs, one per agent.
  *
@@ -45,10 +51,7 @@ const FALLBACKS: Record<AgentId, { name: string; description: string }[]> = {
     { name: "/compact", description: "Compact the conversation to free context" },
     { name: "/clear", description: "Clear the conversation" },
     { name: "/context", description: "Show context window usage" },
-    {
-      name: "/btw",
-      description: "Ask a quick side question without interrupting the main conversation",
-    },
+    ...SIDE_COMMANDS,
     { name: "/review", description: "Review a pull request or change" },
     { name: "/init", description: "Create or refresh the project memory file" },
     { name: "/mcp", description: "Manage MCP servers" },
@@ -72,8 +75,7 @@ const FALLBACKS: Record<AgentId, { name: string; description: string }[]> = {
     { name: "/model", description: "Change the model for later turns" },
     { name: "/effort", description: "Set reasoning effort for later turns" },
     { name: "/compact", description: "Compact the conversation to free context" },
-    { name: "/side", description: "Start a side conversation in an ephemeral fork" },
-    { name: "/btw", description: "Start a side conversation in an ephemeral fork" },
+    ...SIDE_COMMANDS,
   ],
   grok: [
     { name: "/resume", description: "Continue a past Grok Build session in this folder" },

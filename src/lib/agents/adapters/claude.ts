@@ -52,7 +52,7 @@ import {
  * model tokens involved (verified against claude 2.1). The one exception is
  * `/model <id>`, which we route through the `set_model` control request so
  * the header learns the new model from a structured ACK rather than by
- * parsing the CLI's friendly confirmation sentence. `/btw` also uses its
+ * parsing the CLI's friendly confirmation sentence. `/btw` and `/side` also use the
  * dedicated `side_question` control request so it can run without interrupting
  * or entering the main transcript.
  */
@@ -600,7 +600,7 @@ export function createClaudeAdapter(): AgentAdapter {
     string,
     { mode: AgentAccessMode; announce: boolean }
   >();
-  /** Outbound one-shot `/btw` requests, separate from the main turn. */
+  /** Outbound one-shot `/btw` and `/side` requests, separate from the main turn. */
   const pendingSideQuestions = new Map<
     string,
     { sideQuestion: AgentSideQuestion }
@@ -1692,7 +1692,7 @@ export function createClaudeAdapter(): AgentAdapter {
     const name = (space < 0 ? text : text.slice(0, space)).toLowerCase();
     const arg = space < 0 ? "" : text.slice(space + 1).trim();
 
-    if (name === "/btw") {
+    if (name === "/btw" || name === "/side") {
       if (!arg) {
         if (lastSideQuestion) {
           ctx.emit({ type: "side-question", sideQuestion: lastSideQuestion });
@@ -1700,7 +1700,7 @@ export function createClaudeAdapter(): AgentAdapter {
           ctx.emit({
             type: "notice",
             tone: "error",
-            text: "Usage: /btw <your question>",
+            text: `Usage: ${name} <your question>`,
           });
         }
         return "handled";
@@ -1717,7 +1717,7 @@ export function createClaudeAdapter(): AgentAdapter {
       const requestId = `dw-side-${controlSeq}`;
       const sideQuestion: AgentSideQuestion = {
         id: requestId,
-        command: "/btw",
+        command: name,
         question: arg,
         answer: "",
         status: "asking",
@@ -2101,7 +2101,7 @@ export function createClaudeAdapter(): AgentAdapter {
 
     command: handleCommand,
 
-    commandAvailableDuringTurn: (text) => /^\/btw(?:\s|$)/i.test(text.trim()),
+    commandAvailableDuringTurn: (text) => /^\/(?:btw|side)(?:\s|$)/i.test(text.trim()),
 
     configure: (kind, value, ctx) => {
       if (kind !== "model") return false;

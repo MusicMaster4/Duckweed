@@ -1661,6 +1661,52 @@ describe("Custom agent UI sessions", () => {
     } finally { desktopFailure = false; }
   });
 
+  test.each([
+    ["/btw", "queue"],
+    ["/side", "queue"],
+    ["/btw", "steer"],
+    ["/side", "steer"],
+  ] as const)("runs Claude %s separately during an active turn in %s mode", async (command, mode) => {
+    const termId = `claude-side-${command.slice(1)}-${mode}`;
+    await session.start(termId, { ...grokLaunch, agent: "claude", program: "claude" }, "H:/project");
+    await flush();
+    feed({ type: "system", subtype: "init", session_id: "main-session" });
+    session.setFollowupMode(mode);
+    session.submit(termId, "Keep working on the main task");
+    await flush();
+    expect(session.get(termId)?.status).toBe("working");
+    const mainItems = session.get(termId)?.items;
+    const beforeSide = sent.length;
+
+    expect(session.submit(termId, `${command} Which file was that?`)).toBe(true);
+    await flush();
+    const sideMessages = sent.slice(beforeSide).map(rpc);
+    expect(sideMessages).toEqual([
+      expect.objectContaining({
+        type: "control_request",
+        request: { subtype: "side_question", question: "Which file was that?" },
+      }),
+    ]);
+    expect(session.get(termId)).toMatchObject({
+      status: "working",
+      pending: [],
+      sideQuestion: { command, question: "Which file was that?", status: "asking" },
+    });
+    expect(session.get(termId)?.items).toEqual(mainItems);
+
+    feed({ type: "control_response", response: {
+      subtype: "success",
+      request_id: sideMessages[0].request_id,
+      response: { response: "src/config.ts" },
+    } });
+    expect(session.get(termId)).toMatchObject({
+      status: "working",
+      pending: [],
+      sideQuestion: { command, answer: "src/config.ts", status: "answered" },
+    });
+    expect(session.get(termId)?.items).toEqual(mainItems);
+  });
+
   test("routes /side with an image into a fork instead of the main Codex turn", async () => {
     expect(await session.start("t-codex-side-image", codexLaunch, "H:/project")).toBeNull();
     await codexHandshake();
