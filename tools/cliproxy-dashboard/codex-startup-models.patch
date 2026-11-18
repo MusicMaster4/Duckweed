@@ -1,0 +1,286 @@
+diff --git a/internal/registry/models/models.json b/internal/registry/models/models.json
+index 4ca36db..90b0702 100644
+--- a/internal/registry/models/models.json
++++ b/internal/registry/models/models.json
+@@ -2776,6 +2776,76 @@
+     }
+   ],
+   "codex-team": [
++    {
++      "id": "gpt-6.2-astra",
++      "object": "model",
++      "created": 1794942000,
++      "owned_by": "openai",
++      "type": "openai",
++      "display_name": "GPT 6.2 Astra",
++      "version": "gpt-6.2",
++      "description": "GPT-6.2 Astra is our most capable model for your hardest projects, from start to finish.",
++      "context_length": 272000,
++      "max_completion_tokens": 128000,
++      "supported_parameters": [
++        "tools"
++      ],
++      "thinking": {
++        "levels": [
++          "low",
++          "medium",
++          "high",
++          "xhigh",
++          "max"
++        ]
++      },
++      "supportedInputModalities": [
++        "text",
++        "image"
++      ],
++      "supportedOutputModalities": [
++        "text"
++      ],
++      "native_capabilities": {
++        "web_search": true
++      },
++      "support_configuration_update": true
++    },
++    {
++      "id": "gpt-6.2-sol",
++      "object": "model",
++      "created": 1794942000,
++      "owned_by": "openai",
++      "type": "openai",
++      "display_name": "GPT 6.2 Sol",
++      "version": "gpt-6.2",
++      "description": "GPT-6.2 Astra is our go-to model for everyday work, from coding to powering agents at scale.",
++      "context_length": 500000,
++      "max_completion_tokens": 128000,
++      "supported_parameters": [
++        "tools"
++      ],
++      "thinking": {
++        "levels": [
++          "low",
++          "medium",
++          "high",
++          "xhigh",
++          "max"
++        ]
++      },
++      "supportedInputModalities": [
++        "text",
++        "image"
++      ],
++      "supportedOutputModalities": [
++        "text"
++      ],
++      "native_capabilities": {
++        "web_search": true
++      },
++      "support_configuration_update": true
++    },
+     {
+       "id": "gpt-5.5",
+       "object": "model",
+@@ -3092,6 +3162,76 @@
+     }
+   ],
+   "codex-plus": [
++    {
++      "id": "gpt-6.2-astra",
++      "object": "model",
++      "created": 1794942000,
++      "owned_by": "openai",
++      "type": "openai",
++      "display_name": "GPT 6.2 Astra",
++      "version": "gpt-6.2",
++      "description": "GPT-6.2 Astra is our most capable model for your hardest projects, from start to finish.",
++      "context_length": 272000,
++      "max_completion_tokens": 128000,
++      "supported_parameters": [
++        "tools"
++      ],
++      "thinking": {
++        "levels": [
++          "low",
++          "medium",
++          "high",
++          "xhigh",
++          "max"
++        ]
++      },
++      "supportedInputModalities": [
++        "text",
++        "image"
++      ],
++      "supportedOutputModalities": [
++        "text"
++      ],
++      "native_capabilities": {
++        "web_search": true
++      },
++      "support_configuration_update": true
++    },
++    {
++      "id": "gpt-6.2-sol",
++      "object": "model",
++      "created": 1794942000,
++      "owned_by": "openai",
++      "type": "openai",
++      "display_name": "GPT 6.2 Sol",
++      "version": "gpt-6.2",
++      "description": "GPT-6.2 Astra is our go-to model for everyday work, from coding to powering agents at scale.",
++      "context_length": 500000,
++      "max_completion_tokens": 128000,
++      "supported_parameters": [
++        "tools"
++      ],
++      "thinking": {
++        "levels": [
++          "low",
++          "medium",
++          "high",
++          "xhigh",
++          "max"
++        ]
++      },
++      "supportedInputModalities": [
++        "text",
++        "image"
++      ],
++      "supportedOutputModalities": [
++        "text"
++      ],
++      "native_capabilities": {
++        "web_search": true
++      },
++      "support_configuration_update": true
++    },
+     {
+       "id": "gpt-5.5",
+       "object": "model",
+@@ -3408,6 +3548,76 @@
+     }
+   ],
+   "codex-pro": [
++    {
++      "id": "gpt-6.2-astra",
++      "object": "model",
++      "created": 1794942000,
++      "owned_by": "openai",
++      "type": "openai",
++      "display_name": "GPT 6.2 Astra",
++      "version": "gpt-6.2",
++      "description": "GPT-6.2 Astra is our most capable model for your hardest projects, from start to finish.",
++      "context_length": 272000,
++      "max_completion_tokens": 128000,
++      "supported_parameters": [
++        "tools"
++      ],
++      "thinking": {
++        "levels": [
++          "low",
++          "medium",
++          "high",
++          "xhigh",
++          "max"
++        ]
++      },
++      "supportedInputModalities": [
++        "text",
++        "image"
++      ],
++      "supportedOutputModalities": [
++        "text"
++      ],
++      "native_capabilities": {
++        "web_search": true
++      },
++      "support_configuration_update": true
++    },
++    {
++      "id": "gpt-6.2-sol",
++      "object": "model",
++      "created": 1794942000,
++      "owned_by": "openai",
++      "type": "openai",
++      "display_name": "GPT 6.2 Sol",
++      "version": "gpt-6.2",
++      "description": "GPT-6.2 Astra is our go-to model for everyday work, from coding to powering agents at scale.",
++      "context_length": 500000,
++      "max_completion_tokens": 128000,
++      "supported_parameters": [
++        "tools"
++      ],
++      "thinking": {
++        "levels": [
++          "low",
++          "medium",
++          "high",
++          "xhigh",
++          "max"
++        ]
++      },
++      "supportedInputModalities": [
++        "text",
++        "image"
++      ],
++      "supportedOutputModalities": [
++        "text"
++      ],
++      "native_capabilities": {
++        "web_search": true
++      },
++      "support_configuration_update": true
++    },
+     {
+       "id": "gpt-5.5",
+       "object": "model",
+diff --git a/sdk/cliproxy/service_codex_startup_test.go b/sdk/cliproxy/service_codex_startup_test.go
+new file mode 100644
+index 0000000..e1048af
+--- /dev/null
++++ b/sdk/cliproxy/service_codex_startup_test.go
+@@ -0,0 +1,45 @@
++package cliproxy
++
++import (
++	"context"
++	"testing"
++
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
++	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
++)
++
++// This process never starts the remote catalog updater. Routing must work from
++// embedded definitions before the first network refresh.
++func TestCodex62RoutesBeforeCatalogRefresh(t *testing.T) {
++	for _, plan := range []string{"team", "plus", "pro", "free"} {
++		t.Run(plan, func(t *testing.T) {
++			id := "embedded-codex-62-" + plan
++			modelRegistry := registry.GetGlobalRegistry()
++			t.Cleanup(func() { modelRegistry.UnregisterClient(id) })
++			service := &Service{cfg: &config.Config{}}
++			service.registerModelsForAuth(context.Background(), &coreauth.Auth{
++				ID: id, Provider: "codex", Status: coreauth.StatusActive,
++				Attributes: map[string]string{"plan_type": plan},
++			})
++			registered := codexModelIDSet(modelRegistry.GetModelsForClient(id))
++			for _, model := range []string{"gpt-6.2-sol", "gpt-6.2-astra"} {
++				_, present := registered[model]
++				if present != (plan != "free") {
++					t.Fatalf("model %s registration for %s = %v", model, plan, present)
++				}
++				if plan == "free" {
++					continue
++				}
++				found := false
++				for _, provider := range util.GetProviderName(model) {
++					found = found || provider == "codex"
++				}
++				if !found {
++					t.Fatalf("model %s has no Codex route before remote refresh", model)
++				}
++			}
++		})
++	}
++}

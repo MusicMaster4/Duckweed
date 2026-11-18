@@ -1,0 +1,286 @@
+diff --git a/internal/runtime/executor/codex_executor_execute.go b/internal/runtime/executor/codex_executor_execute.go
+index 7fdda8b..d1dc029 100644
+--- a/internal/runtime/executor/codex_executor_execute.go
++++ b/internal/runtime/executor/codex_executor_execute.go
+@@ -90,7 +90,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
+ 		authLabel = auth.Label
+ 		authType, authValue = auth.AccountInfo()
+ 	}
+-	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
++	requestLog := helps.UpstreamRequestLog{
+ 		URL:       url,
+ 		Method:    http.MethodPost,
+ 		Headers:   httpReq.Header.Clone(),
+@@ -100,10 +100,10 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
+ 		AuthLabel: authLabel,
+ 		AuthType:  authType,
+ 		AuthValue: authValue,
+-	})
++	}
+ 	httpClient := helps.NewUtlsHTTPClient(ctx, e.cfg, auth, 0)
+ 	httpClient = reporter.TrackHTTPClient(httpClient)
+-	httpResp, err := httpClient.Do(httpReq)
++	httpResp, err := e.doCodexResponseRequest(ctx, httpClient, httpReq, requestLog)
+ 	if err != nil {
+ 		helps.RecordAPIResponseError(ctx, e.cfg, err)
+ 		return resp, err
+@@ -261,7 +261,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
+ 		authLabel = auth.Label
+ 		authType, authValue = auth.AccountInfo()
+ 	}
+-	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
++	requestLog := helps.UpstreamRequestLog{
+ 		URL:       url,
+ 		Method:    http.MethodPost,
+ 		Headers:   httpReq.Header.Clone(),
+@@ -271,10 +271,10 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
+ 		AuthLabel: authLabel,
+ 		AuthType:  authType,
+ 		AuthValue: authValue,
+-	})
++	}
+ 	httpClient := helps.NewUtlsHTTPClient(ctx, e.cfg, auth, 0)
+ 	httpClient = reporter.TrackHTTPClient(httpClient)
+-	httpResp, err := httpClient.Do(httpReq)
++	httpResp, err := e.doCodexResponseRequest(ctx, httpClient, httpReq, requestLog)
+ 	if err != nil {
+ 		helps.RecordAPIResponseError(ctx, e.cfg, err)
+ 		return resp, err
+diff --git a/internal/runtime/executor/codex_executor_stream.go b/internal/runtime/executor/codex_executor_stream.go
+index bae496f..6b7faf2 100644
+--- a/internal/runtime/executor/codex_executor_stream.go
++++ b/internal/runtime/executor/codex_executor_stream.go
+@@ -98,7 +98,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+ 		authLabel = auth.Label
+ 		authType, authValue = auth.AccountInfo()
+ 	}
+-	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
++	requestLog := helps.UpstreamRequestLog{
+ 		URL:       url,
+ 		Method:    http.MethodPost,
+ 		Headers:   httpReq.Header.Clone(),
+@@ -108,11 +108,11 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+ 		AuthLabel: authLabel,
+ 		AuthType:  authType,
+ 		AuthValue: authValue,
+-	})
++	}
+ 
+ 	httpClient := helps.NewUtlsHTTPClient(ctx, e.cfg, auth, 0)
+ 	httpClient = reporter.TrackHTTPClientRoundTripOnly(httpClient)
+-	httpResp, err := httpClient.Do(httpReq)
++	httpResp, err := e.doCodexResponseRequest(ctx, httpClient, httpReq, requestLog)
+ 	if err != nil {
+ 		helps.RecordAPIResponseError(ctx, e.cfg, err)
+ 		return nil, err
+diff --git a/internal/runtime/executor/codex_executor_tool_audio.go b/internal/runtime/executor/codex_executor_tool_audio.go
+new file mode 100644
+index 0000000..2724597
+--- /dev/null
++++ b/internal/runtime/executor/codex_executor_tool_audio.go
+@@ -0,0 +1,92 @@
++package executor
++
++import (
++	"bytes"
++	"context"
++	"io"
++	"net/http"
++	"strconv"
++
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
++	log "github.com/sirupsen/logrus"
++	"github.com/tidwall/gjson"
++	"github.com/tidwall/sjson"
++)
++
++var codexUnavailableToolAudio = []byte(`{"type":"input_text","text":"[Tool audio is unavailable to this model.]"}`)
++
++// Retry once on the specific upstream validation error, before any stream can
++// reach the caller. Change only the outgoing copy of tool results.
++func (e *CodexExecutor) doCodexResponseRequest(ctx context.Context, client *http.Client, req *http.Request, requestLog helps.UpstreamRequestLog) (*http.Response, error) {
++	helps.RecordAPIRequest(ctx, e.cfg, requestLog)
++	resp, err := client.Do(req)
++	if err != nil || resp.StatusCode != http.StatusBadRequest {
++		return resp, err
++	}
++
++	data, readErr := io.ReadAll(resp.Body)
++	if closeErr := resp.Body.Close(); closeErr != nil {
++		log.Errorf("codex executor: close response body error: %v", closeErr)
++	}
++	if readErr != nil {
++		return nil, readErr
++	}
++	retryBody := codexResponseWithoutToolAudio(requestLog.Body, data)
++	if retryBody == nil {
++		resp.Body = io.NopCloser(bytes.NewReader(data))
++		return resp, nil
++	}
++
++	helps.RecordAPIResponseMetadata(ctx, e.cfg, resp.StatusCode, resp.Header.Clone())
++	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
++	retry := req.Clone(req.Context())
++	retry.ContentLength = int64(len(retryBody))
++	retry.GetBody = func() (io.ReadCloser, error) {
++		return io.NopCloser(bytes.NewReader(retryBody)), nil
++	}
++	retry.Body, _ = retry.GetBody()
++	requestLog.Body = retryBody
++	helps.RecordAPIRequest(ctx, e.cfg, requestLog)
++	return client.Do(retry)
++}
++
++func codexResponseWithoutToolAudio(request, rejection []byte) []byte {
++	apiError := gjson.GetBytes(rejection, "error")
++	if apiError.Get("type").Str != "invalid_request_error" ||
++		apiError.Get("param").Str != "input" ||
++		apiError.Get("message").Str != "Audio input is not available." {
++		return nil
++	}
++
++	input := gjson.GetBytes(request, "input")
++	if !input.IsArray() {
++		return nil
++	}
++	var retry []byte
++	for itemIndex, item := range input.Array() {
++		switch item.Get("type").Str {
++		case "function_call_output", "custom_tool_call_output":
++		default:
++			continue
++		}
++		output := item.Get("output")
++		if !output.IsArray() {
++			continue
++		}
++		for partIndex, part := range output.Array() {
++			if part.Get("type").Str != "input_audio" {
++				continue
++			}
++			if retry == nil {
++				retry = request
++			}
++			path := "input." + strconv.Itoa(itemIndex) + ".output." + strconv.Itoa(partIndex)
++			var err error
++			retry, err = sjson.SetRawBytes(retry, path, codexUnavailableToolAudio)
++			if err != nil {
++				return nil
++			}
++		}
++	}
++	return retry
++}
+diff --git a/internal/runtime/executor/codex_executor_tool_audio_test.go b/internal/runtime/executor/codex_executor_tool_audio_test.go
+new file mode 100644
+index 0000000..01a9e9a
+--- /dev/null
++++ b/internal/runtime/executor/codex_executor_tool_audio_test.go
+@@ -0,0 +1,107 @@
++package executor
++
++import (
++	"bytes"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"testing"
++
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
++	"github.com/tidwall/gjson"
++)
++
++func TestCodexHTTPToolAudioFallback(t *testing.T) {
++	const rejection = `{"error":{"code":null,"message":"Audio input is not available.","param":"input","type":"invalid_request_error"}}`
++	const attachment = `{"type":"input_audio","audio_url":"data:audio/mpeg;base64,AA=="}`
++	const withToolAudio = `{"model":"fixture","input":[
++		{"type":"message","role":"user","content":[{"type":"input_text","text":"continue"}]},
++		{"type":"custom_tool_call_output","call_id":"custom","output":[{"type":"input_text","text":"keep this"},` + attachment + `,{"type":"input_image","image_url":"data:image/png;base64,AA=="}]},
++		{"type":"function_call_output","call_id":"function","output":[` + attachment + `]},
++		{"type":"function_call_output","call_id":"plain","output":"keep this too"}
++	]}`
++	const withUserAudio = `{"input":[{"type":"message","role":"user","content":[` + attachment + `]}]}`
++
++	for _, tc := range []struct {
++		name, request, upstreamError string
++		firstStatus, retryStatus     int
++	}{
++		{"retry rejected history", withToolAudio, rejection, 400, 200},
++		{"try only once", withToolAudio, rejection, 400, 400},
++		{"preserve accepted audio", withToolAudio, "", 200, 0},
++		{"preserve other errors", withToolAudio, `{"error":{"message":"Invalid input"}}`, 400, 0},
++		{"preserve user audio", withUserAudio, rejection, 400, 0},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			type attempt struct {
++				body   []byte
++				header string
++			}
++			attempts := make(chan attempt, 3)
++			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++				body, _ := io.ReadAll(r.Body)
++				status := tc.firstStatus
++				if !bytes.Equal(body, []byte(tc.request)) {
++					status = tc.retryStatus
++				}
++				attempts <- attempt{body, r.Header.Get("X-Session-ID")}
++				w.WriteHeader(status)
++				if status == http.StatusOK {
++					_, _ = io.WriteString(w, "accepted")
++				} else {
++					_, _ = io.WriteString(w, tc.upstreamError)
++				}
++			}))
++			defer upstream.Close()
++			req, err := http.NewRequest(http.MethodPost, upstream.URL, strings.NewReader(tc.request))
++			if err != nil {
++				t.Fatal(err)
++			}
++			req.Header.Set("X-Session-ID", "session")
++			resp, err := NewCodexExecutor(nil).doCodexResponseRequest(t.Context(), upstream.Client(), req, helps.UpstreamRequestLog{Body: []byte(tc.request)})
++			if err != nil {
++				t.Fatal(err)
++			}
++			defer resp.Body.Close()
++			body, err := io.ReadAll(resp.Body)
++			wantStatus := tc.firstStatus
++			if tc.retryStatus != 0 {
++				wantStatus = tc.retryStatus
++			}
++			wantBody := tc.upstreamError
++			if wantStatus == http.StatusOK {
++				wantBody = "accepted"
++			}
++			if err != nil || resp.StatusCode != wantStatus || string(body) != wantBody {
++				t.Fatalf("got status %d, body %q, error %v", resp.StatusCode, body, err)
++			}
++			wantRequests := 1
++			if tc.retryStatus != 0 {
++				wantRequests = 2
++			}
++			if len(attempts) != wantRequests {
++				t.Fatalf("expected %d request(s), got %d", wantRequests, len(attempts))
++			}
++			if first := <-attempts; string(first.body) != tc.request || first.header != "session" {
++				t.Fatalf("initial request changed: %s", first.body)
++			}
++			if tc.retryStatus != 0 {
++				retry := <-attempts
++				want := strings.ReplaceAll(tc.request, attachment, string(codexUnavailableToolAudio))
++				if string(retry.body) != want || retry.header != "session" {
++					t.Fatalf("retry changed more than tool audio: %s", retry.body)
++				}
++			}
++		})
++	}
++}
++
++func TestCodexToolAudioFallbackKeepsToolResultShape(t *testing.T) {
++	const request = `{"input":[{"type":"custom_tool_call_output","call_id":"audio-only","output":[{"type":"input_audio","audio_url":"fixture"}]}]}`
++	const rejection = `{"error":{"message":"Audio input is not available.","param":"input","type":"invalid_request_error"}}`
++	result := gjson.GetBytes(codexResponseWithoutToolAudio([]byte(request), []byte(rejection)), "input.0")
++	if result.Get("call_id").Str != "audio-only" || result.Get("output.0.type").Str != "input_text" {
++		t.Fatalf("audio-only tool result was lost: %s", result.Raw)
++	}
++}
