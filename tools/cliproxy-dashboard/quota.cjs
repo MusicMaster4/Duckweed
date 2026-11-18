@@ -172,6 +172,10 @@ async function probe(account) {
     let method = 'GET', url, data;
     if (account.provider === 'claude') {
       url = 'https://api.anthropic.com/api/oauth/usage'; header['anthropic-beta'] = 'oauth-2025-04-20';
+      // Anonymous proxy requests can receive persistent 429s even when quota is available.
+      // Keep the usage request headers compatible with the installed Claude Code client.
+      header['User-Agent'] = 'claude-code/2.1.322';
+      header.Accept = 'application/json, text/plain, */*';
     } else if (account.provider === 'codex') {
       url = 'https://chatgpt.com/backend-api/wham/usage';
       if (path.basename(account.name) === account.name) {

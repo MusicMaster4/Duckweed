@@ -167,7 +167,7 @@
     return { type, rows, columns: ordered, primary, session };
   }
 
-  const absoluteTime = ms => new Date(ms).toLocaleString('en-US', { weekday: 'short', hour: 'numeric', minute: '2-digit' });
+  const absoluteTime = ms => new Date(ms).toLocaleString('en-US', { weekday: 'short', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
   function poolMembers(group) {
     if (!group.primary) return [];
     return group.rows.filter(row => !row.entry.file.disabled && row.status === 'success').flatMap(row => {
@@ -300,12 +300,10 @@
     const Bar = ({ percent, session = false }) => h('span', { className: session ? 'dqx-bar dqx-bar-session' : 'dqx-bar', 'data-tone': tone(percent) },
       h('span', { className: 'dqx-fill', 'data-tone': (session ? sessionTone : tone)(percent), style: { width: `${percent ?? 0}%` } }));
 
-    function resetText(props, ms, now) {
+    function resetText(ms, now) {
       if (ms === null) return '';
       if (ms <= now) return 'Awaiting refresh';
-      const minutes = Math.max(1, Math.ceil((ms - now) / 60000));
-      const days = Math.floor(minutes / 1440), hours = Math.floor(minutes % 1440 / 60);
-      return `Resets in ${days ? `${days}d ${hours}h` : hours ? `${hours}h ${minutes % 60}m` : `${minutes}m`}`;
+      return `Resets at ${absoluteTime(ms)}`;
     }
 
     function Cell({ meter, props, now }) {
@@ -314,7 +312,7 @@
       return h('div', { className: 'dqx-cell', title: meter.title || undefined },
         h('div', { className: 'dqx-cell-head' }, h('span', { className: 'dqx-cell-label' }, meter.label), h('b', { 'data-tone': tone(meter.remaining) }, `${fmtPercent(meter.remaining)}${meter.remaining === null ? '' : ' left'}`)),
         h(Bar, { percent: meter.remaining }),
-        h('div', { className: soon ? 'dqx-cell-foot dqx-soon' : 'dqx-cell-foot' }, resetText(props, meter.resetAtMs, now) || ' '));
+        h('div', { className: soon ? 'dqx-cell-foot dqx-soon' : 'dqx-cell-foot' }, resetText(meter.resetAtMs, now) || ' '));
     }
 
     function Row({ row, group, props, now, siblings }) {
@@ -346,7 +344,7 @@
         body = h('div', { className: 'dqx-row-msg', style: span }, h('button', { type: 'button', className: 'dqx-link', onClick: refresh, disabled: !canRefresh }, t(`${adapter.i18nPrefix}.idle`)));
       }
       const session = status === 'success' && group.session ? data.meters.find(meter => meter.id === group.session.id) ?? null : null;
-      const sessionReset = session ? resetText(props, session.resetAtMs, now) : '';
+      const sessionReset = session ? resetText(session.resetAtMs, now) : '';
       const showClaudeReset = entry.type === 'claude' && status === 'success' && (claudeReset.count > 0 || claudeReset.buttonLabel === 'retry');
       return h('div', { className: 'dqx-row', 'data-status': status },
         h('div', { className: 'dqx-acct' },

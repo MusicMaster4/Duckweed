@@ -95,13 +95,16 @@ test('failed local repairs preserve quota and retry on the next fresh observatio
 });
 
 
-test('scheduled refresh repairs fresh Claude quota, preserves exhausted accounts and never repairs cached readings', async () => {
+test('identified Claude usage requests recover stale quota, preserve exhausted accounts and never repair cached readings', async () => {
   const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
   const http = require('node:http'), { spawn } = require('node:child_process'), { once } = require('node:events');
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cliproxy-claude-recovery-'));
   const ready = { ...account(), name: 'ready.json', priority: 2 }, exhausted = { ...account(), auth_index: 'exhausted', name: 'exhausted.json', priority: -100 };
   const files = [ready, exhausted], resets = [];
   let probes = 0, denied = false;
+  const identified = body => /^claude-code\/\d+\.\d+\.\d+$/.test(body.header?.['User-Agent'] || '')
+    && body.header?.Accept === 'application/json, text/plain, */*'
+    && body.header?.['anthropic-beta'] === 'oauth-2025-04-20';
   const server = http.createServer(async (req, res) => {
     let raw = ''; for await (const chunk of req) raw += chunk;
     const body = raw ? JSON.parse(raw) : {};
@@ -109,7 +112,7 @@ test('scheduled refresh repairs fresh Claude quota, preserves exhausted accounts
     if (req.url === '/v0/management/auth-files') return res.end(JSON.stringify({ files }));
     if (req.url === '/v0/management/api-call') {
       probes++;
-      return res.end(JSON.stringify(denied ? { status_code: 429, body: '{}' } : { status_code: 200,
+      return res.end(JSON.stringify(denied || !identified(body) ? { status_code: 429, header: { 'Retry-After': ['0'] }, body: '{}' } : { status_code: 200,
         body: JSON.stringify({ five_hour: null, seven_day: { utilization: body.auth_index === 'fixture' ? 0 : 100 } }) }));
     }
     if (req.url === '/v8/management/routing/cooldown/reset') {
@@ -122,6 +125,13 @@ test('scheduled refresh repairs fresh Claude quota, preserves exhausted accounts
     fs.writeFileSync(path.join(root, '.management-key'), 'fixture-key');
     server.listen(0, '127.0.0.1'); await once(server, 'listening');
     const statePath = path.join(root, 'priority-status.json');
+    fs.writeFileSync(statePath, JSON.stringify({ accounts: files.map(file => ({
+      id: file.auth_index, provider: 'claude', available: false,
+      checkedAt: new Date(now - 3600000).toISOString(),
+      attemptedAt: new Date(now - 1200000).toISOString(), retryAt: new Date(now - 1000).toISOString(),
+      error: 'Quota update returned HTTP 429.', errorStatus: 429, rateLimitFailures: 2,
+      windows: [{ id: 'seven_day', remainingPercent: 0 }],
+    })) }));
     const run = async () => {
       const child = spawn(process.execPath, [path.join(__dirname, 'quota.cjs'), '--quiet'], {
         env: { ...process.env, CLIPROXY_HOME: root, CLIPROXY_API_URL: `http://127.0.0.1:${server.address().port}` },
@@ -134,6 +144,9 @@ test('scheduled refresh repairs fresh Claude quota, preserves exhausted accounts
     let state = await run();
     assert.deepEqual(resets, ['fixture']); assert.equal(probes, 2);
     assert.equal(state.accounts[0].status, 'active'); assert.ok(state.accounts[0].routingRecovery.resetAt);
+    assert.equal(state.accounts[0].windows[0].remainingPercent, 100);
+    assert.equal(state.accounts[0].error, null); assert.equal(state.accounts[0].retryAt, null);
+    assert.equal(state.accounts[0].rateLimitFailures, 0);
     assert.equal(state.accounts[1].available, false);
     ready.cooldowns = account().cooldowns;
     await run(); assert.equal(probes, 2); assert.deepEqual(resets, ['fixture']);

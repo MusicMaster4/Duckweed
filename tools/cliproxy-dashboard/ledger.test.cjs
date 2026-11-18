@@ -100,6 +100,9 @@ test('native React ledger and forecasts render with accessible quotas and privac
     };
     const html = renderToStaticMarkup(context.duckweedLedger.render(props));
     assert.ok(html.includes('30% left') && html.includes('data-tone="mid"'));
+    const resetTime = new Date(now + 86400000).toLocaleString('en-US', { weekday: 'short', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+    assert.ok(html.includes(`Resets at ${resetTime}`));
+    assert.ok(!html.includes('Resets in '));
     assert.ok(html.includes('Forecast range') && html.includes('Claude pool balance'));
     assert.ok(html.includes('Waiting for first reading'));
     if (privateMode) { assert.ok(!html.includes('private@example.test')); assert.ok(html.includes('Account 1')); }
