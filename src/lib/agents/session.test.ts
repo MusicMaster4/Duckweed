@@ -652,6 +652,36 @@ describe("Custom agent UI sessions", () => {
     expect(sent.map(rpc).filter((message) => message.method === "turn/start")).toHaveLength(0);
   });
 
+  test("keeps a resumed Claude session usable after a proxy rate limit", async () => {
+    const termId = "claude-proxy-rate-limit";
+    const sessionId = "resumed-conversation";
+    const requests: session.AgentAuthRequest[] = [];
+    const unsubscribe = session.subscribeAuthRequest((request) => requests.push(request));
+    try {
+      await session.start(termId, {
+        ...grokLaunch, agent: "claude", program: "claude", resumeId: sessionId,
+      }, "H:/project");
+      expect(spawn?.args).toContain(sessionId);
+      feed({ type: "system", subtype: "init", session_id: sessionId });
+      session.submit(termId, "continue");
+      await flush();
+      const error = "API Error: 503 auth_unavailable: no auth available (providers=claude, "
+        + "model=claude-fable-5-2; last upstream error: rate_limit_error: This request would "
+        + "exceed your account's rate limit. Please try again later.); check Claude auth/key "
+        + "session and cooldown state via /v0/management/auth-files.";
+      feed({ type: "result", is_error: true, result: error });
+      expect(requests).toEqual([]);
+      expect(session.get(termId)?.items).toContainEqual(expect.objectContaining({ text: error }));
+      expect(session.submit(termId, "try again")).toBe(true);
+      await flush();
+      expect(sent.map(rpc).filter((message) => message.type === "user")).toHaveLength(2);
+      feed({ type: "result", is_error: false });
+      expect(session.get(termId)).toMatchObject({ sessionId, status: "idle" });
+    } finally {
+      unsubscribe();
+    }
+  });
+
   test("recovers Claude's exact conversation, draft, images, wrapper and settings", async () => {
     const termId = "recover-claude";
     const launch: AgentLaunch = {
