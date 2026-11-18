@@ -11,6 +11,7 @@ const statePath = path.join(root, 'priority-status.json');
 const CLAUDE_REFRESH_MS = 10 * 60 * 1000;
 const CLAUDE_RATE_LIMIT_MS = 10 * 60 * 1000;
 const MAX_BACKOFF_MS = 60 * 60 * 1000;
+const CLAUDE_GRANT_USAGE_URL = 'https://api.anthropic.com/api/oauth/usage?cedar_ember=1&skip_spend=1';
 
 function retryAfterMs(headers, now = Date.now()) {
   const entry = Object.entries(headers || {}).find(([key]) => key.toLowerCase() === 'retry-after');
@@ -40,6 +41,14 @@ function shouldProbe(old, provider, now = Date.now()) {
   if (old?.error && !old.retryAt) {
     const attemptedAt = Date.parse(old.attemptedAt || old.checkedAt);
     if (Number.isFinite(attemptedAt) && now - attemptedAt < (provider === 'claude' ? CLAUDE_REFRESH_MS : 60000)) return false;
+  }
+  if (provider === 'claude') {
+    const attemptedAt = Date.parse(old?.attemptedAt || old?.checkedAt);
+    // Read once after a known window rolls over, even if the normal interval has not elapsed.
+    if (old?.windows?.some(({ id, resetAt }) => {
+      const reset = Date.parse(resetAt);
+      return ['five_hour', 'seven_day'].includes(id) && attemptedAt < reset && reset <= now;
+    })) return true;
   }
   return !old?.checkedAt || now - Date.parse(old.checkedAt) >= (provider === 'claude' ? CLAUDE_REFRESH_MS : 55000);
 }
@@ -171,10 +180,11 @@ async function probe(account) {
     const header = { Authorization: 'Bearer $TOKEN$' };
     let method = 'GET', url, data;
     if (account.provider === 'claude') {
-      url = 'https://api.anthropic.com/api/oauth/usage'; header['anthropic-beta'] = 'oauth-2025-04-20';
+      url = CLAUDE_GRANT_USAGE_URL; header['anthropic-beta'] = 'oauth-2025-04-20';
       // Anonymous proxy requests can receive persistent 429s even when quota is available.
       // Keep the usage request headers compatible with the installed Claude Code client.
-      header['User-Agent'] = 'claude-code/2.1.322';
+      header['User-Agent'] = 'claude-cli/2.1.322 (external, cli)';
+      header['Content-Type'] = 'application/json';
       header.Accept = 'application/json, text/plain, */*';
     } else if (account.provider === 'codex') {
       url = 'https://chatgpt.com/backend-api/wham/usage';

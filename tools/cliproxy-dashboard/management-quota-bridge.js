@@ -1,20 +1,39 @@
 (() => {
   'use strict';
+  const usageUrl = 'https://api.anthropic.com/api/oauth/usage';
+  const grantUrl = usageUrl + '?cedar_ember=1&skip_spend=1';
+  const usedAt = new Map();
+  globalThis.duckweedIsClaudeUsage = request => request.method === 'GET' && [usageUrl, grantUrl].includes(request.url);
+  globalThis.duckweedClaudeGrantUsed = authIndex => usedAt.set(authIndex, Date.now());
   globalThis.duckweedClaudeQuota = async (payload, session, fallback) => {
     let api;
     try { api = new URL(session.apiBase); } catch { return fallback(); }
     if (!['http://127.0.0.1:8317', 'http://localhost:8317'].includes(api.origin)) return fallback();
+    const authIndex = payload.authIndex || payload.auth_index;
     let response;
     try {
       response = await fetch(`http://${api.hostname}:8318/local/claude-quota`, {
         method: 'POST', headers: { Authorization: `Bearer ${session.managementKey}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ authIndex: payload.authIndex || payload.auth_index }), signal: AbortSignal.timeout(30000),
+        body: JSON.stringify({ authIndex }), signal: AbortSignal.timeout(30000),
       });
     } catch {
       throw new Error('The local quota monitor is unavailable. Run cliproxy start and try again.');
     }
     const result = await response.json();
     if (!response.ok) throw new Error(result.error || 'Unable to read the cached quota.');
+    if (payload.url === grantUrl && result.status_code === 200) {
+      const usage = JSON.parse(result.body);
+      const metadata = usage._duckweed_cache;
+      const checkedAt = Date.parse(metadata?.checkedAt);
+      if (metadata?.error?.includes('HTTP 429')) return { ...result, status_code: 429 };
+      if (metadata?.error || !Number.isFinite(checkedAt) || Date.now() - checkedAt > 11 * 60 * 1000 || !usage.cedar_ember) {
+        return { ...result, status_code: 503 };
+      }
+      if (checkedAt <= (usedAt.get(authIndex) ?? 0)) {
+        // Wait for a post-claim provider reading before offering another grant.
+        return { ...result, body: JSON.stringify({ cedar_ember: { eligible: true, grants: [] } }) };
+      }
+    }
     return result;
   };
   globalThis.duckweedQuotaNote = (cache) => {

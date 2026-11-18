@@ -102,7 +102,7 @@ test('identified Claude usage requests recover stale quota, preserve exhausted a
   const ready = { ...account(), name: 'ready.json', priority: 2 }, exhausted = { ...account(), auth_index: 'exhausted', name: 'exhausted.json', priority: -100 };
   const files = [ready, exhausted], resets = [];
   let probes = 0, denied = false;
-  const identified = body => /^claude-code\/\d+\.\d+\.\d+$/.test(body.header?.['User-Agent'] || '')
+  const identified = body => /^claude-cli\/\d+\.\d+\.\d+ \(external, cli\)$/.test(body.header?.['User-Agent'] || '')
     && body.header?.Accept === 'application/json, text/plain, */*'
     && body.header?.['anthropic-beta'] === 'oauth-2025-04-20';
   const server = http.createServer(async (req, res) => {

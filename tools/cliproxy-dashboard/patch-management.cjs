@@ -15,10 +15,30 @@ function autoQuota(html) {
   html = html.replace(before, 'duckweedAutoQuota=globalThis.duckweedStartQuotaMonitor(CA,jm,Fm,Ay,Dm,ml),'+before);
   return html.replace('</head>', `${autoMarker}\n<style>*,*::before,*::after{box-shadow:none!important;text-shadow:none!important}</style>\n</head>`);
 }
+function shareClaudeGrantReads(html) {
+  if (!html.includes('useClaudeReset:') || html.includes('globalThis.duckweedIsClaudeUsage(e)')) return html;
+  const replacements = [
+    ['e.url===`https://api.anthropic.com/api/oauth/usage`?await globalThis.duckweedClaudeQuota',
+      'globalThis.duckweedIsClaudeUsage(e)?await globalThis.duckweedClaudeQuota'],
+    ['CN.includes(a))return a',
+      'CN.includes(a)){if(a===`reset`||a===`already_used`)globalThis.duckweedClaudeGrantUsed(e);return a}'],
+    ['Pg={"User-Agent":`claude-cli/2.1.280 (external, cli)`', 'Pg={"User-Agent":`claude-cli/2.1.322 (external, cli)`'],
+    ['throw new wN(`upstream`);return n.body', 'throw new wN(n.statusCode===429?`rate_limited`:`upstream`);return n.body'],
+    ['i()&&(h(e),b(``))},()=>{i()&&b(`read_error`)}',
+      'i()&&(h(e),b(e.eligible?``:`ineligible`))},e=>{i()&&b(e?.code===`rate_limited`?`rate_limited`:`read_error`)}'],
+  ];
+  for (const [before, after] of replacements) {
+    if (html.split(before).length !== 2) {
+      throw new Error('Management UI version differs from the tested Claude reset patch. The file was left unchanged.');
+    }
+    html = html.replace(before, () => after);
+  }
+  return html;
+}
 function patchHtml(html) {
   if (html.includes(marker)) {
     const patched = autoQuota(panelEntry(html));
-    return require('./patch-ledger.cjs').enhanceLedger(patched);
+    return shareClaudeGrantReads(require('./patch-ledger.cjs').enhanceLedger(patched));
   }
   const replacements = [
     ['qp={request:async(e,t)=>{let n=await W.post(`/requests/api-call`,e,t)',

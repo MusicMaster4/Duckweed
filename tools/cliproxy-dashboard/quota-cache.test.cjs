@@ -53,6 +53,46 @@ test('Claude retry deadlines survive repeated refreshes and a zero Retry-After',
   assert.equal(shouldProbe({ checkedAt: new Date(now).toISOString() }, 'claude', now + 600000), true);
 });
 
+test('Claude quota refreshes once across a window reset without overriding Retry-After', () => {
+  const now = Date.parse('2026-10-02T10:00:00Z');
+  const old = { checkedAt: new Date(now - 60000).toISOString(), windows: [{ id: 'seven_day', resetAt: new Date(now).toISOString() }] };
+  assert.equal(shouldProbe(old, 'claude', now - 1), false);
+  assert.equal(shouldProbe(old, 'claude', now), true);
+  assert.equal(shouldProbe({ ...old, attemptedAt: new Date(now).toISOString() }, 'claude', now + 1), false);
+  assert.equal(shouldProbe({ ...old, retryAt: new Date(now + 60000).toISOString() }, 'claude', now), false);
+});
+
+test('native grant reads share usage and stop offering a grant from before a claim', async () => {
+  const baseUrl = 'https://api.anthropic.com/api/oauth/usage';
+  const grantUrl = baseUrl + '?cedar_ember=1&skip_spend=1';
+  const session = { apiBase: 'http://127.0.0.1:8317', managementKey: 'fixture-key' };
+  const grant = { eligible: true, grants: [{ id: 'fixture-grant' }] };
+  let now = Date.now();
+  const usage = { cedar_ember: grant, _duckweed_cache: { checkedAt: new Date(now - 2000).toISOString(), cached: true, error: null } };
+  const context = { URL, AbortSignal, Date: class extends Date { static now() { return now; } }, fetch: async (url, options) => {
+    assert.equal(url, 'http://127.0.0.1:8318/local/claude-quota');
+    assert.equal(JSON.parse(options.body).authIndex, 'fixture-index');
+    return { ok: true, json: async () => ({ status_code: 200, body: JSON.stringify(usage) }) };
+  } };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, 'management-quota-bridge.js'), 'utf8'), context);
+  const fallback = () => assert.fail('Local usage should use the quota monitor');
+  const read = url => context.duckweedClaudeQuota({ authIndex: 'fixture-index', method: 'GET', url }, session, fallback);
+  assert.equal(context.duckweedIsClaudeUsage({ method: 'GET', url: grantUrl }), true);
+  assert.equal(context.duckweedIsClaudeUsage({ method: 'POST', url: grantUrl }), false);
+  assert.equal(context.duckweedIsClaudeUsage({ method: 'GET', url: grantUrl.replace('=1', '=0') }), false);
+  assert.deepEqual(JSON.parse((await read(grantUrl)).body).cedar_ember, grant);
+  usage._duckweed_cache.error = 'Quota update returned HTTP 429.';
+  assert.equal((await read(grantUrl)).status_code, 429);
+  assert.equal((await read(baseUrl)).status_code, 200);
+  usage._duckweed_cache.error = null;
+  context.duckweedClaudeGrantUsed('fixture-index');
+  assert.deepEqual(JSON.parse((await read(grantUrl)).body).cedar_ember.grants, []);
+  assert.deepEqual(JSON.parse((await read(baseUrl)).body).cedar_ember, grant);
+  now += 1000;
+  usage._duckweed_cache.checkedAt = new Date(now).toISOString();
+  assert.deepEqual(JSON.parse((await read(grantUrl)).body).cedar_ember, grant);
+});
+
 test('legacy cached windows keep their measured values and are labeled cached', () => {
   const result = claudeCacheResult({ checkedAt: '2026-10-02T09:00:00Z', error: 'Quota update returned HTTP 429.',
     retryAt: '2026-10-02T11:00:00Z', windows: [{ id: 'five_hour', remainingPercent: 97, resetAt: '2026-10-02T14:59:59Z' }] });
@@ -75,15 +115,18 @@ test('both panels share one quota cache and cannot override its cooldown', async
     error: 'Quota update returned HTTP 429.', errorStatus: 429, rateLimitFailures: 1, retryAt: new Date(Date.now() + 600000).toISOString(),
     windows: [{ id: 'five_hour', remainingPercent: 97, resetAt: null }], quotaSupported: true };
   fs.writeFileSync(statePath, JSON.stringify({ accounts: [oldAccount] }));
+  const probes = [];
   let calls = 0, rateLimited = true, emptyUsage = false;
   const upstream = http.createServer(async (req, res) => {
-    for await (const chunk of req) { /* Drain fixture request bodies. */ }
+    let body = '';
+    for await (const chunk of req) body += chunk;
     let data;
     if (req.url === '/v0/management/auth-files') data = { files: [{ auth_index: 'claude-fixture', name: 'claude.json', provider: 'claude', status: 'active', disabled: false }] };
     else if (req.url === '/v0/management/api-call') {
       calls++;
+      probes.push(JSON.parse(body));
       data = rateLimited ? { status_code: 429, header: { 'Retry-After': ['0'] }, body: '{"error":{"message":"Rate limited"}}' }
-        : { status_code: 200, header: {}, body: JSON.stringify(emptyUsage ? {} : { five_hour: { utilization: 4, resets_at: null }, extra_usage: { is_enabled: false } }) };
+        : { status_code: 200, header: {}, body: JSON.stringify(emptyUsage ? {} : { five_hour: { utilization: 4, resets_at: null }, extra_usage: { is_enabled: false }, cedar_ember: { eligible: false, grants: [] } }) };
     } else if (req.url === '/v0/management/auth-files/fields') data = {};
     else { res.writeHead(404); return res.end('{}'); }
     res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(data));
@@ -130,6 +173,9 @@ test('both panels share one quota cache and cannot override its cooldown', async
     assert.equal(calls, 2); assert.equal(recovered.five_hour.utilization, 4);
     assert.equal(recovered._duckweed_cache.error, null);
     assert.deepEqual(recovered.extra_usage, { is_enabled: false });
+    assert.deepEqual(recovered.cedar_ember, { eligible: false, grants: [] });
+    assert.ok(probes.every(({ url, auth_index }) =>
+      url === 'https://api.anthropic.com/api/oauth/usage?cedar_ember=1&skip_spend=1' && auth_index === 'claude-fixture'));
     assert.equal(JSON.parse(fs.readFileSync(statePath)).accounts[0].rateLimitFailures, 0);
     await request(); assert.equal(calls, 2, 'successful readings are cached for ten minutes');
     emptyUsage = true;
