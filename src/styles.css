@@ -3530,6 +3530,22 @@ body.is-dragging-prompt * {
   line-height: 1.5;
 }
 
+.power-scheduled-option {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 3px 0;
+  color: var(--text-dim);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.power-scheduled-option input {
+  flex: none;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
 /* Primary action: same fill language as layout-save / port-primary. */
 .power-arm {
   display: flex;

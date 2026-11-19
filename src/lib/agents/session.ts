@@ -439,6 +439,11 @@ export function get(termId: string): AgentSessionState | null {
   return sessions.get(termId)?.state ?? null;
 }
 
+/** A submitted prompt is waiting for its staged configuration to finish. */
+export function isPreparingPrompt(termId: string): boolean {
+  return Boolean(sessions.get(termId)?.preparing);
+}
+
 /** Content safe to hand to the encrypted mobile-notification transport. */
 export function completionDetails(termId: string): AgentCompletionDetails | null {
   const state = sessions.get(termId)?.state;

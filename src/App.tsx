@@ -979,7 +979,9 @@ export default function App() {
       const meta = terminals.getMeta(termId);
       if (!meta || meta.exited || images.length > 0 || !text.trim()) return false;
       if (!preserveDraft) terminals.setDraft(termId, "");
-      if (meta.agent || meta.busy) {
+      if (meta.agent) {
+        terminals.submitTerminalInput(termId, text);
+      } else if (meta.busy) {
         terminals.writeRaw(termId, `${text}\r`);
       } else {
         const draft = preserveDraft ? terminals.getDraft(termId) : "";
@@ -1542,7 +1544,7 @@ export default function App() {
                   if (session) {
                     agentSessions.submit(command.terminalId, command.text ?? "", command.images);
                   } else if (command.text) {
-                    terminals.submitRemoteInput(command.terminalId, command.text);
+                    terminals.submitTerminalInput(command.terminalId, command.text);
                   }
                 }
               }
@@ -1807,6 +1809,32 @@ export default function App() {
     return entries;
   }, []);
 
+  const probePowerActivity = useCallback((includeScheduledMessages: boolean) => {
+    const active = probeActivity();
+    if (!includeScheduledMessages) return active;
+
+    const entries: powerWatch.PowerWatchBusyEntry[] = [...active];
+    const activeIds = new Set(active.map((entry) => entry.termId));
+    for (const tab of tabsRef.current) {
+      const panes = leaves(tab.root);
+      panes.forEach(({ term }, index) => {
+        if (activeIds.has(term)) return;
+        const scheduled = scheduledSendsRef.current.has(term) || (timedSendsRef.current.get(term)?.length ?? 0) > 0;
+        const preparing = agentSessions.isPreparingPrompt(term);
+        if (!scheduled && !preparing) return;
+
+        const where = panes.length > 1 ? `${tab.title} · pane ${index + 1}` : tab.title;
+        const agentLabel = agentSessions.get(term)?.label ?? terminals.getMeta(term)?.agent;
+        entries.push({
+          termId: term,
+          label: agentLabel ? `${where} · ${agentLabel}` : where,
+          reason: preparing ? "agent-starting" : "scheduled-message",
+        });
+      });
+    }
+    return entries;
+  }, [probeActivity]);
+
   const firePowerAction = useCallback(async (action: powerWatch.PowerAction) => {
     saveWorkspaceRef.current();
     agentSessions.flushRecovery();
@@ -1815,8 +1843,8 @@ export default function App() {
   }, [acknowledgeTermFromMobile]);
 
   useEffect(
-    () => powerWatch.connect({ probe: probeActivity, fire: firePowerAction }),
-    [firePowerAction, probeActivity],
+    () => powerWatch.connect({ probe: probePowerActivity, fire: firePowerAction }),
+    [firePowerAction, probePowerActivity],
   );
 
   // Power watch (and anything else that lists panes) can jump the UI to a
