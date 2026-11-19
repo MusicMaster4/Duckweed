@@ -933,19 +933,29 @@ export default function App() {
     setScheduledSends(next);
   }, []);
 
-  const scheduleTimedSend = useCallback((termId: string, send: TimedSend) => {
-    if (!Number.isFinite(send.at) || send.at <= Date.now()) return;
-    const next = new Map(timedSendsRef.current);
-    const hasCustomMessage = Boolean(send.text?.trim()) || Boolean(send.images?.length);
-    const message: TimedSend = {
-      ...send, id: crypto.randomUUID(),
-      text: hasCustomMessage ? send.text : undefined,
-      images: hasCustomMessage ? send.images : undefined,
+  const scheduleTimedSend = useCallback((termId: string, send: TimedSend, original?: TimedSend): boolean => {
+    if (!Number.isFinite(send.at) || send.at <= Date.now()) return false;
+    const pending = [...(timedSendsRef.current.get(termId) ?? [])];
+    const index = original ? pending.indexOf(original) : pending.length;
+    if (index < 0) return false;
+
+    const images = original?.images ?? send.images;
+    const hasCustomMessage = Boolean(send.text?.trim()) || Boolean(images?.length);
+    pending[index] = {
+      ...original,
+      ...send,
+      id: original?.id ?? crypto.randomUUID(),
+      text: hasCustomMessage ? (send.text ?? "") : undefined,
+      images: hasCustomMessage ? images : undefined,
     };
-    next.set(termId, [...(next.get(termId) ?? []), message].sort((a, b) => a.at - b.at));
-    workspaceRecovery.update(termId, { timed: null, timedMessages: next.get(termId) });
+    pending.sort((a, b) => a.at - b.at);
+
+    const next = new Map(timedSendsRef.current);
+    next.set(termId, pending);
+    workspaceRecovery.update(termId, { timed: null, timedMessages: pending });
     timedSendsRef.current = next;
     setTimedSends(next);
+    return true;
   }, []);
 
   const cancelTimedSend = useCallback((termId: string, messageId?: string) => {

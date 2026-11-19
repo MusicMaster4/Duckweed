@@ -12714,12 +12714,26 @@ body.is-dragging-rail * {
   font: 12px/1.45 var(--font-mono);
 }
 .pane-tools-form textarea:focus-visible,
+.pane-tools-message-edit:focus-visible,
 .pane-tools-cancel:focus-visible {
   outline: 1px solid var(--accent-line);
   outline-offset: 2px;
 }
 .pane-tools-form textarea::placeholder { color: var(--text-faint); }
 .pane-tools-message-list { max-height: 176px; overflow-y: auto; }
+.pane-tools-message-edit {
+  grid-column: span 2;
+  display: grid;
+  grid-template-columns: 7px minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  border-radius: 4px;
+  text-align: left;
+}
+.pane-tools-message-edit:hover {
+  background: var(--hover);
+}
 .pane-tools-message-summary { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .pane-tools-message-preview {
   overflow: hidden;

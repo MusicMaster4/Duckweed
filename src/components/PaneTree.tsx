@@ -51,7 +51,7 @@ export interface PaneTreeShared {
   timedSends: ReadonlyMap<string, TimedSend[]>;
   onScheduleSend: (termId: string, target: AgentTarget) => void;
   onCancelSchedule: (termId: string) => void;
-  onScheduleTimedSend: (termId: string, send: TimedSend) => void;
+  onScheduleTimedSend: (termId: string, send: TimedSend, original?: TimedSend) => boolean;
   onCancelTimedSend: (termId: string, messageId?: string) => void;
   onBeforeSubmit: (
     termId: string,
