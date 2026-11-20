@@ -1832,4 +1832,17 @@ describe("Custom agent UI sessions", () => {
       status: "asking",
     });
   });
+
+  test("guards Antigravity Ctrl+C exits with a confirming second press", async () => {
+    const termId = "t-antigravity-exit-confirm";
+    const launch: AgentLaunch = { ...grokLaunch, agent: "antigravity", program: "agy" };
+    expect(await session.start(termId, launch, "H:/project")).toBeNull();
+    try {
+      expect(session.requestExit(termId)).toBe("armed");
+      expect(session.get(termId)?.exitArmed).toBe(true);
+      expect(session.requestExit(termId)).toBe("close");
+    } finally {
+      session.stop(termId);
+    }
+  });
 });

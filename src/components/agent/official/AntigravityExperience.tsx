@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 
+import type { AgentItem } from "../../../lib/agents/types";
 import { SubagentBoardForActivities } from "../subagents/SubagentBoard";
 import {
   ActivityHistory,
@@ -10,15 +11,119 @@ import {
   MessageItem,
   PlanTracker,
   ProviderEmpty,
+  shortAssistantUpdatesAsThinking,
   StillWorking,
   type ExperienceProps,
 } from "./OfficialShared";
+
+const ANTIGRAVITY_ASSISTANT_THINKING_LIMIT = 300;
+const ANTIGRAVITY_MILESTONE_MIN_CHARS = 450;
+const ANTIGRAVITY_MILESTONE_MAX_CHARS = 2_400;
+const ANTIGRAVITY_BOILERPLATE_LEAD =
+  /^I['’]m thinking through how to approach this\.?(?:\s*\r?\n)+\s*/i;
+
+type AssistantItem = Extract<AgentItem, { kind: "assistant" }>;
+type ThinkingItem = Extract<AgentItem, { kind: "thinking" }>;
+
+const promotedThinkingCache = new WeakMap<ThinkingItem, AssistantItem>();
+
+function countCodePointsUpTo(text: string, limit: number): number {
+  let count = 0;
+  for (const _character of text) {
+    count += 1;
+    if (count > limit) return count;
+  }
+  return count;
+}
+
+function cleanAntigravityMilestoneText(text: string): string {
+  return text.trim().replace(ANTIGRAVITY_BOILERPLATE_LEAD, "").trim();
+}
+
+function thinkingAsAssistant(item: ThinkingItem, cleanedText: string): AssistantItem {
+  const cached = promotedThinkingCache.get(item);
+  if (cached && cached.text === cleanedText) return cached;
+  const assistant: AssistantItem = {
+    ...item,
+    kind: "assistant",
+    text: cleanedText,
+    streaming: false,
+  };
+  promotedThinkingCache.set(item, assistant);
+  return assistant;
+}
+
+/**
+ * Project Antigravity's ACP transcript into highlighted milestones and folded
+ * thinking traces.
+ *
+ * Antigravity streams almost all mid-turn narration as `agent_thought_chunk`:
+ * brief single-paragraph step updates (<= 450 chars) and deep internal reasoning
+ * walls (> 2400 chars) stay inside Thinking, while settled mid-turn milestones
+ * followed by further tool work stay pinned as highlighted interim updates.
+ * Direct assistant commentary follows Codex's 300-character threshold.
+ */
+export function antigravityTranscriptItems(
+  items: AgentItem[],
+  working: boolean,
+): AgentItem[] {
+  const originalThinkingIds = new Set<string>();
+  for (const item of items) {
+    if (item.kind === "thinking") originalThinkingIds.add(item.id);
+  }
+  const base = shortAssistantUpdatesAsThinking(
+    items,
+    working,
+    ANTIGRAVITY_ASSISTANT_THINKING_LIMIT,
+  );
+  const promoted = [...base];
+  let turnStart = 0;
+
+  const promoteTurn = (start: number, end: number) => {
+    let lastToolIndex = -1;
+    for (let index = end - 1; index >= start; index -= 1) {
+      if (base[index].kind === "tool") {
+        lastToolIndex = index;
+        break;
+      }
+    }
+    if (lastToolIndex <= start) return;
+
+    for (let index = start; index < lastToolIndex; index += 1) {
+      const item = base[index];
+      if (
+        item.kind !== "thinking" ||
+        item.streaming ||
+        !originalThinkingIds.has(item.id)
+      ) {
+        continue;
+      }
+      const cleaned = cleanAntigravityMilestoneText(item.text);
+      if (!cleaned) continue;
+      const length = countCodePointsUpTo(cleaned, ANTIGRAVITY_MILESTONE_MAX_CHARS);
+      if (
+        length > ANTIGRAVITY_MILESTONE_MIN_CHARS &&
+        length <= ANTIGRAVITY_MILESTONE_MAX_CHARS
+      ) {
+        promoted[index] = thinkingAsAssistant(item, cleaned);
+      }
+    }
+  };
+
+  for (let index = 1; index < base.length; index += 1) {
+    if (base[index].kind !== "user") continue;
+    promoteTurn(turnStart, index);
+    turnStart = index;
+  }
+  promoteTurn(turnStart, base.length);
+  return promoted;
+}
 
 /**
  * Antigravity CLI transcript experience.
  *
  * Groups reasoning traces and tool calls into collapsible activity clusters
- * while keeping interim updates visible and framing final answers cleanly.
+ * while pinning substantive mid-turn milestones and framing final answers cleanly.
  */
 export function AntigravityExperience({
   items,
@@ -30,15 +135,22 @@ export function AntigravityExperience({
   program,
   cwd,
 }: ExperienceProps) {
-  const groups = useMemo(() => activityGroups(items), [items]);
+  const transcriptItems = useMemo(
+    () => antigravityTranscriptItems(items, status === "working"),
+    [items, status],
+  );
+  const groups = useMemo(() => activityGroups(transcriptItems), [transcriptItems]);
   const answerIds = useMemo(
     () => new Set(groups.flatMap((group) => (group.answerId ? [group.answerId] : []))),
     [groups],
   );
-  const continuedIds = useMemo(() => continuedAssistantIds(items), [items]);
+  const continuedIds = useMemo(
+    () => continuedAssistantIds(transcriptItems),
+    [transcriptItems],
+  );
   const liveAssistantId = useMemo(
-    () => activeAssistantId(items, status === "working"),
-    [items, status],
+    () => activeAssistantId(transcriptItems, status === "working"),
+    [transcriptItems, status],
   );
   const groupByActivity = useMemo(
     () =>
@@ -51,8 +163,8 @@ export function AntigravityExperience({
   );
 
   let latestUserIndex = -1;
-  for (let index = items.length - 1; index >= 0; index -= 1) {
-    if (items[index]?.kind === "user") {
+  for (let index = transcriptItems.length - 1; index >= 0; index -= 1) {
+    if (transcriptItems[index]?.kind === "user") {
       latestUserIndex = index;
       break;
     }
@@ -61,9 +173,9 @@ export function AntigravityExperience({
   for (const group of groups) {
     if (group.firstIndex > latestUserIndex) liveGroup = group;
   }
-  let latestLiveContent: (typeof items)[number] | undefined;
-  for (let index = items.length - 1; index > latestUserIndex; index -= 1) {
-    const item = items[index];
+  let latestLiveContent: (typeof transcriptItems)[number] | undefined;
+  for (let index = transcriptItems.length - 1; index > latestUserIndex; index -= 1) {
+    const item = transcriptItems[index];
     if (
       item.kind === "assistant" ||
       item.kind === "thinking" ||
@@ -79,7 +191,7 @@ export function AntigravityExperience({
   const needsEmptyLiveTrace =
     status === "working" && !liveGroup && !needsStillWorking;
   const liveUserId =
-    latestUserIndex >= 0 ? items[latestUserIndex]?.id : "session-start";
+    latestUserIndex >= 0 ? transcriptItems[latestUserIndex]?.id : "session-start";
 
   if (!started && status !== "error") {
     return (
@@ -97,7 +209,7 @@ export function AntigravityExperience({
   return (
     <div className="agent-experience antigravity-experience">
       <div className="official-transcript">
-        {items.map((item) => {
+        {transcriptItems.map((item) => {
           if (item.kind === "thinking" || item.kind === "tool") {
             const group = groupByActivity.get(item.id);
             if (!group || item.id !== group.firstId) return null;

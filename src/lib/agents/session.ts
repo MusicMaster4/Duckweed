@@ -2401,13 +2401,20 @@ export function dismissSideQuestion(termId: string): void {
 
 /**
  * Ctrl+C from a custom UI means "leave the harness", matching its terminal
- * gesture instead of merely stopping the current turn. Claude and Grok guard
- * exits with a quick second press; the other harnesses close immediately.
+ * gesture instead of merely stopping the current turn. Claude, Grok, and
+ * Antigravity guard exits with a quick second press; the other harnesses close
+ * immediately.
  */
 export function requestExit(termId: string): "armed" | "close" | "none" {
   const session = sessions.get(termId);
   if (!session || session.disposed) return "none";
-  if (session.state.agent !== "claude" && session.state.agent !== "grok") return "close";
+  if (
+    session.state.agent !== "claude" &&
+    session.state.agent !== "grok" &&
+    session.state.agent !== "antigravity"
+  ) {
+    return "close";
+  }
 
   const now = Date.now();
   if (session.exitArmedUntil >= now) {
