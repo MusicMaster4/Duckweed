@@ -17,8 +17,8 @@ const LOCAL_COMMANDS = [
 
 /** Both spellings open the same separate response in the custom UI. */
 const SIDE_COMMANDS = [
-  { name: "/btw", description: "Ask a side question without interrupting the main conversation" },
-  { name: "/side", description: "Ask a side question without interrupting the main conversation" },
+  { name: "/btw", description: "Open a side chat without interrupting the main conversation" },
+  { name: "/side", description: "Open a side chat without interrupting the main conversation" },
 ];
 
 /**

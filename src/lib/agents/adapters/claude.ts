@@ -54,8 +54,42 @@ import {
  * the header learns the new model from a structured ACK rather than by
  * parsing the CLI's friendly confirmation sentence. `/btw` and `/side` also use the
  * dedicated `side_question` control request so it can run without interrupting
- * or entering the main transcript.
+ * or entering the main transcript. That request is one-shot, so follow-ups in
+ * an open side chat carry the earlier side exchanges inside the question.
  */
+
+interface SideConversationState {
+  id: string;
+  command: "/btw" | "/side";
+  turns: AgentSideQuestion[];
+}
+
+/** Side exchanges replayed into a follow-up, newest kept when trimming. */
+const SIDE_HISTORY_TURNS = 12;
+const SIDE_HISTORY_CHARS = 24_000;
+
+/**
+ * Claude's `side_question` request has no thread of its own, so a follow-up
+ * restates the earlier answered exchanges of the same side chat before the
+ * new question. The first question goes out unchanged.
+ */
+export function sideFollowupQuestion(turns: AgentSideQuestion[], question: string): string {
+  const answered = turns.filter((turn) => turn.status === "answered" && turn.answer.trim());
+  if (answered.length === 0) return question;
+  const blocks: string[] = [];
+  let size = 0;
+  for (const turn of answered.slice(-SIDE_HISTORY_TURNS).reverse()) {
+    const block = `User: ${turn.question}\n\nAssistant: ${turn.answer}`;
+    if (blocks.length > 0 && size + block.length > SIDE_HISTORY_CHARS) break;
+    blocks.unshift(block);
+    size += block.length;
+  }
+  return [
+    "This continues an ongoing side conversation. Earlier exchanges in this side conversation:",
+    blocks.join("\n\n---\n\n"),
+    `Follow-up question:\n${question}`,
+  ].join("\n\n");
+}
 
 interface ToolCall {
   name: string;
@@ -606,7 +640,8 @@ export function createClaudeAdapter(): AgentAdapter {
     { sideQuestion: AgentSideQuestion }
   >();
   let activeSideQuestionRequestId: string | null = null;
-  let lastSideQuestion: AgentSideQuestion | null = null;
+  /** Open side chat. Follow-ups replay its answered turns as context. */
+  let sideConversation: SideConversationState | null = null;
   /**
    * Claude can report one API failure through several protocol frames: a
    * synthetic assistant message, a forwarded child-agent message, and the
@@ -1604,7 +1639,11 @@ export function createClaudeAdapter(): AgentAdapter {
           "Claude did not return a side-question response.",
         status: succeeded ? "answered" : "error",
       };
-      if (succeeded) lastSideQuestion = settled;
+      if (sideConversation && sideConversation.id === settled.conversationId) {
+        sideConversation.turns = sideConversation.turns.map((turn) =>
+          turn.id === settled.id ? settled : turn,
+        );
+      }
       ctx.emit({ type: "side-question", sideQuestion: settled });
       return;
     }
@@ -1693,18 +1732,12 @@ export function createClaudeAdapter(): AgentAdapter {
     const arg = space < 0 ? "" : text.slice(space + 1).trim();
 
     if (name === "/btw" || name === "/side") {
-      if (!arg) {
-        if (lastSideQuestion) {
-          ctx.emit({ type: "side-question", sideQuestion: lastSideQuestion });
-        } else {
-          ctx.emit({
-            type: "notice",
-            tone: "error",
-            text: `Usage: ${name} <your question>`,
-          });
-        }
-        return "handled";
+      if (!sideConversation) {
+        controlSeq += 1;
+        sideConversation = { id: `dw-side-chat-${controlSeq}`, command: name, turns: [] };
+        if (!arg) ctx.emit({ type: "side-open", conversationId: sideConversation.id, command: name });
       }
+      if (!arg) return "handled";
       if (activeSideQuestionRequestId) {
         ctx.emit({
           type: "notice",
@@ -1717,18 +1750,21 @@ export function createClaudeAdapter(): AgentAdapter {
       const requestId = `dw-side-${controlSeq}`;
       const sideQuestion: AgentSideQuestion = {
         id: requestId,
+        conversationId: sideConversation.id,
         command: name,
         question: arg,
         answer: "",
         status: "asking",
       };
+      const question = sideFollowupQuestion(sideConversation.turns, arg);
+      sideConversation.turns = [...sideConversation.turns, sideQuestion];
       activeSideQuestionRequestId = requestId;
       pendingSideQuestions.set(requestId, { sideQuestion });
       ctx.emit({ type: "side-question", sideQuestion });
       ctx.send({
         type: "control_request",
         request_id: requestId,
-        request: { subtype: "side_question", question: arg },
+        request: { subtype: "side_question", question },
       });
       return "handled";
     }
@@ -1835,7 +1871,7 @@ export function createClaudeAdapter(): AgentAdapter {
       pendingPermissions: [...pendingPermissions],
       pendingModelChanges: [...pendingModelChanges].map(([id, entry]) => [id, { model: entry.model, announce: entry.announce }] as const),
       pendingAccessChanges: [...pendingAccessChanges], pendingSideQuestions: [...pendingSideQuestions],
-      activeSideQuestionRequestId, lastSideQuestion, seenTurnErrors: [...seenTurnErrors],
+      activeSideQuestionRequestId, sideConversation, seenTurnErrors: [...seenTurnErrors],
       currentGoal, extensions, goalBeforeCommand, goalResponsePending,
     });
   }
@@ -1860,8 +1896,9 @@ export function createClaudeAdapter(): AgentAdapter {
       seenTurnErrors.clear();
       for (const error of saved.seenTurnErrors) seenTurnErrors.add(error);
       ({ latestWorkflowCallId, turnResultPending, interruptRequested, messageSeq, settledMessageSeq,
-        controlSeq, initializeRequestId, catalogRequest, activeSideQuestionRequestId, lastSideQuestion,
+        controlSeq, initializeRequestId, catalogRequest, activeSideQuestionRequestId,
         currentGoal, extensions, goalBeforeCommand, goalResponsePending } = saved);
+      sideConversation = saved.sideConversation ?? null;
       return true;
     } catch { return false; }
   }
@@ -2102,6 +2139,13 @@ export function createClaudeAdapter(): AgentAdapter {
     command: handleCommand,
 
     commandAvailableDuringTurn: (text) => /^\/(?:btw|side)(?:\s|$)/i.test(text.trim()),
+
+    closeSide: () => {
+      // A request still in flight settles into a closed conversation, which
+      // the session drops, so a new side chat can start right away.
+      sideConversation = null;
+      activeSideQuestionRequestId = null;
+    },
 
     configure: (kind, value, ctx) => {
       if (kind !== "model") return false;

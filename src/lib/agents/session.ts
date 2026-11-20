@@ -942,7 +942,7 @@ function emitNow(session: Session, event: AgentEvent): void {
   if (
     event.type === "side-question" &&
     event.sideQuestion &&
-    session.dismissedSideQuestions.has(event.sideQuestion.id)
+    session.dismissedSideQuestions.has(event.sideQuestion.conversationId ?? event.sideQuestion.id)
   ) {
     return;
   }
@@ -1877,6 +1877,38 @@ export function submit(
   return true;
 }
 
+/**
+ * Send a message from the side chat panel. It continues the open side
+ * conversation and never touches the main composer's draft or history.
+ */
+export function submitSide(
+  termId: string,
+  text: string,
+  images: AgentImageAttachment[] = [],
+): boolean {
+  const session = sessions.get(termId);
+  if (!session || session.disposed) return false;
+  if (session.state.status === "exited" || session.state.status === "error") return false;
+  const trimmed = text.trim();
+  if (!trimmed && images.length === 0) return false;
+  const command = `${session.state.sideConversation?.command ?? "/side"} ${trimmed}`;
+  if (
+    session.state.status !== "idle" &&
+    session.adapter.commandAvailableDuringTurn?.(command) !== true
+  ) {
+    // Codex cannot fork while a resumed thread is still hydrating.
+    emit(session, {
+      type: "notice",
+      tone: "error",
+      text: "The side chat is not available yet. Try again in a moment.",
+      transient: true,
+    });
+    return false;
+  }
+  const result = session.adapter.command?.(command, session.context, images);
+  return result === "handled" || result === "handled-turn";
+}
+
 /** Control a persisted goal without consuming the composer's unsent draft. */
 export function controlGoal(termId: string, action: "resume" | "pause"): void {
   const session = sessions.get(termId);
@@ -2344,11 +2376,20 @@ export function interrupt(termId: string): void {
   session.adapter.interrupt(session.context);
 }
 
-/** Hide the ephemeral side response without changing the main conversation. */
+/**
+ * Close the side chat without changing the main conversation. The next `/side`
+ * or `/btw` starts a fresh side conversation.
+ */
 export function dismissSideQuestion(termId: string): void {
   const session = sessions.get(termId);
-  if (!session || session.disposed || !session.state.sideQuestion) return;
-  session.dismissedSideQuestions.add(session.state.sideQuestion.id);
+  if (!session || session.disposed) return;
+  const conversationId =
+    session.state.sideConversation?.id ??
+    session.state.sideQuestion?.conversationId ??
+    session.state.sideQuestion?.id;
+  if (!conversationId) return;
+  session.adapter.closeSide?.(session.context);
+  session.dismissedSideQuestions.add(conversationId);
   if (session.dismissedSideQuestions.size > 32) {
     const oldest = session.dismissedSideQuestions.values().next().value;
     if (oldest) session.dismissedSideQuestions.delete(oldest);

@@ -44,7 +44,7 @@ import { AgentProviderIcon } from "./AgentProviderIcon";
 import { AgentQuestion } from "./AgentQuestion";
 import { AgentRuntimePanel } from "./AgentRuntimePanel";
 import { AgentSessions } from "./AgentSessions";
-import { AgentSideQuestion } from "./AgentSideQuestion";
+import { AgentSideChat } from "./AgentSideQuestion";
 import { AgentTimeline } from "./AgentTimeline";
 import { copySelectedTextFromContextMenu } from "./selectionCopy";
 import { PlanTracker, type OfficialVariant } from "./official/OfficialShared";
@@ -1050,14 +1050,6 @@ export function AgentSurface({
               <span>Jump to bottom</span>
             </button>
           )}
-          {session.sideQuestion && (
-            <div className="agent-side-question-dock">
-              <AgentSideQuestion
-                question={session.sideQuestion}
-                onDismiss={dismissSideQuestion}
-              />
-            </div>
-          )}
           <AgentComposer
             session={session}
             active={active && !session.permission && resumeQuery === null}
@@ -1073,6 +1065,17 @@ export function AgentSurface({
                   }
                 : undefined
             }
+          />
+        </div>
+      )}
+
+      {session.status !== "starting" && session.sideConversation && (
+        <div className="agent-side-question-dock">
+          <AgentSideChat
+            conversation={session.sideConversation}
+            onDismiss={dismissSideQuestion}
+            onSubmit={(text) => agents.submitSide(termId, text)}
+            onLeave={() => composerRef.current?.focus()}
           />
         </div>
       )}

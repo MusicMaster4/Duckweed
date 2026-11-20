@@ -1824,6 +1824,50 @@ export const meta = {
     expect(h.state().items).toEqual([]);
   });
 
+  test("keeps follow-ups in the same side conversation until it is closed", () => {
+    const h = harness();
+    const answer = (text: string) => {
+      const sent = h.sent.at(-1) as { request_id: string };
+      h.feed({
+        type: "control_response",
+        response: {
+          subtype: "success",
+          request_id: sent.request_id,
+          response: { response: text, synthetic: false },
+        },
+      });
+    };
+
+    expect(h.adapter.command?.("/side which file was that?", h.ctx)).toBe("handled");
+    answer("It was src/config.ts.");
+    expect(h.adapter.command?.("/side what does it export?", h.ctx)).toBe("handled");
+    const followup = h.sent.at(-1) as { request: { question: string } };
+    expect(followup.request.question).toContain("User: which file was that?");
+    expect(followup.request.question).toContain("Assistant: It was src/config.ts.");
+    expect(followup.request.question).toContain("Follow-up question:\nwhat does it export?");
+    answer("A default config object.");
+
+    const conversation = h.state().sideConversation;
+    expect(conversation?.turns.map((turn) => turn.answer)).toEqual([
+      "It was src/config.ts.",
+      "A default config object.",
+    ]);
+    expect(h.state().items).toEqual([]);
+
+    h.adapter.closeSide?.(h.ctx);
+    expect(h.adapter.command?.("/side fresh topic", h.ctx)).toBe("handled");
+    expect((h.sent.at(-1) as { request: { question: string } }).request.question).toBe("fresh topic");
+    expect(h.state().sideConversation?.id).not.toBe(conversation?.id);
+    expect(h.state().sideConversation?.turns).toHaveLength(1);
+  });
+
+  test("opens an empty side conversation for a bare /side", () => {
+    const h = harness();
+    expect(h.adapter.command?.("/side", h.ctx)).toBe("handled");
+    expect(h.sent).toEqual([]);
+    expect(h.state().sideConversation).toMatchObject({ command: "/side", turns: [] });
+  });
+
   test.each(["/btw", "/side"] as const)("does not mix main-turn thinking into a %s side answer", (command) => {
     const h = harness();
     expect(h.adapter.command?.(`${command} which file was that?`, h.ctx)).toBe("handled");

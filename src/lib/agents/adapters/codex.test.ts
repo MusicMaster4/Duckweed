@@ -970,11 +970,44 @@ describe("codex adapter", () => {
       status: "answered",
     });
     expect(h.state().items).toEqual([]);
+    // The fork stays open for follow-ups in the same side conversation.
+    expect(h.sent.at(-1)).toMatchObject({ id: 5, method: "turn/start" });
+
+    expect(h.adapter.command?.(`${command} and the tests?`, h.ctx)).toBe("handled");
     expect(h.sent.at(-1)).toMatchObject({
       id: 6,
+      method: "turn/start",
+      params: { threadId: "side_1", input: [{ type: "text", text: "and the tests?" }] },
+    });
+    h.feed({ jsonrpc: "2.0", id: 6, result: { turn: { id: "side_turn_2" } } });
+    h.notify("item/completed", {
+      threadId: "side_1",
+      turnId: "side_turn_2",
+      item: { id: "side_message_2", type: "agentMessage", text: "They still pass." },
+    });
+    h.notify("turn/completed", {
+      threadId: "side_1",
+      turn: { id: "side_turn_2", status: "completed", items: [] },
+    });
+    const conversation = h.state().sideConversation;
+    expect(conversation?.turns.map((turn) => [turn.question, turn.answer, turn.status])).toEqual([
+      ["what changed?", "Only the parser changed.", "answered"],
+      ["and the tests?", "They still pass.", "answered"],
+    ]);
+    expect(h.state().items).toEqual([]);
+
+    h.adapter.closeSide?.(h.ctx);
+    expect(h.sent.at(-1)).toMatchObject({
+      id: 7,
       method: "thread/unsubscribe",
       params: { threadId: "side_1" },
     });
+
+    // After closing, the next side command forks a fresh conversation.
+    expect(h.adapter.command?.(`${command} new topic`, h.ctx)).toBe("handled");
+    expect(h.sent.at(-1)).toMatchObject({ method: "thread/fork" });
+    expect(h.state().sideConversation?.id).not.toBe(conversation?.id);
+    expect(h.state().sideConversation?.turns).toHaveLength(1);
   });
 
   test("settles /side on thread idle when turn/completed is omitted", async () => {
@@ -1006,10 +1039,6 @@ describe("codex adapter", () => {
       answer: "Only the parser changed.",
       status: "answered",
     });
-    expect(h.sent.at(-1)).toMatchObject({
-      method: "thread/unsubscribe",
-      params: { threadId: "side_1" },
-    });
 
     h.notify("turn/completed", {
       threadId: "side_1",
@@ -1025,6 +1054,10 @@ describe("codex adapter", () => {
       command: "/btw",
       question: "and the tests?",
       status: "asking",
+    });
+    expect(h.sent.at(-1)).toMatchObject({
+      method: "turn/start",
+      params: { threadId: "side_1" },
     });
   });
 

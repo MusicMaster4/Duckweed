@@ -1737,6 +1737,46 @@ describe("Custom agent UI sessions", () => {
     expect(session.get(termId)?.items).toEqual(mainItems);
   });
 
+  test("continues the side chat from its panel and starts fresh after closing", async () => {
+    const termId = "claude-side-panel";
+    await session.start(termId, { ...grokLaunch, agent: "claude", program: "claude" }, "H:/project");
+    await flush();
+    feed({ type: "system", subtype: "init", session_id: "main-session" });
+    session.submit(termId, "Keep working on the main task");
+    await flush();
+    const mainItems = session.get(termId)?.items;
+    const reply = (text: string) => {
+      const request = rpc(sent.at(-1)!);
+      feed({ type: "control_response", response: {
+        subtype: "success",
+        request_id: request.request_id,
+        response: { response: text },
+      } });
+    };
+
+    session.submit(termId, "/btw Which file was that?");
+    await flush();
+    reply("src/config.ts");
+    const draftBefore = session.getDraft(termId);
+    expect(session.submitSide(termId, "What does it export?")).toBe(true);
+    await flush();
+    expect((rpc(sent.at(-1)!).request as { question: string }).question).toContain("Assistant: src/config.ts");
+    reply("A config object.");
+    const conversation = session.get(termId)?.sideConversation;
+    expect(conversation).toMatchObject({ command: "/btw" });
+    expect(conversation?.turns.map((turn) => turn.answer)).toEqual(["src/config.ts", "A config object."]);
+    expect(session.get(termId)?.items).toEqual(mainItems);
+    expect(session.getDraft(termId)).toBe(draftBefore);
+
+    session.dismissSideQuestion(termId);
+    expect(session.get(termId)?.sideConversation).toBeNull();
+    session.submit(termId, "/side Something else");
+    await flush();
+    expect((rpc(sent.at(-1)!).request as { question: string }).question).toBe("Something else");
+    expect(session.get(termId)?.sideConversation?.id).not.toBe(conversation?.id);
+    expect(session.get(termId)?.sideConversation?.turns).toHaveLength(1);
+  });
+
   test("routes /side with an image into a fork instead of the main Codex turn", async () => {
     expect(await session.start("t-codex-side-image", codexLaunch, "H:/project")).toBeNull();
     await codexHandshake();

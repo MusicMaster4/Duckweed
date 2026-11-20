@@ -1,3 +1,4 @@
+import { SettingsToggle } from "./SettingsToggle";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { AutomaticApprovalDialog } from "./AutomaticApprovalDialog";
@@ -65,14 +66,6 @@ interface Props {
   onResetSuggestions: () => Promise<boolean>;
   onShell: (shellId: string | null) => void;
   onCheckUpdates: () => void;
-}
-
-function Toggle({ enabled }: { enabled: boolean }) {
-  return (
-    <span className={`settings-switch ${enabled ? "is-on" : ""}`} aria-hidden="true">
-      <span />
-    </span>
-  );
 }
 
 function ApprovalConsentDialog({
@@ -446,7 +439,7 @@ export function SettingsMenu({
                       Lock Duckweed after this much focused use, without stopping active work
                     </span>
                   </span>
-                  <Toggle enabled={wellbeingEnabled} />
+                  <SettingsToggle enabled={wellbeingEnabled} />
                 </button>
               )}
               {matches("wellbeing health daily usage time limit focus lock lockout hours") && (
@@ -538,7 +531,7 @@ export function SettingsMenu({
                         requests after the daily limit is reached
                       </span>
                     </span>
-                    <Toggle enabled={autoApproveLockedRequests} />
+                    <SettingsToggle enabled={autoApproveLockedRequests} />
                   </button>
                   <p className="settings-risk-note">
                     Automatic approvals can run destructive actions and cause data
@@ -575,7 +568,7 @@ export function SettingsMenu({
                     <strong>Syntax highlighting</strong>
                     <span>Colour commands and plain terminal output</span>
                   </span>
-                  <Toggle enabled={highlight} />
+                  <SettingsToggle enabled={highlight} />
                 </button>
               )}
               {matches("tint workspace background active tab colour frame status bar") && (
@@ -588,7 +581,7 @@ export function SettingsMenu({
                     <strong>Tint workspace background</strong>
                     <span>Use the active tab colour in the workspace frame and status bar</span>
                   </span>
-                  <Toggle enabled={tintWorkspaceWithTabColor} />
+                  <SettingsToggle enabled={tintWorkspaceWithTabColor} />
                 </button>
               )}
               {matches("completion highlights finished process unread tab outline rose") && (
@@ -601,7 +594,7 @@ export function SettingsMenu({
                     <strong>Completion highlights</strong>
                     <span>Mark completed agent turns, or jobs that run over 30 seconds</span>
                   </span>
-                  <Toggle enabled={completionHighlights} />
+                  <SettingsToggle enabled={completionHighlights} />
                 </button>
               )}
               {matches("completion sound audio cue process agent finished") && (
@@ -614,7 +607,7 @@ export function SettingsMenu({
                     <strong>Completion sound</strong>
                     <span>Play for finished agent turns and terminal jobs longer than one minute</span>
                   </span>
-                  <Toggle enabled={completionSoundEnabled} />
+                  <SettingsToggle enabled={completionSoundEnabled} />
                 </button>
               )}
             </section>
@@ -647,7 +640,7 @@ export function SettingsMenu({
                         <strong>{AGENTS[agent].label}</strong>
                         <span>New sessions started with {AGENTS[agent].binaries[0]}</span>
                       </span>
-                      <Toggle enabled={customAgentUi[agent]} />
+                      <SettingsToggle enabled={customAgentUi[agent]} />
                     </button>
                   ))}
                 </>
@@ -688,7 +681,7 @@ export function SettingsMenu({
                           : `Enabled until ${new Date(automaticApproval).toLocaleString("en-US", { dateStyle: "medium", timeStyle: "short" })}. Click to disable`}
                     </span>
                   </span>
-                  <Toggle enabled={automaticApproval !== null} />
+                  <SettingsToggle enabled={automaticApproval !== null} />
                 </button>
               )}
               {capacityReplyHit && (
@@ -709,7 +702,7 @@ export function SettingsMenu({
                         “Selected model is at capacity” in the Custom Agent UI
                       </span>
                     </span>
-                    <Toggle enabled={codexCapacityReply.enabled} />
+                    <SettingsToggle enabled={codexCapacityReply.enabled} />
                   </button>
                   <label className="settings-field settings-message-field">
                     <span>
@@ -748,7 +741,7 @@ export function SettingsMenu({
                     <strong>Command editor</strong>
                     <span>{inputMode === "editor" ? "Compose commands below the grid" : "Type directly in the terminal"}</span>
                   </span>
-                  <Toggle enabled={inputMode === "editor"} />
+                  <SettingsToggle enabled={inputMode === "editor"} />
                 </button>
               )}
               {matches("default shell system powershell") && (
@@ -779,7 +772,7 @@ export function SettingsMenu({
                     <strong>Confirm before closing</strong>
                     <span>Warn when a pane, tab, or the window still has a process running</span>
                   </span>
-                  <Toggle enabled={confirmCloseRunning} />
+                  <SettingsToggle enabled={confirmCloseRunning} />
                 </button>
               )}
               {explorerIntegration !== null &&
@@ -795,7 +788,7 @@ export function SettingsMenu({
                       <strong>Open in new tab</strong>
                       <span>Show “Open Duckweed in new tab” when right-clicking a folder</span>
                     </span>
-                    <Toggle enabled={explorerIntegration.tab} />
+                    <SettingsToggle enabled={explorerIntegration.tab} />
                   </button>
                 )}
               {explorerIntegration !== null &&
@@ -811,7 +804,7 @@ export function SettingsMenu({
                       <strong>Open in new window</strong>
                       <span>Show “Open Duckweed in new window” when right-clicking a folder</span>
                     </span>
-                    <Toggle enabled={explorerIntegration.window} />
+                    <SettingsToggle enabled={explorerIntegration.window} />
                   </button>
                 )}
               {(section === "Terminal" || searching) &&

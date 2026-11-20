@@ -133,6 +133,12 @@ export interface AgentAdapter {
    */
   commandAvailableDuringTurn?: (text: string) => boolean;
   /**
+   * The user closed the side chat opened by `/side` or `/btw`. The next side
+   * command must start a fresh conversation, and provider resources held for
+   * follow-ups can be released.
+   */
+  closeSide?: (ctx: AdapterContext) => void;
+  /**
    * Apply a session-wide access level. `default` must remove Duckweed's
    * overrides so the agent's own configuration remains authoritative.
    */

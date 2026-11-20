@@ -104,6 +104,8 @@ export type AgentEvent =
   | { type: "notice"; text: string; tone: "info" | "error"; transient?: boolean }
   /** Replace or dismiss the ephemeral response shown beside the transcript. */
   | { type: "side-question"; sideQuestion: AgentSideQuestion | null }
+  /** Open an empty side chat panel, before its first message. */
+  | { type: "side-open"; conversationId: string; command: "/btw" | "/side" }
   | { type: "exit-armed"; armed: boolean }
   /** Remove picker confirmations and double-Ctrl+C hints without touching errors. */
   | { type: "dismiss-transient-notices" }
@@ -662,10 +664,37 @@ function reduceEvent(state: AgentSessionState, event: AgentEvent): AgentSessionS
         ],
       };
 
-    case "side-question":
+    case "side-question": {
+      if (!event.sideQuestion) return { ...state, sideQuestion: null, sideConversation: null };
+      const turn = { ...event.sideQuestion };
+      const conversationId = turn.conversationId ?? turn.id;
+      const current = state.sideConversation;
+      let turns: AgentSideQuestion[];
+      if (current && current.id === conversationId) {
+        const index = current.turns.findIndex((existing) => existing.id === turn.id);
+        turns = index < 0
+          ? [...current.turns, turn]
+          : current.turns.map((existing, i) => (i === index ? turn : existing));
+      } else {
+        turns = [turn];
+      }
       return {
         ...state,
-        sideQuestion: event.sideQuestion ? { ...event.sideQuestion } : null,
+        sideQuestion: turns[turns.length - 1] ?? null,
+        sideConversation: {
+          id: conversationId,
+          command: current && current.id === conversationId ? current.command : turn.command,
+          turns,
+        },
+      };
+    }
+
+    case "side-open":
+      if (state.sideConversation?.id === event.conversationId) return state;
+      return {
+        ...state,
+        sideQuestion: null,
+        sideConversation: { id: event.conversationId, command: event.command, turns: [] },
       };
 
     case "exit-armed":
@@ -682,6 +711,7 @@ function reduceEvent(state: AgentSessionState, event: AgentEvent): AgentSessionS
         started: true,
         goal: null,
         sideQuestion: null,
+        sideConversation: null,
         items: event.items ?? [],
         lastWorkedForMs: null,
         pending: [],

@@ -1,5 +1,6 @@
 import { useEffect, useState, useSyncExternalStore } from "react";
 
+import { SettingsToggle } from "./SettingsToggle";
 import { Tooltip } from "./Tooltip";
 import * as bus from "../lib/bus";
 import {
@@ -230,14 +231,16 @@ export function PowerWatchTool() {
             </div>
           </Tooltip>
 
-          <label className="power-scheduled-option">
-            <input
-              type="checkbox"
-              checked={state.includeScheduledMessages}
-              onChange={(event) => setIncludeScheduledMessages(event.currentTarget.checked)}
-            />
+          <button
+            type="button"
+            className="power-scheduled-option"
+            role="switch"
+            aria-checked={state.includeScheduledMessages}
+            onClick={() => setIncludeScheduledMessages(!state.includeScheduledMessages)}
+          >
             Wait for scheduled messages
-          </label>
+            <SettingsToggle enabled={state.includeScheduledMessages} />
+          </button>
         </article>
 
         {!armed && (
