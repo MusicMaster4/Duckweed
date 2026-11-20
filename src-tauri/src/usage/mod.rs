@@ -398,9 +398,14 @@ pub fn scan(
     }
 
     // --- parse what changed ----------------------------------------------
+    // Parsing is the one large transient allocation here. When Windows has
+    // almost nothing left to commit, a failed allocation aborts the whole app,
+    // so report the totals already indexed and read the changes next time.
+    // Tests assert parsed totals regardless of the machine running them.
+    let memory_low = !cfg!(test) && crate::memory::status().is_some_and(|memory| memory.low);
     let to_read: Vec<&Job> = jobs
         .iter()
-        .filter(|j| !matches!(j.plan, Plan::Reuse))
+        .filter(|j| !memory_low && !matches!(j.plan, Plan::Reuse))
         .collect();
     index_dirty |= !to_read.is_empty();
     let total_read = to_read.len() as u32;
@@ -707,7 +712,8 @@ fn parse_all(jobs: &[&Job], emit: &(dyn Fn(u32, u32) + Sync)) -> Vec<(Vec<Record
     }
 
     let threads = std::thread::available_parallelism()
-        .map(|n| n.get().clamp(2, 8))
+        // Each thread may hold a large transcript line at once.
+        .map(|n| n.get().clamp(2, 4))
         .unwrap_or(4)
         .min(total);
 

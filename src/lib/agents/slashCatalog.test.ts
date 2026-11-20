@@ -56,15 +56,19 @@ describe("slashCatalog", () => {
     }
   });
 
-  test("offers each agent's native side-conversation commands", () => {
-    const claude = fallbackCommands("claude").map((command) => command.name);
-    const codex = fallbackCommands("codex").map((command) => command.name);
-    const unsupported = ["grok", "opencode", "cursor"] as const;
-
-    expect(claude).toContain("/btw");
-    expect(claude).not.toContain("/side");
-    expect(codex).toEqual(expect.arrayContaining(["/side", "/btw"]));
-    for (const agent of unsupported) {
+  test("offers the same side-question aliases for Claude and Codex", () => {
+    const sideCommands = (agent: "claude" | "codex", program?: string) =>
+      fallbackCommands(agent, program).filter(({ name }) => name === "/btw" || name === "/side");
+    const claude = sideCommands("claude");
+    expect(claude.map(({ name }) => name).sort()).toEqual(["/btw", "/side"]);
+    expect(sideCommands("codex")).toEqual(claude);
+    expect(sideCommands("claude", "claudex")).toEqual(claude);
+    expect(claude[0].description).toBe(claude[1].description);
+    expect(
+      mergeCommands(fallbackCommands("claude"), [{ name: "/btw", description: "Native side question" }])
+        .map(({ name }) => name),
+    ).toEqual(expect.arrayContaining(["/btw", "/side"]));
+    for (const agent of ["grok", "opencode", "cursor"] as const) {
       const commands = fallbackCommands(agent).map((command) => command.name);
       expect(commands).not.toContain("/side");
       expect(commands).not.toContain("/btw");

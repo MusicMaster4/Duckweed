@@ -1,5 +1,4 @@
 import { Component, type ErrorInfo, type ReactNode } from "react";
-import { relaunch } from "@tauri-apps/plugin-process";
 
 interface Props {
   children: ReactNode;
@@ -17,7 +16,7 @@ function errorMessage(error: unknown): string {
 
 export function RecoveryScreen({ error }: { error: unknown }) {
   const restart = () => {
-    void relaunch().catch(() => window.location.reload());
+    window.location.reload();
   };
 
   return (
@@ -27,12 +26,12 @@ export function RecoveryScreen({ error }: { error: unknown }) {
         <div>
           <h1>Duckweed needs to recover</h1>
           <p>
-            The interface stopped unexpectedly. Restart Duckweed to restore your
-            workspace.
+            The interface stopped unexpectedly. Reload it to reconnect to your
+            agents and restore your workspace.
           </p>
         </div>
         <pre>{errorMessage(error)}</pre>
-        <button type="button" onClick={restart}>Restart Duckweed</button>
+        <button type="button" onClick={restart}>Reload interface</button>
       </div>
     </main>
   );

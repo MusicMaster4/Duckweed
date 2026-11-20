@@ -6,6 +6,8 @@ import type { CompletionFlash } from "../lib/completionHighlights";
 import { edgeRadius } from "../lib/layout";
 import type { AgentTarget, ScheduledSend, SubmitDelivery, TimedSend } from "../lib/scheduledSend";
 import type { AgentImageAttachment } from "../lib/agents/types";
+import * as agentSessions from "../lib/agents/session";
+import { isSessionExited } from "../lib/processActivity";
 import * as terminals from "../lib/terminals";
 import type { DropZone, LeafNode, ProjectInfo } from "../lib/types";
 import { AgentSurface } from "./agent/AgentSurface";
@@ -58,7 +60,7 @@ interface Props {
   timedMessages: TimedSend[];
   onScheduleSend: (termId: string, target: AgentTarget) => void;
   onCancelSchedule: (termId: string) => void;
-  onScheduleTimedSend: (termId: string, send: TimedSend) => void;
+  onScheduleTimedSend: (termId: string, send: TimedSend, original?: TimedSend) => boolean;
   onCancelTimedSend: (termId: string, messageId?: string) => void;
   onBeforeSubmit: (
     termId: string,
@@ -113,6 +115,13 @@ export const TerminalPane = memo(function TerminalPane({
   const bodyRef = useRef<HTMLDivElement>(null);
   const copyToastTimer = useRef<number | null>(null);
   const [meta, setMeta] = useState(() => terminals.getMeta(node.term));
+  const [agentStatus, setAgentStatus] = useState(() => agentSessions.get(node.term)?.status);
+  useEffect(() => {
+    const read = () => setAgentStatus(agentSessions.get(node.term)?.status);
+    read();
+    return agentSessions.subscribe(node.term, read);
+  }, [node.term]);
+  const sessionExited = isSessionExited(meta?.exited ?? false, agentStatus);
   const [searching, setSearching] = useState(false);
   const [inputMode, setInputMode] = useState(terminals.getInputMode);
   const [copyToast, setCopyToast] = useState<CopyToast | null>(null);
@@ -123,9 +132,13 @@ export const TerminalPane = memo(function TerminalPane({
   const [timedAt, setTimedAt] = useState("");
   const [timedError, setTimedError] = useState("");
   const [messageText, setMessageText] = useState("");
-  const startTimedMessage = () => {
-    setMessageText("");
-    setTimedAt(localDateTime(Math.ceil((Date.now() + 5 * 60_000) / 60_000) * 60_000));
+  const [editingTimedMessage, setEditingTimedMessage] = useState<TimedSend | null>(null);
+  const timedHeading = editingTimedMessage ? "Edit scheduled message" : "Schedule message";
+  const openTimedMessage = (send?: TimedSend) => {
+    const at = send?.at ?? Math.ceil((Date.now() + 5 * 60_000) / 60_000) * 60_000;
+    setEditingTimedMessage(send ?? null);
+    setMessageText(send?.text ?? "");
+    setTimedAt(localDateTime(at));
     setTimedError("");
     setToolsView("timed");
   };
@@ -273,6 +286,7 @@ export const TerminalPane = memo(function TerminalPane({
         activating ? "is-activating" : "",
         isSource ? "is-source" : "",
         meta?.exited ? "is-exited" : "",
+        sessionExited ? "has-exited" : "",
         effectiveRaw ? "is-raw" : "is-editor",
         blank ? "is-blank" : "",
         unread ? "is-unread" : "",
@@ -535,7 +549,7 @@ export const TerminalPane = memo(function TerminalPane({
             <div
               className="menu pane-tools-menu"
               role={toolsView === "timed" ? "dialog" : "menu"}
-              aria-label={toolsView === "timed" ? "Schedule message" : undefined}
+              aria-label={toolsView === "timed" ? timedHeading : undefined}
               style={{ left: toolsMenu.left, top: toolsMenu.top, maxHeight: Math.min(400, window.innerHeight - toolsMenu.top - 8) }}
             >
               {toolsView === "home" ? (
@@ -552,11 +566,20 @@ export const TerminalPane = memo(function TerminalPane({
                     <div className="pane-tools-message-list" aria-label="Scheduled messages">
                       {timedMessages.map((send, index) => (
                         <div className="pane-tools-scheduled" key={send.id ?? index}>
-                          <span className="pane-tools-scheduled-mark" aria-hidden="true" />
-                          <div className="pane-tools-message-summary">
-                            <strong>{new Date(send.at).toLocaleString("en-US", { dateStyle: "medium", timeStyle: "short" })}</strong>
-                            <span className="pane-tools-message-preview" title={send.text}>{send.text || (send.images?.length ? "Image attachment" : "Terminal draft")}</span>
-                          </div>
+                          <button
+                            type="button"
+                            role="menuitem"
+                            className="pane-tools-message-edit"
+                            title="Edit scheduled message"
+                            aria-label={`Edit message scheduled for ${new Date(send.at).toLocaleString("en-US")}`}
+                            onClick={() => openTimedMessage(send)}
+                          >
+                            <span className="pane-tools-scheduled-mark" aria-hidden="true" />
+                            <span className="pane-tools-message-summary">
+                              <strong>{new Date(send.at).toLocaleString("en-US", { dateStyle: "medium", timeStyle: "short" })}</strong>
+                              <span className="pane-tools-message-preview" title={send.text}>{send.text || (send.images?.length ? "Image attachment" : "Terminal draft")}</span>
+                            </span>
+                          </button>
                           <button type="button" className="pane-tools-cancel" aria-label={`Cancel message scheduled for ${new Date(send.at).toLocaleString("en-US")}`} onClick={() => onCancelTimedSend(node.term, send.id)}>Cancel</button>
                         </div>
                       ))}
@@ -566,7 +589,7 @@ export const TerminalPane = memo(function TerminalPane({
                     <span>Send on agent completion</span>
                     <span className="menu-hint">Send the current draft when another agent finishes.</span>
                   </button>
-                  <button type="button" role="menuitem" className="menu-item pane-tools-option" onClick={startTimedMessage}>
+                  <button type="button" role="menuitem" className="menu-item pane-tools-option" onClick={() => openTimedMessage()}>
                     <span>{timedMessages.length ? "Add scheduled message" : "Schedule message"}</span>
                     <span className="menu-hint">Choose a message and a time to send it.</span>
                   </button>
@@ -606,15 +629,20 @@ export const TerminalPane = memo(function TerminalPane({
               ) : (
                 <>
                   <button type="button" className="pane-tools-back" onClick={() => setToolsView("home")}>‹ Tools</button>
-                  <h3 className="pane-tools-heading">Schedule message</h3>
+                  <h3 className="pane-tools-heading">{timedHeading}</h3>
                   <form noValidate className="pane-tools-form" onSubmit={(event) => {
                     event.preventDefault();
-                    const at = new Date(timedAt).getTime();
+                    const at = editingTimedMessage && timedAt === localDateTime(editingTimedMessage.at)
+                      ? editingTimedMessage.at
+                      : new Date(timedAt).getTime();
                     if (!Number.isFinite(at) || at <= Date.now()) {
                       setTimedError("Choose a future date and time.");
                       return;
                     }
-                    onScheduleTimedSend(node.term, { at, text: messageText });
+                    if (!onScheduleTimedSend(node.term, { at, text: messageText }, editingTimedMessage ?? undefined)) {
+                      setTimedError(at <= Date.now() ? "Choose a future date and time." : "This message is no longer pending.");
+                      return;
+                    }
                     setToolsView("home");
                   }}>
                     <label htmlFor={`timed-message-${node.id}`}>Message</label>
@@ -634,7 +662,7 @@ export const TerminalPane = memo(function TerminalPane({
                       type="submit"
                       className="pane-tools-submit"
                     >
-                      Add scheduled message
+                      {editingTimedMessage ? "Save changes" : "Add scheduled message"}
                     </button>
                   </form>
                 </>

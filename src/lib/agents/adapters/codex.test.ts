@@ -911,12 +911,12 @@ describe("codex adapter", () => {
     });
   });
 
-  test("runs /side in an ephemeral read-only fork without touching the main transcript", async () => {
+  test.each(["/btw", "/side"] as const)("runs %s in an ephemeral read-only fork without touching the main transcript", async (command) => {
     const h = harness();
     await h.handshake();
 
-    expect(h.adapter.commandAvailableDuringTurn?.("/side what changed?")).toBe(true);
-    expect(h.adapter.command?.("/side what changed?", h.ctx)).toBe("handled");
+    expect(h.adapter.commandAvailableDuringTurn?.(`${command} what changed?`)).toBe(true);
+    expect(h.adapter.command?.(`${command} what changed?`, h.ctx)).toBe("handled");
     expect(h.sent.at(-1)).toMatchObject({
       id: 4,
       method: "thread/fork",
@@ -929,7 +929,7 @@ describe("codex adapter", () => {
       },
     });
     expect(h.state().sideQuestion).toMatchObject({
-      command: "/side",
+      command,
       question: "what changed?",
       status: "asking",
     });
@@ -970,11 +970,44 @@ describe("codex adapter", () => {
       status: "answered",
     });
     expect(h.state().items).toEqual([]);
+    // The fork stays open for follow-ups in the same side conversation.
+    expect(h.sent.at(-1)).toMatchObject({ id: 5, method: "turn/start" });
+
+    expect(h.adapter.command?.(`${command} and the tests?`, h.ctx)).toBe("handled");
     expect(h.sent.at(-1)).toMatchObject({
       id: 6,
+      method: "turn/start",
+      params: { threadId: "side_1", input: [{ type: "text", text: "and the tests?" }] },
+    });
+    h.feed({ jsonrpc: "2.0", id: 6, result: { turn: { id: "side_turn_2" } } });
+    h.notify("item/completed", {
+      threadId: "side_1",
+      turnId: "side_turn_2",
+      item: { id: "side_message_2", type: "agentMessage", text: "They still pass." },
+    });
+    h.notify("turn/completed", {
+      threadId: "side_1",
+      turn: { id: "side_turn_2", status: "completed", items: [] },
+    });
+    const conversation = h.state().sideConversation;
+    expect(conversation?.turns.map((turn) => [turn.question, turn.answer, turn.status])).toEqual([
+      ["what changed?", "Only the parser changed.", "answered"],
+      ["and the tests?", "They still pass.", "answered"],
+    ]);
+    expect(h.state().items).toEqual([]);
+
+    h.adapter.closeSide?.(h.ctx);
+    expect(h.sent.at(-1)).toMatchObject({
+      id: 7,
       method: "thread/unsubscribe",
       params: { threadId: "side_1" },
     });
+
+    // After closing, the next side command forks a fresh conversation.
+    expect(h.adapter.command?.(`${command} new topic`, h.ctx)).toBe("handled");
+    expect(h.sent.at(-1)).toMatchObject({ method: "thread/fork" });
+    expect(h.state().sideConversation?.id).not.toBe(conversation?.id);
+    expect(h.state().sideConversation?.turns).toHaveLength(1);
   });
 
   test("settles /side on thread idle when turn/completed is omitted", async () => {
@@ -1006,10 +1039,6 @@ describe("codex adapter", () => {
       answer: "Only the parser changed.",
       status: "answered",
     });
-    expect(h.sent.at(-1)).toMatchObject({
-      method: "thread/unsubscribe",
-      params: { threadId: "side_1" },
-    });
 
     h.notify("turn/completed", {
       threadId: "side_1",
@@ -1025,6 +1054,10 @@ describe("codex adapter", () => {
       command: "/btw",
       question: "and the tests?",
       status: "asking",
+    });
+    expect(h.sent.at(-1)).toMatchObject({
+      method: "turn/start",
+      params: { threadId: "side_1" },
     });
   });
 
@@ -4640,6 +4673,39 @@ describe("codex adapter", () => {
     expect(
       h.state().items.some((item) => item.kind === "notice" && item.tone === "error"),
     ).toBe(false);
+  });
+
+  test("startup resume keeps the saved identity without opening a provisional thread", async () => {
+    const h = harness({ resumeId: "saved-startup-thread" });
+    h.adapter.start(h.ctx);
+    await Promise.resolve();
+    h.feed({ id: 1, result: {} });
+    await Promise.resolve();
+    await Promise.resolve();
+    h.feed({ id: "duckweed-account-read", result: { account: { type: "chatgpt" } } });
+    for (let step = 0; step < 8; step++) await Promise.resolve();
+    expect(h.sent.some((message) => message.method === "thread/start")).toBe(false);
+    expect(h.state()).toMatchObject({ sessionId: "saved-startup-thread", status: "idle" });
+    expect(h.state().capabilities?.inputs.text).toBe(true);
+    await h.adapter.dispose?.(h.ctx, { preserveWork: true });
+  });
+
+  test("automatic recovery never forks a slow conversation or interrupts its live work", async () => {
+    const h = harness({}, { completionQuietMs: 0, resumeTimeoutMs: 40 });
+    await h.handshake();
+    let reconnects = 0;
+    h.ctx.reconnect = () => { reconnects += 1; return true; };
+    const before = h.sent.length;
+    const resumed = h.adapter.resume?.("original-running-thread", h.ctx, { allowFork: false });
+    expect(await resumed).toBe(false);
+    const methods = h.sent.slice(before).map((message) => message.method);
+    expect(reconnects).toBe(1);
+    expect(methods).toContain("thread/resume");
+    for (const method of ["thread/start", "thread/fork", "turn/start", "turn/interrupt", "thread/goal/set", "thread/backgroundTerminals/clean"]) {
+      expect(methods).not.toContain(method);
+    }
+    expect(h.state().loadingHistory).toBe(false);
+    await h.adapter.dispose?.(h.ctx, { preserveWork: true });
   });
 
   test("times out a silent thread/resume, then hydrates a forked copy", async () => {

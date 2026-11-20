@@ -1,5 +1,6 @@
 import { useEffect, useState, useSyncExternalStore } from "react";
 
+import { SettingsToggle } from "./SettingsToggle";
 import { Tooltip } from "./Tooltip";
 import * as bus from "../lib/bus";
 import {
@@ -13,8 +14,9 @@ import {
   secondsLeft,
   setAction,
   setGrace,
+  setIncludeScheduledMessages,
   subscribe,
-  type BusyReason,
+  type PowerWatchBusyReason,
   type PowerAction,
 } from "../lib/powerWatch";
 import { AsciiAmbient } from "./AsciiAmbient";
@@ -53,12 +55,13 @@ const ACTIONS: {
 ];
 
 /** Why one pane still counts, in words, for the activity list. */
-const BUSY_REASON_HINTS: Record<BusyReason, string> = {
+const BUSY_REASON_HINTS: Record<PowerWatchBusyReason, string> = {
   process: "A command is still running in this pane.",
   "agent-starting": "The agent is still coming up.",
   "agent-working": "The agent is working on a turn you asked for.",
   "agent-waiting":
     "The agent is blocked on you, most likely a permission prompt. It will not clear on its own.",
+  "scheduled-message": "This pane has a message waiting to send.",
 };
 
 /**
@@ -227,6 +230,17 @@ export function PowerWatchTool() {
               ))}
             </div>
           </Tooltip>
+
+          <button
+            type="button"
+            className="power-scheduled-option"
+            role="switch"
+            aria-checked={state.includeScheduledMessages}
+            onClick={() => setIncludeScheduledMessages(!state.includeScheduledMessages)}
+          >
+            Wait for scheduled messages
+            <SettingsToggle enabled={state.includeScheduledMessages} />
+          </button>
         </article>
 
         {!armed && (

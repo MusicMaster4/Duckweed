@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import {
   detectAgent,
   didProcessFinish,
+  isSessionExited,
   isAgentPromptSubmission,
   isGenericOsc777Notification,
   parseAgentOsc777,
@@ -386,4 +387,14 @@ describe("CLI agent signals", () => {
     expect(isGenericOsc777Notification("notify;Working;Still generating…")).toBe(false);
     expect(isGenericOsc777Notification("notify;Status;Agent busy")).toBe(false);
   });
+});
+
+
+test("shell exits and ended agents qualify for exit alerts, waiting and idle do not", () => {
+  expect(isSessionExited(true)).toBe(true);
+  expect(isSessionExited(false, "exited")).toBe(true);
+  expect(isSessionExited(false, "error")).toBe(true);
+  for (const status of [undefined, "starting", "working", "waiting", "idle"]) {
+    expect(isSessionExited(false, status)).toBe(false);
+  }
 });

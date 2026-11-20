@@ -8,12 +8,13 @@ interface Props {
   working: boolean;
   active: boolean;
   unread: boolean;
+  exited?: boolean;
   onCollapseOthers?: () => void;
   onExpandAll?: () => void;
   onUpdate: (patch: Partial<Pick<TabGroup, "name" | "collapsed" | "color">> | null) => void;
 }
 
-export function TabGroupLabel({ group, count, working, active, unread, onUpdate, onCollapseOthers, onExpandAll }: Props) {
+export function TabGroupLabel({ group, count, working, active, unread, exited, onUpdate, onCollapseOthers, onExpandAll }: Props) {
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -46,7 +47,7 @@ export function TabGroupLabel({ group, count, working, active, unread, onUpdate,
     <button
       type="button"
       ref={buttonRef}
-      className={`tab-group-label${active ? " is-active" : ""}${unread ? " is-unread" : ""}${color ? " is-colored" : ""}`}
+      className={`tab-group-label${active ? " is-active" : ""}${unread ? " is-unread" : ""}${exited ? " has-exited" : ""}${color ? " is-colored" : ""}`}
       style={color ? { "--group-color": color } as CSSProperties : undefined}
       data-group-id={group.id}
       data-strip-motion-id={`group:${group.id}`}

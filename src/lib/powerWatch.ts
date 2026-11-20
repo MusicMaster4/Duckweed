@@ -44,15 +44,22 @@ export interface BusyEntry {
   reason: BusyReason;
 }
 
+export type PowerWatchBusyReason = BusyReason | "scheduled-message";
+
+export interface PowerWatchBusyEntry extends Omit<BusyEntry, "reason"> {
+  reason: PowerWatchBusyReason;
+}
+
 export interface PowerWatchState {
   action: PowerAction;
   phase: PowerWatchPhase;
   /** Uninterrupted quiet required before firing. */
   graceMs: number;
+  includeScheduledMessages: boolean;
   /** Epoch ms the countdown ends at. Null outside `countdown`. */
   firesAt: number | null;
   /** What is keeping the watch waiting, as of the last poll. */
-  busy: BusyEntry[];
+  busy: PowerWatchBusyEntry[];
   error: string | null;
 }
 
@@ -79,11 +86,12 @@ export const POWER_ACTION_GERUNDS: Record<PowerAction, string> = {
   shutdown: "Shutting down",
 };
 
-export const BUSY_REASON_LABELS: Record<BusyReason, string> = {
+export const BUSY_REASON_LABELS: Record<PowerWatchBusyReason, string> = {
   process: "running",
   "agent-starting": "starting",
   "agent-working": "working",
   "agent-waiting": "needs you",
+  "scheduled-message": "scheduled",
 };
 
 // ------------------------------------------------------------------ machine
@@ -132,37 +140,42 @@ export function formatCountdown(seconds: number): string {
 
 // -------------------------------------------------------------------- store
 
-function loadPrefs(): { action: PowerAction; graceMs: number } {
-  const fallback = { action: "suspend" as PowerAction, graceMs: DEFAULT_GRACE_MS };
+type PowerWatchPrefs = Pick<PowerWatchState, "action" | "graceMs" | "includeScheduledMessages">;
+
+const DEFAULT_PREFS: PowerWatchPrefs = {
+  action: "suspend",
+  graceMs: DEFAULT_GRACE_MS,
+  includeScheduledMessages: false,
+};
+
+function loadPrefs(): PowerWatchPrefs {
   try {
     const raw = localStorage.getItem(PREFS_KEY);
-    if (!raw) return fallback;
-    const parsed = JSON.parse(raw) as { action?: unknown; graceMs?: unknown };
+    if (!raw) return DEFAULT_PREFS;
+    const parsed = JSON.parse(raw) as Partial<Record<keyof PowerWatchPrefs, unknown>>;
     return {
       action: parsed.action === "shutdown" ? "shutdown" : "suspend",
       graceMs: GRACE_CHOICES.some((choice) => choice.ms === parsed.graceMs)
         ? (parsed.graceMs as number)
         : DEFAULT_GRACE_MS,
+      includeScheduledMessages: parsed.includeScheduledMessages === true,
     };
   } catch {
-    return fallback;
+    return DEFAULT_PREFS;
   }
 }
 
-function savePrefs(state: PowerWatchState): void {
+function savePrefs({ action, graceMs, includeScheduledMessages }: PowerWatchPrefs): void {
   try {
-    localStorage.setItem(PREFS_KEY, JSON.stringify({ action: state.action, graceMs: state.graceMs }));
+    localStorage.setItem(PREFS_KEY, JSON.stringify({ action, graceMs, includeScheduledMessages }));
   } catch {
     // A remembered dropdown position is not worth failing over.
   }
 }
 
-const initial = loadPrefs();
-
 let state: PowerWatchState = {
-  action: initial.action,
+  ...loadPrefs(),
   phase: "off",
-  graceMs: initial.graceMs,
   firesAt: null,
   busy: [],
   error: null,
@@ -192,7 +205,7 @@ export function subscribe(callback: () => void): () => void {
  * module stays free of xterm and Tauri, and so tests can drive both sides.
  */
 export interface PowerWatchRuntime {
-  probe: () => BusyEntry[];
+  probe: (includeScheduledMessages: boolean) => PowerWatchBusyEntry[];
   fire: (action: PowerAction) => Promise<void>;
 }
 
@@ -230,7 +243,7 @@ function stopPolling(): void {
 export function poll(now = Date.now()): void {
   if (state.phase === "off" || state.phase === "firing" || !runtime) return;
 
-  const busy = runtime.probe();
+  const busy = runtime.probe(state.includeScheduledMessages);
   const timing = nextTiming(state, busy.length > 0, now);
   set({ busy, phase: timing.phase, firesAt: timing.firesAt });
 
@@ -252,7 +265,7 @@ export function poll(now = Date.now()): void {
 
 export function arm(): void {
   if (state.phase === "armed" || state.phase === "countdown") return;
-  set({ phase: "armed", firesAt: null, error: null, busy: runtime?.probe() ?? [] });
+  set({ phase: "armed", firesAt: null, error: null, busy: [] });
   startPolling();
   // Evaluate immediately so arming with nothing running shows its countdown at
   // once rather than a second of blank "waiting".
@@ -279,14 +292,20 @@ export function setGrace(graceMs: number): void {
   savePrefs(state);
 }
 
+export function setIncludeScheduledMessages(includeScheduledMessages: boolean): void {
+  if (state.includeScheduledMessages === includeScheduledMessages) return;
+  set({ includeScheduledMessages });
+  savePrefs(state);
+  if (state.phase === "armed" || state.phase === "countdown") poll();
+}
+
 /** Test seam: drop every scrap of state between cases. */
 export function resetForTests(next?: Partial<PowerWatchState>): void {
   stopPolling();
   runtime = null;
   state = {
-    action: "suspend",
+    ...DEFAULT_PREFS,
     phase: "off",
-    graceMs: DEFAULT_GRACE_MS,
     firesAt: null,
     busy: [],
     error: null,

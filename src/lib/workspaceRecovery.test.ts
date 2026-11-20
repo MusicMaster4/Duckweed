@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { createRecoveryStore, parseRecovery } from "./workspaceRecovery";
+import {
+  createRecoveryStore, parseRecovery, recoverySaveDelay,
+  RECOVERY_SAVE_INTERVAL_MS, RECOVERY_SAVE_MAX_INTERVAL_MS,
+} from "./workspaceRecovery";
 
 function recoveryHarness() {
   const pending = new Set<() => void>();
@@ -132,6 +135,32 @@ describe("workspace crash recovery", () => {
     tick();
     expect(writes).toHaveLength(1);
     expect(parseRecovery(writes[0]).panes["shell-only"]?.draft).toBe("last keystroke");
+  });
+
+  test("large snapshots are checkpointed less often", () => {
+    const delays: number[] = [];
+    const pending = new Set<() => void>();
+    const store = createRecoveryStore(() => null, () => {}, (save, delayMs) => {
+      delays.push(delayMs);
+      pending.add(save);
+      return () => { pending.delete(save); };
+    });
+    const tick = () => { for (const save of [...pending]) save(); };
+    store.update("a", { draft: "small" });
+    tick();
+    store.update("a", { draft: "x".repeat(4_000_000) });
+    tick();
+    store.update("a", { draft: "y".repeat(4_000_000) });
+    expect(delays[0]).toBe(RECOVERY_SAVE_INTERVAL_MS);
+    expect(delays[1]).toBe(RECOVERY_SAVE_INTERVAL_MS);
+    expect(delays[2]).toBeGreaterThan(1_500);
+    expect(recoverySaveDelay(1_000_000_000)).toBe(RECOVERY_SAVE_MAX_INTERVAL_MS);
+    // An explicit flush, as on shutdown, never waits for the timer.
+    let disk = "";
+    const urgent = createRecoveryStore(() => null, (raw) => { disk = raw; }, () => () => {});
+    urgent.update("a", { draft: "now" });
+    urgent.flush();
+    expect(parseRecovery(disk).panes.a?.draft).toBe("now");
   });
 
   test("invalid recovery data does not prevent startup", () => {

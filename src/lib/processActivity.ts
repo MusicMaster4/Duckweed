@@ -1,3 +1,8 @@
+/** Ended agent sessions share the shell-exit alert, including crashes. */
+export function isSessionExited(shellExited: boolean, agentStatus?: string | null): boolean {
+  return shellExited || agentStatus === "exited" || agentStatus === "error";
+}
+
 export interface ProcessState {
   busy: boolean;
   exited: boolean;

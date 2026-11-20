@@ -15,8 +15,31 @@ function autoQuota(html) {
   html = html.replace(before, 'duckweedAutoQuota=globalThis.duckweedStartQuotaMonitor(CA,jm,Fm,Ay,Dm,ml),'+before);
   return html.replace('</head>', `${autoMarker}\n<style>*,*::before,*::after{box-shadow:none!important;text-shadow:none!important}</style>\n</head>`);
 }
+function shareClaudeGrantReads(html) {
+  if (!html.includes('useClaudeReset:') || html.includes('globalThis.duckweedIsClaudeUsage(e)')) return html;
+  const replacements = [
+    ['e.url===`https://api.anthropic.com/api/oauth/usage`?await globalThis.duckweedClaudeQuota',
+      'globalThis.duckweedIsClaudeUsage(e)?await globalThis.duckweedClaudeQuota'],
+    ['CN.includes(a))return a',
+      'CN.includes(a)){if(a===`reset`||a===`already_used`)globalThis.duckweedClaudeGrantUsed(e);return a}'],
+    ['Pg={"User-Agent":`claude-cli/2.1.280 (external, cli)`', 'Pg={"User-Agent":`claude-cli/2.1.322 (external, cli)`'],
+    ['throw new wN(`upstream`);return n.body', 'throw new wN(n.statusCode===429?`rate_limited`:`upstream`);return n.body'],
+    ['i()&&(h(e),b(``))},()=>{i()&&b(`read_error`)}',
+      'i()&&(h(e),b(e.eligible?``:`ineligible`))},e=>{i()&&b(e?.code===`rate_limited`?`rate_limited`:`read_error`)}'],
+  ];
+  for (const [before, after] of replacements) {
+    if (html.split(before).length !== 2) {
+      throw new Error('Management UI version differs from the tested Claude reset patch. The file was left unchanged.');
+    }
+    html = html.replace(before, () => after);
+  }
+  return html;
+}
 function patchHtml(html) {
-  if (html.includes(marker)) return autoQuota(panelEntry(html));
+  if (html.includes(marker)) {
+    const patched = autoQuota(panelEntry(html));
+    return shareClaudeGrantReads(require('./patch-ledger.cjs').enhanceLedger(patched));
+  }
   const replacements = [
     ['qp={request:async(e,t)=>{let n=await W.post(`/requests/api-call`,e,t)',
       'qp={request:async(e,t)=>{let n=e.url===`https://api.anthropic.com/api/oauth/usage`?await globalThis.duckweedClaudeQuota(e,Fm.getState(),()=>W.post(`/requests/api-call`,e,t)):await W.post(`/requests/api-call`,e,t)'],
@@ -43,7 +66,20 @@ function patchManagementPanel(root) {
   const filename = path.join(root, 'static', 'management.html');
   if (!fs.existsSync(filename)) return false;
   const original = fs.readFileSync(filename, 'utf8');
-  const patched = patchHtml(original);
+  const saved = path.join(root, 'dashboard', 'management-custom.html');
+  let patched;
+  try { patched = patchHtml(original); }
+  catch (error) {
+    if (!fs.existsSync(saved)) throw error;
+    const recovery = fs.readFileSync(saved, 'utf8');
+    if (!recovery.includes('globalThis.duckweedLedger.render(')) throw error;
+    patched = patchHtml(recovery);
+  }
+  // Keep the installed native React integrations when the proxy downloads another bundle.
+  if (!patched.includes('globalThis.duckweedLedger.render(') && fs.existsSync(saved)) {
+    const recovery = fs.readFileSync(saved, 'utf8');
+    if (recovery.includes('globalThis.duckweedLedger.render(')) patched = patchHtml(recovery);
+  }
   if (original === patched) return false;
   const backupDir = path.join(root, 'backups', 'quota-ui-' + new Date().toISOString().replace(/[:.]/g, '-'));
   fs.mkdirSync(backupDir, { recursive: true });
@@ -51,6 +87,7 @@ function patchManagementPanel(root) {
   const temporary = filename + '.' + process.pid + '.tmp';
   fs.writeFileSync(temporary, patched);
   fs.renameSync(temporary, filename);
+  if (patched.includes('globalThis.duckweedLedger.render(') && fs.existsSync(path.dirname(saved))) fs.writeFileSync(saved, patched);
   return true;
 }
 function watchManagementPanel(root) {

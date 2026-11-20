@@ -12,7 +12,7 @@ import {
 import { isAuthenticationFailure } from "../auth";
 import { isCodexCapacityError } from "../capacityReply";
 import { desktopConnectionFailure } from "../codexDesktop";
-import { applyEvent, type AgentEvent } from "../events";
+import { applyEvent, clampEnd, MAX_TEXT, MAX_TOOL_OUTPUT, type AgentEvent } from "../events";
 import type { AgentLaunch } from "../launch";
 import {
   emptyUsage,
@@ -94,7 +94,7 @@ const RESUME_RPC_TIMEOUT_MS = 10_000;
 const RPC_TIMEOUT_MS = 30_000;
 const STOP_RPC_TIMEOUT_MS = 5_000;
 const SIDE_DEVELOPER_INSTRUCTIONS = `You are in an ephemeral side conversation, not the main thread.
-Use the inherited conversation only as reference context. Answer only the question submitted after the fork. Do not continue tasks, plans, or tool calls inherited from the parent thread. Keep the response focused and do not modify files or workspace state.`;
+Use the inherited conversation only as reference context. Answer only the questions submitted after the fork, treating each follow-up as part of this side conversation. Do not continue tasks, plans, or tool calls inherited from the parent thread. Keep the response focused and do not modify files or workspace state.`;
 
 /** Side cards show the reply, not Codex commentary or reasoning traces. */
 function pickSideAnswer(messages: Map<string, CodexSideMessage>): string {
@@ -314,6 +314,10 @@ interface CodexSideMessage {
 interface CodexSideThread {
   threadId: string | null;
   currentTurnId: string | null;
+  /** A side turn is running; follow-ups wait until it settles. */
+  busy: boolean;
+  /** Shared by every exchange in one open side chat. */
+  conversationId: string;
   messages: Map<string, CodexSideMessage>;
   sideQuestion: AgentSideQuestion;
 }
@@ -527,6 +531,8 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
   let persistedHistoryReplayDepth = 0;
   /** Ephemeral `/side` and `/btw` forks, kept outside the main transcript. */
   const sideThreads = new Map<string, CodexSideThread>();
+  /** The side chat currently open in the UI; follow-ups reuse its fork. */
+  let openSide: CodexSideThread | null = null;
   let pendingSideThread: CodexSideThread | null = null;
   let activeSideThreadId: string | null = null;
   let sideSequence = 0;
@@ -738,22 +744,14 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     return null;
   }
 
-  function mergeChildStreamEvent(
-    previous: AgentEvent | undefined,
-    event: AgentEvent,
-  ): AgentEvent {
-    if (!previous || previous.type !== event.type) return event;
-    if (
-      (event.type === "assistant-delta" || event.type === "thinking-delta") &&
-      (previous.type === "assistant-delta" || previous.type === "thinking-delta")
-    ) {
-      return { ...event, text: previous.text + event.text };
+  function mergeChildStreamEvent(previous: AgentEvent | undefined, event: AgentEvent): AgentEvent {
+    if (event.type === "assistant-delta" || event.type === "thinking-delta") {
+      const earlier = previous?.type === event.type ? previous.text : "";
+      return { ...event, text: clampEnd(earlier + event.text, MAX_TEXT) };
     }
-    if (event.type === "tool" && previous.type === "tool") {
-      return {
-        ...event,
-        outputDelta: (previous.outputDelta ?? "") + (event.outputDelta ?? ""),
-      };
+    if (event.type === "tool") {
+      const earlier = previous?.type === "tool" ? previous.outputDelta ?? "" : "";
+      return { ...event, outputDelta: clampEnd(earlier + (event.outputDelta ?? ""), MAX_TOOL_OUTPUT) };
     }
     return event;
   }
@@ -1513,7 +1511,8 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     fallback?: string,
   ): void {
     const side = sideThreads.get(sideThreadId);
-    if (!side) return;
+    if (!side || !side.busy) return;
+    side.busy = false;
     side.currentTurnId = null;
     side.sideQuestion.status = status;
     side.sideQuestion.answer = pickSideAnswer(side.messages);
@@ -1524,12 +1523,34 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     }
     emitSide(side, ctx);
     if (activeSideThreadId === sideThreadId) activeSideThreadId = null;
+    // The fork stays subscribed while its side chat is open so follow-ups
+    // keep the thread's context. Closing the chat releases it.
+    if (openSide !== side) releaseSideThread(sideThreadId, ctx);
+  }
+
+  function releaseSideThread(sideThreadId: string, ctx: AdapterContext): void {
+    if (activeSideThreadId === sideThreadId) activeSideThreadId = null;
     void request(ctx, "thread/unsubscribe", { threadId: sideThreadId })
       .catch(() => {
         // Ephemeral threads are in-memory only. A failed unsubscribe does not
         // affect the parent conversation or make the side reply persistent.
       })
       .finally(() => sideThreads.delete(sideThreadId));
+  }
+
+  function closeSideConversation(ctx: AdapterContext): void {
+    const side = openSide;
+    openSide = null;
+    if (!side) return;
+    if (pendingSideThread === side) pendingSideThread = null;
+    if (!side.threadId) return;
+    const sideThreadId = side.threadId;
+    if (side.busy && side.currentTurnId) {
+      void request(ctx, "turn/interrupt", { threadId: sideThreadId, turnId: side.currentTurnId })
+        .catch(() => {});
+    }
+    side.busy = false;
+    releaseSideThread(sideThreadId, ctx);
   }
 
   function handleSideNotification(
@@ -1539,7 +1560,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     ctx: AdapterContext,
   ): void {
     const side = sideThreads.get(sideThreadId);
-    if (!side) return;
+    if (!side || !side.busy) return;
     switch (method) {
       case "error": {
         const detail = codexErrorDetail(params);
@@ -1586,6 +1607,10 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         return;
       }
       case "turn/completed": {
+        const turnId = asString(asRecord(params.turn)?.id);
+        // A late completion from an earlier side turn must not settle the
+        // follow-up that is running now.
+        if (turnId && side.currentTurnId && turnId !== side.currentTurnId) return;
         const error = asRecord(asRecord(params.turn)?.error);
         if (error) {
           finishSide(
@@ -1619,6 +1644,47 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     }
   }
 
+  function startSideTurn(
+    side: CodexSideThread,
+    sideThreadId: string,
+    question: string,
+    images: AgentImageAttachment[],
+    ctx: AdapterContext,
+  ): Promise<void> {
+    activeSideThreadId = sideThreadId;
+    return request(ctx, "turn/start", {
+      threadId: sideThreadId,
+      input: [
+        ...(question ? [{ type: "text", text: question }] : []),
+        ...images.map((image) => ({
+          type: "image",
+          url: imagePayloadDataUrl(image),
+        })),
+      ],
+      approvalPolicy: "never",
+      sandboxPolicy: { type: "readOnly" },
+      ...(currentModel ? { model: currentModel } : {}),
+      ...(currentEffort ? { effort: currentEffort } : {}),
+      ...serviceTierParamsFor(currentModel),
+    }).then((started) => {
+      if (!side.busy) return;
+      side.currentTurnId = asString(asRecord(started.turn)?.id) ?? side.currentTurnId;
+    });
+  }
+
+  function failSideTurn(side: CodexSideThread, error: unknown, ctx: AdapterContext): void {
+    if (pendingSideThread === side) pendingSideThread = null;
+    if (side.threadId && activeSideThreadId === side.threadId) activeSideThreadId = null;
+    if (!side.busy) return;
+    side.busy = false;
+    side.currentTurnId = null;
+    const record = asRecord(error);
+    side.sideQuestion.status = "error";
+    side.sideQuestion.answer =
+      asString(record?.message) ?? "Codex could not start the side conversation.";
+    emitSide(side, ctx);
+  }
+
   function startSideQuestion(
     command: "/side" | "/btw",
     question: string,
@@ -1626,11 +1692,12 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     images: AgentImageAttachment[] = [],
   ): void {
     if (!question && images.length === 0) {
-      ctx.emit({
-        type: "notice",
-        tone: "error",
-        text: `Usage: ${command} <your question or attached image>`,
-      });
+      // A bare command opens an empty side chat to type into.
+      if (!openSide) {
+        sideSequence += 1;
+        openSide = newSideConversation(command, `codex-side-chat-${sideSequence}`);
+        ctx.emit({ type: "side-open", conversationId: openSide.conversationId, command });
+      }
       return;
     }
     if (!threadId) {
@@ -1641,7 +1708,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       });
       return;
     }
-    if (pendingSideThread || activeSideThreadId) {
+    if (openSide?.busy) {
       ctx.emit({
         type: "notice",
         tone: "error",
@@ -1651,21 +1718,29 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     }
 
     sideSequence += 1;
-    const side: CodexSideThread = {
-      threadId: null,
-      currentTurnId: null,
-      messages: new Map(),
-      sideQuestion: {
-        id: `codex-side-${sideSequence}`,
-        command,
-        question,
-        images: [...images],
-        answer: "",
-        status: "asking",
-      },
+    const side = openSide ?? newSideConversation(command, `codex-side-chat-${sideSequence}`);
+    openSide = side;
+    side.busy = true;
+    side.currentTurnId = null;
+    side.messages = new Map();
+    side.sideQuestion = {
+      id: `codex-side-${sideSequence}`,
+      conversationId: side.conversationId,
+      command,
+      question,
+      images: [...images],
+      answer: "",
+      status: "asking",
     };
-    pendingSideThread = side;
     emitSide(side, ctx);
+
+    if (side.threadId) {
+      void startSideTurn(side, side.threadId, question, images, ctx)
+        .catch((error: unknown) => failSideTurn(side, error, ctx));
+      return;
+    }
+
+    pendingSideThread = side;
     const parentThreadId = threadId;
     const forkParams = {
       threadId: parentThreadId,
@@ -1683,40 +1758,36 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         const forked = asRecord(result.thread) ?? result;
         const sideThreadId = asString(forked.id);
         if (!sideThreadId) throw new Error("Codex did not return a side thread id.");
+        if (pendingSideThread === side) pendingSideThread = null;
         side.threadId = sideThreadId;
-        pendingSideThread = null;
-        activeSideThreadId = sideThreadId;
         sideThreads.set(sideThreadId, side);
-        const started = await request(ctx, "turn/start", {
-          threadId: sideThreadId,
-          input: [
-            ...(question ? [{ type: "text", text: question }] : []),
-            ...images.map((image) => ({
-              type: "image",
-              url: imagePayloadDataUrl(image),
-            })),
-          ],
-          approvalPolicy: "never",
-          sandboxPolicy: { type: "readOnly" },
-          ...(currentModel ? { model: currentModel } : {}),
-          ...(currentEffort ? { effort: currentEffort } : {}),
-          ...serviceTierParamsFor(currentModel),
-        });
-        side.currentTurnId = asString(asRecord(started.turn)?.id) ?? side.currentTurnId;
-      })
-      .catch((error: unknown) => {
-        pendingSideThread = null;
-        if (side.threadId && activeSideThreadId === side.threadId) activeSideThreadId = null;
-        if (side.threadId) sideThreads.delete(side.threadId);
-        const record = asRecord(error);
-        side.sideQuestion.status = "error";
-        side.sideQuestion.answer =
-          asString(record?.message) ?? "Codex could not start the side conversation.";
-        emitSide(side, ctx);
-        if (side.threadId) {
-          void request(ctx, "thread/unsubscribe", { threadId: side.threadId }).catch(() => {});
+        if (openSide !== side) {
+          // The chat closed while the fork was loading.
+          side.busy = false;
+          releaseSideThread(sideThreadId, ctx);
+          return;
         }
-      });
+        await startSideTurn(side, sideThreadId, question, images, ctx);
+      })
+      .catch((error: unknown) => failSideTurn(side, error, ctx));
+  }
+
+  function newSideConversation(command: "/side" | "/btw", conversationId: string): CodexSideThread {
+    return {
+      threadId: null,
+      currentTurnId: null,
+      busy: false,
+      conversationId,
+      messages: new Map(),
+      sideQuestion: {
+        id: conversationId,
+        conversationId,
+        command,
+        question: "",
+        answer: "",
+        status: "answered",
+      },
+    };
   }
 
   async function handshake(ctx: AdapterContext) {
@@ -1791,13 +1862,20 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       let bridge = options.desktopBridge ? await currentDesktopBridge() : null;
       if (disposed) return;
       let thread: Record<string, unknown>;
-      try {
-        thread = await request(ctx, "thread/start", { ...startParams, ...desktopBridgeParams(bridge) });
-      } catch (error) {
-        // Browser settings must never be the reason a conversation cannot open.
-        if (!bridge || disposed) throw error;
-        bridge = null;
-        thread = await request(ctx, "thread/start", startParams);
+      if (ctx.launch.resumeId) {
+        // The session coordinator resumes this exact conversation on idle.
+        // Opening a provisional thread first wastes memory and can leave an
+        // unrelated blank session behind after a renderer crash.
+        thread = { thread: { id: ctx.launch.resumeId } };
+      } else {
+        try {
+          thread = await request(ctx, "thread/start", { ...startParams, ...desktopBridgeParams(bridge) });
+        } catch (error) {
+          // Browser settings must never be the reason a conversation cannot open.
+          if (!bridge || disposed) throw error;
+          bridge = null;
+          thread = await request(ctx, "thread/start", startParams);
+        }
       }
       boundDesktopBridge = bridge?.fingerprint ?? null;
       desktopBridgeUnverified = false;
@@ -4084,6 +4162,8 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
 
     command: handleCommand,
 
+    closeSide: (ctx) => closeSideConversation(ctx),
+
     commandSupportsImages: (text) => /^\/(?:side|btw)(?:\s|$)/i.test(text.trim()),
 
     commandAvailableDuringTurn: (text) => {
@@ -4128,7 +4208,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
      * idle fork resumes immediately), and still paint whatever history pages
      * arrived so the composer does not sit on "Loading conversation" forever.
      */
-    resume: (sessionId, ctx) => {
+    resume: (sessionId, ctx, resumeOptions) => {
       stoppedByUser = false;
       currentGoal = null;
       cancelPendingRootCompletion();
@@ -4196,7 +4276,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         try {
           result = await callResume(targetId);
         } catch (error: unknown) {
-          if (resumeErrorCode(error) !== RESUME_TIMEOUT) throw error;
+          if (resumeErrorCode(error) !== RESUME_TIMEOUT || resumeOptions?.allowFork === false) throw error;
           result = await recoverHungResume(targetId);
           recoveredFromHang = true;
         }
@@ -4323,6 +4403,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       return load()
         .catch((error: unknown) => {
           hydratingResume = false;
+          if (resumeOptions?.allowFork === false && resumeErrorCode(error) === RESUME_TIMEOUT && ctx.reconnect?.()) return false;
           if (rootTurnGeneration === resumeGeneration) {
             threadId = previousThreadId;
             settleRootTurn(null);

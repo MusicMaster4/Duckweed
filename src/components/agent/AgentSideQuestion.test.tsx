@@ -1,55 +1,78 @@
 import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import type { AgentSideQuestion as SideQuestion } from "../../lib/agents/types";
-import { AgentSideQuestion } from "./AgentSideQuestion";
+import type {
+  AgentSideConversation,
+  AgentSideQuestion as SideQuestion,
+} from "../../lib/agents/types";
+import { AgentSideChat } from "./AgentSideQuestion";
 
 const base: SideQuestion = {
   id: "side-1",
+  conversationId: "chat-1",
   command: "/btw",
   question: "Will this affect the main task?",
   answer: "",
   status: "asking",
 };
 
-describe("agent side question", () => {
+function chat(turns: SideQuestion[], command: "/btw" | "/side" = "/btw"): AgentSideConversation {
+  return { id: "chat-1", command, turns };
+}
+
+function render(conversation: AgentSideConversation): string {
+  return renderToStaticMarkup(
+    <AgentSideChat
+      conversation={conversation}
+      onDismiss={() => {}}
+      onSubmit={() => true}
+      autoFocus={false}
+    />,
+  );
+}
+
+describe("agent side chat", () => {
   test("shows a distinct busy surface while the answer is pending", () => {
-    const html = renderToStaticMarkup(
-      <AgentSideQuestion question={base} onDismiss={() => {}} />,
-    );
+    const html = render(chat([base]));
 
     expect(html).toContain('role="complementary"');
     expect(html).toContain('aria-busy="true"');
     expect(html).toContain("Will this affect the main task?");
     expect(html).toContain("Answering beside the main conversation");
-    expect(html).toContain('aria-label="Dismiss side question"');
+    expect(html).toContain('aria-label="Close side conversation"');
+    expect(html).toContain('aria-label="Side conversation message"');
   });
 
-  test("renders a completed answer as safe Markdown", () => {
-    const html = renderToStaticMarkup(
-      <AgentSideQuestion
-        question={{
-          ...base,
-          command: "/side",
-          answer: "No. It stays **separate** from the main transcript.",
-          status: "answered",
-        }}
-        onDismiss={() => {}}
-      />,
+  test("renders every exchange of the thread in order with Markdown answers", () => {
+    const html = render(
+      chat(
+        [
+          { ...base, answer: "No. It stays **separate**.", status: "answered" },
+          { ...base, id: "side-2", question: "And the tests?", answer: "They pass.", status: "answered" },
+        ],
+        "/side",
+      ),
     );
 
-    expect(html).toContain('class="agent-side-question is-answered"');
     expect(html).toContain("<code>/side</code>");
     expect(html).toContain("<strong>separate</strong>");
+    expect(html.indexOf("Will this affect the main task?")).toBeLessThan(html.indexOf("And the tests?"));
+    expect(html).toContain("They pass.");
     expect(html).not.toContain('aria-busy="true"');
   });
 
-  test("shows images attached to the side question", () => {
-    const html = renderToStaticMarkup(
-      <AgentSideQuestion
-        question={{
+  test("opens empty with a hint when started without a question", () => {
+    const html = render(chat([]));
+
+    expect(html).toContain("agent-side-chat is-empty");
+    expect(html).toContain("Follow-ups stay in this");
+  });
+
+  test("shows images attached to a side question", () => {
+    const html = render(
+      chat([
+        {
           ...base,
-          command: "/side",
           images: [
             {
               id: "image-1",
@@ -59,9 +82,8 @@ describe("agent side question", () => {
               size: 5,
             },
           ],
-        }}
-        onDismiss={() => {}}
-      />,
+        },
+      ]),
     );
 
     expect(html).toContain('aria-label="1 attached image"');
@@ -69,11 +91,9 @@ describe("agent side question", () => {
   });
 
   test("uses an explicit fallback when the provider returns no error text", () => {
-    const html = renderToStaticMarkup(
-      <AgentSideQuestion question={{ ...base, status: "error" }} onDismiss={() => {}} />,
-    );
+    const html = render(chat([{ ...base, status: "error" }]));
 
-    expect(html).toContain('class="agent-side-question is-error"');
+    expect(html).toContain("agent-side-chat is-error");
     expect(html).toContain("The side question could not be answered.");
     expect(html).toContain('role="alert"');
   });

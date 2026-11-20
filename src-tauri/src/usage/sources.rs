@@ -306,12 +306,12 @@ fn collect_matching(
 /// half-flushed line.
 pub fn parse(agent_id: &str, path: &Path, offset: u64) -> (Vec<Record>, u64) {
     match agent_id {
-        "claude" => lines(path, offset, "\"usage\"", claude_line),
+        "claude" => lines(path, offset, "\"usage\"", LineParser::Text(claude_text)),
         "codex" => codex_lines(path, offset),
-        "grok" => lines(path, offset, "\"usage\"", grok_line),
-        "kimi" => lines(path, offset, "\"usage\"", kimi_line),
-        "antigravity" => lines(path, offset, "\"timestamp\"", antigravity_line),
-        "pi" => lines(path, offset, "\"usage\"", pi_line),
+        "grok" => lines(path, offset, "\"usage\"", LineParser::Value(grok_line)),
+        "kimi" => lines(path, offset, "\"usage\"", LineParser::Value(kimi_line)),
+        "antigravity" => lines(path, offset, "\"timestamp\"", LineParser::Value(antigravity_line)),
+        "pi" => lines(path, offset, "\"usage\"", LineParser::Value(pi_line)),
         "gemini" => (whole(path, gemini_file), 0),
         "opencode" => {
             if is_opencode_db(path) {
@@ -378,13 +378,57 @@ fn opencode_data_dirs(home: &Path) -> Vec<PathBuf> {
     dirs
 }
 
+/// Longest transcript line held in memory. Usage records are a few kilobytes;
+/// the lines past this are pasted files, images and subagent transcripts, and
+/// several scan threads buffering them at once is what used to abort the app
+/// when Windows had no memory left to give.
+const MAX_LINE_BYTES: usize = 16 << 20;
+
+enum Line {
+    /// No more bytes.
+    End,
+    /// A trailing chunk with no newline: a line still being written.
+    Partial,
+    /// `bytes` were consumed. An oversized line is skipped, not truncated.
+    Complete { bytes: usize, oversized: bool },
+}
+
+/// Read one line into `buf`, retaining at most `MAX_LINE_BYTES` of it.
+fn next_line<R: BufRead>(reader: &mut R, buf: &mut Vec<u8>) -> Line {
+    next_line_within(reader, buf, MAX_LINE_BYTES)
+}
+
+fn next_line_within<R: BufRead>(reader: &mut R, buf: &mut Vec<u8>, limit: usize) -> Line {
+    buf.clear();
+    let mut total = 0usize;
+    loop {
+        let Ok(available) = reader.fill_buf() else {
+            return Line::End;
+        };
+        if available.is_empty() {
+            return if total == 0 { Line::End } else { Line::Partial };
+        }
+        let newline = available.iter().position(|byte| *byte == b'\n');
+        let take = newline.map_or(available.len(), |index| index + 1);
+        let room = limit.saturating_sub(buf.len());
+        buf.extend_from_slice(&available[..take.min(room)]);
+        reader.consume(take);
+        total = total.saturating_add(take);
+        if newline.is_some() {
+            return Line::Complete { bytes: total, oversized: total > limit };
+        }
+    }
+}
+
+enum LineParser {
+    /// Reads only the fields it needs from the raw line.
+    Text(fn(&str) -> Option<Vec<Record>>),
+    /// Small formats that are simpler to read as a JSON tree.
+    Value(fn(&Value) -> Option<Vec<Record>>),
+}
+
 /// Stream a line-delimited file, parsing only lines containing `needle`.
-fn lines(
-    path: &Path,
-    offset: u64,
-    needle: &str,
-    each: fn(&Value) -> Option<Vec<Record>>,
-) -> (Vec<Record>, u64) {
+fn lines(path: &Path, offset: u64, needle: &str, each: LineParser) -> (Vec<Record>, u64) {
     let Ok(mut file) = File::open(path) else {
         return (Vec::new(), offset);
     };
@@ -398,31 +442,29 @@ fn lines(
     let mut buf = Vec::new();
 
     loop {
-        buf.clear();
-        match reader.read_until(b'\n', &mut buf) {
-            Ok(0) => break,
-            Ok(read) => {
-                // A trailing chunk with no newline is a line still being
-                // written. Leave the offset before it and pick it up next scan.
-                if !buf.ends_with(b"\n") {
-                    break;
-                }
-                consumed += read as u64;
-                // The prefilter is the whole point: most lines are tool output
-                // or pasted files and never reach serde.
-                let Ok(text) = std::str::from_utf8(&buf) else {
-                    continue;
-                };
-                if !text.contains(needle) {
-                    continue;
-                }
-                if let Ok(value) = serde_json::from_str::<Value>(text.trim_end()) {
-                    if let Some(records) = each(&value) {
-                        out.extend(records);
-                    }
-                }
-            }
-            Err(_) => break,
+        // A partial line is left before the offset and picked up next scan.
+        let Line::Complete { bytes, oversized } = next_line(&mut reader, &mut buf) else {
+            break;
+        };
+        consumed += bytes as u64;
+        if oversized {
+            continue;
+        }
+        // The prefilter is the whole point: most lines are tool output
+        // or pasted files and never reach serde.
+        let Ok(text) = std::str::from_utf8(&buf) else {
+            continue;
+        };
+        if !text.contains(needle) {
+            continue;
+        }
+        let text = text.trim_end();
+        let records = match each {
+            LineParser::Text(parse) => parse(text),
+            LineParser::Value(parse) => serde_json::from_str::<Value>(text).ok().and_then(|value| parse(&value)),
+        };
+        if let Some(records) = records {
+            out.extend(records);
         }
     }
     (out, consumed)
@@ -561,36 +603,99 @@ fn pi_line(value: &Value) -> Option<Vec<Record>> {
     }])
 }
 
+/// The fields of a Claude transcript line that usage needs.
+///
+/// Message content, tool results and subagent transcripts are skipped while
+/// parsing instead of being copied into a JSON tree. Scalars stay `Value` so a
+/// field with an unexpected type is ignored rather than dropping the record.
+#[derive(serde::Deserialize)]
+struct ClaudeEntry {
+    #[serde(default, rename = "type")]
+    kind: Value,
+    #[serde(default)]
+    message: Option<ClaudeMessage>,
+    #[serde(default)]
+    timestamp: Value,
+    #[serde(default, rename = "requestId")]
+    request_id: Value,
+    #[serde(default, rename = "costUSD")]
+    cost_usd: Value,
+}
+
+#[derive(serde::Deserialize)]
+struct ClaudeMessage {
+    #[serde(default)]
+    model: Value,
+    #[serde(default)]
+    id: Value,
+    #[serde(default)]
+    usage: Option<ClaudeUsage>,
+}
+
+#[derive(serde::Deserialize)]
+struct ClaudeUsage {
+    #[serde(default)]
+    input_tokens: Value,
+    #[serde(default)]
+    output_tokens: Value,
+    #[serde(default)]
+    cache_read_input_tokens: Value,
+    #[serde(default)]
+    cache_creation_input_tokens: Value,
+    #[serde(default)]
+    cache_creation: Option<ClaudeCacheCreation>,
+    #[serde(default)]
+    speed: Value,
+}
+
+#[derive(serde::Deserialize)]
+struct ClaudeCacheCreation {
+    #[serde(default)]
+    ephemeral_1h_input_tokens: Value,
+}
+
+fn claude_text(text: &str) -> Option<Vec<Record>> {
+    claude_entry(serde_json::from_str(text).ok()?)
+}
+
+#[cfg(test)]
+fn claude_line(value: &Value) -> Option<Vec<Record>> {
+    use serde::Deserialize;
+    claude_entry(ClaudeEntry::deserialize(value).ok()?)
+}
+
 /// `~/.claude/projects/<slug>/<session>.jsonl`
 ///
 /// One JSON object per line; assistant turns carry `message.usage`.
-fn claude_line(value: &Value) -> Option<Vec<Record>> {
-    if s(value, "type")? != "assistant" {
+fn claude_entry(entry: ClaudeEntry) -> Option<Vec<Record>> {
+    let number = |value: &Value| value.as_u64().unwrap_or(0);
+    if entry.kind.as_str()? != "assistant" {
         return None;
     }
-    let message = value.get("message")?;
-    let usage = message.get("usage")?;
-    let model = s(message, "model").unwrap_or("unknown");
+    let message = entry.message?;
+    let usage = message.usage?;
+    let model = message.model.as_str().unwrap_or("unknown");
     // Claude Code writes synthetic assistant turns (interrupts, local errors)
     // that were never billed.
     if model.starts_with('<') {
         return None;
     }
-    let at = iso_ms(s(value, "timestamp")?)?;
+    let at = iso_ms(entry.timestamp.as_str()?)?;
 
     // Anthropic reports cache reads and writes outside `input_tokens`, and
     // folds thinking into `output_tokens`.
     let tokens = Tokens {
-        input: u(usage, "input_tokens"),
-        output: u(usage, "output_tokens"),
+        input: number(&usage.input_tokens),
+        output: number(&usage.output_tokens),
         reasoning: 0,
-        cache_read: u(usage, "cache_read_input_tokens"),
-        cache_write: u(usage, "cache_creation_input_tokens"),
+        cache_read: number(&usage.cache_read_input_tokens),
+        cache_write: number(&usage.cache_creation_input_tokens),
         cache_write_1h: usage
-            .get("cache_creation")
-            .map(|creation| u(creation, "ephemeral_1h_input_tokens"))
+            .cache_creation
+            .as_ref()
+            .map(|creation| number(&creation.ephemeral_1h_input_tokens))
             .unwrap_or(0)
-            .min(u(usage, "cache_creation_input_tokens")),
+            .min(number(&usage.cache_creation_input_tokens)),
     };
     if tokens.total() == 0 {
         return None;
@@ -600,21 +705,21 @@ fn claude_line(value: &Value) -> Option<Vec<Record>> {
     // the request id is what makes those the same billed call.
     let key = format!(
         "{}:{}",
-        s(message, "id").unwrap_or_default(),
-        s(value, "requestId").unwrap_or_default()
+        message.id.as_str().unwrap_or_default(),
+        entry.request_id.as_str().unwrap_or_default()
     );
     Some(vec![Record {
         pricing: super::pricing::Context::for_request(
             model,
-            s(usage, "speed").unwrap_or(""),
+            usage.speed.as_str().unwrap_or(""),
             &tokens,
         ),
         at,
         model: model.to_string(),
         tokens,
-        reported_cost: value
-            .get("costUSD")
-            .and_then(Value::as_f64)
+        reported_cost: entry
+            .cost_usd
+            .as_f64()
             .filter(|cost| cost.is_finite() && *cost >= 0.0),
         dedup: if key == ":" { 0 } else { hash(&key) },
     }])
@@ -631,18 +736,18 @@ fn codex_lines(path: &Path, offset: u64) -> (Vec<Record>, u64) {
     let mut previous_total: Option<Value> = None;
     let mut service_tier = String::new();
     let mut position = 0u64;
-    let mut buf = String::new();
+    let mut raw = Vec::new();
     let mut out = Vec::new();
     loop {
-        buf.clear();
-        let Ok(n) = reader.read_line(&mut buf) else {
+        let Line::Complete { bytes, oversized } = next_line(&mut reader, &mut raw) else {
             break;
         };
-        if n == 0 || !buf.ends_with('\n') {
-            break;
-        }
-        position += n as u64;
-        if !buf.contains("turn_context")
+        position += bytes as u64;
+        let Ok(buf) = std::str::from_utf8(&raw) else {
+            continue;
+        };
+        if oversized
+            || !buf.contains("turn_context")
             && !buf.contains("token_count")
             && !buf.contains("thread_settings_applied")
         {
@@ -1587,5 +1692,35 @@ mod tests {
         assert_eq!(next, 2 * complete.len() as u64);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn oversized_lines_are_skipped_without_losing_the_records_around_them() {
+        let mut input = std::io::Cursor::new(b"short\n0123456789abcdef \"usage\"\nnext\npartial".to_vec());
+        let mut buf = Vec::new();
+        assert!(matches!(next_line_within(&mut input, &mut buf, 8), Line::Complete { bytes: 6, oversized: false }));
+        assert_eq!(buf, b"short\n");
+        assert!(matches!(next_line_within(&mut input, &mut buf, 8), Line::Complete { bytes: 25, oversized: true }));
+        assert!(buf.len() <= 8);
+        assert!(matches!(next_line_within(&mut input, &mut buf, 8), Line::Complete { bytes: 5, oversized: false }));
+        assert_eq!(buf, b"next\n");
+        assert!(matches!(next_line_within(&mut input, &mut buf, 8), Line::Partial));
+        assert!(matches!(next_line_within(&mut input, &mut buf, 8), Line::End));
+    }
+
+    #[test]
+    fn claude_usage_ignores_large_content_and_odd_scalars() {
+        let huge = "x".repeat(200_000);
+        let line = format!(
+            "{{\"type\":\"assistant\",\"timestamp\":\"2026-07-06T12:34:15.306Z\",\"requestId\":\"r\",\"costUSD\":\"n/a\",\
+             \"message\":{{\"id\":\"m\",\"model\":\"claude-opus-5\",\"content\":[{{\"type\":\"text\",\"text\":\"{huge}\"}}],\
+             \"usage\":{{\"input_tokens\":10,\"output_tokens\":2.5,\"cache_creation\":null,\"speed\":7}}}}}}"
+        );
+        let records = claude_text(&line).unwrap();
+        assert_eq!(records[0].tokens.input, 10);
+        assert_eq!(records[0].tokens.output, 0);
+        assert!(records[0].reported_cost.is_none());
+        assert!(claude_text(&line.replace("\"assistant\"", "\"user\"")).is_none());
+        assert!(claude_text("[1,2]").is_none());
     }
 }

@@ -1864,11 +1864,11 @@ function sendToShell(session: Session, text: string): void {
 }
 
 /**
- * Send one mobile composer submission to the program currently owning a PTY.
+ * Submit text to the program currently owning a PTY.
  * Raw agent CLIs need a credited turn so status and completion tracking follow
  * the prompt, while an ordinary idle shell should keep normal command blocks.
  */
-export function submitRemoteInput(id: string, input: string): void {
+export function submitTerminalInput(id: string, input: string): void {
   const session = sessions.get(id);
   if (!session || session.exited) return;
   const text = input.replace(/\r\n/g, "\n").replace(/\r/g, "\n");

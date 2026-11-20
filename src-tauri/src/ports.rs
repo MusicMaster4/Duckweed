@@ -1283,10 +1283,13 @@ fn find_tunnel_executable(name: &str, tools_dir: &Path) -> Option<PathBuf> {
     None
 }
 
+#[cfg(windows)]
 fn hide_console_if_windows(command: &mut Command) {
-    #[cfg(windows)]
     hide_console(command);
 }
+
+#[cfg(not(windows))]
+fn hide_console_if_windows(_command: &mut Command) {}
 
 fn owner_map(
     processes: &[ProcessInfo],

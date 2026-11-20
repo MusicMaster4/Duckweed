@@ -444,7 +444,18 @@ button.chip:hover {
     background 120ms ease,
     color 120ms ease,
     border-color 120ms ease;
-  overflow: hidden;
+  overflow: visible;
+}
+
+/* Reach the window's top edge without changing the tab's painted bounds.
+   Keep this on the tab so selection, context menus and reordering all work. */
+.tab::before {
+  content: "";
+  position: absolute;
+  top: calc((36px - var(--titlebar-h)) / 2 - 1px);
+  left: -1px;
+  right: -1px;
+  bottom: calc(100% - 9px);
 }
 
 /*
@@ -3517,6 +3528,27 @@ body.is-dragging-prompt * {
   color: var(--text-faint);
   font-size: 10.5px;
   line-height: 1.5;
+}
+
+.power-scheduled-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 7px;
+  width: 100%;
+  padding: 3px 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.power-scheduled-option:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 2px;
 }
 
 /* Primary action: same fill language as layout-save / port-primary. */
@@ -9825,10 +9857,107 @@ body.is-resizing * {
   }
 }
 
+/* The side chat takes the lower half of the agent pane; the main transcript
+   and its composer keep the upper half. */
 .agent-side-question-dock {
+  display: flex;
+  flex: 0 0 50%;
+  min-height: 0;
+  flex-direction: column;
   padding: 7px 14px 8px;
   border-top: 1px solid var(--border);
   background: var(--bg-pane);
+}
+
+.agent-side-chat {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  flex-direction: column;
+}
+
+.agent-side-chat .agent-side-question-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
+}
+
+.agent-side-turn + .agent-side-turn {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.055);
+}
+
+.agent-side-chat-empty {
+  margin: 0;
+  color: var(--text-faint);
+  font-size: 10.5px;
+  line-height: 1.5;
+}
+
+.agent-side-question-status.is-error {
+  color: var(--rose);
+}
+
+.agent-side-chat-composer {
+  display: flex;
+  flex: none;
+  align-items: flex-end;
+  gap: 6px;
+  padding: 6px 6px 6px 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.065);
+}
+
+.agent-side-chat-composer textarea {
+  flex: 1 1 auto;
+  min-height: 22px;
+  max-height: 96px;
+  padding: 3px 0;
+  border: 0;
+  outline: none;
+  resize: none;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 11.5px;
+  line-height: 1.45;
+  field-sizing: content;
+}
+
+.agent-side-chat-composer textarea::placeholder {
+  color: var(--text-faint);
+}
+
+.agent-side-chat-send {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  flex: none;
+  padding: 0;
+  place-items: center;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--agent-accent) 18%, transparent);
+  color: var(--agent-accent);
+}
+
+.agent-side-chat-send:disabled {
+  background: transparent;
+  color: var(--text-faint);
+  cursor: default;
+}
+
+.agent-side-chat-send:not(:disabled):hover {
+  background: color-mix(in srgb, var(--agent-accent) 28%, transparent);
+}
+
+.agent-side-chat-send svg {
+  width: 12px;
+  height: 12px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .agent-side-question {
@@ -12687,16 +12816,50 @@ body.is-dragging-rail * {
   font: 12px/1.45 var(--font-mono);
 }
 .pane-tools-form textarea:focus-visible,
+.pane-tools-message-edit:focus-visible,
 .pane-tools-cancel:focus-visible {
   outline: 1px solid var(--accent-line);
   outline-offset: 2px;
 }
 .pane-tools-form textarea::placeholder { color: var(--text-faint); }
 .pane-tools-message-list { max-height: 176px; overflow-y: auto; }
+.pane-tools-message-edit {
+  grid-column: span 2;
+  display: grid;
+  grid-template-columns: 7px minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  border-radius: 4px;
+  text-align: left;
+}
+.pane-tools-message-edit:hover {
+  background: var(--hover);
+}
 .pane-tools-message-summary { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .pane-tools-message-preview {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--text-faint);
+}
+
+/* Ended sessions keep the existing review outline, in yellow without a glow. */
+.pane.has-exited::after,
+.pane.has-exited .pane-completion-flash {
+  border-color: var(--amber);
+  box-shadow: none;
+}
+.tab.has-exited::after,
+.tab.has-exited .tab-completion-review {
+  box-shadow: inset 0 0 0 2px var(--amber);
+}
+.zoom-rail-item.is-unread.has-exited {
+  border-color: var(--amber);
+  box-shadow: inset 0 0 0 1px var(--amber);
+}
+
+.tab-group-label.is-unread.has-exited .tab-group-count {
+  color: var(--amber);
+  background: color-mix(in srgb, var(--amber) 16%, transparent);
 }

@@ -36,6 +36,7 @@ const START_TIMEOUT: Duration = Duration::from_secs(5);
 
 struct Request {
     cue: &'static [u8],
+    semitones: i32,
     reply: SyncSender<Result<(), String>>,
 }
 
@@ -83,14 +84,14 @@ impl SoundPlayer {
     /// Resolves once the cue has started, not once it has finished. The call
     /// blocks for as long as opening the output device takes, so it belongs on
     /// a blocking task rather than the IPC thread.
-    pub fn play(&self, cue_index: Option<usize>) -> Result<(), String> {
+    pub fn play(&self, cue_index: Option<usize>, semitones: i32) -> Result<(), String> {
         let cue_index = cue_index.unwrap_or_else(next_cue_index);
         let cue = CUES
             .get(cue_index)
             .copied()
             .ok_or_else(|| "unknown completion cue".to_string())?;
         let (reply, started) = mpsc::sync_channel(1);
-        self.send(Request { cue, reply })?;
+        self.send(Request { cue, semitones, reply })?;
         started
             .recv_timeout(START_TIMEOUT)
             .unwrap_or_else(|_| Err("the audio thread did not answer".into()))
@@ -135,11 +136,11 @@ fn run_worker(requests: Receiver<Request>) {
     // device is open. It opens on the first cue, never before.
     let mut output: Option<Output> = None;
     while let Ok(request) = requests.recv() {
-        let _ = request.reply.send(start(&mut output, request.cue));
+        let _ = request.reply.send(start(&mut output, request.cue, request.semitones));
     }
 }
 
-fn start(output: &mut Option<Output>, cue: &'static [u8]) -> Result<(), String> {
+fn start(output: &mut Option<Output>, cue: &'static [u8], semitones: i32) -> Result<(), String> {
     let device = default_device_id();
     if output
         .as_ref()
@@ -172,7 +173,7 @@ fn start(output: &mut Option<Output>, cue: &'static [u8]) -> Result<(), String> 
     let open = output
         .as_mut()
         .ok_or("the audio output disappeared while opening it")?;
-    replace_cue(&mut open.player, open.sink.mixer(), cue)?;
+    replace_cue(&mut open.player, open.sink.mixer(), cue, semitones)?;
     if open.state.failed.load(Ordering::Acquire) {
         // Catch errors delivered while opening/starting, so this completion
         // can use the WebView fallback instead of being reported as audible.
@@ -186,6 +187,7 @@ fn replace_cue(
     player: &mut Option<Player>,
     mixer: &Mixer,
     cue: &'static [u8],
+    semitones: i32,
 ) -> Result<(), String> {
     let source = Decoder::new(Cursor::new(cue))
         .map_err(|error| format!("could not decode a cue: {error}"))?;
@@ -194,6 +196,7 @@ fn replace_cue(
     // Dropping the old player stops it without waiting for a device callback.
     *player = None;
     let next = Player::connect_new(mixer);
+    next.set_speed(2.0_f32.powf(semitones.clamp(-24, 24) as f32 / 12.0));
     next.append(source);
     next.play();
     *player = Some(next);
@@ -316,8 +319,8 @@ mod tests {
                 rodio::SampleRate::new(48_000).unwrap(),
             );
             let mut player = None;
-            replace_cue(&mut player, &mixer, CUES[0]).unwrap();
-            replace_cue(&mut player, &mixer, CUES[1]).unwrap();
+            replace_cue(&mut player, &mixer, CUES[0], 0).unwrap();
+            replace_cue(&mut player, &mixer, CUES[1], 0).unwrap();
             assert_eq!(player.as_ref().unwrap().len(), 1);
             assert!(samples.by_ref().take(48_000).any(|sample| sample != 0.0));
             finished.send(()).unwrap();
@@ -328,6 +331,19 @@ mod tests {
         worker.join().unwrap();
     }
 
+    #[test]
+    fn exit_cues_play_one_octave_below_normal_cues() {
+        let (mixer, _samples) = rodio::mixer::mixer(
+            rodio::ChannelCount::new(2).unwrap(),
+            rodio::SampleRate::new(48_000).unwrap(),
+        );
+        let mut player = None;
+        replace_cue(&mut player, &mixer, CUES[0], -12).unwrap();
+        assert_eq!(player.as_ref().unwrap().speed(), 0.5);
+        replace_cue(&mut player, &mixer, CUES[0], 0).unwrap();
+        assert_eq!(player.as_ref().unwrap().speed(), 1.0);
+    }
+
     /// Hand check on a machine with speakers, since CI runners have none:
     /// `cargo test -- --ignored plays_a_cue_on_the_default_device`.
     /// While it sleeps, the volume mixer lists the test binary, proof that the
@@ -336,7 +352,7 @@ mod tests {
     #[ignore = "opens the default output device and makes noise"]
     fn plays_a_cue_on_the_default_device() {
         let player = SoundPlayer::default();
-        player.play(None).expect("the cue starts");
+        player.play(None, 0).expect("the cue starts");
         std::thread::sleep(Duration::from_secs(3));
     }
 
@@ -344,11 +360,11 @@ mod tests {
     #[ignore = "opens and reopens the default output device and makes noise"]
     fn reopens_the_default_device_after_a_stream_error() {
         let mut output = None;
-        start(&mut output, CUES[0]).expect("the first cue starts");
+        start(&mut output, CUES[0], 0).expect("the first cue starts");
         std::thread::sleep(Duration::from_millis(100));
         let device = output.as_ref().unwrap().state.device.clone();
         output.as_ref().unwrap().state.error_callback()(StreamError::StreamInvalidated);
-        start(&mut output, CUES[1]).expect("the next cue reopens the device");
+        start(&mut output, CUES[1], 0).expect("the next cue reopens the device");
         assert!(output.as_ref().unwrap().state.reusable_for(&device));
         std::thread::sleep(Duration::from_secs(3));
     }

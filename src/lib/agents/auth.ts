@@ -27,6 +27,7 @@ export function isAuthenticationFailure(message: string | null | undefined): boo
     /\b(?:authentication|authorization|login|sign[ -]?in) (?:is )?required\b/i.test(message) ||
     /\bmissing (?:authentication|authorization|bearer|credentials?)\b/i.test(message) ||
     /\b(?:invalid|expired) (?:api key|access token|auth token|credentials?)\b/i.test(message) ||
-    /(?:run|use|please).*\/(?:login|auth)\b/i.test(message)
+    // Match a CLI instruction, including quoted commands, without matching URL paths.
+    /\b(?:run|use|type|enter|please)\s+[`'"]?\/(?:login|auth)(?=$|[\s`'".,;:!?)])/i.test(message)
   );
 }

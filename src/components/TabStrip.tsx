@@ -45,6 +45,7 @@ interface Props {
   /** Tabs containing at least one agent with an active turn. */
   workingTabIds: ReadonlySet<string>;
   unreadCounts: Record<string, number>;
+  exitedTabIds?: ReadonlySet<string>;
   /** One-shot review outline keyed by the tab that owns the completed pane. */
   completionReviewFlashes: Record<string, number>;
   /** When false, hide completion outlines (tracking still runs in the app). */
@@ -140,6 +141,7 @@ export function TabStrip({
   paneCounts,
   workingTabIds,
   unreadCounts,
+  exitedTabIds,
   completionReviewFlashes,
   completionHighlights,
   drag,
@@ -472,6 +474,7 @@ export function TabStrip({
             count={members.length}
             working={members.some((member) => workingTabIds.has(member.id))}
             active={!settingsActive && members.some((member) => member.id === activeTabId)}
+            exited={members.some((member) => exitedTabIds?.has(member.id))}
             unread={completionHighlights && members.some((member) => (unreadCounts[member.id] ?? 0) > 0)}
             onUpdate={(patch) => onUpdateGroup?.(group.id, patch)}
             onCollapseOthers={groups.some((other) => other.id !== group.id && !other.collapsed) ? () => {
@@ -518,6 +521,7 @@ export function TabStrip({
                   accent ? "is-colored" : "",
                   isWorking ? "is-agent-working" : "",
                   showUnread ? "is-unread" : "",
+                  exitedTabIds?.has(tab.id) ? "has-exited" : "",
                   dragTabId === tab.id ? "is-reordering" : "",
                 ]
                   .filter(Boolean)

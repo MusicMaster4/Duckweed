@@ -2,6 +2,8 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { applyTransport } = require('./codex-transport-policy.cjs');
+const { recoverQuotaCooldown } = require('./quota-recovery.cjs');
+const { reconcileClaudeCooldown } = require('./cooldown-recovery.cjs');
 const root = process.env.CLIPROXY_HOME || path.join(os.homedir(), '.cli-proxy-api');
 const proxyBase = process.env.CLIPROXY_API_URL || 'http://127.0.0.1:8317';
 const base = proxyBase + '/v0/management';
@@ -9,6 +11,7 @@ const statePath = path.join(root, 'priority-status.json');
 const CLAUDE_REFRESH_MS = 10 * 60 * 1000;
 const CLAUDE_RATE_LIMIT_MS = 10 * 60 * 1000;
 const MAX_BACKOFF_MS = 60 * 60 * 1000;
+const CLAUDE_GRANT_USAGE_URL = 'https://api.anthropic.com/api/oauth/usage?cedar_ember=1&skip_spend=1';
 
 function retryAfterMs(headers, now = Date.now()) {
   const entry = Object.entries(headers || {}).find(([key]) => key.toLowerCase() === 'retry-after');
@@ -38,6 +41,14 @@ function shouldProbe(old, provider, now = Date.now()) {
   if (old?.error && !old.retryAt) {
     const attemptedAt = Date.parse(old.attemptedAt || old.checkedAt);
     if (Number.isFinite(attemptedAt) && now - attemptedAt < (provider === 'claude' ? CLAUDE_REFRESH_MS : 60000)) return false;
+  }
+  if (provider === 'claude') {
+    const attemptedAt = Date.parse(old?.attemptedAt || old?.checkedAt);
+    // Read once after a known window rolls over, even if the normal interval has not elapsed.
+    if (old?.windows?.some(({ id, resetAt }) => {
+      const reset = Date.parse(resetAt);
+      return ['five_hour', 'seven_day'].includes(id) && attemptedAt < reset && reset <= now;
+    })) return true;
   }
   return !old?.checkedAt || now - Date.parse(old.checkedAt) >= (provider === 'claude' ? CLAUDE_REFRESH_MS : 55000);
 }
@@ -80,7 +91,8 @@ function codexWindows(usage) {
   const additional = usage.additional_rate_limits || {};
   for (const [id, value] of Object.entries(additional)) append(value.rate_limit || value, id, value.limit_name || id);
   const core = windows.filter(w => w.id.startsWith('main-'));
-  return { windows, available: core.length ? core.every(w => w.remainingPercent === null || w.remainingPercent > 0) : null,
+  return { windows, available: core.length ? main.allowed !== false && main.limit_reached !== true
+    && core.every(w => Number.isFinite(w.remainingPercent) && w.remainingPercent > 0) : null,
     weeklyResetAt: core.find(w => w.label === 'Weekly')?.resetAt || null, plan: usage.plan_type || null, quotaSupported: true };
 }
 function claudeWindows(usage) {
@@ -168,7 +180,12 @@ async function probe(account) {
     const header = { Authorization: 'Bearer $TOKEN$' };
     let method = 'GET', url, data;
     if (account.provider === 'claude') {
-      url = 'https://api.anthropic.com/api/oauth/usage'; header['anthropic-beta'] = 'oauth-2025-04-20';
+      url = CLAUDE_GRANT_USAGE_URL; header['anthropic-beta'] = 'oauth-2025-04-20';
+      // Anonymous proxy requests can receive persistent 429s even when quota is available.
+      // Keep the usage request headers compatible with the installed Claude Code client.
+      header['User-Agent'] = 'claude-cli/2.1.322 (external, cli)';
+      header['Content-Type'] = 'application/json';
+      header.Accept = 'application/json, text/plain, */*';
     } else if (account.provider === 'codex') {
       url = 'https://chatgpt.com/backend-api/wham/usage';
       if (path.basename(account.name) === account.name) {
@@ -264,13 +281,23 @@ async function update(authIndex) {
         const old = previous.accounts.find(a => a.id === account.auth_index);
         const item = { ...safeAccount(account), plan: old?.plan || null, windows: old?.windows || [], checkedAt: old?.checkedAt || null,
           attemptedAt: old?.attemptedAt || null, retryAt: old?.retryAt || null, errorStatus: old?.errorStatus || null,
-          rateLimitFailures: old?.rateLimitFailures || 0, ...(account.provider === 'claude' && old?.usage ? { usage: old.usage } : {}),
+          rateLimitFailures: old?.rateLimitFailures || 0, ...(old?.routingRecovery ? { routingRecovery: old.routingRecovery } : {}), ...(account.provider === 'claude' && old?.usage ? { usage: old.usage } : {}),
           weeklyResetAt: old?.weeklyResetAt || null, available: old?.available ?? null, quotaSupported: old?.quotaSupported ?? false };
         if (account.disabled) return { ...item, error: null };
         if (authIndex && account.auth_index !== authIndex) return { ...item, error: old?.error || null };
         if (!shouldProbe(old, account.provider)) return { ...item, error: old?.error || null };
-        try { return { ...item, ...(await probe(account)), checkedAt: new Date().toISOString(), attemptedAt: new Date().toISOString(),
-          error: null, errorStatus: null, retryAt: null, rateLimitFailures: 0 }; }
+        try {
+          const probeStartedAt = Date.now();
+          const result = { ...item, ...(await probe(account)), checkedAt: new Date().toISOString(), attemptedAt: new Date(probeStartedAt).toISOString(),
+            error: null, errorStatus: null, retryAt: null, rateLimitFailures: 0 };
+          if (account.provider === 'claude') {
+            result.routingRecovery = await reconcileClaudeCooldown(account, old, result, probeStartedAt, management);
+          } else if (account.provider === 'codex') {
+            try { await recoverQuotaCooldown(account, result, management); }
+            catch (error) { result.cooldownResetError = error.message; }
+          }
+          return result;
+        }
         catch (error) { return { ...item, ...failureState(error, old, account.provider) }; }
       })));
     }
@@ -288,6 +315,8 @@ async function update(authIndex) {
       }
     }
     const state = { checkedAt: new Date().toISOString(), accounts: observations };
+    try { require('./quota-history.cjs').recordHistory(root, state); }
+    catch (error) { console.error('Quota history: ' + error.message); }
     const temporary = `${statePath}.${process.pid}.tmp`;
     fs.writeFileSync(temporary, JSON.stringify(state, null, 2)); fs.renameSync(temporary, statePath);
     return state;

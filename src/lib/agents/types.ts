@@ -247,10 +247,15 @@ export interface AgentPendingPrompt extends AgentPrompt {
   id: string;
 }
 
-/** An ephemeral question that runs beside the main conversation. */
+/** One exchange in an ephemeral side conversation beside the main thread. */
 export interface AgentSideQuestion {
   /** Stable while the provider resolves the question. */
   id: string;
+  /**
+   * The side conversation this exchange belongs to. Follow-ups share it so
+   * they render in the same thread; closing the panel ends it.
+   */
+  conversationId?: string;
   /** Slash spelling the user invoked. */
   command: "/btw" | "/side";
   question: string;
@@ -259,6 +264,14 @@ export interface AgentSideQuestion {
   /** Empty until the first response text arrives. */
   answer: string;
   status: "asking" | "answered" | "error";
+}
+
+/** A multi-turn side chat opened with `/side` or `/btw`, kept outside the transcript. */
+export interface AgentSideConversation {
+  id: string;
+  command: "/btw" | "/side";
+  /** Oldest first. Empty right after a bare `/side` opens the panel. */
+  turns: AgentSideQuestion[];
 }
 
 interface ItemBase {
@@ -322,6 +335,8 @@ export interface SubagentMeta {
   role?: string;
   /** Child thread id when the protocol exposes one. */
   threadId?: string;
+  /** Provider id for background work, which later completions report against. */
+  taskId?: string;
   /** Parent delegation call for nested protocol messages. */
   parentCallId?: string;
   /** Model selected for this child. */
@@ -521,8 +536,10 @@ export interface AgentSessionState {
   /** Long-running objective currently owned by the provider, when known. */
   goal: AgentGoal | null;
   items: AgentItem[];
-  /** Ephemeral side response, rendered outside the main transcript. */
+  /** Latest exchange of the open side conversation, if any. */
   sideQuestion?: AgentSideQuestion | null;
+  /** Open side chat, rendered in its own panel outside the main transcript. */
+  sideConversation?: AgentSideConversation | null;
   /**
    * Prompts the user sent while a turn was still running, oldest first.
    *

@@ -5,12 +5,14 @@ mod agent_activity;
 mod agent_documents;
 mod agent_proc;
 mod agent_sessions;
+mod automatic_approval;
 mod codex_desktop;
 mod codex_transport;
 mod discord_presence;
 mod fs;
 mod git;
 mod launch;
+mod memory;
 mod mobile_push;
 mod ports;
 mod power;
@@ -57,8 +59,10 @@ struct DurableSettings(Mutex<()>);
 struct FullscreenRestore(Mutex<bool>);
 
 const COMMAND_HISTORY_KEY: &str = "duckweed:command-history:v1";
+#[cfg(any(windows, test))]
 const CRASH_RECOVERY_LOG_MAX_BYTES: u64 = 512 * 1024;
 
+#[cfg(any(windows, test))]
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CrashRecoveryRecord {
@@ -74,9 +78,13 @@ struct CrashRecoveryRecord {
     active_agent_sessions: usize,
     protocol_frames_forwarded: u64,
     protocol_bytes_forwarded: u64,
+    /// Operating-system headroom when the failure happened. A nearly empty
+    /// commit budget means the whole machine ran out of memory, not Duckweed.
+    system_memory: Option<memory::SystemMemory>,
     recovery_action: String,
 }
 
+#[cfg(any(windows, test))]
 fn append_crash_recovery_record(
     path: &Path,
     record: &CrashRecoveryRecord,
@@ -113,6 +121,7 @@ fn append_crash_recovery_record(
     file.flush().map_err(|error| error.to_string())
 }
 
+#[cfg(windows)]
 fn webview_failed_kind_name(code: i32) -> &'static str {
     match code {
         0 => "browser_process_exited",
@@ -129,6 +138,7 @@ fn webview_failed_kind_name(code: i32) -> &'static str {
     }
 }
 
+#[cfg(windows)]
 fn webview_failed_reason_name(code: i32) -> &'static str {
     match code {
         0 => "unexpected",
@@ -229,12 +239,77 @@ fn read_settings(path: &Path) -> HashMap<String, String> {
         .unwrap_or_default()
 }
 
+const RECOVERY_KEY: &str = "duckweed:workspace-recovery:v1";
+
+/// The recovery snapshot holds whole transcripts and is checkpointed while
+/// agents stream. Kept inside the shared settings file, every save of any small
+/// setting had to parse, re-escape, back up and rewrite that snapshot too.
+fn recovery_path(settings: &Path) -> PathBuf {
+    settings.with_file_name("workspace-recovery.json")
+}
+
+fn read_recovery(path: &Path) -> Option<String> {
+    let read = |candidate: &Path| {
+        std::fs::read_to_string(candidate)
+            .ok()
+            .filter(|raw| serde_json::from_str::<serde::de::IgnoredAny>(raw).is_ok())
+    };
+    read(path).or_else(|| read(&path.with_extension("json.bak")))
+}
+
+fn write_settings_map(path: &Path, settings: &HashMap<String, String>) -> Result<(), String> {
+    let raw = serde_json::to_vec_pretty(settings).map_err(|error| error.to_string())?;
+    write_settings_file(path, &raw)
+}
+
+/// Every durable setting, with the recovery snapshot read from its own file.
+fn load_settings_at(path: &Path) -> HashMap<String, String> {
+    let mut settings = read_settings(path);
+    if let Some(recovery) = read_recovery(&recovery_path(path)) {
+        settings.insert(RECOVERY_KEY.into(), recovery);
+    }
+    settings
+}
+
+/// Store one validated setting. Callers hold the settings lock.
+fn save_setting_at(path: &Path, key: String, value: String, replace: bool) -> Result<(), String> {
+    let recovery = recovery_path(path);
+    if key == RECOVERY_KEY {
+        write_settings_file(&recovery, value.as_bytes())?;
+        // One-time move out of the shared file written by earlier versions.
+        let mut settings = read_settings(path);
+        if settings.remove(RECOVERY_KEY).is_some() {
+            write_settings_map(path, &settings)?;
+        }
+        return Ok(());
+    }
+
+    let mut settings = read_settings(path);
+    if let Some(legacy) = settings.remove(RECOVERY_KEY) {
+        if read_recovery(&recovery).is_none() {
+            write_settings_file(&recovery, legacy.as_bytes())?;
+        }
+    }
+    // History accumulates across windows, builds and updates; everything else
+    // is a single-writer snapshot that simply replaces the stored copy.
+    let value = if key == COMMAND_HISTORY_KEY && !replace {
+        merge_history(
+            settings.get(&key).map(String::as_str).unwrap_or("[]"),
+            &value,
+        )
+    } else {
+        value
+    };
+    settings.insert(key, value);
+    write_settings_map(path, &settings)
+}
+
 #[tauri::command]
 async fn settings_load(app: AppHandle) -> Result<HashMap<String, String>, String> {
     blocking(move || {
         let state = app.state::<DurableSettings>();
         let _guard = state.0.lock().map_err(|error| error.to_string())?;
-        Ok(read_settings(&settings_path(&app)?))
+        Ok(load_settings_at(&settings_path(&app)?))
     })
     .await
 }
@@ -253,29 +328,70 @@ async fn settings_save(
             return Err("unsupported settings key".into());
         }
         // Reject corrupt payloads before they can replace the last good copy.
-        serde_json::from_str::<serde_json::Value>(&value).map_err(|error| error.to_string())?;
+        let cursors = if key == RECOVERY_KEY {
+            recovery_cursors(&value)?
+        } else {
+            serde_json::from_str::<serde::de::IgnoredAny>(&value).map_err(|error| error.to_string())?;
+            Vec::new()
+        };
 
         let state = app.state::<DurableSettings>();
         let _guard = state.0.lock().map_err(|error| error.to_string())?;
-        let path = settings_path(&app)?;
-        let mut settings = read_settings(&path);
-
-        // History accumulates across windows, builds and updates; everything else
-        // is a single-writer snapshot that simply replaces the stored copy.
-        let value = if key == COMMAND_HISTORY_KEY && !replace.unwrap_or(false) {
-            merge_history(
-                settings.get(&key).map(String::as_str).unwrap_or("[]"),
-                &value,
-            )
-        } else {
-            value
-        };
-
-        settings.insert(key, value);
-        let raw = serde_json::to_vec_pretty(&settings).map_err(|error| error.to_string())?;
-        write_settings_file(&path, &raw)
+        save_setting_at(&settings_path(&app)?, key, value, replace.unwrap_or(false))?;
+        if let Some(manager) = app.try_state::<AgentProcManager>() {
+            for (id, instance_id, sequence) in cursors { manager.checkpoint_saved(&id, &instance_id, sequence); }
+        }
+        Ok(())
     })
     .await
+}
+
+/// Validate a recovery snapshot and read each live agent's frame cursor.
+///
+/// Snapshots hold whole transcripts and are saved continuously. Building a
+/// generic JSON tree for one costs several times its size on every save, so
+/// only the cursors are materialized and the rest is skipped while parsing.
+fn recovery_cursors(raw: &str) -> Result<Vec<(String, String, u64)>, String> {
+    use serde::de::IgnoredAny;
+    use serde_json::Value;
+
+    #[derive(serde::Deserialize)]
+    struct Snapshot {
+        #[serde(default)]
+        panes: HashMap<String, Pane>,
+    }
+    // Unknown fields, which is where the transcripts are, are skipped unbuffered.
+    #[derive(serde::Deserialize)]
+    struct Pane {
+        #[serde(default)]
+        agent: Option<Agent>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Agent {
+        #[serde(default)]
+        runtime: Option<Runtime>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Runtime {
+        // Scalars. A malformed cursor is ignored rather than failing the save.
+        #[serde(default, rename = "instanceId")]
+        instance_id: Value,
+        #[serde(default)]
+        sequence: Value,
+    }
+
+    let snapshot: Snapshot = match serde_json::from_str(raw) {
+        Ok(snapshot) => snapshot,
+        // Any other valid JSON is still saved, exactly as before.
+        Err(_) => {
+            serde_json::from_str::<IgnoredAny>(raw).map_err(|error| error.to_string())?;
+            return Ok(Vec::new());
+        }
+    };
+    Ok(snapshot.panes.into_iter().filter_map(|(id, pane)| {
+        let runtime = pane.agent?.runtime?;
+        Some((id, runtime.instance_id.as_str()?.to_owned(), runtime.sequence.as_u64()?))
+    }).collect())
 }
 
 fn write_settings_file(path: &Path, raw: &[u8]) -> Result<(), String> {
@@ -565,6 +681,12 @@ async fn codex_desktop_bridge(codex_home: Option<String>) -> Result<Option<codex
     blocking(move || Ok(codex_desktop::bridge(codex_home.as_deref()))).await
 }
 
+/// Operating-system memory headroom, or `None` where it is not measured.
+#[tauri::command]
+fn system_memory_status() -> Option<memory::SystemMemory> {
+    memory::status()
+}
+
 /// Launch a coding agent in its line-delimited JSON mode.
 #[tauri::command]
 async fn agent_proc_start(
@@ -575,6 +697,30 @@ async fn agent_proc_start(
 ) -> Result<AgentStarted, String> {
     let manager = manager.inner().clone();
     blocking(move || agent_proc::start(&manager, on_frame, id, options)).await
+}
+
+/// Rebind a surviving local agent after the WebView document was replaced.
+#[tauri::command]
+fn agent_proc_attach(
+    manager: State<'_, AgentProcManager>,
+    id: String,
+    instance_id: String,
+    sequence: u64,
+    on_frame: Channel<AgentFrame>,
+) -> Result<bool, String> {
+    manager.attach(&id, &instance_id, sequence, on_frame)
+}
+
+/// Newest frame sequence produced for a live agent's renderer.
+#[tauri::command]
+fn agent_proc_sequence(manager: State<'_, AgentProcManager>, id: String, instance_id: String) -> Option<u64> {
+    manager.sequence(&id, &instance_id)
+}
+
+/// Global unattended permission policy, independent of window focus or visibility.
+#[tauri::command]
+fn agent_automatic_approval(manager: State<'_, AgentProcManager>, setting: serde_json::Value) {
+    manager.set_automatic_approval(&setting);
 }
 
 /// One protocol message to the agent's stdin.
@@ -882,9 +1028,10 @@ async fn power_action(action: String) -> Result<(), String> {
 async fn play_completion_sound(
     player: State<'_, SoundPlayer>,
     cue_index: Option<usize>,
+    semitones: Option<i32>,
 ) -> Result<(), String> {
     let player = player.inner().clone();
-    blocking(move || player.play(cue_index)).await
+    blocking(move || player.play(cue_index, semitones.unwrap_or(0))).await
 }
 
 /// Validate and hand `url` to the OS default handler.
@@ -1142,6 +1289,7 @@ fn recover_failed_webview_renderer(window: &tauri::WebviewWindow) -> tauri::Resu
                                 active_agent_sessions,
                                 protocol_frames_forwarded: protocol_frames,
                                 protocol_bytes_forwarded: protocol_bytes,
+                                system_memory: memory::status(),
                                 recovery_action: if renderer_exited {
                                     "reload_renderer"
                                 } else {
@@ -1160,10 +1308,10 @@ fn recover_failed_webview_renderer(window: &tauri::WebviewWindow) -> tauri::Resu
                         // conversation reset. Reload only after WebView2 says
                         // the renderer actually exited.
                         if renderer_exited {
-                            // The old JS channel is gone and cannot own these
-                            // headless processes after the document rebuilds.
+                            // Release stale renderer connections without pausing
+                            // provider-owned turns, goals or background terminals.
                             if let Some(manager) = app.try_state::<AgentProcManager>() {
-                                manager.stop_all();
+                                manager.recover_renderer();
                             }
                             let _ = sender.Reload();
                         }
@@ -1279,6 +1427,7 @@ fn main() {
                 let _ = disable_browser_accelerator_keys(&window);
                 let _ = recover_failed_webview_renderer(&window);
             }
+            app.state::<AgentProcManager>().start_approval_monitor();
             pty::start_busy_monitor(app.handle().clone())?;
             agent_activity::start_monitor(app.handle().clone())?;
             watch::start_monitor(app.handle().clone())?;
@@ -1327,8 +1476,12 @@ fn main() {
             agent_session_transcript,
             agent_proc_probe,
             opencode_models_refresh,
+            system_memory_status,
             agent_proc_start,
+            agent_proc_attach,
+            agent_proc_sequence,
             agent_proc_send,
+            agent_automatic_approval,
             agent_proc_set_runtime_roots,
             agent_codex_auth_sync,
             agent_proc_close_stdin,
@@ -1427,6 +1580,36 @@ mod tests {
         std::fs::remove_dir(directory).unwrap();
     }
 
+    #[test]
+    fn recovery_snapshot_lives_apart_from_small_settings_and_migrates() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let directory = std::env::temp_dir().join(format!("duckweed-recovery-{}-{unique}", std::process::id()));
+        let path = directory.join("durable-settings.json");
+        // A file written by an earlier version keeps the snapshot inline.
+        let legacy = HashMap::from([
+            (RECOVERY_KEY.to_string(), r#"{"version":1,"panes":{"a":{}}}"#.to_string()),
+            ("duckweed:state:v1".to_string(), r#"{"tabs":1}"#.to_string()),
+        ]);
+        write_settings_map(&path, &legacy).unwrap();
+
+        save_setting_at(&path, "duckweed:usage:v1".into(), "{}".into(), false).unwrap();
+        assert!(!read_settings(&path).contains_key(RECOVERY_KEY));
+        assert_eq!(load_settings_at(&path)[RECOVERY_KEY], r#"{"version":1,"panes":{"a":{}}}"#);
+
+        save_setting_at(&path, RECOVERY_KEY.into(), r#"{"version":1,"panes":{}}"#.into(), false).unwrap();
+        let loaded = load_settings_at(&path);
+        assert_eq!(loaded[RECOVERY_KEY], r#"{"version":1,"panes":{}}"#);
+        assert_eq!(loaded["duckweed:state:v1"], r#"{"tabs":1}"#);
+        assert_eq!(loaded["duckweed:usage:v1"], "{}");
+        assert!(!read_settings(&path).contains_key(RECOVERY_KEY));
+
+        // A damaged snapshot falls back to its previous copy.
+        std::fs::write(recovery_path(&path), "damaged").unwrap();
+        assert_eq!(load_settings_at(&path)[RECOVERY_KEY], r#"{"version":1,"panes":{"a":{}}}"#);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
     fn commands(raw: &str) -> Vec<String> {
         parse_history(raw).into_iter().map(|e| e.command).collect()
     }
@@ -1452,6 +1635,13 @@ mod tests {
             active_agent_sessions: 2,
             protocol_frames_forwarded: 12_345,
             protocol_bytes_forwarded: 6_789_012,
+            system_memory: Some(memory::SystemMemory {
+                commit_limit_bytes: 8_000,
+                commit_available_bytes: 100,
+                physical_total_bytes: 6_000,
+                physical_available_bytes: 2_000,
+                low: true,
+            }),
             recovery_action: "reload_renderer".into(),
         };
 
@@ -1461,9 +1651,26 @@ mod tests {
         assert_eq!(parsed["reason"], "out_of_memory");
         assert_eq!(parsed["processFailedKind"], "render_process_exited");
         assert_eq!(parsed["protocolFramesForwarded"], 12_345);
+        assert_eq!(parsed["systemMemory"]["commitAvailableBytes"], 100);
+        assert_eq!(parsed["systemMemory"]["low"], true);
         assert!(raw.ends_with('\n'));
 
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn recovery_cursors_skip_transcripts_and_tolerate_other_shapes() {
+        let raw = r#"{"version":1,"savedAt":5,"panes":{
+            "live":{"draft":"x","agent":{"items":[{"kind":"tool","output":"big"}],
+                "runtime":{"instanceId":"abc","sequence":42,"adapter":{"deep":[1,2,{"a":null}]}}}},
+            "resumed":{"agent":{"items":[]}},
+            "shell":{"cwd":"H:/","agent":null},
+            "odd":{"agent":{"runtime":{"instanceId":7,"sequence":"x"}}}}}"#;
+        assert_eq!(recovery_cursors(raw).unwrap(), [("live".to_string(), "abc".to_string(), 42)]);
+        // Unexpected but valid JSON is still accepted, as it always was.
+        assert!(recovery_cursors(r#"{"panes":[1,2]}"#).unwrap().is_empty());
+        assert!(recovery_cursors("[]").unwrap().is_empty());
+        assert!(recovery_cursors(r#"{"panes":{"a":{"agent":"#).is_err());
     }
 
     #[test]

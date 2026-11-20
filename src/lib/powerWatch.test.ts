@@ -1,9 +1,15 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 
 import {
+  connect,
   formatCountdown,
+  getState,
   nextTiming,
+  poll,
+  resetForTests,
   secondsLeft,
+  setIncludeScheduledMessages,
+  type PowerWatchBusyEntry,
   type PowerWatchPhase,
   type PowerWatchState,
 } from "./powerWatch";
@@ -66,11 +72,71 @@ describe("nextTiming", () => {
   });
 });
 
+describe("scheduled messages", () => {
+  const scheduled: PowerWatchBusyEntry = {
+    termId: "terminal",
+    label: "Terminal",
+    reason: "scheduled-message",
+  };
+
+  afterEach(() => resetForTests());
+
+  test("ignores a pending message by default and checks it when the option changes", () => {
+    resetForTests({ phase: "armed" });
+    connect({
+      probe: (includeScheduledMessages) => includeScheduledMessages ? [scheduled] : [],
+      fire: async () => {},
+    });
+
+    poll(0);
+    expect(getState().phase).toBe("countdown");
+
+    setIncludeScheduledMessages(true);
+    expect(getState()).toMatchObject({ phase: "armed", firesAt: null, busy: [scheduled] });
+
+    setIncludeScheduledMessages(false);
+    expect(getState()).toMatchObject({ phase: "countdown", busy: [] });
+  });
+
+  test("waits for delivery and then for the agent before starting a full quiet period", async () => {
+    resetForTests({ phase: "armed", includeScheduledMessages: true, action: "shutdown" });
+    let pending = true;
+    let running = false;
+    const fired: string[] = [];
+    connect({
+      probe: (includeScheduledMessages) => {
+        if (running) return [{ ...scheduled, reason: "agent-working" }];
+        return includeScheduledMessages && pending ? [scheduled] : [];
+      },
+      fire: async (action) => { fired.push(action); },
+    });
+
+    poll(0);
+    poll(GRACE);
+    expect(getState().phase).toBe("armed");
+
+    pending = false;
+    running = true;
+    poll(2 * GRACE);
+    expect(getState()).toMatchObject({ phase: "armed", busy: [{ reason: "agent-working" }] });
+
+    running = false;
+    poll(3 * GRACE);
+    expect(getState()).toMatchObject({ phase: "countdown", firesAt: 4 * GRACE });
+    poll(4 * GRACE - 1);
+    expect(fired).toEqual([]);
+    poll(4 * GRACE);
+    expect(fired).toEqual(["shutdown"]);
+    await Promise.resolve();
+  });
+});
+
 describe("countdown readout", () => {
   const state = (firesAt: number | null): PowerWatchState => ({
     action: "suspend",
     phase: "countdown",
     graceMs: GRACE,
+    includeScheduledMessages: false,
     firesAt,
     busy: [],
     error: null,

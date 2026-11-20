@@ -63,6 +63,7 @@ fn push_if_exists(out: &mut Vec<ShellInfo>, id: &str, label: &str, path: &Path, 
     }
 }
 
+#[cfg(windows)]
 fn push_if_in_path(out: &mut Vec<ShellInfo>, id: &str, label: &str, exe: &str, args: &[&str]) {
     if let Some(path) = find_in_path(exe) {
         push_if_exists(out, id, label, &path, args);

@@ -149,6 +149,7 @@ describe("power watch panel", () => {
     expect(html).toContain("Shut down");
     expect(html).toContain("still here when the machine wakes");
     expect(html).toContain("Arm sleep");
+    expect(html).toContain('role="switch" aria-checked="false">Wait for scheduled messages');
     // The one thing a user must know before walking away.
     expect(html).toContain("session only");
   });
@@ -168,6 +169,17 @@ describe("power watch panel", () => {
     expect(html).toContain("Click a row to jump to that pane");
     // Arming is not offered twice.
     expect(html).not.toContain("Arm sleep");
+  });
+
+  test("shows a scheduled message as a reason the watch is waiting", () => {
+    powerWatch.resetForTests({
+      phase: "armed",
+      includeScheduledMessages: true,
+      busy: [{ termId: "t1", label: "Terminal 1", reason: "scheduled-message" }],
+    });
+    const html = renderToStaticMarkup(<PowerWatchTool />);
+    expect(html).toContain('role="switch" aria-checked="true">Wait for scheduled messages');
+    expect(html).toContain('class="power-busy-reason">scheduled</span>');
   });
 
   test("the countdown leads with the time left", () => {
