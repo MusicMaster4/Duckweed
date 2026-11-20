@@ -8143,7 +8143,8 @@ body.is-resizing * {
 
 .agent-provider-icon.is-claude svg,
 .agent-provider-icon.is-grok svg,
-.agent-provider-icon.is-opencode svg {
+.agent-provider-icon.is-opencode svg,
+.agent-provider-icon.is-antigravity svg {
   fill: currentColor;
   stroke: none;
 }

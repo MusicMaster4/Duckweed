@@ -29,7 +29,7 @@ const TAURI_RUNTIME = typeof window !== "undefined" && "__TAURI_INTERNALS__" in 
  * store and its ACP mode has no listing, so there is nothing honest to put in
  * a picker. It stays off this list rather than opening an empty one.
  */
-const RESUMABLE: AgentId[] = ["claude", "codex", "grok", "opencode"];
+const RESUMABLE: AgentId[] = ["claude", "codex", "grok", "opencode", "antigravity"];
 
 export function canResume(agent: AgentId): boolean {
   return RESUMABLE.includes(agent);

@@ -9,6 +9,8 @@ describe("agent authentication", () => {
     expect(nativeAuthCommand("cursor", "login")).toBe("cursor-agent login");
     expect(nativeAuthCommand("grok", "logout")).toBe("grok logout");
     expect(nativeAuthCommand("opencode", "login")).toBe("opencode providers login");
+    expect(nativeAuthCommand("antigravity", "login")).toBe("agy acp --login");
+    expect(nativeAuthCommand("antigravity", "logout")).toBe("agy");
   });
 
   test("recognizes auth failures without swallowing ordinary errors", () => {

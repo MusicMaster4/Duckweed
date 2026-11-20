@@ -178,6 +178,7 @@ function threadAccessParams(mode: AgentAccessMode): Record<string, unknown> {
       };
     case "full-access":
       return { approvalPolicy: "never", sandbox: "danger-full-access" };
+    case "auto":
     case "default":
       return {};
   }
@@ -202,6 +203,7 @@ function turnAccessParams(mode: AgentAccessMode): Record<string, unknown> {
         approvalPolicy: "never",
         sandboxPolicy: { type: "dangerFullAccess" },
       };
+    case "auto":
     case "default":
       return {};
   }

@@ -40,7 +40,7 @@ function cleanModel(launch: AgentLaunch, value: unknown): string | null {
 }
 
 function cleanAccessMode(value: unknown): AgentAccessMode {
-  return value === "read-only" || value === "workspace" || value === "full-access"
+  return value === "read-only" || value === "workspace" || value === "auto" || value === "full-access"
     ? value
     : "default";
 }

@@ -36,7 +36,7 @@ export interface ExperienceProps {
   cwd: string;
 }
 
-export type OfficialVariant = "chatgpt" | "claude" | "grok";
+export type OfficialVariant = "chatgpt" | "claude" | "grok" | "antigravity";
 export type ActivityVariant = OfficialVariant | "cursor" | "opencode";
 
 const TOOL_LABEL: Record<ToolKind, string> = {
@@ -779,7 +779,10 @@ export function StillWorking({
   clusterId: string;
 }) {
   const message = preparingMessageFor(clusterId);
-  const elapsed = useActivityElapsed(clusterId, variant === "chatgpt");
+  const elapsed = useActivityElapsed(
+    clusterId,
+    variant === "chatgpt" || variant === "antigravity",
+  );
   const activeDuration = elapsed === null ? null : `Working · ${elapsed}`;
 
   return (
@@ -1048,7 +1051,7 @@ export const ActivityHistory = memo(function ActivityHistory({
           thoughts={thoughts}
           working={working}
           showLatestFull={showLatestThinking}
-          showElapsed={variant === "chatgpt"}
+          showElapsed={variant === "chatgpt" || variant === "antigravity"}
           clusterId={clusterId}
         />
       )}

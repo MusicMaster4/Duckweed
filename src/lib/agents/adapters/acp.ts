@@ -14,6 +14,7 @@ import { promptTextWithLocalSkills } from "../localSkills";
 import {
   makeChange,
   toolKind,
+  type AgentAccessMode,
   type AgentFileChange,
   type AgentGoal,
   type AgentExtension,
@@ -76,6 +77,72 @@ const ACP_STATUS: Record<string, ToolStatus> = {
   failed: "error",
 };
 
+const EFFORT_ORDER = ["low", "medium", "high", "xhigh", "max"] as const;
+
+function asNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+/** Normalize `/C:/path` Windows URIs that ACP servers like Antigravity emit. */
+function normalizeAcpPath(path: string): string {
+  return path.replace(/^\/([A-Za-z]:\/)/, "$1");
+}
+
+function readCommandInput(input: Record<string, unknown> | null): string | null {
+  if (!input) return null;
+  return asString(input.command) ?? asString(input.CommandLine);
+}
+
+/** Extract per-model efforts from flattened variant ids like `gemini-4-neon-xhigh`. */
+function effortsFromModelVariants(baseId: string, variantIds: readonly string[]): string[] {
+  const prefix = `${baseId.toLowerCase()}-`;
+  const found = new Set<string>();
+  for (const variant of variantIds) {
+    const lower = variant.toLowerCase();
+    if (!lower.startsWith(prefix)) continue;
+    const suffix = lower.slice(prefix.length);
+    if ((EFFORT_ORDER as readonly string[]).includes(suffix)) found.add(suffix);
+  }
+  return EFFORT_ORDER.filter((level) => found.has(level));
+}
+
+function splitAntigravityModelEffort(
+  value: string,
+): { model: string; effort: string } | null {
+  const match = /^(.+)-(low|medium|high|xhigh|max)$/i.exec(value);
+  if (!match) return null;
+  return { model: match[1], effort: match[2].toLowerCase() };
+}
+
+function accessModeFromAcpMode(modeId: string): AgentAccessMode | null {
+  switch (modeId.toLowerCase()) {
+    case "default":
+      return "default";
+    case "plan":
+      return "read-only";
+    case "accept-edits":
+      return "workspace";
+    case "auto":
+      return "auto";
+    default:
+      return null;
+  }
+}
+
+function acpModeFromAccessMode(mode: AgentAccessMode): string {
+  switch (mode) {
+    case "read-only":
+      return "plan";
+    case "workspace":
+      return "accept-edits";
+    case "auto":
+    case "full-access":
+      return "auto";
+    case "default":
+      return "default";
+  }
+}
+
 /** Canonical effort token: Grok catalog rows use `value`, older ACP rows use `id`. */
 function effortToken(entry: Record<string, unknown>): string {
   return asString(entry.value) ?? asString(entry.id) ?? "";
@@ -92,6 +159,12 @@ function isEffortConfigOption(entry: Record<string, unknown>): boolean {
   );
 }
 
+function isModeConfigOption(entry: Record<string, unknown>): boolean {
+  const id = (asString(entry.id) ?? "").toLowerCase();
+  const category = (asString(entry.category) ?? "").toLowerCase();
+  return category === "mode" || id === "mode";
+}
+
 /** Pull display text and diffs out of a tool call's content blocks. */
 function readToolContent(blocks: unknown[]): { text: string; changes: AgentFileChange[] } {
   const lines: string[] = [];
@@ -102,7 +175,11 @@ function readToolContent(blocks: unknown[]): { text: string; changes: AgentFileC
     const type = asString(block.type);
     if (type === "diff") {
       const path = asString(block.path);
-      if (path) changes.push(makeChange(path, asString(block.oldText), asString(block.newText)));
+      if (path) {
+        changes.push(
+          makeChange(normalizeAcpPath(path), asString(block.oldText), asString(block.newText)),
+        );
+      }
       continue;
     }
     // `{ type: "content", content: { type: "text", text } }` is the common
@@ -248,26 +325,34 @@ function isTodoToolTitle(title: string): boolean {
 function readSubagentMeta(
   title: string | null,
   input: Record<string, unknown> | null,
+  toolName: string | null = null,
 ): SubagentMeta | null {
-  if (!input) return null;
-  const prompt = asString(input.prompt)?.trim();
-  const description = asString(input.description)?.trim();
+  if (!input && (!toolName || toolKind(toolName) !== "task")) return null;
+  const prompt = (asString(input?.prompt) ?? asString(input?.Prompt))?.trim();
+  const description = (
+    asString(input?.description) ??
+    asString(input?.Description) ??
+    asString(input?.Role)
+  )?.trim();
   const role =
-    asString(input.subagent_type)?.trim() ||
-    asString(input.agent)?.trim() ||
-    asString(input.agent_name)?.trim() ||
-    asString(input.agentName)?.trim();
+    asString(input?.subagent_type)?.trim() ||
+    asString(input?.TypeName)?.trim() ||
+    asString(input?.Role)?.trim() ||
+    asString(input?.agent)?.trim() ||
+    asString(input?.agent_name)?.trim() ||
+    asString(input?.agentName)?.trim();
   const rawTool =
-    asString(input.tool)?.trim() ||
-    asString(input.tool_name)?.trim() ||
-    asString(input.toolName)?.trim();
+    toolName?.trim() ||
+    asString(input?.tool)?.trim() ||
+    asString(input?.tool_name)?.trim() ||
+    asString(input?.toolName)?.trim();
   const taskShaped =
     (rawTool ? toolKind(rawTool) === "task" : false) ||
     Boolean(role) ||
     Boolean(prompt && description);
   if (!taskShaped) return null;
   const label = description || role || title?.trim() || prompt || "Subagent";
-  const model = asString(input.model)?.trim();
+  const model = (asString(input?.model) ?? asString(input?.Model))?.trim();
   return {
     label: oneLine(label, 80),
     ...(role ? { role } : {}),
@@ -331,18 +416,31 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
   let supportsTerminalClient = false;
   /** Models the agent can switch to, and each one's effort levels. */
   let availableModels: AcpModel[] = [];
+  /** Raw flattened model ids reported by `session.models` (used by Antigravity). */
+  let rawModelVariantIds: string[] = [];
   let currentModelId: string | null = null;
   let currentEffort: string | null = null;
   /**
    * OpenCode advertises effort as a `configOptions` entry (`id: "effort"`,
    * category `thought_level`). Grok 1.0.24+ does the same with
-   * `id: "reasoning_effort"`. When present, model/effort changes go through
+   * `id: "reasoning_effort"`, and Antigravity with `id: "thought_level"` plus
+   * `id: "mode"`. When present, model/effort/mode changes go through
    * `session/set_config_option` so the response can refresh the option list
    * (effort levels depend on model). Older Grok still uses `session/set_mode`.
    */
   let usesConfigOptions = false;
   /** `configId` for the thought-level option, when the agent publishes one. */
   let effortConfigId: string | null = null;
+  /** `configId` for the execution mode option, when the agent publishes one. */
+  let modeConfigId: string | null = null;
+  /**
+   * Antigravity Full access runs ACP in `auto` mode and immediately approves
+   * any remaining `session/request_permission` prompts without asking.
+   */
+  let fullAccessBypass = false;
+  /** Cumulative token usage across turns in this ACP session. */
+  let totalInputTokens = 0;
+  let totalOutputTokens = 0;
   /**
    * Slash commands an agent intercepts can legitimately produce no output
    * (grok's `/context` renders in its TUI only). When a slash turn comes
@@ -551,7 +649,10 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
         };
       })
       .filter((model) => model.id);
-    if (models.length) availableModels = models;
+    if (models.length) {
+      rawModelVariantIds = models.map((model) => model.id);
+      availableModels = models;
+    }
     if (current) currentModelId = current;
     const active = entries.find((model) => asString(model.modelId) === currentModelId);
     const effort = applyEffort ? asString(asRecord(active?._meta)?.reasoningEffort) : null;
@@ -573,6 +674,7 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
   function readConfigOptions(raw: unknown): {
     model?: string;
     effort?: string | null;
+    accessMode?: AgentAccessMode;
     models?: ReturnType<typeof modelsForUi>;
   } {
     const options = asArray(raw)
@@ -585,8 +687,12 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
       (entry) => entry.category === "model" || asString(entry.id) === "model",
     );
     const effortOption = options.find(isEffortConfigOption);
+    const modeOption = options.find(isModeConfigOption);
     if (effortOption) {
       effortConfigId = asString(effortOption.id) ?? effortConfigId ?? "effort";
+    }
+    if (modeOption) {
+      modeConfigId = asString(modeOption.id) ?? modeConfigId ?? "mode";
     }
 
     const efforts = effortOption
@@ -609,10 +715,25 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
         .filter((model) => model.id);
       if (current) currentModelId = current;
       if (listed.length) {
-        if (availableModels.length) {
+        const known = new Map(availableModels.map((model) => [model.id, model]));
+        if (agent === "antigravity" && rawModelVariantIds.length) {
+          // Antigravity publishes flattened `<model>-<effort>` variants in
+          // `session.models` alongside clean base ids in `configOptions`.
+          // Derive each base model's exact effort list upfront so pickers
+          // reflect per-model thinking support before switching.
+          availableModels = listed.map((model) => {
+            const variantEfforts = effortsFromModelVariants(model.id, rawModelVariantIds);
+            const existing = known.get(model.id);
+            const resolvedEfforts = variantEfforts.length
+              ? variantEfforts
+              : existing
+                ? existing.efforts
+                : [];
+            return { ...model, efforts: [...resolvedEfforts] };
+          });
+        } else if (availableModels.length) {
           // Grok already sent per-model effort lists on modelState. Keep those
           // (grok-4.6 has xhigh, grok-4.5 does not) and only refresh names.
-          const known = new Map(availableModels.map((model) => [model.id, model]));
           availableModels = listed.map((model) => {
             const existing = known.get(model.id);
             return existing
@@ -627,10 +748,16 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
           availableModels = listed.map((model) => ({ ...model, efforts: [...efforts] }));
         }
       }
-      if (efforts.length && currentModelId) {
-        availableModels = availableModels.map((model) =>
-          model.id === currentModelId ? { ...model, efforts: [...efforts] } : model,
-        );
+      if (currentModelId) {
+        if (efforts.length) {
+          availableModels = availableModels.map((model) =>
+            model.id === currentModelId ? { ...model, efforts: [...efforts] } : model,
+          );
+        } else if (!effortOption) {
+          availableModels = availableModels.map((model) =>
+            model.id === currentModelId ? { ...model, efforts: [] } : model,
+          );
+        }
       }
     } else if (efforts.length && currentModelId) {
       // Only effort changed; stamp the new list onto the active model.
@@ -647,14 +774,22 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
         effort = value;
       }
     } else if (modelOption) {
-      // Model config refreshed without an effort option — this model has none.
+      // Model config refreshed without an effort option: this model has none.
       currentEffort = null;
       effort = null;
+    }
+
+    let accessMode: AgentAccessMode | undefined;
+    if (agent === "antigravity" && modeOption) {
+      const value = asString(modeOption.currentValue);
+      const mapped = value ? resolveAntigravityAccessMode(value) : null;
+      if (mapped) accessMode = mapped;
     }
 
     return {
       ...(currentModelId ? { model: currentModelId } : {}),
       ...(effort !== undefined ? { effort } : {}),
+      ...(accessMode !== undefined ? { accessMode } : {}),
       ...(availableModels.length ? { models: modelsForUi() } : {}),
     };
   }
@@ -705,6 +840,40 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
     ctx.emit({ type: "session", effort: level });
   }
 
+  function resolveAntigravityAccessMode(modeId: string): AgentAccessMode | null {
+    const mapped = accessModeFromAcpMode(modeId);
+    if (!mapped) return null;
+    if (mapped === "auto" && fullAccessBypass) return "full-access";
+    if (mapped !== "auto") fullAccessBypass = false;
+    return mapped;
+  }
+
+  async function setAccessMode(mode: AgentAccessMode, ctx: AdapterContext): Promise<void> {
+    if (!sessionId) return;
+    const previousBypass = fullAccessBypass;
+    fullAccessBypass = mode === "full-access";
+    const modeId = acpModeFromAccessMode(mode);
+    try {
+      if (usesConfigOptions) {
+        const result = await request(ctx, "session/set_config_option", {
+          sessionId,
+          configId: modeConfigId ?? "mode",
+          value: modeId,
+        });
+        applyConfigResult(result, ctx);
+        if (!result.configOptions) {
+          ctx.emit({ type: "session", accessMode: mode });
+        }
+        return;
+      }
+      await request(ctx, "session/set_mode", { sessionId, modeId });
+      ctx.emit({ type: "session", accessMode: mode });
+    } catch (error) {
+      fullAccessBypass = previousBypass;
+      throw error;
+    }
+  }
+
   /** `initialize` → `session/new` → launch-time model/effort → ready. */
   /** Resolve ACP client-file requests inside the launched workspace only. */
   function resolveClientPath(cwd: string, requested: string): string | null {
@@ -733,8 +902,9 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
     ctx: AdapterContext,
   ): boolean {
     if (method !== "fs/read_text_file" && method !== "fs/write_text_file") return false;
-    // Grok must retain its native filesystem tools, including binary reads.
-    if (agent === "grok") return false;
+    // Grok and Antigravity must retain their native filesystem tools, including
+    // binary reads, artifacts, and skill folders outside the workspace.
+    if (agent === "grok" || agent === "antigravity") return false;
     const requested = asString(params.path);
     const path = requested ? resolveClientPath(ctx.cwd, requested) : null;
     if (!path) {
@@ -790,14 +960,14 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
       const initialized = await request(ctx, "initialize", {
         protocolVersion: PROTOCOL_VERSION,
         clientCapabilities: {
-          // Grok routes read_file through this text-only service when enabled,
-          // losing native image handling, large-file reads, and access to its
-          // own skills and temporary attachments outside the workspace. Keep
-          // both file operations native, under Grok's permission policy. Other
+          // Grok and Antigravity route read_file through this text-only service
+          // when enabled, losing native image handling, large-file reads, and
+          // access to skills and artifacts outside the workspace. Keep both
+          // file operations native under their own permission policies. Other
           // ACP agents retain the workspace-scoped client file service.
           fs: {
-            readTextFile: agent !== "grok" && Boolean(ctx.files),
-            writeTextFile: agent !== "grok" && Boolean(ctx.files),
+            readTextFile: agent !== "grok" && agent !== "antigravity" && Boolean(ctx.files),
+            writeTextFile: agent !== "grok" && agent !== "antigravity" && Boolean(ctx.files),
           },
           terminal: false,
         },
@@ -821,6 +991,7 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
       const meta = asRecord(initialized._meta);
       const identity = readModelState(meta?.modelState);
       const commands = readCommands(meta?.availableCommands);
+      const richNativeAgent = agent === "grok" || agent === "antigravity";
       ctx.emit({
         type: "session",
         ...identity,
@@ -831,21 +1002,21 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
             image: supportsImages || supportsEmbeddedContext,
             file: supportsEmbeddedContext,
             embeddedContext: supportsEmbeddedContext,
-            skill: agent === "grok",
+            skill: richNativeAgent,
             appMention: false,
           },
           interactions: { approvals: true, questions: agent === "grok", forms: false, links: false },
           extensions: {
-            skills: agent === "grok",
+            skills: richNativeAgent,
             apps: false,
-            plugins: agent === "grok",
+            plugins: richNativeAgent,
             mcp: true,
-            hooks: agent === "grok",
-            workflows: agent === "grok",
+            hooks: richNativeAgent,
+            workflows: richNativeAgent,
           },
           runtime: {
-            backgroundTasks: agent === "grok",
-            terminals: agent === "grok" || supportsTerminalClient,
+            backgroundTasks: richNativeAgent,
+            terminals: richNativeAgent || supportsTerminalClient,
             worktrees: agent === "grok",
             checkpointing: agent === "grok",
             nativeFallback: true,
@@ -867,9 +1038,18 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
         ...readModelState(session.models),
         ...readConfigOptions(session.configOptions),
       };
-      ctx.emit({ type: "session", sessionId, ...fromSession });
+      const launchModeOverride =
+        agent === "antigravity" &&
+        ctx.launch.accessMode !== undefined &&
+        ctx.launch.accessMode !== "default";
+      const { accessMode: initialAccessMode, ...sessionWithoutInitialAccess } = fromSession;
+      ctx.emit({
+        type: "session",
+        sessionId,
+        ...(launchModeOverride ? sessionWithoutInitialAccess : fromSession),
+      });
 
-      await applyLaunchSettings(ctx);
+      await applyLaunchSettings(ctx, initialAccessMode);
       ctx.emit({ type: "status", status: "idle" });
     } catch (error) {
       const record = asRecord(error);
@@ -877,10 +1057,35 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
     }
   }
 
-  /** Honor `-m` / `--effort` typed at launch, over the protocol. */
-  async function applyLaunchSettings(ctx: AdapterContext) {
-    if (ctx.launch.model) {
-      const model = ctx.launch.model;
+  /** Honor `-m` / `--effort` / `--mode` typed at launch, over the protocol. */
+  async function applyLaunchSettings(
+    ctx: AdapterContext,
+    fallbackAccessMode?: AgentAccessMode,
+  ) {
+    let requestedModel = ctx.launch.model;
+    let requestedEffort = ctx.launch.effort;
+
+    if (agent === "antigravity" && requestedModel) {
+      const lowered = requestedModel.toLowerCase();
+      const exact = availableModels.find((model) => model.id.toLowerCase() === lowered);
+      if (exact) {
+        requestedModel = exact.id;
+      } else {
+        const split = splitAntigravityModelEffort(requestedModel);
+        if (split) {
+          const base = availableModels.find(
+            (model) => model.id.toLowerCase() === split.model.toLowerCase(),
+          );
+          if (base) {
+            requestedModel = base.id;
+            requestedEffort = requestedEffort ?? split.effort;
+          }
+        }
+      }
+    }
+
+    if (requestedModel) {
+      const model = requestedModel;
       await setModel(model, ctx).catch((error: unknown) => {
         const record = asRecord(error);
         ctx.emit({
@@ -890,8 +1095,8 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
         });
       });
     }
-    if (ctx.launch.effort) {
-      const effort = ctx.launch.effort.toLowerCase();
+    if (requestedEffort) {
+      const effort = requestedEffort.toLowerCase();
       const efforts = availableModels.find((model) => model.id === currentModelId)?.efforts ?? [];
       if (!efforts.length && !usesConfigOptions) {
         ctx.emit({
@@ -915,6 +1120,22 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
           });
         });
       }
+    }
+    if (
+      agent === "antigravity" &&
+      ctx.launch.accessMode &&
+      ctx.launch.accessMode !== "default"
+    ) {
+      const mode = ctx.launch.accessMode;
+      await setAccessMode(mode, ctx).catch((error: unknown) => {
+        const record = asRecord(error);
+        ctx.emit({ type: "session", accessMode: fallbackAccessMode ?? "default" });
+        ctx.emit({
+          type: "notice",
+          tone: "error",
+          text: `Could not set mode "${mode}": ${asString(record?.message) ?? "rejected"}.`,
+        });
+      });
     }
   }
 
@@ -1005,27 +1226,30 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
         if (!callId) return;
         beginToolContentPhase(callId, ctx);
         turnHadContent = true;
-        const title = asString(update.title);
+        const rawTitle = asString(update.title);
+        const title = rawTitle ? rawTitle.replace(/^File \/([A-Za-z]:\/)/, "File $1") : null;
+        const rawToolName = asString(update.name);
         if (title) toolTitles.set(callId, title);
         const rawInput = asRecord(update.rawInput);
-        const command = asString(rawInput?.command);
+        const command = readCommandInput(rawInput);
         const status = asString(update.status);
         const { text, changes } = readToolContent(asArray(update.content));
-        const name = title ?? toolTitles.get(callId) ?? "tool";
+        const name = title ?? toolTitles.get(callId) ?? rawToolName ?? "tool";
+        const kindName = rawToolName ?? name;
         const acpKind = asString(update.kind);
         const inputTodoSteps = readTodoSteps(rawInput);
         const outputTodoSteps = text ? readTodoSteps(text) : null;
         const todoSteps = inputTodoSteps ?? outputTodoSteps;
         const isTodo =
           todoCalls.has(callId) ||
-          isTodoToolTitle(name) ||
+          isTodoToolTitle(kindName) ||
           (rawInput !== null && Array.isArray(rawInput.todos));
         if (isTodo) {
           todoCalls.add(callId);
           if (todoSteps) ctx.emit({ type: "plan", planType: "tasks", steps: todoSteps });
           return;
         }
-        const taskMeta = readSubagentMeta(title, rawInput);
+        const taskMeta = readSubagentMeta(title, rawInput, rawToolName);
         if (taskMeta) taskCalls.add(callId);
         const isTask = taskCalls.has(callId);
         const launched = isTask && /Async agent launched successfully/i.test(text);
@@ -1045,11 +1269,11 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
           // A `tool_call_update` carries only what changed. Re-deriving the
           // family from a frame that omits `kind` would downgrade a known
           // tool to "other" halfway through the call.
-          ...(title ? { name: oneLine(name, 40) } : {}),
+          ...(title ? { name: oneLine(name, 40) } : rawToolName ? { name: oneLine(rawToolName, 40) } : {}),
           ...(isTask
             ? { tool: "task" as const }
-            : acpKind
-              ? { tool: toolKind(name, acpKind) }
+            : acpKind || rawToolName
+              ? { tool: toolKind(kindName, acpKind) }
               : {}),
           ...(title ? { title: oneLine(title) } : {}),
           ...(status && ACP_STATUS[status]
@@ -1128,11 +1352,36 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
       }
       case "available_commands_update": {
         const commands = readCommands(update.availableCommands);
-        if (commands.length) ctx.emit({ type: "session", commands });
+        if (commands.length) {
+          ctx.emit({ type: "session", commands });
+          ctx.emit({
+            type: "extensions",
+            extensions: extensions.map((extension) => ({ ...extension })),
+            loading: false,
+            error: null,
+          });
+        }
         return;
       }
-      case "current_mode_update":
+      case "current_mode_update": {
+        if (agent === "antigravity") {
+          const modeId = asString(update.currentModeId);
+          const accessMode = modeId ? resolveAntigravityAccessMode(modeId) : null;
+          if (accessMode) ctx.emit({ type: "session", accessMode });
+        }
         return;
+      }
+      case "usage_update": {
+        const used = asNumber(update.used);
+        const size = asNumber(update.size);
+        if (used !== null && size !== null && size > 0 && used >= 0) {
+          ctx.emit({
+            type: "usage",
+            usage: { contextUsed: Math.min(1, Math.max(0, used / size)) },
+          });
+        }
+        return;
+      }
       case "model_changed": {
         const model = asString(update.model_id) ?? asString(update.modelId);
         const effort =
@@ -1168,6 +1417,26 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
     params: Record<string, unknown>,
     ctx: AdapterContext,
   ) {
+    if (agent === "antigravity" && fullAccessBypass) {
+      const rawOptions = asArray(params.options)
+        .map((raw) => asRecord(raw))
+        .filter((option): option is Record<string, unknown> => option !== null)
+        .filter((option) => Boolean(asString(option.optionId)));
+      const allowOption =
+        rawOptions.find((option) => asString(option.kind) === "allow_once") ??
+        rawOptions.find((option) => asString(option.kind) === "allow_always");
+      const optionId =
+        asString(allowOption?.optionId) ?? (rawOptions.length === 0 ? "allow" : null);
+      if (optionId) {
+        ctx.send({
+          jsonrpc: "2.0",
+          id,
+          result: { outcome: { outcome: "selected", optionId } },
+        });
+        return;
+      }
+    }
+
     const toolCall = asRecord(params.toolCall);
     const title = asString(toolCall?.title) ?? "The agent wants to act";
     const rawInput = asRecord(toolCall?.rawInput);
@@ -1201,7 +1470,7 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
         id: permissionId,
         title: oneLine(title),
         detail: null,
-        command: asString(rawInput?.command),
+        command: readCommandInput(rawInput),
         changes,
         options: options.length
           ? options
@@ -1279,6 +1548,15 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
     );
     if (partial.length === 1) return partial[0];
     if (partial.length > 1 || suffix.length > 1) return "ambiguous";
+    if (agent === "antigravity") {
+      const split = splitAntigravityModelEffort(arg);
+      if (split) {
+        const base = availableModels.find(
+          (model) => model.id.toLowerCase() === split.model.toLowerCase(),
+        );
+        if (base) return base;
+      }
+    }
     return null;
   }
 
@@ -1600,6 +1878,20 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
         prompt: promptContent(prompt),
       })
         .then((result) => {
+          const usage = asRecord(result.usage);
+          const input = asNumber(usage?.inputTokens);
+          const output = asNumber(usage?.outputTokens);
+          if (input !== null || output !== null) {
+            if (input !== null && input > 0) totalInputTokens += input;
+            if (output !== null && output > 0) totalOutputTokens += output;
+            ctx.emit({
+              type: "usage",
+              usage: {
+                inputTokens: totalInputTokens,
+                outputTokens: totalOutputTokens,
+              },
+            });
+          }
           const stop = asString(result.stopReason);
           promptRequestSettled = true;
           if (stop === "refusal") {
@@ -1644,6 +1936,16 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
 
     ...(agent === "grok" ? { steer: steerTurn } : {}),
 
+    ...(agent === "antigravity"
+      ? {
+          configureAccess: async (mode: AgentAccessMode, ctx: AdapterContext) => {
+            if (!sessionId) return false;
+            await setAccessMode(mode, ctx);
+            return true;
+          },
+        }
+      : {}),
+
     command: handleCommand,
 
     configure: async (kind, value, ctx) => {
@@ -1677,6 +1979,8 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
      */
     resume: (id, ctx) => {
       if (!canLoadSession) return false;
+      totalInputTokens = 0;
+      totalOutputTokens = 0;
       currentGoal = null;
       goalBeforeCommand = null;
       goalResponsePending = false;

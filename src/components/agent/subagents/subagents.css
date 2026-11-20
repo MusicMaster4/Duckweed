@@ -18,6 +18,10 @@
   --agent-sub-accent: #d7a85b;
 }
 
+.agent-sub--antigravity {
+  --agent-sub-accent: #58c7d9;
+}
+
 .agent-sub-board {
   --agent-sub-accent: var(--agent-accent);
   width: min(100%, 840px);

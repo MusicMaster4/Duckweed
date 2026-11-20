@@ -1820,4 +1820,365 @@ describe("acp adapter", () => {
     expect(h.state().items.at(-1)).toMatchObject({ kind: "notice", tone: "error", text: "no such session" });
     expect(h.state().status).toBe("idle");
   });
+
+  test("preserves Antigravity native filesystem tools and derives per-model efforts", async () => {
+    const h = harness({ agent: "antigravity", program: "agy" });
+    const calls: string[] = [];
+    h.ctx.files = {
+      readText: async (path) => {
+        calls.push(path);
+        return { content: "", binary: false, tooLarge: false };
+      },
+      writeText: async (path) => {
+        calls.push(path);
+      },
+    };
+    await h.handshake(
+      {
+        agentCapabilities: {
+          loadSession: true,
+          promptCapabilities: { image: true, audio: false, embeddedContext: true },
+        },
+      },
+      {
+        models: {
+          currentModelId: "gemini-4-neon-high",
+          availableModels: [
+            { modelId: "gemini-4-neon-high", name: "Gemini 4 Neon (High)" },
+            { modelId: "gemini-4-neon-xhigh", name: "Gemini 4 Neon (XHigh)" },
+            { modelId: "gemini-4-neon-medium", name: "Gemini 4 Neon (Medium)" },
+            { modelId: "gemini-4-neon-low", name: "Gemini 4 Neon (Low)" },
+            { modelId: "gemini-3.8-flash-high", name: "Gemini 3.8 Flash (High)" },
+            { modelId: "gemini-3.8-flash-low", name: "Gemini 3.8 Flash (Low)" },
+            { modelId: "gpt-oss-120b-medium", name: "GPT-OSS 120B (Medium)" },
+          ],
+        },
+        configOptions: [
+          {
+            id: "model",
+            name: "Model",
+            category: "model",
+            type: "select",
+            currentValue: "gemini-4-neon",
+            options: [
+              { value: "gemini-4-neon", name: "Gemini 4 Neon" },
+              { value: "gemini-3.8-flash", name: "Gemini 3.8 Flash" },
+              { value: "gpt-oss-120b-medium", name: "GPT-OSS 120B (Medium)" },
+            ],
+          },
+          {
+            id: "thought_level",
+            name: "Thinking Level",
+            category: "thought_level",
+            type: "select",
+            currentValue: "high",
+            options: [
+              { value: "low", name: "Low" },
+              { value: "medium", name: "Medium" },
+              { value: "high", name: "High" },
+              { value: "xhigh", name: "Extra" },
+            ],
+          },
+          {
+            id: "mode",
+            name: "Mode",
+            category: "mode",
+            type: "select",
+            currentValue: "default",
+            options: [
+              { value: "default", name: "Default" },
+              { value: "accept-edits", name: "Accept edits" },
+              { value: "auto", name: "Auto" },
+              { value: "plan", name: "Plan" },
+            ],
+          },
+        ],
+      },
+    );
+
+    expect(h.sent[0]).toMatchObject({
+      params: { clientCapabilities: { fs: { readTextFile: false, writeTextFile: false } } },
+    });
+    h.feed({ jsonrpc: "2.0", id: 91, method: "fs/read_text_file", params: { path: "package.json" } });
+    expect(h.sent.at(-1)).toMatchObject({ id: 91, error: { code: -32601 } });
+    expect(calls).toEqual([]);
+
+    const state = h.state();
+    expect(state.model).toBe("gemini-4-neon");
+    expect(state.effort).toBe("high");
+    expect(state.accessMode).toBe("default");
+    expect(state.models).toEqual([
+      { id: "gemini-4-neon", label: "Gemini 4 Neon", efforts: ["low", "medium", "high", "xhigh"] },
+      { id: "gemini-3.8-flash", label: "Gemini 3.8 Flash", efforts: ["low", "high"] },
+      { id: "gpt-oss-120b-medium", label: "GPT-OSS 120B (Medium)", efforts: [] },
+    ]);
+  });
+
+  test("applies Antigravity access modes, usage updates, commands, diffs, and subagents", async () => {
+    const h = harness({
+      agent: "antigravity",
+      program: "agy",
+      model: "gemini-4-neon-xhigh",
+      accessMode: "read-only",
+    });
+    h.adapter.start(h.ctx);
+    await Promise.resolve();
+    h.feed({ jsonrpc: "2.0", id: 1, result: { protocolVersion: 1, agentCapabilities: { loadSession: true } } });
+    await Promise.resolve();
+    await Promise.resolve();
+    h.feed({
+      jsonrpc: "2.0",
+      id: 2,
+      result: {
+        sessionId: "agy-1",
+        configOptions: [
+          {
+            id: "model",
+            category: "model",
+            currentValue: "gemini-4-neon",
+            options: [{ value: "gemini-4-neon", name: "Gemini 4 Neon" }],
+          },
+          {
+            id: "thought_level",
+            category: "thought_level",
+            currentValue: "high",
+            options: [
+              { value: "low", name: "Low" },
+              { value: "high", name: "High" },
+              { value: "xhigh", name: "Extra" },
+            ],
+          },
+          {
+            id: "mode",
+            category: "mode",
+            currentValue: "default",
+            options: [
+              { value: "default", name: "Default" },
+              { value: "plan", name: "Plan" },
+              { value: "accept-edits", name: "Accept edits" },
+              { value: "auto", name: "Auto" },
+            ],
+          },
+        ],
+      },
+    });
+    const flush = async () => {
+      for (let i = 0; i < 4; i++) await Promise.resolve();
+    };
+    await flush();
+
+    // Launch settings: flattened model+effort splits into model + thought_level + mode.
+    expect(h.sent[2]).toMatchObject({
+      method: "session/set_config_option",
+      params: { sessionId: "agy-1", configId: "model", value: "gemini-4-neon" },
+    });
+    h.feed({ jsonrpc: "2.0", id: 3, result: {} });
+    await flush();
+    expect(h.sent[3]).toMatchObject({
+      method: "session/set_config_option",
+      params: { sessionId: "agy-1", configId: "thought_level", value: "xhigh" },
+    });
+    h.feed({ jsonrpc: "2.0", id: 4, result: {} });
+    await flush();
+    expect(h.sent[4]).toMatchObject({
+      method: "session/set_config_option",
+      params: { sessionId: "agy-1", configId: "mode", value: "plan" },
+    });
+    h.feed({ jsonrpc: "2.0", id: 5, result: {} });
+    await flush();
+    expect(h.state().status).toBe("idle");
+    expect(h.state().accessMode).toBe("read-only");
+
+    // In-session mode switch via configureAccess.
+    const switched = h.adapter.configureAccess?.("workspace", h.ctx);
+    expect(h.sent.at(-1)).toMatchObject({
+      method: "session/set_config_option",
+      params: { sessionId: "agy-1", configId: "mode", value: "accept-edits" },
+    });
+    h.feed({ jsonrpc: "2.0", id: 6, result: {} });
+    expect(await switched).toBe(true);
+    expect(h.state().accessMode).toBe("workspace");
+
+    // current_mode_update + available_commands_update + usage_update.
+    h.update({ sessionUpdate: "current_mode_update", currentModeId: "auto" });
+    h.update({
+      sessionUpdate: "available_commands_update",
+      availableCommands: [{ name: "boost", description: "Invoke Boost orchestrator" }],
+    });
+    h.update({ sessionUpdate: "usage_update", used: 524288, size: 1048576 });
+
+    // Tool calls: CommandLine, normalized Windows diff path, and invoke_subagent.
+    h.adapter.prompt({ text: "check it", images: [] }, h.ctx);
+    const promptReqId = (h.sent.at(-1) as { id: number }).id;
+    h.update({
+      sessionUpdate: "tool_call",
+      toolCallId: "cmd-1",
+      name: "run_command",
+      kind: "execute",
+      title: "bun test",
+      status: "completed",
+      rawInput: { CommandLine: "bun test" },
+    });
+    h.update({
+      sessionUpdate: "tool_call_update",
+      toolCallId: "edit-1",
+      name: "edit_file",
+      kind: "edit",
+      title: "File /H:/project/demo.ts",
+      status: "completed",
+      content: [{ type: "diff", path: "/H:/project/demo.ts", oldText: "a", newText: "b" }],
+    });
+    h.update({
+      sessionUpdate: "tool_call",
+      toolCallId: "sub-1",
+      name: "invoke_subagent",
+      kind: "other",
+      title: "Run invoke_subagent",
+      status: "in_progress",
+      rawInput: {
+        Role: "Codebase Researcher",
+        TypeName: "research",
+        Prompt: "Inspect adapters",
+        Model: "flash",
+      },
+    });
+    h.feed({
+      jsonrpc: "2.0",
+      id: promptReqId,
+      result: { stopReason: "end_turn", usage: { inputTokens: 1200, outputTokens: 300 } },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const state = h.state();
+    expect(state.accessMode).toBe("auto");
+    expect(state.usage).toEqual({
+      inputTokens: 1200,
+      outputTokens: 300,
+      costUsd: null,
+      contextUsed: 0.5,
+    });
+    expect(state.extensions).toEqual([
+      expect.objectContaining({ name: "/boost", kind: "workflow", source: "antigravity" }),
+    ]);
+    const tools = state.items.filter((item) => item.kind === "tool");
+    expect(tools[0]).toMatchObject({ tool: "execute", command: "bun test" });
+    expect(tools[1]).toMatchObject({
+      tool: "edit",
+      title: "File H:/project/demo.ts",
+      changes: [expect.objectContaining({ path: "H:/project/demo.ts" })],
+    });
+    expect(tools[2]).toMatchObject({
+      tool: "task",
+      subagent: {
+        label: "Codebase Researcher",
+        role: "research",
+        prompt: "Inspect adapters",
+        model: "flash",
+      },
+    });
+  });
+
+  test("supports Antigravity Full access with automatic permission approval and reversible switching", async () => {
+    const h = harness({
+      agent: "antigravity",
+      program: "agy",
+      accessMode: "full-access",
+    });
+    const flush = async () => {
+      for (let i = 0; i < 4; i++) await Promise.resolve();
+    };
+    const modeConfig = (currentValue: string) => [
+      {
+        id: "mode",
+        category: "mode",
+        currentValue,
+        options: [
+          { value: "default", name: "Default" },
+          { value: "plan", name: "Plan" },
+          { value: "accept-edits", name: "Accept edits" },
+          { value: "auto", name: "Auto" },
+        ],
+      },
+    ];
+
+    h.adapter.start(h.ctx);
+    await flush();
+    h.feed({ jsonrpc: "2.0", id: 1, result: { protocolVersion: 1 } });
+    await flush();
+    h.feed({
+      jsonrpc: "2.0",
+      id: 2,
+      result: { sessionId: "agy-fa", configOptions: modeConfig("default") },
+    });
+    await flush();
+
+    // Launch full-access applies ACP `auto` mode and stays on `full-access`.
+    expect(h.sent[2]).toMatchObject({
+      method: "session/set_config_option",
+      params: { sessionId: "agy-fa", configId: "mode", value: "auto" },
+    });
+    h.feed({ jsonrpc: "2.0", id: 3, result: { configOptions: modeConfig("auto") } });
+    await flush();
+    expect(h.state().accessMode).toBe("full-access");
+
+    // Server echoing `current_mode_update: auto` preserves `full-access`.
+    h.update({ sessionUpdate: "current_mode_update", currentModeId: "auto" });
+    expect(h.state().accessMode).toBe("full-access");
+
+    // Remaining permission prompts are approved automatically without blocking the UI.
+    h.feed({
+      jsonrpc: "2.0",
+      id: "perm-99",
+      method: "session/request_permission",
+      params: {
+        toolCall: { title: "Run destructive command", rawInput: { CommandLine: "rm -rf dist" } },
+        options: [
+          { optionId: "reject", name: "Reject", kind: "reject_once" },
+          { optionId: "allow_once", name: "Allow once", kind: "allow_once" },
+        ],
+      },
+    });
+    expect(h.sent.at(-1)).toEqual({
+      jsonrpc: "2.0",
+      id: "perm-99",
+      result: { outcome: { outcome: "selected", optionId: "allow_once" } },
+    });
+    expect(h.state().permission).toBeNull();
+
+    // Switching down to Auto disables full-access auto-approval.
+    const toAuto = h.adapter.configureAccess?.("auto", h.ctx);
+    const autoReqId = (h.sent.at(-1) as { id: number }).id;
+    h.feed({ jsonrpc: "2.0", id: autoReqId, result: { configOptions: modeConfig("auto") } });
+    expect(await toAuto).toBe(true);
+    expect(h.state().accessMode).toBe("auto");
+
+    h.feed({
+      jsonrpc: "2.0",
+      id: "perm-100",
+      method: "session/request_permission",
+      params: {
+        toolCall: { title: "Run destructive command", rawInput: { CommandLine: "rm -rf dist" } },
+        options: [
+          { optionId: "allow_once", name: "Allow once", kind: "allow_once" },
+          { optionId: "reject", name: "Reject", kind: "reject_once" },
+        ],
+      },
+    });
+    expect(h.state().permission).toMatchObject({
+      id: "perm-perm-100",
+      command: "rm -rf dist",
+    });
+
+    // Switching back to Full access re-enables auto-approval.
+    const toFull = h.adapter.configureAccess?.("full-access", h.ctx);
+    const fullReqId = (h.sent.at(-1) as { id: number }).id;
+    h.feed({ jsonrpc: "2.0", id: fullReqId, result: { configOptions: modeConfig("auto") } });
+    expect(await toFull).toBe(true);
+    expect(h.state().accessMode).toBe("full-access");
+
+    // Switching to Plan via server update clears full-access cleanly.
+    h.update({ sessionUpdate: "current_mode_update", currentModeId: "plan" });
+    expect(h.state().accessMode).toBe("read-only");
+  });
 });

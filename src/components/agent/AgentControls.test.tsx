@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { emptyUsage, type AgentSessionState } from "../../lib/agents/types";
+import { accessChoicesFor, emptyUsage, type AgentSessionState } from "../../lib/agents/types";
 import { fallbackModels } from "../../lib/agents/slashCatalog";
 import { AgentControls } from "./AgentControls";
 
@@ -48,6 +48,46 @@ describe("agent access control", () => {
     );
 
     expect(html).toBe("");
+  });
+
+  test("exposes Antigravity's native ACP mode picker and per-model effort visibility", () => {
+    const agy = session("antigravity");
+    agy.label = "Antigravity";
+    agy.mark = "AG";
+    agy.model = "gemini-4-neon";
+    agy.effort = "xhigh";
+    agy.accessMode = "workspace";
+    agy.models = [
+      { id: "gemini-4-neon", label: "Gemini 4 Neon", efforts: ["low", "medium", "high", "xhigh"] },
+      { id: "gpt-oss-120b-medium", label: "GPT-OSS 120B (Medium)", efforts: [] },
+    ];
+
+    const html = renderToStaticMarkup(
+      <AgentControls session={agy} onSelect={() => {}} />,
+    );
+    expect(html).toContain("Gemini 4 Neon");
+    expect(html).toContain("XHigh");
+    expect(html).toContain("Accept edits");
+    expect(accessChoicesFor("antigravity").map((choice) => choice.label)).toEqual([
+      "Agent default",
+      "Plan",
+      "Accept edits",
+      "Auto",
+      "Full access",
+    ]);
+
+    agy.accessMode = "full-access";
+    const fullAccessHtml = renderToStaticMarkup(
+      <AgentControls session={agy} onSelect={() => {}} />,
+    );
+    expect(fullAccessHtml).toContain("Full access");
+
+    agy.model = "gpt-oss-120b-medium";
+    const noEffortHtml = renderToStaticMarkup(
+      <AgentControls session={agy} onSelect={() => {}} />,
+    );
+    expect(noEffortHtml).toContain("GPT-OSS 120B (Medium)");
+    expect(noEffortHtml).not.toContain("is-effort");
   });
 });
 

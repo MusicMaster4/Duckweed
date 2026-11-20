@@ -1335,6 +1335,147 @@ fn opencode_sessions(home: &Path, cwd: &Path) -> Vec<AgentSessionSummary> {
     found
 }
 
+// ---------------------------------------------------------------- Antigravity
+
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(hex) = std::str::from_utf8(&bytes[i + 1..i + 3]) {
+                if let Ok(decoded) = u8::from_str_radix(hex, 16) {
+                    out.push(decoded);
+                    i += 3;
+                    continue;
+                }
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Convert a `file:///H:/path` or `file:///Users/me/My%20App` URI into a local path.
+fn file_uri_to_path(uri: &str) -> String {
+    let trimmed = uri.trim();
+    let body = if trimmed.len() >= 7 && trimmed[..7].eq_ignore_ascii_case("file://") {
+        let rest = &trimmed[7..];
+        let without_host = rest
+            .strip_prefix("localhost/")
+            .map(|tail| format!("/{tail}"))
+            .unwrap_or_else(|| rest.to_string());
+        percent_decode(&without_host)
+    } else {
+        trimmed.to_string()
+    };
+    let bytes = body.as_bytes();
+    if bytes.len() >= 3 && bytes[0] == b'/' && bytes[1].is_ascii_alphabetic() && bytes[2] == b':' {
+        body[1..].to_string()
+    } else {
+        body
+    }
+}
+
+/// Antigravity writes Go timestamps (`2026-11-20 16:45:43.021+00:00`) or RFC 3339.
+/// Reject zero-date sentinels (`0001-01-01...`) whose epoch millis are non-positive.
+fn parse_antigravity_timestamp(value: &str) -> i64 {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return 0;
+    }
+    let direct = parse_timestamp(trimmed);
+    if direct > 0 {
+        return direct;
+    }
+    if let Some((date, rest)) = trimmed.split_once(' ') {
+        let rfc = format!("{date}T{rest}");
+        let parsed = parse_timestamp(&rfc);
+        if parsed > 0 {
+            return parsed;
+        }
+    }
+    0
+}
+
+/// `~/.gemini/antigravity-cli/conversation_summaries.db`.
+///
+/// Antigravity stores every conversation's title, workspace URIs, step count,
+/// and parent relationship in this SQLite index. Filtering out zero-step rows
+/// and nested subagent conversations matches what `agy` itself can resume.
+fn antigravity_sessions(home: &Path, cwd: &Path) -> Vec<AgentSessionSummary> {
+    use rusqlite::{Connection, OpenFlags};
+
+    let database = home.join(".gemini/antigravity-cli/conversation_summaries.db");
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let Ok(connection) = Connection::open_with_flags(&database, flags) else {
+        return Vec::new();
+    };
+    let Ok(mut statement) = connection.prepare(
+        "SELECT conversation_id, title, preview, step_count, last_modified_time, \
+                workspace_uris, last_user_input_time \
+         FROM conversation_summaries \
+         WHERE COALESCE(parent_conversation_id, '') = '' \
+           AND COALESCE(nesting_depth, 0) = 0 \
+           AND step_count > 0 \
+         ORDER BY last_modified_time DESC",
+    ) else {
+        return Vec::new();
+    };
+    let Ok(mut rows) = statement.query([]) else {
+        return Vec::new();
+    };
+    let cwd_text = cwd.to_string_lossy().to_string();
+    let db_path = database.to_string_lossy().to_string();
+    let mut found = Vec::new();
+
+    while let Ok(Some(row)) = rows.next() {
+        let Ok(id) = row.get::<_, String>(0) else {
+            continue;
+        };
+        if id.trim().is_empty() {
+            continue;
+        }
+        let workspace_uris = row.get::<_, String>(5).unwrap_or_default();
+        let matches_cwd = serde_json::from_str::<Vec<String>>(&workspace_uris)
+            .map(|uris| {
+                uris.iter()
+                    .any(|uri| same_path(&file_uri_to_path(uri), &cwd_text))
+            })
+            .unwrap_or_else(|_| same_path(&file_uri_to_path(&workspace_uris), &cwd_text));
+        if !matches_cwd {
+            continue;
+        }
+        let title_raw = row.get::<_, String>(1).unwrap_or_default();
+        let preview_raw = row.get::<_, String>(2).unwrap_or_default();
+        let title = [title_raw, preview_raw]
+            .into_iter()
+            .find(|value| !value.trim().is_empty())
+            .map(|value| clean_title(&value))
+            .unwrap_or_else(|| "Untitled session".to_string());
+        let step_count = row.get::<_, i64>(3).unwrap_or(0).max(0) as u32;
+        let updated_raw = row.get::<_, String>(4).unwrap_or_default();
+        let input_raw = row.get::<_, String>(6).unwrap_or_default();
+        let updated_at = parse_antigravity_timestamp(&updated_raw);
+        let created_at = parse_antigravity_timestamp(&input_raw);
+
+        found.push(AgentSessionSummary {
+            id,
+            title,
+            updated_at: if updated_at > 0 { updated_at } else { created_at },
+            created_at,
+            message_count: step_count,
+            model: String::new(),
+            path: db_path.clone(),
+        });
+        if found.len() >= MAX_RESULTS {
+            break;
+        }
+    }
+    found
+}
+
 // --------------------------------------------------------------------- Cursor
 
 /// Cursor Agent keeps its chats in a SQLite store whose schema it does not
@@ -1355,6 +1496,7 @@ pub fn list(agent: &str, cwd: &str) -> Result<Vec<AgentSessionSummary>, String> 
         "codex" => codex_sessions(&home, path),
         "grok" => grok_sessions(&home, path),
         "opencode" => opencode_sessions(&home, path),
+        "antigravity" => antigravity_sessions(&home, path),
         "cursor" => cursor_sessions(&home, path),
         other => return Err(format!("unknown agent `{other}`")),
     };
@@ -2015,6 +2157,110 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].id, "ses_mine");
         assert_eq!(found[0].updated_at, 1770727895431);
+    }
+
+    #[test]
+    fn antigravity_listing_reads_workspace_uris_and_excludes_subagents() {
+        use rusqlite::{params, Connection};
+
+        let home = temp_dir("antigravity");
+        let cwd = Path::new(r"H:\Python\My Project");
+        let database = home.join(".gemini/antigravity-cli/conversation_summaries.db");
+        fs::create_dir_all(database.parent().unwrap()).unwrap();
+        let connection = Connection::open(&database).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE conversation_summaries (
+                    conversation_id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL DEFAULT '',
+                    preview TEXT NOT NULL DEFAULT '',
+                    step_count INTEGER NOT NULL DEFAULT 0,
+                    last_modified_time DATETIME NOT NULL,
+                    workspace_uris TEXT NOT NULL,
+                    parent_conversation_id TEXT NOT NULL DEFAULT '',
+                    nesting_depth INTEGER NOT NULL DEFAULT 0,
+                    last_user_input_time DATETIME NOT NULL
+                );",
+            )
+            .unwrap();
+        for (id, title, preview, steps, modified, uris, parent, depth, input_time) in [
+            (
+                "root-1",
+                "Antigravity ACP Integration",
+                "Integrate agy",
+                12_i64,
+                "2026-11-20 16:45:43.021+00:00",
+                r#"["file:///H:/Python/My%20Project"]"#,
+                "",
+                0_i64,
+                "2026-11-20 16:41:14+00:00",
+            ),
+            (
+                "root-preview-only",
+                "",
+                "Fallback preview prompt",
+                3_i64,
+                "2026-11-20 15:00:00+00:00",
+                r#"["file:///H:/Python/My%20Project"]"#,
+                "",
+                0_i64,
+                "2026-11-20 14:59:00+00:00",
+            ),
+            (
+                "empty-session",
+                "",
+                "",
+                0_i64,
+                "0001-01-01 00:00:00+00:00",
+                r#"["file:///H:/Python/My%20Project"]"#,
+                "",
+                0_i64,
+                "0001-01-01 00:00:00+00:00",
+            ),
+            (
+                "child-subagent",
+                "Research child",
+                "",
+                8_i64,
+                "2026-11-20 16:44:00+00:00",
+                r#"["file:///H:/Python/My%20Project"]"#,
+                "root-1",
+                1_i64,
+                "2026-11-20 16:43:00+00:00",
+            ),
+            (
+                "other-workspace",
+                "Other project",
+                "",
+                5_i64,
+                "2026-11-20 17:00:00+00:00",
+                r#"["file:///C:/Elsewhere"]"#,
+                "",
+                0_i64,
+                "2026-11-20 17:00:00+00:00",
+            ),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO conversation_summaries (
+                        conversation_id, title, preview, step_count, last_modified_time,
+                        workspace_uris, parent_conversation_id, nesting_depth, last_user_input_time
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    params![id, title, preview, steps, modified, uris, parent, depth, input_time],
+                )
+                .unwrap();
+        }
+        drop(connection);
+
+        let found = antigravity_sessions(&home, cwd);
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0].id, "root-1");
+        assert_eq!(found[0].title, "Antigravity ACP Integration");
+        assert_eq!(found[0].message_count, 12);
+        assert!(found[0].updated_at > 0);
+        assert!(found[0].created_at > 0);
+        assert_eq!(found[1].id, "root-preview-only");
+        assert_eq!(found[1].title, "Fallback preview prompt");
     }
 
     #[test]

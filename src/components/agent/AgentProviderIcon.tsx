@@ -46,6 +46,16 @@ export function AgentProviderIcon({ agent, program, className = "" }: Props) {
     );
   }
 
+  if (agent === "antigravity") {
+    return (
+      <span className={classes} aria-hidden="true">
+        <svg viewBox="0 0 24 24">
+          <path d="M12 2.8c-1.2 0-2.2.65-2.8 1.9L3.2 18.9c-.5 1.15.35 2.3 1.6 2.3.95 0 1.75-.6 2.25-1.55C8.5 16.85 10.1 12.6 12 12.6s3.5 4.25 4.95 7.05c.5.95 1.3 1.55 2.25 1.55 1.25 0 2.1-1.15 1.6-2.3L14.8 4.7c-.6-1.25-1.6-1.9-2.8-1.9Z" />
+        </svg>
+      </span>
+    );
+  }
+
   if (agent === "cursor") {
     return (
       <span className={classes} aria-hidden="true">

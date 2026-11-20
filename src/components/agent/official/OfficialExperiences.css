@@ -96,6 +96,11 @@
   background: rgba(255, 255, 255, 0.065);
 }
 
+.official-user--antigravity {
+  border-radius: 14px 14px 5px 14px;
+  background: rgba(255, 255, 255, 0.065);
+}
+
 .official-answer {
   position: relative;
   align-self: stretch;
@@ -114,6 +119,11 @@
 
 .official-answer--grok {
   font-size: 13px;
+}
+
+.official-answer--antigravity {
+  font-size: 13px;
+  line-height: 1.62;
 }
 
 .official-answer.is-interim-update {
@@ -480,6 +490,10 @@
   background: rgba(255, 255, 255, 0.09);
 }
 
+.official-user--antigravity {
+  background: rgba(255, 255, 255, 0.085);
+}
+
 .official-markdown h1,
 .official-markdown h2,
 .official-markdown h3,
@@ -510,6 +524,10 @@
 
 .official-plan--grok {
   --plan-color: #7ea6ff;
+}
+
+.official-plan--antigravity {
+  --plan-color: #58c7d9;
 }
 
 .official-plan-head {
@@ -722,6 +740,10 @@
 
 .official-tool--grok {
   --tool-color: #7ea6ff;
+}
+
+.official-tool--antigravity {
+  --tool-color: #58c7d9;
 }
 
 .official-tool.is-error {
@@ -1065,6 +1087,10 @@
 
 .agent-activity-cluster[data-variant="opencode"] {
   --activity-accent: #7be05a;
+}
+
+.agent-activity-cluster[data-variant="antigravity"] {
+  --activity-accent: #58c7d9;
 }
 
 .agent-activity-history {

@@ -71,6 +71,9 @@ const EXECUTABLES: Record<string, AgentId> = {
   "grok-build": "grok",
   opencode: "opencode",
   "opencode-ai": "opencode",
+  agy: "antigravity",
+  antigravity: "antigravity",
+  "antigravity-cli": "antigravity",
 };
 
 /** Direct executable names worth probing before a command is submitted. */
@@ -93,6 +96,7 @@ const PREFIXES: [RegExp, AgentId][] = [
   [/^cursor-agent-/, "cursor"],
   [/^grok-/, "grok"],
   [/^opencode-/, "opencode"],
+  [/^(agy|antigravity)-/, "antigravity"],
 ];
 
 /**
@@ -181,6 +185,9 @@ const VALUE_FLAGS = new Set([
   "--settings",
   "--mcp-config",
   "--session-id",
+  "--conversation",
+  "--mode",
+  "--log-file",
   "--resume",
   "-s",
   "--session",
@@ -234,7 +241,24 @@ function takesValue(agent: AgentId, flag: string): boolean {
   const lower = flag.toLowerCase();
   if (lower === "-c") return agent === "codex";
   if (lower === "--config") return agent === "codex";
+  if (lower === "--sandbox") return agent !== "antigravity";
   return VALUE_FLAGS.has(lower);
+}
+
+/** Map Antigravity CLI `--mode` flags onto Duckweed's coarse access modes. */
+function antigravityAccessMode(value: string): AgentAccessMode | null {
+  switch (value.trim().toLowerCase()) {
+    case "default":
+      return "default";
+    case "plan":
+      return "read-only";
+    case "accept-edits":
+      return "workspace";
+    case "auto":
+      return "auto";
+    default:
+      return null;
+  }
 }
 
 function isContinue(agent: AgentId, flag: string): boolean {
@@ -318,6 +342,7 @@ export function parseAgentLaunch(command: string): AgentLaunch | null {
   let prompt: string | null = null;
   let model: string | null = null;
   let effort: string | null = null;
+  let accessMode: AgentAccessMode | undefined;
   let resume = false;
   let resumeId: string | null = null;
   const wrapperArgs: string[] = [];
@@ -349,6 +374,17 @@ export function parseAgentLaunch(command: string): AgentLaunch | null {
           effort = word.slice(equals + 1);
           consumed = true;
         }
+        if (agent === "antigravity" && flag === "--conversation") {
+          resumeId = word.slice(equals + 1) || null;
+          consumed = true;
+        }
+        if (agent === "antigravity" && flag === "--mode") {
+          const mapped = antigravityAccessMode(word.slice(equals + 1));
+          if (mapped) {
+            accessMode = mapped;
+            consumed = true;
+          }
+        }
         if (agent === "codex" && (flag === "-c" || flag === "--config")) {
           const config = readCodexConfig(word.slice(equals + 1));
           model = config.model ?? model;
@@ -360,6 +396,10 @@ export function parseAgentLaunch(command: string): AgentLaunch | null {
       }
       if (isContinue(agent, word)) {
         resume = true;
+        continue;
+      }
+      if (agent === "antigravity" && lower === "--dangerously-skip-permissions") {
+        accessMode = "full-access";
         continue;
       }
       if (takesValue(agent, word)) {
@@ -375,6 +415,17 @@ export function parseAgentLaunch(command: string): AgentLaunch | null {
         if (isEffortFlag(lower)) {
           effort = hasValue ? value : null;
           consumed = true;
+        }
+        if (hasValue && agent === "antigravity" && lower === "--conversation") {
+          resumeId = value;
+          consumed = true;
+        }
+        if (hasValue && agent === "antigravity" && lower === "--mode") {
+          const mapped = antigravityAccessMode(value);
+          if (mapped) {
+            accessMode = mapped;
+            consumed = true;
+          }
         }
         if (hasValue && agent === "codex" && (lower === "-c" || lower === "--config")) {
           const config = readCodexConfig(value);
@@ -425,6 +476,7 @@ export function parseAgentLaunch(command: string): AgentLaunch | null {
     prompt,
     model,
     effort,
+    ...(accessMode !== undefined ? { accessMode } : {}),
     resume,
     resumeId,
   };

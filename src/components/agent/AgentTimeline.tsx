@@ -1,5 +1,6 @@
 import { AgentMarkdownWorkspace } from "./AgentMarkdownAssets";
 import type { AgentSessionState } from "../../lib/agents/types";
+import { AntigravityExperience } from "./official/AntigravityExperience";
 import { ChatGPTExperience } from "./official/ChatGPTExperience";
 import { ClaudeExperience } from "./official/ClaudeExperience";
 import { GrokExperience } from "./official/GrokExperience";
@@ -37,5 +38,7 @@ function ProviderTimeline(props: AgentTimelineProps) {
       return <CursorExperience session={props.session} items={props.items} />;
     case "opencode":
       return <OpenCodeExperience session={props.session} items={props.items} />;
+    case "antigravity":
+      return <AntigravityExperience {...props} />;
   }
 }

@@ -36,6 +36,7 @@ const PROVIDERS: Array<{
   { id: "grok", label: "Grok Build", mark: "GR", accent: "#7ea6ff", model: "Grok 4.6" },
   { id: "cursor", label: "Cursor Agent", mark: "CU", accent: "#d4d4d4", model: "Composer" },
   { id: "opencode", label: "OpenCode", mark: "OC", accent: "#7be05a", model: "Default" },
+  { id: "antigravity", label: "Antigravity", mark: "AG", accent: "#58c7d9", model: "Gemini 4 Neon" },
 ];
 
 function previewItems(): AgentItem[] {

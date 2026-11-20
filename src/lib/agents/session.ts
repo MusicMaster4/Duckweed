@@ -620,6 +620,8 @@ function nativeResumeCommand(agent: AgentId, program: string, sessionId: string 
       return `${program} resume${quoted}`;
     case "opencode":
       return `${program} --session${quoted}`;
+    case "antigravity":
+      return `${program} --conversation${quoted}`;
     case "claude":
     case "cursor":
     case "grok":
@@ -2129,7 +2131,7 @@ export function configure(
     }
     const context = contextWithoutUserEcho(session);
     const mode = value.trim() as AgentAccessMode;
-    if (!["default", "read-only", "workspace", "full-access"].includes(mode)) return;
+    if (!["default", "read-only", "workspace", "auto", "full-access"].includes(mode)) return;
     const configured = session.adapter.configureAccess?.(mode, context);
     if (configured === undefined || configured === false) {
       emit(session, {

@@ -11,6 +11,7 @@ import { AgentMarkdownWorkspace } from "../AgentMarkdownAssets";
 import { AgentProviderIcon } from "../AgentProviderIcon";
 import { CursorExperience } from "../provider/CursorExperience";
 import { OpenCodeExperience } from "../provider/OpenCodeExperience";
+import { AntigravityExperience } from "./AntigravityExperience";
 import { ChatGPTExperience } from "./ChatGPTExperience";
 import { ClaudeExperience } from "./ClaudeExperience";
 import { GrokDotMatrix, GrokExperience } from "./GrokExperience";
@@ -44,7 +45,9 @@ function activitySession(agent: AgentId, items: AgentItem[]): AgentSessionState 
             ? "Grok Build"
             : agent === "cursor"
               ? "Cursor Agent"
-              : "OpenCode",
+              : agent === "antigravity"
+                ? "Antigravity"
+                : "OpenCode",
     mark: agent.slice(0, 2).toUpperCase(),
     accent: "#7ea6ff",
     status: "working",
@@ -93,6 +96,8 @@ function renderAgentActivity(
       return renderToStaticMarkup(<CursorExperience session={session} items={items} />);
     case "opencode":
       return renderToStaticMarkup(<OpenCodeExperience session={session} items={items} />);
+    case "antigravity":
+      return renderToStaticMarkup(<AntigravityExperience {...props} />);
   }
 }
 
@@ -1410,5 +1415,38 @@ describe("activity group projection reuse", () => {
     expect(shifted[0]).not.toBe(refreshed[0]);
     expect(shifted[0].firstIndex).toBe(1);
     expect(activityGroups([thought])[0]).toEqual(unanswered);
+  });
+
+  test("renders the Antigravity experience and icon cleanly", () => {
+    const iconHtml = renderToStaticMarkup(<AgentProviderIcon agent="antigravity" program="agy" />);
+    expect(iconHtml).toContain("is-antigravity");
+    expect(iconHtml).toContain("<path");
+
+    const html = renderAgentActivity(
+      "antigravity",
+      [
+        { kind: "user", id: "u1", at: 1, text: "Check package.json" },
+        { kind: "thinking", id: "r1", at: 2, text: "Reading package manifest", streaming: false },
+        {
+          kind: "tool",
+          id: "t1",
+          at: 3,
+          callId: "c1",
+          name: "read_file",
+          tool: "read",
+          title: "File package.json",
+          status: "done",
+          command: null,
+          output: "",
+          changes: [],
+        },
+        { kind: "assistant", id: "a1", at: 4, text: "The package is duckweed.", streaming: false },
+      ],
+      "idle",
+    );
+    expect(html).toContain("antigravity-experience");
+    expect(html).toContain('data-variant="antigravity"');
+    expect(html).toContain("official-answer-divider");
+    expect(html).toContain("The package is duckweed.");
   });
 });

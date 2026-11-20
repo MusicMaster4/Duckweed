@@ -15,6 +15,8 @@ export function nativeAuthCommand(agent: AgentId, action: AgentAuthAction): stri
       return `grok ${action}`;
     case "opencode":
       return `opencode providers ${action}`;
+    case "antigravity":
+      return action === "login" ? "agy acp --login" : "agy";
   }
 }
 

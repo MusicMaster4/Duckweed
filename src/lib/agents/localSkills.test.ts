@@ -49,6 +49,37 @@ describe("local agent skills", () => {
     expect(skills.every((skill) => skill.local && skill.path?.endsWith("SKILL.md"))).toBe(true);
   });
 
+  test("discovers Antigravity workspace and global config skills", async () => {
+    const directories = new Map<string, DirEntry[]>([
+      ["C:/Users/me/.gemini/config/skills", [entry("C:/Users/me/.gemini/config/skills/global-one", "global-one", true)]],
+      ["C:/Users/me/.gemini/config/skills/global-one", [entry("C:/Users/me/.gemini/config/skills/global-one/SKILL.md", "SKILL.md", false)]],
+      ["H:/repo/.agent/skills", [entry("H:/repo/.agent/skills/local-one", "local-one", true)]],
+      ["H:/repo/.agent/skills/local-one", [entry("H:/repo/.agent/skills/local-one/SKILL.md", "SKILL.md", false)]],
+    ]);
+    const files = new Map<string, string>([
+      ["C:/Users/me/.gemini/config/skills/global-one/SKILL.md", "---\nname: global-one\ndescription: Global skill\n---\n"],
+      ["H:/repo/.agent/skills/local-one/SKILL.md", "---\nname: local-one\ndescription: Project skill\n---\n"],
+    ]);
+    const skills = await discoverLocalSkills("antigravity", "H:/repo", {
+      homeDir: async () => "C:/Users/me",
+      listDir: async (path) => {
+        const value = directories.get(path);
+        if (!value) throw new Error("missing");
+        return value;
+      },
+      readFile: async (path) =>
+        ({
+          path,
+          content: files.get(path) ?? "",
+          binary: false,
+          too_large: false,
+          size: files.get(path)?.length ?? 0,
+        }) satisfies FileContent,
+    });
+
+    expect(skills.map((skill) => skill.name)).toEqual(["global-one", "local-one"]);
+  });
+
   test("turns a selected local skill into provider-readable instructions", () => {
     expect(
       promptTextWithLocalSkills({
