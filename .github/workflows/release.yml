@@ -296,6 +296,7 @@ jobs:
       - name: Build native bundles and signed updater artifact
         timeout-minutes: 75
         env:
+          PLATFORM: ${{ matrix.platform }}
           DUCKWEED_RELAY_URL: ${{ vars.DUCKWEED_RELAY_URL }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
@@ -311,7 +312,23 @@ jobs:
             unset APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID || true
             echo "Skipping Apple notarization (credentials incomplete)."
           fi
-          bun run tauri build --bundles "${{ matrix.bundles }}" ${{ matrix.target_args }}
+          if [ "$PLATFORM" = macos ]; then
+            bun run tauri build --no-bundle ${{ matrix.target_args }}
+            # Disk image operations can fail intermittently on hosted macOS runners.
+            # Retry packaging with the compiled binary and log the DMG tool output.
+            for attempt in 1 2 3; do
+              if bun run tauri bundle --verbose --bundles "${{ matrix.bundles }}" ${{ matrix.target_args }}; then
+                break
+              fi
+              if [ "$attempt" -eq 3 ]; then
+                exit 1
+              fi
+              echo "::warning::macOS packaging attempt $attempt failed. Retrying in 15 seconds."
+              sleep 15
+            done
+          else
+            bun run tauri build --bundles "${{ matrix.bundles }}" ${{ matrix.target_args }}
+          fi
 
       - name: Stage release assets
         env:
@@ -341,7 +358,7 @@ jobs:
               stage_files "$BUNDLE_DIR/appimage"
               ;;
             macos)
-              stage_files "$BUNDLE_DIR/dmg"
+              cp "$BUNDLE_DIR/dmg/Duckweed_${VERSION}_universal.dmg" release-assets/
               UPDATER="$(find "$BUNDLE_DIR/macos" -maxdepth 1 -type f -name '*.app.tar.gz' -print -quit)"
               if [ -z "$UPDATER" ]; then
                 echo "No .app.tar.gz updater artifact under $BUNDLE_DIR/macos" >&2
