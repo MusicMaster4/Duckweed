@@ -614,7 +614,13 @@ export function AgentSurface({
    */
   const focusComposer = (event: React.MouseEvent) => {
     if (ended || session.permission || resumeQuery !== null) return;
-    if ((event.target as HTMLElement).closest("button, a, input, textarea, pre, code")) return;
+    if (
+      (event.target as HTMLElement).closest(
+        "button, a, input, textarea, pre, code, .agent-side-question-dock",
+      )
+    ) {
+      return;
+    }
     if (window.getSelection()?.toString()) return;
     composerRef.current?.focus();
   };
@@ -629,12 +635,16 @@ export function AgentSurface({
     });
   };
 
+  const hasSideConversation = session.status !== "starting" && Boolean(session.sideConversation);
+
   return (
     <div
       ref={surfaceRef}
       className={`agent-surface is-${session.status}${
         subagentNavigatorOpen ? " has-subagent-navigator" : ""
-      }${multiPane ? " is-subagent-multi-pane" : ""}`}
+      }${multiPane ? " is-subagent-multi-pane" : ""}${
+        hasSideConversation ? " has-side-conversation" : ""
+      }`}
       style={{ ["--agent-accent" as string]: session.accent }}
       data-agent={session.agent}
       data-program={session.program}
@@ -841,14 +851,16 @@ export function AgentSurface({
         />
       )}
 
-      <div
-        className={`agent-scroll${multiPane ? " is-subagent-workspace" : ""}${
-          session.permission && session.permission.kind !== "question"
-            ? " has-permission"
-            : ""
-        }`}
-        ref={scrollRef}
-      >
+      <div className="agent-body">
+        <div className="agent-main">
+          <div
+            className={`agent-scroll${multiPane ? " is-subagent-workspace" : ""}${
+              session.permission && session.permission.kind !== "question"
+                ? " has-permission"
+                : ""
+            }`}
+            ref={scrollRef}
+          >
         <SubagentUiProvider
           agent={session.agent}
           now={clockNow}
@@ -1004,6 +1016,54 @@ export function AgentSurface({
           ))}
       </div>
 
+          {session.status !== "starting" && (
+            <div className="agent-composer-shell">
+              {showJumpToBottom && (
+                <button
+                  type="button"
+                  className="agent-jump-bottom"
+                  onClick={jumpToBottom}
+                  title="Jump to bottom"
+                  aria-label="Jump to bottom"
+                >
+                  <svg viewBox="0 0 16 16" aria-hidden="true">
+                    <path d="M3.5 6 8 10.5 12.5 6" />
+                  </svg>
+                  <span>Jump to bottom</span>
+                </button>
+              )}
+              <AgentComposer
+                session={session}
+                active={active && !session.permission && resumeQuery === null}
+                inputRef={composerRef}
+                onSubmit={submit}
+                onInterrupt={() => agents.interrupt(termId)}
+                target={
+                  composerSubagent
+                    ? {
+                        kind: "subagent",
+                        label: composerSubagent.label,
+                        canMessage: canMessageFocused,
+                      }
+                    : undefined
+                }
+              />
+            </div>
+          )}
+        </div>
+
+        {hasSideConversation && session.sideConversation && (
+          <div className="agent-side-question-dock">
+            <AgentSideChat
+              conversation={session.sideConversation}
+              onDismiss={dismissSideQuestion}
+              onSubmit={(text) => agents.submitSide(termId, text)}
+              onLeave={() => composerRef.current?.focus()}
+            />
+          </div>
+        )}
+      </div>
+
       {subagentNavigatorOpen && fleet.length > 0 && (
         <div className="agent-sub-navigator-shell" id={subagentNavigatorId}>
           <SubagentNavigator
@@ -1031,52 +1091,6 @@ export function AgentSurface({
         <div className="agent-exit-hint is-surface" role="status" aria-live="polite">
           <kbd>Ctrl+C</kbd>
           <span>again to close</span>
-        </div>
-      )}
-
-      {session.status !== "starting" && (
-        <div className="agent-composer-shell">
-          {showJumpToBottom && (
-            <button
-              type="button"
-              className="agent-jump-bottom"
-              onClick={jumpToBottom}
-              title="Jump to bottom"
-              aria-label="Jump to bottom"
-            >
-              <svg viewBox="0 0 16 16" aria-hidden="true">
-                <path d="M3.5 6 8 10.5 12.5 6" />
-              </svg>
-              <span>Jump to bottom</span>
-            </button>
-          )}
-          <AgentComposer
-            session={session}
-            active={active && !session.permission && resumeQuery === null}
-            inputRef={composerRef}
-            onSubmit={submit}
-            onInterrupt={() => agents.interrupt(termId)}
-            target={
-              composerSubagent
-                ? {
-                    kind: "subagent",
-                    label: composerSubagent.label,
-                    canMessage: canMessageFocused,
-                  }
-                : undefined
-            }
-          />
-        </div>
-      )}
-
-      {session.status !== "starting" && session.sideConversation && (
-        <div className="agent-side-question-dock">
-          <AgentSideChat
-            conversation={session.sideConversation}
-            onDismiss={dismissSideQuestion}
-            onSubmit={(text) => agents.submitSide(termId, text)}
-            onLeave={() => composerRef.current?.focus()}
-          />
         </div>
       )}
 
