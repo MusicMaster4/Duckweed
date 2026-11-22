@@ -653,7 +653,11 @@ export function createClaudeAdapter(): AgentAdapter {
   let goalBeforeCommand: AgentGoal | null = null;
   let goalResponsePending = false;
 
-  const blockId = (index: number) => `m${messageSeq}-b${index}`;
+  // A relaunched CLI keeps the transcript but starts these counters from zero.
+  // An attached stream still uses the existing block IDs from its checkpoint.
+  const messageIdPrefix = crypto.randomUUID();
+  const blockId = (index: number) => `${messageIdPrefix}-m${messageSeq}-b${index}`;
+  const nextSettledMessageId = () => `${messageIdPrefix}-settled-${++settledMessageSeq}`;
   const ROOT_TASK_SCOPE = "";
 
   function tasksFor(scope: string): Map<string, TrackedTask> {
@@ -1111,8 +1115,7 @@ export function createClaudeAdapter(): AgentAdapter {
         goalResponsePending = false;
       }
     }
-    const fallbackMessageId =
-      asString(message.id) ?? `settled-${++settledMessageSeq}`;
+    const fallbackMessageId = asString(message.id) ?? nextSettledMessageId();
     // The settled message can omit thinking blocks that were present in the
     // raw stream. Match text by its ordinal among text blocks, not by the
     // absolute content index, so the authoritative copy updates the streamed
@@ -1173,8 +1176,7 @@ export function createClaudeAdapter(): AgentAdapter {
     parentCallId: string,
     ctx: AdapterContext,
   ) {
-    const messageId =
-      asString(message.id) ?? `child-${parentCallId}-${++settledMessageSeq}`;
+    const messageId = asString(message.id) ?? nextSettledMessageId();
     for (const [index, raw] of asArray(message.content).entries()) {
       const block = asRecord(raw);
       if (!block) continue;

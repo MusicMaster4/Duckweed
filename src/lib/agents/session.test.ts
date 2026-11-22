@@ -760,6 +760,7 @@ describe("Custom agent UI sessions", () => {
     native(5, { type: "control_request", request_id: "pending-native-permission", request: {
       subtype: "can_use_tool", tool_name: "Bash", input: { command: "echo recovery" },
     } });
+    const streamedId = session.get(termId)?.items.find((item) => item.kind === "assistant")?.id;
     session.setDraft(termId, "Keep my draft");
     session.setDraftImages(termId, [image]);
     session.flushRecovery();
@@ -785,7 +786,7 @@ describe("Custom agent UI sessions", () => {
       expect(sent).toEqual([]);
       expect(session.get(termId)).toMatchObject({ sessionId: "same-live-claude", status: "waiting", error: null });
       expect(session.get(termId)?.items.filter((item) => item.kind === "assistant")).toEqual([
-        expect.objectContaining({ text: "Before crash after crash", id: "m1-b0" }),
+        expect.objectContaining({ text: "Before crash after crash", id: streamedId }),
       ]);
       expect(session.getDraft(termId)).toBe("Keep my draft");
       expect(session.getDraftImages(termId)).toEqual([image]);
@@ -802,15 +803,27 @@ describe("Custom agent UI sessions", () => {
     } finally { attachOverride = null; }
   });
 
-  test("app restart starts restored Claude on a fresh channel after the declined attach ended its own", async () => {
+  test("app restart resumes Claude on a fresh channel without overwriting old responses", async () => {
     const termId = "app-restart-fresh-claude-channel";
     const launch: AgentLaunch = { ...grokLaunch, agent: "claude", program: "claude" };
     await session.start(termId, launch, "H:/project");
-    frameSink?.({ kind: "sequenced", sequence: 1,
-      frame: { kind: "stdout", line: JSON.stringify({ type: "system", subtype: "init", session_id: "before-restart" }) } });
+    const native = (sequence: number, frame: unknown) => frameSink?.({
+      kind: "sequenced", sequence, frame: { kind: "stdout", line: JSON.stringify(frame) },
+    });
+    const reply = (text: string, messageId: string) => {
+      native(2, { type: "stream_event", event: { type: "message_start" } });
+      native(3, { type: "stream_event", event: { type: "content_block_start", index: 0, content_block: { type: "text" } } });
+      native(4, { type: "stream_event", event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text } } });
+      native(5, { type: "assistant", message: { id: messageId, content: [{ type: "text", text }] } });
+      native(6, { type: "result", subtype: "success", is_error: false, result: text });
+    };
+    native(1, { type: "system", subtype: "init", session_id: "resumed-claude" });
+    session.submit(termId, "First question");
+    await flush();
+    reply("First answer", "message-before-restart");
     session.flushRecovery();
     const saved = JSON.parse(JSON.stringify(workspaceRecovery.get(termId)?.agent));
-    expect(saved.runtime.sequence).toBe(1);
+    expect(saved.runtime.sequence).toBe(6);
     session.stop(termId);
     await flush();
     attachedChannels.length = 0;
@@ -823,9 +836,18 @@ describe("Custom agent UI sessions", () => {
       await session.start(termId, { ...saved.launch, resumeId: saved.sessionId }, saved.cwd, saved);
       expect(attachedChannels).toHaveLength(1);
       expect(startedChannel).not.toBe(attachedChannels[0]);
-      frameSink?.({ kind: "sequenced", sequence: 1,
-        frame: { kind: "stdout", line: JSON.stringify({ type: "system", subtype: "init", session_id: "after-restart" }) } });
-      expect(session.get(termId)?.sessionId).toBe("after-restart");
+      native(1, { type: "system", subtype: "init", session_id: saved.sessionId });
+      session.submit(termId, "Second question");
+      await flush();
+      reply("Second answer", "message-after-restart");
+      expect(session.get(termId)).toMatchObject({ sessionId: "resumed-claude", status: "idle" });
+      expect(session.get(termId)?.items.filter((item) => item.kind === "user" || item.kind === "assistant")
+        .map((item) => [item.kind, item.text])).toEqual([
+        ["user", "First question"],
+        ["assistant", "First answer"],
+        ["user", "Second question"],
+        ["assistant", "Second answer"],
+      ]);
     } finally {
       attachOverride = null;
       session.stop(termId);

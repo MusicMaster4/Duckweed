@@ -298,6 +298,7 @@ describe("claude adapter", () => {
       },
     });
 
+    const streamedId = h.state().items[0]?.id;
     h.feed({
       type: "assistant",
       message: {
@@ -314,7 +315,7 @@ describe("claude adapter", () => {
     expect(h.state().items).toEqual([
       expect.objectContaining({
         kind: "assistant",
-        id: "m1-b0",
+        id: streamedId,
         text: "The partial answer is replaced immediately by the complete response.",
         streaming: false,
       }),
@@ -335,6 +336,7 @@ describe("claude adapter", () => {
       h.feed(frame);
     }
 
+    const streamedId = h.state().items.find((item) => item.kind === "assistant")?.id;
     h.feed({
       type: "assistant",
       message: {
@@ -346,7 +348,7 @@ describe("claude adapter", () => {
     const answers = h.state().items.filter((item) => item.kind === "assistant");
     expect(answers).toEqual([
       expect.objectContaining({
-        id: "m1-b1",
+        id: streamedId,
         text: "The complete answer.",
         streaming: false,
       }),
@@ -378,6 +380,7 @@ describe("claude adapter", () => {
     for (const frame of streamBlock(0, { type: "thinking" }, [
       { type: "thinking_delta", thinking: "Checking" },
     ])) h.feed(frame);
+    const streamedId = h.state().items[0]?.id;
     h.feed({
       type: "assistant",
       message: {
@@ -388,7 +391,7 @@ describe("claude adapter", () => {
 
     expect(h.state().items).toEqual([
       expect.objectContaining({
-        kind: "thinking", id: "m1-b0", text: "Checking the affected paths.", streaming: false,
+        kind: "thinking", id: streamedId, text: "Checking the affected paths.", streaming: false,
       }),
     ]);
   });
