@@ -19,6 +19,14 @@ export type AgentCommandResult =
   /** Send the slash text through the provider's ordinary prompt path. */
   | "prompt";
 
+export interface AntigravitySubagentUpdate {
+  callId: string;
+  threadId: string;
+  status: "pending" | "running" | "done" | "error";
+  toolName: string | null;
+  output: string | null;
+}
+
 /** What an adapter is given to do its job. */
 export interface AdapterContext {
   /** Folder the agent was launched in. */
@@ -43,6 +51,8 @@ export interface AdapterContext {
   interruptFallback?: () => Promise<void>;
   /** Reload an idle local service after credentials changed through a CLI command. */
   syncAccount?: (signedIn: boolean) => Promise<"unchanged" | "deferred" | "restarted">;
+  /** Read child status associated with the given Antigravity ACP tool calls. */
+  readAntigravitySubagents?: (sessionId: string, callIds: string[]) => Promise<AntigravitySubagentUpdate[]>;
   /**
    * Workspace-scoped file service advertised to protocols such as ACP.
    * Implementations must enforce canonical containment after following

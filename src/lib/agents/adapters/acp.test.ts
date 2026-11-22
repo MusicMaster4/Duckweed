@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import type { AdapterContext } from "../adapter";
 import { applyEvent, type AgentEvent } from "../events";
 import type { AgentLaunch } from "../launch";
+import { subagentsForTurn } from "../subagents";
 import { emptyUsage, type AgentSessionState } from "../types";
 import { createAcpAdapter } from "./acp";
 
@@ -41,8 +42,8 @@ function harness(overrides: Partial<AgentLaunch> = {}) {
     emit: (event) => events.push(event),
   };
   const feed = (frame: unknown) => adapter.receive(JSON.stringify(frame), ctx);
-  const update = (payload: unknown) =>
-    feed({ jsonrpc: "2.0", method: "session/update", params: { sessionId: "s1", update: payload } });
+  const update = (payload: unknown, sessionId = "s1") =>
+    feed({ jsonrpc: "2.0", method: "session/update", params: { sessionId, update: payload } });
   const state = () =>
     events.reduce<AgentSessionState>(applyEvent, {
       termId: "t1",
@@ -1999,18 +2000,19 @@ describe("acp adapter", () => {
     expect(await switched).toBe(true);
     expect(h.state().accessMode).toBe("workspace");
 
+    const update = (payload: unknown) => h.update(payload, "agy-1");
     // current_mode_update + available_commands_update + usage_update.
-    h.update({ sessionUpdate: "current_mode_update", currentModeId: "auto" });
-    h.update({
+    update({ sessionUpdate: "current_mode_update", currentModeId: "auto" });
+    update({
       sessionUpdate: "available_commands_update",
       availableCommands: [{ name: "boost", description: "Invoke Boost orchestrator" }],
     });
-    h.update({ sessionUpdate: "usage_update", used: 524288, size: 1048576 });
+    update({ sessionUpdate: "usage_update", used: 524288, size: 1048576 });
 
     // Tool calls: CommandLine, normalized Windows diff path, and invoke_subagent.
     h.adapter.prompt({ text: "check it", images: [] }, h.ctx);
     const promptReqId = (h.sent.at(-1) as { id: number }).id;
-    h.update({
+    update({
       sessionUpdate: "tool_call",
       toolCallId: "cmd-1",
       name: "run_command",
@@ -2019,7 +2021,7 @@ describe("acp adapter", () => {
       status: "completed",
       rawInput: { CommandLine: "bun test" },
     });
-    h.update({
+    update({
       sessionUpdate: "tool_call_update",
       toolCallId: "edit-1",
       name: "edit_file",
@@ -2028,7 +2030,7 @@ describe("acp adapter", () => {
       status: "completed",
       content: [{ type: "diff", path: "/H:/project/demo.ts", oldText: "a", newText: "b" }],
     });
-    h.update({
+    update({
       sessionUpdate: "tool_call",
       toolCallId: "sub-1",
       name: "invoke_subagent",
@@ -2079,6 +2081,95 @@ describe("acp adapter", () => {
     });
   });
 
+  test("tracks Antigravity workers after payload-free launch acknowledgements and parent turn end", async () => {
+    const h = harness({ agent: "antigravity", program: "agy" });
+    let phase: "running" | "done" = "running";
+    const readers: Array<{ sessionId: string; calls: string[] }> = [];
+    h.ctx.readAntigravitySubagents = async (sessionId, calls) => {
+      readers.push({ sessionId, calls });
+      return [
+        { callId: "first", threadId: "child-1", status: phase, toolName: "view_file", output: phase === "done" ? "270" : null },
+        { callId: "second", threadId: "child-2", status: "done", toolName: null, output: "843" },
+      ];
+    };
+    await h.handshake();
+    h.adapter.prompt({ text: "Delegate two checks", images: [] }, h.ctx);
+    const request = h.sent.at(-1) as { id: number };
+
+    try {
+      for (const callId of ["first", "second"]) {
+        h.update({
+          sessionUpdate: "tool_call",
+          toolCallId: callId,
+          name: "invoke_subagent",
+          kind: "other",
+          title: "Run invoke_subagent",
+          status: "in_progress",
+          rawInput: { Role: callId, TypeName: "research", Prompt: "Check this" },
+        });
+        h.update({ sessionUpdate: "tool_call_update", toolCallId: callId, status: "completed" });
+      }
+      expect(subagentsForTurn(h.state().items).map(({ status }) => status)).toEqual(["running", "running"]);
+
+      h.feed({ jsonrpc: "2.0", id: request.id, result: { stopReason: "end_turn" } });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(readers).toEqual([{ sessionId: "s1", calls: ["first", "second"] }]);
+      expect(h.state().status).toBe("idle");
+      expect(subagentsForTurn(h.state().items)).toMatchObject([
+        { label: "first", status: "running", threadId: "child-1", activity: "Using view file" },
+        { label: "second", status: "done", threadId: "child-2", output: "843" },
+      ]);
+
+      // A repeated launch acknowledgement cannot overwrite the child's result.
+      h.update({ sessionUpdate: "tool_call_update", toolCallId: "second", status: "completed" });
+      phase = "done";
+      await new Promise((resolve) => setTimeout(resolve, 800));
+      expect(readers.at(-1)?.calls).toEqual(["first"]);
+      expect(subagentsForTurn(h.state().items)).toMatchObject([
+        { label: "first", status: "done", output: "270" },
+        { label: "second", status: "done", output: "843" },
+      ]);
+    } finally {
+      h.adapter.dispose?.(h.ctx);
+    }
+  });
+
+  test("keeps Antigravity callbacks scoped to the session being replayed", async () => {
+    const h = harness({ agent: "antigravity", program: "agy" });
+    await h.handshake({ agentCapabilities: { loadSession: true } });
+    const resumed = h.adapter.resume?.("stored", h.ctx);
+    const request = h.sent.at(-1) as { id: number };
+    const invoke = {
+      sessionUpdate: "tool_call",
+      name: "invoke_subagent",
+      kind: "other",
+      status: "completed",
+    };
+    h.update({ ...invoke, toolCallId: "old-live" });
+    h.update({ ...invoke, toolCallId: "stored-child" }, "stored");
+    h.feed({ jsonrpc: "2.0", id: request.id, result: {} });
+    expect(await resumed).toBe(true);
+
+    h.update({ ...invoke, toolCallId: "late-live" });
+    expect(subagentsForTurn(h.state().items).map(({ callId }) => callId)).toEqual(["stored-child"]);
+  });
+
+  test("does not claim Antigravity child completion when native status is unavailable", () => {
+    const h = harness({ agent: "antigravity", program: "agy" });
+    h.update({
+      sessionUpdate: "tool_call",
+      toolCallId: "replayed",
+      name: "invoke_subagent",
+      kind: "other",
+      title: "Run invoke_subagent",
+      status: "completed",
+      rawInput: { Role: "Researcher", Prompt: "Check this" },
+    });
+    expect(subagentsForTurn(h.state().items)).toMatchObject([
+      { label: "Researcher", status: "unknown", output: "" },
+    ]);
+  });
+
   test("supports Antigravity Full access with automatic permission approval and reversible switching", async () => {
     const h = harness({
       agent: "antigravity",
@@ -2123,7 +2214,7 @@ describe("acp adapter", () => {
     expect(h.state().accessMode).toBe("full-access");
 
     // Server echoing `current_mode_update: auto` preserves `full-access`.
-    h.update({ sessionUpdate: "current_mode_update", currentModeId: "auto" });
+    h.update({ sessionUpdate: "current_mode_update", currentModeId: "auto" }, "agy-fa");
     expect(h.state().accessMode).toBe("full-access");
 
     // Remaining permission prompts are approved automatically without blocking the UI.
@@ -2178,7 +2269,7 @@ describe("acp adapter", () => {
     expect(h.state().accessMode).toBe("full-access");
 
     // Switching to Plan via server update clears full-access cleanly.
-    h.update({ sessionUpdate: "current_mode_update", currentModeId: "plan" });
+    h.update({ sessionUpdate: "current_mode_update", currentModeId: "plan" }, "agy-fa");
     expect(h.state().accessMode).toBe("read-only");
   });
 });

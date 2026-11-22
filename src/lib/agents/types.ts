@@ -373,6 +373,8 @@ export interface SubagentMeta {
   parentCallId?: string;
   /** Model selected for this child. */
   model?: string;
+  /** The call launched a child whose current status could not be read. */
+  statusUnavailable?: boolean;
   /** Current one-line work update. */
   activity?: string;
   /** Original delegated prompt. */

@@ -123,6 +123,7 @@ describe("subagentsForTurn", () => {
 
     expect(runningSubagentCount(subagents)).toBe(2);
     expect(subagentStatusCounts(subagents)).toEqual({
+      unknown: 0,
       running: 1,
       pending: 1,
       done: 1,

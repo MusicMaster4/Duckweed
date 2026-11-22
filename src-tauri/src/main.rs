@@ -5,6 +5,7 @@ mod agent_activity;
 mod agent_documents;
 mod agent_proc;
 mod agent_sessions;
+mod antigravity_subagents;
 mod automatic_approval;
 mod codex_desktop;
 mod codex_transport;
@@ -649,6 +650,14 @@ async fn agent_sessions_list(
     cwd: String,
 ) -> Result<Vec<AgentSessionSummary>, String> {
     blocking(move || agent_sessions::list(&agent, &cwd)).await
+}
+
+#[tauri::command]
+async fn agent_antigravity_subagents(
+    session_id: String,
+    call_ids: Vec<String>,
+) -> Result<Vec<antigravity_subagents::SubagentUpdate>, String> {
+    blocking(move || Ok(antigravity_subagents::subagents(&session_id, &call_ids))).await
 }
 
 /// Visible turns for agents whose resume protocol does not replay history.
@@ -1473,6 +1482,7 @@ fn main() {
             agent_watch,
             agent_unwatch,
             agent_sessions_list,
+            agent_antigravity_subagents,
             agent_session_transcript,
             agent_proc_probe,
             opencode_models_refresh,

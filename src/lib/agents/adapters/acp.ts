@@ -26,6 +26,7 @@ import {
   type SubagentMeta,
   type ToolStatus,
 } from "../types";
+import { createAntigravitySubagentTracker } from "./antigravitySubagents";
 
 /**
  * Agent Client Protocol — the shared language of Cursor, Grok, and OpenCode.
@@ -367,6 +368,7 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
   let sessionId: string | null = null;
   /** The session/load request currently replaying history into the pane. */
   let resumeRequestId: number | null = null;
+  let resumeSessionId: string | null = null;
   /** Turn ids so streamed chunks group into one bubble per turn. */
   let turnSeq = 0;
   /**
@@ -401,6 +403,9 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
   const taskCalls = new Set<string>();
   /** A launch acknowledgement is not the background agent's result. */
   const backgroundTaskCalls = new Set<string>();
+  const antigravitySubagents = agent === "antigravity" ? createAntigravitySubagentTracker() : null;
+  /** Whether AGY has already acknowledged starting each invoke_subagent call. */
+  const antigravityInvocations = new Map<string, boolean>();
   /** OpenCode updates omit raw input too, so keep TodoWrite calls absorbed. */
   const todoCalls = new Set<string>();
   /**
@@ -1049,6 +1054,7 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
         ...(launchModeOverride ? sessionWithoutInitialAccess : fromSession),
       });
 
+      antigravitySubagents?.start(ctx, sessionId);
       await applyLaunchSettings(ctx, initialAccessMode);
       ctx.emit({ type: "status", status: "idle" });
     } catch (error) {
@@ -1159,15 +1165,26 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
     ctx.emit({ type: "user", text });
   }
 
+  function beginReplay(ctx: AdapterContext) {
+    replayStarted = true;
+    antigravitySubagents?.reset();
+    antigravityInvocations.clear();
+    ctx.emit({ type: "transcript" });
+  }
+
   function handleSessionUpdate(params: Record<string, unknown>, ctx: AdapterContext) {
     const update = asRecord(params.update);
     if (!update) return;
+    if (antigravitySubagents) {
+      const expectedSessionId = resumeSessionId ?? sessionId;
+      const updateSessionId = asString(params.sessionId);
+      if (expectedSessionId && updateSessionId && expectedSessionId !== updateSessionId) return;
+    }
     if (loading && !replayStarted) {
       // Keep the current conversation visible until the provider actually
       // starts replaying the selected one. A stalled or rejected load should
       // never erase a perfectly good transcript.
-      replayStarted = true;
-      ctx.emit({ type: "transcript" });
+      beginReplay(ctx);
     }
     const kind = asString(update.sessionUpdate);
 
@@ -1263,6 +1280,30 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
         const activity = isTask
           ? waitingForResult ? "Working" : text ? lastLine(text) : null
           : null;
+        let toolStatus = status && ACP_STATUS[status]
+          ? waitingForResult ? "running" as const : ACP_STATUS[status]
+          : undefined;
+        let output = text;
+        let childPatch: SubagentMeta | undefined;
+        if (antigravitySubagents && rawToolName === "invoke_subagent" && !antigravityInvocations.has(callId)) {
+          antigravityInvocations.set(callId, false);
+        }
+        if (antigravitySubagents && antigravityInvocations.has(callId)) {
+          const launchOnly = !text || launched || text.includes("Created the following subagent:");
+          if (status === "completed" && launchOnly) {
+            if (antigravityInvocations.get(callId)) return;
+            antigravityInvocations.set(callId, true);
+            const tracking = antigravitySubagents.track(callId, ctx);
+            toolStatus = tracking.status;
+            childPatch = tracking.subagent;
+            output = "";
+          } else if (status === "failed" || status === "completed") {
+            antigravitySubagents.untrack(callId);
+            childPatch = { statusUnavailable: false, activity: activity ?? (status === "failed"
+              ? "Delegation failed"
+              : "Delegated work completed") };
+          }
+        }
         ctx.emit({
           type: "tool",
           callId,
@@ -1276,17 +1317,16 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
               ? { tool: toolKind(kindName, acpKind) }
               : {}),
           ...(title ? { title: oneLine(title) } : {}),
-          ...(status && ACP_STATUS[status]
-            ? { status: waitingForResult ? "running" as const : ACP_STATUS[status] }
-            : {}),
+          ...(toolStatus ? { status: toolStatus } : {}),
           ...(command ? { command } : {}),
-          ...(text ? { output: text } : {}),
+          ...(output ? { output } : {}),
           ...(changes.length ? { changes } : {}),
           ...(isTask
             ? {
                 subagent: {
                   ...taskMeta,
                   ...(activity ? { activity: oneLine(activity) } : {}),
+                  ...childPatch,
                 },
               }
             : {}),
@@ -1985,6 +2025,8 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
       goalBeforeCommand = null;
       goalResponsePending = false;
       goalResponseText = "";
+      antigravitySubagents?.pause();
+      resumeSessionId = id;
       loading = true;
       replayStarted = false;
       replayedUser = "";
@@ -2006,8 +2048,7 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
           // A valid session may have no visible messages. Clear the previous
           // transcript only after the load itself has succeeded.
           if (!replayStarted) {
-            replayStarted = true;
-            ctx.emit({ type: "transcript" });
+            beginReplay(ctx);
           }
           flushReplayedUser(ctx);
           const identity = {
@@ -2033,8 +2074,10 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
         })
         .finally(() => {
           if (resumeRequestId === requestId) resumeRequestId = null;
+          resumeSessionId = null;
           loading = false;
           replayStarted = false;
+          if (sessionId) antigravitySubagents?.start(ctx, sessionId);
         });
     },
 
@@ -2086,6 +2129,7 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
       ctx.emit({ type: "permission", permission: null });
       ctx.emit({ type: "status", status: "working" });
     },
+    ...(antigravitySubagents ? { dispose: antigravitySubagents.dispose } : {}),
     refreshExtensions: () => extensions.map((extension) => ({ ...extension })),
     refreshTasks: () => [...runtimeTasks.values()].map((task) => ({ ...task })),
   };

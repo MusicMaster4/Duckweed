@@ -8,6 +8,8 @@ import type {
   ToolStatus,
 } from "./types";
 
+type SubagentStatus = ToolStatus | "unknown";
+
 export interface SubagentSummary {
   id: string;
   callId: string;
@@ -18,7 +20,7 @@ export interface SubagentSummary {
   parentCallId: string | null;
   prompt: string | null;
   activity: string;
-  status: ToolStatus;
+  status: SubagentStatus;
   output: string;
   changes: AgentFileChange[];
   items: AgentItem[];
@@ -37,6 +39,7 @@ export interface SubagentStatusCounts {
   running: number;
   done: number;
   error: number;
+  unknown: number;
 }
 
 export interface VisibleRosterRows {
@@ -44,17 +47,18 @@ export interface VisibleRosterRows {
   hiddenCompleted: number;
 }
 
-const STATUS_LABEL: Record<ToolStatus, string> = {
+const STATUS_LABEL: Record<SubagentStatus, string> = {
   pending: "Queued",
   running: "Running",
   done: "Completed",
   error: "Failed",
+  unknown: "Status unavailable",
 };
 
 /** Collapse extra completed workers once a roster grows past this many rows. */
 export const ROSTER_COLLAPSE_AFTER = 6;
 
-export function subagentStatusLabel(status: ToolStatus): string {
+export function subagentStatusLabel(status: SubagentStatus): string {
   return STATUS_LABEL[status];
 }
 
@@ -103,16 +107,19 @@ function summaryFor(item: ToolItem): SubagentSummary {
   const role = clean(meta.role);
   const prompt = clean(meta.prompt);
   const label = clean(meta.label) ?? role ?? prompt ?? clean(item.title) ?? "Subagent";
+  const status = meta.statusUnavailable ? "unknown" : item.status;
   const activity =
     clean(meta.activity) ??
     lastOutputLine(item.output) ??
-    (item.status === "pending"
-      ? "Waiting to start"
-      : item.status === "running"
-        ? "Starting…"
-        : item.status === "error"
-          ? "Delegated work failed"
-          : "Delegated work completed");
+    (status === "unknown"
+      ? "Launch acknowledged"
+      : status === "pending"
+        ? "Waiting to start"
+        : status === "running"
+          ? "Starting…"
+          : status === "error"
+            ? "Delegated work failed"
+            : "Delegated work completed");
 
   const summary: SubagentSummary = {
     id: clean(meta.threadId) ?? item.callId,
@@ -124,7 +131,7 @@ function summaryFor(item: ToolItem): SubagentSummary {
     parentCallId: clean(meta.parentCallId),
     prompt,
     activity: compact(activity),
-    status: item.status,
+    status,
     output: item.output,
     changes: item.changes,
     items: meta.items ?? [],
@@ -264,6 +271,7 @@ export function subagentStatusCounts(
     running: 0,
     done: 0,
     error: 0,
+    unknown: 0,
   };
   for (const subagent of subagents) counts[subagent.status] += 1;
   return counts;
@@ -279,6 +287,7 @@ export function subagentFleetStatusLabel(
     counts.pending ? `${counts.pending} queued` : "",
     counts.done ? `${counts.done} completed` : "",
     counts.error ? `${counts.error} failed` : "",
+    counts.unknown ? `${counts.unknown} with status unavailable` : "",
   ]
     .filter(Boolean)
     .join(" · ");
@@ -348,7 +357,7 @@ export function subagentRoleMark(subagent: SubagentSummary): string {
 export function subagentElapsedLabel(
   startedAt: number,
   now: number,
-  status: ToolStatus,
+  status: SubagentStatus,
 ): string | null {
   if (status !== "running" && status !== "pending") return null;
   return formatWorkDuration(Math.max(0, now - startedAt));

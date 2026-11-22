@@ -17,7 +17,7 @@ import {
   type AgentFrame,
   type SystemMemory,
 } from "../ipc";
-import type { AdapterContext, AgentAdapter } from "./adapter";
+import type { AdapterContext, AgentAdapter, AntigravitySubagentUpdate } from "./adapter";
 import {
   completionDetailsFromState,
   type AgentCompletionDetails,
@@ -1552,6 +1552,10 @@ export async function start(
       runtimeProcesses: (pids) => invoke<void>("agent_proc_set_runtime_roots", { id: termId, pids }),
       syncAccount: (signedIn) => agentCodexAuthSync(termId, signedIn),
       interruptFallback: () => invoke<void>("agent_codex_interrupt", { id: termId }),
+      ...(TAURI_RUNTIME && launch.agent === "antigravity" ? {
+        readAntigravitySubagents: (sessionId: string, callIds: string[]) =>
+          invoke<AntigravitySubagentUpdate[]>("agent_antigravity_subagents", { sessionId, callIds }),
+      } : {}),
       files: {
         readText: async (path) => {
           const file = await invoke<{
