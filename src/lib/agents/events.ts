@@ -139,7 +139,7 @@ export type AgentEvent =
   /** A queued follow-up has been sent, cancelled, or restored for editing. */
   | { type: "unqueue"; id: string }
   /** The turn finished; the composer takes the keyboard back. */
-  | { type: "turn-end" };
+  | { type: "turn-end"; historyReplay?: true };
 
 /** Keep a tool's collected output bounded — panes render it, not tail it. */
 export const MAX_TOOL_OUTPUT = 20_000;

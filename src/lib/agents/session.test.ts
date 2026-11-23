@@ -160,10 +160,10 @@ async function flush(): Promise<void> {
   for (let step = 0; step < 32; step += 1) await Promise.resolve();
 }
 
-async function handshake(): Promise<void> {
+async function handshake(agentCapabilities: { loadSession?: boolean } = {}): Promise<void> {
   await flush();
   const initialize = sent.map(rpc).find((message) => message.method === "initialize");
-  feed({ jsonrpc: "2.0", id: initialize?.id, result: { protocolVersion: 1 } });
+  feed({ jsonrpc: "2.0", id: initialize?.id, result: { protocolVersion: 1, agentCapabilities } });
   await flush();
   const created = sent.map(rpc).find((message) => message.method === "session/new");
   feed({ jsonrpc: "2.0", id: created?.id, result: { sessionId: "s1" } });
@@ -1853,6 +1853,65 @@ describe("Custom agent UI sessions", () => {
       images: [image],
       status: "asking",
     });
+  });
+
+  test("restores completed Antigravity history silently and announces the next live turn", async () => {
+    const termId = "recover-antigravity";
+    const cwd = "H:/project";
+    const launch: AgentLaunch = { ...grokLaunch, agent: "antigravity", program: "agy" };
+    const update = (sessionUpdate: string, text: string) => feed({
+      jsonrpc: "2.0",
+      method: "session/update",
+      params: { sessionId: "s1", update: { sessionUpdate, content: { type: "text", text } } },
+    });
+
+    await session.start(termId, launch, cwd);
+    await handshake({ loadSession: true });
+    session.submit(termId, "Earlier task");
+    await flush();
+    const earlier = sent.map(rpc).findLast((message) => message.method === "session/prompt")!;
+    update("agent_message_chunk", "Earlier response");
+    feed({ jsonrpc: "2.0", id: earlier.id, result: { stopReason: "end_turn" } });
+    await flush();
+    expect(session.get(termId)?.status).toBe("idle");
+    session.flushRecovery();
+    const saved = workspaceRecovery.get(termId)?.agent;
+    expect(saved?.sessionId).toBe("s1");
+    session.stop(termId);
+    sent.length = 0;
+
+    const completions: string[] = [];
+    const unsubscribe = session.subscribeTurnEnd((id) => completions.push(id));
+    try {
+      await session.start(termId, { ...launch, resumeId: saved!.sessionId }, cwd, saved);
+      await handshake({ loadSession: true });
+      const load = sent.map(rpc).find((message) => message.method === "session/load")!;
+      expect(load.params).toMatchObject({ sessionId: "s1" });
+      update("user_message_chunk", "Earlier task");
+      update("agent_message_chunk", "Earlier response");
+      feed({ jsonrpc: "2.0", id: load.id, result: {} });
+      await flush();
+
+      expect(session.get(termId)?.status).toBe("idle");
+      expect(session.get(termId)?.items).toContainEqual(expect.objectContaining({
+        kind: "assistant", text: "Earlier response", streaming: false,
+      }));
+      expect(completions).toEqual([]);
+
+      session.submit(termId, "New task");
+      await flush();
+      const prompt = sent.map(rpc).findLast((message) => message.method === "session/prompt")!;
+      expect(prompt.params).toMatchObject({
+        sessionId: "s1", prompt: [{ type: "text", text: "New task" }],
+      });
+      update("agent_message_chunk", "New response");
+      feed({ jsonrpc: "2.0", id: prompt.id, result: { stopReason: "end_turn" } });
+      await flush();
+
+      expect(completions).toEqual([termId]);
+    } finally {
+      unsubscribe();
+    }
   });
 
   test("guards Antigravity Ctrl+C exits with a confirming second press", async () => {

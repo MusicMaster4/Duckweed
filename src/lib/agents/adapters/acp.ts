@@ -2056,7 +2056,7 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
             ...readConfigOptions(result.configOptions),
           };
           ctx.emit({ type: "session", sessionId: id, ...identity });
-          ctx.emit({ type: "turn-end" });
+          ctx.emit({ type: "turn-end", historyReplay: true });
           return true;
         })
         .catch((error: unknown) => {
@@ -2069,7 +2069,7 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
               text: asString(record?.message) ?? "The agent could not load that session.",
             });
           }
-          ctx.emit({ type: "turn-end" });
+          ctx.emit({ type: "turn-end", historyReplay: true });
           return false;
         })
         .finally(() => {

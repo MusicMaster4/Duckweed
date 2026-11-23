@@ -1062,7 +1062,7 @@ function emitNow(session: Session, event: AgentEvent): void {
     releasingQueued,
     interrupted: session.interrupted,
   };
-  const ended = isTurnEnd(turnEndState);
+  const ended = !(event.type === "turn-end" && event.historyReplay) && isTurnEnd(turnEndState);
   const turnEnd: TurnAnnounceInput = {
     ...turnEndState,
     userInitiated: session.userInitiatedTurn,
@@ -2184,9 +2184,8 @@ export function configure(
  */
 async function applyResume(session: Session, sessionId: string, title: string, silent = false): Promise<void> {
   cancelCapacityReply(session);
-  // Rejoining is an explicit request. Idle history stays silent because its
-  // working -> idle transition occurs under `loadingHistory`; a live turn
-  // keeps ownership until its real completion arrives.
+  // Rejoining can recover a live turn. Keep ownership for its eventual
+  // completion. Adapters identify ends that only settle stored history.
   session.interrupted = false;
   session.userInitiatedTurn = true;
   session.restoring = true;
