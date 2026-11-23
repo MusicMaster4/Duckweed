@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import type { AdapterContext } from "../adapter";
 import { applyEvent, type AgentEvent } from "../events";
+import { subagentForCallId, subagentRosters } from "../subagents";
 import type { AgentLaunch } from "../launch";
 import { emptyUsage, type AgentSessionState } from "../types";
 import { createCodexAdapter } from "./codex";
@@ -4220,6 +4221,81 @@ describe("codex adapter", () => {
         (item) => item.kind === "tool" && item.subagent?.threadId === "unrelated_large_thread",
       ),
     ).toBe(false);
+  });
+
+  test("keeps discovered subagents clickable when full resume history replaces the summary", async () => {
+    const h = harness();
+    await h.handshake();
+    const resumed = h.adapter.resume?.("fleet-history", h.ctx);
+    const resume = h.sent.findLast((message) => message.method === "thread/resume")!;
+    const user = { type: "userMessage", id: "user", content: [{ type: "text", text: "Review the project" }] };
+    h.feed({ id: resume.id, result: {
+      thread: { id: "fleet-history", status: { type: "idle" } },
+      initialTurnsPage: {
+        data: [{ id: "review", status: "completed", itemsView: "summary", items: [user] }],
+        nextCursor: null,
+      },
+    } });
+    expect(await resumed).toBe(true);
+
+    const thread = {
+      id: "reviewer-thread",
+      parentThreadId: "fleet-history",
+      agentNickname: "Reviewer",
+      status: { type: "notLoaded" },
+    };
+    const olderThread = { ...thread, id: "older-thread", agentNickname: "Researcher" };
+    const discovery = h.sent.findLast((message) => message.method === "thread/list")!;
+    h.feed({ id: discovery.id, result: { data: [thread, olderThread] } });
+    await Promise.resolve();
+    await Promise.resolve();
+    const callId = "codex-child:reviewer-thread";
+    expect(subagentForCallId(h.state().items, callId)).toMatchObject({
+      label: "Reviewer",
+      threadId: thread.id,
+    });
+
+    const details = h.sent.findLast((message) => message.method === "thread/items/list")!;
+    const activity = (kind: string) => ({
+      turnId: "review",
+      item: {
+        id: kind,
+        type: "subAgentActivity",
+        kind,
+        agentThreadId: thread.id,
+        agentPath: "/root/reviewer",
+      },
+    });
+    h.feed({ id: details.id, result: {
+      data: [activity("completed"), activity("started"), { turnId: "review", item: user }],
+      nextCursor: null,
+    } });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(subagentRosters(h.state().items).flatMap((roster) => roster.subagents)).toHaveLength(2);
+    expect(subagentForCallId(h.state().items, "codex-child:older-thread")).toMatchObject({
+      label: "Researcher",
+      threadId: olderThread.id,
+      status: "done",
+    });
+    expect(subagentForCallId(h.state().items, callId)).toMatchObject({
+      label: "Reviewer",
+      threadId: thread.id,
+      status: "done",
+    });
+    expect(h.sent.some((message) => message.method === "thread/read")).toBe(false);
+
+    const inspected = h.adapter.inspectSubagent?.(callId, thread.id, h.ctx);
+    const read = h.sent.findLast((message) => message.method === "thread/read")!;
+    expect(read.params).toMatchObject({ threadId: thread.id, includeTurns: false });
+    h.feed({ id: read.id, result: { thread: { ...thread, turns: [
+      { id: "child-turn", items: [{ id: "child-answer", type: "agentMessage", text: "Review complete" }] },
+    ] } } });
+    expect(await inspected).toBe(true);
+    expect(subagentForCallId(h.state().items, callId)?.items).toMatchObject([
+      { kind: "assistant", text: "Review complete" },
+    ]);
   });
 
   test("hydrates paginated history in order, including image-only prompts", async () => {

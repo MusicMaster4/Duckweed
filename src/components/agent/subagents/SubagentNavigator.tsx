@@ -110,25 +110,25 @@ export function SubagentNavigator({
           const selected = selectedId === subagent.callId;
           const pinned = multiPane && paneIds.includes(subagent.callId);
           return (
-            <button
-              key={subagent.callId}
-              type="button"
-              role="listitem"
-              className={`agent-sub-nav-row is-${subagent.status}${selected ? " is-selected" : ""}`}
-              onClick={() => onSelectSubagent(subagent.callId)}
-              aria-current={selected ? "page" : undefined}
-              aria-label={`${subagentStatusLabel(subagent.status)}: ${subagent.label}. ${subagentResultLine(subagent)}`}
-            >
-              <StatusMark subagent={subagent} />
-              <span className="agent-sub-nav-copy">
-                <strong>{subagent.label}</strong>
-                <small>{subagentResultLine(subagent)}</small>
-              </span>
-              <span className="agent-sub-nav-meta">
-                {pinned && <span aria-label="Open in workspace">▥</span>}
-                {elapsed ?? (subagent.status === "done" ? "Done" : subagentStatusLabel(subagent.status))}
-              </span>
-            </button>
+            <div key={subagent.callId} role="listitem">
+              <button
+                type="button"
+                className={`agent-sub-nav-row is-${subagent.status}${selected ? " is-selected" : ""}`}
+                onClick={() => onSelectSubagent(subagent.callId)}
+                aria-current={selected ? "page" : undefined}
+                aria-label={`${subagentStatusLabel(subagent.status)}: ${subagent.label}. ${subagentResultLine(subagent)}`}
+              >
+                <StatusMark subagent={subagent} />
+                <span className="agent-sub-nav-copy">
+                  <strong>{subagent.label}</strong>
+                  <small>{subagentResultLine(subagent)}</small>
+                </span>
+                <span className="agent-sub-nav-meta">
+                  {pinned && <span aria-label="Open in workspace">▥</span>}
+                  {elapsed ?? (subagent.status === "done" ? "Done" : subagentStatusLabel(subagent.status))}
+                </span>
+              </button>
+            </div>
           );
         })}
       </div>

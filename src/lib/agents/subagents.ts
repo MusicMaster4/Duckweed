@@ -216,6 +216,11 @@ export function subagentRosters(items: AgentItem[]): SubagentRoster[] {
   return rosters;
 }
 
+/** Newest turns first in the session navigator, keeping each roster's order. */
+export function subagentsForNavigator(rosters: SubagentRoster[]): SubagentSummary[] {
+  return rosters.slice().reverse().flatMap((roster) => roster.subagents);
+}
+
 export function absorbedSubagentCallIds(rosters: SubagentRoster[]): Set<string> {
   const ids = new Set<string>();
   for (const roster of rosters) {

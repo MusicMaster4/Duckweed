@@ -325,6 +325,7 @@ const RESUME_TIMEOUT = "duckweed_resume_timeout";
 
 interface ChildThread {
   callId: string | null;
+  discoveredParentId?: string;
   label: string | null;
   role: string | null;
   model: string | null;
@@ -768,6 +769,8 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     ctx.emit({
       type: "tool",
       callId: child.callId,
+      // A history replay can clear the original row before this update arrives.
+      tool: "task",
       status,
       subagent: {
         threadId: childThreadId,
@@ -1298,6 +1301,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
             sortKey: "created_at",
             sortDirection: "asc",
           });
+          if (disposed || threadId !== parentThreadId) continue;
           for (const rawThread of asArray(result.data)) {
             const childThread = asRecord(rawThread);
             if (!childThread) continue;
@@ -1305,7 +1309,8 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
             // boundary. Adopting an unrelated thread here would fetch its
             // transcript and can multiply resume traffic dramatically.
             if (asString(childThread.parentThreadId) !== parentThreadId) continue;
-            adoptChildThread(childThread, ctx, synthesize, false, !synthesize);
+            const childId = adoptChildThread(childThread, ctx, synthesize, false, !synthesize);
+            if (childId) childFor(childId).discoveredParentId = parentThreadId;
           }
         } catch {
           // Older app-server builds can stream child events without supporting
@@ -2861,6 +2866,11 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       const missing = asArray(turn.items).filter((item) => !ids.has(asRecord(item)?.id));
       return { ...turn, items: [...missing, ...items] };
     }), ctx);
+
+    // Some discovered children have no activity in the bounded history page.
+    for (const [childId, child] of children) {
+      if (child.discoveredParentId === targetId) syncChild(childId, ctx);
+    }
   }
 
   function handleNotification(method: string, params: Record<string, unknown>, ctx: AdapterContext) {

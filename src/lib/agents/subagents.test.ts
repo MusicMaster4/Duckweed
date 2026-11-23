@@ -20,6 +20,7 @@ import {
   subagentRoleMark,
   subagentRosters,
   subagentStatusCounts,
+  subagentsForNavigator,
   subagentsForTurn,
   subagentStatusLabel,
   visibleRosterRows,
@@ -185,6 +186,21 @@ describe("subagent rosters and timeline absorption", () => {
     expect(subagentsForTurn(items).map((subagent) => subagent.callId)).toEqual([
       "research",
       "layout",
+    ]);
+  });
+
+  test("keeps earlier subagents in the navigator after a follow-up without delegations", () => {
+    const followedUp: AgentItem[] = [
+      ...items.map((item) => item.kind === "tool" ? { ...item, status: "done" as const } : item),
+      { kind: "user", id: "user-3", at: 5, text: "Summarize the findings" },
+    ];
+
+    expect(subagentsForTurn(followedUp)).toHaveLength(0);
+    expect(subagentsForNavigator(subagentRosters(followedUp)).map((subagent) => subagent.callId)).toEqual([
+      "research",
+      "layout",
+      "old-explore",
+      "old-tests",
     ]);
   });
 
