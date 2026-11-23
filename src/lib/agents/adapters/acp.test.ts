@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import type { AdapterContext } from "../adapter";
+import type { AdapterContext, AntigravitySubagentUpdate } from "../adapter";
 import { applyEvent, type AgentEvent } from "../events";
 import type { AgentLaunch } from "../launch";
 import { subagentsForTurn } from "../subagents";
@@ -2134,24 +2134,56 @@ describe("acp adapter", () => {
     }
   });
 
-  test("keeps Antigravity callbacks scoped to the session being replayed", async () => {
+  test("resumes Antigravity polling after an in-flight read from the previous session", async () => {
     const h = harness({ agent: "antigravity", program: "agy" });
-    await h.handshake({ agentCapabilities: { loadSession: true } });
-    const resumed = h.adapter.resume?.("stored", h.ctx);
-    const request = h.sent.at(-1) as { id: number };
+    const oldRead = Promise.withResolvers<AntigravitySubagentUpdate[]>();
+    const readers: Array<{ sessionId: string; calls: string[] }> = [];
+    h.ctx.readAntigravitySubagents = (sessionId, calls) => {
+      readers.push({ sessionId, calls });
+      if (sessionId === "s1") return oldRead.promise;
+      return Promise.resolve([
+        { callId: "child", threadId: "stored-child", status: "done", toolName: null, output: "Restored result" },
+      ]);
+    };
     const invoke = {
       sessionUpdate: "tool_call",
       name: "invoke_subagent",
       kind: "other",
       status: "completed",
     };
-    h.update({ ...invoke, toolCallId: "old-live" });
-    h.update({ ...invoke, toolCallId: "stored-child" }, "stored");
-    h.feed({ jsonrpc: "2.0", id: request.id, result: {} });
-    expect(await resumed).toBe(true);
 
-    h.update({ ...invoke, toolCallId: "late-live" });
-    expect(subagentsForTurn(h.state().items).map(({ callId }) => callId)).toEqual(["stored-child"]);
+    try {
+      await h.handshake({ agentCapabilities: { loadSession: true } });
+      h.update({ ...invoke, toolCallId: "child" });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(readers).toEqual([{ sessionId: "s1", calls: ["child"] }]);
+
+      const resumed = h.adapter.resume?.("stored", h.ctx);
+      const request = h.sent.at(-1) as { id: number };
+      h.update({ ...invoke, toolCallId: "old-live" });
+      h.update({ ...invoke, toolCallId: "child" }, "stored");
+      h.feed({ jsonrpc: "2.0", id: request.id, result: {} });
+      expect(await resumed).toBe(true);
+      h.update({ ...invoke, toolCallId: "late-live" });
+
+      const eventsBeforeOldRead = h.events.length;
+      oldRead.resolve([
+        { callId: "child", threadId: "old-child", status: "done", toolName: null, output: "Stale result" },
+      ]);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(readers).toEqual([
+        { sessionId: "s1", calls: ["child"] },
+        { sessionId: "stored", calls: ["child"] },
+      ]);
+      expect(h.events.slice(eventsBeforeOldRead)).toEqual([
+        expect.objectContaining({ type: "tool", callId: "child", output: "Restored result" }),
+      ]);
+      expect(subagentsForTurn(h.state().items)).toMatchObject([
+        { callId: "child", threadId: "stored-child", status: "done" },
+      ]);
+    } finally {
+      h.adapter.dispose?.(h.ctx);
+    }
   });
 
   test("does not claim Antigravity child completion when native status is unavailable", () => {

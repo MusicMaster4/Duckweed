@@ -237,19 +237,18 @@ fn read_updates(
     Ok(updates)
 }
 
-pub fn subagents(parent_id: &str, call_ids: &[String]) -> Vec<SubagentUpdate> {
+pub fn subagents(parent_id: &str, call_ids: &[String]) -> rusqlite::Result<Vec<SubagentUpdate>> {
     let Ok(id) = Uuid::parse_str(parent_id) else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let Some(home) = crate::agent_sessions::home_dir() else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     read_updates(
         &home.join(".gemini/antigravity-cli"),
         &id.to_string(),
         call_ids,
     )
-    .unwrap_or_default()
 }
 #[cfg(test)]
 mod tests {

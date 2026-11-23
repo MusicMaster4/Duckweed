@@ -46,13 +46,9 @@ export function createAntigravitySubagentTracker() {
       await poll(session);
     } finally {
       polling = false;
-      if (active === session && calls.size) {
-        const immediate = pollAgain;
-        pollAgain = false;
-        schedule(immediate ? 0 : POLL_INTERVAL_MS);
-      } else {
-        pollAgain = false;
-      }
+      const immediate = pollAgain || active !== session;
+      pollAgain = false;
+      schedule(immediate ? 0 : POLL_INTERVAL_MS);
     }
   }
 

@@ -657,7 +657,11 @@ async fn agent_antigravity_subagents(
     session_id: String,
     call_ids: Vec<String>,
 ) -> Result<Vec<antigravity_subagents::SubagentUpdate>, String> {
-    blocking(move || Ok(antigravity_subagents::subagents(&session_id, &call_ids))).await
+    blocking(move || {
+        antigravity_subagents::subagents(&session_id, &call_ids)
+            .map_err(|error| format!("could not read Antigravity subagent status: {error}"))
+    })
+    .await
 }
 
 /// Visible turns for agents whose resume protocol does not replay history.
