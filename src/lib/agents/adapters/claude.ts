@@ -95,6 +95,7 @@ interface ToolCall {
   name: string;
   /** Accumulated `input_json_delta` text, parsed once the block closes. */
   partialInput: string;
+  runInBackground?: boolean;
 }
 
 interface TrackedTask {
@@ -346,22 +347,32 @@ function workflowLaunch(
 function backgroundAgentId(
   frame: Record<string, unknown>,
   output: string,
+  runInBackground = false,
 ): string | null | undefined {
   const result =
     asRecord(frame.toolUseResult) ??
     asRecord(frame.tool_use_result) ??
     asRecord(frame.tool_result);
-  if (
-    asString(result?.status) !== "async_launched" &&
-    !/Async agent launched successfully/i.test(output)
-  ) return undefined;
+  const resultStatus = asString(result?.status);
+  const explicitAsync =
+    resultStatus === "async_launched" ||
+    resultStatus === "teammate_spawned" ||
+    result?.isAsync === true ||
+    result?.is_async === true ||
+    /Async agent launched successfully|Agent launched in background|Background agent (?:started|launched)/i.test(
+      output,
+    ) ||
+    (runInBackground && resultStatus !== "completed" && !result?.content);
+  if (!explicitAsync) return undefined;
+  const parsedFromOutput = /(?:agent[_ ]?id|task[_ ]?id):\s*([A-Za-z0-9_.:-]+)/i
+    .exec(output)?.[1]
+    ?.replace(/[.,;:!?)\]]+$/, "");
   return (
     asString(result?.agentId) ??
     asString(result?.agent_id) ??
     asString(result?.taskId) ??
     asString(result?.task_id) ??
-    /(?:Agent|Task) ID:\s*(\S+)/i.exec(output)?.[1] ??
-    null
+    (parsedFromOutput || null)
   );
 }
 
@@ -370,6 +381,7 @@ function taskNotification(text: string): {
   toolUseId?: string;
   status: "completed" | "failed" | "stopped";
   summary: string;
+  result: string;
 } | null {
   if (!text.includes("<task-notification>")) return null;
   const taskId = /<task-id>([^<]+)<\/task-id>/i.exec(text)?.[1]?.trim() ?? "";
@@ -385,6 +397,7 @@ function taskNotification(text: string): {
     toolUseId: /<tool-use-id>([^<]+)<\/tool-use-id>/i.exec(text)?.[1]?.trim(),
     status: rawStatus,
     summary: /<summary>([\s\S]*?)<\/summary>/i.exec(text)?.[1]?.trim() ?? "",
+    result: /<result>([\s\S]*?)<\/result>/i.exec(text)?.[1]?.trim() ?? "",
   };
 }
 
@@ -575,6 +588,8 @@ export function createClaudeAdapter(): AgentAdapter {
   const backgroundAgentCallByTaskId = new Map<string, string>();
   /** Async launch results are acknowledgements, not completed Agent calls. */
   const backgroundAgents = new Map<string, ToolStatus>();
+  /** Root tool calls waiting for a tool_result; settled on turn end or interrupt. */
+  const openSyncTools = new Set<string>();
   let latestWorkflowCallId: string | null = null;
   /** Goal state before an optimistic create/update, restored if the tool fails. */
   const goalToolUndo = new Map<string, AgentGoal | null>();
@@ -592,6 +607,56 @@ export function createClaudeAdapter(): AgentAdapter {
       [...workflowsByCallId.values()].some(
         (workflow) => workflow.taskId !== null && workflow.status === "running",
       );
+  }
+
+  function settleRunningWork(
+    ctx: AdapterContext,
+    outcome: "done" | "error",
+    includeBackground: boolean,
+  ): void {
+    if (includeBackground) {
+      let workflowChanged = false;
+      for (const [callId, status] of backgroundAgents) {
+        if (status !== "running") continue;
+        backgroundAgents.set(callId, "error");
+        ctx.emit({
+          type: "tool",
+          callId,
+          status: "error",
+          subagent: { activity: "Delegated work stopped" },
+        });
+      }
+      for (const [callId, workflow] of workflowsByCallId) {
+        if (workflow.status !== "running" && workflow.status !== "launching") continue;
+        workflow.status = "stopped";
+        workflowChanged = true;
+        ctx.emit({ type: "tool", callId, status: "error" });
+      }
+      if (workflowChanged) emitRuntimeTasks(ctx);
+    }
+    for (const callId of [...openSyncTools]) {
+      openSyncTools.delete(callId);
+      if (backgroundAgents.get(callId) === "running") continue;
+      const wf = workflowsByCallId.get(callId);
+      if (wf && (wf.status === "running" || wf.status === "launching")) continue;
+      const known = tools.get(callId);
+      const isTask = known ? toolKind(known.name) === "task" : false;
+      ctx.emit({
+        type: "tool",
+        callId,
+        status: outcome,
+        ...(isTask
+          ? {
+              subagent: {
+                activity:
+                  outcome === "error"
+                    ? "Delegated work stopped"
+                    : "Delegated work completed",
+              },
+            }
+          : {}),
+      });
+    }
   }
 
   function refreshModels(ctx: AdapterContext): void {
@@ -935,6 +1000,17 @@ export function createClaudeAdapter(): AgentAdapter {
         steps: workflowSteps(workflow, "running"),
       });
     }
+    const existingTool = tools.get(callId);
+    const runInBackground =
+      input.run_in_background === true || existingTool?.runInBackground === true;
+    tools.set(callId, {
+      name,
+      partialInput: existingTool?.partialInput ?? "",
+      ...(runInBackground ? { runInBackground: true } : {}),
+    });
+    if (backgroundAgents.get(callId) !== "done" && backgroundAgents.get(callId) !== "error") {
+      openSyncTools.add(callId);
+    }
     trackTaskUse(ROOT_TASK_SCOPE, callId, name, input, ctx);
     const subagent = subagentForTool(name, input);
     ctx.emit({
@@ -972,6 +1048,7 @@ export function createClaudeAdapter(): AgentAdapter {
         const name = asString(block.name) ?? "tool";
         blocks.set(index, { kind: "tool", id: callId });
         tools.set(callId, { name, partialInput: "" });
+        openSyncTools.add(callId);
         ctx.emit({
           type: "tool",
           callId,
@@ -1154,7 +1231,14 @@ export function createClaudeAdapter(): AgentAdapter {
       const name = asString(block.name) ?? "tool";
       const input = asRecord(block.input) ?? {};
       if (!callId) continue;
-      tools.set(callId, { name, partialInput: "" });
+      const existing = tools.get(callId);
+      tools.set(callId, {
+        name,
+        partialInput: "",
+        ...(existing?.runInBackground || input.run_in_background === true
+          ? { runInBackground: true }
+          : {}),
+      });
       settleTool(callId, name, input, ctx);
     }
     // A later settled message may arrive without stream events. Never match it
@@ -1167,6 +1251,7 @@ export function createClaudeAdapter(): AgentAdapter {
       asString(message.stop_reason) === "end_turn"
     ) {
       turnResultPending = false;
+      settleRunningWork(ctx, "done", false);
       ctx.emit({ type: "turn-end" });
     }
   }
@@ -1181,6 +1266,16 @@ export function createClaudeAdapter(): AgentAdapter {
       const block = asRecord(raw);
       if (!block) continue;
       const blockType = asString(block.type);
+      if (blockType === "thinking") {
+        const text = asString(block.thinking)?.trim();
+        if (!text) continue;
+        ctx.emit({
+          type: "tool",
+          callId: parentCallId,
+          subagent: { activity: oneLine(text.split(/\r?\n/).filter(Boolean).at(-1) ?? text) },
+        });
+        continue;
+      }
       if (blockType === "text") {
         const text = asString(block.text)?.trim();
         if (!text) continue;
@@ -1295,7 +1390,12 @@ export function createClaudeAdapter(): AgentAdapter {
       if (!callId) continue;
       const failed = block.is_error === true;
       const known = tools.get(callId);
+      openSyncTools.delete(callId);
       const output = resultText(block.content);
+      const resultRecord =
+        asRecord(frame.toolUseResult) ??
+        asRecord(frame.tool_use_result) ??
+        asRecord(frame.tool_result);
       const workflow = workflowsByCallId.get(callId);
       const launch = workflow ? workflowLaunch(frame, output) : null;
       if (workflow && launch && !failed) {
@@ -1323,8 +1423,55 @@ export function createClaudeAdapter(): AgentAdapter {
         }
         continue;
       }
+      if (!failed && known && known.name.toLowerCase() === "taskstop") {
+        const stoppedId =
+          asString(resultRecord?.task_id) ??
+          asString(resultRecord?.taskId) ??
+          asString(resultRecord?.agent_id) ??
+          asString(resultRecord?.agentId);
+        if (stoppedId) {
+          const stoppedAgentCallId = backgroundAgentCallByTaskId.get(stoppedId);
+          if (stoppedAgentCallId) {
+            backgroundAgents.set(stoppedAgentCallId, "error");
+            ctx.emit({
+              type: "tool",
+              callId: stoppedAgentCallId,
+              status: "error",
+              subagent: { activity: "Delegated work stopped" },
+            });
+          }
+          const stoppedWorkflowCallId = workflowCallByTaskId.get(stoppedId);
+          const stoppedWorkflow = stoppedWorkflowCallId
+            ? workflowsByCallId.get(stoppedWorkflowCallId)
+            : undefined;
+          if (stoppedWorkflowCallId && stoppedWorkflow) {
+            stoppedWorkflow.status = "stopped";
+            emitRuntimeTasks(ctx);
+            ctx.emit({ type: "tool", callId: stoppedWorkflowCallId, status: "error" });
+          }
+        }
+      }
+      if (!failed && known && known.name.toLowerCase() === "sendmessage") {
+        const resumedId =
+          asString(resultRecord?.resumedAgentId) ??
+          asString(resultRecord?.revivedAgentId) ??
+          asString(resultRecord?.resumed_agent_id) ??
+          asString(resultRecord?.revived_agent_id);
+        if (resumedId) {
+          const resumedCallId = backgroundAgentCallByTaskId.get(resumedId);
+          if (resumedCallId) {
+            backgroundAgents.set(resumedCallId, "running");
+            ctx.emit({
+              type: "tool",
+              callId: resumedCallId,
+              status: "running",
+              subagent: { activity: "Working" },
+            });
+          }
+        }
+      }
       if (!failed && known && toolKind(known.name) === "task") {
-        const agentId = backgroundAgentId(frame, output);
+        const agentId = backgroundAgentId(frame, output, Boolean(known.runInBackground));
         if (agentId !== undefined) {
           if (agentId) backgroundAgentCallByTaskId.set(agentId, callId);
           // A structured completion can race ahead of the launch result.
@@ -1378,17 +1525,28 @@ export function createClaudeAdapter(): AgentAdapter {
     if (agentCallId) {
       backgroundAgentCallByTaskId.set(notification.taskId, agentCallId);
       backgroundAgents.set(agentCallId, notification.status === "completed" ? "done" : "error");
+      openSyncTools.delete(agentCallId);
+      const output = notification.result || notification.summary;
+      const fallbackActivity =
+        notification.status === "completed"
+          ? "Delegated work completed"
+          : notification.status === "stopped"
+            ? "Delegated work stopped"
+            : "Delegated work failed";
       ctx.emit({
         type: "tool",
         callId: agentCallId,
         status: notification.status === "completed" ? "done" : "error",
-        ...(notification.summary ? { output: notification.summary } : {}),
+        ...(output ? { output } : {}),
         subagent: {
           activity:
             notification.summary ||
-            (notification.status === "completed"
-              ? "Delegated work completed"
-              : "Delegated work failed"),
+            (notification.result
+              ? oneLine(
+                  notification.result.split(/\r?\n/).find((line) => line.trim()) ??
+                    notification.result,
+                )
+              : fallbackActivity),
         },
       });
       return;
@@ -1448,6 +1606,7 @@ export function createClaudeAdapter(): AgentAdapter {
             toolUseId: toolUseId ?? undefined,
             status,
             summary: asString(frame.summary) ?? "",
+            result: asString(frame.result) ?? "",
           }, ctx);
         }
       } else if (taskId) {
@@ -1459,11 +1618,17 @@ export function createClaudeAdapter(): AgentAdapter {
           // Only a fresh start may reopen it; late progress must not.
           if (subtype === "task_started" || (status !== "done" && status !== "error")) {
             backgroundAgents.set(callId, "running");
+            const lastTool = asString(frame.last_tool_name);
+            const activity =
+              asString(frame.summary) ??
+              (lastTool ? oneLine(`Using ${lastTool}`) : null) ??
+              asString(frame.description) ??
+              "Working";
             ctx.emit({
               type: "tool",
               callId,
               status: "running",
-              subagent: { activity: asString(frame.description) ?? "Working" },
+              subagent: { activity },
             });
           }
         }
@@ -1578,6 +1743,8 @@ export function createClaudeAdapter(): AgentAdapter {
       turnResultPending = true;
       return;
     }
+    const failed = frame.is_error === true || interruptRequested;
+    settleRunningWork(ctx, failed ? "error" : "done", failed);
     turnResultPending = false;
     ctx.emit({ type: "turn-end" });
   }
@@ -2067,7 +2234,32 @@ export function createClaudeAdapter(): AgentAdapter {
         }
         case "stream_event": {
           const event = asRecord(frame.event);
-          if (event) handleStreamEvent(event, ctx);
+          if (!event) return;
+          const parentCallId =
+            asString(frame.parent_tool_use_id) ?? asString(event.parent_tool_use_id);
+          if (parentCallId) {
+            // Subagent stream events belong to the child, never to root blocks/tools.
+            const bgStatus = backgroundAgents.get(parentCallId);
+            if (
+              bgStatus !== "done" &&
+              bgStatus !== "error" &&
+              asString(event.type) === "content_block_start"
+            ) {
+              const block = asRecord(event.content_block);
+              if (asString(block?.type) === "tool_use") {
+                const toolName = asString(block?.name);
+                if (toolName) {
+                  ctx.emit({
+                    type: "tool",
+                    callId: parentCallId,
+                    subagent: { activity: `Using ${oneLine(toolName, 100)}` },
+                  });
+                }
+              }
+            }
+            return;
+          }
+          handleStreamEvent(event, ctx);
           return;
         }
         case "assistant": {
@@ -2179,6 +2371,7 @@ export function createClaudeAdapter(): AgentAdapter {
     interrupt: (ctx) => {
       interruptRequested = true;
       turnResultPending = false;
+      settleRunningWork(ctx, "error", true);
       controlSeq += 1;
       ctx.send({
         type: "control_request",

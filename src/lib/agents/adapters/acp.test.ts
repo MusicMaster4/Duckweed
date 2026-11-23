@@ -2272,4 +2272,129 @@ describe("acp adapter", () => {
     h.update({ sessionUpdate: "current_mode_update", currentModeId: "plan" }, "agy-fa");
     expect(h.state().accessMode).toBe("read-only");
   });
+
+  test("tracks Grok task_backgrounded, task_completed, background_tasks, and KillTask", async () => {
+    const h = harness({ agent: "grok", program: "grok" });
+    await h.handshake();
+    h.adapter.prompt({ text: "Run background delegation", images: [] }, h.ctx);
+    const promptReq = h.sent.findLast((msg) => msg.method === "session/prompt") as { id: number };
+
+    h.update({
+      sessionUpdate: "tool_call",
+      toolCallId: "grok-task-1",
+      title: "Task",
+      kind: "other",
+      status: "in_progress",
+      rawInput: {
+        description: "Audit API",
+        prompt: "Check routes",
+        run_in_background: true,
+        task_id: "bg-grok-1",
+      },
+      _meta: { "x.ai/tool": { name: "Task" } },
+    });
+    h.update({
+      sessionUpdate: "task_backgrounded",
+      task_id: "bg-grok-1",
+      tool_call_id: "grok-task-1",
+      description: "Auditing routes",
+    });
+    h.feed({ jsonrpc: "2.0", id: promptReq.id, result: { stopReason: "end_turn" } });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(h.state().items.find((item) => item.kind === "tool" && item.callId === "grok-task-1"))
+      .toMatchObject({ tool: "task", status: "running", subagent: { taskId: "bg-grok-1" } });
+
+    h.update({
+      sessionUpdate: "task_completed",
+      will_wake: false,
+      task_snapshot: {
+        task_id: "bg-grok-1",
+        completed: true,
+        exit_code: 0,
+        explicitly_killed: false,
+        output: "All routes verified",
+      },
+    });
+    expect(h.state().items.find((item) => item.kind === "tool" && item.callId === "grok-task-1"))
+      .toMatchObject({
+        tool: "task",
+        status: "done",
+        output: "All routes verified",
+      });
+  });
+
+  test("retracks an Antigravity subagent when send_message revives it and settles orphaned sync ACP tasks on turn end", async () => {
+    const readers: Array<{ sessionId: string; calls: string[] }> = [];
+    let phase = 0;
+    const h = harness({ agent: "antigravity", program: "agy" });
+    h.ctx.readAntigravitySubagents = async (sessionId, calls) => {
+      readers.push({ sessionId, calls });
+      if (phase === 0) {
+        return [{ callId: "agy-child-1", threadId: "child-thread-1", status: "done", toolName: null, output: "First pass" }];
+      }
+      return [{ callId: "agy-child-1", threadId: "child-thread-1", status: "done", toolName: null, output: "Second pass" }];
+    };
+    try {
+      await h.handshake();
+      h.update({
+        sessionUpdate: "tool_call",
+        toolCallId: "agy-child-1",
+        title: "Run invoke_subagent",
+        kind: "other",
+        status: "completed",
+        rawInput: { TypeName: "research", Role: "Investigator", Prompt: "Check logs" },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(subagentsForTurn(h.state().items)).toMatchObject([
+        { callId: "agy-child-1", threadId: "child-thread-1", status: "done", output: "First pass" },
+      ]);
+
+      phase = 1;
+      h.update({
+        sessionUpdate: "tool_call",
+        toolCallId: "msg-1",
+        name: "send_message",
+        kind: "other",
+        status: "completed",
+        rawInput: { Recipient: "child-thread-1", Message: "Look deeper" },
+      });
+      expect(subagentsForTurn(h.state().items)).toMatchObject([
+        { callId: "agy-child-1", status: "running" },
+      ]);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(subagentsForTurn(h.state().items)).toMatchObject([
+        { callId: "agy-child-1", status: "done", output: "Second pass" },
+      ]);
+      expect(readers.length).toBeGreaterThanOrEqual(2);
+    } finally {
+      h.adapter.dispose?.(h.ctx);
+    }
+
+    // Synchronous OpenCode task that misses its final update settles when turn ends.
+    const oc = harness({ agent: "opencode", program: "opencode" });
+    await oc.handshake();
+    oc.adapter.prompt({ text: "Analyze", images: [] }, oc.ctx);
+    const req = oc.sent.findLast((msg) => msg.method === "session/prompt") as { id: number };
+    oc.update({
+      sessionUpdate: "tool_call",
+      toolCallId: "oc-task-1",
+      name: "task",
+      kind: "other",
+      status: "in_progress",
+      rawInput: { description: "Explore files", prompt: "List modules", subagent_type: "explore" },
+    });
+    expect(oc.state().items.find((item) => item.kind === "tool")).toMatchObject({
+      tool: "task",
+      status: "running",
+    });
+    oc.feed({ jsonrpc: "2.0", id: req.id, result: { stopReason: "end_turn" } });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(oc.state().items.find((item) => item.kind === "tool")).toMatchObject({
+      tool: "task",
+      status: "done",
+    });
+  });
 });

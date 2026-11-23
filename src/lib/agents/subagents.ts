@@ -255,6 +255,33 @@ export function subagentForCallId(
   return item ? summaryFor(item) : null;
 }
 
+export function isActiveSubagentItem(item: AgentItem): boolean {
+  return (
+    item.kind === "tool" &&
+    item.tool === "task" &&
+    !item.subagent?.statusUnavailable &&
+    (item.status === "running" || item.status === "pending")
+  );
+}
+
+export function activeSubagentCount(
+  items: readonly AgentItem[] | undefined,
+): number {
+  if (!items?.length) return 0;
+  let count = 0;
+  for (const item of items) {
+    if (isActiveSubagentItem(item)) count += 1;
+  }
+  return count;
+}
+
+export function hasActiveSubagents(
+  items: readonly AgentItem[] | undefined,
+): boolean {
+  if (!items?.length) return false;
+  return items.some(isActiveSubagentItem);
+}
+
 export function runningSubagentCount(subagents: SubagentSummary[]): number {
   return subagents.reduce(
     (count, subagent) =>

@@ -250,6 +250,77 @@ function lastLine(text: string): string | null {
   return lines.at(-1) ?? null;
 }
 
+function readRawOutputText(raw: unknown): string {
+  if (typeof raw === "string") return raw;
+  if (Array.isArray(raw)) {
+    return raw
+      .map((entry) => (typeof entry === "string" ? entry : readContentText(entry)))
+      .filter(Boolean)
+      .join("\n");
+  }
+  const record = asRecord(raw);
+  if (!record) return "";
+  return (
+    asString(record.text) ??
+    asString(record.output) ??
+    asString(record.result) ??
+    asString(record.summary) ??
+    readContentText(record.content)
+  );
+}
+
+function readMetaToolName(meta: Record<string, unknown> | null): string | null {
+  if (!meta) return null;
+  const xaiTool = asRecord(meta["x.ai/tool"]);
+  return (
+    asString(meta.toolName) ??
+    asString(meta.tool_name) ??
+    asString(meta.name) ??
+    asString(xaiTool?.name) ??
+    asString(xaiTool?.tool_name) ??
+    asString(xaiTool?.toolName)
+  );
+}
+
+function readMetaThreadId(
+  meta: Record<string, unknown> | null,
+  rawOutput: unknown,
+): string | null {
+  const output = asRecord(rawOutput);
+  const outputMeta = asRecord(output?.metadata);
+  return (
+    asString(meta?.subagentSessionId) ??
+    asString(meta?.sessionId) ??
+    asString(meta?.session_id) ??
+    asString(meta?.threadId) ??
+    asString(meta?.thread_id) ??
+    asString(output?.subagentSessionId) ??
+    asString(output?.sessionId) ??
+    asString(output?.session_id) ??
+    asString(output?.threadId) ??
+    asString(output?.thread_id) ??
+    asString(outputMeta?.sessionId) ??
+    asString(outputMeta?.session_id) ??
+    null
+  );
+}
+
+function isAntigravityInvokeCall(
+  agent: AgentId,
+  rawToolName: string | null,
+  title: string | null,
+  rawInput: Record<string, unknown> | null,
+): boolean {
+  if (agent !== "antigravity") return false;
+  if (rawToolName === "invoke_subagent") return true;
+  if (title && /\binvoke_subagent\b/i.test(title)) return true;
+  return Boolean(
+    rawInput &&
+      asString(rawInput.TypeName) &&
+      (asString(rawInput.Prompt) || asString(rawInput.Role)),
+  );
+}
+
 /** Grok's private ACP extension reports background workflow phases this way. */
 function readWorkflowSteps(update: Record<string, unknown>): AgentPlanStep[] {
   const workflowStatus = asString(update.status)?.toLowerCase();
@@ -403,6 +474,11 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
   const taskCalls = new Set<string>();
   /** A launch acknowledgement is not the background agent's result. */
   const backgroundTaskCalls = new Set<string>();
+  /** Synchronous delegated calls that must settle when their parent turn ends. */
+  const openSyncTaskCalls = new Set<string>();
+  /** Grok background task_id -> originating ACP toolCallId. */
+  const grokTaskCallById = new Map<string, string>();
+  const activeGrokTasks = new Set<string>();
   const antigravitySubagents = agent === "antigravity" ? createAntigravitySubagentTracker() : null;
   /** Whether AGY has already acknowledged starting each invoke_subagent call. */
   const antigravityInvocations = new Map<string, boolean>();
@@ -513,7 +589,34 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
   function finishTurnWhenReady(ctx: AdapterContext, force = false) {
     if (!turnOpen || !promptRequestSettled) return;
     if (!force && activeWorkflows.size > 0) return;
-    if (force) activeWorkflows.clear();
+    if (force) {
+      activeWorkflows.clear();
+      for (const callId of backgroundTaskCalls) {
+        if (antigravityInvocations.has(callId)) continue;
+        ctx.emit({
+          type: "tool",
+          callId,
+          status: "error",
+          ...(taskCalls.has(callId)
+            ? { subagent: { activity: "Delegated work stopped" } }
+            : {}),
+        });
+      }
+      backgroundTaskCalls.clear();
+      activeGrokTasks.clear();
+    }
+    for (const callId of openSyncTaskCalls) {
+      ctx.emit({
+        type: "tool",
+        callId,
+        status: force ? "error" : "done",
+        subagent: {
+          activity: force ? "Delegated work stopped" : "Delegated work completed",
+        },
+      });
+    }
+    openSyncTaskCalls.clear();
+    antigravitySubagents?.pollNow();
     turnOpen = false;
     ctx.emit({ type: "turn-end" });
   }
@@ -1169,6 +1272,11 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
     replayStarted = true;
     antigravitySubagents?.reset();
     antigravityInvocations.clear();
+    taskCalls.clear();
+    backgroundTaskCalls.clear();
+    openSyncTaskCalls.clear();
+    grokTaskCallById.clear();
+    activeGrokTasks.clear();
     ctx.emit({ type: "transcript" });
   }
 
@@ -1243,14 +1351,20 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
         if (!callId) return;
         beginToolContentPhase(callId, ctx);
         turnHadContent = true;
+        const meta = asRecord(update._meta);
         const rawTitle = asString(update.title);
         const title = rawTitle ? rawTitle.replace(/^File \/([A-Za-z]:\/)/, "File $1") : null;
-        const rawToolName = asString(update.name);
+        const rawToolName = asString(update.name) ?? readMetaToolName(meta);
         if (title) toolTitles.set(callId, title);
         const rawInput = asRecord(update.rawInput);
         const command = readCommandInput(rawInput);
         const status = asString(update.status);
-        const { text, changes } = readToolContent(asArray(update.content));
+        const { text: contentText, changes } = readToolContent(asArray(update.content));
+        const rawOutputText = readRawOutputText(update.rawOutput);
+        const text = contentText || rawOutputText;
+        const outputThreadId = readMetaThreadId(meta, update.rawOutput);
+        const outputInterrupted =
+          asRecord(update.rawOutput)?.interrupted === true || meta?.interrupted === true;
         const name = title ?? toolTitles.get(callId) ?? rawToolName ?? "tool";
         const kindName = rawToolName ?? name;
         const acpKind = asString(update.kind);
@@ -1267,29 +1381,62 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
           return;
         }
         const taskMeta = readSubagentMeta(title, rawInput, rawToolName);
-        if (taskMeta) taskCalls.add(callId);
+        if (taskMeta || toolKind(kindName, acpKind) === "task") taskCalls.add(callId);
         const isTask = taskCalls.has(callId);
-        const launched = isTask && /Async agent launched successfully/i.test(text);
+        const inputTaskId = asString(rawInput?.task_id) ?? asString(rawInput?.taskId);
+        if (isTask && inputTaskId) grokTaskCallById.set(inputTaskId, callId);
+        const explicitAsyncInput =
+          rawInput?.run_in_background === true || rawInput?.background === true;
+        const launched =
+          isTask &&
+          (/Async agent launched successfully|Agent launched in background/i.test(text) ||
+            (explicitAsyncInput &&
+              status === "completed" &&
+              (!text || /\b(?:launched|started|background|task[_ ]?id)\b/i.test(text))));
         if (launched) backgroundTaskCalls.add(callId);
         const waitingForResult =
-          backgroundTaskCalls.has(callId) && status !== "failed" && (!text || launched);
-        if (backgroundTaskCalls.has(callId) && !waitingForResult &&
-          (status === "completed" || status === "failed")) {
+          backgroundTaskCalls.has(callId) &&
+          status !== "failed" &&
+          !outputInterrupted &&
+          (!text || launched);
+        if (
+          backgroundTaskCalls.has(callId) &&
+          !waitingForResult &&
+          (status === "completed" || status === "failed" || outputInterrupted)
+        ) {
           backgroundTaskCalls.delete(callId);
         }
         const activity = isTask
-          ? waitingForResult ? "Working" : text ? lastLine(text) : null
+          ? waitingForResult
+            ? "Working"
+            : outputInterrupted
+              ? "Delegated work stopped"
+              : text
+                ? lastLine(text)
+                : null
           : null;
-        let toolStatus = status && ACP_STATUS[status]
-          ? waitingForResult ? "running" as const : ACP_STATUS[status]
-          : undefined;
+        let toolStatus = outputInterrupted
+          ? ("error" as const)
+          : status && ACP_STATUS[status]
+            ? waitingForResult
+              ? ("running" as const)
+              : ACP_STATUS[status]
+            : undefined;
         let output = text;
         let childPatch: SubagentMeta | undefined;
-        if (antigravitySubagents && rawToolName === "invoke_subagent" && !antigravityInvocations.has(callId)) {
+        if (
+          antigravitySubagents &&
+          isAntigravityInvokeCall(agent, rawToolName, title, rawInput) &&
+          !antigravityInvocations.has(callId)
+        ) {
           antigravityInvocations.set(callId, false);
         }
         if (antigravitySubagents && antigravityInvocations.has(callId)) {
-          const launchOnly = !text || launched || text.includes("Created the following subagent:");
+          const launchOnly =
+            !text ||
+            launched ||
+            text.includes("Created the following subagent:") ||
+            /subagent.*launched|started.*subagent/i.test(text);
           if (status === "completed" && launchOnly) {
             if (antigravityInvocations.get(callId)) return;
             antigravityInvocations.set(callId, true);
@@ -1299,9 +1446,77 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
             output = "";
           } else if (status === "failed" || status === "completed") {
             antigravitySubagents.untrack(callId);
-            childPatch = { statusUnavailable: false, activity: activity ?? (status === "failed"
-              ? "Delegation failed"
-              : "Delegated work completed") };
+            childPatch = {
+              statusUnavailable: false,
+              activity:
+                activity ??
+                (status === "failed"
+                  ? "Delegation failed"
+                  : "Delegated work completed"),
+            };
+          }
+        }
+        // Re-engage Antigravity DB tracking if the parent messages a finished child
+        // or immediately poll when manage_subagents kills one.
+        if (antigravitySubagents) {
+          const recipient = asString(rawInput?.Recipient);
+          const isSendMessage =
+            rawToolName === "send_message" ||
+            (title !== null && /\bsend_message\b/i.test(title)) ||
+            Boolean(recipient && rawInput?.Message !== undefined);
+          if (isSendMessage && recipient) {
+            const targetCallId = antigravitySubagents.callIdForThread(recipient);
+            if (targetCallId) {
+              antigravitySubagents.retrack(targetCallId, ctx);
+              ctx.emit({
+                type: "tool",
+                callId: targetCallId,
+                status: "running",
+                subagent: { activity: "Working", statusUnavailable: false },
+              });
+            }
+          }
+          const isManageSubagents =
+            rawToolName === "manage_subagents" ||
+            (title !== null && /\bmanage_subagents\b/i.test(title));
+          if (isManageSubagents && (status === "completed" || status === "failed")) {
+            antigravitySubagents.pollNow();
+          }
+        }
+        // Grok's KillTask immediately terminates a background task/subagent.
+        if (
+          (rawToolName?.toLowerCase() === "killtask" || title?.toLowerCase() === "killtask") &&
+          status === "completed" &&
+          inputTaskId
+        ) {
+          activeGrokTasks.delete(inputTaskId);
+          const existingTask = runtimeTasks.get(inputTaskId);
+          if (existingTask) {
+            runtimeTasks.set(inputTaskId, { ...existingTask, status: "stopped" });
+            ctx.emit({ type: "runtime-tasks", tasks: [...runtimeTasks.values()] });
+          }
+          const killedCallId = grokTaskCallById.get(inputTaskId);
+          if (killedCallId) {
+            backgroundTaskCalls.delete(killedCallId);
+            openSyncTaskCalls.delete(killedCallId);
+            ctx.emit({
+              type: "tool",
+              callId: killedCallId,
+              status: "error",
+              ...(taskCalls.has(killedCallId)
+                ? { subagent: { activity: "Delegated work stopped" } }
+                : {}),
+            });
+          }
+        }
+        if (isTask) {
+          const isAsyncTracked =
+            backgroundTaskCalls.has(callId) || antigravityInvocations.has(callId);
+          const settledStatus = toolStatus === "done" || toolStatus === "error";
+          if (isAsyncTracked || settledStatus) {
+            openSyncTaskCalls.delete(callId);
+          } else if (kind === "tool_call" || toolStatus === "running" || toolStatus === "pending") {
+            openSyncTaskCalls.add(callId);
           }
         }
         ctx.emit({
@@ -1325,12 +1540,166 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
             ? {
                 subagent: {
                   ...taskMeta,
+                  ...(outputThreadId ? { threadId: outputThreadId } : {}),
+                  ...(inputTaskId ? { taskId: inputTaskId } : {}),
                   ...(activity ? { activity: oneLine(activity) } : {}),
                   ...childPatch,
                 },
               }
             : {}),
         });
+        return;
+      }
+      case "task_backgrounded": {
+        const taskId = asString(update.task_id) ?? asString(update.taskId);
+        const toolCallId = asString(update.tool_call_id) ?? asString(update.toolCallId);
+        const description =
+          asString(update.description) ??
+          asString(update.monitor_description) ??
+          asString(update.command) ??
+          "Background task";
+        if (taskId) {
+          activeGrokTasks.add(taskId);
+          if (toolCallId) grokTaskCallById.set(taskId, toolCallId);
+          runtimeTasks.set(taskId, {
+            id: taskId,
+            kind: "task",
+            title: oneLine(description, 80),
+            status: "running",
+          });
+          ctx.emit({ type: "runtime-tasks", tasks: [...runtimeTasks.values()] });
+        }
+        if (toolCallId && taskCalls.has(toolCallId)) {
+          backgroundTaskCalls.add(toolCallId);
+          openSyncTaskCalls.delete(toolCallId);
+          ctx.emit({
+            type: "tool",
+            callId: toolCallId,
+            status: "running",
+            subagent: {
+              ...(taskId ? { taskId } : {}),
+              activity: oneLine(description, 120),
+            },
+          });
+        }
+        return;
+      }
+      case "task_completed": {
+        const snapshot = asRecord(update.task_snapshot) ?? update;
+        const taskId = asString(snapshot.task_id) ?? asString(snapshot.taskId);
+        const rawStatus = asString(snapshot.status)?.toLowerCase() ?? "";
+        const exitCode = asNumber(snapshot.exit_code);
+        const explicitlyKilled = snapshot.explicitly_killed === true;
+        const signal = asString(snapshot.signal);
+        const failed =
+          explicitlyKilled ||
+          Boolean(signal) ||
+          (exitCode !== null && exitCode !== 0) ||
+          rawStatus === "failed" ||
+          rawStatus === "error";
+        const output = asString(snapshot.output) ?? "";
+        const description =
+          asString(snapshot.description) ?? asString(snapshot.command) ?? "";
+        if (taskId) {
+          activeGrokTasks.delete(taskId);
+          const existing = runtimeTasks.get(taskId);
+          runtimeTasks.set(taskId, {
+            id: taskId,
+            kind: existing?.kind ?? "task",
+            title: existing?.title ?? (description ? oneLine(description, 80) : "Background task"),
+            status: explicitlyKilled ? "stopped" : failed ? "error" : "done",
+          });
+          ctx.emit({ type: "runtime-tasks", tasks: [...runtimeTasks.values()] });
+          const targetCallId = grokTaskCallById.get(taskId);
+          if (targetCallId) {
+            backgroundTaskCalls.delete(targetCallId);
+            openSyncTaskCalls.delete(targetCallId);
+            ctx.emit({
+              type: "tool",
+              callId: targetCallId,
+              status: failed ? "error" : "done",
+              ...(output ? { output } : {}),
+              ...(taskCalls.has(targetCallId)
+                ? {
+                    subagent: {
+                      activity: explicitlyKilled
+                        ? "Delegated work stopped"
+                        : failed
+                          ? "Delegated work failed"
+                          : output.trim()
+                            ? oneLine(lastLine(output) ?? output)
+                            : "Delegated work completed",
+                    },
+                  }
+                : {}),
+            });
+          }
+        }
+        if (!loading && update.will_wake === false) {
+          finishTurnWhenReady(ctx);
+        }
+        return;
+      }
+      case "background_tasks": {
+        const tasks = asArray(update.tasks)
+          .map((entry) => asRecord(entry))
+          .filter((entry): entry is Record<string, unknown> => entry !== null);
+        const stillRunning = new Set<string>();
+        for (const task of tasks) {
+          const taskId = asString(task.task_id) ?? asString(task.taskId);
+          if (!taskId) continue;
+          const rawStatus = asString(task.status)?.toLowerCase() ?? "running";
+          const signal = asString(task.signal);
+          const exitCode = asNumber(task.exit_code);
+          const isRunning = rawStatus === "running" || rawStatus === "pending" || rawStatus === "in_progress";
+          const failed =
+            rawStatus === "failed" ||
+            rawStatus === "error" ||
+            Boolean(signal) ||
+            (exitCode !== null && exitCode !== 0);
+          const description =
+            asString(task.description) ?? asString(task.command) ?? "Background task";
+          if (isRunning) stillRunning.add(taskId);
+          runtimeTasks.set(taskId, {
+            id: taskId,
+            kind: "task",
+            title: oneLine(description, 80),
+            status: isRunning
+              ? "running"
+              : signal === "killed"
+                ? "stopped"
+                : failed
+                  ? "error"
+                  : "done",
+          });
+          const targetCallId = grokTaskCallById.get(taskId);
+          if (targetCallId && !isRunning && backgroundTaskCalls.has(targetCallId)) {
+            backgroundTaskCalls.delete(targetCallId);
+            openSyncTaskCalls.delete(targetCallId);
+            ctx.emit({
+              type: "tool",
+              callId: targetCallId,
+              status: failed ? "error" : "done",
+              ...(taskCalls.has(targetCallId)
+                ? {
+                    subagent: {
+                      activity:
+                        signal === "killed"
+                          ? "Delegated work stopped"
+                          : failed
+                            ? "Delegated work failed"
+                            : "Delegated work completed",
+                    },
+                  }
+                : {}),
+            });
+          }
+        }
+        for (const taskId of [...activeGrokTasks]) {
+          if (!stillRunning.has(taskId)) activeGrokTasks.delete(taskId);
+        }
+        for (const taskId of stillRunning) activeGrokTasks.add(taskId);
+        ctx.emit({ type: "runtime-tasks", tasks: [...runtimeTasks.values()] });
         return;
       }
       case "plan": {

@@ -525,8 +525,13 @@ export function AgentSurface({
     .filter(Boolean)
     .join(" · ");
   const ended = session.status === "exited" || session.status === "error";
+  const headerActive =
+    session.status === "working" || (session.status === "idle" && childrenLive);
   const resumable = canResume(session.agent);
-  const resumeBlocked = session.status === "working" || session.status === "waiting";
+  const resumeBlocked =
+    session.status === "working" ||
+    session.status === "waiting" ||
+    (session.status === "idle" && childrenLive);
   const copyConversation = async () => {
     const transcript = conversationText(session.items, session.label);
     if (!transcript) return;
@@ -535,7 +540,7 @@ export function AgentSurface({
 
   /** Warn only while closing would interrupt an unfinished turn. */
   const requestClose = () => {
-    if (!agentHasUnfinishedWork(session.status)) {
+    if (!agentHasUnfinishedWork(session.status, session.items)) {
       onClose();
       return;
     }
@@ -677,10 +682,14 @@ export function AgentSurface({
         </span>
         <span
           className={`agent-state is-${
-            focusedSubagent ? focusedSubagent.status : session.status
+            focusedSubagent
+              ? focusedSubagent.status
+              : headerActive
+                ? "working"
+                : session.status
           }`}
         >
-          {session.status === "working" && !session.loadingHistory && !focusedSubagent && !multiPane && (
+          {headerActive && !session.loadingHistory && !focusedSubagent && !multiPane && (
             <span className="agent-pulse" aria-hidden="true" />
           )}
           {session.loadingHistory

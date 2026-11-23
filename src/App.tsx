@@ -50,6 +50,7 @@ import * as checklist from "./lib/checklist";
 import * as powerWatch from "./lib/powerWatch";
 import type { BusyEntry } from "./lib/powerWatch";
 import { agentHasUnfinishedWork } from "./lib/agents/activity";
+import { hasActiveSubagents } from "./lib/agents/subagents";
 import { AGENTS, AGENT_IDS } from "./lib/agents/catalog";
 import * as agentSessions from "./lib/agents/session";
 import type { AgentId, AgentImageAttachment } from "./lib/agents/types";
@@ -1045,7 +1046,7 @@ export default function App() {
     (targetTermId: string) => {
       const targetAgent = agentSessions.get(targetTermId);
       const targetStillWorking = targetAgent
-        ? agentHasUnfinishedWork(targetAgent.status)
+        ? agentHasUnfinishedWork(targetAgent.status, targetAgent.items)
         : terminals.hasPendingAgentTurn(targetTermId);
       if (targetStillWorking) return;
 
@@ -1169,7 +1170,10 @@ export default function App() {
               agent: meta.agent,
               busy: meta.busy,
               pendingAgentTurn: terminals.hasPendingAgentTurn(node.term),
-              structuredStatus: session?.status ?? null,
+              structuredStatus:
+                session?.status === "idle" && hasActiveSubagents(session.items)
+                  ? "working"
+                  : (session?.status ?? null),
             });
             const rawAgent = meta.agent
               ? meta.agent.charAt(0).toUpperCase() + meta.agent.slice(1)
@@ -1594,7 +1598,7 @@ export default function App() {
       const next = new Set(
         termIds.filter((termId) => {
           const agent = agentSessions.get(termId);
-          if (agent) return agentHasUnfinishedWork(agent.status);
+          if (agent) return agentHasUnfinishedWork(agent.status, agent.items);
           return terminals.hasPendingAgentTurn(termId);
         }),
       );
@@ -1797,7 +1801,9 @@ export default function App() {
                 ? "agent-starting"
                 : agent.status === "waiting"
                   ? "agent-waiting"
-                  : null;
+                  : agent.status === "idle" && hasActiveSubagents(agent.items)
+                    ? "agent-subagents"
+                    : null;
           if (reason) entries.push({ termId: node.term, label: `${where} · ${agent.label}`, reason });
           return;
         }

@@ -4910,4 +4910,119 @@ describe("codex adapter", () => {
     });
     expect(h.state().status).toBe("idle");
   });
+
+  test("reconciles child status from wait, closeAgent, sendInput, thread/closed, and hydration", async () => {
+    const h = harness({}, { completionQuietMs: 0, childPollIntervalMs: 0 });
+    await h.handshake();
+    h.notify("item/completed", {
+      threadId: "thread_1",
+      item: {
+        id: "spawn-1",
+        type: "collabAgentToolCall",
+        tool: "spawnAgent",
+        status: "completed",
+        receiverThreadIds: ["thread_child_a"],
+        prompt: "Inspect parser",
+        agentsStates: { thread_child_a: { status: "running" } },
+      },
+    });
+    expect(h.state().items.find((item) => item.kind === "tool" && item.callId === "spawn-1"))
+      .toMatchObject({ status: "running" });
+
+    // `wait` reporting completed settles the spawned child row while keeping wait out of the fleet.
+    h.notify("item/completed", {
+      threadId: "thread_1",
+      item: {
+        id: "wait-1",
+        type: "collabAgentToolCall",
+        tool: "wait",
+        status: "completed",
+        receiverThreadIds: ["thread_child_a"],
+        agentsStates: { thread_child_a: { status: "completed", message: "Parser looks clean" } },
+      },
+    });
+    expect(h.state().items.find((item) => item.kind === "tool" && item.callId === "spawn-1"))
+      .toMatchObject({ status: "done", subagent: { activity: "Parser looks clean" } });
+
+    // `sendInput` reopens the child, and `errored` on a later wait marks it failed.
+    h.notify("item/completed", {
+      threadId: "thread_1",
+      item: {
+        id: "send-1",
+        type: "collabAgentToolCall",
+        tool: "sendInput",
+        status: "completed",
+        receiverThreadIds: ["thread_child_a"],
+        agentsStates: { thread_child_a: { status: "running" } },
+      },
+    });
+    expect(h.state().items.find((item) => item.kind === "tool" && item.callId === "spawn-1"))
+      .toMatchObject({ status: "running" });
+
+    h.notify("item/completed", {
+      threadId: "thread_1",
+      item: {
+        id: "wait-2",
+        type: "collabAgentToolCall",
+        tool: "wait",
+        status: "completed",
+        receiverThreadIds: ["thread_child_a"],
+        agentsStates: { thread_child_a: { status: "errored", message: "Tests failed" } },
+      },
+    });
+    expect(h.state().items.find((item) => item.kind === "tool" && item.callId === "spawn-1"))
+      .toMatchObject({ status: "error", subagent: { activity: "Tests failed" } });
+
+    // `resumeAgent` reopens it again, and `thread/closed` settles it cleanly.
+    h.notify("item/completed", {
+      threadId: "thread_1",
+      item: {
+        id: "resume-1",
+        type: "collabAgentToolCall",
+        tool: "resumeAgent",
+        status: "completed",
+        receiverThreadIds: ["thread_child_a"],
+      },
+    });
+    expect(h.state().items.find((item) => item.kind === "tool" && item.callId === "spawn-1"))
+      .toMatchObject({ status: "running" });
+
+    h.notify("thread/closed", { threadId: "thread_child_a" });
+    expect(h.state().items.find((item) => item.kind === "tool" && item.callId === "spawn-1"))
+      .toMatchObject({ status: "done" });
+  });
+
+  test("allows thread/read hydration to settle a running child when no newer live status arrived", async () => {
+    const h = harness({}, { completionQuietMs: 0, childPollIntervalMs: 0 });
+    await h.handshake();
+    h.notify("item/completed", {
+      threadId: "thread_1",
+      item: {
+        id: "spawn-hydrate-settle",
+        type: "collabAgentToolCall",
+        tool: "spawnAgent",
+        status: "completed",
+        receiverThreadIds: ["thread_child_silent"],
+        prompt: "Check build",
+        agentsStates: { thread_child_silent: { status: "running" } },
+      },
+    });
+    const read = h.sent.findLast((message) => message.method === "thread/read") as { id: number };
+    h.feed({
+      jsonrpc: "2.0",
+      id: read.id,
+      result: {
+        thread: {
+          id: "thread_child_silent",
+          status: { type: "notLoaded" },
+          turns: [{ id: "t-1", status: "completed", items: [] }],
+        },
+      },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(h.state().items.find((item) => item.kind === "tool" && item.callId === "spawn-hydrate-settle"))
+      .toMatchObject({ status: "done" });
+  });
 });

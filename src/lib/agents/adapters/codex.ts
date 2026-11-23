@@ -84,6 +84,8 @@ const DEFAULT_SERVICE_TIER = "default";
 const ROOT_COMPLETION_QUIET_MS = 800;
 /** Child transcripts are detail views, not a 60 fps animation surface. */
 const DEFAULT_CHILD_STREAM_PUBLISH_MS = 125;
+/** Backup poll so active child threads settle even if app-server omits notifications. */
+const DEFAULT_CHILD_STATUS_POLL_MS = 2_500;
 /**
  * Codex `thread/resume` has no server-side timeout. A thread left `active`
  * with no running turn never answers, which used to leave the pane loading
@@ -120,6 +122,8 @@ interface CodexAdapterOptions {
   completionQuietMs?: number;
   /** Test seam; production batches nested transcript reduction and paints to this cadence. */
   childStreamPublishMs?: number;
+  /** Test seam; periodic backup poll for active child thread status. `0` disables. */
+  childPollIntervalMs?: number;
   /** Test seam for verifying that child token bursts are reduced in bounded batches. */
   childEventReducer?: (state: AgentSessionState, event: AgentEvent) => AgentSessionState;
   /**
@@ -275,6 +279,40 @@ const COLLAB_STATUS: Record<string, ToolStatus> = {
   failed: "error",
 };
 
+function collabAgentStatus(raw: string | null): ToolStatus | null {
+  if (!raw) return null;
+  switch (raw) {
+    case "pendingInit":
+    case "pending":
+      return "pending";
+    case "running":
+    case "active":
+    case "inProgress":
+      return "running";
+    case "completed":
+    case "idle":
+    case "shutdown":
+    case "closed":
+      return "done";
+    case "failed":
+    case "error":
+    case "errored":
+    case "interrupted":
+    case "cancelled":
+    case "canceled":
+    case "notFound":
+      return "error";
+    default:
+      return null;
+  }
+}
+
+function threadIsUnloaded(value: unknown): boolean {
+  const record = asRecord(value);
+  const raw = asString(record?.type) ?? asString(value);
+  return raw === "notLoaded";
+}
+
 interface Pending {
   resolve: (result: Record<string, unknown>) => void;
   reject: (error: Record<string, unknown>) => void;
@@ -295,6 +333,8 @@ interface ChildThread {
   currentTurnId: string | null;
   /** A streamed/collaboration status outranks the eventually-consistent thread/read snapshot. */
   hasLiveStatus: boolean;
+  /** Monotonic counter incremented on live status updates so only newer live events outrank thread/read. */
+  liveStatusVersion: number;
   streamed: Set<string>;
   state: AgentSessionState;
 }
@@ -356,6 +396,8 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
   const completionQuietMs = options.completionQuietMs ?? ROOT_COMPLETION_QUIET_MS;
   const childStreamPublishMs =
     options.childStreamPublishMs ?? DEFAULT_CHILD_STREAM_PUBLISH_MS;
+  const childPollIntervalMs =
+    options.childPollIntervalMs ?? DEFAULT_CHILD_STATUS_POLL_MS;
   const reduceChildEvent = options.childEventReducer ?? applyEvent;
   const resumeTimeoutMs = options.resumeTimeoutMs ?? RESUME_RPC_TIMEOUT_MS;
   const stopTimeoutMs = options.stopTimeoutMs ?? STOP_RPC_TIMEOUT_MS;
@@ -521,6 +563,8 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
   const pendingChildStreamEvents = new Map<string, Map<string, AgentEvent>>();
   /** One shared timer keeps a fleet on one cadence instead of N staggered timers. */
   let childStreamFlushTimer: ReturnType<typeof setTimeout> | null = null;
+  let childStatusPollTimer: ReturnType<typeof setInterval> | null = null;
+  const childStatusPollsInFlight = new Set<string>();
   let childDiscoveryInFlight: Promise<void> | null = null;
   let childDiscoveryRequested = false;
   let childDiscoveryShouldSynthesize = false;
@@ -670,6 +714,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       activity: null,
       currentTurnId: null,
       hasLiveStatus: false,
+      liveStatusVersion: 0,
       streamed: new Set<string>(),
       state: newChildState(childThreadId),
     };
@@ -830,6 +875,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     const child = childFor(childThreadId);
     if (event.type === "status" || event.type === "turn-end") {
       child.hasLiveStatus = true;
+      child.liveStatusVersion += 1;
     }
     const streamKey = childStreamEventKey(event);
     if (streamKey) {
@@ -842,6 +888,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     cancelEmptyChildStreamTimer();
     child.state = reduceChildEvent(child.state, event);
     publishChild(childThreadId, ctx);
+    ensureChildStatusPolling(ctx);
   }
 
   function childContext(childThreadId: string, ctx: AdapterContext): AdapterContext {
@@ -855,9 +902,114 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     const record = asRecord(value);
     const raw = asString(record?.type) ?? asString(value);
     if (raw === "idle") return "idle";
-    if (raw === "active" || raw === "running" || raw === "inProgress") return "working";
-    if (raw === "error" || raw === "failed") return "error";
+    if (raw === "active" || raw === "running" || raw === "inProgress" || raw === "pendingInit") {
+      return "working";
+    }
+    if (raw === "error" || raw === "failed" || raw === "errored" || raw === "systemError") {
+      return "error";
+    }
     return null;
+  }
+
+  function lastChildTurnStatus(turns: unknown[]): AgentStatus | null {
+    for (let index = turns.length - 1; index >= 0; index -= 1) {
+      const turn = asRecord(turns[index]);
+      if (!turn) continue;
+      const raw = asString(turn.status);
+      if (raw === "inProgress" || raw === "running" || raw === "active") return "working";
+      if (raw === "failed" || raw === "interrupted" || raw === "error" || raw === "errored") {
+        return "error";
+      }
+      if (raw === "completed" || raw === "idle") return "idle";
+    }
+    return null;
+  }
+
+  function childIsActive(child: ChildThread): boolean {
+    return (
+      child.state.status === "starting" ||
+      child.state.status === "working" ||
+      child.state.status === "waiting"
+    );
+  }
+
+  function stopChildStatusPolling(): void {
+    if (childStatusPollTimer !== null) {
+      clearInterval(childStatusPollTimer);
+      childStatusPollTimer = null;
+    }
+  }
+
+  function hasActiveChildrenOrSpawns(): boolean {
+    if (pendingChildSpawns.size > 0) return true;
+    for (const child of children.values()) {
+      if (child.callId && childIsActive(child)) return true;
+    }
+    return false;
+  }
+
+  function pollActiveChildren(ctx: AdapterContext): void {
+    if (disposed || hydratingResume || !threadId) return;
+    if (!hasActiveChildrenOrSpawns()) {
+      stopChildStatusPolling();
+      return;
+    }
+    if (pendingChildSpawns.size > 0) {
+      void discoverChildThreads(ctx);
+    }
+    for (const [childThreadId, child] of children) {
+      if (!child.callId || !childIsActive(child)) continue;
+      if (hydratingChildren.has(childThreadId) || childStatusPollsInFlight.has(childThreadId)) {
+        continue;
+      }
+      const versionAtStart = child.liveStatusVersion;
+      childStatusPollsInFlight.add(childThreadId);
+      void requestWithTimeout(
+        ctx,
+        nextId++,
+        "thread/read",
+        { threadId: childThreadId, includeTurns: false },
+        stopTimeoutMs,
+      )
+        .then((result) => {
+          if (disposed) return;
+          const current = children.get(childThreadId);
+          if (!current || current.liveStatusVersion !== versionAtStart) return;
+          const thread = asRecord(result.thread) ?? result;
+          const status = threadStatus(thread.status);
+          const unloaded = threadIsUnloaded(thread.status);
+          const settledStatus: AgentStatus | null =
+            status === "idle" || status === "error"
+              ? status
+              : unloaded
+                ? "idle"
+                : null;
+          if (!settledStatus) return;
+          current.currentTurnId = null;
+          current.state = applyEvent(current.state, { type: "status", status: settledStatus });
+          syncChild(childThreadId, ctx);
+          void hydrateChild(childThreadId, ctx, true);
+          if (!hasActiveChildrenOrSpawns()) stopChildStatusPolling();
+        })
+        .catch(() => {
+          // Ignore transient read errors; next poll or live event will retry.
+        })
+        .finally(() => {
+          childStatusPollsInFlight.delete(childThreadId);
+        });
+    }
+  }
+
+  function ensureChildStatusPolling(ctx: AdapterContext): void {
+    if (disposed || childPollIntervalMs <= 0) return;
+    if (!hasActiveChildrenOrSpawns()) {
+      stopChildStatusPolling();
+      return;
+    }
+    if (childStatusPollTimer !== null) return;
+    childStatusPollTimer = setInterval(() => {
+      pollActiveChildren(ctx);
+    }, childPollIntervalMs);
   }
 
   function hydratedTurnId(
@@ -908,6 +1060,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       return refresh;
     }
 
+    const versionAtStart = childFor(childThreadId).liveStatusVersion;
     const metadataRequestId = nextId++;
     const hydration = requestWithTimeout(ctx, metadataRequestId, "thread/read", {
       threadId: childThreadId,
@@ -932,7 +1085,18 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
           });
           turns = asArray(page.data).reverse();
         }
-        const status = threadStatus(thread.status);
+        const rawThreadStatus = threadStatus(thread.status);
+        const unloaded = threadIsUnloaded(thread.status);
+        const lastTurn = lastChildTurnStatus(turns);
+        const activeHydratedTurn = hydratedTurnId({ ...thread, turns }, false);
+        const status: AgentStatus | null =
+          activeHydratedTurn !== null
+            ? "working"
+            : rawThreadStatus === "error" || lastTurn === "error"
+              ? "error"
+              : rawThreadStatus === "idle" || unloaded
+                ? "idle"
+                : rawThreadStatus ?? lastTurn;
         if (
           status === "working" &&
           (!child.hasLiveStatus || child.state.status === "working")
@@ -940,7 +1104,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
           // The parent collaboration item independently reported this child as
           // running, so its coarse thread status is corroborated here.
           child.currentTurnId ??= hydratedTurnId({ ...thread, turns }, true);
-        } else if (!child.hasLiveStatus) {
+        } else if (!child.hasLiveStatus || status === "idle" || status === "error") {
           child.currentTurnId = null;
         }
 
@@ -977,9 +1141,16 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         } finally {
           persistedHistoryReplayDepth -= 1;
         }
-        // Live status events can overtake thread/read. Never flash a completed
-        // child back to working because an older snapshot arrived late.
-        if (!child.hasLiveStatus && status) {
+        // Live status events that arrived while thread/read was in flight win.
+        // When no newer live event arrived, allow thread/read to settle an
+        // active child that finished silently without regressing a completed
+        // child back to a stale coarse "active" status with no active turn.
+        const noNewerLiveStatus = child.liveStatusVersion === versionAtStart;
+        const canReconcileLive =
+          noNewerLiveStatus &&
+          ((childIsActive(child) && (status === "idle" || status === "error")) ||
+            (status === "working" && activeHydratedTurn !== null));
+        if (status && (!child.hasLiveStatus || canReconcileLive)) {
           hydratedState = applyEvent(hydratedState, { type: "status", status });
         } else {
           hydratedState = {
@@ -993,6 +1164,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         child.state = hydratedState;
         child.streamed = hydratedStreamed;
         syncChild(childThreadId, ctx);
+        ensureChildStatusPolling(ctx);
         hydratedChildren.add(childThreadId);
         return true;
       })
@@ -1056,9 +1228,12 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     child.model = asString(rawThread.model) ?? child.model;
     child.prompt = preview ?? child.prompt;
 
-    const status = threadStatus(rawThread.status);
+    const status = threadStatus(rawThread.status) ?? (threadIsUnloaded(rawThread.status) ? "idle" : null);
     if (status && (liveStatus || !child.hasLiveStatus)) {
-      if (liveStatus) child.hasLiveStatus = true;
+      if (liveStatus) {
+        child.hasLiveStatus = true;
+        child.liveStatusVersion += 1;
+      }
       child.state = applyEvent(child.state, { type: "status", status });
     }
 
@@ -1095,6 +1270,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
 
     if (child.callId) {
       syncChild(childThreadId, ctx);
+      ensureChildStatusPolling(ctx);
       if (hydrateTranscript) void hydrateChild(childThreadId, ctx);
     }
     return childThreadId;
@@ -2238,6 +2414,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         });
         return;
       }
+      case "collabToolCall":
       case "collabAgentToolCall": {
         const collabTool = asString(item.tool) ?? "agent";
         const isSpawn = collabTool === "spawnAgent";
@@ -2288,6 +2465,24 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
         ]
           .filter(Boolean)
           .join("\n");
+        const activityForState = (
+          rawStatus: string | null,
+          rawMessage: string | null,
+        ): string =>
+          rawMessage?.trim() ||
+          (rawStatus
+            ? rawStatus === "pendingInit" || rawStatus === "pending"
+              ? "Pending initialization"
+              : rawStatus === "running" || rawStatus === "active" || rawStatus === "inProgress"
+                ? "Working"
+                : rawStatus === "completed" || rawStatus === "idle" || rawStatus === "shutdown" || rawStatus === "closed"
+                  ? "Delegated work completed"
+                  : rawStatus === "interrupted" || rawStatus === "cancelled" || rawStatus === "canceled"
+                    ? "Delegated work stopped"
+                    : rawStatus === "failed" || rawStatus === "error" || rawStatus === "errored"
+                      ? "Delegated work failed"
+                      : `Status: ${rawStatus.replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase()}`
+            : "");
         const primaryStateRaw =
           receiverIds
             .map((receiverId) => asRecord(states?.[receiverId]))
@@ -2295,59 +2490,120 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
           asRecord(stateEntries[0]?.[1]);
         const primaryState = asString(primaryStateRaw?.status);
         const primaryMessage = asString(primaryStateRaw?.message);
-        const activity =
-          primaryMessage?.trim() ||
-          (primaryState
-            ? primaryState === "pendingInit"
-              ? "Pending initialization"
-              : primaryState === "running" || primaryState === "active"
-                ? "Working"
-                : primaryState === "completed" || primaryState === "idle"
-                  ? "Delegated work completed"
-                  : `Status: ${primaryState.replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase()}`
-            : "");
-        const childStatus: ToolStatus | null =
-          primaryState === "pendingInit" || primaryState === "pending"
-            ? "pending"
-            : primaryState === "running" || primaryState === "active"
-              ? "running"
-              : primaryState === "completed" || primaryState === "idle"
-                ? "done"
-                : primaryState === "failed" || primaryState === "error"
-                  ? "error"
-                  : null;
+        const activity = activityForState(primaryState, primaryMessage);
+        const childStatus = collabAgentStatus(primaryState);
         if (isSpawn) {
           if (receiverIds.length === 0) {
-            pendingChildSpawns.set(id, {
-              callId: id,
-              prompt,
-              label: prompt ? oneLine(prompt, 80) : operation,
-              model,
-              activity: activity ? oneLine(activity, 120) : null,
-            });
+            if (status !== "failed") {
+              pendingChildSpawns.set(id, {
+                callId: id,
+                prompt,
+                label: prompt ? oneLine(prompt, 80) : operation,
+                model,
+                activity: activity ? oneLine(activity, 120) : null,
+              });
+            }
           } else {
             pendingChildSpawns.delete(id);
           }
-          for (const receiverId of receiverIds) {
+          receiverIds.forEach((receiverId, index) => {
             const child = childFor(receiverId);
-            child.callId = id;
+            const targetCallId = index === 0 ? id : `codex-child:${receiverId}`;
+            child.callId = targetCallId;
             child.label = prompt ? oneLine(prompt, 80) : child.label;
             child.model = model ?? child.model;
             child.prompt = prompt ?? child.prompt;
-            child.activity = activity ? oneLine(activity, 120) : child.activity;
-            if (childStatus && childStatus !== "pending") {
+            const entryState = asRecord(states?.[receiverId]) ?? (index === 0 ? primaryStateRaw : null);
+            const entryRawStatus = asString(entryState?.status);
+            const entryActivity = activityForState(entryRawStatus, asString(entryState?.message));
+            const entryStatus = collabAgentStatus(entryRawStatus) ?? (index === 0 ? childStatus : null);
+            child.activity = entryActivity ? oneLine(entryActivity, 120) : child.activity;
+            if (entryStatus && entryStatus !== "pending") {
               child.hasLiveStatus = true;
+              child.liveStatusVersion += 1;
+              if (entryStatus === "done" || entryStatus === "error") {
+                child.currentTurnId = null;
+              }
               child.state = applyEvent(child.state, {
                 type: "status",
                 status:
-                  childStatus === "done"
+                  entryStatus === "done"
                     ? "idle"
-                    : childStatus === "error"
+                    : entryStatus === "error"
                       ? "error"
                       : "working",
               });
             }
+            if (index > 0) {
+              ctx.emit({
+                type: "tool",
+                callId: targetCallId,
+                name: `collab/${collabTool}`,
+                tool: "task",
+                title: prompt ? `${operation}: ${oneLine(prompt)}` : operation,
+                status: entryStatus ?? childToolStatus(child.state.status),
+                subagent: {
+                  threadId: receiverId,
+                  label: prompt ? oneLine(prompt, 80) : operation,
+                  ...(model ? { model } : {}),
+                  ...(prompt ? { prompt } : {}),
+                  ...(entryActivity ? { activity: oneLine(entryActivity) } : {}),
+                },
+              });
+            }
+          });
+        } else {
+          // Non-spawn collab operations (`wait`, `closeAgent`, `sendInput`, `resumeAgent`)
+          // carry authoritative per-child states in `agentsStates`. Reconcile known
+          // children so wait/close/resume transitions are never missed.
+          const targetIds = [
+            ...new Set([
+              ...explicitReceiverIds,
+              ...stateEntries.map(([agentId]) => agentId),
+            ]),
+          ];
+          for (const targetId of targetIds) {
+            if (!targetId || targetId === threadId) continue;
+            const child = children.get(targetId);
+            if (!child) continue;
+            const entryState = asRecord(states?.[targetId]);
+            const entryRawStatus = asString(entryState?.status);
+            const entryMessage = asString(entryState?.message);
+            let mapped = collabAgentStatus(entryRawStatus);
+            if (!mapped && collabTool === "closeAgent" && settled && status !== "failed") {
+              mapped = "done";
+            } else if (
+              !mapped &&
+              (collabTool === "sendInput" || collabTool === "resumeAgent") &&
+              status !== "failed"
+            ) {
+              mapped = "running";
+            }
+            if (!mapped) continue;
+            const entryActivity = activityForState(entryRawStatus, entryMessage);
+            if (entryActivity) child.activity = oneLine(entryActivity, 120);
+            child.hasLiveStatus = true;
+            child.liveStatusVersion += 1;
+            if (mapped === "done" || mapped === "error") {
+              child.currentTurnId = null;
+            }
+            child.state = applyEvent(child.state, {
+              type: "status",
+              status:
+                mapped === "done"
+                  ? "idle"
+                  : mapped === "error"
+                    ? "error"
+                    : mapped === "pending"
+                      ? "starting"
+                      : "working",
+            });
+            syncChild(targetId, ctx);
+            if (mapped === "done" || mapped === "error") {
+              void hydrateChild(targetId, ctx, true);
+            }
           }
+          ensureChildStatusPolling(ctx);
         }
         ctx.emit({
           type: "tool",
@@ -2355,17 +2611,19 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
           name: `collab/${collabTool}`,
           tool: isSpawn ? "task" : "other",
           title: prompt ? `${operation}: ${oneLine(prompt)}` : operation,
-          status:
-            isSpawn && receiverIds.length
-              ? childStatus ??
-                childToolStatus(childFor(receiverIds[0]).state.status)
-              : COLLAB_STATUS[status] ?? (settled ? "done" : "running"),
+          status: isSpawn
+            ? receiverIds.length
+              ? childStatus ?? childToolStatus(childFor(receiverIds[0]).state.status)
+              : status === "failed"
+                ? "error"
+                : childStatus ?? "running"
+            : COLLAB_STATUS[status] ?? (settled ? "done" : "running"),
           ...(detail ? { output: detail } : {}),
           ...(isSpawn
             ? {
                 subagent: {
                   label: prompt ? oneLine(prompt, 80) : operation,
-                  ...(receiverIds.length === 1 ? { threadId: receiverIds[0] } : {}),
+                  ...(receiverIds.length >= 1 ? { threadId: receiverIds[0] } : {}),
                   ...(model ? { model } : {}),
                   ...(prompt ? { prompt } : {}),
                   ...(activity ? { activity: oneLine(activity) } : {}),
@@ -2379,15 +2637,20 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
             void hydrateChild(receiverId, ctx, settled);
           }
           if (receiverIds.length === 0) void discoverChildThreads(ctx);
+          ensureChildStatusPolling(ctx);
         }
         return;
       }
       case "subAgentActivity": {
         const kind = asString(item.kind) ?? "interacted";
         const activityStatus: ToolStatus =
-          kind === "completed" || kind === "finished"
+          kind === "completed" || kind === "finished" || kind === "closed" || kind === "shutdown"
             ? "done"
-            : kind === "interrupted" || kind === "failed"
+            : kind === "interrupted" ||
+                kind === "failed" ||
+                kind === "errored" ||
+                kind === "cancelled" ||
+                kind === "canceled"
               ? "error"
               : "running";
         const agentPath = asString(item.agentPath);
@@ -2409,12 +2672,17 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
           const child = childFor(agentThreadId);
           child.activity = kind.replace(/([a-z])([A-Z])/g, "$1 $2");
           child.hasLiveStatus = true;
+          child.liveStatusVersion += 1;
+          if (activityStatus === "done" || activityStatus === "error") {
+            child.currentTurnId = null;
+          }
           child.state = applyEvent(child.state, {
             type: "status",
             status: activityStatus === "error" ? "error" : activityStatus === "done" ? "idle" : "working",
           });
           if (child.callId) {
             syncChild(agentThreadId, ctx);
+            ensureChildStatusPolling(ctx);
             void hydrateChild(agentThreadId, ctx, true);
             return;
           }
@@ -2445,7 +2713,10 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
             activity: kind.replace(/([a-z])([A-Z])/g, "$1 $2"),
           },
         });
-        if (agentThreadId) void hydrateChild(agentThreadId, ctx, true);
+        if (agentThreadId) {
+          ensureChildStatusPolling(ctx);
+          void hydrateChild(agentThreadId, ctx, true);
+        }
         return;
       }
       case "webSearch": {
@@ -2943,13 +3214,23 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       }
       case "thread/status/changed": {
         const status = threadStatus(params.status);
-        if (status === "working") childFor(childThreadId).activity = null;
-        if (status === "idle" || status === "error") {
+        const unloaded = threadIsUnloaded(params.status);
+        const resolved = status ?? (unloaded ? "idle" : null);
+        if (resolved === "working") childFor(childThreadId).activity = null;
+        if (resolved === "idle" || resolved === "error") {
           childFor(childThreadId).currentTurnId = null;
         }
-        if (status) emitChild(childThreadId, { type: "status", status }, ctx);
-        if (status === "idle" || status === "error") {
+        if (resolved) emitChild(childThreadId, { type: "status", status: resolved }, ctx);
+        if (resolved === "idle" || resolved === "error") {
           void hydrateChild(childThreadId, ctx, true);
+        }
+        return;
+      }
+      case "thread/closed": {
+        const child = childFor(childThreadId);
+        child.currentTurnId = null;
+        if (childIsActive(child)) {
+          emitChild(childThreadId, { type: "status", status: "idle" }, ctx);
         }
         return;
       }
@@ -3663,8 +3944,31 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
     }
     for (const target of targets) {
       if (!target) continue;
-      const childTurn = children.get(target)?.currentTurnId ?? sideThreads.get(target)?.currentTurnId;
-      if (childTurn) work.push(stopTurn(target, childTurn, ctx, generation));
+      const child = children.get(target);
+      const childTurn = child?.currentTurnId ?? sideThreads.get(target)?.currentTurnId;
+      if (childTurn) {
+        work.push(
+          stopTurn(target, childTurn, ctx, generation).then((stopped) => {
+            if (stopped && child && childIsActive(child)) {
+              child.currentTurnId = null;
+              child.hasLiveStatus = true;
+              child.liveStatusVersion += 1;
+              child.activity = "Delegated work stopped";
+              child.state = applyEvent(child.state, { type: "status", status: "error" });
+              syncChild(target, ctx);
+              ensureChildStatusPolling(ctx);
+            }
+            return stopped;
+          }),
+        );
+      } else if (child && childIsActive(child)) {
+        child.hasLiveStatus = true;
+        child.liveStatusVersion += 1;
+        child.activity = "Delegated work stopped";
+        child.state = applyEvent(child.state, { type: "status", status: "error" });
+        syncChild(target, ctx);
+        ensureChildStatusPolling(ctx);
+      }
       work.push(requestWithTimeout(ctx, nextId++, "thread/backgroundTerminals/clean", { threadId: target }, stopTimeoutMs)
         .then(() => {
           if (!disposed && generation === rootTurnGeneration && target === threadId) {
@@ -3697,6 +4001,7 @@ export function createCodexAdapter(options: CodexAdapterOptions = {}): AgentAdap
       disposed = true;
       if (authPollTimer !== null) clearInterval(authPollTimer);
       if (childStreamFlushTimer !== null) clearTimeout(childStreamFlushTimer);
+      stopChildStatusPolling();
       cancelPendingRootCompletion();
       const active = [
         { threadId, turnId: currentTurnId },

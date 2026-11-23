@@ -43,6 +43,7 @@ import {
   type AgentEvent,
   type TurnAnnounceInput,
 } from "./events";
+import { hasActiveSubagents } from "./subagents";
 import { latest as latestSession, transcript as sessionTranscript } from "./history";
 import { AGENT_PROGRAMS, type AgentLaunch } from "./launch";
 import { loadClaudeSettingsDefaults } from "./claudeSettings";
@@ -265,7 +266,8 @@ function scheduleCheckpoint(session: Session): void {
 export function readyForScheduledSend(termId: string): boolean {
   const session = sessions.get(termId);
   return !!session && !session.disposed && !session.pendingResume && !session.restoring &&
-    !session.state.loadingHistory && !session.state.authenticationRequired && session.state.status === "idle";
+    !session.state.loadingHistory && !session.state.authenticationRequired &&
+    session.state.status === "idle" && !hasActiveSubagents(session.state.items);
 }
 let followupMode: AgentFollowupMode = "queue";
 let capacityReply = codexCapacityReplySettings();
@@ -990,8 +992,10 @@ function emitNow(session: Session, event: AgentEvent): void {
   }
 
   const before = session.state.status;
+  const beforeHadActiveSubagents = hasActiveSubagents(session.state.items);
   const next = applyEvent(session.state, event);
   if (next === session.state) return;
+  const afterHasActiveSubagents = hasActiveSubagents(next.items);
   if (event.type === "user" || event.type === "transcript" ||
       (event.type === "history-loading" && event.loading) ||
       (event.type === "session" && next.sessionId !== session.state.sessionId) ||
@@ -1041,11 +1045,15 @@ function emitNow(session: Session, event: AgentEvent): void {
 
   // Fresh work starts the completion clock. `waiting` → `working` is the user
   // answering a permission prompt mid-turn, not a new job.
-  if (
-    next.status === "working" &&
-    (before === "idle" || before === "starting") &&
-    !next.loadingHistory
-  ) {
+  const startedWork =
+    (next.status === "working" &&
+      (before === "idle" || before === "starting") &&
+      !beforeHadActiveSubagents) ||
+    (next.status === "idle" &&
+      before === "idle" &&
+      !beforeHadActiveSubagents &&
+      afterHasActiveSubagents);
+  if (startedWork && !next.loadingHistory) {
     announceTurnStart(session);
   }
 
@@ -1053,7 +1061,7 @@ function emitNow(session: Session, event: AgentEvent): void {
   // running, waits here. Exactly one is released per idle moment: every
   // protocol we speak runs one turn at a time, so pushing the whole backlog
   // would just make the agent reject the rest.
-  const releasingQueued = next.status === "idle" && !session.interrupted && !session.queuePaused && !session.restoring &&
+  const releasingQueued = next.status === "idle" && !afterHasActiveSubagents && !session.interrupted && !session.queuePaused && !session.restoring &&
     !next.loadingHistory && !next.authenticationRequired && session.queued.length > 0;
   const turnEndState = {
     before,
@@ -1061,6 +1069,8 @@ function emitNow(session: Session, event: AgentEvent): void {
     permission: next.permission !== null,
     releasingQueued,
     interrupted: session.interrupted,
+    beforeHadActiveSubagents,
+    hasActiveSubagents: afterHasActiveSubagents,
   };
   const ended = !(event.type === "turn-end" && event.historyReplay) && isTurnEnd(turnEndState);
   const turnEnd: TurnAnnounceInput = {
@@ -1077,11 +1087,14 @@ function emitNow(session: Session, event: AgentEvent): void {
     session.deferredTurnEnd = null;
   }
 
-  // Spend the flags that belonged to the turn which just became idle before
-  // releasing a queued prompt. `dispatch` starts the next turn synchronously
-  // and gives it fresh flags; clearing them afterwards would make that real
-  // user turn look like a synthetic resume/load when it eventually finishes.
-  if (didStatusEnterIdle(before, next.status)) {
+  // Spend the flags that belonged to the turn which just became fully idle
+  // before releasing a queued prompt. When the parent pauses while subagents
+  // are still active, keep user ownership alive until those subagents settle.
+  const enteredFullyIdle =
+    next.status === "idle" &&
+    !afterHasActiveSubagents &&
+    (didStatusEnterIdle(before, next.status) || beforeHadActiveSubagents);
+  if (enteredFullyIdle) {
     session.interrupted = false;
     session.userInitiatedTurn = false;
   }
@@ -1105,6 +1118,7 @@ function emitNow(session: Session, event: AgentEvent): void {
   if (
     event.type === "turn-end" ||
     event.type === "permission" ||
+    beforeHadActiveSubagents !== afterHasActiveSubagents ||
     (event.type === "status" &&
       (event.status === "idle" ||
         event.status === "waiting" ||
@@ -1121,7 +1135,7 @@ function emitNow(session: Session, event: AgentEvent): void {
   if (
     ended &&
     next.loadingHistory &&
-    event.type === "turn-end" &&
+    (event.type === "turn-end" || (beforeHadActiveSubagents && !afterHasActiveSubagents)) &&
     isAnnounceableTurn(turnEnd)
   ) {
     // Codex can finish the live resumed turn while transcript pages are still
@@ -2057,13 +2071,26 @@ export async function promptSubagent(
   const session = sessions.get(termId);
   const clean = text.trim();
   if (!session || session.disposed || !clean || !session.adapter.promptSubagent) return false;
+  const previousInterrupted = session.interrupted;
+  const previousUserInitiated = session.userInitiatedTurn;
+  session.interrupted = false;
+  session.userInitiatedTurn = true;
   try {
-    return await session.adapter.promptSubagent(
+    const accepted = await session.adapter.promptSubagent(
       threadId,
       { text: clean, images: [] },
       session.context,
     );
+    if (!accepted && !session.disposed) {
+      session.interrupted = previousInterrupted;
+      session.userInitiatedTurn = previousUserInitiated;
+    }
+    return accepted;
   } catch {
+    if (!session.disposed) {
+      session.interrupted = previousInterrupted;
+      session.userInitiatedTurn = previousUserInitiated;
+    }
     return false;
   }
 }

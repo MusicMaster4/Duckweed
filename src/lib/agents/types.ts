@@ -743,6 +743,11 @@ const TOOL_KINDS: Record<string, ToolKind> = {
   spawn_agent: "task",
   spawnagent: "task",
   invoke_subagent: "task",
+  run_subagent: "task",
+  launch_subagent: "task",
+  spawn_subagent: "task",
+  create_subagent: "task",
+  agent_task: "task",
   run_workflow: "task",
   swarm: "task",
   subagent: "task",
@@ -779,12 +784,10 @@ const ACP_TOOL_KINDS: Record<string, ToolKind> = {
 };
 
 export function toolKind(name: string, acpKind?: string | null): ToolKind {
-  if (acpKind) {
-    const mapped = ACP_TOOL_KINDS[acpKind.toLowerCase()];
-    if (mapped) return mapped;
-  }
+  const mapped = acpKind ? ACP_TOOL_KINDS[acpKind.toLowerCase()] : undefined;
+  if (mapped && mapped !== "other") return mapped;
   const key = name.toLowerCase().replace(/[\s-]/g, "_");
-  return TOOL_KINDS[key] ?? TOOL_KINDS[key.replace(/_/g, "")] ?? "other";
+  return TOOL_KINDS[key] ?? TOOL_KINDS[key.replace(/_/g, "")] ?? mapped ?? "other";
 }
 
 /** Count changed lines without building a full diff — enough for a `+n −m` chip. */

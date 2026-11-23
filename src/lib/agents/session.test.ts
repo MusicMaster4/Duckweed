@@ -1926,4 +1926,87 @@ describe("Custom agent UI sessions", () => {
       session.stop(termId);
     }
   });
+
+  test("defers turn completion and scheduled sends until active background subagents finish", async () => {
+    const termId = "t-subagent-deferred-completion";
+    const completions: string[] = [];
+    const unsubscribe = session.subscribeTurnEnd((id) => completions.push(id));
+    try {
+      expect(await session.start(termId, grokLaunch, "H:/project")).toBeNull();
+      await handshake();
+
+      session.submit(termId, "Audit in background");
+      await flush();
+      const prompt = sent.map(rpc).findLast((message) => message.method === "session/prompt")!;
+
+      feed({
+        jsonrpc: "2.0",
+        method: "session/update",
+        params: {
+          sessionId: "s1",
+          update: {
+            sessionUpdate: "tool_call",
+            toolCallId: "bg-task-1",
+            title: "Task",
+            kind: "other",
+            status: "in_progress",
+            rawInput: {
+              description: "Background audit",
+              prompt: "Audit routes",
+              run_in_background: true,
+              task_id: "grok-bg-9",
+            },
+            _meta: { "x.ai/tool": { name: "Task" } },
+          },
+        },
+      });
+      feed({
+        jsonrpc: "2.0",
+        method: "session/update",
+        params: {
+          sessionId: "s1",
+          update: {
+            sessionUpdate: "task_backgrounded",
+            task_id: "grok-bg-9",
+            tool_call_id: "bg-task-1",
+            description: "Auditing routes",
+          },
+        },
+      });
+      // Parent turn ends while the background subagent is still running.
+      feed({ jsonrpc: "2.0", id: prompt.id, result: { stopReason: "end_turn" } });
+      await flush();
+
+      expect(session.get(termId)?.status).toBe("idle");
+      expect(session.readyForScheduledSend(termId)).toBe(false);
+      expect(completions).toEqual([]);
+
+      // When the subagent completes, completion fires once and scheduled sends unblock.
+      feed({
+        jsonrpc: "2.0",
+        method: "session/update",
+        params: {
+          sessionId: "s1",
+          update: {
+            sessionUpdate: "task_completed",
+            will_wake: false,
+            task_snapshot: {
+              task_id: "grok-bg-9",
+              completed: true,
+              exit_code: 0,
+              explicitly_killed: false,
+              output: "Audit finished",
+            },
+          },
+        },
+      });
+      await flush();
+
+      expect(session.readyForScheduledSend(termId)).toBe(true);
+      expect(completions).toEqual([termId]);
+    } finally {
+      unsubscribe();
+      session.stop(termId);
+    }
+  });
 });

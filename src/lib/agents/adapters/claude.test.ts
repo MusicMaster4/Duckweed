@@ -2202,4 +2202,116 @@ export const meta = {
       text: "Effort set to high.",
     });
   });
+
+  test("isolates child stream_event frames from root tools and parses camelCase agentId", () => {
+    const h = harness();
+    h.adapter.prompt({ text: "Run background research", images: [] }, h.ctx);
+    h.feed({
+      type: "assistant",
+      message: {
+        content: [{
+          type: "tool_use",
+          id: "agent-bg-camel",
+          name: "Agent",
+          input: { description: "Audit code", prompt: "Inspect modules", run_in_background: true },
+        }],
+      },
+    });
+    h.feed({
+      type: "user",
+      message: {
+        content: [{
+          type: "tool_result",
+          tool_use_id: "agent-bg-camel",
+          content: "Async agent launched successfully.\nagentId: a-camel-77.",
+        }],
+      },
+    });
+    // Child stream events must never leak onto the root timeline as orphaned tools.
+    h.feed({
+      type: "stream_event",
+      parent_tool_use_id: "agent-bg-camel",
+      event: {
+        type: "content_block_start",
+        index: 0,
+        content_block: { type: "tool_use", id: "child-stream-only", name: "Read" },
+      },
+    });
+    expect(h.state().items.filter((item) => item.kind === "tool")).toHaveLength(1);
+    expect(h.state().items.find((item) => item.kind === "tool")).toMatchObject({
+      callId: "agent-bg-camel",
+      status: "running",
+      subagent: { taskId: "a-camel-77", activity: "Using Read" },
+    });
+
+    h.feed({
+      type: "queue-operation",
+      content: "<task-notification><task-id>a-camel-77</task-id><status>completed</status><summary>Audit done</summary><result>All checks clean.</result></task-notification>",
+    });
+    expect(h.state().items.find((item) => item.kind === "tool")).toMatchObject({
+      callId: "agent-bg-camel",
+      status: "done",
+      output: "All checks clean.",
+      subagent: { activity: "Audit done" },
+    });
+  });
+
+  test("settles stopped agents via TaskStop, reopens via SendMessage, and cleans up on interrupt", () => {
+    const h = harness();
+    h.adapter.prompt({ text: "Delegate work", images: [] }, h.ctx);
+    launchBackgroundAgent(h, "bg-1", "agent-stop-1");
+    h.feed({
+      type: "assistant",
+      message: {
+        content: [{
+          type: "tool_use",
+          id: "stop-call",
+          name: "TaskStop",
+          input: { task_id: "agent-stop-1" },
+        }],
+      },
+    });
+    h.feed({
+      type: "user",
+      message: {
+        content: [{
+          type: "tool_result",
+          tool_use_id: "stop-call",
+          content: "Stopped",
+        }],
+      },
+      toolUseResult: { task_id: "agent-stop-1", task_type: "local_agent", message: "Stopped" },
+    });
+    expect(h.state().items.find((item) => item.kind === "tool" && item.callId === "bg-1"))
+      .toMatchObject({ status: "error", subagent: { activity: "Delegated work stopped" } });
+
+    h.feed({
+      type: "assistant",
+      message: {
+        content: [{
+          type: "tool_use",
+          id: "msg-call",
+          name: "SendMessage",
+          input: { to: "agent-stop-1", message: "Continue" },
+        }],
+      },
+    });
+    h.feed({
+      type: "user",
+      message: {
+        content: [{
+          type: "tool_result",
+          tool_use_id: "msg-call",
+          content: "Sent",
+        }],
+      },
+      toolUseResult: { revivedAgentId: "agent-stop-1", success: true },
+    });
+    expect(h.state().items.find((item) => item.kind === "tool" && item.callId === "bg-1"))
+      .toMatchObject({ status: "running" });
+
+    h.adapter.interrupt(h.ctx);
+    expect(h.state().items.find((item) => item.kind === "tool" && item.callId === "bg-1"))
+      .toMatchObject({ status: "error", subagent: { activity: "Delegated work stopped" } });
+  });
 });

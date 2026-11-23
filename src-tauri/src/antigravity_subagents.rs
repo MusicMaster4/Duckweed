@@ -172,27 +172,10 @@ fn read_updates(
         let Some(state) = states.next()? else {
             continue;
         };
-        let status = match (
-            state.get::<_, String>(0)?.as_str(),
-            state.get(1)?,
-            state.get(2)?,
-            state.get::<_, i64>(3)?,
-        ) {
-            (_, _, true, _) => "error",
-            (_, true, _, _)
-            | (
-                "CASCADE_RUN_STATUS_RUNNING"
-                | "CASCADE_RUN_STATUS_BUSY"
-                | "CASCADE_RUN_STATUS_CANCELING",
-                _,
-                _,
-                _,
-            ) => "running",
-            ("CASCADE_RUN_STATUS_IDLE", _, _, steps) if steps > 1 => "done",
-            ("CASCADE_RUN_STATUS_IDLE", _, _, _) => "pending",
-            _ => continue,
-        };
-        let (tool_name, child_output) = child_activity(root, &id, status);
+        let raw_status = state.get::<_, String>(0)?;
+        let not_fully_idle: bool = state.get(1)?;
+        let killed: bool = state.get(2)?;
+        let steps: i64 = state.get(3)?;
         let mut received = messages.query(rusqlite::params![
             SYSTEM_MESSAGE,
             row.get::<_, i64>(0)?,
@@ -213,6 +196,36 @@ fn read_updates(
                 }
             }
         }
+        let status = match (raw_status.as_str(), not_fully_idle, killed, steps) {
+            (_, _, true, _)
+            | (
+                "CASCADE_RUN_STATUS_ERROR"
+                | "CASCADE_RUN_STATUS_FAILED"
+                | "CASCADE_RUN_STATUS_CANCELED"
+                | "CASCADE_RUN_STATUS_CANCELLED",
+                _,
+                _,
+                _,
+            ) => "error",
+            (_, true, _, _)
+            | (
+                "CASCADE_RUN_STATUS_RUNNING"
+                | "CASCADE_RUN_STATUS_BUSY"
+                | "CASCADE_RUN_STATUS_CANCELING"
+                | "CASCADE_RUN_STATUS_WAITING_FOR_USER",
+                _,
+                _,
+                _,
+            ) => "running",
+            ("CASCADE_RUN_STATUS_IDLE", false, false, steps) if steps > 1 || output.is_some() => {
+                "done"
+            }
+            ("CASCADE_RUN_STATUS_IDLE", false, false, _) => "pending",
+            ("", false, false, _) if output.is_some() => "done",
+            ("", false, false, _) => "pending",
+            _ => continue,
+        };
+        let (tool_name, child_output) = child_activity(root, &id, status);
         updates.push(SubagentUpdate {
             call_id: call_id.to_owned(),
             thread_id: id,
@@ -356,6 +369,26 @@ mod tests {
         let updates = read_updates(&root, &parent, &calls).unwrap();
         assert_eq!(updates.len(), 1);
         assert_eq!(updates[0].thread_id, first);
+
+        // Explicit error/cancelled/killed and 1-step reply completions settle accurately.
+        index
+            .execute(
+                "UPDATE conversation_summaries SET status = 'CASCADE_RUN_STATUS_FAILED', not_fully_idle = 0 WHERE conversation_id = ?1",
+                [&first],
+            )
+            .unwrap();
+        let updates = read_updates(&root, &parent, &calls).unwrap();
+        assert_eq!(updates[0].status, "error");
+
+        index
+            .execute(
+                "UPDATE conversation_summaries SET status = 'CASCADE_RUN_STATUS_IDLE', not_fully_idle = 0, step_count = 1 WHERE conversation_id = ?1",
+                [&first],
+            )
+            .unwrap();
+        let updates = read_updates(&root, &parent, &calls).unwrap();
+        assert_eq!(updates[0].status, "done");
+
         drop((index, parent_db));
         std::fs::remove_file(conversations.join(format!("{parent}.db"))).unwrap();
         std::fs::remove_file(root.join("conversation_summaries.db")).unwrap();

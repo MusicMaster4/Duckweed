@@ -1,11 +1,19 @@
-import type { AgentStatus } from "./types";
+import { hasActiveSubagents } from "./subagents";
+import type { AgentItem, AgentStatus } from "./types";
 
 /**
- * True while closing an agent would interrupt an unfinished turn.
+ * True while closing an agent would interrupt an unfinished turn or active
+ * subagent work.
  *
- * An idle agent is still open, but it has already handed control back to the
- * user, so closing it does not need a warning.
+ * An idle agent with no active subagents is still open, but it has handed
+ * control back to the user, so closing it does not need a warning.
  */
-export function agentHasUnfinishedWork(status: AgentStatus): boolean {
-  return status === "starting" || status === "working" || status === "waiting";
+export function agentHasUnfinishedWork(
+  status: AgentStatus,
+  items?: readonly AgentItem[],
+): boolean {
+  if (status === "starting" || status === "working" || status === "waiting") {
+    return true;
+  }
+  return status === "idle" && hasActiveSubagents(items);
 }

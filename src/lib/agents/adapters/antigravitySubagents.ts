@@ -6,13 +6,18 @@ interface TrackedCall {
 }
 
 const POLL_INTERVAL_MS = 750;
-const MISSING_STATUS_GRACE_MS = 8_000;
+const MISSING_STATUS_GRACE_MS = 12_000;
 const UNAVAILABLE = { statusUnavailable: true, activity: "Launch acknowledged" };
 
 /** AGY completes the invocation at launch. The child runs on its own timeline. */
 export function createAntigravitySubagentTracker() {
   const calls = new Map<string, TrackedCall>();
+  /** Remembers threadId -> callId even after completion so send_message can revive tracking. */
+  const callIdByThreadId = new Map<string, string>();
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let timerImmediate = false;
+  let polling = false;
+  let pollAgain = false;
   let disposed = false;
   let active: {
     read: NonNullable<AdapterContext["readAntigravitySubagents"]>;
@@ -22,21 +27,46 @@ export function createAntigravitySubagentTracker() {
 
   function schedule(delay: number) {
     const session = active;
-    if (!session || timer !== undefined || !calls.size) return;
+    if (!session || timer !== undefined || polling || !calls.size) return;
+    timerImmediate = delay <= 0;
     timer = setTimeout(() => {
-      void poll(session).finally(() => {
-        if (active !== session) return;
-        timer = undefined;
-        schedule(POLL_INTERVAL_MS);
-      });
+      timer = undefined;
+      timerImmediate = false;
+      void runPoll(session);
     }, delay);
+  }
+
+  async function runPoll(session: NonNullable<typeof active>) {
+    if (polling) {
+      pollAgain = true;
+      return;
+    }
+    polling = true;
+    try {
+      await poll(session);
+    } finally {
+      polling = false;
+      if (active === session && calls.size) {
+        const immediate = pollAgain;
+        pollAgain = false;
+        schedule(immediate ? 0 : POLL_INTERVAL_MS);
+      } else {
+        pollAgain = false;
+      }
+    }
   }
 
   async function poll(session: NonNullable<typeof active>) {
     const current = new Map(calls);
+    if (!current.size) return;
     const { read, emit, sessionId } = session;
-    const updates = await read(sessionId, [...current.keys()])
-      .catch(() => []);
+    let updates: AntigravitySubagentUpdate[];
+    try {
+      updates = await read(sessionId, [...current.keys()]);
+    } catch {
+      // Transient SQLite busy / IPC errors must not falsely retire live children.
+      return;
+    }
     if (active !== session) return;
     const snapshots = new Map(updates.map((update) => [update.callId, update]));
     const now = Date.now();
@@ -51,6 +81,7 @@ export function createAntigravitySubagentTracker() {
         continue;
       }
       call.lastSeenAt = now;
+      if (update.threadId) callIdByThreadId.set(update.threadId, callId);
       const previous = call.snapshot;
       if (previous?.status === update.status && previous.toolName === update.toolName &&
           previous.output === update.output && previous.threadId === update.threadId) continue;
@@ -80,6 +111,8 @@ export function createAntigravitySubagentTracker() {
     active = undefined;
     clearTimeout(timer);
     timer = undefined;
+    timerImmediate = false;
+    pollAgain = false;
   }
 
   return {
@@ -93,6 +126,37 @@ export function createAntigravitySubagentTracker() {
         ? { status: "running" as const, subagent: { activity: "Working" } }
         : { status: "done" as const, subagent: UNAVAILABLE };
     },
+    retrack(callId: string, ctx: AdapterContext) {
+      if (disposed || !ctx.readAntigravitySubagents) return;
+      calls.set(callId, { lastSeenAt: Date.now() });
+      if (timer !== undefined && !timerImmediate) {
+        clearTimeout(timer);
+        timer = undefined;
+      }
+      if (polling) {
+        pollAgain = true;
+      } else {
+        schedule(0);
+      }
+    },
+    pollNow() {
+      if (!active || !calls.size) return;
+      if (timer !== undefined && !timerImmediate) {
+        clearTimeout(timer);
+        timer = undefined;
+      }
+      if (polling) {
+        pollAgain = true;
+      } else {
+        schedule(0);
+      }
+    },
+    callIdForThread(threadId: string): string | null {
+      return callIdByThreadId.get(threadId) ?? null;
+    },
+    hasTracked(): boolean {
+      return calls.size > 0;
+    },
     untrack(callId: string) {
       calls.delete(callId);
     },
@@ -105,6 +169,7 @@ export function createAntigravitySubagentTracker() {
     reset() {
       pause();
       calls.clear();
+      callIdByThreadId.clear();
     },
     dispose(ctx: AdapterContext) {
       disposed = true;
@@ -113,6 +178,7 @@ export function createAntigravitySubagentTracker() {
         ctx.emit({ type: "tool", callId, status: "done", subagent: UNAVAILABLE });
       }
       calls.clear();
+      callIdByThreadId.clear();
     },
   };
 }

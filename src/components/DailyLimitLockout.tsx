@@ -17,6 +17,8 @@ function statusLabel(reason: BusyReason): string {
       return "Waiting";
     case "agent-working":
       return "Working";
+    case "agent-subagents":
+      return "Subagents";
     case "process":
       return "Running";
   }
