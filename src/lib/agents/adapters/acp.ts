@@ -38,9 +38,8 @@ import { createAntigravitySubagentTracker } from "./antigravitySubagents";
  * lifecycle also participates in turn completion. Because three of the five
  * supported agents speak ACP, this one adapter is most of the
  * protocol coverage — the per-agent differences live in spawn arguments
- * and in the `_meta` fields read below. Same-turn steering is Grok-only:
- * `_x.ai/interject` while the original `session/prompt` is still pending.
- * Cursor and OpenCode do not get that method.
+ * and in the `_meta` fields read below. Grok steers through
+ * `_x.ai/interject` and Antigravity steers with an overlapping `session/prompt`.
  *
  * Slash commands: names an agent advertises (`availableCommands`) are sent
  * back as plain `session/prompt` text — the agent intercepts them (verified:
@@ -535,7 +534,8 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
    * the turn remains busy until every run reports a terminal status.
    */
   const activeWorkflows = new Set<string>();
-  let promptRequestSettled = true;
+  // Antigravity can settle superseded prompt requests out of order after a steer.
+  let pendingTurnPrompts = 0;
   let turnOpen = false;
   /** The agent advertised `session/load` — see {@link AgentAdapter.resume}. */
   let canLoadSession = false;
@@ -587,7 +587,7 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
   }
 
   function finishTurnWhenReady(ctx: AdapterContext, force = false) {
-    if (!turnOpen || !promptRequestSettled) return;
+    if (!turnOpen || pendingTurnPrompts > 0) return;
     if (!force && activeWorkflows.size > 0) return;
     if (force) {
       activeWorkflows.clear();
@@ -2143,7 +2143,7 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
    * or any other RPC failure returns false so the session can restore the
    * follow-up into the local queue. Do not `session/cancel`.
    */
-  async function steerTurn(prompt: AgentPrompt, ctx: AdapterContext): Promise<boolean> {
+  async function steerGrokTurn(prompt: AgentPrompt, ctx: AdapterContext): Promise<boolean> {
     if (agent !== "grok" || ctx.launch.agent !== "grok" || !sessionId || !turnOpen) {
       return false;
     }
@@ -2164,6 +2164,97 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
       sameTurn: true,
     });
     return true;
+  }
+
+  function sendPrompt(prompt: AgentPrompt, ctx: AdapterContext, sameTurn = false): void {
+    if (!sessionId) return;
+    pendingTurnPrompts += 1;
+    if (sameTurn) {
+      closeActiveContent(ctx);
+      contentPhase += 1;
+      slashPending = false;
+    } else {
+      turnSeq += 1;
+      resetContentSegments();
+      turnOpen = true;
+      slashPending = prompt.text.startsWith("/");
+      turnHadContent = false;
+      // Claim the turn before emitting events that could release the next queued prompt.
+      ctx.emit({ type: "status", status: "working" });
+    }
+    if (prompt.images.length && !supportsImages && !supportsEmbeddedContext) {
+      ctx.emit({
+        type: "notice",
+        tone: "error",
+        text: `${ctx.launch.program} does not accept image input over ACP. The text and supported context were sent without the image.`,
+      });
+    }
+    ctx.emit({
+      type: "user",
+      text: prompt.text,
+      images: prompt.images,
+      ...(sameTurn ? { sameTurn: true } : {}),
+    });
+    void request(ctx, "session/prompt", {
+      sessionId,
+      prompt: promptContent(prompt),
+    })
+      .then((result) => {
+        const usage = asRecord(result.usage);
+        const input = asNumber(usage?.inputTokens);
+        const output = asNumber(usage?.outputTokens);
+        if (input !== null || output !== null) {
+          if (input !== null && input > 0) totalInputTokens += input;
+          if (output !== null && output > 0) totalOutputTokens += output;
+          ctx.emit({
+            type: "usage",
+            usage: {
+              inputTokens: totalInputTokens,
+              outputTokens: totalOutputTokens,
+            },
+          });
+        }
+        pendingTurnPrompts -= 1;
+        if (pendingTurnPrompts > 0) return;
+        const stop = asString(result.stopReason);
+        if (stop === "refusal") {
+          if (goalResponsePending) {
+            currentGoal = goalBeforeCommand;
+            ctx.emit({ type: "goal", goal: currentGoal });
+          }
+          ctx.emit({ type: "notice", tone: "error", text: "The agent refused the request." });
+        } else if (slashPending && !turnHadContent) {
+          ctx.emit({
+            type: "notice",
+            tone: "info",
+            text: `Ran ${oneLine(prompt.text.split(/\s/)[0], 40)}. This agent does not return its output to the custom UI.`,
+          });
+        }
+        slashPending = false;
+        goalResponsePending = false;
+        goalResponseText = "";
+        finishTurnWhenReady(
+          ctx,
+          stop === "refusal" || stop === "cancelled" || stop === "canceled",
+        );
+      }, (error: unknown) => {
+        pendingTurnPrompts -= 1;
+        const record = asRecord(error);
+        ctx.emit({
+          type: "notice",
+          tone: "error",
+          text: asString(record?.message) ?? (sameTurn ? "Steering failed." : "The turn failed."),
+        });
+        if (pendingTurnPrompts > 0) return;
+        slashPending = false;
+        if (goalResponsePending) {
+          currentGoal = goalBeforeCommand;
+          ctx.emit({ type: "goal", goal: currentGoal });
+        }
+        goalResponsePending = false;
+        goalResponseText = "";
+        finishTurnWhenReady(ctx, true);
+      });
   }
 
   return {
@@ -2265,88 +2356,17 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
       }
     },
 
-    prompt: (prompt, ctx) => {
-      if (!sessionId) return;
-      if (prompt.images.length && !supportsImages && !supportsEmbeddedContext) {
-        ctx.emit({
-          type: "notice",
-          tone: "error",
-          text: `${ctx.launch.program} does not accept image input over ACP. The text and supported context were sent without the image.`,
-        });
-      }
-      turnSeq += 1;
-      resetContentSegments();
-      promptRequestSettled = false;
-      turnOpen = true;
-      slashPending = prompt.text.startsWith("/");
-      turnHadContent = false;
-      ctx.emit({ type: "user", text: prompt.text, images: prompt.images });
-      ctx.emit({ type: "status", status: "working" });
-      request(ctx, "session/prompt", {
-        sessionId,
-        prompt: promptContent(prompt),
-      })
-        .then((result) => {
-          const usage = asRecord(result.usage);
-          const input = asNumber(usage?.inputTokens);
-          const output = asNumber(usage?.outputTokens);
-          if (input !== null || output !== null) {
-            if (input !== null && input > 0) totalInputTokens += input;
-            if (output !== null && output > 0) totalOutputTokens += output;
-            ctx.emit({
-              type: "usage",
-              usage: {
-                inputTokens: totalInputTokens,
-                outputTokens: totalOutputTokens,
-              },
-            });
-          }
-          const stop = asString(result.stopReason);
-          promptRequestSettled = true;
-          if (stop === "refusal") {
-            if (goalResponsePending) {
-              currentGoal = goalBeforeCommand;
-              ctx.emit({ type: "goal", goal: currentGoal });
-            }
-            ctx.emit({ type: "notice", tone: "error", text: "The agent refused the request." });
-          } else if (slashPending && !turnHadContent) {
-            ctx.emit({
-              type: "notice",
-              tone: "info",
-              text: `Ran ${oneLine(prompt.text.split(/\s/)[0], 40)}. This agent does not return its output to the custom UI.`,
-            });
-          }
-          slashPending = false;
-          goalResponsePending = false;
-          goalResponseText = "";
-          finishTurnWhenReady(
-            ctx,
-            stop === "refusal" || stop === "cancelled" || stop === "canceled",
-          );
-        })
-        .catch((error: unknown) => {
-          promptRequestSettled = true;
-          slashPending = false;
-          if (goalResponsePending) {
-            currentGoal = goalBeforeCommand;
-            ctx.emit({ type: "goal", goal: currentGoal });
-          }
-          goalResponsePending = false;
-          goalResponseText = "";
-          const record = asRecord(error);
-          ctx.emit({
-            type: "notice",
-            tone: "error",
-            text: asString(record?.message) ?? "The turn failed.",
-          });
-          finishTurnWhenReady(ctx, true);
-        });
-    },
+    prompt: sendPrompt,
 
-    ...(agent === "grok" ? { steer: steerTurn } : {}),
+    ...(agent === "grok" ? { steer: steerGrokTurn } : {}),
 
     ...(agent === "antigravity"
       ? {
+          steer: (prompt: AgentPrompt, ctx: AdapterContext) => {
+            if (!sessionId || !turnOpen || loading || pendingTurnPrompts === 0) return false;
+            sendPrompt(prompt, ctx, true);
+            return true;
+          },
           configureAccess: async (mode: AgentAccessMode, ctx: AdapterContext) => {
             if (!sessionId) return false;
             await setAccessMode(mode, ctx);

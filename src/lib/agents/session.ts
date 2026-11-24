@@ -1061,7 +1061,9 @@ function emitNow(session: Session, event: AgentEvent): void {
   // running, waits here. Exactly one is released per idle moment: every
   // protocol we speak runs one turn at a time, so pushing the whole backlog
   // would just make the agent reject the rest.
-  const releasingQueued = next.status === "idle" && !afterHasActiveSubagents && !session.interrupted && !session.queuePaused && !session.restoring &&
+  const releasingQueued =
+    next.status === "idle" && !afterHasActiveSubagents && !session.interrupted &&
+    !session.queuePaused && !session.restoring && !session.configuring &&
     !next.loadingHistory && !next.authenticationRequired && session.queued.length > 0;
   const turnEndState = {
     before,

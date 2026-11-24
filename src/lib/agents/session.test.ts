@@ -1855,6 +1855,94 @@ describe("Custom agent UI sessions", () => {
     });
   });
 
+  test("keeps Antigravity working across out-of-order replies to steering prompts", async () => {
+    const termId = "antigravity-steering";
+    const launch: AgentLaunch = { ...grokLaunch, agent: "antigravity", program: "agy" };
+    const completions: string[] = [];
+    const unsubscribe = session.subscribeTurnEnd((id) => completions.push(id));
+    try {
+      await session.start(termId, launch, "H:/project");
+      await handshake();
+      expect(session.canSteer(termId)).toBe(true);
+
+      session.submit(termId, "Work on the parser");
+      session.setFollowupMode("steer");
+      session.submit(termId, "Focus on the failing test", [image]);
+      session.setFollowupMode("queue");
+      session.submit(termId, "Use the smaller fixture");
+      const queued = session.get(termId)!.pending[0];
+      session.sendQueuedNow(termId, queued.id);
+      await flush();
+
+      const prompts = sent.map(rpc).filter((message) => message.method === "session/prompt");
+      expect(prompts.map((message) => message.params)).toEqual([
+        { sessionId: "s1", prompt: [{ type: "text", text: "Work on the parser" }] },
+        {
+          sessionId: "s1",
+          prompt: [
+            { type: "text", text: "Focus on the failing test" },
+            { type: "image", data: "aGVsbG8=", mimeType: "image/png" },
+          ],
+        },
+        { sessionId: "s1", prompt: [{ type: "text", text: "Use the smaller fixture" }] },
+      ]);
+      expect(sent.map(rpc).some((message) => message.method === "session/cancel")).toBe(false);
+      expect(session.get(termId)?.pending).toEqual([]);
+      const userMessages = session.get(termId)?.items.filter((item) => item.kind === "user");
+      expect(userMessages?.slice(1).map(({ text, sameTurn }) => ({ text, sameTurn }))).toEqual([
+        { text: "Focus on the failing test", sameTurn: true },
+        { text: "Use the smaller fixture", sameTurn: true },
+      ]);
+
+      for (const index of [0, 2, 1]) {
+        feed({ jsonrpc: "2.0", id: prompts[index].id, result: { stopReason: "end_turn" } });
+        await flush();
+        expect(session.get(termId)?.status).toBe(index === 1 ? "idle" : "working");
+        expect(completions).toEqual(index === 1 ? [termId] : []);
+      }
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  test.each([null, "gemini-4-neon"])("runs queued Antigravity turns in order (staged model: %s)", async (model) => {
+    const termId = "antigravity-queued-turns";
+    const launch: AgentLaunch = { ...grokLaunch, agent: "antigravity", program: "agy-queue-test.exe" };
+    const prompts = () => sent.map(rpc).filter((message) => message.method === "session/prompt");
+
+    await session.start(termId, launch, "H:/project");
+    await handshake();
+    session.submit(termId, "First task");
+    if (model) session.configure(termId, "model", model);
+    session.submit(termId, "Second task");
+    session.submit(termId, "Third task");
+    await flush();
+    expect(prompts()).toHaveLength(1);
+
+    for (const [index, text] of ["Second task", "Third task"].entries()) {
+      feed({ jsonrpc: "2.0", id: prompts()[index].id, result: { stopReason: "end_turn" } });
+      await flush();
+      if (model && index === 0) {
+        const config = sent.map(rpc).find((message) => message.method === "session/set_model");
+        expect(config?.params).toEqual({ sessionId: "s1", modelId: model });
+        expect(prompts()).toHaveLength(1);
+        feed({ jsonrpc: "2.0", id: config?.id, result: {} });
+        await flush();
+      }
+      expect(prompts()).toHaveLength(index + 2);
+      expect(prompts().at(-1)?.params).toEqual({ sessionId: "s1", prompt: [{ type: "text", text }] });
+      expect(session.get(termId)?.status).toBe("working");
+      expect(session.get(termId)?.workStartedAt).not.toBeNull();
+      expect(session.get(termId)?.pending.map((prompt) => prompt.text)).toEqual(
+        index === 0 ? ["Third task"] : [],
+      );
+    }
+
+    feed({ jsonrpc: "2.0", id: prompts()[2].id, result: { stopReason: "end_turn" } });
+    await flush();
+    expect(session.get(termId)?.status).toBe("idle");
+  });
+
   test("restores completed Antigravity history silently and announces the next live turn", async () => {
     const termId = "recover-antigravity";
     const cwd = "H:/project";
