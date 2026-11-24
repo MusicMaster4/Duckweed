@@ -1571,6 +1571,8 @@ export async function start(
       ...(TAURI_RUNTIME && launch.agent === "antigravity" ? {
         readAntigravitySubagents: (sessionId: string, callIds: string[]) =>
           invoke<AntigravitySubagentUpdate[]>("agent_antigravity_subagents", { sessionId, callIds }),
+        readAntigravityActivity: (sessionId: string) =>
+          invoke<boolean | null>("agent_antigravity_activity", { sessionId }),
       } : {}),
       files: {
         readText: async (path) => {

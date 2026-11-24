@@ -1,6 +1,9 @@
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::Serialize;
-use std::{collections::HashSet, path::Path};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+};
 use uuid::Uuid;
 
 // The AGY SQLite store uses CortexStep/StepMetadata protobufs. Read only the
@@ -74,6 +77,65 @@ fn open_db(path: &Path) -> rusqlite::Result<Connection> {
     let db = Connection::open_with_flags(path, flags)?;
     db.busy_timeout(std::time::Duration::from_millis(250))?;
     Ok(db)
+}
+
+enum RunStatus {
+    Active,
+    Idle,
+    Error,
+    Unknown,
+}
+
+fn run_status(raw_status: &str, not_fully_idle: bool, killed: bool) -> RunStatus {
+    match (raw_status, not_fully_idle, killed) {
+        (_, _, true)
+        | (
+            "CASCADE_RUN_STATUS_ERROR"
+            | "CASCADE_RUN_STATUS_FAILED"
+            | "CASCADE_RUN_STATUS_CANCELED"
+            | "CASCADE_RUN_STATUS_CANCELLED",
+            _,
+            _,
+        ) => RunStatus::Error,
+        (_, true, _)
+        | (
+            "CASCADE_RUN_STATUS_RUNNING"
+            | "CASCADE_RUN_STATUS_BUSY"
+            | "CASCADE_RUN_STATUS_CANCELING"
+            | "CASCADE_RUN_STATUS_WAITING_FOR_USER",
+            _,
+            _,
+        ) => RunStatus::Active,
+        ("CASCADE_RUN_STATUS_IDLE", _, _) => RunStatus::Idle,
+        _ => RunStatus::Unknown,
+    }
+}
+
+fn read_activity(root: &Path, id: &str) -> rusqlite::Result<Option<bool>> {
+    let db = open_db(&root.join("conversation_summaries.db"))?;
+    let status = db
+        .query_row(
+            "SELECT status, not_fully_idle, killed FROM conversation_summaries WHERE conversation_id = ?1",
+            [id],
+            |row| Ok(run_status(&row.get::<_, String>(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    Ok(match status {
+        Some(RunStatus::Active) => Some(true),
+        Some(RunStatus::Idle | RunStatus::Error) => Some(false),
+        _ => None,
+    })
+}
+
+fn antigravity_root() -> Option<PathBuf> {
+    crate::agent_sessions::home_dir().map(|home| home.join(".gemini/antigravity-cli"))
+}
+
+pub fn activity(id: &str) -> rusqlite::Result<Option<bool>> {
+    let (Ok(id), Some(root)) = (Uuid::parse_str(id), antigravity_root()) else {
+        return Ok(None);
+    };
+    read_activity(&root, &id.to_string())
 }
 
 fn bounded_output(text: &str) -> String {
@@ -196,34 +258,14 @@ fn read_updates(
                 }
             }
         }
-        let status = match (raw_status.as_str(), not_fully_idle, killed, steps) {
-            (_, _, true, _)
-            | (
-                "CASCADE_RUN_STATUS_ERROR"
-                | "CASCADE_RUN_STATUS_FAILED"
-                | "CASCADE_RUN_STATUS_CANCELED"
-                | "CASCADE_RUN_STATUS_CANCELLED",
-                _,
-                _,
-                _,
-            ) => "error",
-            (_, true, _, _)
-            | (
-                "CASCADE_RUN_STATUS_RUNNING"
-                | "CASCADE_RUN_STATUS_BUSY"
-                | "CASCADE_RUN_STATUS_CANCELING"
-                | "CASCADE_RUN_STATUS_WAITING_FOR_USER",
-                _,
-                _,
-                _,
-            ) => "running",
-            ("CASCADE_RUN_STATUS_IDLE", false, false, steps) if steps > 1 || output.is_some() => {
-                "done"
-            }
-            ("CASCADE_RUN_STATUS_IDLE", false, false, _) => "pending",
-            ("", false, false, _) if output.is_some() => "done",
-            ("", false, false, _) => "pending",
-            _ => continue,
+        let status = match run_status(&raw_status, not_fully_idle, killed) {
+            RunStatus::Error => "error",
+            RunStatus::Active => "running",
+            RunStatus::Idle if steps > 1 || output.is_some() => "done",
+            RunStatus::Unknown if raw_status.is_empty() && output.is_some() => "done",
+            RunStatus::Idle => "pending",
+            RunStatus::Unknown if raw_status.is_empty() => "pending",
+            RunStatus::Unknown => continue,
         };
         let (tool_name, child_output) = child_activity(root, &id, status);
         updates.push(SubagentUpdate {
@@ -241,14 +283,10 @@ pub fn subagents(parent_id: &str, call_ids: &[String]) -> rusqlite::Result<Vec<S
     let Ok(id) = Uuid::parse_str(parent_id) else {
         return Ok(Vec::new());
     };
-    let Some(home) = crate::agent_sessions::home_dir() else {
+    let Some(root) = antigravity_root() else {
         return Ok(Vec::new());
     };
-    read_updates(
-        &home.join(".gemini/antigravity-cli"),
-        &id.to_string(),
-        call_ids,
-    )
+    read_updates(&root, &id.to_string(), call_ids)
 }
 #[cfg(test)]
 mod tests {
@@ -338,6 +376,10 @@ mod tests {
                 rusqlite::params![child, parent, running],
             ).unwrap();
         }
+
+        assert_eq!(read_activity(&root, &parent).unwrap(), None);
+        assert_eq!(read_activity(&root, &first).unwrap(), Some(true));
+        assert_eq!(read_activity(&root, &second).unwrap(), Some(false));
 
         let calls = ["call_1".to_owned(), "call_10".to_owned()];
         let updates = read_updates(&root, &parent, &calls).unwrap();

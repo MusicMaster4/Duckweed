@@ -53,6 +53,8 @@ export interface AdapterContext {
   syncAccount?: (signedIn: boolean) => Promise<"unchanged" | "deferred" | "restarted">;
   /** Read child status associated with the given Antigravity ACP tool calls. */
   readAntigravitySubagents?: (sessionId: string, callIds: string[]) => Promise<AntigravitySubagentUpdate[]>;
+  /** Read whether the native Antigravity conversation is still active. */
+  readAntigravityActivity?: (sessionId: string) => Promise<boolean | null>;
   /**
    * Workspace-scoped file service advertised to protocols such as ACP.
    * Implementations must enforce canonical containment after following

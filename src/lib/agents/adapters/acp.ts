@@ -77,6 +77,10 @@ const ACP_STATUS: Record<string, ToolStatus> = {
   failed: "error",
 };
 
+const ANTIGRAVITY_ACTIVE_POLL_MS = 750;
+const ANTIGRAVITY_IDLE_POLL_MS = 2_000;
+const ANTIGRAVITY_STATUS_GRACE_MS = 12_000;
+
 const EFFORT_ORDER = ["low", "medium", "high", "xhigh", "max"] as const;
 
 function asNumber(value: unknown): number | null {
@@ -537,6 +541,8 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
   // Antigravity can settle superseded prompt requests out of order after a steer.
   let pendingTurnPrompts = 0;
   let turnOpen = false;
+  let antigravityActivityWatch: { timer?: ReturnType<typeof setTimeout> } | undefined;
+  let disposed = false;
   /** The agent advertised `session/load` — see {@link AgentAdapter.resume}. */
   let canLoadSession = false;
   /**
@@ -619,6 +625,58 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
     antigravitySubagents?.pollNow();
     turnOpen = false;
     ctx.emit({ type: "turn-end" });
+  }
+
+  function stopAntigravityActivityWatch() {
+    clearTimeout(antigravityActivityWatch?.timer);
+    antigravityActivityWatch = undefined;
+  }
+
+  function watchAntigravityActivity(ctx: AdapterContext): boolean {
+    const readActivity = ctx.readAntigravityActivity;
+    const id = sessionId;
+    if (agent !== "antigravity" || !readActivity || !id || disposed) return false;
+
+    const watch: NonNullable<typeof antigravityActivityWatch> = {};
+    antigravityActivityWatch = watch;
+    let lastStatusAt: number | null = null;
+
+    const poll = async () => {
+      const active = await readActivity(id).catch(() => null);
+      if (antigravityActivityWatch !== watch) return;
+
+      if (active === null) {
+        // Older CLI versions may have no readable status. After a successful
+        // read, tolerate temporary SQLite or IPC failures before falling back.
+        if (lastStatusAt === null || Date.now() - lastStatusAt >= ANTIGRAVITY_STATUS_GRACE_MS) {
+          stopAntigravityActivityWatch();
+          finishTurnWhenReady(ctx);
+          return;
+        }
+      } else {
+        lastStatusAt = Date.now();
+        if (active && !turnOpen) {
+          turnOpen = true;
+          if (permissionRequests.size === 0 && questionRequests.size === 0) {
+            ctx.emit({ type: "status", status: "working" });
+          }
+        } else if (!active) {
+          finishTurnWhenReady(ctx);
+        }
+      }
+
+      // Completing a turn can dispatch a queued prompt synchronously.
+      if (antigravityActivityWatch === watch) {
+        const delay = turnOpen ? ANTIGRAVITY_ACTIVE_POLL_MS : ANTIGRAVITY_IDLE_POLL_MS;
+        watch.timer = setTimeout(poll, delay);
+        (watch.timer as { unref?: () => void }).unref?.();
+      }
+    };
+
+    // ACP can answer session/prompt while the conversation still has work.
+    // Check again after idle in case Antigravity restarts on its own.
+    void poll();
+    return true;
   }
 
   function activeContentId(): string | null {
@@ -2168,6 +2226,7 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
 
   function sendPrompt(prompt: AgentPrompt, ctx: AdapterContext, sameTurn = false): void {
     if (!sessionId) return;
+    stopAntigravityActivityWatch();
     pendingTurnPrompts += 1;
     if (sameTurn) {
       closeActiveContent(ctx);
@@ -2233,10 +2292,8 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
         slashPending = false;
         goalResponsePending = false;
         goalResponseText = "";
-        finishTurnWhenReady(
-          ctx,
-          stop === "refusal" || stop === "cancelled" || stop === "canceled",
-        );
+        const force = stop === "refusal" || stop === "cancelled" || stop === "canceled";
+        if (force || !watchAntigravityActivity(ctx)) finishTurnWhenReady(ctx, force);
       }, (error: unknown) => {
         pendingTurnPrompts -= 1;
         const record = asRecord(error);
@@ -2363,7 +2420,7 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
     ...(agent === "antigravity"
       ? {
           steer: (prompt: AgentPrompt, ctx: AdapterContext) => {
-            if (!sessionId || !turnOpen || loading || pendingTurnPrompts === 0) return false;
+            if (!sessionId || !turnOpen || loading) return false;
             sendPrompt(prompt, ctx, true);
             return true;
           },
@@ -2408,6 +2465,7 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
      */
     resume: (id, ctx) => {
       if (!canLoadSession) return false;
+      stopAntigravityActivityWatch();
       totalInputTokens = 0;
       totalOutputTokens = 0;
       currentGoal = null;
@@ -2518,7 +2576,13 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
       ctx.emit({ type: "permission", permission: null });
       ctx.emit({ type: "status", status: "working" });
     },
-    ...(antigravitySubagents ? { dispose: antigravitySubagents.dispose } : {}),
+    ...(antigravitySubagents ? {
+      dispose: (ctx: AdapterContext) => {
+        disposed = true;
+        stopAntigravityActivityWatch();
+        antigravitySubagents.dispose(ctx);
+      },
+    } : {}),
     refreshExtensions: () => extensions.map((extension) => ({ ...extension })),
     refreshTasks: () => [...runtimeTasks.values()].map((task) => ({ ...task })),
   };

@@ -653,6 +653,15 @@ async fn agent_sessions_list(
 }
 
 #[tauri::command]
+async fn agent_antigravity_activity(session_id: String) -> Result<Option<bool>, String> {
+    blocking(move || {
+        antigravity_subagents::activity(&session_id)
+            .map_err(|error| format!("could not read Antigravity conversation status: {error}"))
+    })
+    .await
+}
+
+#[tauri::command]
 async fn agent_antigravity_subagents(
     session_id: String,
     call_ids: Vec<String>,
@@ -1486,6 +1495,7 @@ fn main() {
             agent_watch,
             agent_unwatch,
             agent_sessions_list,
+            agent_antigravity_activity,
             agent_antigravity_subagents,
             agent_session_transcript,
             agent_proc_probe,

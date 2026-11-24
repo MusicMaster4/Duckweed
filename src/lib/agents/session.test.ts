@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 
+import { workStatusLabel } from "../agentWorkDuration";
 import type { AgentFrame, AgentSpawnOptions } from "../ipc";
 import type { AgentLaunch } from "./launch";
 import type { AgentImageAttachment } from "./types";
@@ -38,6 +39,7 @@ let frameSink: ((frame: AgentFrame) => void) | null = null;
 let spawnFailure: string | null = null;
 let spawnFailureOnce = false;
 let sendOverride: ((line: string) => Promise<void>) | null = null;
+let readAntigravityActivity: ((id: string) => boolean) | null = null;
 let nativeStops = 0;
 let nativeStarts = 0;
 let attachOverride: ((id: string, sequence: number, channel: { onmessage?: (frame: AgentFrame) => void }) => Promise<boolean>) | null = null;
@@ -57,8 +59,11 @@ mock.module("@tauri-apps/api/core", () => ({
   Channel: class Channel {
     onmessage: ((frame: AgentFrame) => void) | null = null;
   },
-  invoke: async (command: string) => {
+  invoke: async (command: string, args?: { sessionId: string }) => {
     if (command === "agent_codex_interrupt") return;
+    if (command === "agent_antigravity_activity") {
+      return args ? readAntigravityActivity?.(args.sessionId) ?? null : null;
+    }
     throw new Error("unexpected invoke");
   },
 }));
@@ -1069,6 +1074,7 @@ describe("Custom agent UI sessions", () => {
     spawnFailure = null;
     spawnFailureOnce = false;
     sendOverride = null;
+    readAntigravityActivity = null;
     nativeStops = 0;
     nativeStopModes.length = 0;
     session.setFollowupMode("queue");
@@ -1900,6 +1906,81 @@ describe("Custom agent UI sessions", () => {
         expect(session.get(termId)?.status).toBe(index === 1 ? "idle" : "working");
         expect(completions).toEqual(index === 1 ? [termId] : []);
       }
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  test("keeps Antigravity busy after an ACP reply and detects autonomous resumption", async () => {
+    const termId = "antigravity-native-activity";
+    const launch: AgentLaunch = { ...grokLaunch, agent: "antigravity", program: "agy" };
+    const prompts = () => sent.map(rpc).filter((message) => message.method === "session/prompt");
+    let active = true;
+    let onRead: (() => void) | undefined;
+    readAntigravityActivity = (id) => {
+      expect(id).toBe("s1");
+      onRead?.();
+      return active;
+    };
+    const completions: string[] = [];
+    const unsubscribe = session.subscribeTurnEnd((id) => completions.push(id));
+    const changeActivity = async (value: boolean) => {
+      active = value;
+      await new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error("Antigravity activity was not polled")), 3_000);
+        onRead = () => {
+          clearTimeout(timeout);
+          resolve();
+        };
+      });
+      onRead = undefined;
+      await flush();
+    };
+
+    try {
+      await session.start(termId, launch, "H:/project");
+      await handshake();
+      session.submit(termId, "Start a render and wait for it");
+      session.submit(termId, "Review the finished render");
+      await flush();
+      const startedAt = session.get(termId)?.workStartedAt;
+
+      feed({ jsonrpc: "2.0", id: prompts()[0].id, result: { stopReason: "end_turn" } });
+      await flush();
+      feed({
+        jsonrpc: "2.0",
+        method: "session/update",
+        params: {
+          sessionId: "s1",
+          update: { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "The render finished. Checking it now." } },
+        },
+      });
+      expect(session.get(termId)?.status).toBe("working");
+      expect(session.get(termId)?.workStartedAt).toBe(startedAt);
+      expect(session.get(termId)?.pending.map(({ text }) => text)).toEqual(["Review the finished render"]);
+      expect(prompts()).toHaveLength(1);
+      expect(completions).toEqual([]);
+
+      await changeActivity(false);
+      expect(prompts()).toHaveLength(2);
+      feed({ jsonrpc: "2.0", id: prompts()[1].id, result: { stopReason: "end_turn" } });
+      await flush();
+      expect(workStatusLabel(session.get(termId)!, Date.now())).toMatch(/^Worked for /);
+      expect(completions).toEqual([termId]);
+
+      await changeActivity(true);
+      expect(workStatusLabel(session.get(termId)!, Date.now())).toMatch(/^Working for /);
+
+      session.interrupt(termId);
+      await flush();
+      expect(sent.map(rpc)).toContainEqual({
+        jsonrpc: "2.0",
+        method: "session/cancel",
+        params: { sessionId: "s1" },
+      });
+      await changeActivity(false);
+      expect(workStatusLabel(session.get(termId)!, Date.now())).toMatch(/^Worked for /);
+      expect(completions).toEqual([termId]);
     } finally {
       unsubscribe();
     }
