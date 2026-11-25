@@ -17,7 +17,7 @@ import {
   type AgentFrame,
   type SystemMemory,
 } from "../ipc";
-import type { AdapterContext, AgentAdapter, AntigravitySubagentUpdate } from "./adapter";
+import type { AdapterContext, AgentAdapter, AntigravitySubagentUpdate, ClaudeSubagentSnapshot } from "./adapter";
 import {
   completionDetailsFromState,
   type AgentCompletionDetails,
@@ -1160,6 +1160,31 @@ function emitNow(session: Session, event: AgentEvent): void {
   }
 }
 
+const ORPHANED_WORK_OUTPUT =
+  "Stopped before reporting back. The process that ran it has ended.";
+
+/**
+ * Settle every row the previous agent process left running.
+ *
+ * Claude runs background agents inside its CLI. A crash, a relaunch, or an
+ * app restart that cannot reattach ends that process, and a new one never
+ * reports on the old agents. Left alone, those rows read "working" forever.
+ */
+function settleOrphanedWork(session: Session): void {
+  for (const item of session.state.items) {
+    if (item.kind !== "tool" || (item.status !== "running" && item.status !== "pending")) continue;
+    emit(session, {
+      type: "tool",
+      callId: item.callId,
+      status: "error",
+      ...(item.output.trim() ? {} : { output: ORPHANED_WORK_OUTPUT }),
+      ...(item.tool === "task"
+        ? { subagent: { activity: "Stopped before reporting back", statusUnavailable: false } }
+        : {}),
+    });
+  }
+}
+
 /** Settle uncertain input before releasing a connection that cannot recover. */
 /** How long a launch may stay silent before memory pressure is checked. */
 const SLOW_START_CHECK_MS = 20_000;
@@ -1408,6 +1433,7 @@ function handleFrame(session: Session, frame: AgentFrame): void {
       } else {
         emit(session, { type: "status", status: "exited" });
       }
+      if (session.adapter.backgroundWorkEndsWithProcess) settleOrphanedWork(session);
       notifyNow(session);
       return;
     }
@@ -1578,6 +1604,15 @@ export async function start(
       runtimeProcesses: (pids) => invoke<void>("agent_proc_set_runtime_roots", { id: termId, pids }),
       syncAccount: (signedIn) => agentCodexAuthSync(termId, signedIn),
       interruptFallback: () => invoke<void>("agent_codex_interrupt", { id: termId }),
+      ...(TAURI_RUNTIME && launch.agent === "claude" ? {
+        readClaudeSubagents: (sessionId: string, agentIds: string[]) =>
+          invoke<ClaudeSubagentSnapshot[]>("agent_claude_subagents", {
+            cwd,
+            sessionId,
+            agentIds,
+            configDir: launch.env.CLAUDE_CONFIG_DIR ?? null,
+          }),
+      } : {}),
       ...(TAURI_RUNTIME && launch.agent === "antigravity" ? {
         readAntigravitySubagents: (sessionId: string, callIds: string[]) =>
           invoke<AntigravitySubagentUpdate[]>("agent_antigravity_subagents", { sessionId, callIds }),
@@ -1627,6 +1662,7 @@ export async function start(
       if (attached) {
         session.channel = channel;
         session.recovery = null;
+        adapter.reattached?.(session.context, session.state.items);
         emit(session, { type: "resumed", sessionId: session.state.sessionId ?? "", title: "", silent: true });
       }
     }
@@ -1710,7 +1746,11 @@ export async function start(
 
   if (!attached) {
     // Rows recovered from a previous process were not streamed by this adapter.
-    if (session.state.items.length) adapter.adoptTranscript?.(session.state.items);
+    if (session.state.items.length) {
+      // That process is gone, and so is any background work it was running.
+      if (adapter.backgroundWorkEndsWithProcess) settleOrphanedWork(session);
+      adapter.adoptTranscript?.(session.state.items);
+    }
     adapter.start(session.context);
   }
   watchDelivery(session);

@@ -7,6 +7,7 @@ mod agent_proc;
 mod agent_sessions;
 mod antigravity_subagents;
 mod automatic_approval;
+mod claude_subagents;
 mod codex_desktop;
 mod codex_transport;
 mod discord_presence;
@@ -669,6 +670,21 @@ async fn agent_antigravity_subagents(
     blocking(move || {
         antigravity_subagents::subagents(&session_id, &call_ids)
             .map_err(|error| format!("could not read Antigravity subagent status: {error}"))
+    })
+    .await
+}
+
+/// Claude's durable record of its background agents, so a lost completion
+/// frame cannot leave a finished agent marked as working.
+#[tauri::command]
+async fn agent_claude_subagents(
+    cwd: String,
+    session_id: String,
+    agent_ids: Vec<String>,
+    config_dir: Option<String>,
+) -> Result<Vec<claude_subagents::ClaudeSubagentSnapshot>, String> {
+    blocking(move || {
+        claude_subagents::subagents(&cwd, &session_id, &agent_ids, config_dir.as_deref())
     })
     .await
 }
@@ -1497,6 +1513,7 @@ fn main() {
             agent_sessions_list,
             agent_antigravity_activity,
             agent_antigravity_subagents,
+            agent_claude_subagents,
             agent_session_transcript,
             agent_proc_probe,
             opencode_models_refresh,

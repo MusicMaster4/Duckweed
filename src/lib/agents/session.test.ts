@@ -859,6 +859,72 @@ describe("Custom agent UI sessions", () => {
     }
   });
 
+  test("background agents from a Claude process that is gone are settled, not left working", async () => {
+    const termId = "app-restart-orphaned-claude-agents";
+    const launch: AgentLaunch = { ...grokLaunch, agent: "claude", program: "claude" };
+    await session.start(termId, launch, "H:/project");
+    const native = (sequence: number, frame: unknown) => frameSink?.({
+      kind: "sequenced", sequence, frame: { kind: "stdout", line: JSON.stringify(frame) },
+    });
+    native(1, { type: "system", subtype: "init", session_id: "crashed-claude" });
+    session.submit(termId, "Make the video");
+    await flush();
+    native(2, { type: "assistant", message: { id: "m1", content: [{
+      type: "tool_use", id: "call-docs", name: "Agent", input: { description: "Document animations owner" },
+    }] } });
+    native(3, { type: "user", toolUseResult: { status: "async_launched", agentId: "agent-docs" },
+      message: { content: [{ type: "tool_result", tool_use_id: "call-docs",
+        content: "Async agent launched successfully. agentId: agent-docs" }] } });
+    const docs = () => session.get(termId)?.items.find((item) => item.kind === "tool" && item.callId === "call-docs");
+    expect(docs()).toMatchObject({ status: "running" });
+    session.flushRecovery();
+    const saved = JSON.parse(JSON.stringify(workspaceRecovery.get(termId)?.agent));
+    session.stop(termId);
+    await flush();
+    // The machine crashed: nothing survives to reattach to.
+    attachOverride = async () => false;
+    try {
+      await session.start(termId, { ...saved.launch, resumeId: saved.sessionId }, saved.cwd, saved);
+      expect(docs()).toMatchObject({
+        status: "error",
+        subagent: { activity: "Stopped before reporting back" },
+      });
+      expect(session.get(termId)?.items.some((item) =>
+        item.kind === "tool" && (item.status === "running" || item.status === "pending"))).toBe(false);
+    } finally {
+      attachOverride = null;
+      session.stop(termId);
+    }
+  });
+
+  test("a Claude process that exits settles the background agents it was running", async () => {
+    const termId = "exited-claude-agents";
+    const launch: AgentLaunch = { ...grokLaunch, agent: "claude", program: "claude" };
+    await session.start(termId, launch, "H:/project");
+    const native = (sequence: number, frame: unknown) => frameSink?.({
+      kind: "sequenced", sequence, frame: { kind: "stdout", line: JSON.stringify(frame) },
+    });
+    native(1, { type: "system", subtype: "init", session_id: "exiting-claude" });
+    session.submit(termId, "Make the video");
+    await flush();
+    native(2, { type: "assistant", message: { id: "m1", content: [{
+      type: "tool_use", id: "call-docs", name: "Agent", input: { description: "Document animations owner" },
+    }] } });
+    native(3, { type: "user", toolUseResult: { status: "async_launched", agentId: "agent-docs" },
+      message: { content: [{ type: "tool_result", tool_use_id: "call-docs",
+        content: "Async agent launched successfully. agentId: agent-docs" }] } });
+    native(4, { type: "result", subtype: "success", is_error: false, result: "Launched" });
+    try {
+      frameSink?.({ kind: "exit", code: 1, reconnect: false });
+      await flush();
+      expect(session.get(termId)?.status).toBe("exited");
+      expect(session.get(termId)?.items.find((item) => item.kind === "tool" && item.callId === "call-docs"))
+        .toMatchObject({ status: "error", subagent: { activity: "Stopped before reporting back" } });
+    } finally {
+      session.stop(termId);
+    }
+  });
+
   test("a renderer that stops receiving native frames reattaches and replays the missed output", async () => {
     const termId = "stalled-claude-channel";
     const launch: AgentLaunch = { ...grokLaunch, agent: "claude", program: "claude" };

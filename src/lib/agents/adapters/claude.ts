@@ -7,6 +7,7 @@ import {
   parseJson,
   type AdapterContext,
   type AgentAdapter,
+  type ClaudeSubagentSnapshot,
 } from "../adapter";
 import {
   goalAfterCommand,
@@ -376,6 +377,19 @@ function backgroundAgentId(
   );
 }
 
+const ORPHANED_AGENT_OUTPUT =
+  "Stopped before reporting back. The process that ran it has ended.";
+/** How often background agents marked running are checked against disk. */
+const RECONCILE_INTERVAL_MS = 15_000;
+/** Late progress from a finished agent is checked sooner. */
+const REVIVAL_CHECK_MS = 3_000;
+/** Claude's notification usually lands right after the sidecar is marked finished. */
+const FINISHED_GRACE_MS = 20_000;
+/** Without a readable sidecar, a final answer must stay final for longer. */
+const ENDED_GRACE_MS = 90_000;
+/** Quiet time before a turn held open for vanished background work is released. */
+const IDLE_TURN_GRACE_MS = 30_000;
+
 function taskNotification(text: string): {
   taskId: string;
   toolUseId?: string;
@@ -601,6 +615,20 @@ export function createClaudeAdapter(): AgentAdapter {
   let controlSeq = 0;
   let initializeRequestId: string | null = null;
   let catalogRequest: { id: string; sentAt: number } | null = null;
+  /** Claude's own session id, which names its on-disk agent records. */
+  let claudeSessionId: string | null = null;
+  /** Finished agents that sent progress since, waiting for a disk check. */
+  const revivalSuspects = new Set<string>();
+  /** When each background agent was last settled, to spot later activity. */
+  const settledAt = new Map<string, number>();
+  let reconcileTimer: ReturnType<typeof setTimeout> | undefined;
+  let reconcileDueAt = 0;
+  let reconciling = false;
+  let reconcileAgain = false;
+  let lastFrameAt = Date.now();
+  /** The reconciler settled agents while the parent turn waited on them. */
+  let healedHeldTurn = false;
+  let disposed = false;
 
   function backgroundWorkRunning(): boolean {
     return [...backgroundAgents.values()].some((status) => status === "running") ||
@@ -656,6 +684,148 @@ export function createClaudeAdapter(): AgentAdapter {
             }
           : {}),
       });
+    }
+  }
+
+  /**
+   * Self-healing for background agents.
+   *
+   * A `<task-notification>` is the only live signal that a background agent
+   * ended, and it can go missing. Claude also records every run's end on disk,
+   * so agents still marked running are checked against that record. Agents
+   * marked finished that show signs of life (late progress frames) are checked
+   * the same way before they are reopened.
+   */
+  function backgroundAgentIdFor(callId: string): string | null {
+    for (const [agentId, owner] of backgroundAgentCallByTaskId) {
+      if (owner === callId) return agentId;
+    }
+    return null;
+  }
+
+  function reconcileCandidates(): Map<string, string> {
+    const candidates = new Map<string, string>();
+    for (const [callId, status] of backgroundAgents) {
+      if (status !== "running" && !revivalSuspects.has(callId)) continue;
+      const agentId = backgroundAgentIdFor(callId);
+      if (agentId) candidates.set(agentId, callId);
+    }
+    return candidates;
+  }
+
+  /** A turn held open for agents Claude never reported, now all settled. */
+  function heldTurnAwaitingRelease(): boolean {
+    return turnResultPending && healedHeldTurn && !backgroundWorkRunning();
+  }
+
+  function scheduleReconcile(ctx: AdapterContext, delay = RECONCILE_INTERVAL_MS): void {
+    if (disposed || !ctx.readClaudeSubagents) return;
+    if (reconciling) {
+      reconcileAgain = true;
+      return;
+    }
+    if (reconcileTimer !== undefined && reconcileDueAt <= Date.now() + delay) return;
+    if (!reconcileCandidates().size && !heldTurnAwaitingRelease()) return;
+    clearTimeout(reconcileTimer);
+    reconcileDueAt = Date.now() + delay;
+    reconcileTimer = setTimeout(() => {
+      reconcileTimer = undefined;
+      void reconcile(ctx);
+    }, delay);
+    (reconcileTimer as { unref?: () => void }).unref?.();
+  }
+
+  function settleFromDisk(
+    callId: string,
+    snapshot: ClaudeSubagentSnapshot,
+    ctx: AdapterContext,
+  ): void {
+    const completed = !snapshot.stoppedByUser && snapshot.transcriptEnded;
+    const status: ToolStatus = completed ? "done" : "error";
+    backgroundAgents.set(callId, status);
+    settledAt.set(callId, Date.now());
+    openSyncTools.delete(callId);
+    if (turnResultPending) healedHeldTurn = true;
+    const report = snapshot.finalText?.trim() ?? "";
+    ctx.emit({
+      type: "tool",
+      callId,
+      status,
+      ...(report ? { output: report } : {}),
+      subagent: {
+        activity: report
+          ? oneLine(report.split(/\r?\n/).find((line) => line.trim()) ?? report)
+          : snapshot.stoppedByUser
+            ? "Delegated work stopped"
+            : completed
+              ? "Delegated work completed"
+              : "Delegated work ended without a report",
+      },
+    });
+  }
+
+  async function reconcile(ctx: AdapterContext): Promise<void> {
+    const read = ctx.readClaudeSubagents;
+    const sessionId = claudeSessionId ?? ctx.launch.resumeId;
+    const candidates = reconcileCandidates();
+    if (disposed || !read || !sessionId) return;
+    if (!candidates.size && !heldTurnAwaitingRelease()) return;
+    reconciling = true;
+    try {
+      let snapshots: ClaudeSubagentSnapshot[] = [];
+      if (candidates.size) {
+        try {
+          snapshots = await read(sessionId, [...candidates.keys()]);
+        } catch {
+          // A failed read is not evidence of anything. Try again later.
+          return;
+        }
+      }
+      if (disposed) return;
+      const now = Date.now();
+      for (const snapshot of snapshots) {
+        const callId = candidates.get(snapshot.agentId);
+        if (!callId || !snapshot.found) continue;
+        const quietFor = now - snapshot.updatedAt;
+        if (backgroundAgents.get(callId) === "running") {
+          // Give Claude's own notification the first chance to arrive.
+          const ended =
+            (snapshot.metaReadable && snapshot.finished && quietFor >= FINISHED_GRACE_MS) ||
+            // A crash can zero the sidecar. A final answer that has stayed
+            // final for a while is then the only record of the end.
+            (!snapshot.metaReadable && snapshot.transcriptEnded && quietFor >= ENDED_GRACE_MS);
+          if (ended) settleFromDisk(callId, snapshot, ctx);
+          continue;
+        }
+        if (!revivalSuspects.has(callId)) continue;
+        revivalSuspects.delete(callId);
+        const revived =
+          snapshot.metaReadable &&
+          !snapshot.finished &&
+          !snapshot.transcriptEnded &&
+          snapshot.updatedAt > (settledAt.get(callId) ?? 0) + 1_000;
+        if (!revived) continue;
+        backgroundAgents.set(callId, "running");
+        ctx.emit({ type: "tool", callId, status: "running", subagent: { activity: "Working" } });
+      }
+      // The parent turn was held open for background work Claude never
+      // reported. Release it once nothing runs and Claude has gone quiet. A
+      // foreground tool still running means the parent is busy, not stuck.
+      if (
+        heldTurnAwaitingRelease() &&
+        openSyncTools.size === 0 &&
+        Date.now() - lastFrameAt >= IDLE_TURN_GRACE_MS
+      ) {
+        turnResultPending = false;
+        healedHeldTurn = false;
+        settleRunningWork(ctx, "done", false);
+        ctx.emit({ type: "turn-end" });
+      }
+    } finally {
+      reconciling = false;
+      const again = reconcileAgain;
+      reconcileAgain = false;
+      scheduleReconcile(ctx, again || revivalSuspects.size ? REVIVAL_CHECK_MS : RECONCILE_INTERVAL_MS);
     }
   }
 
@@ -1525,6 +1695,8 @@ export function createClaudeAdapter(): AgentAdapter {
     if (agentCallId) {
       backgroundAgentCallByTaskId.set(notification.taskId, agentCallId);
       backgroundAgents.set(agentCallId, notification.status === "completed" ? "done" : "error");
+      settledAt.set(agentCallId, Date.now());
+      revivalSuspects.delete(agentCallId);
       openSyncTools.delete(agentCallId);
       const output = notification.result || notification.summary;
       const fallbackActivity =
@@ -1617,6 +1789,7 @@ export function createClaudeAdapter(): AgentAdapter {
           // `SendMessage` resumes a finished agent under its original task id.
           // Only a fresh start may reopen it; late progress must not.
           if (subtype === "task_started" || (status !== "done" && status !== "error")) {
+            revivalSuspects.delete(callId);
             backgroundAgents.set(callId, "running");
             const lastTool = asString(frame.last_tool_name);
             const activity =
@@ -1630,6 +1803,11 @@ export function createClaudeAdapter(): AgentAdapter {
               status: "running",
               subagent: { activity },
             });
+          } else {
+            // Usually a late frame from the run that just ended. It can also
+            // be a revival Claude did not announce; the disk record decides.
+            revivalSuspects.add(callId);
+            scheduleReconcile(ctx, REVIVAL_CHECK_MS);
           }
         }
       }
@@ -2027,6 +2205,164 @@ export function createClaudeAdapter(): AgentAdapter {
     });
   }
 
+  /** One line from Claude's stdout. */
+  function receiveFrame(line: string, ctx: AdapterContext): void {
+    const frame = parseJson(line);
+    if (!frame) return;
+    const type = asString(frame.type);
+
+    switch (type) {
+      case "system": {
+        if (asString(frame.subtype) !== "init") {
+          const subtype = asString(frame.subtype) ?? "hook";
+          if (subtype.includes("hook")) {
+            const callId = asString(frame.hook_id) ?? asString(frame.uuid) ?? `hook-${++controlSeq}`;
+            const failed = frame.error != null || subtype.includes("error");
+            ctx.emit({
+              type: "tool",
+              callId,
+              name: asString(frame.hook_name) ?? asString(frame.hook_event) ?? "hook",
+              tool: "other",
+              title: asString(frame.hook_name) ?? asString(frame.hook_event) ?? "Claude hook",
+              status: failed ? "error" : subtype.includes("start") ? "running" : "done",
+              output: asString(frame.output) ?? asString(frame.message) ?? "",
+            });
+          }
+          handleNotificationFrame(frame, null, ctx);
+          return;
+        }
+        const commands = asArray(frame.slash_commands)
+          .map((name) => asString(name))
+          .filter((name): name is string => name !== null)
+          .map((name) => ({ name: `/${name}`, description: "" }));
+        const skillRows: AgentExtension[] = commands.map((command) => ({
+          id: `skill:${command.name.slice(1)}`,
+          kind: "skill",
+          name: command.name,
+          description: command.description,
+          enabled: true,
+          callable: true,
+          status: "ready",
+          source: "Claude Code",
+        }));
+        const mcpRows: AgentExtension[] = asArray(frame.mcp_servers)
+          .map((raw) => asRecord(raw))
+          .filter((server): server is Record<string, unknown> => server !== null)
+          .map((server) => {
+            const status = asString(server.status) ?? "connected";
+            return {
+              id: `mcp:${asString(server.name) ?? "server"}`,
+              kind: "mcp" as const,
+              name: asString(server.name) ?? "MCP server",
+              description: asString(server.description) ?? `Status: ${status}`,
+              enabled: status !== "disabled",
+              callable: false,
+              status: status.includes("fail") ? ("error" as const) : status === "disabled" ? ("disabled" as const) : ("ready" as const),
+              source: "Claude Code",
+            };
+          });
+        const pluginRows: AgentExtension[] = asArray(frame.plugins)
+          .map((raw) => asRecord(raw))
+          .filter((plugin): plugin is Record<string, unknown> => plugin !== null)
+          .map((plugin) => ({
+            id: `plugin:${asString(plugin.id) ?? asString(plugin.name) ?? "plugin"}`,
+            kind: "plugin",
+            name: asString(plugin.name) ?? asString(plugin.id) ?? "Plugin",
+            description: asString(plugin.description) ?? "",
+            enabled: plugin.enabled !== false,
+            callable: false,
+            status: plugin.enabled === false ? "disabled" : "ready",
+            source: asString(plugin.path) ?? "Claude Code",
+          }));
+        claudeSessionId = asString(frame.session_id) ?? claudeSessionId;
+        extensions = [...skillRows, ...mcpRows, ...pluginRows];
+        ctx.emit({ type: "extensions", extensions, loading: false, error: null });
+        // Prefer the raw model id from init (`claude-opus-5[1m]`); the
+        // session already seeded the alias list for the picker.
+        ctx.emit({
+          type: "session",
+          sessionId: asString(frame.session_id) ?? undefined,
+          model: asString(frame.model) ?? undefined,
+          cwd: asString(frame.cwd) ?? undefined,
+          commands,
+        });
+        return;
+      }
+      case "stream_event": {
+        const event = asRecord(frame.event);
+        if (!event) return;
+        const parentCallId =
+          asString(frame.parent_tool_use_id) ?? asString(event.parent_tool_use_id);
+        if (parentCallId) {
+          // Subagent stream events belong to the child, never to root blocks/tools.
+          const bgStatus = backgroundAgents.get(parentCallId);
+          if (
+            bgStatus !== "done" &&
+            bgStatus !== "error" &&
+            asString(event.type) === "content_block_start"
+          ) {
+            const block = asRecord(event.content_block);
+            if (asString(block?.type) === "tool_use") {
+              const toolName = asString(block?.name);
+              if (toolName) {
+                ctx.emit({
+                  type: "tool",
+                  callId: parentCallId,
+                  subagent: { activity: `Using ${oneLine(toolName, 100)}` },
+                });
+              }
+            }
+          }
+          return;
+        }
+        handleStreamEvent(event, ctx);
+        return;
+      }
+      case "assistant": {
+        const message = asRecord(frame.message);
+        if (!message) return;
+        const parentCallId =
+          asString(frame.parent_tool_use_id) ??
+          asString(message.parent_tool_use_id);
+        if (parentCallId) {
+          handleSubagentAssistant(message, parentCallId, ctx);
+        } else {
+          handleAssistant(message, frame, ctx);
+        }
+        return;
+      }
+      case "user": {
+        const message = asRecord(frame.message);
+        if (!message) return;
+        handleNotificationFrame(frame, message, ctx);
+        const parentCallId =
+          asString(frame.parent_tool_use_id) ??
+          asString(message.parent_tool_use_id);
+        if (parentCallId) {
+          handleSubagentToolResults(message, parentCallId, ctx);
+        } else {
+          handleToolResults(message, frame, ctx);
+        }
+        return;
+      }
+      case "queue-operation":
+      case "attachment":
+        handleNotificationFrame(frame, null, ctx);
+        return;
+      case "control_request":
+        handleControlRequest(frame, ctx);
+        return;
+      case "control_response":
+        handleControlResponse(frame, ctx);
+        return;
+      case "result":
+        handleResult(frame, ctx);
+        return;
+      default:
+        return;
+    }
+  }
+
   function checkpoint() {
     return structuredClone({
       version: 1, blocks: [...blocks], tools: [...tools], nestedTools: [...nestedTools],
@@ -2042,6 +2378,7 @@ export function createClaudeAdapter(): AgentAdapter {
       pendingAccessChanges: [...pendingAccessChanges], pendingSideQuestions: [...pendingSideQuestions],
       activeSideQuestionRequestId, sideConversation, seenTurnErrors: [...seenTurnErrors],
       currentGoal, extensions, goalBeforeCommand, goalResponsePending,
+      claudeSessionId, revivalSuspects: [...revivalSuspects], settledAt: [...settledAt], healedHeldTurn,
     });
   }
 
@@ -2068,6 +2405,12 @@ export function createClaudeAdapter(): AgentAdapter {
         controlSeq, initializeRequestId, catalogRequest, activeSideQuestionRequestId,
         currentGoal, extensions, goalBeforeCommand, goalResponsePending } = saved);
       sideConversation = saved.sideConversation ?? null;
+      // Older checkpoints predate disk reconciliation.
+      claudeSessionId = saved.claudeSessionId ?? null;
+      revivalSuspects.clear();
+      for (const callId of saved.revivalSuspects ?? []) revivalSuspects.add(callId);
+      load(settledAt, saved.settledAt ?? []);
+      healedHeldTurn = saved.healedHeldTurn ?? false;
       return true;
     } catch { return false; }
   }
@@ -2093,6 +2436,8 @@ export function createClaudeAdapter(): AgentAdapter {
     restore,
     adoptTranscript,
     endsOnStdinClose: true,
+    // Background agents live inside the CLI. `--resume` does not revive them.
+    backgroundWorkEndsWithProcess: true,
 
     // No `resume` here on purpose: `stream-json` has no method for swapping
     // conversations, so the session store relaunches the CLI with the flags
@@ -2152,164 +2497,41 @@ export function createClaudeAdapter(): AgentAdapter {
     },
 
     receive: (line, ctx) => {
-      const frame = parseJson(line);
-      if (!frame) return;
-      const type = asString(frame.type);
+      lastFrameAt = Date.now();
+      receiveFrame(line, ctx);
+      scheduleReconcile(ctx);
+    },
 
-      switch (type) {
-        case "system": {
-          if (asString(frame.subtype) !== "init") {
-            const subtype = asString(frame.subtype) ?? "hook";
-            if (subtype.includes("hook")) {
-              const callId = asString(frame.hook_id) ?? asString(frame.uuid) ?? `hook-${++controlSeq}`;
-              const failed = frame.error != null || subtype.includes("error");
-              ctx.emit({
-                type: "tool",
-                callId,
-                name: asString(frame.hook_name) ?? asString(frame.hook_event) ?? "hook",
-                tool: "other",
-                title: asString(frame.hook_name) ?? asString(frame.hook_event) ?? "Claude hook",
-                status: failed ? "error" : subtype.includes("start") ? "running" : "done",
-                output: asString(frame.output) ?? asString(frame.message) ?? "",
-              });
-            }
-            handleNotificationFrame(frame, null, ctx);
-            return;
-          }
-          const commands = asArray(frame.slash_commands)
-            .map((name) => asString(name))
-            .filter((name): name is string => name !== null)
-            .map((name) => ({ name: `/${name}`, description: "" }));
-          const skillRows: AgentExtension[] = commands.map((command) => ({
-            id: `skill:${command.name.slice(1)}`,
-            kind: "skill",
-            name: command.name,
-            description: command.description,
-            enabled: true,
-            callable: true,
-            status: "ready",
-            source: "Claude Code",
-          }));
-          const mcpRows: AgentExtension[] = asArray(frame.mcp_servers)
-            .map((raw) => asRecord(raw))
-            .filter((server): server is Record<string, unknown> => server !== null)
-            .map((server) => {
-              const status = asString(server.status) ?? "connected";
-              return {
-                id: `mcp:${asString(server.name) ?? "server"}`,
-                kind: "mcp" as const,
-                name: asString(server.name) ?? "MCP server",
-                description: asString(server.description) ?? `Status: ${status}`,
-                enabled: status !== "disabled",
-                callable: false,
-                status: status.includes("fail") ? ("error" as const) : status === "disabled" ? ("disabled" as const) : ("ready" as const),
-                source: "Claude Code",
-              };
-            });
-          const pluginRows: AgentExtension[] = asArray(frame.plugins)
-            .map((raw) => asRecord(raw))
-            .filter((plugin): plugin is Record<string, unknown> => plugin !== null)
-            .map((plugin) => ({
-              id: `plugin:${asString(plugin.id) ?? asString(plugin.name) ?? "plugin"}`,
-              kind: "plugin",
-              name: asString(plugin.name) ?? asString(plugin.id) ?? "Plugin",
-              description: asString(plugin.description) ?? "",
-              enabled: plugin.enabled !== false,
-              callable: false,
-              status: plugin.enabled === false ? "disabled" : "ready",
-              source: asString(plugin.path) ?? "Claude Code",
-            }));
-          extensions = [...skillRows, ...mcpRows, ...pluginRows];
-          ctx.emit({ type: "extensions", extensions, loading: false, error: null });
-          // Prefer the raw model id from init (`claude-opus-5[1m]`); the
-          // session already seeded the alias list for the picker.
-          ctx.emit({
-            type: "session",
-            sessionId: asString(frame.session_id) ?? undefined,
-            model: asString(frame.model) ?? undefined,
-            cwd: asString(frame.cwd) ?? undefined,
-            commands,
-          });
-          return;
-        }
-        case "stream_event": {
-          const event = asRecord(frame.event);
-          if (!event) return;
-          const parentCallId =
-            asString(frame.parent_tool_use_id) ?? asString(event.parent_tool_use_id);
-          if (parentCallId) {
-            // Subagent stream events belong to the child, never to root blocks/tools.
-            const bgStatus = backgroundAgents.get(parentCallId);
-            if (
-              bgStatus !== "done" &&
-              bgStatus !== "error" &&
-              asString(event.type) === "content_block_start"
-            ) {
-              const block = asRecord(event.content_block);
-              if (asString(block?.type) === "tool_use") {
-                const toolName = asString(block?.name);
-                if (toolName) {
-                  ctx.emit({
-                    type: "tool",
-                    callId: parentCallId,
-                    subagent: { activity: `Using ${oneLine(toolName, 100)}` },
-                  });
-                }
-              }
-            }
-            return;
-          }
-          handleStreamEvent(event, ctx);
-          return;
-        }
-        case "assistant": {
-          const message = asRecord(frame.message);
-          if (!message) return;
-          const parentCallId =
-            asString(frame.parent_tool_use_id) ??
-            asString(message.parent_tool_use_id);
-          if (parentCallId) {
-            handleSubagentAssistant(message, parentCallId, ctx);
-          } else {
-            handleAssistant(message, frame, ctx);
-          }
-          return;
-        }
-        case "user": {
-          const message = asRecord(frame.message);
-          if (!message) return;
-          handleNotificationFrame(frame, message, ctx);
-          const parentCallId =
-            asString(frame.parent_tool_use_id) ??
-            asString(message.parent_tool_use_id);
-          if (parentCallId) {
-            handleSubagentToolResults(message, parentCallId, ctx);
-          } else {
-            handleToolResults(message, frame, ctx);
-          }
-          return;
-        }
-        case "queue-operation":
-        case "attachment":
-          handleNotificationFrame(frame, null, ctx);
-          return;
-        case "control_request":
-          handleControlRequest(frame, ctx);
-          return;
-        case "control_response":
-          handleControlResponse(frame, ctx);
-          return;
-        case "result":
-          handleResult(frame, ctx);
-          return;
-        default:
-          return;
+    reattached: (ctx, items) => {
+      // This process never tracked these running agents, so an earlier
+      // process, now gone, left them. Nothing will ever report on them.
+      for (const item of items) {
+        if (item.kind !== "tool" || item.tool !== "task") continue;
+        if (item.status !== "running" && item.status !== "pending") continue;
+        if (backgroundAgents.get(item.callId) === "running" || openSyncTools.has(item.callId)) continue;
+        ctx.emit({
+          type: "tool",
+          callId: item.callId,
+          status: "error",
+          ...(item.output.trim() ? {} : { output: ORPHANED_AGENT_OUTPUT }),
+          subagent: { activity: "Stopped before reporting back", statusUnavailable: false },
+        });
       }
+      // The checkpoint can hold agents marked running while Claude itself is
+      // idle and sends nothing that would start the disk check.
+      scheduleReconcile(ctx, REVIVAL_CHECK_MS);
+    },
+
+    dispose: () => {
+      disposed = true;
+      clearTimeout(reconcileTimer);
+      reconcileTimer = undefined;
     },
 
     prompt: (prompt, ctx) => {
       seenTurnErrors.clear();
       turnResultPending = false;
+      healedHeldTurn = false;
       interruptRequested = false;
       ctx.emit({ type: "user", text: prompt.text, images: prompt.images });
       ctx.emit({ type: "status", status: "working" });

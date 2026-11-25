@@ -1,6 +1,6 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, jest, test } from "bun:test";
 
-import type { AdapterContext } from "../adapter";
+import type { AdapterContext, ClaudeSubagentSnapshot } from "../adapter";
 import {
   autoQuestionAnswers,
   handleUnattendedPermission,
@@ -672,6 +672,158 @@ describe("claude adapter", () => {
     h.feed({ type: "system", subtype: "task_notification", task_id: "agent-1", tool_use_id: "send-1",
       status: "completed", summary: "Sources added" });
     expect(tasks()[0]).toMatchObject({ status: "done", output: "Sources added" });
+  });
+
+  describe("background agent reconciliation", () => {
+    afterEach(() => jest.useRealTimers());
+
+    /** Lets the reconciler's awaited disk read and its follow-ups run. */
+    async function settle() {
+      for (let i = 0; i < 5; i += 1) await Promise.resolve();
+    }
+
+    function diskHarness(read: (ids: string[]) => ClaudeSubagentSnapshot[]) {
+      const h = harness();
+      const reads: string[][] = [];
+      h.ctx.readClaudeSubagents = async (sessionId, ids) => {
+        expect(sessionId).toBe("session-1");
+        reads.push(ids);
+        return read(ids);
+      };
+      h.feed({ type: "system", subtype: "init", session_id: "session-1" });
+      return { ...h, reads };
+    }
+
+    function snapshot(agentId: string, fields: Partial<ClaudeSubagentSnapshot>): ClaudeSubagentSnapshot {
+      return {
+        agentId, found: true, metaReadable: true, finished: false, stoppedByUser: false,
+        updatedAt: Date.now() - 120_000, transcriptEnded: false, finalText: null, ...fields,
+      };
+    }
+
+    const task = (h: ReturnType<typeof harness>) =>
+      h.state().items.find((item) => item.kind === "tool" && item.tool === "task");
+
+    test("settles an agent Claude finished on disk but never reported", async () => {
+      jest.useFakeTimers();
+      const h = diskHarness((ids) => ids.map((id) => snapshot(id, {
+        finished: true, transcriptEnded: true,
+        finalText: "All 24 segments are delivered.\nDetails follow.",
+      })));
+      h.adapter.prompt({ text: "Make the video", images: [] }, h.ctx);
+      launchBackgroundAgent(h, "call-1", "agent-1");
+      h.feed({ type: "result", is_error: false });
+      expect(task(h)).toMatchObject({ status: "running" });
+      expect(h.state().status).toBe("working");
+
+      jest.advanceTimersByTime(15_000);
+      await settle();
+      expect(h.reads).toEqual([["agent-1"]]);
+      expect(task(h)).toMatchObject({
+        status: "done",
+        output: "All 24 segments are delivered.\nDetails follow.",
+        subagent: { activity: "All 24 segments are delivered." },
+      });
+
+      // Claude went quiet, so the turn held open for that agent is released.
+      jest.setSystemTime(new Date(Date.now() + 60_000));
+      jest.advanceTimersByTime(15_000);
+      await settle();
+      expect(h.state().status).toBe("idle");
+      expect(h.events.filter((event) => event.type === "turn-end")).toHaveLength(1);
+    });
+
+    test("leaves working agents alone and gives Claude's notification time to land", async () => {
+      jest.useFakeTimers();
+      let finishedAt = 0;
+      const h = diskHarness((ids) => ids.map((id) => snapshot(id, finishedAt
+        ? { finished: true, transcriptEnded: true, updatedAt: finishedAt }
+        : { updatedAt: Date.now() })));
+      launchBackgroundAgent(h, "call-1", "agent-1");
+      jest.advanceTimersByTime(15_000);
+      await settle();
+      expect(task(h)).toMatchObject({ status: "running" });
+
+      finishedAt = Date.now();
+      jest.advanceTimersByTime(15_000);
+      await settle();
+      expect(h.reads.length).toBe(2);
+      expect(task(h)).toMatchObject({ status: "running" });
+
+      h.feed({ type: "system", subtype: "task_notification", task_id: "agent-1",
+        status: "completed", summary: "Reported normally" });
+      expect(task(h)).toMatchObject({ status: "done", output: "Reported normally" });
+      jest.advanceTimersByTime(60_000);
+      await settle();
+      expect(h.reads.length).toBe(2);
+    });
+
+    test("uses a final answer when a crash zeroed the sidecar", async () => {
+      jest.useFakeTimers();
+      const h = diskHarness((ids) => ids.map((id) => snapshot(id, {
+        metaReadable: false, transcriptEnded: true, finalText: "Done.",
+      })));
+      launchBackgroundAgent(h, "call-1", "agent-1");
+      jest.advanceTimersByTime(15_000);
+      await settle();
+      expect(task(h)).toMatchObject({ status: "done", output: "Done." });
+    });
+
+    test("marks a run that ended without a final answer as stopped", async () => {
+      jest.useFakeTimers();
+      const h = diskHarness((ids) => ids.map((id) => snapshot(id, { finished: true })));
+      launchBackgroundAgent(h, "call-1", "agent-1");
+      jest.advanceTimersByTime(15_000);
+      await settle();
+      expect(task(h)).toMatchObject({
+        status: "error", subagent: { activity: "Delegated work ended without a report" },
+      });
+    });
+
+    test("a reattached process settles running agents it never tracked", () => {
+      const h = harness();
+      launchBackgroundAgent(h, "call-live", "agent-live");
+      const checkpoint = h.adapter.checkpoint!();
+      const restored = harness();
+      expect(restored.adapter.restore!(checkpoint)).toBe(true);
+      const items = [
+        ...h.state().items,
+        { kind: "tool" as const, id: "tool-old", at: 1, callId: "call-old", name: "Agent",
+          tool: "task" as const, title: "Document animations owner", status: "running" as const,
+          command: null, output: "", changes: [], subagent: { taskId: "agent-old" } },
+      ];
+      restored.events.push({ type: "transcript", items });
+      restored.adapter.reattached!(restored.ctx, items);
+      const rows = restored.state().items.filter((item) => item.kind === "tool");
+      expect(rows.find((item) => item.callId === "call-live")).toMatchObject({ status: "running" });
+      expect(rows.find((item) => item.callId === "call-old")).toMatchObject({
+        status: "error", subagent: { activity: "Stopped before reporting back" },
+      });
+    });
+
+    test("reopens a finished agent only when disk shows a new run", async () => {
+      jest.useFakeTimers();
+      let revived = false;
+      const h = diskHarness((ids) => ids.map((id) => snapshot(id, revived
+        ? { updatedAt: Date.now() + 5_000 }
+        : { finished: true, transcriptEnded: true })));
+      launchBackgroundAgent(h, "call-1", "agent-1");
+      h.feed({ type: "system", subtype: "task_notification", task_id: "agent-1",
+        status: "completed", summary: "First pass" });
+
+      // A late frame from the run that just ended.
+      h.feed({ type: "system", subtype: "task_progress", task_id: "agent-1", description: "Late" });
+      jest.advanceTimersByTime(3_000);
+      await settle();
+      expect(task(h)).toMatchObject({ status: "done" });
+
+      // A revival Claude did not announce with task_started.
+      revived = true;
+      h.feed({ type: "system", subtype: "task_progress", task_id: "agent-1", description: "Again" });
+      jest.advanceTimersByTime(3_000);
+      await settle();
+      expect(task(h)).toMatchObject({ status: "running" });
+    });
   });
 
   test("routes frames for agents restored from history to their original rows", () => {
