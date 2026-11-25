@@ -46,7 +46,13 @@ import {
 import { hasActiveSubagents } from "./subagents";
 import { latest as latestSession, transcript as sessionTranscript } from "./history";
 import { AGENT_PROGRAMS, type AgentLaunch } from "./launch";
-import { loadClaudeSettingsDefaults } from "./claudeSettings";
+import {
+  CLAUDE_AI_LOGIN_SHADOWED_NOTICE,
+  claudeChromeArgs,
+  loadClaudeChromeDefault,
+  loadClaudeSettingsDefaults,
+  shadowsClaudeAiLogin,
+} from "./claudeSettings";
 import {
   CODEX_CAPACITY_REPLY_DELAY_MS,
   codexCapacityReplySettings,
@@ -1372,6 +1378,10 @@ function handleFrame(session: Session, frame: AgentFrame): void {
     case "stderr":
       session.stderr.push(frame.line);
       if (session.stderr.length > 50) session.stderr.shift();
+      if (session.state.agent === "claude" && shadowsClaudeAiLogin(frame.line) &&
+          !session.state.items.some((item) => item.kind === "notice" && item.text === CLAUDE_AI_LOGIN_SHADOWED_NOTICE)) {
+        emit(session, { type: "notice", tone: "info", text: CLAUDE_AI_LOGIN_SHADOWED_NOTICE });
+      }
       return;
     case "exit": {
       if (frame.reconnect && reconnect(session)) return;
@@ -1632,6 +1642,10 @@ export async function start(
     }
     // Shared-service recovery replaces only the proxy, preserving its work.
     if (!attached && recovery) await agentProcStop(termId, launch.agent === "codex" || options.preserveCodexWork).catch(() => {});
+    // Headless Claude ignores Chrome's "Enabled by default"; carry it over.
+    const chromeArgs = !attached && launch.agent === "claude"
+      ? claudeChromeArgs([...launch.wrapperArgs, ...launch.forwardArgs], await loadClaudeChromeDefault())
+      : [];
     if (session.disposed) return null;
     // Never reuse the attach channel: a declined attach ended it on the native
     // side, so a process started on it would stream into nothing.
@@ -1650,6 +1664,7 @@ export async function start(
           ...launch.wrapperArgs,
           ...launch.forwardArgs,
           ...definition.headlessArgs,
+          ...chromeArgs,
           ...adapter.args(launch),
         ],
         cwd,
