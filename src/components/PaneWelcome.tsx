@@ -30,7 +30,7 @@ const HINTS: readonly { keys: readonly string[]; label: string }[] = [
 const TOGGLE_HINTS_KEYS = ["Ctrl", "Shift", "/"] as const;
 
 /** How many recent folders the empty tab offers before it stops being a shortcut. */
-const RECENT_CHIPS = 4;
+const RECENT_CHIPS = 10;
 
 /**
  * What a pane shows before it has run anything.
