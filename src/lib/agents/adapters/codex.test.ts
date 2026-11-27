@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import type { AdapterContext } from "../adapter";
 import { applyEvent, type AgentEvent } from "../events";
+import { subagentForCallId, subagentRosters } from "../subagents";
 import type { AgentLaunch } from "../launch";
 import { emptyUsage, type AgentSessionState } from "../types";
 import { createCodexAdapter } from "./codex";
@@ -4222,6 +4223,81 @@ describe("codex adapter", () => {
     ).toBe(false);
   });
 
+  test("keeps discovered subagents clickable when full resume history replaces the summary", async () => {
+    const h = harness();
+    await h.handshake();
+    const resumed = h.adapter.resume?.("fleet-history", h.ctx);
+    const resume = h.sent.findLast((message) => message.method === "thread/resume")!;
+    const user = { type: "userMessage", id: "user", content: [{ type: "text", text: "Review the project" }] };
+    h.feed({ id: resume.id, result: {
+      thread: { id: "fleet-history", status: { type: "idle" } },
+      initialTurnsPage: {
+        data: [{ id: "review", status: "completed", itemsView: "summary", items: [user] }],
+        nextCursor: null,
+      },
+    } });
+    expect(await resumed).toBe(true);
+
+    const thread = {
+      id: "reviewer-thread",
+      parentThreadId: "fleet-history",
+      agentNickname: "Reviewer",
+      status: { type: "notLoaded" },
+    };
+    const olderThread = { ...thread, id: "older-thread", agentNickname: "Researcher" };
+    const discovery = h.sent.findLast((message) => message.method === "thread/list")!;
+    h.feed({ id: discovery.id, result: { data: [thread, olderThread] } });
+    await Promise.resolve();
+    await Promise.resolve();
+    const callId = "codex-child:reviewer-thread";
+    expect(subagentForCallId(h.state().items, callId)).toMatchObject({
+      label: "Reviewer",
+      threadId: thread.id,
+    });
+
+    const details = h.sent.findLast((message) => message.method === "thread/items/list")!;
+    const activity = (kind: string) => ({
+      turnId: "review",
+      item: {
+        id: kind,
+        type: "subAgentActivity",
+        kind,
+        agentThreadId: thread.id,
+        agentPath: "/root/reviewer",
+      },
+    });
+    h.feed({ id: details.id, result: {
+      data: [activity("completed"), activity("started"), { turnId: "review", item: user }],
+      nextCursor: null,
+    } });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(subagentRosters(h.state().items).flatMap((roster) => roster.subagents)).toHaveLength(2);
+    expect(subagentForCallId(h.state().items, "codex-child:older-thread")).toMatchObject({
+      label: "Researcher",
+      threadId: olderThread.id,
+      status: "done",
+    });
+    expect(subagentForCallId(h.state().items, callId)).toMatchObject({
+      label: "Reviewer",
+      threadId: thread.id,
+      status: "done",
+    });
+    expect(h.sent.some((message) => message.method === "thread/read")).toBe(false);
+
+    const inspected = h.adapter.inspectSubagent?.(callId, thread.id, h.ctx);
+    const read = h.sent.findLast((message) => message.method === "thread/read")!;
+    expect(read.params).toMatchObject({ threadId: thread.id, includeTurns: false });
+    h.feed({ id: read.id, result: { thread: { ...thread, turns: [
+      { id: "child-turn", items: [{ id: "child-answer", type: "agentMessage", text: "Review complete" }] },
+    ] } } });
+    expect(await inspected).toBe(true);
+    expect(subagentForCallId(h.state().items, callId)?.items).toMatchObject([
+      { kind: "assistant", text: "Review complete" },
+    ]);
+  });
+
   test("hydrates paginated history in order, including image-only prompts", async () => {
     const h = harness();
     await h.handshake();
@@ -4909,5 +4985,120 @@ describe("codex adapter", () => {
       text: "thread not found",
     });
     expect(h.state().status).toBe("idle");
+  });
+
+  test("reconciles child status from wait, closeAgent, sendInput, thread/closed, and hydration", async () => {
+    const h = harness({}, { completionQuietMs: 0, childPollIntervalMs: 0 });
+    await h.handshake();
+    h.notify("item/completed", {
+      threadId: "thread_1",
+      item: {
+        id: "spawn-1",
+        type: "collabAgentToolCall",
+        tool: "spawnAgent",
+        status: "completed",
+        receiverThreadIds: ["thread_child_a"],
+        prompt: "Inspect parser",
+        agentsStates: { thread_child_a: { status: "running" } },
+      },
+    });
+    expect(h.state().items.find((item) => item.kind === "tool" && item.callId === "spawn-1"))
+      .toMatchObject({ status: "running" });
+
+    // `wait` reporting completed settles the spawned child row while keeping wait out of the fleet.
+    h.notify("item/completed", {
+      threadId: "thread_1",
+      item: {
+        id: "wait-1",
+        type: "collabAgentToolCall",
+        tool: "wait",
+        status: "completed",
+        receiverThreadIds: ["thread_child_a"],
+        agentsStates: { thread_child_a: { status: "completed", message: "Parser looks clean" } },
+      },
+    });
+    expect(h.state().items.find((item) => item.kind === "tool" && item.callId === "spawn-1"))
+      .toMatchObject({ status: "done", subagent: { activity: "Parser looks clean" } });
+
+    // `sendInput` reopens the child, and `errored` on a later wait marks it failed.
+    h.notify("item/completed", {
+      threadId: "thread_1",
+      item: {
+        id: "send-1",
+        type: "collabAgentToolCall",
+        tool: "sendInput",
+        status: "completed",
+        receiverThreadIds: ["thread_child_a"],
+        agentsStates: { thread_child_a: { status: "running" } },
+      },
+    });
+    expect(h.state().items.find((item) => item.kind === "tool" && item.callId === "spawn-1"))
+      .toMatchObject({ status: "running" });
+
+    h.notify("item/completed", {
+      threadId: "thread_1",
+      item: {
+        id: "wait-2",
+        type: "collabAgentToolCall",
+        tool: "wait",
+        status: "completed",
+        receiverThreadIds: ["thread_child_a"],
+        agentsStates: { thread_child_a: { status: "errored", message: "Tests failed" } },
+      },
+    });
+    expect(h.state().items.find((item) => item.kind === "tool" && item.callId === "spawn-1"))
+      .toMatchObject({ status: "error", subagent: { activity: "Tests failed" } });
+
+    // `resumeAgent` reopens it again, and `thread/closed` settles it cleanly.
+    h.notify("item/completed", {
+      threadId: "thread_1",
+      item: {
+        id: "resume-1",
+        type: "collabAgentToolCall",
+        tool: "resumeAgent",
+        status: "completed",
+        receiverThreadIds: ["thread_child_a"],
+      },
+    });
+    expect(h.state().items.find((item) => item.kind === "tool" && item.callId === "spawn-1"))
+      .toMatchObject({ status: "running" });
+
+    h.notify("thread/closed", { threadId: "thread_child_a" });
+    expect(h.state().items.find((item) => item.kind === "tool" && item.callId === "spawn-1"))
+      .toMatchObject({ status: "done" });
+  });
+
+  test("allows thread/read hydration to settle a running child when no newer live status arrived", async () => {
+    const h = harness({}, { completionQuietMs: 0, childPollIntervalMs: 0 });
+    await h.handshake();
+    h.notify("item/completed", {
+      threadId: "thread_1",
+      item: {
+        id: "spawn-hydrate-settle",
+        type: "collabAgentToolCall",
+        tool: "spawnAgent",
+        status: "completed",
+        receiverThreadIds: ["thread_child_silent"],
+        prompt: "Check build",
+        agentsStates: { thread_child_silent: { status: "running" } },
+      },
+    });
+    const read = h.sent.findLast((message) => message.method === "thread/read") as { id: number };
+    h.feed({
+      jsonrpc: "2.0",
+      id: read.id,
+      result: {
+        thread: {
+          id: "thread_child_silent",
+          status: { type: "notLoaded" },
+          turns: [{ id: "t-1", status: "completed", items: [] }],
+        },
+      },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(h.state().items.find((item) => item.kind === "tool" && item.callId === "spawn-hydrate-settle"))
+      .toMatchObject({ status: "done" });
   });
 });

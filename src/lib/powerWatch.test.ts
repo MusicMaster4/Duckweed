@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 
 import {
+  arm,
   connect,
   formatCountdown,
   getState,
@@ -156,5 +157,41 @@ describe("countdown readout", () => {
     expect(formatCountdown(9)).toBe("0:09");
     expect(formatCountdown(75)).toBe("1:15");
     expect(formatCountdown(900)).toBe("15:00");
+  });
+});
+
+
+describe("subagents", () => {
+  afterEach(() => resetForTests());
+
+  test("stays armed while subagents are working and counts down once they finish", () => {
+    let subagentsActive = true;
+    const fired: string[] = [];
+    resetForTests({ graceMs: 60_000 });
+    const disconnect = connect({
+      probe: () =>
+        subagentsActive
+          ? [{ termId: "t1", label: "Tab 1 · Claude", reason: "agent-subagents" }]
+          : [],
+      fire: async (action) => {
+        fired.push(action);
+      },
+    });
+    try {
+      arm();
+      poll(1_000);
+      expect(getState().phase).toBe("armed");
+      expect(getState().busy[0]?.reason).toBe("agent-subagents");
+
+      subagentsActive = false;
+      poll(2_000);
+      expect(getState().phase).toBe("countdown");
+      expect(getState().firesAt).toBe(62_000);
+
+      poll(62_000);
+      expect(fired).toEqual(["suspend"]);
+    } finally {
+      disconnect();
+    }
   });
 });

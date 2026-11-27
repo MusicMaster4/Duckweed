@@ -18,6 +18,7 @@ import {
   subagentForCallId,
   subagentRosters,
   subagentStatusLabel,
+  subagentsForNavigator,
   subagentsForTurn,
   type SubagentSummary,
 } from "../../lib/agents/subagents";
@@ -142,6 +143,7 @@ export function AgentSurface({
   const autoPeekedRef = useRef<string | null>(null);
   const fleet = useMemo(() => subagentsForTurn(items), [items]);
   const rosters = useMemo(() => subagentRosters(items), [items]);
+  const navigatorSubagents = useMemo(() => subagentsForNavigator(rosters), [rosters]);
   const focusedSubagent = useMemo(
     () => (focusedCallId ? subagentForCallId(items, focusedCallId) : null),
     [focusedCallId, items],
@@ -209,7 +211,8 @@ export function AgentSurface({
 
   const enterMultiPane = useCallback(() => {
     const preferred = focusedCallId ?? peekedCallId;
-    const initial = [preferred, ...fleet.map((subagent) => subagent.callId)]
+    const initialSubagents = fleet.length > 0 ? fleet : navigatorSubagents;
+    const initial = [preferred, ...initialSubagents.map((subagent) => subagent.callId)]
       .filter((callId): callId is string => Boolean(callId))
       .filter((callId, index, all) => all.indexOf(callId) === index)
       .slice(0, 3);
@@ -220,7 +223,7 @@ export function AgentSurface({
     setPeekedCallId(null);
     setMultiPane(true);
     closeNavigatorIfCompact();
-  }, [closeNavigatorIfCompact, fleet, focusedCallId, inspectSubagent, peekedCallId]);
+  }, [closeNavigatorIfCompact, fleet, focusedCallId, inspectSubagent, navigatorSubagents, peekedCallId]);
 
   const leaveMultiPane = useCallback(() => {
     setMultiPane(false);
@@ -358,11 +361,11 @@ export function AgentSurface({
   }, [fleet, focusedCallId]);
 
   useEffect(() => {
-    const available = new Set(fleet.map((subagent) => subagent.callId));
+    const available = new Set(navigatorSubagents.map((subagent) => subagent.callId));
     setMultiPaneCallIds((current) => current.every((callId) => available.has(callId))
       ? current
       : current.filter((callId) => available.has(callId)));
-    if (fleet.length === 0) {
+    if (navigatorSubagents.length === 0) {
       setSubagentNavigatorOpen(false);
       setMultiPane(false);
       setActivePaneId("parent");
@@ -371,10 +374,10 @@ export function AgentSurface({
     if (activePaneId !== "parent" && !available.has(activePaneId)) {
       setActivePaneId("parent");
     }
-  }, [activePaneId, fleet]);
+  }, [activePaneId, navigatorSubagents]);
 
   useEffect(() => {
-    if (!active || fleet.length === 0) return;
+    if (!active || navigatorSubagents.length === 0) return;
     const navigateRoster = (event: KeyboardEvent) => {
       if (!event.altKey || event.ctrlKey || event.metaKey) return;
       if (event.code === "Backslash") {
@@ -386,7 +389,7 @@ export function AgentSurface({
             fleet.find(
               (subagent) =>
                 subagent.status === "running" || subagent.status === "pending",
-            ) ?? fleet[0];
+            ) ?? navigatorSubagents[0];
           openSubagent(first.callId);
         }
         return;
@@ -394,16 +397,17 @@ export function AgentSurface({
       if (event.code !== "BracketLeft" && event.code !== "BracketRight") return;
       event.preventDefault();
       const currentId = focusedCallId ?? peekedCallId;
-      const current = fleet.findIndex((subagent) => subagent.callId === currentId);
+      const current = navigatorSubagents.findIndex((subagent) => subagent.callId === currentId);
+      const count = navigatorSubagents.length;
       const direction = event.code === "BracketRight" ? 1 : -1;
       const next =
         current < 0
           ? direction > 0
             ? 0
-            : fleet.length - 1
-          : (current + direction + fleet.length) % fleet.length;
-      if (focusedCallId) openSubagent(fleet[next].callId);
-      else peekSubagent(fleet[next].callId);
+            : count - 1
+          : (current + direction + count) % count;
+      if (focusedCallId) openSubagent(navigatorSubagents[next].callId);
+      else peekSubagent(navigatorSubagents[next].callId);
     };
     window.addEventListener("keydown", navigateRoster);
     return () => window.removeEventListener("keydown", navigateRoster);
@@ -412,6 +416,7 @@ export function AgentSurface({
     fleet,
     focusedCallId,
     leaveFocus,
+    navigatorSubagents,
     openSubagent,
     peekedCallId,
     peekSubagent,
@@ -525,8 +530,13 @@ export function AgentSurface({
     .filter(Boolean)
     .join(" · ");
   const ended = session.status === "exited" || session.status === "error";
+  const headerActive =
+    session.status === "working" || (session.status === "idle" && childrenLive);
   const resumable = canResume(session.agent);
-  const resumeBlocked = session.status === "working" || session.status === "waiting";
+  const resumeBlocked =
+    session.status === "working" ||
+    session.status === "waiting" ||
+    (session.status === "idle" && childrenLive);
   const copyConversation = async () => {
     const transcript = conversationText(session.items, session.label);
     if (!transcript) return;
@@ -535,7 +545,7 @@ export function AgentSurface({
 
   /** Warn only while closing would interrupt an unfinished turn. */
   const requestClose = () => {
-    if (!agentHasUnfinishedWork(session.status)) {
+    if (!agentHasUnfinishedWork(session.status, session.items)) {
       onClose();
       return;
     }
@@ -614,7 +624,13 @@ export function AgentSurface({
    */
   const focusComposer = (event: React.MouseEvent) => {
     if (ended || session.permission || resumeQuery !== null) return;
-    if ((event.target as HTMLElement).closest("button, a, input, textarea, pre, code")) return;
+    if (
+      (event.target as HTMLElement).closest(
+        "button, a, input, textarea, pre, code, .agent-side-question-dock",
+      )
+    ) {
+      return;
+    }
     if (window.getSelection()?.toString()) return;
     composerRef.current?.focus();
   };
@@ -629,12 +645,16 @@ export function AgentSurface({
     });
   };
 
+  const hasSideConversation = session.status !== "starting" && Boolean(session.sideConversation);
+
   return (
     <div
       ref={surfaceRef}
       className={`agent-surface is-${session.status}${
         subagentNavigatorOpen ? " has-subagent-navigator" : ""
-      }${multiPane ? " is-subagent-multi-pane" : ""}`}
+      }${multiPane ? " is-subagent-multi-pane" : ""}${
+        hasSideConversation ? " has-side-conversation" : ""
+      }`}
       style={{ ["--agent-accent" as string]: session.accent }}
       data-agent={session.agent}
       data-program={session.program}
@@ -667,10 +687,14 @@ export function AgentSurface({
         </span>
         <span
           className={`agent-state is-${
-            focusedSubagent ? focusedSubagent.status : session.status
+            focusedSubagent
+              ? focusedSubagent.status
+              : headerActive
+                ? "working"
+                : session.status
           }`}
         >
-          {session.status === "working" && !session.loadingHistory && !focusedSubagent && !multiPane && (
+          {headerActive && !session.loadingHistory && !focusedSubagent && !multiPane && (
             <span className="agent-pulse" aria-hidden="true" />
           )}
           {session.loadingHistory
@@ -681,14 +705,14 @@ export function AgentSurface({
               ? subagentStatusLabel(focusedSubagent.status)
               : workStatusLabel(session, clockNow)}
         </span>
-        {fleet.length > 0 && (
+        {navigatorSubagents.length > 0 && (
           <button
             type="button"
             className={`agent-sub-tab${subagentNavigatorOpen ? " is-active" : ""}`}
             onClick={() => setSubagentNavigatorOpen((open) => !open)}
             aria-controls={subagentNavigatorId}
             aria-expanded={subagentNavigatorOpen}
-            aria-label={`Agents, ${fleet.length} subagents`}
+            aria-label={`Agents, ${navigatorSubagents.length} subagents`}
             title="Subagents"
           >
             <svg viewBox="0 0 16 16" aria-hidden="true">
@@ -698,7 +722,7 @@ export function AgentSurface({
               <path d="M5.3 5.8 7.1 10M10.7 5.8 8.9 10" />
             </svg>
             <span>Agents</span>
-            <i>{fleet.length}</i>
+            <i>{navigatorSubagents.length}</i>
           </button>
         )}
         <span className="agent-head-spacer" />
@@ -841,14 +865,16 @@ export function AgentSurface({
         />
       )}
 
-      <div
-        className={`agent-scroll${multiPane ? " is-subagent-workspace" : ""}${
-          session.permission && session.permission.kind !== "question"
-            ? " has-permission"
-            : ""
-        }`}
-        ref={scrollRef}
-      >
+      <div className="agent-body">
+        <div className="agent-main">
+          <div
+            className={`agent-scroll${multiPane ? " is-subagent-workspace" : ""}${
+              session.permission && session.permission.kind !== "question"
+                ? " has-permission"
+                : ""
+            }`}
+            ref={scrollRef}
+          >
         <SubagentUiProvider
           agent={session.agent}
           now={clockNow}
@@ -1004,13 +1030,61 @@ export function AgentSurface({
           ))}
       </div>
 
-      {subagentNavigatorOpen && fleet.length > 0 && (
+          {session.status !== "starting" && (
+            <div className="agent-composer-shell">
+              {showJumpToBottom && (
+                <button
+                  type="button"
+                  className="agent-jump-bottom"
+                  onClick={jumpToBottom}
+                  title="Jump to bottom"
+                  aria-label="Jump to bottom"
+                >
+                  <svg viewBox="0 0 16 16" aria-hidden="true">
+                    <path d="M3.5 6 8 10.5 12.5 6" />
+                  </svg>
+                  <span>Jump to bottom</span>
+                </button>
+              )}
+              <AgentComposer
+                session={session}
+                active={active && !session.permission && resumeQuery === null}
+                inputRef={composerRef}
+                onSubmit={submit}
+                onInterrupt={() => agents.interrupt(termId)}
+                target={
+                  composerSubagent
+                    ? {
+                        kind: "subagent",
+                        label: composerSubagent.label,
+                        canMessage: canMessageFocused,
+                      }
+                    : undefined
+                }
+              />
+            </div>
+          )}
+        </div>
+
+        {hasSideConversation && session.sideConversation && (
+          <div className="agent-side-question-dock">
+            <AgentSideChat
+              conversation={session.sideConversation}
+              onDismiss={dismissSideQuestion}
+              onSubmit={(text) => agents.submitSide(termId, text)}
+              onLeave={() => composerRef.current?.focus()}
+            />
+          </div>
+        )}
+      </div>
+
+      {subagentNavigatorOpen && navigatorSubagents.length > 0 && (
         <div className="agent-sub-navigator-shell" id={subagentNavigatorId}>
           <SubagentNavigator
             agent={session.agent}
             parentLabel={session.label}
             parentWorking={session.status === "working"}
-            subagents={fleet}
+            subagents={navigatorSubagents}
             now={clockNow}
             selectedId={multiPane ? activePaneId : focusedCallId ?? "parent"}
             multiPane={multiPane}
@@ -1031,52 +1105,6 @@ export function AgentSurface({
         <div className="agent-exit-hint is-surface" role="status" aria-live="polite">
           <kbd>Ctrl+C</kbd>
           <span>again to close</span>
-        </div>
-      )}
-
-      {session.status !== "starting" && (
-        <div className="agent-composer-shell">
-          {showJumpToBottom && (
-            <button
-              type="button"
-              className="agent-jump-bottom"
-              onClick={jumpToBottom}
-              title="Jump to bottom"
-              aria-label="Jump to bottom"
-            >
-              <svg viewBox="0 0 16 16" aria-hidden="true">
-                <path d="M3.5 6 8 10.5 12.5 6" />
-              </svg>
-              <span>Jump to bottom</span>
-            </button>
-          )}
-          <AgentComposer
-            session={session}
-            active={active && !session.permission && resumeQuery === null}
-            inputRef={composerRef}
-            onSubmit={submit}
-            onInterrupt={() => agents.interrupt(termId)}
-            target={
-              composerSubagent
-                ? {
-                    kind: "subagent",
-                    label: composerSubagent.label,
-                    canMessage: canMessageFocused,
-                  }
-                : undefined
-            }
-          />
-        </div>
-      )}
-
-      {session.status !== "starting" && session.sideConversation && (
-        <div className="agent-side-question-dock">
-          <AgentSideChat
-            conversation={session.sideConversation}
-            onDismiss={dismissSideQuestion}
-            onSubmit={(text) => agents.submitSide(termId, text)}
-            onLeave={() => composerRef.current?.focus()}
-          />
         </div>
       )}
 

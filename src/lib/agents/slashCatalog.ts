@@ -92,6 +92,20 @@ const FALLBACKS: Record<AgentId, { name: string; description: string }[]> = {
     { name: "/compact", description: "Compact the conversation to free context" },
   ],
   cursor: [{ name: "/model", description: "Change the model for this session" }],
+  antigravity: [
+    { name: "/resume", description: "Continue a past Antigravity session in this folder" },
+    { name: "/model", description: "Change the model for this session" },
+    { name: "/effort", description: "Set thinking level: low, medium, high, xhigh" },
+    { name: "/compact", description: "Compact the conversation to free context" },
+    { name: "/plan", description: "Plan carefully before executing a task" },
+    { name: "/goal", description: "Run until the specified goal is completely finished" },
+    { name: "/schedule", description: "Run an instruction on a recurring schedule or timer" },
+    { name: "/browser", description: "Invoke a browser agent for web tasks" },
+    { name: "/grill-me", description: "Interview to align on a plan" },
+    { name: "/teamwork", description: "Invoke a team of agents for large projects" },
+    { name: "/learn", description: "Capture reusable skills or rules from this session" },
+    { name: "/boost", description: "Invoke the Boost multi-agent orchestrator" },
+  ],
 };
 
 /**

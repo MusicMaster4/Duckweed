@@ -1,3 +1,4 @@
+import { activeSubagentCount } from "./agents/subagents";
 import type { AgentSessionState } from "./agents/types";
 
 const STATUS_LABEL: Record<AgentSessionState["status"], string> = {
@@ -25,14 +26,23 @@ export function workStatusLabel(
   session: Pick<
     AgentSessionState,
     "status" | "workStartedAt" | "lastWorkedForMs"
-  >,
+  > & { items?: AgentSessionState["items"] },
   now: number,
 ): string {
   if (session.status === "working" && session.workStartedAt !== null) {
     return `Working for ${formatWorkDuration(now - session.workStartedAt)}`;
   }
-  if (session.status === "idle" && session.lastWorkedForMs !== null) {
-    return `Worked for ${formatWorkDuration(session.lastWorkedForMs)}`;
+  if (session.status === "idle") {
+    const activeSubagents = activeSubagentCount(session.items);
+    if (activeSubagents > 0) {
+      const label = `${activeSubagents} ${activeSubagents === 1 ? "subagent" : "subagents"} working`;
+      return session.workStartedAt !== null
+        ? `${label} · ${formatWorkDuration(now - session.workStartedAt)}`
+        : label;
+    }
+    if (session.lastWorkedForMs !== null) {
+      return `Worked for ${formatWorkDuration(session.lastWorkedForMs)}`;
+    }
   }
   return STATUS_LABEL[session.status];
 }

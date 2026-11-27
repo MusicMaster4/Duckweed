@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 
+import { workStatusLabel } from "../agentWorkDuration";
 import type { AgentFrame, AgentSpawnOptions } from "../ipc";
 import type { AgentLaunch } from "./launch";
 import type { AgentImageAttachment } from "./types";
@@ -38,6 +39,7 @@ let frameSink: ((frame: AgentFrame) => void) | null = null;
 let spawnFailure: string | null = null;
 let spawnFailureOnce = false;
 let sendOverride: ((line: string) => Promise<void>) | null = null;
+let readAntigravityActivity: ((id: string) => boolean) | null = null;
 let nativeStops = 0;
 let nativeStarts = 0;
 let attachOverride: ((id: string, sequence: number, channel: { onmessage?: (frame: AgentFrame) => void }) => Promise<boolean>) | null = null;
@@ -57,8 +59,11 @@ mock.module("@tauri-apps/api/core", () => ({
   Channel: class Channel {
     onmessage: ((frame: AgentFrame) => void) | null = null;
   },
-  invoke: async (command: string) => {
+  invoke: async (command: string, args?: { sessionId: string }) => {
     if (command === "agent_codex_interrupt") return;
+    if (command === "agent_antigravity_activity") {
+      return args ? readAntigravityActivity?.(args.sessionId) ?? null : null;
+    }
     throw new Error("unexpected invoke");
   },
 }));
@@ -160,10 +165,10 @@ async function flush(): Promise<void> {
   for (let step = 0; step < 32; step += 1) await Promise.resolve();
 }
 
-async function handshake(): Promise<void> {
+async function handshake(agentCapabilities: { loadSession?: boolean } = {}): Promise<void> {
   await flush();
   const initialize = sent.map(rpc).find((message) => message.method === "initialize");
-  feed({ jsonrpc: "2.0", id: initialize?.id, result: { protocolVersion: 1 } });
+  feed({ jsonrpc: "2.0", id: initialize?.id, result: { protocolVersion: 1, agentCapabilities } });
   await flush();
   const created = sent.map(rpc).find((message) => message.method === "session/new");
   feed({ jsonrpc: "2.0", id: created?.id, result: { sessionId: "s1" } });
@@ -760,6 +765,7 @@ describe("Custom agent UI sessions", () => {
     native(5, { type: "control_request", request_id: "pending-native-permission", request: {
       subtype: "can_use_tool", tool_name: "Bash", input: { command: "echo recovery" },
     } });
+    const streamedId = session.get(termId)?.items.find((item) => item.kind === "assistant")?.id;
     session.setDraft(termId, "Keep my draft");
     session.setDraftImages(termId, [image]);
     session.flushRecovery();
@@ -785,7 +791,7 @@ describe("Custom agent UI sessions", () => {
       expect(sent).toEqual([]);
       expect(session.get(termId)).toMatchObject({ sessionId: "same-live-claude", status: "waiting", error: null });
       expect(session.get(termId)?.items.filter((item) => item.kind === "assistant")).toEqual([
-        expect.objectContaining({ text: "Before crash after crash", id: "m1-b0" }),
+        expect.objectContaining({ text: "Before crash after crash", id: streamedId }),
       ]);
       expect(session.getDraft(termId)).toBe("Keep my draft");
       expect(session.getDraftImages(termId)).toEqual([image]);
@@ -802,15 +808,27 @@ describe("Custom agent UI sessions", () => {
     } finally { attachOverride = null; }
   });
 
-  test("app restart starts restored Claude on a fresh channel after the declined attach ended its own", async () => {
+  test("app restart resumes Claude on a fresh channel without overwriting old responses", async () => {
     const termId = "app-restart-fresh-claude-channel";
     const launch: AgentLaunch = { ...grokLaunch, agent: "claude", program: "claude" };
     await session.start(termId, launch, "H:/project");
-    frameSink?.({ kind: "sequenced", sequence: 1,
-      frame: { kind: "stdout", line: JSON.stringify({ type: "system", subtype: "init", session_id: "before-restart" }) } });
+    const native = (sequence: number, frame: unknown) => frameSink?.({
+      kind: "sequenced", sequence, frame: { kind: "stdout", line: JSON.stringify(frame) },
+    });
+    const reply = (text: string, messageId: string) => {
+      native(2, { type: "stream_event", event: { type: "message_start" } });
+      native(3, { type: "stream_event", event: { type: "content_block_start", index: 0, content_block: { type: "text" } } });
+      native(4, { type: "stream_event", event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text } } });
+      native(5, { type: "assistant", message: { id: messageId, content: [{ type: "text", text }] } });
+      native(6, { type: "result", subtype: "success", is_error: false, result: text });
+    };
+    native(1, { type: "system", subtype: "init", session_id: "resumed-claude" });
+    session.submit(termId, "First question");
+    await flush();
+    reply("First answer", "message-before-restart");
     session.flushRecovery();
     const saved = JSON.parse(JSON.stringify(workspaceRecovery.get(termId)?.agent));
-    expect(saved.runtime.sequence).toBe(1);
+    expect(saved.runtime.sequence).toBe(6);
     session.stop(termId);
     await flush();
     attachedChannels.length = 0;
@@ -823,11 +841,86 @@ describe("Custom agent UI sessions", () => {
       await session.start(termId, { ...saved.launch, resumeId: saved.sessionId }, saved.cwd, saved);
       expect(attachedChannels).toHaveLength(1);
       expect(startedChannel).not.toBe(attachedChannels[0]);
-      frameSink?.({ kind: "sequenced", sequence: 1,
-        frame: { kind: "stdout", line: JSON.stringify({ type: "system", subtype: "init", session_id: "after-restart" }) } });
-      expect(session.get(termId)?.sessionId).toBe("after-restart");
+      native(1, { type: "system", subtype: "init", session_id: saved.sessionId });
+      session.submit(termId, "Second question");
+      await flush();
+      reply("Second answer", "message-after-restart");
+      expect(session.get(termId)).toMatchObject({ sessionId: "resumed-claude", status: "idle" });
+      expect(session.get(termId)?.items.filter((item) => item.kind === "user" || item.kind === "assistant")
+        .map((item) => [item.kind, item.text])).toEqual([
+        ["user", "First question"],
+        ["assistant", "First answer"],
+        ["user", "Second question"],
+        ["assistant", "Second answer"],
+      ]);
     } finally {
       attachOverride = null;
+      session.stop(termId);
+    }
+  });
+
+  test("background agents from a Claude process that is gone are settled, not left working", async () => {
+    const termId = "app-restart-orphaned-claude-agents";
+    const launch: AgentLaunch = { ...grokLaunch, agent: "claude", program: "claude" };
+    await session.start(termId, launch, "H:/project");
+    const native = (sequence: number, frame: unknown) => frameSink?.({
+      kind: "sequenced", sequence, frame: { kind: "stdout", line: JSON.stringify(frame) },
+    });
+    native(1, { type: "system", subtype: "init", session_id: "crashed-claude" });
+    session.submit(termId, "Make the video");
+    await flush();
+    native(2, { type: "assistant", message: { id: "m1", content: [{
+      type: "tool_use", id: "call-docs", name: "Agent", input: { description: "Document animations owner" },
+    }] } });
+    native(3, { type: "user", toolUseResult: { status: "async_launched", agentId: "agent-docs" },
+      message: { content: [{ type: "tool_result", tool_use_id: "call-docs",
+        content: "Async agent launched successfully. agentId: agent-docs" }] } });
+    const docs = () => session.get(termId)?.items.find((item) => item.kind === "tool" && item.callId === "call-docs");
+    expect(docs()).toMatchObject({ status: "running" });
+    session.flushRecovery();
+    const saved = JSON.parse(JSON.stringify(workspaceRecovery.get(termId)?.agent));
+    session.stop(termId);
+    await flush();
+    // The machine crashed: nothing survives to reattach to.
+    attachOverride = async () => false;
+    try {
+      await session.start(termId, { ...saved.launch, resumeId: saved.sessionId }, saved.cwd, saved);
+      expect(docs()).toMatchObject({
+        status: "error",
+        subagent: { activity: "Stopped before reporting back" },
+      });
+      expect(session.get(termId)?.items.some((item) =>
+        item.kind === "tool" && (item.status === "running" || item.status === "pending"))).toBe(false);
+    } finally {
+      attachOverride = null;
+      session.stop(termId);
+    }
+  });
+
+  test("a Claude process that exits settles the background agents it was running", async () => {
+    const termId = "exited-claude-agents";
+    const launch: AgentLaunch = { ...grokLaunch, agent: "claude", program: "claude" };
+    await session.start(termId, launch, "H:/project");
+    const native = (sequence: number, frame: unknown) => frameSink?.({
+      kind: "sequenced", sequence, frame: { kind: "stdout", line: JSON.stringify(frame) },
+    });
+    native(1, { type: "system", subtype: "init", session_id: "exiting-claude" });
+    session.submit(termId, "Make the video");
+    await flush();
+    native(2, { type: "assistant", message: { id: "m1", content: [{
+      type: "tool_use", id: "call-docs", name: "Agent", input: { description: "Document animations owner" },
+    }] } });
+    native(3, { type: "user", toolUseResult: { status: "async_launched", agentId: "agent-docs" },
+      message: { content: [{ type: "tool_result", tool_use_id: "call-docs",
+        content: "Async agent launched successfully. agentId: agent-docs" }] } });
+    native(4, { type: "result", subtype: "success", is_error: false, result: "Launched" });
+    try {
+      frameSink?.({ kind: "exit", code: 1, reconnect: false });
+      await flush();
+      expect(session.get(termId)?.status).toBe("exited");
+      expect(session.get(termId)?.items.find((item) => item.kind === "tool" && item.callId === "call-docs"))
+        .toMatchObject({ status: "error", subagent: { activity: "Stopped before reporting back" } });
+    } finally {
       session.stop(termId);
     }
   });
@@ -1047,6 +1140,7 @@ describe("Custom agent UI sessions", () => {
     spawnFailure = null;
     spawnFailureOnce = false;
     sendOverride = null;
+    readAntigravityActivity = null;
     nativeStops = 0;
     nativeStopModes.length = 0;
     session.setFollowupMode("queue");
@@ -1831,5 +1925,323 @@ describe("Custom agent UI sessions", () => {
       images: [image],
       status: "asking",
     });
+  });
+
+  test("keeps Antigravity working across out-of-order replies to steering prompts", async () => {
+    const termId = "antigravity-steering";
+    const launch: AgentLaunch = { ...grokLaunch, agent: "antigravity", program: "agy" };
+    const completions: string[] = [];
+    const unsubscribe = session.subscribeTurnEnd((id) => completions.push(id));
+    try {
+      await session.start(termId, launch, "H:/project");
+      await handshake();
+      expect(session.canSteer(termId)).toBe(true);
+
+      session.submit(termId, "Work on the parser");
+      session.setFollowupMode("steer");
+      session.submit(termId, "Focus on the failing test", [image]);
+      session.setFollowupMode("queue");
+      session.submit(termId, "Use the smaller fixture");
+      const queued = session.get(termId)!.pending[0];
+      session.sendQueuedNow(termId, queued.id);
+      await flush();
+
+      const prompts = sent.map(rpc).filter((message) => message.method === "session/prompt");
+      expect(prompts.map((message) => message.params)).toEqual([
+        { sessionId: "s1", prompt: [{ type: "text", text: "Work on the parser" }] },
+        {
+          sessionId: "s1",
+          prompt: [
+            { type: "text", text: "Focus on the failing test" },
+            { type: "image", data: "aGVsbG8=", mimeType: "image/png" },
+          ],
+        },
+        { sessionId: "s1", prompt: [{ type: "text", text: "Use the smaller fixture" }] },
+      ]);
+      expect(sent.map(rpc).some((message) => message.method === "session/cancel")).toBe(false);
+      expect(session.get(termId)?.pending).toEqual([]);
+      const userMessages = session.get(termId)?.items.filter((item) => item.kind === "user");
+      expect(userMessages?.slice(1).map(({ text, sameTurn }) => ({ text, sameTurn }))).toEqual([
+        { text: "Focus on the failing test", sameTurn: true },
+        { text: "Use the smaller fixture", sameTurn: true },
+      ]);
+
+      for (const index of [0, 2, 1]) {
+        feed({ jsonrpc: "2.0", id: prompts[index].id, result: { stopReason: "end_turn" } });
+        await flush();
+        expect(session.get(termId)?.status).toBe(index === 1 ? "idle" : "working");
+        expect(completions).toEqual(index === 1 ? [termId] : []);
+      }
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  test("keeps Antigravity busy after an ACP reply and detects autonomous resumption", async () => {
+    const termId = "antigravity-native-activity";
+    const launch: AgentLaunch = { ...grokLaunch, agent: "antigravity", program: "agy" };
+    const prompts = () => sent.map(rpc).filter((message) => message.method === "session/prompt");
+    let active = true;
+    let onRead: (() => void) | undefined;
+    readAntigravityActivity = (id) => {
+      expect(id).toBe("s1");
+      onRead?.();
+      return active;
+    };
+    const completions: string[] = [];
+    const unsubscribe = session.subscribeTurnEnd((id) => completions.push(id));
+    const changeActivity = async (value: boolean) => {
+      active = value;
+      await new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error("Antigravity activity was not polled")), 3_000);
+        onRead = () => {
+          clearTimeout(timeout);
+          resolve();
+        };
+      });
+      onRead = undefined;
+      await flush();
+    };
+
+    try {
+      await session.start(termId, launch, "H:/project");
+      await handshake();
+      session.submit(termId, "Start a render and wait for it");
+      session.submit(termId, "Review the finished render");
+      await flush();
+      const startedAt = session.get(termId)?.workStartedAt;
+
+      feed({ jsonrpc: "2.0", id: prompts()[0].id, result: { stopReason: "end_turn" } });
+      await flush();
+      feed({
+        jsonrpc: "2.0",
+        method: "session/update",
+        params: {
+          sessionId: "s1",
+          update: { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "The render finished. Checking it now." } },
+        },
+      });
+      expect(session.get(termId)?.status).toBe("working");
+      expect(session.get(termId)?.workStartedAt).toBe(startedAt);
+      expect(session.get(termId)?.pending.map(({ text }) => text)).toEqual(["Review the finished render"]);
+      expect(prompts()).toHaveLength(1);
+      expect(completions).toEqual([]);
+
+      await changeActivity(false);
+      expect(prompts()).toHaveLength(2);
+      feed({ jsonrpc: "2.0", id: prompts()[1].id, result: { stopReason: "end_turn" } });
+      await flush();
+      expect(workStatusLabel(session.get(termId)!, Date.now())).toMatch(/^Worked for /);
+      expect(completions).toEqual([termId]);
+
+      await changeActivity(true);
+      expect(workStatusLabel(session.get(termId)!, Date.now())).toMatch(/^Working for /);
+
+      session.interrupt(termId);
+      await flush();
+      expect(sent.map(rpc)).toContainEqual({
+        jsonrpc: "2.0",
+        method: "session/cancel",
+        params: { sessionId: "s1" },
+      });
+      await changeActivity(false);
+      expect(workStatusLabel(session.get(termId)!, Date.now())).toMatch(/^Worked for /);
+      expect(completions).toEqual([termId]);
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  test.each([null, "gemini-4-neon"])("runs queued Antigravity turns in order (staged model: %s)", async (model) => {
+    const termId = "antigravity-queued-turns";
+    const launch: AgentLaunch = { ...grokLaunch, agent: "antigravity", program: "agy-queue-test.exe" };
+    const prompts = () => sent.map(rpc).filter((message) => message.method === "session/prompt");
+
+    await session.start(termId, launch, "H:/project");
+    await handshake();
+    session.submit(termId, "First task");
+    if (model) session.configure(termId, "model", model);
+    session.submit(termId, "Second task");
+    session.submit(termId, "Third task");
+    await flush();
+    expect(prompts()).toHaveLength(1);
+
+    for (const [index, text] of ["Second task", "Third task"].entries()) {
+      feed({ jsonrpc: "2.0", id: prompts()[index].id, result: { stopReason: "end_turn" } });
+      await flush();
+      if (model && index === 0) {
+        const config = sent.map(rpc).find((message) => message.method === "session/set_model");
+        expect(config?.params).toEqual({ sessionId: "s1", modelId: model });
+        expect(prompts()).toHaveLength(1);
+        feed({ jsonrpc: "2.0", id: config?.id, result: {} });
+        await flush();
+      }
+      expect(prompts()).toHaveLength(index + 2);
+      expect(prompts().at(-1)?.params).toEqual({ sessionId: "s1", prompt: [{ type: "text", text }] });
+      expect(session.get(termId)?.status).toBe("working");
+      expect(session.get(termId)?.workStartedAt).not.toBeNull();
+      expect(session.get(termId)?.pending.map((prompt) => prompt.text)).toEqual(
+        index === 0 ? ["Third task"] : [],
+      );
+    }
+
+    feed({ jsonrpc: "2.0", id: prompts()[2].id, result: { stopReason: "end_turn" } });
+    await flush();
+    expect(session.get(termId)?.status).toBe("idle");
+  });
+
+  test("restores completed Antigravity history silently and announces the next live turn", async () => {
+    const termId = "recover-antigravity";
+    const cwd = "H:/project";
+    const launch: AgentLaunch = { ...grokLaunch, agent: "antigravity", program: "agy" };
+    const update = (sessionUpdate: string, text: string) => feed({
+      jsonrpc: "2.0",
+      method: "session/update",
+      params: { sessionId: "s1", update: { sessionUpdate, content: { type: "text", text } } },
+    });
+
+    await session.start(termId, launch, cwd);
+    await handshake({ loadSession: true });
+    session.submit(termId, "Earlier task");
+    await flush();
+    const earlier = sent.map(rpc).findLast((message) => message.method === "session/prompt")!;
+    update("agent_message_chunk", "Earlier response");
+    feed({ jsonrpc: "2.0", id: earlier.id, result: { stopReason: "end_turn" } });
+    await flush();
+    expect(session.get(termId)?.status).toBe("idle");
+    session.flushRecovery();
+    const saved = workspaceRecovery.get(termId)?.agent;
+    expect(saved?.sessionId).toBe("s1");
+    session.stop(termId);
+    sent.length = 0;
+
+    const completions: string[] = [];
+    const unsubscribe = session.subscribeTurnEnd((id) => completions.push(id));
+    try {
+      await session.start(termId, { ...launch, resumeId: saved!.sessionId }, cwd, saved);
+      await handshake({ loadSession: true });
+      const load = sent.map(rpc).find((message) => message.method === "session/load")!;
+      expect(load.params).toMatchObject({ sessionId: "s1" });
+      update("user_message_chunk", "Earlier task");
+      update("agent_message_chunk", "Earlier response");
+      feed({ jsonrpc: "2.0", id: load.id, result: {} });
+      await flush();
+
+      expect(session.get(termId)?.status).toBe("idle");
+      expect(session.get(termId)?.items).toContainEqual(expect.objectContaining({
+        kind: "assistant", text: "Earlier response", streaming: false,
+      }));
+      expect(completions).toEqual([]);
+
+      session.submit(termId, "New task");
+      await flush();
+      const prompt = sent.map(rpc).findLast((message) => message.method === "session/prompt")!;
+      expect(prompt.params).toMatchObject({
+        sessionId: "s1", prompt: [{ type: "text", text: "New task" }],
+      });
+      update("agent_message_chunk", "New response");
+      feed({ jsonrpc: "2.0", id: prompt.id, result: { stopReason: "end_turn" } });
+      await flush();
+
+      expect(completions).toEqual([termId]);
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  test("guards Antigravity Ctrl+C exits with a confirming second press", async () => {
+    const termId = "t-antigravity-exit-confirm";
+    const launch: AgentLaunch = { ...grokLaunch, agent: "antigravity", program: "agy" };
+    expect(await session.start(termId, launch, "H:/project")).toBeNull();
+    try {
+      expect(session.requestExit(termId)).toBe("armed");
+      expect(session.get(termId)?.exitArmed).toBe(true);
+      expect(session.requestExit(termId)).toBe("close");
+    } finally {
+      session.stop(termId);
+    }
+  });
+
+  test("defers turn completion and scheduled sends until active background subagents finish", async () => {
+    const termId = "t-subagent-deferred-completion";
+    const completions: string[] = [];
+    const unsubscribe = session.subscribeTurnEnd((id) => completions.push(id));
+    try {
+      expect(await session.start(termId, grokLaunch, "H:/project")).toBeNull();
+      await handshake();
+
+      session.submit(termId, "Audit in background");
+      await flush();
+      const prompt = sent.map(rpc).findLast((message) => message.method === "session/prompt")!;
+
+      feed({
+        jsonrpc: "2.0",
+        method: "session/update",
+        params: {
+          sessionId: "s1",
+          update: {
+            sessionUpdate: "tool_call",
+            toolCallId: "bg-task-1",
+            title: "Task",
+            kind: "other",
+            status: "in_progress",
+            rawInput: {
+              description: "Background audit",
+              prompt: "Audit routes",
+              run_in_background: true,
+              task_id: "grok-bg-9",
+            },
+            _meta: { "x.ai/tool": { name: "Task" } },
+          },
+        },
+      });
+      feed({
+        jsonrpc: "2.0",
+        method: "session/update",
+        params: {
+          sessionId: "s1",
+          update: {
+            sessionUpdate: "task_backgrounded",
+            task_id: "grok-bg-9",
+            tool_call_id: "bg-task-1",
+            description: "Auditing routes",
+          },
+        },
+      });
+      // Parent turn ends while the background subagent is still running.
+      feed({ jsonrpc: "2.0", id: prompt.id, result: { stopReason: "end_turn" } });
+      await flush();
+
+      expect(session.get(termId)?.status).toBe("idle");
+      expect(session.readyForScheduledSend(termId)).toBe(false);
+      expect(completions).toEqual([]);
+
+      // When the subagent completes, completion fires once and scheduled sends unblock.
+      feed({
+        jsonrpc: "2.0",
+        method: "session/update",
+        params: {
+          sessionId: "s1",
+          update: {
+            sessionUpdate: "task_completed",
+            will_wake: false,
+            task_snapshot: {
+              task_id: "grok-bg-9",
+              completed: true,
+              exit_code: 0,
+              explicitly_killed: false,
+              output: "Audit finished",
+            },
+          },
+        },
+      });
+      await flush();
+
+      expect(session.readyForScheduledSend(termId)).toBe(true);
+      expect(completions).toEqual([termId]);
+    } finally {
+      unsubscribe();
+      session.stop(termId);
+    }
   });
 });

@@ -633,4 +633,62 @@ describe("completion announcements are only for real tasks", () => {
     expect(isAnnounceableTurn(announce({ interrupted: true }))).toBe(false);
     expect(isAnnounceableTurn(announce({ releasingQueued: true }))).toBe(false);
   });
+
+  test("defers turn completion while subagents are active and announces when the last subagent finishes", () => {
+    // Parent stops while a subagent is still running: not done yet.
+    expect(
+      isAnnounceableTurn(
+        announce({
+          before: "working",
+          after: "idle",
+          hasActiveSubagents: true,
+        }),
+      ),
+    ).toBe(false);
+
+    // Permission prompts still announce immediately even if subagents are running.
+    expect(
+      isAnnounceableTurn(
+        announce({
+          before: "working",
+          after: "waiting",
+          permission: true,
+          hasActiveSubagents: true,
+        }),
+      ),
+    ).toBe(true);
+
+    // Last subagent finishes while parent is already idle: announce now.
+    expect(
+      isAnnounceableTurn(
+        announce({
+          before: "idle",
+          after: "idle",
+          beforeHadActiveSubagents: true,
+          hasActiveSubagents: false,
+          usedTools: true,
+        }),
+      ),
+    ).toBe(true);
+
+    // Work timing stays active across parent idle until subagents finish.
+    let state = applyEvent(blank(), { type: "status", status: "working" });
+    state = applyEvent(state, {
+      type: "tool",
+      callId: "sub-1",
+      name: "Agent",
+      tool: "task",
+      status: "running",
+    });
+    const startedAt = state.workStartedAt;
+    expect(startedAt).not.toBeNull();
+    state = applyEvent(state, { type: "turn-end" });
+    expect(state.status).toBe("idle");
+    expect(state.workStartedAt).toBe(startedAt);
+    expect(state.lastWorkedForMs).toBeNull();
+
+    state = applyEvent(state, { type: "tool", callId: "sub-1", status: "done" });
+    expect(state.workStartedAt).toBeNull();
+    expect(state.lastWorkedForMs).not.toBeNull();
+  });
 });

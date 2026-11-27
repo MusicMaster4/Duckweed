@@ -6,7 +6,8 @@ import {
   subagentRosters,
   subagentsForTurn,
 } from "../../../lib/agents/subagents";
-import type { AgentItem } from "../../../lib/agents/types";
+import type { AgentId, AgentItem } from "../../../lib/agents/types";
+import { AntigravityExperience } from "../official/AntigravityExperience";
 import { ClaudeExperience } from "../official/ClaudeExperience";
 import { ActivityHistory } from "../official/OfficialShared";
 import { SubagentBoard, SubagentPin } from "./SubagentBoard";
@@ -95,12 +96,13 @@ function wrap(
   overrides: {
     peekedCallId?: string | null;
     items?: AgentItem[];
+    agent?: AgentId;
   } = {},
 ) {
   const rosterItems = overrides.items ?? items;
   return (
     <SubagentUiProvider
-      agent="claude"
+      agent={overrides.agent ?? "claude"}
       now={26_000}
       rosters={subagentRosters(rosterItems)}
       peekedCallId={overrides.peekedCallId ?? null}
@@ -152,6 +154,38 @@ describe("subagent roster UI", () => {
     expect(html).toContain("Half-width layout passed");
     expect(html).not.toContain("agent-sub-chip");
     expect(html).not.toContain("Show in timeline");
+  });
+
+  test("renders running, completed, and unavailable Antigravity children in one roster", () => {
+    const [running, completed] = items.filter((item) => item.kind === "tool");
+    const agyItems: AgentItem[] = [
+      running,
+      completed,
+      {
+        ...completed,
+        id: "task-unavailable",
+        callId: "task-unavailable",
+        output: "",
+        subagent: { label: "Check sidebar", statusUnavailable: true },
+      },
+    ];
+    const html = renderToStaticMarkup(
+      wrap(
+        <AntigravityExperience
+          {...claudeProps(agyItems)}
+          agent="antigravity"
+          label="Antigravity"
+          program="agy"
+        />,
+        { items: agyItems, agent: "antigravity" },
+      ),
+    );
+    expect(html.match(/data-subagent-roster=/g)).toHaveLength(1);
+    expect(html).toContain("agent-sub--antigravity");
+    expect(html).toContain("1 running · 1 completed · 1 with status unavailable");
+    expect(html).toContain("Comparing parser fixtures");
+    expect(html).toContain("Half-width layout passed");
+    expect(html).toContain("Status unavailable: Check sidebar.");
   });
 
   test("absorbs current-turn task cards so the timeline does not also render Subagent rows", () => {

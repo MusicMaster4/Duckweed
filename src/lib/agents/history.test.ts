@@ -8,6 +8,7 @@ describe("canResume", () => {
     expect(canResume("codex")).toBe(true);
     expect(canResume("grok")).toBe(true);
     expect(canResume("opencode")).toBe(true);
+    expect(canResume("antigravity")).toBe(true);
     // Cursor Agent publishes neither a listing nor a store we can read, so it
     // must not offer a picker that would always be empty.
     expect(canResume("cursor")).toBe(false);

@@ -14,6 +14,7 @@ import { promptTextWithLocalSkills } from "../localSkills";
 import {
   makeChange,
   toolKind,
+  type AgentAccessMode,
   type AgentFileChange,
   type AgentGoal,
   type AgentExtension,
@@ -25,6 +26,7 @@ import {
   type SubagentMeta,
   type ToolStatus,
 } from "../types";
+import { createAntigravitySubagentTracker } from "./antigravitySubagents";
 
 /**
  * Agent Client Protocol — the shared language of Cursor, Grok, and OpenCode.
@@ -36,9 +38,8 @@ import {
  * lifecycle also participates in turn completion. Because three of the five
  * supported agents speak ACP, this one adapter is most of the
  * protocol coverage — the per-agent differences live in spawn arguments
- * and in the `_meta` fields read below. Same-turn steering is Grok-only:
- * `_x.ai/interject` while the original `session/prompt` is still pending.
- * Cursor and OpenCode do not get that method.
+ * and in the `_meta` fields read below. Grok steers through
+ * `_x.ai/interject` and Antigravity steers with an overlapping `session/prompt`.
  *
  * Slash commands: names an agent advertises (`availableCommands`) are sent
  * back as plain `session/prompt` text — the agent intercepts them (verified:
@@ -76,6 +77,76 @@ const ACP_STATUS: Record<string, ToolStatus> = {
   failed: "error",
 };
 
+const ANTIGRAVITY_ACTIVE_POLL_MS = 750;
+const ANTIGRAVITY_IDLE_POLL_MS = 2_000;
+const ANTIGRAVITY_STATUS_GRACE_MS = 12_000;
+
+const EFFORT_ORDER = ["low", "medium", "high", "xhigh", "max"] as const;
+
+function asNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+/** Normalize `/C:/path` Windows URIs that ACP servers like Antigravity emit. */
+function normalizeAcpPath(path: string): string {
+  return path.replace(/^\/([A-Za-z]:\/)/, "$1");
+}
+
+function readCommandInput(input: Record<string, unknown> | null): string | null {
+  if (!input) return null;
+  return asString(input.command) ?? asString(input.CommandLine);
+}
+
+/** Extract per-model efforts from flattened variant ids like `gemini-4-neon-xhigh`. */
+function effortsFromModelVariants(baseId: string, variantIds: readonly string[]): string[] {
+  const prefix = `${baseId.toLowerCase()}-`;
+  const found = new Set<string>();
+  for (const variant of variantIds) {
+    const lower = variant.toLowerCase();
+    if (!lower.startsWith(prefix)) continue;
+    const suffix = lower.slice(prefix.length);
+    if ((EFFORT_ORDER as readonly string[]).includes(suffix)) found.add(suffix);
+  }
+  return EFFORT_ORDER.filter((level) => found.has(level));
+}
+
+function splitAntigravityModelEffort(
+  value: string,
+): { model: string; effort: string } | null {
+  const match = /^(.+)-(low|medium|high|xhigh|max)$/i.exec(value);
+  if (!match) return null;
+  return { model: match[1], effort: match[2].toLowerCase() };
+}
+
+function accessModeFromAcpMode(modeId: string): AgentAccessMode | null {
+  switch (modeId.toLowerCase()) {
+    case "default":
+      return "default";
+    case "plan":
+      return "read-only";
+    case "accept-edits":
+      return "workspace";
+    case "auto":
+      return "auto";
+    default:
+      return null;
+  }
+}
+
+function acpModeFromAccessMode(mode: AgentAccessMode): string {
+  switch (mode) {
+    case "read-only":
+      return "plan";
+    case "workspace":
+      return "accept-edits";
+    case "auto":
+    case "full-access":
+      return "auto";
+    case "default":
+      return "default";
+  }
+}
+
 /** Canonical effort token: Grok catalog rows use `value`, older ACP rows use `id`. */
 function effortToken(entry: Record<string, unknown>): string {
   return asString(entry.value) ?? asString(entry.id) ?? "";
@@ -92,6 +163,12 @@ function isEffortConfigOption(entry: Record<string, unknown>): boolean {
   );
 }
 
+function isModeConfigOption(entry: Record<string, unknown>): boolean {
+  const id = (asString(entry.id) ?? "").toLowerCase();
+  const category = (asString(entry.category) ?? "").toLowerCase();
+  return category === "mode" || id === "mode";
+}
+
 /** Pull display text and diffs out of a tool call's content blocks. */
 function readToolContent(blocks: unknown[]): { text: string; changes: AgentFileChange[] } {
   const lines: string[] = [];
@@ -102,7 +179,11 @@ function readToolContent(blocks: unknown[]): { text: string; changes: AgentFileC
     const type = asString(block.type);
     if (type === "diff") {
       const path = asString(block.path);
-      if (path) changes.push(makeChange(path, asString(block.oldText), asString(block.newText)));
+      if (path) {
+        changes.push(
+          makeChange(normalizeAcpPath(path), asString(block.oldText), asString(block.newText)),
+        );
+      }
       continue;
     }
     // `{ type: "content", content: { type: "text", text } }` is the common
@@ -170,6 +251,77 @@ function lastLine(text: string): string | null {
     .map((line) => line.trim())
     .filter(Boolean);
   return lines.at(-1) ?? null;
+}
+
+function readRawOutputText(raw: unknown): string {
+  if (typeof raw === "string") return raw;
+  if (Array.isArray(raw)) {
+    return raw
+      .map((entry) => (typeof entry === "string" ? entry : readContentText(entry)))
+      .filter(Boolean)
+      .join("\n");
+  }
+  const record = asRecord(raw);
+  if (!record) return "";
+  return (
+    asString(record.text) ??
+    asString(record.output) ??
+    asString(record.result) ??
+    asString(record.summary) ??
+    readContentText(record.content)
+  );
+}
+
+function readMetaToolName(meta: Record<string, unknown> | null): string | null {
+  if (!meta) return null;
+  const xaiTool = asRecord(meta["x.ai/tool"]);
+  return (
+    asString(meta.toolName) ??
+    asString(meta.tool_name) ??
+    asString(meta.name) ??
+    asString(xaiTool?.name) ??
+    asString(xaiTool?.tool_name) ??
+    asString(xaiTool?.toolName)
+  );
+}
+
+function readMetaThreadId(
+  meta: Record<string, unknown> | null,
+  rawOutput: unknown,
+): string | null {
+  const output = asRecord(rawOutput);
+  const outputMeta = asRecord(output?.metadata);
+  return (
+    asString(meta?.subagentSessionId) ??
+    asString(meta?.sessionId) ??
+    asString(meta?.session_id) ??
+    asString(meta?.threadId) ??
+    asString(meta?.thread_id) ??
+    asString(output?.subagentSessionId) ??
+    asString(output?.sessionId) ??
+    asString(output?.session_id) ??
+    asString(output?.threadId) ??
+    asString(output?.thread_id) ??
+    asString(outputMeta?.sessionId) ??
+    asString(outputMeta?.session_id) ??
+    null
+  );
+}
+
+function isAntigravityInvokeCall(
+  agent: AgentId,
+  rawToolName: string | null,
+  title: string | null,
+  rawInput: Record<string, unknown> | null,
+): boolean {
+  if (agent !== "antigravity") return false;
+  if (rawToolName === "invoke_subagent") return true;
+  if (title && /\binvoke_subagent\b/i.test(title)) return true;
+  return Boolean(
+    rawInput &&
+      asString(rawInput.TypeName) &&
+      (asString(rawInput.Prompt) || asString(rawInput.Role)),
+  );
 }
 
 /** Grok's private ACP extension reports background workflow phases this way. */
@@ -248,26 +400,34 @@ function isTodoToolTitle(title: string): boolean {
 function readSubagentMeta(
   title: string | null,
   input: Record<string, unknown> | null,
+  toolName: string | null = null,
 ): SubagentMeta | null {
-  if (!input) return null;
-  const prompt = asString(input.prompt)?.trim();
-  const description = asString(input.description)?.trim();
+  if (!input && (!toolName || toolKind(toolName) !== "task")) return null;
+  const prompt = (asString(input?.prompt) ?? asString(input?.Prompt))?.trim();
+  const description = (
+    asString(input?.description) ??
+    asString(input?.Description) ??
+    asString(input?.Role)
+  )?.trim();
   const role =
-    asString(input.subagent_type)?.trim() ||
-    asString(input.agent)?.trim() ||
-    asString(input.agent_name)?.trim() ||
-    asString(input.agentName)?.trim();
+    asString(input?.subagent_type)?.trim() ||
+    asString(input?.TypeName)?.trim() ||
+    asString(input?.Role)?.trim() ||
+    asString(input?.agent)?.trim() ||
+    asString(input?.agent_name)?.trim() ||
+    asString(input?.agentName)?.trim();
   const rawTool =
-    asString(input.tool)?.trim() ||
-    asString(input.tool_name)?.trim() ||
-    asString(input.toolName)?.trim();
+    toolName?.trim() ||
+    asString(input?.tool)?.trim() ||
+    asString(input?.tool_name)?.trim() ||
+    asString(input?.toolName)?.trim();
   const taskShaped =
     (rawTool ? toolKind(rawTool) === "task" : false) ||
     Boolean(role) ||
     Boolean(prompt && description);
   if (!taskShaped) return null;
   const label = description || role || title?.trim() || prompt || "Subagent";
-  const model = asString(input.model)?.trim();
+  const model = (asString(input?.model) ?? asString(input?.Model))?.trim();
   return {
     label: oneLine(label, 80),
     ...(role ? { role } : {}),
@@ -282,6 +442,7 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
   let sessionId: string | null = null;
   /** The session/load request currently replaying history into the pane. */
   let resumeRequestId: number | null = null;
+  let resumeSessionId: string | null = null;
   /** Turn ids so streamed chunks group into one bubble per turn. */
   let turnSeq = 0;
   /**
@@ -316,6 +477,14 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
   const taskCalls = new Set<string>();
   /** A launch acknowledgement is not the background agent's result. */
   const backgroundTaskCalls = new Set<string>();
+  /** Synchronous delegated calls that must settle when their parent turn ends. */
+  const openSyncTaskCalls = new Set<string>();
+  /** Grok background task_id -> originating ACP toolCallId. */
+  const grokTaskCallById = new Map<string, string>();
+  const activeGrokTasks = new Set<string>();
+  const antigravitySubagents = agent === "antigravity" ? createAntigravitySubagentTracker() : null;
+  /** Whether AGY has already acknowledged starting each invoke_subagent call. */
+  const antigravityInvocations = new Map<string, boolean>();
   /** OpenCode updates omit raw input too, so keep TodoWrite calls absorbed. */
   const todoCalls = new Set<string>();
   /**
@@ -331,18 +500,31 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
   let supportsTerminalClient = false;
   /** Models the agent can switch to, and each one's effort levels. */
   let availableModels: AcpModel[] = [];
+  /** Raw flattened model ids reported by `session.models` (used by Antigravity). */
+  let rawModelVariantIds: string[] = [];
   let currentModelId: string | null = null;
   let currentEffort: string | null = null;
   /**
    * OpenCode advertises effort as a `configOptions` entry (`id: "effort"`,
    * category `thought_level`). Grok 1.0.24+ does the same with
-   * `id: "reasoning_effort"`. When present, model/effort changes go through
+   * `id: "reasoning_effort"`, and Antigravity with `id: "thought_level"` plus
+   * `id: "mode"`. When present, model/effort/mode changes go through
    * `session/set_config_option` so the response can refresh the option list
    * (effort levels depend on model). Older Grok still uses `session/set_mode`.
    */
   let usesConfigOptions = false;
   /** `configId` for the thought-level option, when the agent publishes one. */
   let effortConfigId: string | null = null;
+  /** `configId` for the execution mode option, when the agent publishes one. */
+  let modeConfigId: string | null = null;
+  /**
+   * Antigravity Full access runs ACP in `auto` mode and immediately approves
+   * any remaining `session/request_permission` prompts without asking.
+   */
+  let fullAccessBypass = false;
+  /** Cumulative token usage across turns in this ACP session. */
+  let totalInputTokens = 0;
+  let totalOutputTokens = 0;
   /**
    * Slash commands an agent intercepts can legitimately produce no output
    * (grok's `/context` renders in its TUI only). When a slash turn comes
@@ -356,8 +538,11 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
    * the turn remains busy until every run reports a terminal status.
    */
   const activeWorkflows = new Set<string>();
-  let promptRequestSettled = true;
+  // Antigravity can settle superseded prompt requests out of order after a steer.
+  let pendingTurnPrompts = 0;
   let turnOpen = false;
+  let antigravityActivityWatch: { timer?: ReturnType<typeof setTimeout> } | undefined;
+  let disposed = false;
   /** The agent advertised `session/load` — see {@link AgentAdapter.resume}. */
   let canLoadSession = false;
   /**
@@ -408,11 +593,90 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
   }
 
   function finishTurnWhenReady(ctx: AdapterContext, force = false) {
-    if (!turnOpen || !promptRequestSettled) return;
+    if (!turnOpen || pendingTurnPrompts > 0) return;
     if (!force && activeWorkflows.size > 0) return;
-    if (force) activeWorkflows.clear();
+    if (force) {
+      activeWorkflows.clear();
+      for (const callId of backgroundTaskCalls) {
+        if (antigravityInvocations.has(callId)) continue;
+        ctx.emit({
+          type: "tool",
+          callId,
+          status: "error",
+          ...(taskCalls.has(callId)
+            ? { subagent: { activity: "Delegated work stopped" } }
+            : {}),
+        });
+      }
+      backgroundTaskCalls.clear();
+      activeGrokTasks.clear();
+    }
+    for (const callId of openSyncTaskCalls) {
+      ctx.emit({
+        type: "tool",
+        callId,
+        status: force ? "error" : "done",
+        subagent: {
+          activity: force ? "Delegated work stopped" : "Delegated work completed",
+        },
+      });
+    }
+    openSyncTaskCalls.clear();
+    antigravitySubagents?.pollNow();
     turnOpen = false;
     ctx.emit({ type: "turn-end" });
+  }
+
+  function stopAntigravityActivityWatch() {
+    clearTimeout(antigravityActivityWatch?.timer);
+    antigravityActivityWatch = undefined;
+  }
+
+  function watchAntigravityActivity(ctx: AdapterContext): boolean {
+    const readActivity = ctx.readAntigravityActivity;
+    const id = sessionId;
+    if (agent !== "antigravity" || !readActivity || !id || disposed) return false;
+
+    const watch: NonNullable<typeof antigravityActivityWatch> = {};
+    antigravityActivityWatch = watch;
+    let lastStatusAt: number | null = null;
+
+    const poll = async () => {
+      const active = await readActivity(id).catch(() => null);
+      if (antigravityActivityWatch !== watch) return;
+
+      if (active === null) {
+        // Older CLI versions may have no readable status. After a successful
+        // read, tolerate temporary SQLite or IPC failures before falling back.
+        if (lastStatusAt === null || Date.now() - lastStatusAt >= ANTIGRAVITY_STATUS_GRACE_MS) {
+          stopAntigravityActivityWatch();
+          finishTurnWhenReady(ctx);
+          return;
+        }
+      } else {
+        lastStatusAt = Date.now();
+        if (active && !turnOpen) {
+          turnOpen = true;
+          if (permissionRequests.size === 0 && questionRequests.size === 0) {
+            ctx.emit({ type: "status", status: "working" });
+          }
+        } else if (!active) {
+          finishTurnWhenReady(ctx);
+        }
+      }
+
+      // Completing a turn can dispatch a queued prompt synchronously.
+      if (antigravityActivityWatch === watch) {
+        const delay = turnOpen ? ANTIGRAVITY_ACTIVE_POLL_MS : ANTIGRAVITY_IDLE_POLL_MS;
+        watch.timer = setTimeout(poll, delay);
+        (watch.timer as { unref?: () => void }).unref?.();
+      }
+    };
+
+    // ACP can answer session/prompt while the conversation still has work.
+    // Check again after idle in case Antigravity restarts on its own.
+    void poll();
+    return true;
   }
 
   function activeContentId(): string | null {
@@ -551,7 +815,10 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
         };
       })
       .filter((model) => model.id);
-    if (models.length) availableModels = models;
+    if (models.length) {
+      rawModelVariantIds = models.map((model) => model.id);
+      availableModels = models;
+    }
     if (current) currentModelId = current;
     const active = entries.find((model) => asString(model.modelId) === currentModelId);
     const effort = applyEffort ? asString(asRecord(active?._meta)?.reasoningEffort) : null;
@@ -573,6 +840,7 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
   function readConfigOptions(raw: unknown): {
     model?: string;
     effort?: string | null;
+    accessMode?: AgentAccessMode;
     models?: ReturnType<typeof modelsForUi>;
   } {
     const options = asArray(raw)
@@ -585,8 +853,12 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
       (entry) => entry.category === "model" || asString(entry.id) === "model",
     );
     const effortOption = options.find(isEffortConfigOption);
+    const modeOption = options.find(isModeConfigOption);
     if (effortOption) {
       effortConfigId = asString(effortOption.id) ?? effortConfigId ?? "effort";
+    }
+    if (modeOption) {
+      modeConfigId = asString(modeOption.id) ?? modeConfigId ?? "mode";
     }
 
     const efforts = effortOption
@@ -609,10 +881,25 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
         .filter((model) => model.id);
       if (current) currentModelId = current;
       if (listed.length) {
-        if (availableModels.length) {
+        const known = new Map(availableModels.map((model) => [model.id, model]));
+        if (agent === "antigravity" && rawModelVariantIds.length) {
+          // Antigravity publishes flattened `<model>-<effort>` variants in
+          // `session.models` alongside clean base ids in `configOptions`.
+          // Derive each base model's exact effort list upfront so pickers
+          // reflect per-model thinking support before switching.
+          availableModels = listed.map((model) => {
+            const variantEfforts = effortsFromModelVariants(model.id, rawModelVariantIds);
+            const existing = known.get(model.id);
+            const resolvedEfforts = variantEfforts.length
+              ? variantEfforts
+              : existing
+                ? existing.efforts
+                : [];
+            return { ...model, efforts: [...resolvedEfforts] };
+          });
+        } else if (availableModels.length) {
           // Grok already sent per-model effort lists on modelState. Keep those
           // (grok-4.6 has xhigh, grok-4.5 does not) and only refresh names.
-          const known = new Map(availableModels.map((model) => [model.id, model]));
           availableModels = listed.map((model) => {
             const existing = known.get(model.id);
             return existing
@@ -627,10 +914,16 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
           availableModels = listed.map((model) => ({ ...model, efforts: [...efforts] }));
         }
       }
-      if (efforts.length && currentModelId) {
-        availableModels = availableModels.map((model) =>
-          model.id === currentModelId ? { ...model, efforts: [...efforts] } : model,
-        );
+      if (currentModelId) {
+        if (efforts.length) {
+          availableModels = availableModels.map((model) =>
+            model.id === currentModelId ? { ...model, efforts: [...efforts] } : model,
+          );
+        } else if (!effortOption) {
+          availableModels = availableModels.map((model) =>
+            model.id === currentModelId ? { ...model, efforts: [] } : model,
+          );
+        }
       }
     } else if (efforts.length && currentModelId) {
       // Only effort changed; stamp the new list onto the active model.
@@ -647,14 +940,22 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
         effort = value;
       }
     } else if (modelOption) {
-      // Model config refreshed without an effort option — this model has none.
+      // Model config refreshed without an effort option: this model has none.
       currentEffort = null;
       effort = null;
+    }
+
+    let accessMode: AgentAccessMode | undefined;
+    if (agent === "antigravity" && modeOption) {
+      const value = asString(modeOption.currentValue);
+      const mapped = value ? resolveAntigravityAccessMode(value) : null;
+      if (mapped) accessMode = mapped;
     }
 
     return {
       ...(currentModelId ? { model: currentModelId } : {}),
       ...(effort !== undefined ? { effort } : {}),
+      ...(accessMode !== undefined ? { accessMode } : {}),
       ...(availableModels.length ? { models: modelsForUi() } : {}),
     };
   }
@@ -705,6 +1006,40 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
     ctx.emit({ type: "session", effort: level });
   }
 
+  function resolveAntigravityAccessMode(modeId: string): AgentAccessMode | null {
+    const mapped = accessModeFromAcpMode(modeId);
+    if (!mapped) return null;
+    if (mapped === "auto" && fullAccessBypass) return "full-access";
+    if (mapped !== "auto") fullAccessBypass = false;
+    return mapped;
+  }
+
+  async function setAccessMode(mode: AgentAccessMode, ctx: AdapterContext): Promise<void> {
+    if (!sessionId) return;
+    const previousBypass = fullAccessBypass;
+    fullAccessBypass = mode === "full-access";
+    const modeId = acpModeFromAccessMode(mode);
+    try {
+      if (usesConfigOptions) {
+        const result = await request(ctx, "session/set_config_option", {
+          sessionId,
+          configId: modeConfigId ?? "mode",
+          value: modeId,
+        });
+        applyConfigResult(result, ctx);
+        if (!result.configOptions) {
+          ctx.emit({ type: "session", accessMode: mode });
+        }
+        return;
+      }
+      await request(ctx, "session/set_mode", { sessionId, modeId });
+      ctx.emit({ type: "session", accessMode: mode });
+    } catch (error) {
+      fullAccessBypass = previousBypass;
+      throw error;
+    }
+  }
+
   /** `initialize` → `session/new` → launch-time model/effort → ready. */
   /** Resolve ACP client-file requests inside the launched workspace only. */
   function resolveClientPath(cwd: string, requested: string): string | null {
@@ -733,8 +1068,9 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
     ctx: AdapterContext,
   ): boolean {
     if (method !== "fs/read_text_file" && method !== "fs/write_text_file") return false;
-    // Grok must retain its native filesystem tools, including binary reads.
-    if (agent === "grok") return false;
+    // Grok and Antigravity must retain their native filesystem tools, including
+    // binary reads, artifacts, and skill folders outside the workspace.
+    if (agent === "grok" || agent === "antigravity") return false;
     const requested = asString(params.path);
     const path = requested ? resolveClientPath(ctx.cwd, requested) : null;
     if (!path) {
@@ -790,14 +1126,14 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
       const initialized = await request(ctx, "initialize", {
         protocolVersion: PROTOCOL_VERSION,
         clientCapabilities: {
-          // Grok routes read_file through this text-only service when enabled,
-          // losing native image handling, large-file reads, and access to its
-          // own skills and temporary attachments outside the workspace. Keep
-          // both file operations native, under Grok's permission policy. Other
+          // Grok and Antigravity route read_file through this text-only service
+          // when enabled, losing native image handling, large-file reads, and
+          // access to skills and artifacts outside the workspace. Keep both
+          // file operations native under their own permission policies. Other
           // ACP agents retain the workspace-scoped client file service.
           fs: {
-            readTextFile: agent !== "grok" && Boolean(ctx.files),
-            writeTextFile: agent !== "grok" && Boolean(ctx.files),
+            readTextFile: agent !== "grok" && agent !== "antigravity" && Boolean(ctx.files),
+            writeTextFile: agent !== "grok" && agent !== "antigravity" && Boolean(ctx.files),
           },
           terminal: false,
         },
@@ -821,6 +1157,7 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
       const meta = asRecord(initialized._meta);
       const identity = readModelState(meta?.modelState);
       const commands = readCommands(meta?.availableCommands);
+      const richNativeAgent = agent === "grok" || agent === "antigravity";
       ctx.emit({
         type: "session",
         ...identity,
@@ -831,21 +1168,21 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
             image: supportsImages || supportsEmbeddedContext,
             file: supportsEmbeddedContext,
             embeddedContext: supportsEmbeddedContext,
-            skill: agent === "grok",
+            skill: richNativeAgent,
             appMention: false,
           },
           interactions: { approvals: true, questions: agent === "grok", forms: false, links: false },
           extensions: {
-            skills: agent === "grok",
+            skills: richNativeAgent,
             apps: false,
-            plugins: agent === "grok",
+            plugins: richNativeAgent,
             mcp: true,
-            hooks: agent === "grok",
-            workflows: agent === "grok",
+            hooks: richNativeAgent,
+            workflows: richNativeAgent,
           },
           runtime: {
-            backgroundTasks: agent === "grok",
-            terminals: agent === "grok" || supportsTerminalClient,
+            backgroundTasks: richNativeAgent,
+            terminals: richNativeAgent || supportsTerminalClient,
             worktrees: agent === "grok",
             checkpointing: agent === "grok",
             nativeFallback: true,
@@ -867,9 +1204,19 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
         ...readModelState(session.models),
         ...readConfigOptions(session.configOptions),
       };
-      ctx.emit({ type: "session", sessionId, ...fromSession });
+      const launchModeOverride =
+        agent === "antigravity" &&
+        ctx.launch.accessMode !== undefined &&
+        ctx.launch.accessMode !== "default";
+      const { accessMode: initialAccessMode, ...sessionWithoutInitialAccess } = fromSession;
+      ctx.emit({
+        type: "session",
+        sessionId,
+        ...(launchModeOverride ? sessionWithoutInitialAccess : fromSession),
+      });
 
-      await applyLaunchSettings(ctx);
+      antigravitySubagents?.start(ctx, sessionId);
+      await applyLaunchSettings(ctx, initialAccessMode);
       ctx.emit({ type: "status", status: "idle" });
     } catch (error) {
       const record = asRecord(error);
@@ -877,10 +1224,35 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
     }
   }
 
-  /** Honor `-m` / `--effort` typed at launch, over the protocol. */
-  async function applyLaunchSettings(ctx: AdapterContext) {
-    if (ctx.launch.model) {
-      const model = ctx.launch.model;
+  /** Honor `-m` / `--effort` / `--mode` typed at launch, over the protocol. */
+  async function applyLaunchSettings(
+    ctx: AdapterContext,
+    fallbackAccessMode?: AgentAccessMode,
+  ) {
+    let requestedModel = ctx.launch.model;
+    let requestedEffort = ctx.launch.effort;
+
+    if (agent === "antigravity" && requestedModel) {
+      const lowered = requestedModel.toLowerCase();
+      const exact = availableModels.find((model) => model.id.toLowerCase() === lowered);
+      if (exact) {
+        requestedModel = exact.id;
+      } else {
+        const split = splitAntigravityModelEffort(requestedModel);
+        if (split) {
+          const base = availableModels.find(
+            (model) => model.id.toLowerCase() === split.model.toLowerCase(),
+          );
+          if (base) {
+            requestedModel = base.id;
+            requestedEffort = requestedEffort ?? split.effort;
+          }
+        }
+      }
+    }
+
+    if (requestedModel) {
+      const model = requestedModel;
       await setModel(model, ctx).catch((error: unknown) => {
         const record = asRecord(error);
         ctx.emit({
@@ -890,8 +1262,8 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
         });
       });
     }
-    if (ctx.launch.effort) {
-      const effort = ctx.launch.effort.toLowerCase();
+    if (requestedEffort) {
+      const effort = requestedEffort.toLowerCase();
       const efforts = availableModels.find((model) => model.id === currentModelId)?.efforts ?? [];
       if (!efforts.length && !usesConfigOptions) {
         ctx.emit({
@@ -916,6 +1288,22 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
         });
       }
     }
+    if (
+      agent === "antigravity" &&
+      ctx.launch.accessMode &&
+      ctx.launch.accessMode !== "default"
+    ) {
+      const mode = ctx.launch.accessMode;
+      await setAccessMode(mode, ctx).catch((error: unknown) => {
+        const record = asRecord(error);
+        ctx.emit({ type: "session", accessMode: fallbackAccessMode ?? "default" });
+        ctx.emit({
+          type: "notice",
+          tone: "error",
+          text: `Could not set mode "${mode}": ${asString(record?.message) ?? "rejected"}.`,
+        });
+      });
+    }
   }
 
   /**
@@ -938,15 +1326,31 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
     ctx.emit({ type: "user", text });
   }
 
+  function beginReplay(ctx: AdapterContext) {
+    replayStarted = true;
+    antigravitySubagents?.reset();
+    antigravityInvocations.clear();
+    taskCalls.clear();
+    backgroundTaskCalls.clear();
+    openSyncTaskCalls.clear();
+    grokTaskCallById.clear();
+    activeGrokTasks.clear();
+    ctx.emit({ type: "transcript" });
+  }
+
   function handleSessionUpdate(params: Record<string, unknown>, ctx: AdapterContext) {
     const update = asRecord(params.update);
     if (!update) return;
+    if (antigravitySubagents) {
+      const expectedSessionId = resumeSessionId ?? sessionId;
+      const updateSessionId = asString(params.sessionId);
+      if (expectedSessionId && updateSessionId && expectedSessionId !== updateSessionId) return;
+    }
     if (loading && !replayStarted) {
       // Keep the current conversation visible until the provider actually
       // starts replaying the selected one. A stalled or rejected load should
       // never erase a perfectly good transcript.
-      replayStarted = true;
-      ctx.emit({ type: "transcript" });
+      beginReplay(ctx);
     }
     const kind = asString(update.sessionUpdate);
 
@@ -1005,68 +1409,355 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
         if (!callId) return;
         beginToolContentPhase(callId, ctx);
         turnHadContent = true;
-        const title = asString(update.title);
+        const meta = asRecord(update._meta);
+        const rawTitle = asString(update.title);
+        const title = rawTitle ? rawTitle.replace(/^File \/([A-Za-z]:\/)/, "File $1") : null;
+        const rawToolName = asString(update.name) ?? readMetaToolName(meta);
         if (title) toolTitles.set(callId, title);
         const rawInput = asRecord(update.rawInput);
-        const command = asString(rawInput?.command);
+        const command = readCommandInput(rawInput);
         const status = asString(update.status);
-        const { text, changes } = readToolContent(asArray(update.content));
-        const name = title ?? toolTitles.get(callId) ?? "tool";
+        const { text: contentText, changes } = readToolContent(asArray(update.content));
+        const rawOutputText = readRawOutputText(update.rawOutput);
+        const text = contentText || rawOutputText;
+        const outputThreadId = readMetaThreadId(meta, update.rawOutput);
+        const outputInterrupted =
+          asRecord(update.rawOutput)?.interrupted === true || meta?.interrupted === true;
+        const name = title ?? toolTitles.get(callId) ?? rawToolName ?? "tool";
+        const kindName = rawToolName ?? name;
         const acpKind = asString(update.kind);
         const inputTodoSteps = readTodoSteps(rawInput);
         const outputTodoSteps = text ? readTodoSteps(text) : null;
         const todoSteps = inputTodoSteps ?? outputTodoSteps;
         const isTodo =
           todoCalls.has(callId) ||
-          isTodoToolTitle(name) ||
+          isTodoToolTitle(kindName) ||
           (rawInput !== null && Array.isArray(rawInput.todos));
         if (isTodo) {
           todoCalls.add(callId);
           if (todoSteps) ctx.emit({ type: "plan", planType: "tasks", steps: todoSteps });
           return;
         }
-        const taskMeta = readSubagentMeta(title, rawInput);
-        if (taskMeta) taskCalls.add(callId);
+        const taskMeta = readSubagentMeta(title, rawInput, rawToolName);
+        if (taskMeta || toolKind(kindName, acpKind) === "task") taskCalls.add(callId);
         const isTask = taskCalls.has(callId);
-        const launched = isTask && /Async agent launched successfully/i.test(text);
+        const inputTaskId = asString(rawInput?.task_id) ?? asString(rawInput?.taskId);
+        if (isTask && inputTaskId) grokTaskCallById.set(inputTaskId, callId);
+        const explicitAsyncInput =
+          rawInput?.run_in_background === true || rawInput?.background === true;
+        const launched =
+          isTask &&
+          (/Async agent launched successfully|Agent launched in background/i.test(text) ||
+            (explicitAsyncInput &&
+              status === "completed" &&
+              (!text || /\b(?:launched|started|background|task[_ ]?id)\b/i.test(text))));
         if (launched) backgroundTaskCalls.add(callId);
         const waitingForResult =
-          backgroundTaskCalls.has(callId) && status !== "failed" && (!text || launched);
-        if (backgroundTaskCalls.has(callId) && !waitingForResult &&
-          (status === "completed" || status === "failed")) {
+          backgroundTaskCalls.has(callId) &&
+          status !== "failed" &&
+          !outputInterrupted &&
+          (!text || launched);
+        if (
+          backgroundTaskCalls.has(callId) &&
+          !waitingForResult &&
+          (status === "completed" || status === "failed" || outputInterrupted)
+        ) {
           backgroundTaskCalls.delete(callId);
         }
         const activity = isTask
-          ? waitingForResult ? "Working" : text ? lastLine(text) : null
+          ? waitingForResult
+            ? "Working"
+            : outputInterrupted
+              ? "Delegated work stopped"
+              : text
+                ? lastLine(text)
+                : null
           : null;
+        let toolStatus = outputInterrupted
+          ? ("error" as const)
+          : status && ACP_STATUS[status]
+            ? waitingForResult
+              ? ("running" as const)
+              : ACP_STATUS[status]
+            : undefined;
+        let output = text;
+        let childPatch: SubagentMeta | undefined;
+        if (
+          antigravitySubagents &&
+          isAntigravityInvokeCall(agent, rawToolName, title, rawInput) &&
+          !antigravityInvocations.has(callId)
+        ) {
+          antigravityInvocations.set(callId, false);
+        }
+        if (antigravitySubagents && antigravityInvocations.has(callId)) {
+          const launchOnly =
+            !text ||
+            launched ||
+            text.includes("Created the following subagent:") ||
+            /subagent.*launched|started.*subagent/i.test(text);
+          if (status === "completed" && launchOnly) {
+            if (antigravityInvocations.get(callId)) return;
+            antigravityInvocations.set(callId, true);
+            const tracking = antigravitySubagents.track(callId, ctx);
+            toolStatus = tracking.status;
+            childPatch = tracking.subagent;
+            output = "";
+          } else if (status === "failed" || status === "completed") {
+            antigravitySubagents.untrack(callId);
+            childPatch = {
+              statusUnavailable: false,
+              activity:
+                activity ??
+                (status === "failed"
+                  ? "Delegation failed"
+                  : "Delegated work completed"),
+            };
+          }
+        }
+        // Re-engage Antigravity DB tracking if the parent messages a finished child
+        // or immediately poll when manage_subagents kills one.
+        if (antigravitySubagents) {
+          const recipient = asString(rawInput?.Recipient);
+          const isSendMessage =
+            rawToolName === "send_message" ||
+            (title !== null && /\bsend_message\b/i.test(title)) ||
+            Boolean(recipient && rawInput?.Message !== undefined);
+          if (isSendMessage && recipient) {
+            const targetCallId = antigravitySubagents.callIdForThread(recipient);
+            if (targetCallId) {
+              antigravitySubagents.retrack(targetCallId, ctx);
+              ctx.emit({
+                type: "tool",
+                callId: targetCallId,
+                status: "running",
+                subagent: { activity: "Working", statusUnavailable: false },
+              });
+            }
+          }
+          const isManageSubagents =
+            rawToolName === "manage_subagents" ||
+            (title !== null && /\bmanage_subagents\b/i.test(title));
+          if (isManageSubagents && (status === "completed" || status === "failed")) {
+            antigravitySubagents.pollNow();
+          }
+        }
+        // Grok's KillTask immediately terminates a background task/subagent.
+        if (
+          (rawToolName?.toLowerCase() === "killtask" || title?.toLowerCase() === "killtask") &&
+          status === "completed" &&
+          inputTaskId
+        ) {
+          activeGrokTasks.delete(inputTaskId);
+          const existingTask = runtimeTasks.get(inputTaskId);
+          if (existingTask) {
+            runtimeTasks.set(inputTaskId, { ...existingTask, status: "stopped" });
+            ctx.emit({ type: "runtime-tasks", tasks: [...runtimeTasks.values()] });
+          }
+          const killedCallId = grokTaskCallById.get(inputTaskId);
+          if (killedCallId) {
+            backgroundTaskCalls.delete(killedCallId);
+            openSyncTaskCalls.delete(killedCallId);
+            ctx.emit({
+              type: "tool",
+              callId: killedCallId,
+              status: "error",
+              ...(taskCalls.has(killedCallId)
+                ? { subagent: { activity: "Delegated work stopped" } }
+                : {}),
+            });
+          }
+        }
+        if (isTask) {
+          const isAsyncTracked =
+            backgroundTaskCalls.has(callId) || antigravityInvocations.has(callId);
+          const settledStatus = toolStatus === "done" || toolStatus === "error";
+          if (isAsyncTracked || settledStatus) {
+            openSyncTaskCalls.delete(callId);
+          } else if (kind === "tool_call" || toolStatus === "running" || toolStatus === "pending") {
+            openSyncTaskCalls.add(callId);
+          }
+        }
         ctx.emit({
           type: "tool",
           callId,
           // A `tool_call_update` carries only what changed. Re-deriving the
           // family from a frame that omits `kind` would downgrade a known
           // tool to "other" halfway through the call.
-          ...(title ? { name: oneLine(name, 40) } : {}),
+          ...(title ? { name: oneLine(name, 40) } : rawToolName ? { name: oneLine(rawToolName, 40) } : {}),
           ...(isTask
             ? { tool: "task" as const }
-            : acpKind
-              ? { tool: toolKind(name, acpKind) }
+            : acpKind || rawToolName
+              ? { tool: toolKind(kindName, acpKind) }
               : {}),
           ...(title ? { title: oneLine(title) } : {}),
-          ...(status && ACP_STATUS[status]
-            ? { status: waitingForResult ? "running" as const : ACP_STATUS[status] }
-            : {}),
+          ...(toolStatus ? { status: toolStatus } : {}),
           ...(command ? { command } : {}),
-          ...(text ? { output: text } : {}),
+          ...(output ? { output } : {}),
           ...(changes.length ? { changes } : {}),
           ...(isTask
             ? {
                 subagent: {
                   ...taskMeta,
+                  ...(outputThreadId ? { threadId: outputThreadId } : {}),
+                  ...(inputTaskId ? { taskId: inputTaskId } : {}),
                   ...(activity ? { activity: oneLine(activity) } : {}),
+                  ...childPatch,
                 },
               }
             : {}),
         });
+        return;
+      }
+      case "task_backgrounded": {
+        const taskId = asString(update.task_id) ?? asString(update.taskId);
+        const toolCallId = asString(update.tool_call_id) ?? asString(update.toolCallId);
+        const description =
+          asString(update.description) ??
+          asString(update.monitor_description) ??
+          asString(update.command) ??
+          "Background task";
+        if (taskId) {
+          activeGrokTasks.add(taskId);
+          if (toolCallId) grokTaskCallById.set(taskId, toolCallId);
+          runtimeTasks.set(taskId, {
+            id: taskId,
+            kind: "task",
+            title: oneLine(description, 80),
+            status: "running",
+          });
+          ctx.emit({ type: "runtime-tasks", tasks: [...runtimeTasks.values()] });
+        }
+        if (toolCallId && taskCalls.has(toolCallId)) {
+          backgroundTaskCalls.add(toolCallId);
+          openSyncTaskCalls.delete(toolCallId);
+          ctx.emit({
+            type: "tool",
+            callId: toolCallId,
+            status: "running",
+            subagent: {
+              ...(taskId ? { taskId } : {}),
+              activity: oneLine(description, 120),
+            },
+          });
+        }
+        return;
+      }
+      case "task_completed": {
+        const snapshot = asRecord(update.task_snapshot) ?? update;
+        const taskId = asString(snapshot.task_id) ?? asString(snapshot.taskId);
+        const rawStatus = asString(snapshot.status)?.toLowerCase() ?? "";
+        const exitCode = asNumber(snapshot.exit_code);
+        const explicitlyKilled = snapshot.explicitly_killed === true;
+        const signal = asString(snapshot.signal);
+        const failed =
+          explicitlyKilled ||
+          Boolean(signal) ||
+          (exitCode !== null && exitCode !== 0) ||
+          rawStatus === "failed" ||
+          rawStatus === "error";
+        const output = asString(snapshot.output) ?? "";
+        const description =
+          asString(snapshot.description) ?? asString(snapshot.command) ?? "";
+        if (taskId) {
+          activeGrokTasks.delete(taskId);
+          const existing = runtimeTasks.get(taskId);
+          runtimeTasks.set(taskId, {
+            id: taskId,
+            kind: existing?.kind ?? "task",
+            title: existing?.title ?? (description ? oneLine(description, 80) : "Background task"),
+            status: explicitlyKilled ? "stopped" : failed ? "error" : "done",
+          });
+          ctx.emit({ type: "runtime-tasks", tasks: [...runtimeTasks.values()] });
+          const targetCallId = grokTaskCallById.get(taskId);
+          if (targetCallId) {
+            backgroundTaskCalls.delete(targetCallId);
+            openSyncTaskCalls.delete(targetCallId);
+            ctx.emit({
+              type: "tool",
+              callId: targetCallId,
+              status: failed ? "error" : "done",
+              ...(output ? { output } : {}),
+              ...(taskCalls.has(targetCallId)
+                ? {
+                    subagent: {
+                      activity: explicitlyKilled
+                        ? "Delegated work stopped"
+                        : failed
+                          ? "Delegated work failed"
+                          : output.trim()
+                            ? oneLine(lastLine(output) ?? output)
+                            : "Delegated work completed",
+                    },
+                  }
+                : {}),
+            });
+          }
+        }
+        if (!loading && update.will_wake === false) {
+          finishTurnWhenReady(ctx);
+        }
+        return;
+      }
+      case "background_tasks": {
+        const tasks = asArray(update.tasks)
+          .map((entry) => asRecord(entry))
+          .filter((entry): entry is Record<string, unknown> => entry !== null);
+        const stillRunning = new Set<string>();
+        for (const task of tasks) {
+          const taskId = asString(task.task_id) ?? asString(task.taskId);
+          if (!taskId) continue;
+          const rawStatus = asString(task.status)?.toLowerCase() ?? "running";
+          const signal = asString(task.signal);
+          const exitCode = asNumber(task.exit_code);
+          const isRunning = rawStatus === "running" || rawStatus === "pending" || rawStatus === "in_progress";
+          const failed =
+            rawStatus === "failed" ||
+            rawStatus === "error" ||
+            Boolean(signal) ||
+            (exitCode !== null && exitCode !== 0);
+          const description =
+            asString(task.description) ?? asString(task.command) ?? "Background task";
+          if (isRunning) stillRunning.add(taskId);
+          runtimeTasks.set(taskId, {
+            id: taskId,
+            kind: "task",
+            title: oneLine(description, 80),
+            status: isRunning
+              ? "running"
+              : signal === "killed"
+                ? "stopped"
+                : failed
+                  ? "error"
+                  : "done",
+          });
+          const targetCallId = grokTaskCallById.get(taskId);
+          if (targetCallId && !isRunning && backgroundTaskCalls.has(targetCallId)) {
+            backgroundTaskCalls.delete(targetCallId);
+            openSyncTaskCalls.delete(targetCallId);
+            ctx.emit({
+              type: "tool",
+              callId: targetCallId,
+              status: failed ? "error" : "done",
+              ...(taskCalls.has(targetCallId)
+                ? {
+                    subagent: {
+                      activity:
+                        signal === "killed"
+                          ? "Delegated work stopped"
+                          : failed
+                            ? "Delegated work failed"
+                            : "Delegated work completed",
+                    },
+                  }
+                : {}),
+            });
+          }
+        }
+        for (const taskId of [...activeGrokTasks]) {
+          if (!stillRunning.has(taskId)) activeGrokTasks.delete(taskId);
+        }
+        for (const taskId of stillRunning) activeGrokTasks.add(taskId);
+        ctx.emit({ type: "runtime-tasks", tasks: [...runtimeTasks.values()] });
         return;
       }
       case "plan": {
@@ -1128,11 +1819,36 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
       }
       case "available_commands_update": {
         const commands = readCommands(update.availableCommands);
-        if (commands.length) ctx.emit({ type: "session", commands });
+        if (commands.length) {
+          ctx.emit({ type: "session", commands });
+          ctx.emit({
+            type: "extensions",
+            extensions: extensions.map((extension) => ({ ...extension })),
+            loading: false,
+            error: null,
+          });
+        }
         return;
       }
-      case "current_mode_update":
+      case "current_mode_update": {
+        if (agent === "antigravity") {
+          const modeId = asString(update.currentModeId);
+          const accessMode = modeId ? resolveAntigravityAccessMode(modeId) : null;
+          if (accessMode) ctx.emit({ type: "session", accessMode });
+        }
         return;
+      }
+      case "usage_update": {
+        const used = asNumber(update.used);
+        const size = asNumber(update.size);
+        if (used !== null && size !== null && size > 0 && used >= 0) {
+          ctx.emit({
+            type: "usage",
+            usage: { contextUsed: Math.min(1, Math.max(0, used / size)) },
+          });
+        }
+        return;
+      }
       case "model_changed": {
         const model = asString(update.model_id) ?? asString(update.modelId);
         const effort =
@@ -1168,6 +1884,26 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
     params: Record<string, unknown>,
     ctx: AdapterContext,
   ) {
+    if (agent === "antigravity" && fullAccessBypass) {
+      const rawOptions = asArray(params.options)
+        .map((raw) => asRecord(raw))
+        .filter((option): option is Record<string, unknown> => option !== null)
+        .filter((option) => Boolean(asString(option.optionId)));
+      const allowOption =
+        rawOptions.find((option) => asString(option.kind) === "allow_once") ??
+        rawOptions.find((option) => asString(option.kind) === "allow_always");
+      const optionId =
+        asString(allowOption?.optionId) ?? (rawOptions.length === 0 ? "allow" : null);
+      if (optionId) {
+        ctx.send({
+          jsonrpc: "2.0",
+          id,
+          result: { outcome: { outcome: "selected", optionId } },
+        });
+        return;
+      }
+    }
+
     const toolCall = asRecord(params.toolCall);
     const title = asString(toolCall?.title) ?? "The agent wants to act";
     const rawInput = asRecord(toolCall?.rawInput);
@@ -1201,7 +1937,7 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
         id: permissionId,
         title: oneLine(title),
         detail: null,
-        command: asString(rawInput?.command),
+        command: readCommandInput(rawInput),
         changes,
         options: options.length
           ? options
@@ -1279,6 +2015,15 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
     );
     if (partial.length === 1) return partial[0];
     if (partial.length > 1 || suffix.length > 1) return "ambiguous";
+    if (agent === "antigravity") {
+      const split = splitAntigravityModelEffort(arg);
+      if (split) {
+        const base = availableModels.find(
+          (model) => model.id.toLowerCase() === split.model.toLowerCase(),
+        );
+        if (base) return base;
+      }
+    }
     return null;
   }
 
@@ -1456,7 +2201,7 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
    * or any other RPC failure returns false so the session can restore the
    * follow-up into the local queue. Do not `session/cancel`.
    */
-  async function steerTurn(prompt: AgentPrompt, ctx: AdapterContext): Promise<boolean> {
+  async function steerGrokTurn(prompt: AgentPrompt, ctx: AdapterContext): Promise<boolean> {
     if (agent !== "grok" || ctx.launch.agent !== "grok" || !sessionId || !turnOpen) {
       return false;
     }
@@ -1477,6 +2222,96 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
       sameTurn: true,
     });
     return true;
+  }
+
+  function sendPrompt(prompt: AgentPrompt, ctx: AdapterContext, sameTurn = false): void {
+    if (!sessionId) return;
+    stopAntigravityActivityWatch();
+    pendingTurnPrompts += 1;
+    if (sameTurn) {
+      closeActiveContent(ctx);
+      contentPhase += 1;
+      slashPending = false;
+    } else {
+      turnSeq += 1;
+      resetContentSegments();
+      turnOpen = true;
+      slashPending = prompt.text.startsWith("/");
+      turnHadContent = false;
+      // Claim the turn before emitting events that could release the next queued prompt.
+      ctx.emit({ type: "status", status: "working" });
+    }
+    if (prompt.images.length && !supportsImages && !supportsEmbeddedContext) {
+      ctx.emit({
+        type: "notice",
+        tone: "error",
+        text: `${ctx.launch.program} does not accept image input over ACP. The text and supported context were sent without the image.`,
+      });
+    }
+    ctx.emit({
+      type: "user",
+      text: prompt.text,
+      images: prompt.images,
+      ...(sameTurn ? { sameTurn: true } : {}),
+    });
+    void request(ctx, "session/prompt", {
+      sessionId,
+      prompt: promptContent(prompt),
+    })
+      .then((result) => {
+        const usage = asRecord(result.usage);
+        const input = asNumber(usage?.inputTokens);
+        const output = asNumber(usage?.outputTokens);
+        if (input !== null || output !== null) {
+          if (input !== null && input > 0) totalInputTokens += input;
+          if (output !== null && output > 0) totalOutputTokens += output;
+          ctx.emit({
+            type: "usage",
+            usage: {
+              inputTokens: totalInputTokens,
+              outputTokens: totalOutputTokens,
+            },
+          });
+        }
+        pendingTurnPrompts -= 1;
+        if (pendingTurnPrompts > 0) return;
+        const stop = asString(result.stopReason);
+        if (stop === "refusal") {
+          if (goalResponsePending) {
+            currentGoal = goalBeforeCommand;
+            ctx.emit({ type: "goal", goal: currentGoal });
+          }
+          ctx.emit({ type: "notice", tone: "error", text: "The agent refused the request." });
+        } else if (slashPending && !turnHadContent) {
+          ctx.emit({
+            type: "notice",
+            tone: "info",
+            text: `Ran ${oneLine(prompt.text.split(/\s/)[0], 40)}. This agent does not return its output to the custom UI.`,
+          });
+        }
+        slashPending = false;
+        goalResponsePending = false;
+        goalResponseText = "";
+        const force = stop === "refusal" || stop === "cancelled" || stop === "canceled";
+        if (force || !watchAntigravityActivity(ctx)) finishTurnWhenReady(ctx, force);
+      }, (error: unknown) => {
+        pendingTurnPrompts -= 1;
+        const record = asRecord(error);
+        ctx.emit({
+          type: "notice",
+          tone: "error",
+          text: asString(record?.message) ?? (sameTurn ? "Steering failed." : "The turn failed."),
+        });
+        if (pendingTurnPrompts > 0) return;
+        slashPending = false;
+        if (goalResponsePending) {
+          currentGoal = goalBeforeCommand;
+          ctx.emit({ type: "goal", goal: currentGoal });
+        }
+        goalResponsePending = false;
+        goalResponseText = "";
+        finishTurnWhenReady(ctx, true);
+      });
   }
 
   return {
@@ -1578,71 +2413,24 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
       }
     },
 
-    prompt: (prompt, ctx) => {
-      if (!sessionId) return;
-      if (prompt.images.length && !supportsImages && !supportsEmbeddedContext) {
-        ctx.emit({
-          type: "notice",
-          tone: "error",
-          text: `${ctx.launch.program} does not accept image input over ACP. The text and supported context were sent without the image.`,
-        });
-      }
-      turnSeq += 1;
-      resetContentSegments();
-      promptRequestSettled = false;
-      turnOpen = true;
-      slashPending = prompt.text.startsWith("/");
-      turnHadContent = false;
-      ctx.emit({ type: "user", text: prompt.text, images: prompt.images });
-      ctx.emit({ type: "status", status: "working" });
-      request(ctx, "session/prompt", {
-        sessionId,
-        prompt: promptContent(prompt),
-      })
-        .then((result) => {
-          const stop = asString(result.stopReason);
-          promptRequestSettled = true;
-          if (stop === "refusal") {
-            if (goalResponsePending) {
-              currentGoal = goalBeforeCommand;
-              ctx.emit({ type: "goal", goal: currentGoal });
-            }
-            ctx.emit({ type: "notice", tone: "error", text: "The agent refused the request." });
-          } else if (slashPending && !turnHadContent) {
-            ctx.emit({
-              type: "notice",
-              tone: "info",
-              text: `Ran ${oneLine(prompt.text.split(/\s/)[0], 40)}. This agent does not return its output to the custom UI.`,
-            });
-          }
-          slashPending = false;
-          goalResponsePending = false;
-          goalResponseText = "";
-          finishTurnWhenReady(
-            ctx,
-            stop === "refusal" || stop === "cancelled" || stop === "canceled",
-          );
-        })
-        .catch((error: unknown) => {
-          promptRequestSettled = true;
-          slashPending = false;
-          if (goalResponsePending) {
-            currentGoal = goalBeforeCommand;
-            ctx.emit({ type: "goal", goal: currentGoal });
-          }
-          goalResponsePending = false;
-          goalResponseText = "";
-          const record = asRecord(error);
-          ctx.emit({
-            type: "notice",
-            tone: "error",
-            text: asString(record?.message) ?? "The turn failed.",
-          });
-          finishTurnWhenReady(ctx, true);
-        });
-    },
+    prompt: sendPrompt,
 
-    ...(agent === "grok" ? { steer: steerTurn } : {}),
+    ...(agent === "grok" ? { steer: steerGrokTurn } : {}),
+
+    ...(agent === "antigravity"
+      ? {
+          steer: (prompt: AgentPrompt, ctx: AdapterContext) => {
+            if (!sessionId || !turnOpen || loading) return false;
+            sendPrompt(prompt, ctx, true);
+            return true;
+          },
+          configureAccess: async (mode: AgentAccessMode, ctx: AdapterContext) => {
+            if (!sessionId) return false;
+            await setAccessMode(mode, ctx);
+            return true;
+          },
+        }
+      : {}),
 
     command: handleCommand,
 
@@ -1677,10 +2465,15 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
      */
     resume: (id, ctx) => {
       if (!canLoadSession) return false;
+      stopAntigravityActivityWatch();
+      totalInputTokens = 0;
+      totalOutputTokens = 0;
       currentGoal = null;
       goalBeforeCommand = null;
       goalResponsePending = false;
       goalResponseText = "";
+      antigravitySubagents?.pause();
+      resumeSessionId = id;
       loading = true;
       replayStarted = false;
       replayedUser = "";
@@ -1702,8 +2495,7 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
           // A valid session may have no visible messages. Clear the previous
           // transcript only after the load itself has succeeded.
           if (!replayStarted) {
-            replayStarted = true;
-            ctx.emit({ type: "transcript" });
+            beginReplay(ctx);
           }
           flushReplayedUser(ctx);
           const identity = {
@@ -1711,7 +2503,7 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
             ...readConfigOptions(result.configOptions),
           };
           ctx.emit({ type: "session", sessionId: id, ...identity });
-          ctx.emit({ type: "turn-end" });
+          ctx.emit({ type: "turn-end", historyReplay: true });
           return true;
         })
         .catch((error: unknown) => {
@@ -1724,13 +2516,15 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
               text: asString(record?.message) ?? "The agent could not load that session.",
             });
           }
-          ctx.emit({ type: "turn-end" });
+          ctx.emit({ type: "turn-end", historyReplay: true });
           return false;
         })
         .finally(() => {
           if (resumeRequestId === requestId) resumeRequestId = null;
+          resumeSessionId = null;
           loading = false;
           replayStarted = false;
+          if (sessionId) antigravitySubagents?.start(ctx, sessionId);
         });
     },
 
@@ -1782,6 +2576,13 @@ export function createAcpAdapter(agent: AgentId = "grok"): AgentAdapter {
       ctx.emit({ type: "permission", permission: null });
       ctx.emit({ type: "status", status: "working" });
     },
+    ...(antigravitySubagents ? {
+      dispose: (ctx: AdapterContext) => {
+        disposed = true;
+        stopAntigravityActivityWatch();
+        antigravitySubagents.dispose(ctx);
+      },
+    } : {}),
     refreshExtensions: () => extensions.map((extension) => ({ ...extension })),
     refreshTasks: () => [...runtimeTasks.values()].map((task) => ({ ...task })),
   };

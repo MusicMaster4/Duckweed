@@ -35,7 +35,12 @@ export type PowerWatchPhase =
   | "failed";
 
 /** Why one pane counts as still working. */
-export type BusyReason = "process" | "agent-starting" | "agent-working" | "agent-waiting";
+export type BusyReason =
+  | "process"
+  | "agent-starting"
+  | "agent-working"
+  | "agent-subagents"
+  | "agent-waiting";
 
 export interface BusyEntry {
   termId: string;
@@ -90,6 +95,7 @@ export const BUSY_REASON_LABELS: Record<PowerWatchBusyReason, string> = {
   process: "running",
   "agent-starting": "starting",
   "agent-working": "working",
+  "agent-subagents": "subagents",
   "agent-waiting": "needs you",
   "scheduled-message": "scheduled",
 };

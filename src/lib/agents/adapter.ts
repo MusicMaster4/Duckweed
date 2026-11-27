@@ -19,6 +19,31 @@ export type AgentCommandResult =
   /** Send the slash text through the provider's ordinary prompt path. */
   | "prompt";
 
+export interface AntigravitySubagentUpdate {
+  callId: string;
+  threadId: string;
+  status: "pending" | "running" | "done" | "error";
+  toolName: string | null;
+  output: string | null;
+}
+
+/** Claude Code's durable record of one background agent. */
+export interface ClaudeSubagentSnapshot {
+  agentId: string;
+  /** Either the sidecar or the agent transcript exists. */
+  found: boolean;
+  /** The sidecar parsed. A crash can leave it empty or zeroed. */
+  metaReadable: boolean;
+  /** Set when a run ends, cleared when the agent is revived. */
+  finished: boolean;
+  stoppedByUser: boolean;
+  /** Newest modification time of the agent's files, in ms. */
+  updatedAt: number;
+  /** The transcript ends in a final answer rather than a tool call or request. */
+  transcriptEnded: boolean;
+  finalText: string | null;
+}
+
 /** What an adapter is given to do its job. */
 export interface AdapterContext {
   /** Folder the agent was launched in. */
@@ -43,6 +68,12 @@ export interface AdapterContext {
   interruptFallback?: () => Promise<void>;
   /** Reload an idle local service after credentials changed through a CLI command. */
   syncAccount?: (signedIn: boolean) => Promise<"unchanged" | "deferred" | "restarted">;
+  /** Read child status associated with the given Antigravity ACP tool calls. */
+  readAntigravitySubagents?: (sessionId: string, callIds: string[]) => Promise<AntigravitySubagentUpdate[]>;
+  /** Read Claude Code's on-disk state for background agents of a session. */
+  readClaudeSubagents?: (sessionId: string, agentIds: string[]) => Promise<ClaudeSubagentSnapshot[]>;
+  /** Read whether the native Antigravity conversation is still active. */
+  readAntigravityActivity?: (sessionId: string) => Promise<boolean | null>;
   /**
    * Workspace-scoped file service advertised to protocols such as ACP.
    * Implementations must enforce canonical containment after following
@@ -78,6 +109,11 @@ export interface AgentAdapter {
    * history restored after a relaunch, so later frames can update those rows.
    */
   adoptTranscript?: (items: AgentItem[]) => void;
+  /**
+   * A surviving process was reattached from a checkpoint. `items` are the
+   * restored rows, which can include rows left by an even older process.
+   */
+  reattached?: (ctx: AdapterContext, items: AgentItem[]) => void;
   /** One line from the agent's stdout. */
   receive: (line: string, ctx: AdapterContext) => void;
   /** The user submitted text and optional images. */
@@ -191,6 +227,11 @@ export interface AgentAdapter {
   connectionLost?: (ctx: AdapterContext) => void;
   /** Release subscriptions and cancel timers before the transport is stopped. */
   dispose?: (ctx: AdapterContext, options?: { preserveWork?: boolean }) => void | Promise<void>;
+  /**
+   * Background work runs inside the agent process. When that process is gone,
+   * rows it left running can never report back and must be settled.
+   */
+  backgroundWorkEndsWithProcess?: boolean;
   /**
    * The session is closing. Adapters that end on stdin EOF rather than a kill
    * say so, and the session closes their stdin first.

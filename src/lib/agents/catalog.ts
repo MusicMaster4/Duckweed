@@ -6,7 +6,7 @@ export type AgentProtocol =
   | "claude-stream-json"
   /** Codex `app-server`: JSON-RPC 2.0 with Codex's own method names. */
   | "codex-app-server"
-  /** Agent Client Protocol — JSON-RPC 2.0, shared by Cursor, Grok, OpenCode. */
+  /** Agent Client Protocol: JSON-RPC 2.0, shared by Cursor, Grok, OpenCode, and Antigravity. */
   | "acp";
 
 export interface AgentDefinition {
@@ -23,17 +23,18 @@ export interface AgentDefinition {
   mark: string;
   /**
    * Subcommands and flags that mean "do not take this over". They ask for
-   * something other than an interactive session — a one-shot run, a login
-   * flow, help output — and the real CLI is the right answer for all of them.
+   * something other than an interactive session (a one-shot run, a login
+   * flow, help output) and the real CLI is the right answer for all of them.
    */
   passthrough: string[];
 }
 
 /**
- * The agents T3 Code drives, and the commands that put each into the JSON mode
+ * The agents Duckweed drives, and the commands that put each into the JSON mode
  * the custom UI reads. These were verified against the installed CLIs rather
- * than taken from documentation: `opencode acp` and `grok agent stdio` both
- * answer an ACP `initialize`, and `codex app-server` answers a JSON-RPC one.
+ * than taken from documentation: `opencode acp`, `grok agent stdio`, and
+ * `agy acp` answer an ACP `initialize`, and `codex app-server` answers a
+ * JSON-RPC one.
  */
 export const AGENTS: Record<AgentId, AgentDefinition> = {
   claude: {
@@ -246,6 +247,49 @@ export const AGENTS: Record<AgentId, AgentDefinition> = {
       "upgrade",
       "uninstall",
       "completion",
+      "-h",
+      "--help",
+      "-v",
+      "--version",
+    ],
+  },
+  antigravity: {
+    id: "antigravity",
+    label: "Antigravity",
+    binaries: ["agy", "antigravity", "antigravity-cli"],
+    headlessArgs: ["acp"],
+    protocol: "acp",
+    accent: "#58c7d9",
+    mark: "AG",
+    passthrough: [
+      "acp",
+      "agent",
+      "agents",
+      "changelog",
+      "help",
+      "install",
+      "mcp",
+      "mic-serve",
+      "models",
+      "plugin",
+      "plugins",
+      "remote-control",
+      "update",
+      "-p",
+      "--print",
+      "--prompt",
+      "-i",
+      "--prompt-interactive",
+      "--output-format",
+      "--input-format",
+      "--json-schema",
+      "--print-timeout",
+      "--disable-slash-commands",
+      "--remote-agent",
+      "--remote-control",
+      "--new-project",
+      "--project",
+      "--settings",
       "-h",
       "--help",
       "-v",

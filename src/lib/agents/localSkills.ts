@@ -40,6 +40,8 @@ function providerSkillDirs(agent: AgentId): string[] {
       return [".cursor"];
     case "opencode":
       return [".opencode"];
+    case "antigravity":
+      return [".agent", ".gemini/config"];
   }
 }
 

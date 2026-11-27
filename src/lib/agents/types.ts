@@ -13,7 +13,7 @@
  */
 
 /** Agents the custom UI can drive headlessly. */
-export type AgentId = "claude" | "codex" | "cursor" | "grok" | "opencode";
+export type AgentId = "claude" | "codex" | "cursor" | "grok" | "opencode" | "antigravity";
 
 /**
  * Coarse access levels shared by the custom UI.
@@ -22,7 +22,7 @@ export type AgentId = "claude" | "codex" | "cursor" | "grok" | "opencode";
  * intentionally an absence of overrides, so the headless session inherits
  * the same configuration as the agent's normal terminal UI.
  */
-export type AgentAccessMode = "default" | "read-only" | "workspace" | "full-access";
+export type AgentAccessMode = "default" | "read-only" | "workspace" | "auto" | "full-access";
 
 export interface AgentAccessChoice {
   id: AgentAccessMode;
@@ -53,12 +53,44 @@ const AGENT_ACCESS_CHOICES: AgentAccessChoice[] = [
   },
 ];
 
+const ANTIGRAVITY_ACCESS_CHOICES: AgentAccessChoice[] = [
+  {
+    id: "default",
+    label: "Agent default",
+    description: "Ask before edits and commands, per your Antigravity settings",
+  },
+  {
+    id: "read-only",
+    label: "Plan",
+    description: "Plan carefully before executing a task",
+  },
+  {
+    id: "workspace",
+    label: "Accept edits",
+    description: "Approve file edits in the workspace without asking",
+  },
+  {
+    id: "auto",
+    label: "Auto",
+    description: "Approve edits and safe commands; ask before irreversible actions",
+  },
+  {
+    id: "full-access",
+    label: "Full access",
+    description: "Auto-approve all edits, commands, and tool permission prompts",
+  },
+];
+
 /**
  * Only expose a picker where the protocol can apply the choice faithfully.
- * ACP agents own their permission policy and currently expose only individual
- * approval requests, not a session-wide access level.
+ * Codex, Claude, and Antigravity (via ACP mode config options) support
+ * session-wide modes; other ACP agents currently expose only per-tool
+ * approval requests.
  */
 export function accessChoicesFor(agent: AgentId): AgentAccessChoice[] {
+  if (agent === "antigravity") {
+    return ANTIGRAVITY_ACCESS_CHOICES.map((choice) => ({ ...choice }));
+  }
   if (agent !== "codex" && agent !== "claude") return [];
   return AGENT_ACCESS_CHOICES.map((choice) => ({ ...choice }));
 }
@@ -341,6 +373,8 @@ export interface SubagentMeta {
   parentCallId?: string;
   /** Model selected for this child. */
   model?: string;
+  /** The call launched a child whose current status could not be read. */
+  statusUnavailable?: boolean;
   /** Current one-line work update. */
   activity?: string;
   /** Original delegated prompt. */
@@ -574,7 +608,7 @@ export interface AgentSessionState {
   runtimeTasks?: AgentRuntimeTask[];
   /** True once any turn has run — the empty state steps aside. */
   started: boolean;
-  /** Claude/Grok are waiting for the confirming Ctrl+C that closes the harness. */
+  /** Claude, Grok, and Antigravity are waiting for the confirming Ctrl+C that closes the harness. */
   exitArmed?: boolean;
 }
 
@@ -643,6 +677,14 @@ export function shortModelLabel(model: string): string {
   if (lower === "opusplan") return "Opus Plan";
   if (lower === "gpt-5.6-sol" || lower === "gpt-5.6") return "GPT-5.6 Sol";
   if (/^grok-\d/.test(lower)) return `Grok ${lower.slice("grok-".length)}`;
+  if (lower === "gemini-pro-orchestrator-neon") return "Orchestrator (Neon)";
+  if (lower === "gemini-pro-orchestrator-g1-pro") return "Orchestrator (Argon)";
+  const gemini = /^gemini-(\d+(?:\.\d+)?)-([a-z]+)(?:-(low|medium|high|xhigh|max))?$/.exec(lower);
+  if (gemini) {
+    const family = gemini[2][0].toUpperCase() + gemini[2].slice(1);
+    return `Gemini ${gemini[1]} ${family}`;
+  }
+  if (lower === "gpt-oss-120b-medium" || lower === "gpt-oss-120b") return "GPT-OSS 120B";
   // OpenCode Zen labels often arrive as the full id; keep the tail readable.
   return base.replace(/^claude-/, "").replace(/-/g, " ");
 }
@@ -656,12 +698,18 @@ const TOOL_KINDS: Record<string, ToolKind> = {
   read: "read",
   readfile: "read",
   read_file: "read",
+  view_file: "read",
+  view_file_outline: "read",
+  view_code_item: "read",
   notebookread: "read",
   write: "edit",
   writefile: "edit",
   write_file: "edit",
+  write_to_file: "edit",
   edit: "edit",
   edit_file: "edit",
+  replace_file_content: "edit",
+  multi_replace_file_content: "edit",
   multiedit: "edit",
   notebookedit: "edit",
   apply_patch: "edit",
@@ -673,23 +721,35 @@ const TOOL_KINDS: Record<string, ToolKind> = {
   codebase_search: "search",
   grep_search: "search",
   file_search: "search",
+  find_by_name: "search",
+  list_dir: "search",
   ls: "search",
   list: "search",
   bash: "execute",
   shell: "execute",
   powershell: "execute",
   run_terminal_cmd: "execute",
+  run_command: "execute",
   local_shell: "execute",
   exec: "execute",
   webfetch: "fetch",
   web_fetch: "fetch",
   websearch: "fetch",
   web_search: "fetch",
+  search_web: "fetch",
   fetch: "fetch",
   task: "task",
   agent: "task",
   spawn_agent: "task",
   spawnagent: "task",
+  invoke_subagent: "task",
+  run_subagent: "task",
+  launch_subagent: "task",
+  spawn_subagent: "task",
+  create_subagent: "task",
+  agent_task: "task",
+  run_workflow: "task",
+  swarm: "task",
   subagent: "task",
   sub_agent: "task",
   delegate: "task",
@@ -724,12 +784,10 @@ const ACP_TOOL_KINDS: Record<string, ToolKind> = {
 };
 
 export function toolKind(name: string, acpKind?: string | null): ToolKind {
-  if (acpKind) {
-    const mapped = ACP_TOOL_KINDS[acpKind.toLowerCase()];
-    if (mapped) return mapped;
-  }
+  const mapped = acpKind ? ACP_TOOL_KINDS[acpKind.toLowerCase()] : undefined;
+  if (mapped && mapped !== "other") return mapped;
   const key = name.toLowerCase().replace(/[\s-]/g, "_");
-  return TOOL_KINDS[key] ?? TOOL_KINDS[key.replace(/_/g, "")] ?? "other";
+  return TOOL_KINDS[key] ?? TOOL_KINDS[key.replace(/_/g, "")] ?? mapped ?? "other";
 }
 
 /** Count changed lines without building a full diff — enough for a `+n −m` chip. */

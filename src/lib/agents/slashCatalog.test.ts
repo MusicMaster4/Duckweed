@@ -16,7 +16,7 @@ import { effortsFor, shortModelLabel, findModelChoice } from "./types";
 
 describe("slashCatalog", () => {
   test("every agent has at least /model in its fallback commands", () => {
-    for (const agent of ["claude", "codex", "grok", "opencode", "cursor"] as const) {
+    for (const agent of AGENT_IDS) {
       expect(fallbackCommands(agent).some((command) => command.name === "/model")).toBe(true);
     }
   });
@@ -31,13 +31,13 @@ describe("slashCatalog", () => {
   });
 
   test("offers app-owned /usage to every agent", () => {
-    for (const agent of ["claude", "codex", "grok", "opencode", "cursor"] as const) {
+    for (const agent of AGENT_IDS) {
       expect(fallbackCommands(agent).some((command) => command.name === "/usage")).toBe(true);
     }
   });
 
   test("offers app-owned /new to every custom agent", () => {
-    for (const agent of ["claude", "codex", "grok", "opencode", "cursor"] as const) {
+    for (const agent of AGENT_IDS) {
       const commands = fallbackCommands(agent);
       expect(commands.some((command) => command.name === "/new")).toBe(true);
       expect(
@@ -51,7 +51,7 @@ describe("slashCatalog", () => {
 
   test("offers /fast only to Codex", () => {
     expect(fallbackCommands("codex").some((command) => command.name === "/fast")).toBe(true);
-    for (const agent of ["claude", "grok", "opencode", "cursor"] as const) {
+    for (const agent of ["claude", "grok", "opencode", "cursor", "antigravity"] as const) {
       expect(fallbackCommands(agent).some((command) => command.name === "/fast")).toBe(false);
     }
   });
@@ -164,7 +164,7 @@ describe("slashCatalog", () => {
   });
 
   test("/resume is offered exactly where a session can be found and resumed", () => {
-    for (const agent of ["claude", "codex", "grok", "opencode", "cursor"] as const) {
+    for (const agent of AGENT_IDS) {
       const has = fallbackCommands(agent).some((command) => command.name === "/resume");
       expect(has).toBe(canResume(agent));
     }
@@ -220,5 +220,9 @@ describe("effortsFor / shortModelLabel", () => {
     expect(shortModelLabel("grok-4.6")).toBe("Grok 4.6");
     expect(shortModelLabel("gpt-5.6-sol")).toBe("GPT-5.6 Sol");
     expect(shortModelLabel("or/selected")).toBe("OpenRouter");
+    expect(shortModelLabel("gemini-4-neon")).toBe("Gemini 4 Neon");
+    expect(shortModelLabel("gemini-3.8-flash-high")).toBe("Gemini 3.8 Flash");
+    expect(shortModelLabel("gemini-pro-orchestrator-neon")).toBe("Orchestrator (Neon)");
+    expect(shortModelLabel("gpt-oss-120b-medium")).toBe("GPT-OSS 120B");
   });
 });

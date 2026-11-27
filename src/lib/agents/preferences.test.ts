@@ -131,6 +131,12 @@ describe("custom agent model preferences", () => {
     rememberPreferences(codex, { accessMode: "workspace" });
 
     expect(withRememberedPreferences(codex).accessMode).toBe("workspace");
+
+    const agy = launch("antigravity", "agy");
+    rememberPreferences(agy, { accessMode: "auto" });
+    expect(withRememberedPreferences(agy).accessMode).toBe("auto");
+    rememberPreferences(agy, { accessMode: "full-access" });
+    expect(withRememberedPreferences(agy).accessMode).toBe("full-access");
   });
 
   test("keeps access levels independent for different CLIs", () => {

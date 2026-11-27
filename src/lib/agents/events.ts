@@ -1,4 +1,5 @@
 import { mergeCommands, refreshClaudeModelLabels } from "./slashCatalog";
+import { hasActiveSubagents } from "./subagents";
 import type {
   AgentAccessMode,
   AgentFileChange,
@@ -139,7 +140,7 @@ export type AgentEvent =
   /** A queued follow-up has been sent, cancelled, or restored for editing. */
   | { type: "unqueue"; id: string }
   /** The turn finished; the composer takes the keyboard back. */
-  | { type: "turn-end" };
+  | { type: "turn-end"; historyReplay?: true };
 
 /** Keep a tool's collected output bounded — panes render it, not tail it. */
 export const MAX_TOOL_OUTPUT = 20_000;
@@ -221,12 +222,14 @@ function nextId(state: AgentSessionState): string {
 function workTimingAfterStatus(
   state: AgentSessionState,
   status: AgentStatus,
+  activeSubagents = hasActiveSubagents(state.items),
   now = Date.now(),
 ): Pick<AgentSessionState, "workStartedAt" | "lastWorkedForMs"> {
   if (
     status === "working" &&
     state.status !== "working" &&
-    !(state.status === "waiting" && state.workStartedAt !== null)
+    !(state.status === "waiting" && state.workStartedAt !== null) &&
+    !(state.status === "idle" && activeSubagents && state.workStartedAt !== null)
   ) {
     return {
       workStartedAt: now,
@@ -234,7 +237,7 @@ function workTimingAfterStatus(
     };
   }
 
-  if (status === "idle" && state.workStartedAt !== null) {
+  if (status === "idle" && state.workStartedAt !== null && !activeSubagents) {
     return {
       workStartedAt: null,
       lastWorkedForMs: Math.max(0, now - state.workStartedAt),
@@ -257,6 +260,10 @@ export interface TurnEndInput {
   releasingQueued: boolean;
   /** The user stopped this turn themselves. */
   interrupted: boolean;
+  /** Subagents were actively working before this event. */
+  beforeHadActiveSubagents?: boolean;
+  /** Subagents are still actively working after this event. */
+  hasActiveSubagents?: boolean;
 }
 
 /**
@@ -318,7 +325,12 @@ export function isTurnEnd(input: TurnEndInput): boolean {
     return input.permission && input.before !== "waiting";
   }
   if (input.after !== "idle") return false;
-  if (input.before !== "working" && input.before !== "waiting") return false;
+  if (input.hasActiveSubagents) return false;
+  const wasActive =
+    input.before === "working" ||
+    input.before === "waiting" ||
+    (input.before === "idle" && input.beforeHadActiveSubagents === true);
+  if (!wasActive) return false;
   return !input.releasingQueued;
 }
 
@@ -459,7 +471,9 @@ function reduceEvent(state: AgentSessionState, event: AgentEvent): AgentSessionS
         : {
             ...state,
             loadingHistory: event.loading,
-            ...(!event.loading && state.status !== "working"
+            ...(!event.loading &&
+            state.status !== "working" &&
+            !hasActiveSubagents(state.items)
               ? { workStartedAt: null, lastWorkedForMs: null }
               : {}),
           };
@@ -557,60 +571,76 @@ function reduceEvent(state: AgentSessionState, event: AgentEvent): AgentSessionS
     }
 
     case "tool": {
+      const hadActiveSubagents = hasActiveSubagents(state.items);
       const index = findTool(state, event.callId);
+      let items: AgentItem[];
       if (index < 0) {
         const subagent = mergeSubagentMeta(
           undefined,
           event.subagent,
           event.subagentItem,
         );
-        return {
-          ...state,
-          started: true,
-          items: [
-            ...state.items,
-            {
-              kind: "tool",
-              id: `t-${event.callId}`,
-              at: Date.now(),
-              callId: event.callId,
-              name: event.name ?? "tool",
-              tool: event.tool ?? "other",
-              title: event.title ?? event.name ?? "tool",
-              status: event.status ?? "running",
-              command: event.command ?? null,
-              output: clampEnd(event.output ?? event.outputDelta ?? "", MAX_TOOL_OUTPUT),
-              changes: event.changes ? boundChanges(event.changes) : [],
-              ...(subagent ? { subagent } : {}),
-            },
-          ],
+        items = [
+          ...state.items,
+          {
+            kind: "tool",
+            id: `t-${event.callId}`,
+            at: Date.now(),
+            callId: event.callId,
+            name: event.name ?? "tool",
+            tool: event.tool ?? "other",
+            title: event.title ?? event.name ?? "tool",
+            status: event.status ?? "running",
+            command: event.command ?? null,
+            output: clampEnd(event.output ?? event.outputDelta ?? "", MAX_TOOL_OUTPUT),
+            changes: event.changes ? boundChanges(event.changes) : [],
+            ...(subagent ? { subagent } : {}),
+          },
+        ];
+      } else {
+        items = state.items.slice();
+        const current = items[index];
+        if (current.kind !== "tool") return state;
+        const output =
+          event.output !== undefined
+            ? event.output
+            : event.outputDelta !== undefined
+              ? current.output + event.outputDelta
+              : current.output;
+        items[index] = {
+          ...current,
+          name: event.name ?? current.name,
+          tool: event.tool ?? current.tool,
+          title: event.title ?? current.title,
+          status: event.status ?? current.status,
+          command: event.command === undefined ? current.command : event.command,
+          output: clampEnd(output, MAX_TOOL_OUTPUT),
+          changes: event.changes ? boundChanges(event.changes) : current.changes,
+          subagent: mergeSubagentMeta(
+            current.subagent,
+            event.subagent,
+            event.subagentItem,
+          ),
         };
       }
-      const items = state.items.slice();
-      const current = items[index];
-      if (current.kind !== "tool") return state;
-      const output =
-        event.output !== undefined
-          ? event.output
-          : event.outputDelta !== undefined
-            ? current.output + event.outputDelta
-            : current.output;
-      items[index] = {
-        ...current,
-        name: event.name ?? current.name,
-        tool: event.tool ?? current.tool,
-        title: event.title ?? current.title,
-        status: event.status ?? current.status,
-        command: event.command === undefined ? current.command : event.command,
-        output: clampEnd(output, MAX_TOOL_OUTPUT),
-        changes: event.changes ? boundChanges(event.changes) : current.changes,
-        subagent: mergeSubagentMeta(
-          current.subagent,
-          event.subagent,
-          event.subagentItem,
-        ),
+      const nextActiveSubagents = hasActiveSubagents(items);
+      let workTiming: Partial<Pick<AgentSessionState, "workStartedAt" | "lastWorkedForMs">> = {};
+      if (state.status === "idle") {
+        if (!hadActiveSubagents && nextActiveSubagents && state.workStartedAt === null) {
+          workTiming = { workStartedAt: Date.now() };
+        } else if (hadActiveSubagents && !nextActiveSubagents && state.workStartedAt !== null) {
+          workTiming = {
+            workStartedAt: null,
+            lastWorkedForMs: Math.max(0, Date.now() - state.workStartedAt),
+          };
+        }
+      }
+      return {
+        ...state,
+        started: true,
+        ...workTiming,
+        items,
       };
-      return { ...state, items };
     }
 
     case "plan": {

@@ -59,6 +59,7 @@ const BUSY_REASON_HINTS: Record<PowerWatchBusyReason, string> = {
   process: "A command is still running in this pane.",
   "agent-starting": "The agent is still coming up.",
   "agent-working": "The agent is working on a turn you asked for.",
+  "agent-subagents": "Subagents are still working in this pane.",
   "agent-waiting":
     "The agent is blocked on you, most likely a permission prompt. It will not clear on its own.",
   "scheduled-message": "This pane has a message waiting to send.",

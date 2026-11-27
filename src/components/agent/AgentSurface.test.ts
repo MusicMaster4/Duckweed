@@ -106,6 +106,31 @@ describe("agent work status", () => {
       ),
     ).toBe("Ready");
   });
+
+  test("shows active subagents when the parent is idle", () => {
+    expect(
+      workStatusLabel(
+        {
+          status: "idle",
+          workStartedAt: 1_000,
+          lastWorkedForMs: null,
+          items: [task("sub-1", "running"), task("sub-2", "pending")],
+        },
+        16_000,
+      ),
+    ).toBe("2 subagents working · 15s");
+    expect(
+      workStatusLabel(
+        {
+          status: "idle",
+          workStartedAt: null,
+          lastWorkedForMs: 83_000,
+          items: [task("sub-1", "done")],
+        },
+        100_000,
+      ),
+    ).toBe("Worked for 1m 23s");
+  });
 });
 
 function task(callId: string, status: ToolItem["status"]): ToolItem {

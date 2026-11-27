@@ -2039,7 +2039,7 @@ export async function anyHasRunningProcess(ids: string[]): Promise<boolean> {
  */
 export async function hasCloseBlockingWork(id: string): Promise<boolean> {
   const agent = agentSessions.get(id);
-  if (agent) return agentHasUnfinishedWork(agent.status);
+  if (agent) return agentHasUnfinishedWork(agent.status, agent.items);
   const session = sessions.get(id);
   if (!session || session.exited || !session.spawned) return false;
   if (session.agent) return session.agentTurns.length > 0;
@@ -2055,7 +2055,7 @@ export async function anyHasCloseBlockingWork(ids: string[]): Promise<boolean> {
   if (
     ids.some((id) => {
       const agent = agentSessions.get(id);
-      return agent ? agentHasUnfinishedWork(agent.status) : false;
+      return agent ? agentHasUnfinishedWork(agent.status, agent.items) : false;
     })
   ) {
     return true;
@@ -2080,7 +2080,7 @@ export async function anyHasCloseBlockingWork(ids: string[]): Promise<boolean> {
 export function runningAgentLabel(ids: string[]): string | null {
   for (const id of ids) {
     const state = agentSessions.get(id);
-    if (state && agentHasUnfinishedWork(state.status)) return state.label;
+    if (state && agentHasUnfinishedWork(state.status, state.items)) return state.label;
   }
   return null;
 }

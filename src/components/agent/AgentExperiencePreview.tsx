@@ -4,6 +4,7 @@ import {
   runningSubagentCount,
   subagentForCallId,
   subagentRosters,
+  subagentsForNavigator,
   subagentsForTurn,
 } from "../../lib/agents/subagents";
 import type { AgentId, AgentItem, AgentSessionState, PlanItem } from "../../lib/agents/types";
@@ -36,6 +37,7 @@ const PROVIDERS: Array<{
   { id: "grok", label: "Grok Build", mark: "GR", accent: "#7ea6ff", model: "Grok 4.6" },
   { id: "cursor", label: "Cursor Agent", mark: "CU", accent: "#d4d4d4", model: "Composer" },
   { id: "opencode", label: "OpenCode", mark: "OC", accent: "#7be05a", model: "Default" },
+  { id: "antigravity", label: "Antigravity", mark: "AG", accent: "#58c7d9", model: "Gemini 4 Neon" },
 ];
 
 function previewItems(): AgentItem[] {
@@ -290,6 +292,7 @@ export function AgentExperiencePreview() {
   const visibleItems = starting ? [] : items;
   const fleet = subagentsForTurn(visibleItems);
   const rosters = subagentRosters(visibleItems);
+  const navigatorSubagents = useMemo(() => subagentsForNavigator(rosters), [rosters]);
   const focusedSubagent = focusedCallId
     ? subagentForCallId(visibleItems, focusedCallId)
     : null;
@@ -384,14 +387,14 @@ export function AgentExperiencePreview() {
             {status === "working" && <span className="agent-pulse" />}
             {status === "working" ? "working" : status === "starting" ? "starting" : "ready"}
           </span>
-          {fleet.length > 0 && (
+          {navigatorSubagents.length > 0 && (
             <button
               type="button"
               className={`agent-sub-tab${navigatorOpen ? " is-active" : ""}`}
               onClick={() => setNavigatorOpen((open) => !open)}
               aria-controls="agent-preview-subagent-navigator"
               aria-expanded={navigatorOpen}
-              aria-label={`Agents, ${fleet.length} subagents`}
+              aria-label={`Agents, ${navigatorSubagents.length} subagents`}
             >
               <svg viewBox="0 0 16 16" aria-hidden="true">
                 <circle cx="4" cy="5" r="1.5" />
@@ -400,7 +403,7 @@ export function AgentExperiencePreview() {
                 <path d="M5.3 5.8 7.1 10M10.7 5.8 8.9 10" />
               </svg>
               <span>Agents</span>
-              <i>{fleet.length}</i>
+              <i>{navigatorSubagents.length}</i>
             </button>
           )}
           <span className="agent-head-spacer" />
@@ -501,7 +504,7 @@ export function AgentExperiencePreview() {
             )}
           </SubagentUiProvider>
         </div>
-        {navigatorOpen && fleet.length > 0 && (
+        {navigatorOpen && navigatorSubagents.length > 0 && (
           <div
             className="agent-sub-navigator-shell"
             id="agent-preview-subagent-navigator"
@@ -510,7 +513,7 @@ export function AgentExperiencePreview() {
               agent={provider.id}
               parentLabel={provider.label}
               parentWorking={status === "working"}
-              subagents={fleet}
+              subagents={navigatorSubagents}
               now={Date.now()}
               selectedId={multiPane ? activePaneId : focusedCallId ?? "parent"}
               multiPane={multiPane}

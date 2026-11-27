@@ -36,7 +36,7 @@ export interface ExperienceProps {
   cwd: string;
 }
 
-export type OfficialVariant = "chatgpt" | "claude" | "grok";
+export type OfficialVariant = "chatgpt" | "claude" | "grok" | "antigravity";
 export type ActivityVariant = OfficialVariant | "cursor" | "opencode";
 
 const TOOL_LABEL: Record<ToolKind, string> = {
@@ -779,7 +779,10 @@ export function StillWorking({
   clusterId: string;
 }) {
   const message = preparingMessageFor(clusterId);
-  const elapsed = useActivityElapsed(clusterId, variant === "chatgpt");
+  const elapsed = useActivityElapsed(
+    clusterId,
+    variant === "chatgpt" || variant === "antigravity",
+  );
   const activeDuration = elapsed === null ? null : `Working · ${elapsed}`;
 
   return (
@@ -811,6 +814,55 @@ function activityStatus(item: ToolItem): string {
   return "Running";
 }
 
+const THINKING_PREVIEW_LIMIT = 500;
+
+/**
+ * Truncate a long thinking trace to a readable preview with an ellipsis,
+ * preferring a word boundary and balancing inline code spans so Markdown
+ * stays valid before the user expands the full trace.
+ */
+export function truncateThinkingPreview(
+  text: string,
+  limit = THINKING_PREVIEW_LIMIT,
+): { text: string; truncated: boolean } {
+  const trimmed = text.trim();
+  let count = 0;
+  let cutIndex = trimmed.length;
+  for (let index = 0; index < trimmed.length; ) {
+    const codePoint = trimmed.codePointAt(index)!;
+    const width = codePoint > 0xffff ? 2 : 1;
+    count += 1;
+    if (count > limit) {
+      cutIndex = index;
+      break;
+    }
+    index += width;
+  }
+  if (count <= limit) return { text, truncated: false };
+
+  let slice = trimmed.slice(0, cutIndex);
+  const lastSpace = slice.search(/\s+\S*$/);
+  if (lastSpace > Math.floor(slice.length * 0.7)) {
+    slice = slice.slice(0, lastSpace);
+  }
+  slice = slice.replace(/[\s,;:]+$/, "");
+
+  // Avoid leaving an open fenced code block or inline backtick dangling.
+  const fences = slice.match(/```/g)?.length ?? 0;
+  if (fences % 2 === 1) {
+    const lastFence = slice.lastIndexOf("```");
+    slice = slice.slice(0, lastFence).replace(/[\s,;:]+$/, "");
+  } else {
+    const backticks = slice.match(/`/g)?.length ?? 0;
+    if (backticks % 2 === 1) {
+      const lastTick = slice.lastIndexOf("`");
+      slice = slice.slice(0, lastTick).replace(/[\s,;:]+$/, "");
+    }
+  }
+
+  return { text: `${slice}...`, truncated: true };
+}
+
 function ThinkingHistory({
   thoughts,
   working,
@@ -826,11 +878,24 @@ function ThinkingHistory({
   clusterId: string;
 }) {
   const [open, setOpen] = useState(false);
+  const [latestExpanded, setLatestExpanded] = useState(false);
   const panelId = useId();
   const latest = showLatestFull ? thoughts[thoughts.length - 1] : undefined;
   const active = working;
   const earlierThoughts = showLatestFull ? thoughts.slice(0, -1) : thoughts;
-  const expandable = earlierThoughts.length > 0;
+  const latestPreview = useMemo(
+    () => (latest ? truncateThinkingPreview(latest.text) : null),
+    [latest],
+  );
+  const latestTruncated = Boolean(latestPreview?.truncated);
+  const showFullLatest = !latestTruncated || latestExpanded || open;
+  const expandable = earlierThoughts.length > 0 || latestTruncated;
+  const headerExpanded = earlierThoughts.length > 0 ? open : latestExpanded;
+
+  useEffect(() => {
+    setLatestExpanded(false);
+  }, [latest?.id]);
+
   const showPreparingSummary = !latest && thoughts.length === 0;
   // Registry-backed like the pulse: a fresh preparing cluster gets a new line;
   // remounts during the same wait keep the same stand-in text.
@@ -845,19 +910,31 @@ function ThinkingHistory({
     ? `${headline}: ${traceSummary(latest.text)}`
     : headline;
 
+  const toggleHeader = () => {
+    if (!expandable) return;
+    if (earlierThoughts.length > 0) {
+      setOpen((value) => {
+        if (value) setLatestExpanded(false);
+        return !value;
+      });
+    } else {
+      setLatestExpanded((value) => !value);
+    }
+  };
+
   return (
     <section
-      className={`agent-activity-history is-thinking${open ? " is-open" : ""}${
+      className={`agent-activity-history is-thinking${headerExpanded ? " is-open" : ""}${
         active ? " is-active" : ""
       }`}
     >
       <button
         type="button"
         className="agent-activity-history-head"
-        onClick={() => expandable && setOpen((value) => !value)}
+        onClick={toggleHeader}
         disabled={!expandable}
-        aria-expanded={expandable ? open : undefined}
-        aria-controls={expandable ? panelId : undefined}
+        aria-expanded={expandable ? headerExpanded : undefined}
+        aria-controls={earlierThoughts.length > 0 ? panelId : undefined}
         aria-label={
           activeDuration ? `${accessibleHeadline}. ${activeDuration}` : accessibleHeadline
         }
@@ -874,14 +951,35 @@ function ThinkingHistory({
             {activeDuration}
           </span>
         )}
-        {expandable && <Chevron open={open} />}
+        {expandable && <Chevron open={headerExpanded} />}
       </button>
       {latest && (
         <div
-          className={`agent-thinking-latest${latest.streaming ? " is-streaming" : ""}`}
+          className={`agent-thinking-latest${latest.streaming ? " is-streaming" : ""}${
+            latestTruncated && !showFullLatest ? " is-truncated" : ""
+          }`}
           aria-label="Latest thinking trace"
         >
-          <AssistantMarkdown text={latest.text} />
+          <AssistantMarkdown
+            text={showFullLatest ? latest.text : (latestPreview?.text ?? latest.text)}
+          />
+          {latestTruncated && (
+            <button
+              type="button"
+              className="agent-thinking-toggle"
+              onClick={() => {
+                if (showFullLatest) {
+                  setLatestExpanded(false);
+                  setOpen(false);
+                } else {
+                  setLatestExpanded(true);
+                }
+              }}
+              aria-expanded={showFullLatest}
+            >
+              {showFullLatest ? "Show less" : "Show more"}
+            </button>
+          )}
         </div>
       )}
       <AnimatedDisclosure open={open}>
@@ -1048,7 +1146,7 @@ export const ActivityHistory = memo(function ActivityHistory({
           thoughts={thoughts}
           working={working}
           showLatestFull={showLatestThinking}
-          showElapsed={variant === "chatgpt"}
+          showElapsed={variant === "chatgpt" || variant === "antigravity"}
           clusterId={clusterId}
         />
       )}

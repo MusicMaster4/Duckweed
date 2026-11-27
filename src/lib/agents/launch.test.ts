@@ -27,6 +27,51 @@ describe("parseAgentLaunch", () => {
     expect(parseAgentLaunch("cursor-agent")?.agent).toBe("cursor");
     expect(parseAgentLaunch("grok")?.agent).toBe("grok");
     expect(parseAgentLaunch("opencode")?.agent).toBe("opencode");
+    expect(parseAgentLaunch("agy")?.agent).toBe("antigravity");
+    expect(parseAgentLaunch("antigravity")?.agent).toBe("antigravity");
+    expect(parseAgentLaunch("antigravity-cli")?.agent).toBe("antigravity");
+    expect(parseAgentLaunch("agy-work")?.program).toBe("agy");
+  });
+
+  test("parses Antigravity conversation, mode, sandbox, and passthrough flags", () => {
+    const resumed = parseAgentLaunch(
+      `agy --conversation sess-42 --mode plan --model gemini-4-neon --effort xhigh --sandbox "inspect the repo"`,
+    );
+    expect(resumed).toMatchObject({
+      agent: "antigravity",
+      program: "agy",
+      resumeId: "sess-42",
+      accessMode: "read-only",
+      model: "gemini-4-neon",
+      effort: "xhigh",
+      prompt: "inspect the repo",
+      forwardArgs: ["--sandbox"],
+    });
+
+    expect(parseAgentLaunch("agy --mode=accept-edits")?.accessMode).toBe("workspace");
+    expect(parseAgentLaunch("agy --mode auto")?.accessMode).toBe("auto");
+    expect(parseAgentLaunch("agy --conversation=abc-123")?.resumeId).toBe("abc-123");
+    expect(parseAgentLaunch("agy -c")?.resume).toBe(true);
+    expect(
+      parseAgentLaunch("agy --dangerously-skip-permissions --add-dir ../shared --agent research"),
+    ).toMatchObject({
+      accessMode: "full-access",
+      forwardArgs: ["--add-dir", "../shared", "--agent", "research"],
+    });
+
+    for (const native of [
+      "agy acp",
+      "agy models",
+      "agy mcp list",
+      "agy -p hi",
+      "agy --print hello",
+      "agy --remote-agent",
+      "agy --settings custom.json",
+      "agy update",
+      "agy --help",
+    ]) {
+      expect(parseAgentLaunch(native)).toBeNull();
+    }
   });
 
   test("claims claudex as Claude protocol while spawning the wrapper", () => {

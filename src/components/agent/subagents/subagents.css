@@ -18,6 +18,10 @@
   --agent-sub-accent: #d7a85b;
 }
 
+.agent-sub--antigravity {
+  --agent-sub-accent: #58c7d9;
+}
+
 .agent-sub-board {
   --agent-sub-accent: var(--agent-accent);
   width: min(100%, 840px);
@@ -550,8 +554,7 @@
   width: 278px;
 }
 
-.agent-surface.has-subagent-navigator > .agent-scroll,
-.agent-surface.has-subagent-navigator > .agent-composer-shell,
+.agent-surface.has-subagent-navigator > .agent-body,
 .agent-preview-surface.has-subagent-navigator > .agent-scroll,
 .agent-preview-surface.has-subagent-navigator > .agent-composer-shell {
   margin-right: 278px;
@@ -901,8 +904,7 @@
 }
 
 @container agent-pane (max-width: 760px) {
-  .agent-surface.has-subagent-navigator > .agent-scroll,
-  .agent-surface.has-subagent-navigator > .agent-composer-shell,
+  .agent-surface.has-subagent-navigator > .agent-body,
   .agent-preview-surface.has-subagent-navigator > .agent-scroll,
   .agent-preview-surface.has-subagent-navigator > .agent-composer-shell {
     margin-right: 0;

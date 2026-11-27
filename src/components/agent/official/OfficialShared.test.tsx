@@ -11,6 +11,7 @@ import { AgentMarkdownWorkspace } from "../AgentMarkdownAssets";
 import { AgentProviderIcon } from "../AgentProviderIcon";
 import { CursorExperience } from "../provider/CursorExperience";
 import { OpenCodeExperience } from "../provider/OpenCodeExperience";
+import { AntigravityExperience, antigravityTranscriptItems } from "./AntigravityExperience";
 import { ChatGPTExperience } from "./ChatGPTExperience";
 import { ClaudeExperience } from "./ClaudeExperience";
 import { GrokDotMatrix, GrokExperience } from "./GrokExperience";
@@ -28,6 +29,7 @@ import {
   PlanTracker,
   ProviderEmpty,
   shortAssistantUpdatesAsThinking,
+  truncateThinkingPreview,
 } from "./OfficialShared";
 
 function activitySession(agent: AgentId, items: AgentItem[]): AgentSessionState {
@@ -44,7 +46,9 @@ function activitySession(agent: AgentId, items: AgentItem[]): AgentSessionState 
             ? "Grok Build"
             : agent === "cursor"
               ? "Cursor Agent"
-              : "OpenCode",
+              : agent === "antigravity"
+                ? "Antigravity"
+                : "OpenCode",
     mark: agent.slice(0, 2).toUpperCase(),
     accent: "#7ea6ff",
     status: "working",
@@ -93,6 +97,8 @@ function renderAgentActivity(
       return renderToStaticMarkup(<CursorExperience session={session} items={items} />);
     case "opencode":
       return renderToStaticMarkup(<OpenCodeExperience session={session} items={items} />);
+    case "antigravity":
+      return renderToStaticMarkup(<AntigravityExperience {...props} />);
   }
 }
 
@@ -1410,5 +1416,190 @@ describe("activity group projection reuse", () => {
     expect(shifted[0]).not.toBe(refreshed[0]);
     expect(shifted[0].firstIndex).toBe(1);
     expect(activityGroups([thought])[0]).toEqual(unanswered);
+  });
+
+  test("renders the Antigravity experience and icon cleanly", () => {
+    const iconHtml = renderToStaticMarkup(<AgentProviderIcon agent="antigravity" program="agy" />);
+    expect(iconHtml).toContain("is-antigravity");
+    expect(iconHtml).toContain("<path");
+
+    const html = renderAgentActivity(
+      "antigravity",
+      [
+        { kind: "user", id: "u1", at: 1, text: "Check package.json" },
+        { kind: "thinking", id: "r1", at: 2, text: "Reading package manifest", streaming: false },
+        {
+          kind: "tool",
+          id: "t1",
+          at: 3,
+          callId: "c1",
+          name: "read_file",
+          tool: "read",
+          title: "File package.json",
+          status: "done",
+          command: null,
+          output: "",
+          changes: [],
+        },
+        { kind: "assistant", id: "a1", at: 4, text: "The package is duckweed.", streaming: false },
+      ],
+      "idle",
+    );
+    expect(html).toContain("antigravity-experience");
+    expect(html).toContain('data-variant="antigravity"');
+    expect(html).toContain("official-answer-divider");
+    expect(html).toContain("The package is duckweed.");
+  });
+
+  test("promotes substantive Antigravity mid-turn milestones while keeping brief and oversized thoughts in Thinking", () => {
+    const milestoneBody =
+      "Initial assessment indicates the task involves recreating the animated short in Portuguese with two distinct music tracks. " +
+      "The reference video has 171 seconds of visual storytelling and scene cuts that must be extracted into frame contact sheets. " +
+      "After inspecting both repositories, the plan is to extract frames first, verify the animation pipeline, and then compose both audio versions in parallel so each scene matches the original pacing and emotional arc.";
+    const preAnswerBody =
+      "Final verification confirms both rendered outputs match every scene boundary and audio transition. " +
+      "Every timestamp in the frame timeline aligns with the Portuguese subtitles, the custom synthesized soundtrack builds at the climax, " +
+      "and the copyright-free alternate track fits the exact same duration without clipping or drift across the entire sequence.";
+    const tool = (id: string, callId: string): AgentItem => ({
+      kind: "tool",
+      id,
+      at: 10,
+      callId,
+      name: "run_command",
+      tool: "execute",
+      title: `Run ${callId}`,
+      status: "done",
+      command: null,
+      output: "",
+      changes: [],
+    });
+
+    const items: AgentItem[] = [
+      { kind: "user", id: "u1", at: 1, text: "Recreate the video" },
+      {
+        kind: "thinking",
+        id: "r-milestone",
+        at: 2,
+        text: `I'm thinking through how to approach this.\n\n\n${milestoneBody}`,
+        streaming: false,
+      },
+      tool("t1", "c1"),
+      {
+        kind: "thinking",
+        id: "r-short",
+        at: 4,
+        text: "Package installed successfully. Proceeding to set up the virtual environment next.",
+        streaming: false,
+      },
+      tool("t2", "c2"),
+      {
+        kind: "thinking",
+        id: "r-huge",
+        at: 6,
+        text: "Deep internal scratchpad. ".repeat(120),
+        streaming: false,
+      },
+      tool("t3", "c3"),
+      {
+        kind: "assistant",
+        id: "a-short-interim",
+        at: 8,
+        text: "Moving to the final export step now.",
+        streaming: false,
+      },
+      tool("t4", "c4"),
+      {
+        kind: "thinking",
+        id: "r-pre-answer",
+        at: 10,
+        text: preAnswerBody,
+        streaming: false,
+      },
+      {
+        kind: "assistant",
+        id: "a-final",
+        at: 11,
+        text: "Done.",
+        streaming: false,
+      },
+    ];
+
+    const first = antigravityTranscriptItems(items, false);
+    const second = antigravityTranscriptItems(items, false);
+
+    // Substantive mid-turn milestone promotes to assistant and strips boilerplate lead-in.
+    expect(first[1]).toMatchObject({
+      id: "r-milestone",
+      kind: "assistant",
+      text: milestoneBody,
+      streaming: false,
+    });
+    expect(first[1]).toBe(second[1]);
+
+    // Brief thought, oversized deep-reasoning dump, short interim assistant, and pre-answer thought stay as thinking.
+    expect(first[3]).toMatchObject({ id: "r-short", kind: "thinking" });
+    expect(first[5]).toMatchObject({ id: "r-huge", kind: "thinking" });
+    expect(first[7]).toMatchObject({ id: "a-short-interim", kind: "thinking" });
+    expect(first[9]).toMatchObject({ id: "r-pre-answer", kind: "thinking" });
+
+    // Final answer stays an assistant response even when short.
+    expect(first[10]).toMatchObject({ id: "a-final", kind: "assistant", text: "Done." });
+
+    // Rendered Antigravity HTML highlights the milestone permanently as an interim update and frames the final answer cleanly.
+    const html = renderAgentActivity("antigravity", items, "idle");
+    expect(html).toContain("official-answer official-answer--antigravity is-interim-update");
+    expect(html).toContain(milestoneBody);
+    expect(html).not.toContain("I&#x27;m thinking through how to approach this.");
+    expect(html).toContain("official-answer-divider");
+    expect(html).toContain("Done.");
+
+    // While a long thought is still streaming with no later tool yet, it stays in Thinking.
+    const streamingTurn: AgentItem[] = [
+      { kind: "user", id: "u2", at: 1, text: "Work" },
+      { kind: "thinking", id: "r-live", at: 2, text: milestoneBody, streaming: true },
+    ];
+    expect(antigravityTranscriptItems(streamingTurn, true)[1]).toMatchObject({
+      id: "r-live",
+      kind: "thinking",
+    });
+  });
+
+  test("truncates long latest thinking traces after 500 characters with an expand toggle", () => {
+    const shortTrace = "Checking the animation frames and audio sync.";
+    expect(truncateThinkingPreview(shortTrace)).toEqual({
+      text: shortTrace,
+      truncated: false,
+    });
+
+    const longTrace =
+      "Analyzing every scene transition and audio cue in the video timeline. ".repeat(14);
+    const preview = truncateThinkingPreview(longTrace, 500);
+    expect(preview.truncated).toBe(true);
+    expect(preview.text.endsWith("...")).toBe(true);
+    expect(preview.text.length).toBeLessThanOrEqual(503);
+
+    const html = renderAgentActivity(
+      "antigravity",
+      [
+        { kind: "user", id: "u-long", at: 1, text: "Analyze frames" },
+        { kind: "thinking", id: "r-long", at: 2, text: longTrace, streaming: true },
+      ],
+      "working",
+    );
+    expect(html).toContain("agent-thinking-latest is-streaming is-truncated");
+    expect(html).toContain("...");
+    expect(html).toContain("Show more");
+    expect(html).toContain('aria-expanded="false"');
+
+    const shortHtml = renderAgentActivity(
+      "antigravity",
+      [
+        { kind: "user", id: "u-short", at: 1, text: "Analyze frames" },
+        { kind: "thinking", id: "r-short", at: 2, text: shortTrace, streaming: true },
+      ],
+      "working",
+    );
+    expect(shortHtml).not.toContain("is-truncated");
+    expect(shortHtml).not.toContain("Show more");
   });
 });

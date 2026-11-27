@@ -8143,7 +8143,8 @@ body.is-resizing * {
 
 .agent-provider-icon.is-claude svg,
 .agent-provider-icon.is-grok svg,
-.agent-provider-icon.is-opencode svg {
+.agent-provider-icon.is-opencode svg,
+.agent-provider-icon.is-antigravity svg {
   fill: currentColor;
   stroke: none;
 }
@@ -8624,6 +8625,21 @@ body.is-resizing * {
   stroke-width: 1.35;
   stroke-linecap: round;
   stroke-linejoin: round;
+}
+
+.agent-body {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+.agent-main {
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
 }
 
 .agent-scroll {
@@ -9857,29 +9873,15 @@ body.is-resizing * {
   }
 }
 
-/* The side chat takes the lower half of the agent pane; the main transcript
-   and its composer keep the upper half. */
+/* The side chat takes the right vertical half of the agent pane; the main
+   transcript and its composer keep the left half. */
 .agent-side-question-dock {
   display: flex;
   flex: 0 0 50%;
+  min-width: 0;
   min-height: 0;
   flex-direction: column;
-  padding: 7px 14px 8px;
-  border-top: 1px solid var(--border);
-  background: var(--bg-pane);
-}
-
-.agent-side-chat {
-  display: flex;
-  flex: 1 1 auto;
-  min-height: 0;
-  flex-direction: column;
-}
-
-.agent-side-chat .agent-side-question-body {
-  flex: 1 1 auto;
-  min-height: 0;
-  max-height: none;
+  background: color-mix(in srgb, var(--bg-elevated) 54%, var(--bg-pane));
 }
 
 .agent-side-turn + .agent-side-turn {
@@ -9891,7 +9893,7 @@ body.is-resizing * {
 .agent-side-chat-empty {
   margin: 0;
   color: var(--text-faint);
-  font-size: 10.5px;
+  font-size: 11px;
   line-height: 1.5;
 }
 
@@ -9902,24 +9904,26 @@ body.is-resizing * {
 .agent-side-chat-composer {
   display: flex;
   flex: none;
-  align-items: flex-end;
-  gap: 6px;
-  padding: 6px 6px 6px 10px;
-  border-top: 1px solid rgba(255, 255, 255, 0.065);
+  min-height: var(--composer-h);
+  align-items: flex-start;
+  gap: 8px;
+  padding: 9px 10px 10px 14px;
+  border-top: 3px solid var(--border);
+  background: var(--bg-raised);
 }
 
 .agent-side-chat-composer textarea {
   flex: 1 1 auto;
-  min-height: 22px;
-  max-height: 96px;
-  padding: 3px 0;
+  min-height: 24px;
+  max-height: 140px;
+  padding: 4px 2px;
   border: 0;
   outline: none;
   resize: none;
   background: transparent;
   color: var(--text);
   font: inherit;
-  font-size: 11.5px;
+  font-size: 12px;
   line-height: 1.45;
   field-sizing: content;
 }
@@ -9930,12 +9934,12 @@ body.is-resizing * {
 
 .agent-side-chat-send {
   display: grid;
-  width: 24px;
-  height: 24px;
+  width: 28px;
+  height: 28px;
   flex: none;
   padding: 0;
   place-items: center;
-  border-radius: 6px;
+  border-radius: 7px;
   background: color-mix(in srgb, var(--agent-accent) 18%, transparent);
   color: var(--agent-accent);
 }
@@ -9951,8 +9955,8 @@ body.is-resizing * {
 }
 
 .agent-side-chat-send svg {
-  width: 12px;
-  height: 12px;
+  width: 13px;
+  height: 13px;
   fill: none;
   stroke: currentColor;
   stroke-width: 1.5;
@@ -9962,14 +9966,25 @@ body.is-resizing * {
 
 .agent-side-question {
   position: relative;
-  width: min(100%, 840px);
-  margin: 0 auto;
+  width: 100%;
   overflow: hidden;
-  border: 1px solid rgba(255, 255, 255, 0.085);
-  border-left: 3px solid color-mix(in srgb, var(--agent-accent) 78%, white 4%);
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--bg-elevated) 84%, var(--bg-pane));
+  border-left: 2px solid color-mix(in srgb, var(--agent-accent) 62%, var(--border));
+  background: transparent;
   animation: agent-side-question-enter 150ms ease-out both;
+}
+
+.agent-side-chat {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  flex-direction: column;
+}
+
+.agent-side-chat .agent-side-question-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
+  padding: 12px 14px 16px;
 }
 
 .agent-side-question.is-error {
@@ -9978,11 +9993,11 @@ body.is-resizing * {
 
 .agent-side-question-head {
   display: flex;
-  min-height: 31px;
+  min-height: 36px;
   align-items: center;
   gap: 7px;
-  padding: 4px 5px 4px 9px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.065);
+  padding: 6px 8px 6px 12px;
+  border-bottom: 1px solid var(--border);
 }
 
 .agent-side-question-icon {
@@ -10147,11 +10162,11 @@ body.is-resizing * {
 @keyframes agent-side-question-enter {
   from {
     opacity: 0;
-    transform: translateY(3px);
+    transform: translateX(6px);
   }
   to {
     opacity: 1;
-    transform: translateY(0);
+    transform: translateX(0);
   }
 }
 
@@ -10949,8 +10964,8 @@ body.is-resizing * {
     padding: 6px 9px 7px;
   }
 
-  .agent-side-question-dock {
-    padding: 6px 9px 7px;
+  .agent-side-chat .agent-side-question-body {
+    padding: 8px 9px 12px;
   }
 
   .agent-control-chip {

@@ -17,7 +17,7 @@ import {
   type AgentFrame,
   type SystemMemory,
 } from "../ipc";
-import type { AdapterContext, AgentAdapter } from "./adapter";
+import type { AdapterContext, AgentAdapter, AntigravitySubagentUpdate, ClaudeSubagentSnapshot } from "./adapter";
 import {
   completionDetailsFromState,
   type AgentCompletionDetails,
@@ -43,9 +43,16 @@ import {
   type AgentEvent,
   type TurnAnnounceInput,
 } from "./events";
+import { hasActiveSubagents } from "./subagents";
 import { latest as latestSession, transcript as sessionTranscript } from "./history";
 import { AGENT_PROGRAMS, type AgentLaunch } from "./launch";
-import { loadClaudeSettingsDefaults } from "./claudeSettings";
+import {
+  CLAUDE_AI_LOGIN_SHADOWED_NOTICE,
+  claudeChromeArgs,
+  loadClaudeChromeDefault,
+  loadClaudeSettingsDefaults,
+  shadowsClaudeAiLogin,
+} from "./claudeSettings";
 import {
   CODEX_CAPACITY_REPLY_DELAY_MS,
   codexCapacityReplySettings,
@@ -265,7 +272,8 @@ function scheduleCheckpoint(session: Session): void {
 export function readyForScheduledSend(termId: string): boolean {
   const session = sessions.get(termId);
   return !!session && !session.disposed && !session.pendingResume && !session.restoring &&
-    !session.state.loadingHistory && !session.state.authenticationRequired && session.state.status === "idle";
+    !session.state.loadingHistory && !session.state.authenticationRequired &&
+    session.state.status === "idle" && !hasActiveSubagents(session.state.items);
 }
 let followupMode: AgentFollowupMode = "queue";
 let capacityReply = codexCapacityReplySettings();
@@ -620,6 +628,8 @@ function nativeResumeCommand(agent: AgentId, program: string, sessionId: string 
       return `${program} resume${quoted}`;
     case "opencode":
       return `${program} --session${quoted}`;
+    case "antigravity":
+      return `${program} --conversation${quoted}`;
     case "claude":
     case "cursor":
     case "grok":
@@ -988,8 +998,10 @@ function emitNow(session: Session, event: AgentEvent): void {
   }
 
   const before = session.state.status;
+  const beforeHadActiveSubagents = hasActiveSubagents(session.state.items);
   const next = applyEvent(session.state, event);
   if (next === session.state) return;
+  const afterHasActiveSubagents = hasActiveSubagents(next.items);
   if (event.type === "user" || event.type === "transcript" ||
       (event.type === "history-loading" && event.loading) ||
       (event.type === "session" && next.sessionId !== session.state.sessionId) ||
@@ -1039,11 +1051,15 @@ function emitNow(session: Session, event: AgentEvent): void {
 
   // Fresh work starts the completion clock. `waiting` → `working` is the user
   // answering a permission prompt mid-turn, not a new job.
-  if (
-    next.status === "working" &&
-    (before === "idle" || before === "starting") &&
-    !next.loadingHistory
-  ) {
+  const startedWork =
+    (next.status === "working" &&
+      (before === "idle" || before === "starting") &&
+      !beforeHadActiveSubagents) ||
+    (next.status === "idle" &&
+      before === "idle" &&
+      !beforeHadActiveSubagents &&
+      afterHasActiveSubagents);
+  if (startedWork && !next.loadingHistory) {
     announceTurnStart(session);
   }
 
@@ -1051,7 +1067,9 @@ function emitNow(session: Session, event: AgentEvent): void {
   // running, waits here. Exactly one is released per idle moment: every
   // protocol we speak runs one turn at a time, so pushing the whole backlog
   // would just make the agent reject the rest.
-  const releasingQueued = next.status === "idle" && !session.interrupted && !session.queuePaused && !session.restoring &&
+  const releasingQueued =
+    next.status === "idle" && !afterHasActiveSubagents && !session.interrupted &&
+    !session.queuePaused && !session.restoring && !session.configuring &&
     !next.loadingHistory && !next.authenticationRequired && session.queued.length > 0;
   const turnEndState = {
     before,
@@ -1059,8 +1077,10 @@ function emitNow(session: Session, event: AgentEvent): void {
     permission: next.permission !== null,
     releasingQueued,
     interrupted: session.interrupted,
+    beforeHadActiveSubagents,
+    hasActiveSubagents: afterHasActiveSubagents,
   };
-  const ended = isTurnEnd(turnEndState);
+  const ended = !(event.type === "turn-end" && event.historyReplay) && isTurnEnd(turnEndState);
   const turnEnd: TurnAnnounceInput = {
     ...turnEndState,
     userInitiated: session.userInitiatedTurn,
@@ -1075,11 +1095,14 @@ function emitNow(session: Session, event: AgentEvent): void {
     session.deferredTurnEnd = null;
   }
 
-  // Spend the flags that belonged to the turn which just became idle before
-  // releasing a queued prompt. `dispatch` starts the next turn synchronously
-  // and gives it fresh flags; clearing them afterwards would make that real
-  // user turn look like a synthetic resume/load when it eventually finishes.
-  if (didStatusEnterIdle(before, next.status)) {
+  // Spend the flags that belonged to the turn which just became fully idle
+  // before releasing a queued prompt. When the parent pauses while subagents
+  // are still active, keep user ownership alive until those subagents settle.
+  const enteredFullyIdle =
+    next.status === "idle" &&
+    !afterHasActiveSubagents &&
+    (didStatusEnterIdle(before, next.status) || beforeHadActiveSubagents);
+  if (enteredFullyIdle) {
     session.interrupted = false;
     session.userInitiatedTurn = false;
   }
@@ -1103,6 +1126,7 @@ function emitNow(session: Session, event: AgentEvent): void {
   if (
     event.type === "turn-end" ||
     event.type === "permission" ||
+    beforeHadActiveSubagents !== afterHasActiveSubagents ||
     (event.type === "status" &&
       (event.status === "idle" ||
         event.status === "waiting" ||
@@ -1119,7 +1143,7 @@ function emitNow(session: Session, event: AgentEvent): void {
   if (
     ended &&
     next.loadingHistory &&
-    event.type === "turn-end" &&
+    (event.type === "turn-end" || (beforeHadActiveSubagents && !afterHasActiveSubagents)) &&
     isAnnounceableTurn(turnEnd)
   ) {
     // Codex can finish the live resumed turn while transcript pages are still
@@ -1133,6 +1157,31 @@ function emitNow(session: Session, event: AgentEvent): void {
   }
   if (["session", "status", "user", "queue", "unqueue", "resumed", "turn-end"].includes(event.type)) {
     checkpoint(session);
+  }
+}
+
+const ORPHANED_WORK_OUTPUT =
+  "Stopped before reporting back. The process that ran it has ended.";
+
+/**
+ * Settle every row the previous agent process left running.
+ *
+ * Claude runs background agents inside its CLI. A crash, a relaunch, or an
+ * app restart that cannot reattach ends that process, and a new one never
+ * reports on the old agents. Left alone, those rows read "working" forever.
+ */
+function settleOrphanedWork(session: Session): void {
+  for (const item of session.state.items) {
+    if (item.kind !== "tool" || (item.status !== "running" && item.status !== "pending")) continue;
+    emit(session, {
+      type: "tool",
+      callId: item.callId,
+      status: "error",
+      ...(item.output.trim() ? {} : { output: ORPHANED_WORK_OUTPUT }),
+      ...(item.tool === "task"
+        ? { subagent: { activity: "Stopped before reporting back", statusUnavailable: false } }
+        : {}),
+    });
   }
 }
 
@@ -1354,6 +1403,10 @@ function handleFrame(session: Session, frame: AgentFrame): void {
     case "stderr":
       session.stderr.push(frame.line);
       if (session.stderr.length > 50) session.stderr.shift();
+      if (session.state.agent === "claude" && shadowsClaudeAiLogin(frame.line) &&
+          !session.state.items.some((item) => item.kind === "notice" && item.text === CLAUDE_AI_LOGIN_SHADOWED_NOTICE)) {
+        emit(session, { type: "notice", tone: "info", text: CLAUDE_AI_LOGIN_SHADOWED_NOTICE });
+      }
       return;
     case "exit": {
       if (frame.reconnect && reconnect(session)) return;
@@ -1380,6 +1433,7 @@ function handleFrame(session: Session, frame: AgentFrame): void {
       } else {
         emit(session, { type: "status", status: "exited" });
       }
+      if (session.adapter.backgroundWorkEndsWithProcess) settleOrphanedWork(session);
       notifyNow(session);
       return;
     }
@@ -1550,6 +1604,21 @@ export async function start(
       runtimeProcesses: (pids) => invoke<void>("agent_proc_set_runtime_roots", { id: termId, pids }),
       syncAccount: (signedIn) => agentCodexAuthSync(termId, signedIn),
       interruptFallback: () => invoke<void>("agent_codex_interrupt", { id: termId }),
+      ...(TAURI_RUNTIME && launch.agent === "claude" ? {
+        readClaudeSubagents: (sessionId: string, agentIds: string[]) =>
+          invoke<ClaudeSubagentSnapshot[]>("agent_claude_subagents", {
+            cwd,
+            sessionId,
+            agentIds,
+            configDir: launch.env.CLAUDE_CONFIG_DIR ?? null,
+          }),
+      } : {}),
+      ...(TAURI_RUNTIME && launch.agent === "antigravity" ? {
+        readAntigravitySubagents: (sessionId: string, callIds: string[]) =>
+          invoke<AntigravitySubagentUpdate[]>("agent_antigravity_subagents", { sessionId, callIds }),
+        readAntigravityActivity: (sessionId: string) =>
+          invoke<boolean | null>("agent_antigravity_activity", { sessionId }),
+      } : {}),
       files: {
         readText: async (path) => {
           const file = await invoke<{
@@ -1593,6 +1662,7 @@ export async function start(
       if (attached) {
         session.channel = channel;
         session.recovery = null;
+        adapter.reattached?.(session.context, session.state.items);
         emit(session, { type: "resumed", sessionId: session.state.sessionId ?? "", title: "", silent: true });
       }
     }
@@ -1608,6 +1678,10 @@ export async function start(
     }
     // Shared-service recovery replaces only the proxy, preserving its work.
     if (!attached && recovery) await agentProcStop(termId, launch.agent === "codex" || options.preserveCodexWork).catch(() => {});
+    // Headless Claude ignores Chrome's "Enabled by default"; carry it over.
+    const chromeArgs = !attached && launch.agent === "claude"
+      ? claudeChromeArgs([...launch.wrapperArgs, ...launch.forwardArgs], await loadClaudeChromeDefault())
+      : [];
     if (session.disposed) return null;
     // Never reuse the attach channel: a declined attach ended it on the native
     // side, so a process started on it would stream into nothing.
@@ -1626,6 +1700,7 @@ export async function start(
           ...launch.wrapperArgs,
           ...launch.forwardArgs,
           ...definition.headlessArgs,
+          ...chromeArgs,
           ...adapter.args(launch),
         ],
         cwd,
@@ -1671,7 +1746,11 @@ export async function start(
 
   if (!attached) {
     // Rows recovered from a previous process were not streamed by this adapter.
-    if (session.state.items.length) adapter.adoptTranscript?.(session.state.items);
+    if (session.state.items.length) {
+      // That process is gone, and so is any background work it was running.
+      if (adapter.backgroundWorkEndsWithProcess) settleOrphanedWork(session);
+      adapter.adoptTranscript?.(session.state.items);
+    }
     adapter.start(session.context);
   }
   watchDelivery(session);
@@ -2051,13 +2130,26 @@ export async function promptSubagent(
   const session = sessions.get(termId);
   const clean = text.trim();
   if (!session || session.disposed || !clean || !session.adapter.promptSubagent) return false;
+  const previousInterrupted = session.interrupted;
+  const previousUserInitiated = session.userInitiatedTurn;
+  session.interrupted = false;
+  session.userInitiatedTurn = true;
   try {
-    return await session.adapter.promptSubagent(
+    const accepted = await session.adapter.promptSubagent(
       threadId,
       { text: clean, images: [] },
       session.context,
     );
+    if (!accepted && !session.disposed) {
+      session.interrupted = previousInterrupted;
+      session.userInitiatedTurn = previousUserInitiated;
+    }
+    return accepted;
   } catch {
+    if (!session.disposed) {
+      session.interrupted = previousInterrupted;
+      session.userInitiatedTurn = previousUserInitiated;
+    }
     return false;
   }
 }
@@ -2129,7 +2221,7 @@ export function configure(
     }
     const context = contextWithoutUserEcho(session);
     const mode = value.trim() as AgentAccessMode;
-    if (!["default", "read-only", "workspace", "full-access"].includes(mode)) return;
+    if (!["default", "read-only", "workspace", "auto", "full-access"].includes(mode)) return;
     const configured = session.adapter.configureAccess?.(mode, context);
     if (configured === undefined || configured === false) {
       emit(session, {
@@ -2178,9 +2270,8 @@ export function configure(
  */
 async function applyResume(session: Session, sessionId: string, title: string, silent = false): Promise<void> {
   cancelCapacityReply(session);
-  // Rejoining is an explicit request. Idle history stays silent because its
-  // working -> idle transition occurs under `loadingHistory`; a live turn
-  // keeps ownership until its real completion arrives.
+  // Rejoining can recover a live turn. Keep ownership for its eventual
+  // completion. Adapters identify ends that only settle stored history.
   session.interrupted = false;
   session.userInitiatedTurn = true;
   session.restoring = true;
@@ -2399,13 +2490,20 @@ export function dismissSideQuestion(termId: string): void {
 
 /**
  * Ctrl+C from a custom UI means "leave the harness", matching its terminal
- * gesture instead of merely stopping the current turn. Claude and Grok guard
- * exits with a quick second press; the other harnesses close immediately.
+ * gesture instead of merely stopping the current turn. Claude, Grok, and
+ * Antigravity guard exits with a quick second press; the other harnesses close
+ * immediately.
  */
 export function requestExit(termId: string): "armed" | "close" | "none" {
   const session = sessions.get(termId);
   if (!session || session.disposed) return "none";
-  if (session.state.agent !== "claude" && session.state.agent !== "grok") return "close";
+  if (
+    session.state.agent !== "claude" &&
+    session.state.agent !== "grok" &&
+    session.state.agent !== "antigravity"
+  ) {
+    return "close";
+  }
 
   const now = Date.now();
   if (session.exitArmedUntil >= now) {

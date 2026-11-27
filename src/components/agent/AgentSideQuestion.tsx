@@ -53,9 +53,9 @@ function SideTurn({ turn }: { turn: SideQuestion }) {
 }
 
 /**
- * Multi-turn side chat opened with `/side` or `/btw`. It takes half of the
- * agent pane, keeps its own input, and stays separate from the main
- * transcript until the user closes it.
+ * Multi-turn side chat opened with `/side` or `/btw`. It takes the right
+ * vertical half of the agent pane, keeps its own input, and stays separate
+ * from the main transcript until the user closes it.
  */
 export function AgentSideChat({ conversation, onDismiss, onSubmit, onLeave, autoFocus = true }: Props) {
   const [draft, setDraft] = useState("");
