@@ -8,6 +8,7 @@ import {
   agentProcStart,
   agentProcAttach,
   agentProcSequence,
+  agentProcHealth,
   agentProcStop,
   agentCodexAuthSync,
   openCodeModelsRefresh,
@@ -111,6 +112,10 @@ interface Session {
   /** Local cursor seen behind the native one on the previous poll. */
   deliveryStalledAt: number | null;
   reattaching: boolean;
+  /** Polls the native registry so a process that died unannounced is noticed. */
+  healthWatch: ReturnType<typeof setInterval> | null;
+  /** Consecutive polls that found the process gone while the session looked live. */
+  healthMisses: number;
   frameFailureReported: boolean;
   state: AgentSessionState;
   adapter: AgentAdapter;
@@ -1305,6 +1310,87 @@ function watchDelivery(session: Session): void {
 function stopDeliveryWatch(session: Session): void {
   if (session.deliveryWatch) clearInterval(session.deliveryWatch);
   session.deliveryWatch = null;
+  if (session.healthWatch) clearInterval(session.healthWatch);
+  session.healthWatch = null;
+}
+
+/** How often a live session asks the native side whether its process still runs. */
+const HEALTH_CHECK_INTERVAL_MS = 4_000;
+/**
+ * Polls that must agree before the process is declared gone. The exit frame
+ * normally arrives within milliseconds, and a stalled channel is replayed by
+ * the delivery watch within two of its polls; this only speaks after both.
+ */
+const HEALTH_MISSES_BEFORE_EXIT = 3;
+
+function watchHealth(session: Session): void {
+  if (!TAURI_RUNTIME || session.healthWatch || session.disposed) return;
+  session.healthWatch = setInterval(() => void verifySessionHealth(session), HEALTH_CHECK_INTERVAL_MS);
+  (session.healthWatch as { unref?: () => void }).unref?.();
+}
+
+/**
+ * Notice an agent process that ended without its exit ever reaching this
+ * session. The exit travels on the same channel as protocol output, so a lost
+ * or swallowed frame used to leave the pane looking idle or busy until the
+ * next message failed to send.
+ */
+export async function verifyHealth(termId: string): Promise<void> {
+  const session = sessions.get(termId);
+  if (session) await verifySessionHealth(session);
+}
+
+function healthCheckApplies(session: Session): boolean {
+  const status = session.state.status;
+  return !session.disposed && sessions.get(session.termId) === session &&
+    status !== "exited" && status !== "error" &&
+    // No channel yet means the process is still being started or reattached.
+    !!session.channel && !session.restoring && !session.reconnecting && !session.reattaching &&
+    !session.connectionError && !session.protocolWriter.failure && !session.authHandoff &&
+    !teardowns.has(session.termId);
+}
+
+async function verifySessionHealth(session: Session): Promise<void> {
+  if (session.disposed || sessions.get(session.termId) !== session) {
+    stopDeliveryWatch(session);
+    return;
+  }
+  if (!healthCheckApplies(session)) {
+    session.healthMisses = 0;
+    return;
+  }
+  const local = session.frameSequence;
+  let health;
+  // A failed call says nothing about the process.
+  try { health = await agentProcHealth(session.termId); } catch { return; }
+  if (!healthCheckApplies(session)) {
+    session.healthMisses = 0;
+    return;
+  }
+  // Still running, or its last frames (the exit among them) are still landing.
+  if ((health && !health.exited) || session.frameSequence !== local) {
+    session.healthMisses = 0;
+    return;
+  }
+  session.healthMisses += 1;
+  if (session.healthMisses < HEALTH_MISSES_BEFORE_EXIT) return;
+  session.healthMisses = 0;
+  try {
+    // A shared Codex proxy with no registry entry left can only be replaced.
+    handleExit(session, health?.code ?? null, health ? health.reconnect : session.state.agent === "codex");
+  } catch (error) {
+    reportFrameFailure(session, error);
+  }
+  if (!healthCheckApplies(session)) return;
+  // The ordinary path could not end the session. Do not leave it looking live.
+  session.protocolWriter.close();
+  session.state = {
+    ...session.state,
+    status: "error",
+    permission: null,
+    error: `The ${session.state.label} process is no longer running. Reopen the conversation to continue it.`,
+  };
+  notifyNow(session);
 }
 
 /**
@@ -1408,36 +1494,54 @@ function handleFrame(session: Session, frame: AgentFrame): void {
         emit(session, { type: "notice", tone: "info", text: CLAUDE_AI_LOGIN_SHADOWED_NOTICE });
       }
       return;
-    case "exit": {
-      if (frame.reconnect && reconnect(session)) return;
-      if (session.protocolWriter.failure || session.reconnecting) return;
-      session.protocolWriter.close();
-      const detail = session.stderr.slice(-6).join("\n").trim();
-      if (frame.reconnect && session.state.agent === "codex") {
-        failConnection(session,
-          `Codex disconnected repeatedly and could not reconnect. Your conversation and unsent messages have been kept.${detail ? `\n${detail}` : ""}`, true);
-        return;
-      }
-      void Promise.resolve(session.adapter.dispose?.(session.context)).catch(() => {});
-      if (isAuthenticationFailure(detail) && handoffToNativeAuth(session, "login")) return;
-      const ready = session.state.status !== "starting" && session.state.status !== "error";
-      if (!ready) {
-        // Never got going: the stderr tail is the only explanation there is.
-        emit(session, {
-          type: "status",
-          status: "error",
-          error:
-            detail ||
-            `${session.state.label} exited${frame.code === null ? "" : ` with code ${frame.code}`} before it was ready.`,
-        });
-      } else {
-        emit(session, { type: "status", status: "exited" });
-      }
-      if (session.adapter.backgroundWorkEndsWithProcess) settleOrphanedWork(session);
-      notifyNow(session);
+    case "exit":
+      handleExit(session, frame.code, frame.reconnect === true);
       return;
-    }
   }
+}
+
+/**
+ * The agent process is gone. A session the user closed is disposed before its
+ * process ends, so an exit that reaches a live session was not asked for.
+ */
+function handleExit(session: Session, code: number | null, reconnectRequested: boolean): void {
+  if (reconnectRequested && reconnect(session)) return;
+  if (session.protocolWriter.failure || session.reconnecting) return;
+  session.protocolWriter.close();
+  const detail = session.stderr.slice(-6).join("\n").trim();
+  if (reconnectRequested && session.state.agent === "codex") {
+    failConnection(session,
+      `Codex disconnected repeatedly and could not reconnect. Your conversation and unsent messages have been kept.${detail ? `\n${detail}` : ""}`, true);
+    return;
+  }
+  void Promise.resolve(session.adapter.dispose?.(session.context)).catch(() => {});
+  if (isAuthenticationFailure(detail) && handoffToNativeAuth(session, "login")) return;
+  const status = session.state.status;
+  const ready = status !== "starting" && status !== "error";
+  const exitCode = code === null ? "" : ` with code ${code}`;
+  // Mid-turn, with background work still running, or with a failing exit
+  // code: the agent did not finish, it died. Say so instead of "ended".
+  const busy = status === "working" || status === "waiting" || hasActiveSubagents(session.state.items);
+  if (!ready) {
+    // Never got going: the stderr tail is the only explanation there is.
+    emit(session, {
+      type: "status",
+      status: "error",
+      error: detail || `${session.state.label} exited${exitCode} before it was ready.`,
+    });
+  } else if (busy || (code !== null && code !== 0)) {
+    emit(session, {
+      type: "status",
+      status: "error",
+      error:
+        `The ${session.state.label} process stopped unexpectedly${exitCode}${busy ? " while it was still working" : ""}. ` +
+        `Reopen the conversation to continue it.${detail ? `\n${detail}` : ""}`,
+    });
+  } else {
+    emit(session, { type: "status", status: "exited" });
+  }
+  if (session.adapter.backgroundWorkEndsWithProcess) settleOrphanedWork(session);
+  notifyNow(session);
 }
 
 /**
@@ -1523,6 +1627,8 @@ export async function start(
     deliveryWatch: null,
     deliveryStalledAt: null,
     reattaching: false,
+    healthWatch: null,
+    healthMisses: 0,
     frameFailureReported: false,
     adapter,
     launch,
@@ -1754,6 +1860,7 @@ export async function start(
     adapter.start(session.context);
   }
   watchDelivery(session);
+  watchHealth(session);
 
   // Claude only reports model/effort on the first turn's system/init. Until
   // then, seed the header and pickers from the same settings file the real

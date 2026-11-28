@@ -109,6 +109,8 @@ interface Session extends TermMeta {
   spawned: boolean;
   /** Set once the spawn handshake starts; a second start would collide server-side. */
   starting: boolean;
+  /** When the hidden shell under an agent surface was last replaced after dying. */
+  shellRespawns: number[];
   /** Bytes typed before the PTY was ready. */
   pending: string[];
   /** Decodes PTY bytes; `stream: true` so multi-byte chars can span chunks. */
@@ -1109,6 +1111,7 @@ function create(id: string, opts: TerminalStartOptions): Session {
     dataChannel: null,
     spawned: false,
     starting: false,
+    shellRespawns: [],
     pending: [],
     decoder: new TextDecoder(),
     // `session` is only read when a frame completes, long after this returns.
@@ -1548,6 +1551,7 @@ async function start(session: Session, opts: TerminalStartOptions) {
     // A program killed mid-redraw leaves a frame open; draw it before the notice
     // so the last thing it managed to print stays above its own epitaph.
     session.frames.flush();
+    if (respawnShellUnderAgent(session, opts)) return;
     session.cursorVisible = false;
     clearTyping(session);
     hideVisualCursor(session);
@@ -1568,34 +1572,7 @@ async function start(session: Session, opts: TerminalStartOptions) {
   session.unlisten.push(offExit);
 
   try {
-    const args = {
-      id,
-      cwd: opts.cwd ?? null,
-      shell: opts.shell ?? null,
-      cols: session.term.cols,
-      rows: session.term.rows,
-    };
-    let result;
-    try {
-      result = await ptySpawn(args, dataChannel);
-    } catch (error) {
-      // A webview reload (Vite HMR, manual refresh) leaves the backend PTY
-      // alive while this side starts from scratch — the restored pane asks for
-      // an id the backend still owns. Kill the orphan and spawn again.
-      if (!String(error).includes("already exists")) throw error;
-      await ptyKill(id);
-      result = await ptySpawn(args, dataChannel);
-    }
-    session.shellLabel = result.shell_label;
-    if (!session.titleLocked) session.title = result.shell_label;
-    if (!session.cwd) session.cwd = result.cwd;
-    session.spawned = true;
-    // The pane may have been resized while the spawn was in flight; resizes are
-    // dropped before the PTY exists, so re-assert the current geometry.
-    void ptyResize(id, session.term.cols, session.term.rows);
-    for (const chunk of session.pending) void ptyWrite(id, chunk);
-    session.pending = [];
-    notifySession(id);
+    await spawnShell(session, opts, dataChannel);
     const startupCommand = opts.command?.trim();
     if (startupCommand) submitCommand(id, startupCommand);
   } catch (error) {
@@ -1603,6 +1580,91 @@ async function start(session: Session, opts: TerminalStartOptions) {
     session.term.write(`\r\n\x1b[31mfailed to start shell: ${String(error)}\x1b[0m\r\n`);
     notifySession(id);
   }
+}
+
+async function spawnShell(
+  session: Session,
+  opts: TerminalStartOptions,
+  dataChannel: Channel<ArrayBuffer>,
+): Promise<void> {
+  const { id } = session;
+  const args = {
+    id,
+    cwd: opts.cwd ?? null,
+    shell: opts.shell ?? null,
+    cols: session.term.cols,
+    rows: session.term.rows,
+  };
+  let result;
+  try {
+    result = await ptySpawn(args, dataChannel);
+  } catch (error) {
+    // A webview reload (Vite HMR, manual refresh) leaves the backend PTY
+    // alive while this side starts from scratch — the restored pane asks for
+    // an id the backend still owns. Kill the orphan and spawn again.
+    if (!String(error).includes("already exists")) throw error;
+    await ptyKill(id);
+    result = await ptySpawn(args, dataChannel);
+  }
+  session.shellLabel = result.shell_label;
+  if (!session.titleLocked) session.title = result.shell_label;
+  if (!session.cwd) session.cwd = result.cwd;
+  session.spawned = true;
+  // The pane may have been resized while the spawn was in flight; resizes are
+  // dropped before the PTY exists, so re-assert the current geometry.
+  void ptyResize(id, session.term.cols, session.term.rows);
+  for (const chunk of session.pending) void ptyWrite(id, chunk);
+  session.pending = [];
+  notifySession(id);
+}
+
+/** A shell that keeps dying is broken, not unlucky. Stop replacing it. */
+const SHELL_RESPAWN_LIMIT = 3;
+const SHELL_RESPAWN_WINDOW_MS = 60_000;
+
+/**
+ * Replace the hidden shell of a pane whose agent is still running.
+ *
+ * The agent is a separate process, so losing the idle shell underneath it
+ * (killed by a cleanup command, for instance) changes nothing the user is
+ * waiting on. Reporting it as the pane exiting flagged healthy agents as dead.
+ * The pane gets a fresh shell to return to instead; only a shell that cannot
+ * be replaced is reported.
+ */
+function respawnShellUnderAgent(session: Session, opts: TerminalStartOptions): boolean {
+  if (!session.agentUi) return false;
+  const now = Date.now();
+  session.shellRespawns = session.shellRespawns.filter((at) => now - at < SHELL_RESPAWN_WINDOW_MS);
+  if (session.shellRespawns.length >= SHELL_RESPAWN_LIMIT) return false;
+  session.shellRespawns.push(now);
+
+  const { id } = session;
+  session.spawned = false;
+  session.busy = false;
+  session.blocks.busyChanged(false);
+  session.term.write("\r\n\x1b[38;5;244m[shell restarted]\x1b[0m\r\n");
+  const dataChannel = new Channel<ArrayBuffer>();
+  dataChannel.onmessage = (payload) => {
+    const text = session.decoder.decode(new Uint8Array(payload), { stream: true });
+    session.frames.push(text);
+  };
+  session.dataChannel = dataChannel;
+  void (async () => {
+    try {
+      // Free the id the dead shell still holds in the native registry.
+      await ptyKill(id);
+      if (sessions.get(id) !== session) return;
+      await spawnShell(session, { ...opts, cwd: session.cwd || opts.cwd, command: null }, dataChannel);
+      // The pane was closed while its replacement shell was starting.
+      if (sessions.get(id) !== session) void ptyKill(id);
+    } catch (error) {
+      if (sessions.get(id) !== session) return;
+      session.exited = true;
+      session.term.write(`\r\n\x1b[31mfailed to restart shell: ${String(error)}\x1b[0m\r\n`);
+      notifySession(id);
+    }
+  })();
+  return true;
 }
 
 /**

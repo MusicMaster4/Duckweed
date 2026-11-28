@@ -49,7 +49,12 @@ pub struct Session {
     pid: Option<u32>,
     cols: u16,
     rows: u16,
+    /// Distinguishes this shell from an earlier one spawned under the same id.
+    generation: u64,
 }
+
+/// Source of `Session::generation`.
+static NEXT_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 #[derive(Default)]
 struct PtyInner {
@@ -95,6 +100,16 @@ impl PtyManager {
             .unwrap()
             .insert(id.clone(), Arc::new(Mutex::new(session)));
         self.inner.busy.lock().unwrap().insert(id, false);
+    }
+
+    /// True while `generation` is still the shell registered for `id`.
+    ///
+    /// A killed shell is removed from the registry before it dies, and a pane
+    /// that respawns reuses its id. Without this check the old shell's exit
+    /// would be reported against the replacement that is running fine.
+    fn is_current(&self, id: &str, generation: u64) -> bool {
+        self.session(id)
+            .is_some_and(|session| session.lock().unwrap().generation == generation)
     }
 
     fn session(&self, id: &str) -> Option<Arc<Mutex<Session>>> {
@@ -366,6 +381,7 @@ pub fn spawn(
 
     let mut reader = pair.master.try_clone_reader().map_err(err)?;
     let writer = pair.master.take_writer().map_err(err)?;
+    let generation = NEXT_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
     manager.insert(
         id.clone(),
@@ -376,6 +392,7 @@ pub fn spawn(
             pid,
             cols,
             rows,
+            generation,
         },
     );
 
@@ -446,10 +463,15 @@ pub fn spawn(
     // Waiter thread: report the exit status so the pane can show it.
     let exit_app = app.clone();
     let exit_id = id.clone();
+    let exit_manager = manager.clone();
     std::thread::Builder::new()
         .name(format!("pty-wait-{exit_id}"))
         .spawn(move || {
             let code = child.wait().ok().map(|status| status.exit_code());
+            // Killed on purpose, or already replaced: the pane has moved on.
+            if !exit_manager.is_current(&exit_id, generation) {
+                return;
+            }
             let _ = exit_app.emit(
                 &format!("pty:exit:{exit_id}"),
                 ExitPayload { id: exit_id, code },

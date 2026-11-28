@@ -89,6 +89,21 @@ struct Process {
     reconnect_on_exit: bool,
     approvals: Arc<Mutex<ApprovalQueue>>,
     channel: Arc<Mutex<AgentDelivery>>,
+    /// Set by the waiter thread once the child is gone: exit code and whether
+    /// the frontend should reconnect instead of ending the session.
+    exit: Option<(Option<i32>, bool)>,
+}
+
+/// Liveness of one agent process, read directly from the registry.
+///
+/// The `Exit` frame travels over the same channel as protocol output. When
+/// that channel stops delivering, the session would otherwise look alive until
+/// the next message fails to send.
+#[derive(Serialize, Clone)]
+pub struct AgentHealth {
+    pub exited: bool,
+    pub code: Option<i32>,
+    pub reconnect: bool,
 }
 
 const MAX_REPLAY_BYTES: usize = 16 * 1024 * 1024;
@@ -457,6 +472,16 @@ impl AgentProcManager {
     }
     fn get(&self, id: &str) -> Option<Arc<Mutex<Process>>> {
         self.inner.processes.lock().unwrap().get(id).cloned()
+    }
+
+    /// `None` when no process is registered under `id` at all.
+    pub fn health(&self, id: &str) -> Option<AgentHealth> {
+        let handle = self.get(id)?;
+        let exit = handle.lock().unwrap().exit;
+        Some(match exit {
+            Some((code, reconnect)) => AgentHealth { exited: true, code, reconnect },
+            None => AgentHealth { exited: false, code: None, reconnect: false },
+        })
     }
 
     /// Number of coding-agent sessions currently owned by the custom UI.
@@ -1015,6 +1040,7 @@ pub fn start(
             reconnect_on_exit: false,
             approvals: Arc::new(Mutex::new(ApprovalQueue::default())),
             channel: Arc::new(Mutex::new(AgentDelivery::new(on_frame, options.renderer_recovery_id))),
+            exit: None,
         })),
     );
 
@@ -1168,6 +1194,7 @@ pub fn start(
             // A proxy can exit during daemon maintenance or lose its local
             // connection while provider-owned work is still running.
             let reconnect = process.reconnect_on_exit || process.service.is_some();
+            process.exit = Some((code, reconnect));
             drop(process);
             let _ = channel.lock().unwrap().send(AgentFrame::Exit { code, reconnect });
         })
@@ -1523,7 +1550,7 @@ mod tests {
                 stdin: Some(Arc::new(Mutex::new(ProcessInput::JsonLines(input)))),
                 child, pid: Some(pid), runtime_roots: Vec::new(), ownership,
                 service: Some(crate::codex_transport::test_service(&root)), reconnect_on_exit: false,
-                approvals: Arc::new(Mutex::new(ApprovalQueue::default())), channel: Arc::new(Mutex::new(AgentDelivery::new(Channel::new(|_| Ok(())), None))),
+                approvals: Arc::new(Mutex::new(ApprovalQueue::default())), channel: Arc::new(Mutex::new(AgentDelivery::new(Channel::new(|_| Ok(())), None))), exit: None,
             }));
             // All cleanup requests are confirmed locally. This fixture tests
             // pipe writes and must never invoke the real control-plane fallback.
@@ -1586,7 +1613,7 @@ mod tests {
             stdin: Some(Arc::new(Mutex::new(ProcessInput::JsonLines(input)))),
             child, pid: Some(pid), runtime_roots: Vec::new(),
             ownership: CodexOwnership::default(), service: None, reconnect_on_exit: false,
-            approvals: Arc::new(Mutex::new(ApprovalQueue::default())), channel: Arc::new(Mutex::new(AgentDelivery::new(Channel::new(|_| Ok(())), None))),
+            approvals: Arc::new(Mutex::new(ApprovalQueue::default())), channel: Arc::new(Mutex::new(AgentDelivery::new(Channel::new(|_| Ok(())), None))), exit: None,
         }));
         let manager = AgentProcManager::default();
         manager.inner.processes.lock().unwrap().insert("backpressure".into(), handle.clone());

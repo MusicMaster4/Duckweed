@@ -46,6 +46,7 @@ let attachOverride: ((id: string, sequence: number, channel: { onmessage?: (fram
 const attachedChannels: Array<{ onmessage?: ((frame: AgentFrame) => void) | null }> = [];
 let startedChannel: { onmessage?: ((frame: AgentFrame) => void) | null } | null = null;
 let nativeSequence: number | null = null;
+let nativeHealth: { exited: boolean; code: number | null; reconnect: boolean } | null = { exited: false, code: null, reconnect: false };
 const desktopOpens: { threadId: string | null; cwd: string; prompt?: string }[] = [];
 let desktopFailure = false;
 const nativeStopModes: boolean[] = [];
@@ -90,6 +91,7 @@ mock.module("../ipc", () => ({
     return attachOverride ? attachOverride(id, sequence, channel) : false;
   },
   agentProcSequence: async () => nativeSequence,
+  agentProcHealth: async () => nativeHealth,
   agentProcSend: async (_id: string, line: string) => {
     sent.push(line);
     await sendOverride?.(line);
@@ -917,10 +919,72 @@ describe("Custom agent UI sessions", () => {
     try {
       frameSink?.({ kind: "exit", code: 1, reconnect: false });
       await flush();
-      expect(session.get(termId)?.status).toBe("exited");
+      // Background agents were still running: this is a crash, not an ending.
+      expect(session.get(termId)?.status).toBe("error");
+      expect(session.get(termId)?.error).toContain("stopped unexpectedly with code 1 while it was still working");
       expect(session.get(termId)?.items.find((item) => item.kind === "tool" && item.callId === "call-docs"))
         .toMatchObject({ status: "error", subagent: { activity: "Stopped before reporting back" } });
     } finally {
+      session.stop(termId);
+    }
+  });
+
+  test("an idle agent that exits cleanly ends without an error", async () => {
+    const termId = "clean-claude-exit";
+    const launch: AgentLaunch = { ...grokLaunch, agent: "claude", program: "claude" };
+    await session.start(termId, launch, "H:/project");
+    frameSink?.({ kind: "sequenced", sequence: 1,
+      frame: { kind: "stdout", line: JSON.stringify({ type: "system", subtype: "init", session_id: "clean-exit" }) } });
+    try {
+      frameSink?.({ kind: "exit", code: 0, reconnect: false });
+      await flush();
+      expect(session.get(termId)?.status).toBe("exited");
+      expect(session.get(termId)?.error).toBeNull();
+    } finally {
+      session.stop(termId);
+    }
+  });
+
+  test("a process that died without its exit frame arriving is reported", async () => {
+    const termId = "silently-dead-claude";
+    const launch: AgentLaunch = { ...grokLaunch, agent: "claude", program: "claude" };
+    await session.start(termId, launch, "H:/project");
+    frameSink?.({ kind: "sequenced", sequence: 1,
+      frame: { kind: "stdout", line: JSON.stringify({ type: "system", subtype: "init", session_id: "silent-death" }) } });
+    session.submit(termId, "Keep working");
+    await flush();
+    try {
+      // A running process is never second-guessed, however often it is polled.
+      for (let poll = 0; poll < 5; poll += 1) await session.verifyHealth(termId);
+      expect(session.get(termId)?.status).toBe("working");
+
+      nativeHealth = { exited: true, code: 3, reconnect: false };
+      // The exit frame and a channel replay get their chance to arrive first.
+      await session.verifyHealth(termId);
+      await session.verifyHealth(termId);
+      expect(session.get(termId)?.status).toBe("working");
+      await session.verifyHealth(termId);
+      expect(session.get(termId)?.status).toBe("error");
+      expect(session.get(termId)?.error).toContain("stopped unexpectedly with code 3 while it was still working");
+    } finally {
+      nativeHealth = { exited: false, code: null, reconnect: false };
+      session.stop(termId);
+    }
+  });
+
+  test("an agent whose native process is no longer registered is reported", async () => {
+    const termId = "unregistered-claude";
+    const launch: AgentLaunch = { ...grokLaunch, agent: "claude", program: "claude" };
+    await session.start(termId, launch, "H:/project");
+    frameSink?.({ kind: "sequenced", sequence: 1,
+      frame: { kind: "stdout", line: JSON.stringify({ type: "system", subtype: "init", session_id: "unregistered" }) } });
+    await flush();
+    nativeHealth = null;
+    try {
+      for (let poll = 0; poll < 3; poll += 1) await session.verifyHealth(termId);
+      expect(session.get(termId)?.status).toBe("exited");
+    } finally {
+      nativeHealth = { exited: false, code: null, reconnect: false };
       session.stop(termId);
     }
   });

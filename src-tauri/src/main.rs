@@ -755,6 +755,12 @@ fn agent_proc_sequence(manager: State<'_, AgentProcManager>, id: String, instanc
     manager.sequence(&id, &instance_id)
 }
 
+/// Whether the agent process behind a pane is still running.
+#[tauri::command]
+fn agent_proc_health(manager: State<'_, AgentProcManager>, id: String) -> Option<agent_proc::AgentHealth> {
+    manager.health(&id)
+}
+
 /// Global unattended permission policy, independent of window focus or visibility.
 #[tauri::command]
 fn agent_automatic_approval(manager: State<'_, AgentProcManager>, setting: serde_json::Value) {
@@ -1521,6 +1527,7 @@ fn main() {
             agent_proc_start,
             agent_proc_attach,
             agent_proc_sequence,
+            agent_proc_health,
             agent_proc_send,
             agent_automatic_approval,
             agent_proc_set_runtime_roots,

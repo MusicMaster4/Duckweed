@@ -583,6 +583,17 @@ export const agentProcAttach = (id: string, instanceId: string, sequence: number
 export const agentProcSequence = (id: string, instanceId: string) =>
   invoke<number | null>("agent_proc_sequence", { id, instanceId });
 
+export interface AgentHealth {
+  exited: boolean;
+  code: number | null;
+  /** The native side would have asked for a reconnect rather than an ending. */
+  reconnect: boolean;
+}
+
+/** Whether the agent process behind a pane still runs. Null when none is registered. */
+export const agentProcHealth = (id: string) =>
+  invoke<AgentHealth | null>("agent_proc_health", { id });
+
 /** Global native policy also applies to agents launched after this call. */
 export const agentAutomaticApproval = (setting: number | "until-disabled" | null) =>
   invoke<void>("agent_automatic_approval", { setting });
