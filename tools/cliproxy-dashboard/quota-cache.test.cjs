@@ -203,6 +203,7 @@ test('native management patch is idempotent, fails safely and has valid JavaScri
   const html = fs.readFileSync(path.join(__dirname, 'management-fixture.html'), 'utf8');
   const patched = patchHtml(html);
   assert.equal(patchHtml(patched), patched);
+  assert.ok(patched.includes('globalThis.duckweedReadClaudePlan(n,Fm.getState()'));
   assert.throws(() => patchHtml('<html><head></head><body></body></html>'), /left unchanged/);
   const script = [...patched.matchAll(/<script([^>]*)>([\s\S]*?)<\/script>/g)].find(match => match[1].includes('type="module"'))?.[2];
   assert.ok(script, 'the standalone management UI module must be present');
@@ -231,4 +232,50 @@ test('unavailable cached quotas carry the remaining Retry-After without probing'
   assert.deepEqual(limited.header, { 'Retry-After': ['600'] });
   assert.equal(claudeCacheResult({ checkedAt: 'invalid', usage: { five_hour: { utilization: 20 } } }, now).status_code, 503);
   assert.equal(claudeCacheResult({ checkedAt: '2026-10-02T09:00:00Z', usage: { five_hour: null } }, now).status_code, 503);
+});
+
+test('invalid Claude grants leave healthy accounts eligible and become due after sign-in', () => {
+  const { nextClaudeProbe } = require('./quota.cjs');
+  const now = Date.now();
+  const files = [
+    { provider: 'claude', auth_index: 'invalid', status_message: 'invalid grant (retrying)' },
+    { provider: 'claude', auth_index: 'healthy' },
+  ];
+  const accounts = [{ id: 'invalid', reauthRequired: true, errorStatus: 401, error: 'Sign in again' }];
+  assert.equal(nextClaudeProbe(files, accounts, now), 'healthy');
+  files[0].status_message = '';
+  assert.equal(nextClaudeProbe(files, accounts, now), 'invalid');
+  accounts[0].retryAt = new Date(now + 3600000).toISOString();
+  assert.equal(nextClaudeProbe(files, accounts, now), 'healthy');
+  accounts.push({ id: 'healthy', attemptedAt: new Date(now).toISOString() });
+  assert.equal(nextClaudeProbe(files, accounts, now + 1000), null);
+});
+
+test('Claude plan reads coalesce, survive a restart and honor both retry deadlines', async t => {
+  const { createPlanReader } = require('./claude-plan.cjs');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-plan-test-'));
+  const filename = path.join(root, 'claude-plan-cache.json');
+  t.after(() => { if (fs.existsSync(filename)) fs.unlinkSync(filename); fs.rmdirSync(root); });
+  let calls = 0;
+  const request = async (_, method, payload) => {
+    calls++;
+    assert.equal(method, 'POST');
+    assert.equal(payload.url, 'https://api.anthropic.com/api/oauth/profile');
+    if (payload.auth_index === 'limited') return { status_code: 429, header: { 'Retry-After': ['7200'] } };
+    return { status_code: 200, body: { account: { has_claude_max: true, email: 'private@example.test' } } };
+  };
+  const read = createPlanReader(root, request, retryAfterMs);
+  const [one, two] = await Promise.all([read('active'), read('active')]);
+  assert.equal(one.account.has_claude_max, true);
+  assert.deepEqual(one, two);
+  assert.equal(calls, 1);
+  assert.equal(await read('blocked', { retryAt: new Date(Date.now() + 600000).toISOString() }), null);
+  assert.equal(await read('limited'), null);
+  const persisted = fs.readFileSync(filename, 'utf8');
+  assert.ok(!persisted.includes('private@example.test'));
+  assert.ok(JSON.parse(persisted).limited.nextRead > Date.now() + 7100000);
+  const restarted = createPlanReader(root, request, retryAfterMs);
+  assert.equal((await restarted('active')).account.has_claude_max, true);
+  assert.equal(await restarted('limited'), null);
+  assert.equal(calls, 2);
 });

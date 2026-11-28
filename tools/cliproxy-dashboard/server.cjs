@@ -6,6 +6,7 @@ const quota = require('./quota.cjs');
 const { claudeCacheResult } = require('./claude-cache.cjs');
 try { require('./patch-management.cjs').watchManagementPanel(quota.root); }
 catch (error) { console.error(error.message); }
+const readClaudePlan = require('./claude-plan.cjs').createPlanReader(quota.root, quota.management, quota.retryAfterMs);
 const PORT = Number(process.env.CLIPROXY_DASHBOARD_PORT || 8318);
 const origin = `http://127.0.0.1:${PORT}`;
 const upstream = process.env.CLIPROXY_API_URL || 'http://127.0.0.1:8317';
@@ -122,11 +123,12 @@ const server = http.createServer(async (req, res) => {
   if (![ `127.0.0.1:${PORT}`, `localhost:${PORT}` ].includes(host)) return json(res, 403, { error: 'Local access only.' });
   const url = new URL(req.url, origin);
   const nativeQuotaRequest = url.pathname === '/local/claude-quota';
+  const nativePlanRequest = url.pathname === '/local/claude-plan';
   const nativeHistoryRequest = url.pathname === '/local/quota-history';
   const nativeNamesRequest = ['/local/account-names', '/local/account-name'].includes(url.pathname);
-  const allowedOrigins = [origin, `http://localhost:${PORT}`, ...((nativeQuotaRequest || nativeHistoryRequest || nativeNamesRequest) ? ['http://127.0.0.1:8317', 'http://localhost:8317'] : [])];
+  const allowedOrigins = [origin, `http://localhost:${PORT}`, ...((nativeQuotaRequest || nativePlanRequest || nativeHistoryRequest || nativeNamesRequest) ? ['http://127.0.0.1:8317', 'http://localhost:8317'] : [])];
   if (req.headers.origin && !allowedOrigins.includes(req.headers.origin)) return json(res, 403, { error: 'Origin is not allowed.' });
-  if ((nativeQuotaRequest || nativeHistoryRequest || nativeNamesRequest) && req.headers.origin) {
+  if ((nativeQuotaRequest || nativePlanRequest || nativeHistoryRequest || nativeNamesRequest) && req.headers.origin) {
     res.setHeader('Access-Control-Allow-Origin', req.headers.origin);
     res.setHeader('Vary', 'Origin');
     res.setHeader('Access-Control-Allow-Methods', nativeHistoryRequest ? 'GET' : nativeNamesRequest ? 'GET, POST' : 'POST');
@@ -154,12 +156,16 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, { names: require('./account-names.cjs').setName(quota.root, data.id, data.name) });
     }
     if (req.method === 'GET' && nativeHistoryRequest) return json(res, 200, require('./quota-history.cjs').readHistory(quota.root));
-    if (req.method === 'POST' && nativeQuotaRequest) {
+    if (req.method === 'POST' && (nativeQuotaRequest || nativePlanRequest)) {
       const data = await body(req);
       const authIndex = String(data.authIndex || data.auth_index || '');
       const { files = [] } = await quota.management('/auth-files');
       const source = files.find(file => file.auth_index === authIndex && file.provider === 'claude');
       if (!source || source.disabled) return json(res, 404, { error: 'Claude account is unavailable.' });
+      if (nativePlanRequest) {
+        const cached = quota.readState().accounts.find(account => account.id === authIndex);
+        return json(res, 200, quota.claudeNeedsSignIn(source) ? null : await readClaudePlan(authIndex, cached));
+      }
       const state = await quota.refresh(authIndex);
       const account = state.accounts.find(account => account.id === authIndex);
       if (!account) return json(res, 503, { error: 'Claude quota has not been loaded yet.' });

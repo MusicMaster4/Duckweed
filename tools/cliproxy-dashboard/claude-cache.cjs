@@ -4,7 +4,7 @@ function claudeCacheResult(account, now = Date.now()) {
   const cached = !!account.error || !Number.isFinite(observedAt) || now - observedAt > 5000;
   const seconds = Math.max(0, Math.ceil((Date.parse(account.retryAt) - now) / 1000));
   const header = Number.isFinite(seconds) && seconds > 0 ? { 'Retry-After': [String(seconds)] } : {};
-  const metadata = { cached, checkedAt, error: account.error || null, retryAt: account.retryAt || null };
+  const metadata = { cached, checkedAt, ...(account.reauthRequired ? { reauthRequired: true } : {}), error: account.error || null, retryAt: account.reauthRequired ? null : account.retryAt || null };
   let usage = account.usage;
   if (!usage) {
     usage = {};

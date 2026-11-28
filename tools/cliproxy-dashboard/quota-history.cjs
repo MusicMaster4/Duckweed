@@ -1,9 +1,26 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const RETENTION = 30 * 86400000;
+function loadFile(filename) {
+  let raw;
+  try { raw = fs.readFileSync(filename, 'utf8'); }
+  catch (error) { if (error.code === 'ENOENT') return {}; throw error; }
+  try {
+    const data = JSON.parse(raw);
+    if (Array.isArray(data?.samples) && data.samples.every(sample =>
+      Number.isFinite(sample?.at) && Array.isArray(sample.accounts) &&
+      sample.accounts.every(account => account && Array.isArray(account.windows)))) return { data, raw };
+  } catch (error) { if (!(error instanceof SyntaxError)) throw error; }
+  return { corrupt: true };
+}
 function readHistory(root) {
-  try { const data = JSON.parse(fs.readFileSync(path.join(root, 'quota-history.json'), 'utf8')); return Array.isArray(data.samples) ? data : { samples: [] }; }
-  catch (error) { if (error.code === 'ENOENT') return { samples: [] }; throw error; }
+  const filename = path.join(root, 'quota-history.json');
+  return loadFile(filename).data || loadFile(filename + '.bak').data || { samples: [] };
+}
+function replaceFile(filename, raw) {
+  const temp = filename + '.' + process.pid + '.tmp';
+  fs.writeFileSync(temp, raw, { flush: true });
+  fs.renameSync(temp, filename);
 }
 function snapshot(state, now = Date.now()) {
   return { at: now, accounts: (state.accounts || []).filter(a => !a.disabled && !a.error && a.checkedAt && (a.windows || []).length).map(a => ({
@@ -23,14 +40,16 @@ function compactHistory(samples, now) {
 }
 function recordHistory(root, state, now = Date.now()) {
   const next = snapshot(state, now);
-  if (!next.accounts.length) return;
-  const history = readHistory(root);
+  const filename = path.join(root, 'quota-history.json');
+  const primary = loadFile(filename);
+  const history = primary.data || loadFile(filename + '.bak').data || { samples: [] };
   const last = history.samples.at(-1);
-  if (last && JSON.stringify(last.accounts) === JSON.stringify(next.accounts)) return;
-  // Unchanged cached observations cannot create a fabricated period of zero burn.
-  if (last && JSON.stringify(last.accounts.map(a => [a.id, a.checkedAt])) === JSON.stringify(next.accounts.map(a => [a.id, a.checkedAt]))) return;
-  history.samples = compactHistory([...history.samples, next], now);
-  const filename = path.join(root, 'quota-history.json'), temp = filename + '.' + process.pid + '.tmp';
-  fs.writeFileSync(temp, JSON.stringify(history)); fs.renameSync(temp, filename);
+  const signature = sample => JSON.stringify(sample.accounts.map(a => [a.id, a.checkedAt]));
+  const changed = next.accounts.length && (!last || signature(last) !== signature(next));
+  if (!changed && (primary.data || !history.samples.length && !primary.corrupt)) return;
+  if (primary.corrupt) fs.copyFileSync(filename, filename + '.corrupt-' + Date.now(), fs.constants.COPYFILE_EXCL);
+  if (primary.data) replaceFile(filename + '.bak', primary.raw);
+  if (changed) history.samples = compactHistory([...history.samples, next], now);
+  replaceFile(filename, JSON.stringify(history));
 }
 module.exports = { readHistory, recordHistory, snapshot, compactHistory };

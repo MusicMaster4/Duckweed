@@ -79,7 +79,7 @@
       result.plan = quota.planType ? t(`claude_quota.${quota.planType}`) : null;
       const extra = quota.extraUsage;
       if (extra?.is_enabled) result.chips.push({ text: `$${(extra.used_credits / 100).toFixed(2)} / $${(extra.monthly_limit / 100).toFixed(2)}`, title: t('claude_quota.extra_usage_label') });
-      if (quota.localCache?.cached || quota.localCache?.error) result.chips.push({ text: 'cached', title: globalThis.duckweedQuotaNote?.(quota.localCache) ?? '' });
+      if (quota.localCache?.cached || quota.localCache?.error) result.chips.push({ text: quota.localCache.reauthRequired ? 'Sign-in required' : 'cached', title: globalThis.duckweedQuotaNote?.(quota.localCache) ?? '' });
       result.meters = (quota.windows ?? []).map(w => ({ id: w.id, label: shortLabel(w.labelKey ? t(w.labelKey) : w.label), remaining: fromUsed(w.usedPercent), resetAtMs: num(w.resetAtMs), period: num(w.periodHours) }));
     } else if (type === 'codex') {
       result.plan = codexPlan(quota.planType, t);
@@ -147,7 +147,7 @@
       let column = columns.get(meter.id);
       if (!column) columns.set(meter.id, column = { id: meter.id, label: meter.label, title: meter.title, period: meter.period, session: isSession(meter), sum: 0, count: 0, reset: null });
       if (meter.remaining === null) return;
-      if (row.entry.file.disabled) return;
+      if (row.entry.file.disabled || row.quota?.localCache?.reauthRequired) return;
       column.sum += meter.remaining * weightOf(row.entry.file);
       column.count += 1;
       column.capacity = (column.capacity || 0) + 100 * weightOf(row.entry.file);
@@ -170,7 +170,7 @@
   const absoluteTime = ms => new Date(ms).toLocaleString('en-US', { weekday: 'short', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
   function poolMembers(group) {
     if (!group.primary) return [];
-    return group.rows.filter(row => !row.entry.file.disabled && row.status === 'success').flatMap(row => {
+    return group.rows.filter(row => !row.entry.file.disabled && !row.quota?.localCache?.reauthRequired && row.status === 'success').flatMap(row => {
       const meter = row.data.meters.find(m => m.id === group.primary.id);
       if (!meter || meter.remaining === null) return [];
       return [{ id: row.entry.file.auth_index || row.entry.file.authIndex, weight: weightOf(row.entry.file), remaining: meter.remaining, reset: meter.resetAtMs, period: meter.period, row }];
@@ -353,7 +353,10 @@
           h('div', { className: 'dqx-acct-sub' },
             data.plan && h('span', { className: 'dqx-plan', title: data.planTitle || undefined }, data.plan),
             data.chips.map(chip => h('span', { key: chip.text, className: 'dqx-chip', title: chip.title || undefined }, chip.text)),
-            claudeReset.message && h('span', { className: 'dqx-chip dqx-error', title: t(`claude_reset.${claudeReset.message}`) }, '!'))),
+            claudeReset.message && !quota?.localCache?.reauthRequired && h('span', {
+              className: claudeReset.message === 'ineligible' ? 'dqx-chip' : 'dqx-chip dqx-error',
+              title: t(`claude_reset.${claudeReset.message}`)
+            }, claudeReset.message === 'ineligible' ? 'No reset grant' : '!'))),
         body,
         h('div', { className: 'dqx-actions' },
           h('button', { type: 'button', className: 'dqx-btn', 'aria-label': `Rename ${accountName(entry.file, siblings)}`, title: 'Rename account', 'data-action': 'rename', onClick: () => props.onRenameAccount?.(entry.file) }, svg(['M16 3l5 5-12 12H4v-5z','M14 5l5 5'])),

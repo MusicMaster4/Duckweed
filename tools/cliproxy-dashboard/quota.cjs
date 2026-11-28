@@ -38,6 +38,7 @@ function failureState(error, old, provider, now = Date.now()) {
 }
 function shouldProbe(old, provider, now = Date.now()) {
   if (old?.retryAt && Date.parse(old.retryAt) > now) return false;
+  if (provider === 'claude' && old?.reauthRequired) return true;
   if (old?.error && !old.retryAt) {
     const attemptedAt = Date.parse(old.attemptedAt || old.checkedAt);
     if (Number.isFinite(attemptedAt) && now - attemptedAt < (provider === 'claude' ? CLAUDE_REFRESH_MS : 60000)) return false;
@@ -51,6 +52,20 @@ function shouldProbe(old, provider, now = Date.now()) {
     })) return true;
   }
   return !old?.checkedAt || now - Date.parse(old.checkedAt) >= (provider === 'claude' ? CLAUDE_REFRESH_MS : 55000);
+}
+
+function claudeNeedsSignIn(file) {
+  return file.provider === 'claude' && /\binvalid[ _]grant\b/i.test(file.status_message || '');
+}
+// Manual refresh and multiple tabs share the same persisted spacing as the scheduled monitor.
+function nextClaudeProbe(files, accounts, now = Date.now()) {
+  const candidates = files.filter(file => file.provider === 'claude' && !file.disabled && !claudeNeedsSignIn(file)).map(file => {
+    const old = accounts.find(account => account.id === file.auth_index);
+    return { id: file.auth_index, due: shouldProbe(old, 'claude', now),
+      attempted: Date.parse(old?.attemptedAt || old?.checkedAt) || 0 };
+  });
+  if (candidates.length > 1 && candidates.some(item => item.attempted > now - 55000)) return null;
+  return candidates.filter(item => item.due).sort((a, b) => a.attempted - b.attempted)[0]?.id || null;
 }
 
 function readState() {
@@ -253,9 +268,13 @@ async function applyNativeCodexHeaders(files) {
     }
   }
 }
-let inFlight;
+let inFlight, refreshingAccount;
 function refresh(authIndex) {
-  if (inFlight) return authIndex ? inFlight.then(() => refresh(authIndex)) : inFlight;
+  if (inFlight) {
+    if (!refreshingAccount || refreshingAccount === authIndex) return inFlight;
+    return inFlight.then(() => refresh(authIndex));
+  }
+  refreshingAccount = authIndex;
   inFlight = update(authIndex).finally(() => { inFlight = null; });
   return inFlight;
 }
@@ -275,6 +294,7 @@ async function update(authIndex) {
     await applyTransport(files, root, management);
     await applyNativeCodexHeaders(files);
     const previous = readState();
+    const claudeProbe = nextClaudeProbe(files, previous.accounts);
     const observations = [];
     for (let offset = 0; offset < files.length; offset += 3) {
       observations.push(...await Promise.all(files.slice(offset, offset + 3).map(async account => {
@@ -284,8 +304,16 @@ async function update(authIndex) {
           rateLimitFailures: old?.rateLimitFailures || 0, ...(old?.routingRecovery ? { routingRecovery: old.routingRecovery } : {}), ...(account.provider === 'claude' && old?.usage ? { usage: old.usage } : {}),
           weeklyResetAt: old?.weeklyResetAt || null, available: old?.available ?? null, quotaSupported: old?.quotaSupported ?? false };
         if (account.disabled) return { ...item, error: null };
-        if (authIndex && account.auth_index !== authIndex) return { ...item, error: old?.error || null };
-        if (!shouldProbe(old, account.provider)) return { ...item, error: old?.error || null };
+        if (claudeNeedsSignIn(account)) return { ...item, reauthRequired: true, errorStatus: 401,
+          error: 'Sign in to this Claude account again. Its authorization could not be renewed.' };
+        let previousError = old?.error || null;
+        if (old?.reauthRequired) {
+          item.errorStatus = Date.parse(item.retryAt) > Date.now() ? 429 : null;
+          previousError = item.errorStatus ? 'Quota update returned HTTP 429.' : 'Waiting for the first quota reading after sign-in.';
+        }
+        if (authIndex && account.auth_index !== authIndex) return { ...item, error: previousError };
+        if (account.provider === 'claude' && account.auth_index !== claudeProbe) return { ...item, error: previousError };
+        if (!shouldProbe(old, account.provider)) return { ...item, error: previousError };
         try {
           const probeStartedAt = Date.now();
           const result = { ...item, ...(await probe(account)), checkedAt: new Date().toISOString(), attemptedAt: new Date(probeStartedAt).toISOString(),
@@ -302,8 +330,8 @@ async function update(authIndex) {
       })));
     }
     for (const provider of ['claude', 'codex']) {
-      const group = observations.filter(a => a.provider === provider && !a.disabled);
-      if (group.some(a => a.error)) continue;
+      const group = observations.filter(a => a.provider === provider && !a.disabled && !a.reauthRequired);
+      if (group.some(a => a.error || !a.checkedAt)) continue;
       const ranked = rankAccounts(group);
       for (let i = 0; i < ranked.length; i++) {
         const item = ranked[i], priority = item.available ? ranked.length - i : -100;
@@ -323,7 +351,7 @@ async function update(authIndex) {
   } finally { fs.closeSync(lock); fs.unlinkSync(lockPath); }
 }
 module.exports = { root, management, readState, refresh, safeAccount, rankAccounts, fiveHourBalance, codexWindows, claudeWindows, normalizedWindows, xaiWindows, timestamp,
-  retryAfterMs, failureState, shouldProbe, isRefreshing: () => !!inFlight };
+  retryAfterMs, failureState, shouldProbe, nextClaudeProbe, claudeNeedsSignIn, isRefreshing: () => !!inFlight };
 if (require.main === module) refresh().then(state => {
   if (!process.argv.includes('--quiet')) console.log(JSON.stringify({ checkedAt: state.checkedAt, accounts: state.accounts.map(a => ({ provider: a.provider, status: a.status, quotaSupported: a.quotaSupported, error: a.error })) }, null, 2));
 }).catch(error => { console.error(error.message); process.exitCode = 1; });

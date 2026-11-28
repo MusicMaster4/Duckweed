@@ -35,10 +35,19 @@ function shareClaudeGrantReads(html) {
   }
   return html;
 }
+function shareClaudePlanReads(html) {
+  if (html.includes('globalThis.duckweedReadClaudePlan(')) return html;
+  // Match the plan badge only. The organization lookup before a reset must remain live.
+  const session = html.match(/globalThis\.duckweedClaudeQuota\(e,([\w$]+)\.getState\(\)/)?.[1];
+  const badge = /(Promise\.allSettled\(\[([\w$]+)\.request\(\{authIndex:n,method:`GET`,url:[\w$]+,header:\{\.\.\.[\w$]+\}\}\),)(\2\.request\(\{authIndex:n,method:`GET`,url:[\w$]+,header:\{\.\.\.[\w$]+\}\}\))(\]\);if\(r\.status===`rejected`\))/;
+  if (!session || !badge.test(html)) return html;
+  return html.replace(badge, (_, first, client, profile, end) =>
+    first + `globalThis.duckweedReadClaudePlan(n,${session}.getState(),()=>${profile})` + end);
+}
 function patchHtml(html) {
   if (html.includes(marker)) {
     const patched = autoQuota(panelEntry(html));
-    return shareClaudeGrantReads(require('./patch-ledger.cjs').enhanceLedger(patched));
+    return shareClaudePlanReads(shareClaudeGrantReads(require('./patch-ledger.cjs').enhanceLedger(patched)));
   }
   const replacements = [
     ['qp={request:async(e,t)=>{let n=await W.post(`/requests/api-call`,e,t)',
@@ -60,7 +69,8 @@ function patchHtml(html) {
   for (const [before, after] of replacements) html = html.replace(before, after);
   const bridge = fs.readFileSync(path.join(__dirname, 'management-quota-bridge.js'), 'utf8');
   if (!html.includes('</head>')) throw new Error('Management UI is missing its head element.');
-  return autoQuota(panelEntry(html.replace('</head>', `${marker}\n<script>\n${bridge}\n</script>\n</head>`)));
+  const patched = autoQuota(panelEntry(html.replace('</head>', `${marker}\n<script>\n${bridge}\n</script>\n</head>`)));
+  return shareClaudePlanReads(shareClaudeGrantReads(patched));
 }
 function patchManagementPanel(root) {
   const filename = path.join(root, 'static', 'management.html');

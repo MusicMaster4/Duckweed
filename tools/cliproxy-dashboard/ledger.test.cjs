@@ -11,8 +11,8 @@ function helpers() {
 }
 const h = helpers();
 test('pool excludes disabled credentials and uses overall Claude weekly limit before model sublimits', () => {
-  const entries = ['one', 'two'].map((name, i) => ({ type: 'claude', file: { name, auth_index: name, disabled: i === 1 } }));
-  const props = { t: key => key, quotaFor: () => ({ status: 'success', windows: [
+  const entries = ['one', 'two', 'expired'].map((name, i) => ({ type: 'claude', file: { name, auth_index: name, disabled: i === 1 } }));
+  const props = { t: key => key, quotaFor: entry => ({ status: 'success', localCache: { reauthRequired: entry.file.name === 'expired' }, windows: [
     { id: 'seven-day-fable', label: '7-day Fable', usedPercent: 99, periodHours: 168 },
     { id: 'seven-day', label: '7-day', usedPercent: 40, periodHours: 168 }
   ] }) };
@@ -20,6 +20,7 @@ test('pool excludes disabled credentials and uses overall Claude weekly limit be
   assert.equal(group.primary.id, 'seven-day');
   assert.equal(group.primary.sum, 60);
   assert.equal(group.primary.capacity, 100);
+  assert.equal(h.poolMembers(group).length, 1);
 });
 test('burn rejects duplicate cached readings, reset jumps, missing data and short observation intervals', () => {
   const now = Date.now(), reset = now + 86400000;
@@ -57,6 +58,13 @@ test('history keeps no names, credentials or raw provider payloads and does not 
     state.accounts[0].checkedAt = new Date(now+600000).toISOString();
     recordHistory(root, state, now+600000);
     assert.equal(readHistory(root).samples.length, 2);
+    const filename = path.join(root, 'quota-history.json');
+    fs.writeFileSync(filename, Buffer.alloc(128));
+    assert.equal(readHistory(root).samples.length, 1, 'the API serves the previous valid history');
+    recordHistory(root, state, now+600000);
+    assert.equal(JSON.parse(fs.readFileSync(filename)).samples.length, 2);
+    const archive = fs.readdirSync(root).find(name => name.startsWith('quota-history.json.corrupt-'));
+    assert.deepEqual(fs.readFileSync(path.join(root, archive)), Buffer.alloc(128));
   } finally {
     const absolute = fs.realpathSync(root);
     assert.equal(path.dirname(absolute).toLowerCase(), fs.realpathSync(os.tmpdir()).toLowerCase());

@@ -111,6 +111,12 @@ test('account panel keeps multiple accounts and keys, protects secrets and enfor
       request.on('error', reject);
     });
     assert.equal(badHost, 403);
+    const initial = await call('/local/refresh', {});
+    assert.deepEqual(initial.accounts.map(a => a.windows.length), [2, 0]);
+    const statePath = path.join(root, 'priority-status.json');
+    const afterTick = JSON.parse(fs.readFileSync(statePath));
+    afterTick.accounts[0].attemptedAt = new Date(Date.now() - 60000).toISOString();
+    fs.writeFileSync(statePath, JSON.stringify(afterTick));
     const first = await call('/local/refresh', {});
     assert.equal(first.accounts.length, 2);
     assert.deepEqual(first.accounts.map(a => a.windows[0].remainingPercent), [80, 20]);

@@ -141,7 +141,16 @@ test('identified Claude usage requests recover stale quota, preserve exhausted a
       const [code] = await once(child, 'close'); assert.equal(code, 0, errors);
       return JSON.parse(fs.readFileSync(statePath));
     };
-    let state = await run();
+    async function nextTick() {
+      const state = JSON.parse(fs.readFileSync(statePath));
+      for (const a of state.accounts) {
+        if (a.attemptedAt) a.attemptedAt = new Date(Date.parse(a.attemptedAt) - 60000).toISOString();
+      }
+      fs.writeFileSync(statePath, JSON.stringify(state));
+      return run();
+    }
+    await run(); assert.equal(probes, 1);
+    let state = await nextTick();
     assert.deepEqual(resets, ['fixture']); assert.equal(probes, 2);
     assert.equal(state.accounts[0].status, 'active'); assert.ok(state.accounts[0].routingRecovery.resetAt);
     assert.equal(state.accounts[0].windows[0].remainingPercent, 100);
@@ -153,8 +162,8 @@ test('identified Claude usage requests recover stale quota, preserve exhausted a
     const expire = () => { state = JSON.parse(fs.readFileSync(statePath));
       for (const a of state.accounts) a.checkedAt = new Date(now - 3600000).toISOString();
       fs.writeFileSync(statePath, JSON.stringify(state)); };
-    expire(); await run(); assert.equal(probes, 4); assert.deepEqual(resets, ['fixture'], 'unchanged fresh quota must preserve a subsequent rate limit');
-    denied = true; expire(); state = await run(); assert.equal(probes, 6);
+    expire(); await nextTick(); await nextTick(); assert.equal(probes, 4); assert.deepEqual(resets, ['fixture'], 'unchanged fresh quota must preserve a subsequent rate limit');
+    denied = true; expire(); await nextTick(); state = await nextTick(); assert.equal(probes, 6);
     assert.equal(state.accounts[0].available, true); assert.equal(state.accounts[0].errorStatus, 429);
     await run(); assert.equal(probes, 6); assert.deepEqual(resets, ['fixture'], 'stale positive quota cannot release a gate');
   } finally {

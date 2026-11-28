@@ -4,6 +4,17 @@
   const grantUrl = usageUrl + '?cedar_ember=1&skip_spend=1';
   const usedAt = new Map();
   globalThis.duckweedIsClaudeUsage = request => request.method === 'GET' && [usageUrl, grantUrl].includes(request.url);
+  globalThis.duckweedReadClaudePlan = async (authIndex, session, fallback) => {
+    let api;
+    try { api = new URL(session.apiBase); } catch { return fallback(); }
+    if (!['http://127.0.0.1:8317', 'http://localhost:8317'].includes(api.origin)) return fallback();
+    const response = await fetch(`http://${api.hostname}:8318/local/claude-plan`, {
+      method: 'POST', headers: { Authorization: `Bearer ${session.managementKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ authIndex }), signal: AbortSignal.timeout(30000)
+    });
+    if (!response.ok) throw new Error('Unable to read the account plan.');
+    return { statusCode: 200, body: await response.json() };
+  };
   globalThis.duckweedClaudeGrantUsed = authIndex => usedAt.set(authIndex, Date.now());
   globalThis.duckweedClaudeQuota = async (payload, session, fallback) => {
     let api;
@@ -25,6 +36,7 @@
       const usage = JSON.parse(result.body);
       const metadata = usage._duckweed_cache;
       const checkedAt = Date.parse(metadata?.checkedAt);
+      if (metadata?.reauthRequired) return { ...result, status_code: 401 };
       if (metadata?.error?.includes('HTTP 429')) return { ...result, status_code: 429 };
       if (metadata?.error || !Number.isFinite(checkedAt) || Date.now() - checkedAt > 11 * 60 * 1000 || !usage.cedar_ember) {
         return { ...result, status_code: 503 };
@@ -39,7 +51,8 @@
   globalThis.duckweedQuotaNote = (cache) => {
     const format = value => new Date(value).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
     const parts = [`Cached quota from ${format(cache.checkedAt)}.`];
-    if (cache.error) parts.push(/429/.test(cache.error) ? 'Refresh rate limited.' : 'Refresh unavailable.');
+    if (cache.reauthRequired) parts.push('Sign in to this Claude account again to resume quota updates.');
+    else if (cache.error) parts.push(/429/.test(cache.error) ? 'Refresh rate limited.' : 'Refresh unavailable.');
     if (cache.retryAt) parts.push(`Retry after ${format(cache.retryAt)}.`);
     return parts.join(' ');
   };
@@ -65,7 +78,8 @@
       const response = await fetch(`http://${api.hostname}:8318/local/quota-history`, {
         headers: { Authorization: `Bearer ${session.managementKey}` }, signal: AbortSignal.timeout(10000), cache: 'no-store'
       });
-      if (!response.ok) throw new Error('Quota history is unavailable. Run cliproxy start.');
+      if (response.status === 401) throw new Error('Sign in to the local manager again to load quota history.');
+      if (!response.ok) throw new Error(`Unable to read quota history (HTTP ${response.status}).`);
       return response.json();
     };
     let busy = false;
